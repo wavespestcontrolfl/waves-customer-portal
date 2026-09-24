@@ -19,6 +19,12 @@ describe('estimateOffCustomerSurface (the one verdict every public predicate sha
     expect(estimateOffCustomerSurface({ estimate_data: pending })).toBe(true);
     expect(estimateOffCustomerSurface({ estimate_data: JSON.stringify({ estimatorEngine: {} }) })).toBe(false);
     expect(estimateOffCustomerSurface({ estimate_data: null })).toBe(false);
+    // The quote intake's county-roll verdict is off-surface too (view,
+    // SSR, accept, asks — and after a generic unarchive).
+    expect(estimateOffCustomerSurface({ estimate_data: { addressUnverified: true } })).toBe(true);
+    expect(estimateOffCustomerSurface({ estimate_data: JSON.stringify({ addressUnverified: true }) })).toBe(true);
+    expect(estimateOffCustomerSurface({ estimate_data: { addressUnverified: false } })).toBe(false);
+    expect(isEstimateCustomerViewable({ status: 'sent', expires_at: FUTURE, estimate_data: { addressUnverified: true } })).toBe(false);
     expect(estimateOffCustomerSurface({})).toBe(false);
   });
   it('is the util verdict (estimate-claim-sql), shared with the add-service request that judges a LOCKED row (codex r10 P0)', () => {
@@ -143,6 +149,17 @@ describe('resolveEstimateDeclineGuard — linkage-invalidation fail-closed (PR #
     const invalidated = JSON.stringify({ estimatorEngine: { linkage_invalidated_at: FUTURE } });
     expect(resolveEstimateDeclineGuard({ status: 'sent', expires_at: FUTURE, estimate_data: invalidated }))
       .toEqual({ ok: false, status: 404, error: 'Estimate not found' });
+  });
+
+  it('the county-roll address block 404s the decline like every other off-surface token route — never the hold\'s 409 (codex #4667 r25 P0)', () => {
+    const blocked = JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: { source: 'county_roll', reason: 'r' } });
+    for (const status of ['sending', 'sent', 'viewed', 'declined']) {
+      expect(resolveEstimateDeclineGuard({ status, expires_at: FUTURE, estimate_data: blocked }))
+        .toEqual({ ok: false, status: 404, error: 'Estimate not found' });
+    }
+    // A lifted block (clean verdict) declines again.
+    expect(resolveEstimateDeclineGuard({ status: 'sent', expires_at: FUTURE, estimate_data: JSON.stringify({ addressUnverified: false }) }))
+      .toEqual({ ok: true });
   });
 
   it('an unmarked sendable row still declines', () => {

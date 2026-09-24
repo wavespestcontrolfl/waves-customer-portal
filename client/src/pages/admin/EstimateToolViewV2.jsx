@@ -1667,6 +1667,12 @@ export default function EstimateToolViewV2({
   // WaveGuard tier was NOT applied — surfaced beside the saved totals so the
   // operator links and re-saves before sending.
   const [memberLinkageWarning, setMemberLinkageWarning] = useState(null);
+  // The quote intake's county-roll verdict on an opened draft (edit-source
+  // `addressUnverified`): the customer link stays off and the send guard
+  // refuses until staff correct the premise or confirm the address here —
+  // the confirmation rides on the revise as `confirmAddress: true`.
+  const [addressUnverified, setAddressUnverified] = useState(null);
+  const [confirmAddress, setConfirmAddress] = useState(false);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customerSearchStatus, setCustomerSearchStatus] = useState("idle");
@@ -1895,6 +1901,8 @@ export default function EstimateToolViewV2({
         }
         if (!d.editable) {
           setEditMode(null);
+          setAddressUnverified(null);
+          setConfirmAddress(false);
           setEditLoadError(
             d.blockReason || "This estimate can no longer be edited.",
           );
@@ -1922,6 +1930,8 @@ export default function EstimateToolViewV2({
           customerName: d.customerName || "",
           hasInputs: !!d.inputs,
         });
+        setAddressUnverified(d.addressUnverified && d.addressUnverified.reason ? d.addressUnverified : null);
+        setConfirmAddress(false);
         // The Customer Lookup panel's only linked-customer visual is this
         // chip — without seeding it here, an opened estimate always shows
         // the empty search state even though the row IS linked (and
@@ -1930,7 +1940,7 @@ export default function EstimateToolViewV2({
         setExistingCustomerMatch(d.customer || null);
       } catch (e) {
         if (!cancelled) {
-          if (!refreshing) setEditMode(null);
+          if (!refreshing) { setEditMode(null); setAddressUnverified(null); setConfirmAddress(false); }
           setEditLoadError(e.message);
         }
       }
@@ -1944,6 +1954,9 @@ export default function EstimateToolViewV2({
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
     onStartNew?.();
     setEditMode(null);
+    // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
+    setAddressUnverified(null);
+    setConfirmAddress(false);
     draftIdRef.current = null;
     setEditLoadError(null);
     setForm(buildDefaultEstimateForm());
@@ -2838,6 +2851,9 @@ export default function EstimateToolViewV2({
     lookupSeqRef.current += 1;
     onStartNew?.();
     setEditMode(null);
+    // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
+    setAddressUnverified(null);
+    setConfirmAddress(false);
     draftIdRef.current = null;
     setEditLoadError(null);
     const multiHome = discountPresets.find((x) => x.discount_key === "multi_home");
@@ -3825,6 +3841,10 @@ export default function EstimateToolViewV2({
         satelliteUrl: satelliteData?.imageUrl || null,
         showOneTimeOption: !!form.showOneTimeOption,
         billByInvoice: !!form.billByInvoice,
+        // Explicit staff confirmation of a county-roll-flagged address
+        // (never inferred from copied data — the server reads only this
+        // request field).
+        ...(isEditRevision && addressUnverified && confirmAddress ? { confirmAddress: true } : {}),
         // Multi-property chain: a create started via "Add another property"
         // joins (or starts) the anchor estimate's group server-side. Never
         // sent on a revise — the row keeps its stored group linkage.
@@ -3882,6 +3902,19 @@ export default function EstimateToolViewV2({
       const recomputeNotice = serverRecomputeNotice(d, monthlyTotal, onetimeTotal);
       setPriceRecomputeNotice(recomputeNotice);
       setMemberLinkageWarning(d.memberLinkageWarning || null);
+      // The server clears the county-roll block on an explicit confirmation
+      // or a changed premise; it reports the standing verdict back.
+      if (d.addressUnverified === false || (isEditRevision && addressUnverified && confirmAddress)) {
+        setAddressUnverified(null);
+        setConfirmAddress(false);
+      } else if (d.addressUnverified === true && !addressUnverified) {
+        // A county lookup flagged this estimate after the editor loaded: the
+        // save reports the standing block, so the warning and the
+        // confirmation control appear now, not after a failed send (codex
+        // #4667 r32 P2).
+        setAddressUnverified({ source: 'county_roll', reason: 'County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.' });
+        setConfirmAddress(false);
+      }
       setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", hasInputs: true });
       savedFormRef.current = savingForm;
       // A slow save must not bless fields edited while it was in flight.
@@ -4048,6 +4081,9 @@ export default function EstimateToolViewV2({
     // Save changes would still PUT the new quote over the estimate that was
     // being edited.
     setEditMode(null);
+    // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
+    setAddressUnverified(null);
+    setConfirmAddress(false);
     draftIdRef.current = null;
     setEditLoadError(null);
     setEstimate(null);
@@ -4536,6 +4572,22 @@ export default function EstimateToolViewV2({
 
                 />
               </Field>
+              {editMode?.id && addressUnverified && (
+                <div role="status" aria-label="County address check" className="mb-3 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
+                  <strong>County records could not confirm this house number.</strong>{" "}
+                  {addressUnverified.reason}
+                  {addressUnverified.nearestNumbers?.length ? ` Nearest on the roll: ${addressUnverified.nearestNumbers.join(", ")}.` : ""}
+                  {" "}The customer link stays off until the address is corrected or confirmed.
+                  <label className="flex items-center gap-2 mt-2">
+                    <input
+                      type="checkbox"
+                      checked={confirmAddress}
+                      onChange={(e) => setConfirmAddress(e.target.checked)}
+                    />
+                    <span>I confirmed this address with the customer — save to clear the block</span>
+                  </label>
+                </div>
+              )}
               {form.leadServiceInterest && (
                 <div className="mb-3 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                   Lead interest:{" "}

@@ -68,6 +68,10 @@ function makeReviseDatabase({
           clause = c;
           return customerChain;
         },
+        // The blocked-row pre-lock (customer BEFORE the estimate row, one
+        // order with the Customer 360 edit — codex #4667 r26 P2).
+        whereNull: () => customerChain,
+        forUpdate: () => customerChain,
         first: async () => {
           if (!customer) return null;
           return String(customer.id) === String(clause?.id) ? customer : null;
@@ -372,6 +376,45 @@ describe('reviseAdminEstimate', () => {
     },
       technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
     expect(JSON.parse(updates[0].estimate_data).deliveryState).toEqual(latest);
+  });
+
+  test('a revision that changes the address clears the wizard address-verification marker; an explicit confirmation clears it too', async () => {
+    const priorData = JSON.parse(sentEstimate.estimate_data);
+    const flagged = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, addressUnverified: true, addressUnverifiedFlag: { reason: 'r' } }) };
+    const corrected = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
+    await reviseAdminEstimate({ database: corrected.database, estimateId: 'est-1', body: { ...reviseBody, address: '1250 Example St, Parrish, FL 34219' },
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    const afterCorrection = JSON.parse(corrected.updates[0].estimate_data);
+    expect(afterCorrection.addressUnverified).toBe(false);
+    expect(afterCorrection.addressUnverifiedClearedBy).toBe('address_corrected');
+    const confirmed = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
+    await reviseAdminEstimate({ database: confirmed.database, estimateId: 'est-1', body: { ...reviseBody, confirmAddress: true },
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(confirmed.updates[0].estimate_data).addressUnverifiedClearedBy).toBe('staff_confirmed');
+    // A copied `addressUnverified: false` in the client's data is NOT a confirmation.
+    const copied = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
+    await reviseAdminEstimate({ database: copied.database, estimateId: 'est-1', body: { ...reviseBody, estimateData: { ...reviseBody.estimateData, addressUnverified: false } },
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(copied.updates[0].estimate_data).addressUnverified).toBe(true);
+  });
+
+  test('a completed locality on a flagged estimate is a correction; a unit-only or spelling edit is not (codex #4667 r27 P1)', () => {
+    const { premiseChanged } = require('../services/admin-estimate-persistence');
+    expect(premiseChanged('1260 Example St', '1260 Example St, Parrish, FL 34219')).toBe(true);
+    expect(premiseChanged('1260 Example St, Parrish', '1260 Example St, Parrish, FL 34219')).toBe(true);
+    expect(premiseChanged('1260 Example St, Parrish, FL 34219', '1250 Example St, Parrish, FL 34219')).toBe(true);
+    expect(premiseChanged('1260 Example St, Parrish, FL 34219', '1260 Example St Apt 4, Parrish, FL 34219')).toBe(false);
+    expect(premiseChanged('1260 Example St, Parrish, FL 34219', '1260 EXAMPLE STREET, Parrish, FL 34219')).toBe(false);
+    expect(premiseChanged('1260 Example St, Parrish, FL 34219', undefined)).toBe(false);
+  });
+
+  test('retains the wizard address-verification marker across an ordinary revision', async () => {
+    const priorData = JSON.parse(sentEstimate.estimate_data);
+    const flagged = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, addressUnverified: true }) };
+    const { database, updates } = makeReviseDatabase({ estimate: flagged, lockedEstimate: flagged });
+    await reviseAdminEstimate({ database, estimateId: 'est-1', body: reviseBody,
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(updates[0].estimate_data).addressUnverified).toBe(true);
   });
 
   test('does not revive a delivery receipt removed before the row lock', async () => {
@@ -1178,7 +1221,12 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
   test('the real save takes the group advisory lock BEFORE the row lock (pre-push codex P1: no deadlock against the schedule route)', async () => {
     const { database, updates } = makeReviseDatabase({ estimate: groupedDraft, scheduledGroupMember: null });
     const order = [];
-    database.raw.mockImplementation(async () => { order.push('group-lock'); return {}; });
+    // Both advisory locks (the scheduled-group lock and, since #4667, the
+    // contact-pair address-verdict lock) land BEFORE the row lock.
+    database.raw.mockImplementation(async (sql, bindings) => {
+      order.push(Array.isArray(bindings) && bindings[0] === 'address-verdict' ? 'address-verdict-lock' : 'group-lock');
+      return {};
+    });
     const originalDb = database;
     // Observe the FOR UPDATE read through the recording chain's forUpdate.
     const chainSpy = originalDb('estimates');
@@ -1189,7 +1237,10 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     expect(updates).toHaveLength(1);
     expect(database.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['estimate-group-send', groupedDraft.estimate_group_id]);
     expect(typeof forUpdate).toBe('function');
-    expect(order).toEqual(['group-lock']);
+    // Contact pair FIRST, then the group (pre-push audit P1 after r42 on
+    // #4667): the proposal editor and the public paths take
+    // address-verdict before any group lock.
+    expect(order).toEqual(['address-verdict-lock', 'group-lock']);
   });
 
   test('dryRun refuses exactly like the real save (no reprice confirm the write would then 409)', async () => {

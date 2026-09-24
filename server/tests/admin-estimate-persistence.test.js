@@ -72,6 +72,10 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
         whereNull() {
           return this;
         },
+        // The reuse UPDATE's live-delivery-claim predicate (#4667).
+        whereRaw() {
+          return this;
+        },
         where() {
           return this;
         },

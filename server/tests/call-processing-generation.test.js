@@ -559,10 +559,17 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     const claim = pub.slice(pub.indexOf('const autoClaimed = await db(\'estimates\')'), pub.indexOf('extension_auto_granted_at: db.fn.now()'));
     expect(claim).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
     const ext = fs.readFileSync(path.join(__dirname, '../services/estimate-extension.js'), 'utf8');
-    expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');");
-    expect(ext.split('.whereRaw(REPRICE_PENDING_ABSENT_SQL)').length - 1).toBe(2);
+    expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');");
+    // Each write pinned separately: the guarded expiry update, the sibling
+    // revive, and the notification-leg delivery claim (codex #4667 r41).
     const guarded = ext.slice(ext.indexOf('const updated = await trx(\'estimates\')'), ext.indexOf('.update(updates);'));
     expect(guarded).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
+    const siblingRevive = ext.indexOf(".whereIn('status', ['sent', 'viewed', 'expired', 'send_failed'])", ext.indexOf('const updated = await trx(\'estimates\')'));
+    const siblings = ext.slice(siblingRevive, ext.indexOf('followup_expiring_sent: true,', siblingRevive));
+    expect(siblings).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
+    const notifyClaim = ext.slice(ext.indexOf('const deliveryClaimToken = '), ext.indexOf('let smsResult = '));
+    expect(notifyClaim).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
+    expect(ext.split('.whereRaw(REPRICE_PENDING_ABSENT_SQL)').length - 1).toBe(3);
   });
 });
 
@@ -685,7 +692,9 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The claim itself now rides the group lock + fixed-hold recheck in
     // claimNotifyOnlyExtensionRequest (GH codex P1 r5 on #4309); the held-row
     // re-read still follows a zero-row claim at the call site.
-    expect(pub).toContain(".whereRaw(REPRICE_PENDING_ABSENT_SQL)\n      .update({ extension_requested_at: trx.fn.now() });");
+    // …and, since #4667 r23, the county-roll address block rides the same
+    // write: the extension claim reasserts BOTH holds.
+    expect(pub).toContain(".whereRaw(REPRICE_PENDING_ABSENT_SQL)\n      // …and the county-roll address block (codex #4667 r23 P1).\n      .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)\n      .update({ extension_requested_at: trx.fn.now() });");
     const notifyClaimAt = pub.indexOf("const { claimed, blocked } = await claimNotifyOnlyExtensionRequest(estimate.id, DEDUPE_OPEN);");
     expect(notifyClaimAt).toBeGreaterThan(-1);
     expect(pub.slice(notifyClaimAt, notifyClaimAt + 500)).toContain("if (!fresh || estimateOffCustomerSurface(fresh)) {\n        return res.status(404).json({ error: 'Estimate not found' });");
@@ -693,7 +702,8 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // The accept preflight answers the documented re-price 409 BEFORE the generic accept-active refusal (codex r6 P0).
     const acceptRepriceAt = pub.indexOf("return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });");
     expect(acceptRepriceAt).toBeGreaterThan(-1);
-    expect(pub.indexOf("if (!isEstimateAcceptActive(estimate)) {\n      return res.status(409).json({ error: 'Estimate is no longer active' });", acceptRepriceAt)).toBeGreaterThan(acceptRepriceAt);
+    // …since #4667 r37 the accept-active refusal re-reads the row and answers the generic 404 when it is off-surface, else its 409.
+    expect(pub.indexOf("if (!isEstimateAcceptActive(estimate)) {\n      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);", acceptRepriceAt)).toBeGreaterThan(acceptRepriceAt);
     // Every operator send surface (incl. the follow-up nudge) refuses a held row through the shared assertion (codex r6 P2).
     expect(route).toContain("if (siblingRepricePending(estimate)) {\n    const err = new Error('This estimate is held for a re-price");
     // The SSR gate reads the ONE shared verdict (linkage markers + hold) since r7.

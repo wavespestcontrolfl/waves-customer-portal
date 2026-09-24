@@ -2093,6 +2093,14 @@ async function createOrReuseAdminEstimate({
     pricingFallbackReason: pricingOut.fallbackReason || null };
 
   return database.transaction(async (trx) => {
+    // The county-roll ADDRESS-VERDICT contact-pair lock FIRST — before the
+    // group and row locks, the order every other verdict writer uses
+    // (pre-push audit P1 after r45 on #4667): a linked-draft reuse that
+    // lifts the hold below stamps the leads' verdicts under it.
+    if (writeFields.customer_email && writeFields.customer_phone) {
+      const { contactPairLockKey } = require('./lead-address-unverified');
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(writeFields.customer_email, writeFields.customer_phone)]);
+    }
     // Reuse the estimate's primary identity for a retried create. The lock
     // serializes double submissions before the existing lead/group writers.
     if (clientDraftId) {
@@ -2197,6 +2205,37 @@ async function createOrReuseAdminEstimate({
               ...parseStoredEstimateData(writeFields.estimate_data), manualSendAttempts: existingAttempts,
             });
           }
+          // The county-roll address block rides the LOCKED draft across this
+          // reuse exactly as it rides a revision (pre-push audit P1 after
+          // r45 on #4667): a POST save that reuses the lead's draft at the
+          // same premise keeps the hold; only a premise correction or an
+          // explicit confirmAddress lifts it.
+          let reuseClearedHold = false;
+          {
+            const reuseData = parseStoredEstimateData(writeFields.estimate_data) || {};
+            const lockedReuseData = parseStoredEstimateData(existingEstimate.estimate_data) || {};
+            const reusePremiseChanged = premiseChanged(existingEstimate.address, writeFields.address);
+            // A premise CORRECTION of a flagged draft is a revision's job:
+            // only reviseAdminEstimate owns the guarded lead / customer /
+            // property fan-out that moves the rejected on-file premise with
+            // it (pre-push audit P1 after r45). Reuse refuses it with the
+            // path to take; a same-premise reuse or an explicit confirmation
+            // proceeds.
+            if (reusePremiseChanged && (lockedReuseData.addressUnverified === true || lockedReuseData.addressUnverifiedFlag)) {
+              throw errorWithStatus('This lead\'s draft carries a county address warning — correct its address by editing the saved estimate (Revise), which moves the lead and customer records with it. Nothing was saved.', 409);
+            }
+            carryAddressBlockAcrossRevise(reuseData, lockedReuseData, {
+              addressChanged: false,
+              explicitConfirm: body?.confirmAddress === true,
+            });
+            // The helper's return also reports a COPIED hold; the lead
+            // reconciliation below is owed only for the prior-true →
+            // next-false transition (pre-push audit P1 after r45).
+            reuseClearedHold = lockedReuseData.addressUnverified === true
+              && reuseData.addressUnverified !== true
+              && !!reuseData.addressUnverifiedClearedBy;
+            writeFields.estimate_data = JSON.stringify(reuseData);
+          }
           const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };
           assertLeadCanAttachEstimate({
             lead,
@@ -2205,6 +2244,11 @@ async function createOrReuseAdminEstimate({
           });
           const [updated] = await trx('estimates')
             .where({ id: existingEstimate.id, status: 'draft' })
+            // Never over a LIVE delivery claim (pre-push audit P1 after r45):
+            // /calculate holds one on a wizard draft across its sends, and
+            // this whole-blob write would erase it. Zero rows → the 409
+            // retry below, as the revise and wizard-refresh paths answer.
+            .whereRaw(require('../utils/estimate-claim-sql').DELIVERY_CLAIM_NOT_LIVE_SQL)
             .update({
               ...writeFields,
               expires_at: expiresAt,
@@ -2213,6 +2257,17 @@ async function createOrReuseAdminEstimate({
             .returning('*');
           if (!updated) {
             throw errorWithStatus('Estimate draft changed; refresh and try again.', 409);
+          }
+          // A reuse that LIFTED the hold reconciles the leads' verdicts too,
+          // under the contact-pair lock taken at the top (pre-push audit P1
+          // after r45): the linked lead and every contact-matched flagged
+          // lead at this premise take the clean verdict, or booking keeps
+          // answering ADDRESS_UNVERIFIED and the next calculation restores
+          // the hold. (A premise CORRECTION's customer / property fan-out
+          // stays the revision path's — the reuse keeps the base row.)
+          if (reuseClearedHold) {
+            const clearedBy = parseStoredEstimateData(updated.estimate_data)?.addressUnverifiedClearedBy || 'staff_confirmed';
+            await stampContactMatchedLeadsClean(trx, { row: updated, clearedBy, now });
           }
           // The builder just wholesale-replaced whatever composition this
           // linked draft held, and `source` is not part of the write payload
@@ -2571,7 +2626,106 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // wholesale revision too. The locked-row pass below overwrites any pending
 // client copy, so the latest committed delivery state wins; a changed offer
 // still fails the annual resend gate through its fingerprint mismatch.
+// addressUnverified: the wizard's county-roll verdict on the draft's
+// address (public-quote), read by wizardDraftSelfServeBookable on every
+// handoff-link recheck — an ordinary staff revision must not silently drop
+// it and revive a stale booking link for a still-unconfirmed address
+// (codex #4667 r5 P1); a clean wizard run clears it explicitly (false).
 const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState'];
+// The wizard's county-roll verdict (addressUnverified + addressUnverifiedFlag)
+// is carried across an ORDINARY revision (the public link and the send
+// guard both refuse while it stands), and cleared by the two staff actions
+// that answer it: a revision that CHANGES the estimate's address (the
+// correction), or an explicit `addressUnverified: false` in the revision
+// payload (the confirmation) — pre-push audit P1 on #4667. Prior-wins
+// otherwise, so a stale client copy cannot drop it by omission.
+// The correction is a change of PREMISE (house number / street / locality,
+// unit-insensitive — the roll's verdict is about the house number): a
+// unit-only edit keeps the block and needs the explicit confirmation
+// (codex #4667 r11 P1).
+// A locality the flagged estimate LACKED and the edit supplies (a city, a
+// ZIP) is a correction too — the premise comparison treats an absent
+// value as a wildcard, which must not leave the completed address blocked
+// and unsendable (codex #4667 r27 P1).
+// The SHARED lead-verdict reconciliation for a staff clear on a row with no
+// direct lead link: every flagged lead under the row's contact pair whose
+// flag covers the row's premise takes the clean verdict (the residential
+// revise and the commercial proposal editor both land here — codex #4667
+// r42 / pre-push audit). Caller holds the contact-pair advisory lock.
+// Best-effort: a failure here never rolls back the staff write.
+async function stampContactMatchedLeadsClean(trx, { row, clearedBy, premiseAddress = null, now = () => new Date() }) {
+  if (!row?.customer_email || !row?.customer_phone) return 0;
+  const parseJson = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+  try {
+    const { parseDisplayAddress, recoverAddressUnverified: recoverLeadFlag, flagCoversAddress } = require('./lead-address-unverified');
+    const parsedRow = parseDisplayAddress(premiseAddress || row.address);
+    const premise = { line1: parsedRow.line1, city: parsedRow.city, state: parsedRow.state, zip: parsedRow.zip };
+    const verdict = {
+      status: 'clean',
+      address_line1: parsedRow.streetLine || null,
+      city: parsedRow.city || null,
+      state: parsedRow.state || 'FL',
+      zip: parsedRow.zip || null,
+      at: new Date().toISOString(),
+      source: `staff:${clearedBy}`,
+    };
+    const flaggedLeads = await trx('leads')
+      .whereNull('deleted_at')
+      .whereRaw('LOWER(email) = ?', [String(row.customer_email).toLowerCase().trim()])
+      .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(row.customer_phone).replace(/\D/g, '').slice(-10)])
+      .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
+      .forUpdate()
+      .select('id', 'extracted_data');
+    const targets = flaggedLeads.filter((lead) => {
+      const flag = recoverLeadFlag(parseJson(lead.extracted_data));
+      return flag && (!flag.address_line1 || flagCoversAddress(flag, premise));
+    }).map((lead) => lead.id);
+    if (targets.length) {
+      await trx('leads').whereIn('id', targets).update({
+        extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
+        updated_at: now(),
+      });
+    }
+    return targets.length;
+  } catch (leadErr) {
+    logger.warn(`[admin-estimate-persistence] contact-matched lead verdict not stamped: ${leadErr.code || leadErr.name || 'error'}`);
+    return 0;
+  }
+}
+
+function premiseChanged(priorAddress, nextAddress) {
+  if (nextAddress === undefined) return false;
+  const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
+  if (!String(priorAddress || '').trim() || !String(nextAddress || '').trim()) return String(priorAddress || '') !== String(nextAddress || '');
+  if (!samePremiseDisplay(priorAddress, nextAddress)) return true;
+  const prior = parseDisplayAddress(priorAddress);
+  const next = parseDisplayAddress(nextAddress);
+  return (!prior.city && !!next.city) || (!prior.zip && !!next.zip);
+}
+// `explicitConfirm` comes from the REQUEST (body.confirmAddress === true),
+// never from a copied `addressUnverified: false` in the client's data
+// (a stale copy must not read as a confirmation — pre-push audit P1).
+function carryAddressBlockAcrossRevise(nextData, priorData, { addressChanged = false, explicitConfirm = false } = {}) {
+  if (!nextData || typeof nextData !== 'object' || !priorData || typeof priorData !== 'object') return false;
+  const explicitlyConfirmed = explicitConfirm === true;
+  if (addressChanged || explicitlyConfirmed) {
+    if (priorData.addressUnverified === true || priorData.addressUnverifiedFlag) {
+      nextData.addressUnverified = false;
+      nextData.addressUnverifiedFlag = null;
+      nextData.addressUnverifiedClearedBy = addressChanged ? 'address_corrected' : 'staff_confirmed';
+      return true;
+    }
+    return false;
+  }
+  let changed = false;
+  for (const key of ['addressUnverified', 'addressUnverifiedFlag']) {
+    if (priorData[key] !== undefined && nextData[key] !== priorData[key]) {
+      nextData[key] = priorData[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
 const GROUP_PUBLICATION_KEYS = ['groupLinkViewableThrough', 'groupPublishedByEstimateId'];
 // Click-to-estimate mints (#3391 audit P0): both markers are
 // lifecycle-critical and PRIOR-WINS across a revise — the zero-comms
@@ -2817,6 +2971,10 @@ async function reviseAdminEstimate({
           preserved = true;
         }
       }
+      if (carryAddressBlockAcrossRevise(nextData, existingData, {
+        addressChanged: premiseChanged(estimate.address, writeFields.address),
+        explicitConfirm: body?.confirmAddress === true,
+      })) preserved = true;
       // Publication belongs to the group that sent the link. A move or
       // explicit removal cannot carry that group's navigation window away.
       const nextGroupId = writeFields.estimate_group_id === undefined
@@ -3008,9 +3166,59 @@ async function reviseAdminEstimate({
     // and resets its baseline. The baseline must snapshot the composition
     // this UPDATE actually replaces, so the locked row — not the pre-read —
     // feeds the capture below.
-    // Group advisory lock(s) BEFORE the row lock — see
-    // lockScheduledGroupGuardGroups for the deadlock this order prevents.
+    // The contact-pair address-verdict advisory lock BEFORE the row lock —
+    // the public paths (lookup, /calculate) take it first and then touch
+    // this row during withdrawal / supersession; the reverse order here
+    // would deadlock a staff save against them (codex #4667 r20 P2).
+    {
+      // BOTH contact pairs a revision can touch (the row's current pair and
+      // the revised pair), in deterministic key order, before the row lock
+      // (codex r23 P2).
+      const { contactPairLockKey } = require('./lead-address-unverified');
+      const pairKeys = new Set();
+      if (estimate?.customer_email && estimate?.customer_phone) pairKeys.add(contactPairLockKey(estimate.customer_email, estimate.customer_phone));
+      const nextEmail = writeFields?.customer_email ?? estimate?.customer_email;
+      const nextPhone = writeFields?.customer_phone ?? estimate?.customer_phone;
+      if (nextEmail && nextPhone) pairKeys.add(contactPairLockKey(nextEmail, nextPhone));
+      for (const key of [...pairKeys].sort()) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
+      }
+    }
+    // Group advisory lock(s) AFTER the contact-pair locks and BEFORE the
+    // row lock — see lockScheduledGroupGuardGroups for the deadlock the
+    // group-before-row order prevents; the contact pair goes first because
+    // PUT /:id/proposal and the public paths take address-verdict before
+    // any group or row lock (pre-push audit P1 after r42).
     const lockedGuardGroups = await lockScheduledGroupGuardGroups(trx, estimate, writeFields);
+    // A blocked row's correction fans out to the linked customer under
+    // the row lock, while the Customer 360 edit locks the customer FIRST
+    // and then rewrites matching estimates — so the customer row is
+    // locked here BEFORE the estimate row, one order with that path
+    // (codex #4667 r26 P2). Only rows carrying the block pay for it.
+    // Decided from a read taken UNDER the contact-pair lock just acquired
+    // (not the pre-transaction snapshot — codex r28 P2): the public lookup
+    // stamps the block only while holding that same lock, so nothing can
+    // flag the row between this read and the row lock below.
+    {
+      const parsePre = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+      const synced = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
+      if (synced?.customer_id && parsePre(synced.estimate_data)?.addressUnverified === true) {
+        // The property-preferences advisory lock FIRST, then the customer
+        // row — the order the Customer 360 edit uses; the correction's
+        // fan-out (markSprinklerSettingsMoved) takes that advisory lock
+        // later, and the reverse order would deadlock (codex r33 P1).
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(synced.customer_id)]);
+        // …then the customer-comms fence, BEFORE any row lock (its lock-order
+        // contract, and the codebase-wide property-preferences → customer-
+        // comms → customer row order): website publication takes this same
+        // fence first and then locks estimate → customer, so without it a
+        // publication and a staff revision of a newly flagged draft could
+        // hold one row each and wait on the other (pre-push audit P1 after
+        // r41). Serialized here, the row order below no longer matters.
+        await require('../utils/customer-comms-lock').lockCustomerComms(trx, synced.customer_id);
+        await trx('customers').where({ id: synced.customer_id }).whereNull('deleted_at').forUpdate().first('id');
+      }
+    }
     const lockedPrior = await trx('estimates')
       .where({ id: estimate.id })
       .forUpdate()
@@ -3066,6 +3274,10 @@ async function reviseAdminEstimate({
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
           }
+          carryAddressBlockAcrossRevise(pendingData, lockedData, {
+            addressChanged: premiseChanged(lockedPrior.address, revisedFields.address),
+            explicitConfirm: body?.confirmAddress === true,
+          });
           const revisedGroupId = revisedFields.estimate_group_id === undefined
             ? lockedPrior.estimate_group_id : revisedFields.estimate_group_id;
           const staysInLockedGroup = lockedPrior.estimate_group_id
@@ -3148,6 +3360,191 @@ async function reviseAdminEstimate({
     // exists would let a concurrent send read the draft as "unedited" (see
     // estimate-learning.js for the concurrency contract).
     await recordPreSendRevision({ priorEstimate: lockedPrior, trx });
+    // A staff correction / confirmation that just cleared the draft's
+    // county-roll block is the AUTHORITATIVE verdict for that premise: it
+    // lands on the linked lead too (its flag cleared, a clean
+    // address_verdict stamped), so the booking route's lead and contact-
+    // pair checks and the next /calculate honor it (pre-push audit P1).
+    const parseJson = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+    const writtenData = parseJson(row.estimate_data);
+    const priorLockedData = parseJson(lockedPrior?.estimate_data);
+    // A blocked LEGACY row with no lead link (a contact-matched
+    // quote-wizard estimate the lookup-stage withdrawal stamped): the
+    // staff verdict still has to reach the lead(s) that carry the flag
+    // for this contact pair and premise, or the next /calculate recovers
+    // the old warning and re-blocks the row (codex #4667 r27 P1). Under
+    // the contact-pair lock taken at the top of this transaction.
+    // Gated on THIS write actually clearing the block (prior true → written
+    // not true), never on the persisted addressUnverifiedClearedBy alone: a
+    // draft staff cleared earlier and a lookup re-flagged still carries
+    // that stale key (pre-push audit P1).
+    const clearedByThisWrite = priorLockedData?.addressUnverified === true && writtenData?.addressUnverified !== true && !!writtenData?.addressUnverifiedClearedBy;
+    if (clearedByThisWrite && !writtenData.lead_id) {
+      await stampContactMatchedLeadsClean(trx, { row, clearedBy: writtenData.addressUnverifiedClearedBy, now });
+    }
+    // Runs with OR without a direct lead link (codex r28 P1): a contact-
+    // matched legacy row with a customer_id but no estimate_data.lead_id
+    // still fans its correction out to the linked customer, primary
+    // property and downstream snapshots — only the lead-specific writes
+    // need the link.
+    if (clearedByThisWrite) {
+      const { parseDisplayAddress } = require('./lead-address-unverified');
+      const parsed = parseDisplayAddress(row.address);
+      const verdict = {
+        status: 'clean',
+        address_line1: parsed.streetLine || null,
+        city: parsed.city || null,
+        state: parsed.state || 'FL',
+        zip: parsed.zip || null,
+        at: new Date().toISOString(),
+        source: `staff:${writtenData.addressUnverifiedClearedBy}`,
+      };
+      // A premise CORRECTION moves the lead's own address columns with it
+      // (the booking route binds an estimate handoff to the lead's / the
+      // customer's on-file premise): clearing the old-premise flag while
+      // the columns still name the rejected number would let the original
+      // unverified address book and reject the corrected one (codex #4667
+      // r13 P1). A confirmation changes nothing but the verdict.
+      const corrected = writtenData.addressUnverifiedClearedBy === 'address_corrected';
+      // The lead is touched ONLY while its current premise is still the one
+      // this estimate carried before the revision: a prefill re-lookup
+      // that already moved the lead to another premise (and maybe wrote a
+      // newer flag for it) must keep that newer verdict and address
+      // (codex #4667 r16 P1) — the same rule the customer fan-out applies.
+      const { samePremiseDisplay: leadPremiseMatches, contactPairLockKey } = require('./lead-address-unverified');
+      // The same contact-pair advisory lock /calculate and the booking
+      // confirm take around the verdict, so a concurrent reconciliation
+      // cannot read the old flag, lose to this clean verdict and then
+      // overwrite it with its stale result (codex r18 P1). Lead row locked
+      // too, so the premise check and the write see one state.
+      // (The advisory lock itself is taken at the top of this transaction,
+      // before the estimate row lock — one order with the public paths.)
+      if (row.customer_email && row.customer_phone) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(row.customer_email, row.customer_phone)]);
+      }
+      const leadRow = writtenData.lead_id
+        ? await trx('leads').where({ id: writtenData.lead_id }).forUpdate().first('address', 'city', 'zip')
+        : null;
+      const leadDisplay = leadRow ? [leadRow.address, leadRow.city, leadRow.zip].filter(Boolean).join(', ') : '';
+      // …and the SAME DOOR (unit): a lead a prefill lookup moved to Apt 5
+      // must not be rewritten by the Apt 4 estimate's correction (codex
+      // r19 P1) — the same guard the customer fan-out applies.
+      const { unitKey: doorUnitKey } = require('./customer-properties');
+      const { splitStreetLineUnit: splitDoor } = require('../utils/address-normalizer');
+      const doorUnit = (line1, line2) => doorUnitKey(line2) || doorUnitKey(splitDoor(String(line1 || '')).unit) || '';
+      const priorParsed = parseDisplayAddress(lockedPrior?.address);
+      const leadSameDoor = !leadRow || !String(leadRow.address || '').trim()
+        || doorUnit(leadRow.address, null) === doorUnit(priorParsed.line1, priorParsed.unit);
+      // …with the COMPLETE locality on both sides, like the customer branch
+      // (codex r22 P1): a street-only estimate must not rewrite a lead a
+      // prefill lookup moved to the same number in another town.
+      // A CORRECTION keeps the strict locality rule (it rewrites the lead's
+      // address); an explicit CONFIRMATION of a street-only intake only
+      // clears the flag and stamps the verdict, so the same-door premise
+      // check suffices (codex r23 P1).
+      // A correction that COMPLETES a street-only prior (adds the city /
+      // ZIP) cannot demand a locality the prior never had: the lead that
+      // still names that street-only premise is reconciled on the
+      // unit-insensitive premise alone, or it would keep its flag while
+      // the estimate clears (pre-push audit P1 after r28).
+      const priorHasLocality = !!(priorParsed.city && priorParsed.zip);
+      const leadStillPrior = !!leadRow && leadSameDoor && (!String(leadRow.address || '').trim() || leadPremiseMatches(leadDisplay, lockedPrior?.address, { requireLocality: corrected && priorHasLocality }));
+      if (leadStillPrior) await trx('leads').where({ id: writtenData.lead_id }).update({
+        extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
+        ...(corrected && parsed.line1 ? {
+          // The lead's single address column carries the whole door.
+          address: parsed.unit ? `${parsed.line1} ${parsed.unit}` : parsed.line1,
+          ...(parsed.city ? { city: parsed.city } : {}),
+          ...(parsed.zip ? { zip: parsed.zip } : {}),
+        } : {}),
+        updated_at: now(),
+      });
+      // The linked customer whose on-file premise IS the rejected one moves
+      // too — never a customer already living somewhere else.
+      if (corrected && parsed.line1 && row.customer_id) {
+        const { samePremiseDisplay } = require('./lead-address-unverified');
+        const before = await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first();
+        const custDisplay = before ? [before.address_line1, before.address_line2, before.city, before.zip].filter(Boolean).join(', ') : '';
+        // …and the SAME DOOR: the premise comparison strips units by design,
+        // but a customer at Apt 4 linked to an Apt 5 estimate must not be
+        // moved by that estimate's correction (codex r18 P1).
+        const sameDoor = !!before && doorUnit(before.address_line1, before.address_line2) === doorUnit(priorParsed.line1, priorParsed.unit);
+        // …and the COMPLETE locality on both sides (codex r21 P1): a
+        // street-only estimate must not move a same-number customer in
+        // another town.
+        // …the SAME relaxation the linked lead gets (codex r43 P1): a prior
+        // estimate that carried no locality at all cannot demand one, or a
+        // street-only flagged estimate could never move its linked customer
+        // off the rejected number.
+        if (before && custDisplay && sameDoor && samePremiseDisplay(custDisplay, lockedPrior?.address, { requireLocality: priorHasLocality })) {
+          // The repository's established address-change path, not a bare
+          // column write (codex r17 P1): coordinates cleared atomically
+          // with the address (the async re-geocode refills them), the
+          // primary customer_properties row synced, matching lead /
+          // estimate snapshots fanned out, then the guarded re-geocode
+          // after commit — exactly what the Customer 360 edit does.
+          await trx('customers').where({ id: before.id }).update({
+            address_line1: parsed.line1,
+            address_line2: parsed.unit,
+            ...(parsed.city ? { city: parsed.city } : {}),
+            // The corrected STATE fans out with the rest (codex r19 P1).
+            ...(parsed.state ? { state: parsed.state } : {}),
+            ...(parsed.zip ? { zip: parsed.zip } : {}),
+            latitude: null,
+            longitude: null,
+            updated_at: now(),
+          });
+          const after = await trx('customers').where({ id: before.id }).first();
+          await require('./customer-properties').syncPrimaryAddress(after, trx, { explicitLine2: true });
+          await require('./customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
+          // Sibling estimates the fan-out just moved to the corrected
+          // premise still carry the OLD premise's county block — their
+          // sends would keep refusing ADDRESS_UNVERIFIED and their links
+          // stay off-surface for an address staff has now vouched for.
+          // Cleared for every open sibling that now names the corrected
+          // premise and whose flag was stamped on the rejected one (or
+          // carries no stamp) (codex #4667 r26 P1).
+          try {
+            const { flagCoversAddress, recoverAddressUnverified: recoverSiblingFlag } = require('./lead-address-unverified');
+            const correctedDisplay = [parsed.unit ? `${parsed.line1} ${parsed.unit}` : parsed.line1, parsed.city, [parsed.state, parsed.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+            const siblings = await trx('estimates')
+              .where({ customer_id: before.id })
+              .whereNot({ id: row.id })
+              .whereNull('archived_at')
+              // The fan-out's own open set.
+              .whereIn('status', ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'])
+              .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+              .select('id', 'address', 'estimate_data');
+            const stale = siblings.filter((sib) => {
+              if (!samePremiseDisplay(sib.address, correctedDisplay, { requireLocality: true })) return false;
+              const flag = recoverSiblingFlag(parseJson(sib.estimate_data) ? { address_unverified: parseJson(sib.estimate_data).addressUnverifiedFlag } : null);
+              return !flag || !flag.address_line1 || flagCoversAddress(flag, { line1: priorParsed.line1, city: priorParsed.city, state: priorParsed.state, zip: priorParsed.zip });
+            }).map((sib) => sib.id);
+            if (stale.length) {
+              await trx('estimates')
+                .whereIn('id', stale)
+                .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+                .update({
+                  estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                    addressUnverified: false,
+                    addressUnverifiedFlag: null,
+                    addressUnverifiedSupersededAt: new Date().toISOString(),
+                    addressUnverifiedClearedBy: 'address_corrected',
+                  })]),
+                  updated_at: now(),
+                });
+            }
+          } catch (siblingErr) {
+            // The correction itself must land; a sibling left blocked is
+            // the pre-existing state, not a new hazard.
+            logger.warn(`[admin-estimate-persistence] sibling address holds not cleared: ${siblingErr.code || siblingErr.name || 'error'}`);
+          }
+          const committed = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+          const regeocode = () => require('./geocoder').regeocodeCustomerAddressGuarded(before.id).catch(() => {});
+          if (committed) committed.then(regeocode).catch(() => {}); else regeocode();
+        }
+      }
+    }
     return row;
   });
   if (!updated) {
@@ -3207,6 +3604,7 @@ module.exports = {
   preserveClickMintMarkersAcrossRevise,
 };
 module.exports.stripClientProposal = stripClientProposal;
+module.exports.premiseChanged = premiseChanged;
 module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisionInScheduledGroup;
 module.exports.lockScheduledGroupGuardGroups = lockScheduledGroupGuardGroups;
 module.exports.lockEstimateGroupAddressRevision = lockEstimateGroupAddressRevision;
@@ -3221,3 +3619,4 @@ module.exports.assertLiveRowMayJoinGroup = assertLiveRowMayJoinGroup;
 module.exports.liveGroupMoveDestinationIds = liveGroupMoveDestinationIds;
 module.exports.revisionGroupLockIds = revisionGroupLockIds;
 module.exports.expiredRowRecoverableUnderGate = expiredRowRecoverableUnderGate;
+module.exports.stampContactMatchedLeadsClean = stampContactMatchedLeadsClean;

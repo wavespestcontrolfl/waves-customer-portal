@@ -484,7 +484,18 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
       // deadline (crashed or delayed) leaves the link-visible scope once
       // expired, yet still decides whether a later group send can deliver
       // (GH codex P2 r2 on #4309).
-      .orWhere((fixed) => fixed.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
+      .orWhere((fixed) => fixed.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`))
+      // …and any PUBLISHED sibling (expired ones included — the shared link
+      // still renders them) under the county-roll address block, so the
+      // scheduling preflight refuses what the cron's final verdict would
+      // abort (codex #4667 r38 P1).
+      // …an EXPIRED sibling only when it was ever published (sent_at or
+      // viewed_at, never expired_unsent) — the renderer's own rule; a
+      // never-delivered legacy row is not part of the link being
+      // protected (codex #4667 r44 P2).
+      .orWhere((held) => held.whereIn('status', ['sending', 'sent', 'viewed', 'expired'])
+        .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+        .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")));
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
@@ -496,6 +507,11 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     // not from the cron parking the anchor at publication (codex r16 P2 on
     // #3804). The publish-time claim re-asserts it atomically.
     if (siblingRepricePending(sibling)) return { sibling, statusCode: 409, code: 'REPRICE_PENDING' };
+    // …and a sibling under the county-roll address block (codex #4667 r30
+    // P1): the grouped claim's assertEstimateSendable would abort the
+    // delivery later, so the refusal lands at scheduling time instead of
+    // a queued send that cannot run.
+    if (parseEstimateData(sibling.estimate_data)?.addressUnverified === true) return { sibling, statusCode: 409, code: 'ADDRESS_UNVERIFIED' };
     const authority = String(sibling.pricing_authority || '').toUpperCase();
     // Automation: the explicit SERVER stamp only. Manual sends: the ONE
     // shared row verdict — SERVER, a genuinely locked accepted price, or an
@@ -523,6 +539,9 @@ function blockingSiblingMessage(blockingSibling, beforeWhat) {
   if (blockingSibling.code === 'REPRICE_PENDING') {
     return `Grouped estimate ${id} is held for a re-price (a clarify answer replaces its dollars or address) — re-draft or revise it before ${beforeWhat}.`;
   }
+  if (blockingSibling.code === 'ADDRESS_UNVERIFIED') {
+    return `Grouped estimate ${id} has a house number county records could not confirm — correct or confirm its address before ${beforeWhat}.`;
+  }
   return `Grouped estimate ${id} has no engine-verified price — re-save it from the estimate tool before ${beforeWhat}.`;
 }
 
@@ -542,6 +561,23 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 409;
     err.code = 'REPRICE_PENDING';
     throw err;
+  }
+  // The quote intake's county-roll verdict: the public renderer refuses
+  // the link while it stands (estimateOffCustomerSurface), so a send would
+  // hand the customer a 404. Staff clear it by correcting the address on
+  // the estimate (a revision that changes the address), or by confirming it
+  // explicitly (addressUnverified: false in the revision) — pre-push audit
+  // P1 on #4667.
+  {
+    const data = typeof estimate.estimate_data === 'string'
+      ? (() => { try { return JSON.parse(estimate.estimate_data); } catch { return null; } })()
+      : estimate.estimate_data;
+    if (data && data.addressUnverified === true) {
+      const err = new Error('County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.');
+      err.statusCode = 409;
+      err.code = 'ADDRESS_UNVERIFIED';
+      throw err;
+    }
   }
   // One-tap purchase drafts are INTERNAL flow state, never a document to
   // publish (Codex #3395 r12 P2): sending one flips it to 'sent' — a state
@@ -1088,6 +1124,10 @@ router.put('/:id', async (req, res, next) => {
       // Unlinked-member guard (2026-08-10) — same contract and ADMIN-ONLY
       // scope as POST / (codex #3338 r23).
       memberLinkageWarning: req.techRole === 'admin' ? (memberLinkageWarning || null) : null,
+      // The county-roll block as it stands AFTER this write (false once a
+      // changed premise or `confirmAddress: true` cleared it), so the
+      // builder drops its notice without a reload.
+      addressUnverified: parseEstimateData(estimate.estimate_data)?.addressUnverified === true,
     });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
@@ -1196,6 +1236,18 @@ router.get('/:id/edit-source', async (req, res, next) => {
       engineRequest: inputs ? estData.engineRequest || null : null,
       token: estimate.token,
       engineProfile,
+      // The quote intake's county-roll verdict on this draft, so the builder
+      // can offer the explicit confirmation the revise route honors
+      // (`confirmAddress: true`) — without it staff could only clear the
+      // block by changing the premise (pre-push audit P1 on #4667).
+      addressUnverified: estData.addressUnverified === true
+        ? {
+          reason: String(estData.addressUnverifiedFlag?.reason || 'County records could not confirm this house number.').slice(0, 600),
+          county: estData.addressUnverifiedFlag?.county || null,
+          houseNumber: estData.addressUnverifiedFlag?.house_number || null,
+          nearestNumbers: Array.isArray(estData.addressUnverifiedFlag?.nearest_numbers) ? estData.addressUnverifiedFlag.nearest_numbers.map(String).slice(0, 5) : [],
+        }
+        : null,
       customer,
     });
   } catch (err) { next(err); }
@@ -1377,6 +1429,10 @@ router.post('/:id/send', async (req, res, next) => {
           // would only refuse it later, with nothing unscheduling it if the
           // reply's own unschedule ran while the row was still a draft.
           .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+          // …and the county-roll address block (codex #4667 r27 P1): a
+          // warning stamped between the pre-read and this claim must not
+          // move the row to 'scheduled' for the cron to refuse later.
+          .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
           // Same pricing-authority re-assertion as the immediate-send claim
           // (pre-push codex P1): a revision stamping CLIENT_FALLBACK between
           // the pre-read check and this UPDATE must lose the race with a 409
@@ -1408,7 +1464,7 @@ router.post('/:id/send', async (req, res, next) => {
       const scheduledClaim = scheduleOutcome.claimed;
       if (!scheduledClaim) {
         return res.status(409).json({
-          error: 'This estimate is mid-send, already accepted, locked, or held for a re-price — refresh and retry.',
+          error: 'This estimate is mid-send, already accepted, locked, held for a re-price, or its address is unconfirmed — refresh and retry.',
         });
       }
       return res.json(scheduleResult);
@@ -1459,6 +1515,11 @@ router.post('/:id/send', async (req, res, next) => {
               .whereRaw("COALESCE(estimate_data, '{}'::jsonb) = ?::jsonb", [JSON.stringify(parseEstimateData(estimate.estimate_data) || {})]);
           }
           if (idempotencyKey) q.whereRaw("NOT (COALESCE(estimate_data->'manualSendAttempts', '[]'::jsonb) @> ?::jsonb)", [JSON.stringify([{ key: idempotencyKey }])]);
+          // The county-roll address block is reasserted IN the claim: a
+          // flagged /calculate that refreshed the draft after the
+          // request-time read must not be sent by a caller that omitted
+          // expectedEditVersion (codex #4667 r13 P1).
+          q.whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL);
         })
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
@@ -2090,6 +2151,25 @@ async function releaseGroupSiblingClaims(claimedSiblings = []) {
 // is non-fatal — an uncleared claim ages out by TTL, the pending marker
 // already blocks any resend, and the next reconcile (claim now stale)
 // applies the full invalidation itself.
+// The group siblings' share of a send's claim (stamped in the claim
+// transaction, codex #4667 r41 P1): a plain token-fenced clear — siblings
+// carry no pending-invalidation bookkeeping of this send's. Non-fatal (TTL).
+async function clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken) {
+  if (!estimate?.id || !estimate.estimate_group_id || !deliveryClaimToken) return;
+  try {
+    await db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereRaw("estimate_data->'estimatorEngine'->>'delivering_token' = ?", [deliveryClaimToken])
+      .update({
+        estimate_data: db.raw("jsonb_set(estimate_data, '{estimatorEngine}', (estimate_data->'estimatorEngine') - 'delivering_at' - 'delivering_token', true)"),
+        updated_at: db.fn.now(),
+      });
+  } catch (err) {
+    logger.warn(`[admin-estimates] group sibling delivery-claim release failed for estimate ${estimate.id} (ages out by TTL): ${err.code || err.name || 'db_error'}`);
+  }
+}
+
 async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
   if (!estimateId || !deliveryClaimToken) return;
   try {
@@ -2146,6 +2226,10 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
 // on the markers, so a message that still slips out carries a link that
 // serves nothing. DB failure fails CLOSED (the leg is retryable);
 // unparseable estimate_data proceeds, matching the verdict read.
+// SQL form of the county-roll address block (estimate_data.addressUnverified
+// === true): every atomic send claim carries it (codex #4667 r13 P1).
+const { ADDRESS_UNVERIFIED_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+
 async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
   const row = await db('estimates').where({ id: estimateId }).first('id', 'estimate_group_id', 'archived_at', 'estimate_data');
   if (!row) return true;
@@ -2155,6 +2239,9 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
     data = typeof row.estimate_data === 'string'
       ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
   } catch { return false; }
+  // The county-roll address block landing between the claim and the
+  // provider handoff (codex #4667 r13 P1).
+  if (data?.addressUnverified === true) return true;
   const eng = data?.estimatorEngine;
   if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
   // A bedroom re-price in flight (estimate-clarify-asks): the draft's
@@ -2229,6 +2316,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     thrown = err;
   } finally {
     await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
+    await clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken);
   }
   // When NO channel delivered, the customer never saw the single-service
   // shape, so the park is compensated — the line is restored through the
@@ -2476,6 +2564,28 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // claimed for publish — so a sibling withheld since its claim aborts the
   // send rather than publishing the group around it.
   const deliveryEstimateIds = [estimate.id, ...claimedGroupSiblings.map((s) => s.id)];
+  // …and every OTHER link-visible member of the group (sent / viewed
+  // siblings the shared link already renders): a county hold landing on one
+  // of them between the sibling preflight and the provider call would make
+  // that property silently disappear from the delivered group link, so the
+  // final pre-handoff verdict covers the whole visible set (codex #4667 r34
+  // P1). Claimed rows keep driving the send metadata.
+  const linkVisibleGroupIds = [...deliveryEstimateIds];
+  if (estimate.estimate_group_id) {
+    const published = await db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNotIn('id', deliveryEstimateIds)
+      // …expired published siblings too: the public group renderer keeps
+      // them as summaries while the anchor's navigation window is open
+      // (codex r35 P1).
+      // …'sending' too — the renderer's link-visible scope includes it (codex r51 P1).
+      .whereIn('status', ['sending', 'sent', 'viewed', 'expired'])
+      // …published ones only (the renderer's rule — codex r44 P2).
+      .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")
+      .whereNull('archived_at')
+      .select('id');
+    for (const row of published) linkVisibleGroupIds.push(row.id);
+  }
 
   // FINAL pre-delivery verdict re-read (codex P0, PR #3304): a linkage
   // invalidation can archive the row after this send claimed it — the
@@ -2493,6 +2603,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // can slip in between this lock releasing and the provider handoff —
     // the lock itself is never held across provider calls.
     const invalidatedNow = await db.transaction(async (trx) => {
+      // Group advisory lock BEFORE any row lock when siblings are claimed
+      // below (pre-push audit P1 after r42): two grouped sends / extensions
+      // on different members would otherwise each hold their anchor and
+      // wait on the other's. Reentrant when the caller already holds it.
+      if (estimate.estimate_group_id && linkVisibleGroupIds.length > 1) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['estimate-group-send', String(estimate.estimate_group_id)]);
+      }
       const verdictRow = await trx('estimates')
         .where({ id: estimate.id })
         .forUpdate()
@@ -2542,8 +2659,39 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         };
         await trx('estimates').where({ id: estimate.id })
           .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+        // …and the SAME claim on every other link-visible group member
+        // (codex #4667 r41 P1): the county-roll withdrawal refuses to
+        // commit a hold while a delivery claim is live, so a sibling
+        // flagged after its final recheck cannot vanish from the group
+        // link mid-send. Token-fenced release in the outer finally. A
+        // sibling already under another send's fresh claim keeps that one.
+        const siblingIds = linkVisibleGroupIds.filter((id) => String(id) !== String(estimate.id));
+        if (siblingIds.length) {
+          const stamped = await trx('estimates')
+            .whereIn('id', siblingIds)
+            .whereNull('archived_at')
+            .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+            .update({
+              estimate_data: trx.raw(
+                "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)",
+                [data.estimatorEngine.delivering_at, deliveryClaimToken],
+              ),
+              updated_at: trx.fn.now(),
+            });
+          // EVERY link-visible sibling must carry this token (pre-push audit
+          // P1 after r44): a sibling under another sender's live claim could
+          // be released and quarantined before the provider handoff. The
+          // throw rolls this claim transaction back (no orphaned stamps);
+          // the send releases to send_failed below.
+          if (Number(stamped) !== siblingIds.length) {
+            throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });
+          }
+        }
       }
       return null;
+    }).catch((claimErr) => {
+      if (claimErr?.code === 'SIBLING_CLAIM_UNAVAILABLE') return 'sibling_claim_unavailable';
+      throw claimErr;
     });
     if (invalidatedNow) {
       if (invalidatedNow === 'saved_offer_changed') {
@@ -2552,9 +2700,16 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
         .update({ status: 'send_failed', last_send_error: invalidatedNow, updated_at: db.fn.now() });
+      // …and the draft siblings this send already claimed as 'sending' go
+      // back too (pre-push audit P1 after r45): every pre-delivery exit
+      // releases the status claims, or the next group send fails its
+      // mid-send check on rows nobody is delivering.
+      await releaseGroupSiblingClaims(claimedGroupSiblings);
       const err = new Error(invalidatedNow === 'reprice_pending'
         ? "This estimate is being re-priced from the customer's bedroom answer — the replacement draft is on its way. Nothing was sent."
-        : 'This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
+        : invalidatedNow === 'sibling_claim_unavailable'
+          ? 'Another send of this group is still delivering — retry in a few minutes. Nothing was sent.'
+          : 'This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
       err.statusCode = 409;
       throw err;
     }
@@ -2674,8 +2829,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
           if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
-            throw new Error('invalidated_before_delivery');
+          // EVERY claimed member of a grouped send, not only the anchor: a
+          // county warning landing on a sibling before the provider call
+          // aborts the shared handoff (codex #4667 r20 P1).
+          for (const deliveryId of linkVisibleGroupIds) {
+            if (await estimateInvalidatedJustBeforeHandoff(deliveryId, now)) {
+              throw new Error('invalidated_before_delivery');
+            }
           }
           const result = await sendCustomerMessage({
             to: normalized,
@@ -2775,8 +2935,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // SendGrid price summary / details match the attached PDF if totals
           // changed mid-send. The PDF was built from freshEstimate above.
           const freshPriceLine = estimateEmailPriceLine(freshEstimate);
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
-            throw new Error('invalidated_before_delivery');
+          // EVERY claimed member of a grouped send, not only the anchor: a
+          // county warning landing on a sibling before the provider call
+          // aborts the shared handoff (codex #4667 r20 P1).
+          for (const deliveryId of linkVisibleGroupIds) {
+            if (await estimateInvalidatedJustBeforeHandoff(deliveryId, now)) {
+              throw new Error('invalidated_before_delivery');
+            }
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
           const result = await sendEstimateEmail({
@@ -4246,6 +4411,15 @@ router.put('/:id/proposal', async (req, res, next) => {
     // leaves 'sending' while the automated link is still being delivered.
     const retry = (message) => { const err = new Error(message); err.statusCode = 409; return err; };
     const { updatedCount, editVersion: committedEditVersion } = await db.transaction(async (trx) => {
+    // The county-roll ADDRESS-VERDICT contact-pair lock FIRST (before the
+    // group and row locks — the order every other verdict writer uses): a
+    // save that lifts the hold below stamps the linked leads' verdicts
+    // under it, so a concurrent /calculate cannot overwrite that clean
+    // verdict with its stale flagged read (pre-push audit P1 after r42).
+    if (estimate.customer_email && estimate.customer_phone) {
+      const { contactPairLockKey } = require('../services/lead-address-unverified');
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(estimate.customer_email, estimate.customer_phone)]);
+    }
     const observed = await trx('estimates').where({ id: estimate.id }).first('id', 'estimate_group_id');
     if (!observed) throw retry('This estimate changed while you were editing — reload and retry.');
     const groupId = observed.estimate_group_id || null;
@@ -4267,9 +4441,48 @@ router.put('/:id/proposal', async (req, res, next) => {
     // save. The whole-blob proposal write must carry the LOCKED row's values
     // even when this edit does not need to extend its own link again.
     const lockedData = parseEstimateData(locked.estimate_data) || {};
-    for (const key of ['groupLinkViewableThrough', 'groupPublishedByEstimateId']) {
+    // …and the county-roll address block (codex #4667 r35 P1): a flagged
+    // lookup that stamped the row after this save's pre-read must survive
+    // the whole-blob write, or the county-rejected proposal becomes
+    // sendable again.
+    for (const key of ['groupLinkViewableThrough', 'groupPublishedByEstimateId', 'addressUnverified', 'addressUnverifiedFlag', 'addressUnverifiedClearedBy', 'addressUnverifiedSupersededAt']) {
       if (Object.hasOwn(lockedData, key)) nextData[key] = lockedData[key];
       else delete nextData[key];
+    }
+    // …but the proposal editor IS the commercial row's only correction
+    // path (the residential revise refuses COMMERCIAL rows and the editor
+    // has no confirm control), so a save that moves the proposal's
+    // editable premise off the flagged one — or an explicit
+    // confirmAddress — lifts the block here, as reviseAdminEstimate does
+    // for residential rows (codex #4667 r42 P1). Judged on the LOCKED
+    // row's marker against the proposal address this save writes; a
+    // same-premise edit keeps the hold.
+    if (lockedData.addressUnverified === true || lockedData.addressUnverifiedFlag) {
+      const { premiseChanged } = require('../services/admin-estimate-persistence');
+      const priorProposalAddress = existingData?.proposal?.propertyAddress || locked.address || null;
+      const addressCorrected = !!normalized?.propertyAddress
+        && premiseChanged(priorProposalAddress, normalized.propertyAddress);
+      const explicitConfirm = req.body?.confirmAddress === true;
+      if (addressCorrected || explicitConfirm) {
+        nextData.addressUnverified = false;
+        nextData.addressUnverifiedFlag = null;
+        nextData.addressUnverifiedClearedBy = addressCorrected ? 'address_corrected' : 'staff_confirmed';
+        delete nextData.addressUnverifiedSupersededAt;
+        // …and the SHARED lead-verdict reconciliation (pre-push audit P1
+        // after r42): the leads under this row's contact pair whose flag
+        // covers the resolved premise take the clean verdict, or a later
+        // lookup / outage recovers the old flag and blocks this proposal
+        // again. Judged on the premise the proposal now names; the base
+        // address column stays immutable on this path by design.
+        const { stampContactMatchedLeadsClean } = require('../services/admin-estimate-persistence');
+        await stampContactMatchedLeadsClean(trx, {
+          row: locked,
+          clearedBy: nextData.addressUnverifiedClearedBy,
+          premiseAddress: addressCorrected ? normalized.propertyAddress : (lockedData.addressUnverifiedFlag?.address_line1
+            ? [lockedData.addressUnverifiedFlag.address_line1, lockedData.addressUnverifiedFlag.city, lockedData.addressUnverifiedFlag.zip].filter(Boolean).join(', ')
+            : null),
+        });
+      }
     }
     // A pending send is judged at the first scheduler tick it can reach,
     // exactly as scheduling judged it (pre-push codex P1 on #4309): a 23:58
@@ -5425,6 +5638,7 @@ router._internals = {
   GATED_SEND_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
   findGroupSiblingBlockingSend,
+  blockingSiblingMessage,
   notifyPricingFallbackAfterCommit,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,
@@ -5446,3 +5660,5 @@ module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
 module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
 module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;
+module.exports.clearEstimateDeliveryClaim = clearEstimateDeliveryClaim;
+module.exports.clearGroupSiblingDeliveryClaims = clearGroupSiblingDeliveryClaims;

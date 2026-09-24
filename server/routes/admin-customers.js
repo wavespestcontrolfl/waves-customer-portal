@@ -1970,7 +1970,11 @@ async function ensureCustomerAccount(trx, input) {
     company_name: input.companyName || null,
   }).returning('*');
 
-  return { accountId: account.id, existingCustomer: null, matchType: null };
+  // `created: true` ONLY on this mint path: a caller that rolls an account
+  // back on a refused request must not infer "minted here" from a null
+  // matchType, which an existing profile-less account satisfies too
+  // (pre-push audit P1 on #4667).
+  return { accountId: account.id, existingCustomer: null, matchType: null, created: true };
 }
 
 async function accountPropertySummary(accountId, excludeCustomerId = null) {

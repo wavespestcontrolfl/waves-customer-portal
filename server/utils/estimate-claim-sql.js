@@ -31,6 +31,10 @@ const LINKAGE_INVALIDATION_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngin
 // or address are about to be corrected is not publishable — anchor OR
 // grouped sibling (codex r1 P1 on #3804).
 const REPRICE_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') = ''";
+// The quote intake's county-roll address block (public-quote addressUnverified)
+// as a SQL predicate, reasserted on every atomic write that could otherwise
+// overwrite the marker from a stale snapshot (codex #4667 r23 P1).
+const ADDRESS_UNVERIFIED_ABSENT_SQL = "NOT COALESCE(estimate_data->'addressUnverified' = 'true'::jsonb, false)";
 const INVALIDATION_PENDING_ABSENT_SQL = "COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''";
 
 // The ONE in-flight verdict for a call's processing state — lives here
@@ -290,6 +294,12 @@ async function unitHoldSatisfied(dbc, callLogId, address) {
 function estimateOffCustomerSurface(estimate = {}) {
   let data = estimate?.estimate_data;
   if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  // The quote intake's durable county-roll verdict (public-quote
+  // addressUnverified): a house number the roll could not confirm keeps the
+  // row off the customer surface — view, server page, accept, asks — even
+  // after a generic unarchive or a withdrawal that failed to land (codex
+  // #4667 r8 P1 ×2). Cleared only by a clean run refreshing the draft.
+  if (data && typeof data === 'object' && data.addressUnverified === true) return true;
   const eng = data && typeof data === 'object' ? data.estimatorEngine : null;
   if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
   return require('../services/estimate-clarify-asks').repricePendingActive(eng);
@@ -303,6 +313,7 @@ module.exports = {
   LINKAGE_INVALIDATION_ABSENT_SQL,
   INVALIDATION_PENDING_ABSENT_SQL,
   REPRICE_PENDING_ABSENT_SQL,
+  ADDRESS_UNVERIFIED_ABSENT_SQL,
   callReprocessInFlight,
   callPassStillOwned,
   callSideBlockForEstimateData,
