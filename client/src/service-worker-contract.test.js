@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -77,14 +77,20 @@ function fakeLocks() {
   };
 }
 
-function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now } = {}) {
+function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, clientList = [] } = {}) {
   const listeners = {};
   const names = new Set([...cacheNames, ...Object.keys(cachesByName)]);
+  const workerClients = {
+    claim: async () => {},
+    openWindow: async () => {},
+    matchAll: async () => clientList,
+  };
   const sandbox = {
     self: {
       addEventListener(name, fn) { listeners[name] = fn; },
-      navigator: locks ? { locks } : {}, location: { origin: 'https://portal.test' }, registration: {},
-      skipWaiting: async () => {}, clients: { claim: async () => {} },
+      navigator: locks ? { locks } : {}, location: { origin: 'https://portal.test' },
+      registration: { showNotification: async () => {} },
+      skipWaiting: async () => {}, clients: workerClients,
     },
     caches: {
       names,
@@ -100,7 +106,7 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now } = 
     Headers,
     URL,
     fetch: async (request) => fakeResponse(`asset:${request.url}`),
-    clients: {},
+    clients: workerClients,
     console,
   };
   vm.createContext(sandbox);
@@ -126,7 +132,15 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now } = 
     listeners.install({ waitUntil(promise) { pending.push(promise); } });
     await Promise.all(pending);
   }
-  return { ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, cacheNames: names };
+  async function dispatchPush(data) {
+    const pending = [];
+    listeners.push({
+      data: { json: () => data },
+      waitUntil(promise) { pending.push(promise); },
+    });
+    await Promise.all(pending);
+  }
+  return { ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, dispatchPush, cacheNames: names };
 }
 
 const shellHtml = (assets) => `<html><head>${assets.map(a => `<script src="${a}"></script>`).join('')}</head></html>`;
@@ -211,6 +225,18 @@ describe('customer service-worker update contract', () => {
     // Must NOT start with APP_CACHE_PREFIX ('waves-customer-') or the
     // activate sweep would wipe the ordering state on every SW update.
     expect('waves-badge-state'.startsWith('waves-customer-')).toBe(false);
+  });
+
+  it('asks visible pages to refresh their unread counts after a push', async () => {
+    const cache = fakeCache();
+    const visible = { visibilityState: 'visible', postMessage: vi.fn() };
+    const hidden = { visibilityState: 'hidden', postMessage: vi.fn() };
+    const { dispatchPush } = loadWorker(cache, { clientList: [visible, hidden] });
+
+    await dispatchPush({ title: 'New activity' });
+
+    expect(visible.postMessage).toHaveBeenCalledWith({ type: 'waves:push-received' });
+    expect(hidden.postMessage).not.toHaveBeenCalled();
   });
 });
 
