@@ -908,6 +908,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // mints a short code, so it carries no url/line — those only exist once
   // sendConsultationLink below actually mints one, on the Send click.
   const [consultationLinks, setConsultationLinks] = useState({});
+  // The consultation gate, read once from the lead list response (Codex
+  // #4709 r6 P1) — null until the first list load, then true/false. Rows
+  // never probe availability while it is off.
+  const [consultationGate, setConsultationGate] = useState(null);
   const loadConsultationLink = useCallback(async (leadId) => {
     setConsultationLinks((m) => ({ ...m, [leadId]: { loading: true } }));
     try {
@@ -983,6 +987,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         if (requestId !== leadsRequestRef.current) return; // superseded
         setLeads(data.leads || []);
         setLeadsTotal(data.total || 0);
+        setConsultationGate(data.consultationLinksEnabled === true);
       } catch (e) {
         if (requestId !== leadsRequestRef.current) return; // superseded
         console.error("loadLeads", e);
@@ -1154,12 +1159,17 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     setPipelineView("table");
     setActiveLead(linkedLeadId);
     loadLeadActivities(linkedLeadId);
-    // The row-expand click path (expandLead) loads this too — the ?lead=
-    // deep link expands the same row without going through that handler,
-    // so it must run the same loader or "Send consultation link" shows no
-    // link at all until the operator collapses and re-expands the row.
-    loadConsultationLink(linkedLeadId);
-  }, [linkedLeadId, setActiveLead, loadLeadActivities, loadConsultationLink, setPipelineView]);
+    // The consultation probe for this deep-linked row runs from the
+    // gate-aware effect below once the list response says the gate is on.
+  }, [linkedLeadId, setActiveLead, loadLeadActivities, setPipelineView]);
+
+  // Probe the expanded lead once the page-level gate is known to be on —
+  // covers the ?lead= deep link (which expands before the list loads) and
+  // any row expanded before the first list response.
+  useEffect(() => {
+    if (consultationGate !== true || !expandedLead || consultationLinks[expandedLead]) return;
+    loadConsultationLink(expandedLead);
+  }, [consultationGate, expandedLead, consultationLinks, loadConsultationLink]);
 
   // Drill-down from the dashboard Marketing Attribution panel:
   // /admin/leads?source_name=<name>&from=<YYYY-MM-DD>&to=<YYYY-MM-DD>&period_label=<label>
@@ -1183,7 +1193,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     }
     setActiveLead(lead.id);
     loadLeadActivities(lead.id);
-    if (!consultationLinks[lead.id]) loadConsultationLink(lead.id);
+    if (consultationGate === true && !consultationLinks[lead.id]) loadConsultationLink(lead.id);
   };
   const updateLeadStatus = async (leadId, status) => {
     try {

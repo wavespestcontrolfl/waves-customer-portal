@@ -18,7 +18,7 @@ beforeEach(() => {
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
     const path = String(url); calls.push({ path, options });
-    const body = path.includes('/admin/leads?') ? { leads: [lead], total: 63 } : path.endsWith('/sources') ? { sources: [] } : {};
+    const body = path.includes('/admin/leads?') ? { leads: [lead], total: 63, consultationLinksEnabled: true } : path.endsWith('/sources') ? { sources: [] } : {};
     return { ok: true, json: async () => body };
   }));
 });
@@ -137,20 +137,23 @@ describe('Pipeline queue navigation', () => {
 
   // Codex #4709 r3 P1: with GATE_LEAD_INSPECTION_LINK dark the probe says
   // enabled:false and the Leads page renders no consultation button at all.
-  it('omits Send consultation link while the gate is dark', async () => {
+  // Codex #4709 r6 P1: the gate is read once from the lead list response;
+  // while it is off no row ever probes availability and no button renders.
+  it('omits Send consultation link and never probes per row while the gate is dark', async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation(async (url, opts) => {
-      if (String(url).includes('/consultation-link')) {
-        calls.push({ path: String(url), options: opts });
-        return { ok: true, json: async () => ({ enabled: false, available: false, reason: 'switched off' }) };
+      const path = String(url);
+      if (path.includes('/admin/leads?')) {
+        calls.push({ path, options: opts });
+        return { ok: true, json: async () => ({ leads: [lead], total: 63, consultationLinksEnabled: false }) };
       }
       return base(url, opts);
     });
     mount();
     fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
-    await waitFor(() => expect(calls.some(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'))).toBe(true));
     await screen.findByRole('button', { name: 'Message' });
     expect(screen.queryByRole('button', { name: 'Send consultation link' })).toBeNull();
+    expect(calls.some(({ path }) => path.includes('/consultation-link'))).toBe(false);
   });
 
   // Pre-push Codex P2: the ?lead= deep-link expansion path skipped the

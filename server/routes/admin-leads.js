@@ -834,7 +834,15 @@ router.get('/', async (req, res, next) => {
       .limit(lim)
       .offset((pg - 1) * lim);
 
-    res.json({ leads, total: parseInt(count, 10), page: pg, limit: lim });
+    res.json({
+      leads,
+      total: parseInt(count, 10),
+      page: pg,
+      limit: lim,
+      // Codex #4709 r6 P1: the Leads page reads the consultation gate once
+      // here, at the page boundary, instead of probing it per expanded row.
+      consultationLinksEnabled: require('../config/feature-gates').leadInspectionLinkLive(),
+    });
   } catch (err) { next(err); }
 });
 
