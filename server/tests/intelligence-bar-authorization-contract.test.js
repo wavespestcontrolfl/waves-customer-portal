@@ -526,7 +526,7 @@ test('assign_technician: terminal exclusions are disclosed on the exact-effects 
     preview: {
       proposal: true,
       stops: [{ id: 's1', customer: 'acct-7002', current_tech: 'Unassigned' }],
-      skipped_terminal: [{ id: 's2', status: 'completed' }],
+      skipped_terminal: [{ id: 's2', status: 'completed', customer: 'acct-7003' }],
     },
   });
   const withoutSkips = buildContract({
@@ -535,7 +535,11 @@ test('assign_technician: terminal exclusions are disclosed on the exact-effects 
     displayParams: { technician_name: 'Luis' },
     preview: { proposal: true, stops: [{ id: 's1', customer: 'acct-7002', current_tech: 'Unassigned' }] },
   });
-  expect(withSkips.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/1 stop\(s\) are in a terminal status.*will NOT be reassigned/));
+  const label = withSkips.effects.map((e) => e.label).find((l) => /will NOT be reassigned/.test(l));
+  expect(label).toMatch(/1 stop\(s\) are in a terminal status/);
+  // Codex round 3 P1: the card names WHICH stops stay behind (customer, id,
+  // status), never just how many.
+  expect(label).toMatch(/acct-7003 #s2 \(completed\)/);
   expect(withoutSkips.effects.some((e) => /terminal status/.test(e.label))).toBe(false);
 });
 
@@ -556,7 +560,10 @@ test('swap_tech_assignments: terminal exclusions are disclosed on the exact-effe
     displayParams: { date: '2026-09-21', tech_a_name: 'Adam', tech_b_name: 'Luis' },
     preview: { proposal: true, stops: { Adam: [{ id: 'a1', service_type: 'Lawn' }], Luis: [] } },
   });
-  expect(withSkips.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/2 stop\(s\) are in a terminal status.*will NOT be swapped/));
+  const label = withSkips.effects.map((e) => e.label).find((l) => /will NOT be swapped/.test(l));
+  expect(label).toMatch(/2 stop\(s\) are in a terminal status/);
+  // Codex round 3 P1: each excluded stop is listed by id and status.
+  expect(label).toMatch(/#a1 \(no_show\), #a2 \(skipped\)/);
   expect(withoutSkips.effects.some((e) => /terminal status/.test(e.label))).toBe(false);
 });
 

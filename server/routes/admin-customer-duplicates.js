@@ -20,7 +20,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   findDuplicateGroups, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty, acquirePairAdjudicationLock,
   REVERT_FINANCIAL_TABLES, CONSENT_CRITICAL_TABLES,
-  countActivityRows, activityColumnsFor,
+  countActivityRows, activityColumnsFor, UNDO_MERGE_DISMISSAL_REASON,
 } = require('../services/customer-dedupe');
 
 const router = express.Router();
@@ -624,6 +624,15 @@ router.post('/dismiss', async (req, res) => {
     return res.status(400).json({ error: 'customerIdA and customerIdB must be distinct customer UUIDs' });
   }
   const [a, b] = idA < idB ? [idA, idB] : [idB, idA];
+  // The undo-merge sentinel is system metadata that rides in this same
+  // column (Codex round 3 P2): an operator typing that exact word as their
+  // reason would record a "not a duplicate" verdict findDuplicateGroups
+  // reads as an undo suppression — the pair would stay visible and
+  // mergeable instead of leaving the queue. Reserved, refused up front.
+  const reasonText = reason == null ? '' : String(reason).trim();
+  if (reasonText === UNDO_MERGE_DISMISSAL_REASON) {
+    return res.status(400).json({ error: `"${UNDO_MERGE_DISMISSAL_REASON}" is a reserved system reason — describe why these are different people instead` });
+  }
   try {
     // Under the pair's adjudication lock: a confirmed-card merge of this
     // pair re-decides eligibility under the same lock, so a verdict here
@@ -642,7 +651,7 @@ router.post('/dismiss', async (req, res) => {
         .insert({
           customer_id_a: a,
           customer_id_b: b,
-          reason: reason ? String(reason).slice(0, 500) : null,
+          reason: reasonText ? reasonText.slice(0, 500) : null,
           created_by: performedBy(req),
         })
         .onConflict(['customer_id_a', 'customer_id_b'])

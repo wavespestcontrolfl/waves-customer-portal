@@ -39,9 +39,12 @@ const ADAM = { id: 'tech-adam', name: 'Adam' };
 
 function chain(overrides = {}) {
   const b = {};
-  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'whereILike', 'leftJoin', 'forUpdate', 'modify', 'forShare']) {
+  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'orWhereNotIn', 'whereRaw', 'whereILike', 'leftJoin', 'forUpdate', 'modify', 'forShare']) {
     b[m] = jest.fn(() => b);
   }
+  // A grouped predicate (`.where((q) => ...)`) runs its callback against the
+  // same recorder so the nested whereNull/orWhereNotIn calls are observable.
+  b.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(b, b); return b; });
   Object.assign(b, {
     select: jest.fn().mockResolvedValue([]),
     first: jest.fn().mockResolvedValue(undefined),
@@ -148,18 +151,25 @@ describe('assign_technician on a mixed set — terminal rows are dropped and dis
     const preview = await executeScheduleTool('assign_technician', { service_ids: ['svc-done', 'svc-open'], technician_name: 'Luis' }, {});
     expect(preview.proposal).toBe(true);
     expect(preview.stops.map((s) => s.id)).toEqual(['svc-open']);
-    expect(preview.skipped_terminal).toEqual([{ id: 'svc-done', status: 'completed' }]);
+    // Codex round 3 P1: each excluded stop is named (customer + id + status)
+    // so the card can list exactly which ones stay behind.
+    expect(preview.skipped_terminal).toEqual([{ id: 'svc-done', status: 'completed', customer: 'Jane Doe' }]);
   });
 
-  test('confirmed run reassigns only the open stop, with a belt-and-braces status fence on the UPDATE', async () => {
+  test('confirmed run reassigns only the open stop, with a NULL-safe belt-and-braces status fence on the UPDATE', async () => {
     const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
     const result = await executeScheduleTool('assign_technician',
       { service_ids: ['svc-done', 'svc-open'], technician_name: 'Luis', confirmed: true }, { confirmed: true });
 
     expect(trxServices.whereIn).toHaveBeenCalledWith('id', ['svc-open']);
-    expect(trxServices.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['completed', 'cancelled', 'skipped', 'no_show']));
+    // Codex round 3 P2: scheduled_services.status is nullable and
+    // `NULL NOT IN (...)` is never true — the fence must admit a null-status
+    // row (the JS filters treat it as open) or the UPDATE touches zero rows
+    // and the count guard reports preview_changed forever.
+    expect(trxServices.whereNull).toHaveBeenCalledWith('status');
+    expect(trxServices.orWhereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['completed', 'cancelled', 'skipped', 'no_show']));
     expect(result).toMatchObject({ success: true, assigned_count: 1 });
-    expect(result.skipped_terminal).toEqual([{ id: 'svc-done', status: 'completed' }]);
+    expect(result.skipped_terminal).toEqual([{ id: 'svc-done', status: 'completed', customer: 'Jane Doe' }]);
     expect(mockNotify).toHaveBeenCalledWith(expect.objectContaining({ visitId: 'svc-open', toTechId: LUIS.id }));
     expect(mockNotify).not.toHaveBeenCalledWith(expect.objectContaining({ visitId: 'svc-done' }));
   });
@@ -228,6 +238,11 @@ describe('swap_tech_assignments with a no_show row — terminal rows never swap'
     { id: 'a-skipped', scheduled_date: '2026-09-21', technician_id: ADAM.id, status: 'skipped', service_type: 'Quarterly', time_window: null, visit_id: null },
     { id: 'a-done', scheduled_date: '2026-09-21', technician_id: ADAM.id, status: 'completed', service_type: 'Quarterly', time_window: null, visit_id: null },
     { id: 'b-open', scheduled_date: '2026-09-21', technician_id: LUIS.id, status: 'confirmed', service_type: 'Lawn', time_window: null, visit_id: null },
+    // Codex round 3 P2: a legacy NULL-status row is open (the JS split keeps
+    // it swappable) and the locked read must keep it too — `NULL NOT IN`
+    // is never true, so a bare whereNotIn would drop it and the membership
+    // check would report preview_changed forever.
+    { id: 'b-legacy-null', scheduled_date: '2026-09-21', technician_id: LUIS.id, status: null, service_type: 'Lawn', time_window: null, visit_id: null },
   ];
 
   function servicesChain() {
@@ -242,13 +257,27 @@ describe('swap_tech_assignments with a no_show row — terminal rows never swap'
     // `liveStops` (inside the transaction) still chains
     // `.whereNotIn(...).forUpdate().select(...)` off the same object, which
     // keeps working unchanged below.
+    let nullAdmitted = false;
     b.where = jest.fn((arg) => {
       if (arg && typeof arg === 'object' && arg.technician_id) techId = arg.technician_id;
+      // The locked read's grouped predicate (`.where((q) => q.whereNull('status')
+      // .orWhereNotIn('status', ...))`) — the mock records exactly what the
+      // executor asked for, so a null-status row survives only if the
+      // predicate really admits NULL.
+      if (typeof arg === 'function') {
+        const q = {
+          whereNull: jest.fn((col) => { if (col === 'status') nullAdmitted = true; return q; }),
+          orWhereNotIn: jest.fn((col, list) => { excluded = list; return q; }),
+        };
+        arg.call(q, q);
+      }
       const p = Promise.resolve(rowsForTech());
       return Object.assign(p, b);
     });
     b.whereNotIn = jest.fn((col, list) => { excluded = list; const p = Promise.resolve(filtered()); Object.assign(p, b); return p; });
-    b.select = jest.fn(async () => filtered().map((r) => ({ id: r.id, visit_id: r.visit_id })));
+    b.select = jest.fn(async () => rowsForTech()
+      .filter((r) => (r.status == null ? nullAdmitted : !excluded.includes(r.status)))
+      .map((r) => ({ id: r.id, visit_id: r.visit_id })));
     return b;
   }
 
@@ -280,7 +309,7 @@ describe('swap_tech_assignments with a no_show row — terminal rows never swap'
     // swappable set — Adam has nothing left to swap.
     expect(aIds).toEqual([]);
     const bIds = preview.stops[LUIS.name].map((s) => s.id).sort();
-    expect(bIds).toEqual(['b-open']);
+    expect(bIds).toEqual(['b-legacy-null', 'b-open']);
     // Codex round 1 P1: the terminal rows must be DISCLOSED on the card,
     // not just silently absent from the swappable set.
     expect(preview.skipped_terminal.map((s) => s.id).sort()).toEqual(['a-done', 'a-noshow', 'a-skipped']);
@@ -292,11 +321,15 @@ describe('swap_tech_assignments with a no_show row — terminal rows never swap'
     // Only b-open (Luis's live stop) moves — to Adam. Adam's terminal rows
     // are never touched.
     const toAdam = updates.find((u) => u.patch.technician_id === ADAM.id);
-    expect(toAdam.ids.sort()).toEqual(['b-open']);
+    expect(toAdam.ids.sort()).toEqual(['b-legacy-null', 'b-open']);
     expect(updates.some((u) => u.patch.technician_id === null)).toBe(false);
     expect(updates.some((u) => (u.ids || []).includes('a-noshow') || (u.ids || []).includes('a-skipped'))).toBe(false);
     // The confirmed response also discloses the terminal rows left behind.
     expect(result.skipped_terminal.map((s) => s.id).sort()).toEqual(['a-done', 'a-noshow', 'a-skipped']);
+    // Codex round 3 P1: each excluded stop is named for the card (customer
+    // + id + status); with no customer row resolvable the name is empty,
+    // never undefined.
+    for (const s of result.skipped_terminal) expect(s).toEqual({ id: s.id, status: expect.any(String), customer: '' });
   });
 });
 

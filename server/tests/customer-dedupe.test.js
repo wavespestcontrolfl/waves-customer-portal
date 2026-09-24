@@ -2361,11 +2361,11 @@ describe('runAutoMergeSweep', () => {
       if (table === 'customer_duplicate_dismissals') return [];
       return [];
     });
-    // Merge path (transaction mock). Codex round 1 P1: the auto sweep now
-    // passes requireQueueEligibility:true, so executeMerge re-derives
-    // duplicatePairEligibility (findDuplicateGroups) on THIS SAME trx before
-    // committing — the customers row-lock read and that detection read both
-    // want the same two rows.
+    // Merge path (transaction mock). Codex round 1 P1: the auto sweep
+    // passes requireQueueEligibility:true, so executeMerge re-checks this
+    // pair under the lock (lockedPairAutoEligibility: the pair's dismissal
+    // row + the two locked rows + the loser's blocker probes) on THIS SAME
+    // trx before committing.
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers') return [winnerRow, loserRow];
       if (table === 'customer_merge_journal') return [{ id: 'j1' }];
@@ -2436,8 +2436,66 @@ describe('runAutoMergeSweep', () => {
     expect(results.merged).toHaveLength(0);
     expect(results.skipped).toHaveLength(1);
     expect(results.skipped[0]).toMatchObject({ loserId: loserRow.id, tier: 'green' });
+    expect(results.skipped[0].reasons[0]).toMatch(/undo_merge_suppressed/);
     const { notifyAdmin } = require('../services/notification-service');
     expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // Codex round 3 P2: the under-lock recheck is PAIR-scoped — it must not
+  // rebuild the whole duplicate queue (findDuplicateGroups over every active
+  // customer + every blocker table for every duplicate member) per
+  // candidate while the row locks are held. Observable here as: the trx
+  // never runs findDuplicateGroups' all-customers read, and a blocker that
+  // appeared on the LOCKED loser row still refuses the merge.
+  it('the under-lock recheck reads only this pair (no queue rebuild) and still refuses a loser that gained a blocker', async () => {
+    const winnerRow = {
+      id: 'cccccccc-0000-0000-0000-000000000005',
+      first_name: 'Sweepfixture', last_name: 'Pairscope', phone: '+15555550143',
+      address_line1: '2 Fixture Ln', zip: '00000',
+      pipeline_stage: 'new_lead', created_at: '2026-07-08',
+    };
+    const loserRow = {
+      id: 'cccccccc-0000-0000-0000-000000000006',
+      first_name: 'Sweepfixture', last_name: null, phone: '5555550143',
+      address_line1: null, zip: null,
+      pipeline_stage: 'new_lead', created_at: '2026-07-09',
+    };
+    installDb((table) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      if (table === 'customer_duplicate_dismissals') return [];
+      return [];
+    });
+    const trxCustomerReads = [];
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        trxCustomerReads.push(q._calls.map(([m]) => m));
+        // Under the lock the loser now carries a Stripe profile — a
+        // review-queue blocker the snapshot never saw.
+        return [winnerRow, { ...loserRow, stripe_customer_id: 'cus_fixture_late' }];
+      }
+      if (table === 'customer_duplicate_dismissals') return [];
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+
+    expect(results.merged).toHaveLength(0);
+    expect(results.skipped).toHaveLength(1);
+    expect(results.skipped[0].reasons[0]).toMatch(/not_green/);
+    // Every customers read on the trx is the pair row lock — never
+    // findDuplicateGroups' unbounded active-customers scan (whereRaw on
+    // phone with no id filter).
+    expect(trxCustomerReads.length).toBeGreaterThan(0);
+    for (const calls of trxCustomerReads) {
+      expect(calls).toContain('whereIn');
+      expect(calls).not.toContain('whereRaw');
+    }
   });
 });
 

@@ -811,9 +811,13 @@ async function assignTechnician(input, actionContext = {}) {
   // behind, refusing outright when nothing remains.
   const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
   const services = allServices.filter((s) => !TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)));
+  // Each excluded stop is named (customer + id + status) so the card can
+  // list exactly WHICH stops the operator is approving to leave behind, not
+  // just how many (Codex round 3 P1); the list rides the fingerprinted
+  // preview like `stops` does.
   const skippedTerminal = allServices
     .filter((s) => TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)))
-    .map((s) => ({ id: s.id, status: s.status }));
+    .map((s) => ({ id: s.id, status: s.status, customer: `${s.first_name || ''} ${s.last_name || ''}`.trim() }));
   if (!services.length) {
     return { error: 'All matching stops are in a terminal status (completed/cancelled/skipped/no_show) — nothing to reassign' };
   }
@@ -966,7 +970,12 @@ async function assignTechnician(input, actionContext = {}) {
       // non-terminal rows above and re-verified live just above, but the
       // in-trx UPDATE — the decisive write — must never depend on either of
       // those alone.
-      .whereNotIn('status', TERMINAL_APPOINTMENT_STATUSES)
+      // NULL-safe (Codex round 3 P2): scheduled_services.status is nullable
+      // and `NULL NOT IN (...)` is never true, so a bare whereNotIn would
+      // drop a legacy null-status row the preview and the live re-read both
+      // treated as open — the UPDATE would touch zero rows and the count
+      // guard below would report preview_changed on every retry.
+      .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_APPOINTMENT_STATUSES))
       .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
       .update({ technician_id: tech.id, route_order: null, updated_at: new Date() })
       .returning(['id', 'scheduled_date', 'window_start', 'window_end']);
@@ -1649,9 +1658,24 @@ async function swapTechAssignments(input, actionContext = {}) {
   ]);
   const aServices = aAllRows.filter((s) => !NON_SWAPPABLE_STATUSES.includes(String(s.status)));
   const bServices = bAllRows.filter((s) => !NON_SWAPPABLE_STATUSES.includes(String(s.status)));
-  const skippedTerminal = [...aAllRows, ...bAllRows]
-    .filter((s) => TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)))
-    .map((s) => ({ id: s.id, status: s.status }));
+  const skippedTerminalRows = [...aAllRows, ...bAllRows]
+    .filter((s) => TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)));
+  // Named like assign_technician's exclusions (Codex round 3 P1): the card
+  // lists WHICH stops stay behind (customer + id + status), not just how
+  // many. The raw tech-day rows carry no customer name, so look the few
+  // skipped ones up by id — only when there is something to disclose.
+  const skippedCustomerName = new Map();
+  if (skippedTerminalRows.length) {
+    const custIds = [...new Set(skippedTerminalRows.map((s) => s.customer_id).filter(Boolean))];
+    const custRows = custIds.length
+      ? await db('customers').whereIn('id', custIds).select('id', 'first_name', 'last_name')
+      : [];
+    for (const c of custRows || []) {
+      skippedCustomerName.set(String(c.id), `${c.first_name || ''} ${c.last_name || ''}`.trim());
+    }
+  }
+  const skippedTerminal = skippedTerminalRows
+    .map((s) => ({ id: s.id, status: s.status, customer: skippedCustomerName.get(String(s.customer_id)) || '' }));
 
   if (confirmed !== true) {
     return {
@@ -1699,7 +1723,12 @@ async function swapTechAssignments(input, actionContext = {}) {
   let bIds = [];
   const liveStops = async (trx, techId) => trx('scheduled_services')
     .where({ scheduled_date: date, technician_id: techId })
-    .whereNotIn('status', NON_SWAPPABLE_STATUSES)
+    // NULL-safe, like assign_technician's UPDATE fence (Codex round 3 P2):
+    // status is nullable and `NULL NOT IN (...)` is never true, so a bare
+    // whereNotIn would drop a legacy null-status row the client-side split
+    // above kept as swappable — the membership check would then read
+    // preview_changed on every retry.
+    .where((q) => q.whereNull('status').orWhereNotIn('status', NON_SWAPPABLE_STATUSES))
     .forUpdate()
     .select('id', 'visit_id');
   let committedSwapRows = [];

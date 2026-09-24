@@ -1394,6 +1394,31 @@ function systemStopReasonBase(reason) {
   return String(reason || '').replace(/:prev=\w+$/, '');
 }
 
+// Every reason a SYSTEM caller passes to stopSequence today (invoice.js
+// stopInvoiceFollowupSequence: the void lifecycle stop and the annual-prepay
+// coverage stop). stopSequence only encodes the `:prev=paused` suffix on a
+// stop with no admin id, and only these reasons arrive that way — so this
+// set, with no admin attribution, is what makes the suffix trustworthy
+// state metadata rather than operator free text (Codex round 3 P2).
+const SYSTEM_STOP_REASONS = ['invoice_voided', 'annual_prepay_covered'];
+
+// True when a stop stamp is one the SYSTEM wrote (recognized reason base,
+// no admin attribution) — the only stamps whose `:prev=<state>` suffix
+// may be read back as the row's pre-stop status. An admin-authored reason
+// that happens to end in `:prev=paused` is free text, never metadata.
+function isSystemStopStamp(seq) {
+  return !seq.stopped_by_admin_id
+    && SYSTEM_STOP_REASONS.includes(systemStopReasonBase(seq.stopped_reason));
+}
+
+// The eligibility rule for the two AUTOMATIC re-arm callers: a naturally
+// completed row, or a stop the settlement itself created — never an admin's
+// stop, never a payment-plan's. Pure; exercised through
+// resumeSequenceIfSystemResumable (the only production caller) and, for the
+// predicate alone, via the _test export — there is deliberately NO public
+// read-then-decide helper, because composing a separate read with
+// resumeSequence is exactly the check-then-act race the locked helper
+// below exists to close.
 function canSystemResume(seq) {
   if (!seq) return false;
   if (seq.status === 'completed') return true;
@@ -1402,23 +1427,8 @@ function canSystemResume(seq) {
     && SYSTEM_SETTLEMENT_STOP_REASONS.includes(systemStopReasonBase(seq.stopped_reason));
 }
 
-// Read-then-decide helper for the two system re-arm callers: they must NOT
-// call resumeSequence at all when the row is an admin (or plan) stop that
-// happens to still be in place — resumeSequence itself has no status guard
-// (by design: the operator's explicit POST /:id/followup/resume legitimately
-// lifts an admin stop) and would silently reactivate it and erase
-// stopped_reason/stopped_by_admin_id. Exported mainly for direct testing of
-// the eligibility rule; callers should use resumeSequenceIfSystemResumable
-// below, which checks and acts under one lock.
-async function canSystemResumeInvoice(invoiceId, dbc = db) {
-  const seq = await dbc('invoice_followup_sequences')
-    .where({ invoice_id: invoiceId })
-    .first('status', 'stopped_reason', 'stopped_by_admin_id');
-  return canSystemResume(seq);
-}
-
 // Atomic check-and-act for the two AUTOMATIC re-arm callers: a separate
-// canSystemResumeInvoice read followed by a later resumeSequence call
+// eligibility read followed by a later resumeSequence call
 // leaves a window where an admin's stop can commit in between — this
 // FOR UPDATEs the row and resumes it, if eligible, inside the SAME
 // transaction, so a concurrent admin stop either lands first (seen here,
@@ -1453,7 +1463,11 @@ async function resumeSequence(invoiceId, dbc = db) {
   // and pauseSequence never touches next_touch_at/is_autopay_held on a
   // later stop, so restoring is just flipping status back — no other field
   // needs recomputing.
-  if (/:prev=paused$/.test(String(seq.stopped_reason || ''))) {
+  // SYSTEM stamps only (Codex round 3 P2): this route also lifts admin
+  // stops, whose reason is operator free text — "customer requested:prev=paused"
+  // typed into the stop box must resume into active dunning like any other
+  // admin stop, not be read as encoded state and leave the row paused.
+  if (isSystemStopStamp(seq) && /:prev=paused$/.test(String(seq.stopped_reason || ''))) {
     await dbc('invoice_followup_sequences').where({ id: seq.id }).update({
       updated_at: dbc.fn.now(),
       status: 'paused',
@@ -1825,7 +1839,6 @@ module.exports = {
   handleAutopayFailure,
   pauseSequence,
   resumeSequence,
-  canSystemResumeInvoice,
   resumeSequenceIfSystemResumable,
   rescheduleForInvoiceEdit,
   stopSequence,
@@ -1835,4 +1848,6 @@ module.exports = {
   skipStaleTouches,
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,
+  // Pure predicates, exported for tests only.
+  _test: { canSystemResume, isSystemStopStamp },
 };

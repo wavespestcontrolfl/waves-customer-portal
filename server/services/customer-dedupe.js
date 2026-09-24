@@ -277,6 +277,27 @@ function sanitizeCustomer(row) {
   return { ...rest, has_portal_login: !!passwordHash, has_stripe: !!stripeCustomerId };
 }
 
+// The pure pair verdict (tier + reasons) from two customer rows and the
+// loser's blocker list — shared by findDuplicateGroups' queue build and
+// executeMerge's per-pair under-lock recheck for the auto sweep, so the two
+// can never drift.
+function classifyPair(winner, loser, blockers) {
+  const addr = addressCompat(winner, loser);
+  const namesOk = namesCompatible(winner, loser);
+  const reasons = [];
+  if (!namesOk) reasons.push('name_conflict');
+  if (!ADDRESS_COMPATIBLE.has(addr.status)) reasons.push(`address_${addr.status}`);
+  blockers.forEach((blocker) => reasons.push(`loser_has_${blocker}`));
+  const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
+    && normName(winner.last_name) !== normName(loser.last_name);
+  let tier = 'green';
+  // Different last name at a POSITIVELY different address (different
+  // street, unit, ZIP, or city) = two people sharing a line.
+  if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) tier = 'red';
+  else if (reasons.length) tier = 'yellow';
+  return { loser, tier, reasons, namesOk, addrStatus: addr.status };
+}
+
 async function findDuplicateGroups(database = db, { failClosedOnDismissals = false, respectUndoMergeSuppression = false } = {}) {
   // Live ROWS only (active + not deleted) — deliberately NOT restricted to
   // whereLiveCustomer's real-customer stages: the duplicates this tool exists
@@ -334,23 +355,7 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
   }
   const blockersById = await batchAutoBlockers(database, allMembers);
 
-  const evaluatePair = (winner, loser) => {
-    const addr = addressCompat(winner, loser);
-    const namesOk = namesCompatible(winner, loser);
-    const blockers = blockersById.get(loser.id) || [];
-    const reasons = [];
-    if (!namesOk) reasons.push('name_conflict');
-    if (!ADDRESS_COMPATIBLE.has(addr.status)) reasons.push(`address_${addr.status}`);
-    blockers.forEach((blocker) => reasons.push(`loser_has_${blocker}`));
-    const lastNamesDiffer = normName(winner.last_name) && normName(loser.last_name)
-      && normName(winner.last_name) !== normName(loser.last_name);
-    let tier = 'green';
-    // Different last name at a POSITIVELY different address (different
-    // street, unit, ZIP, or city) = two people sharing a line.
-    if (lastNamesDiffer && ADDRESS_CONFLICTS.has(addr.status)) tier = 'red';
-    else if (reasons.length) tier = 'yellow';
-    return { loser, tier, reasons, namesOk, addrStatus: addr.status };
-  };
+  const evaluatePair = (winner, loser) => classifyPair(winner, loser, blockersById.get(loser.id) || []);
 
   const groups = [];
   for (const [p10, members] of byPhone) {
@@ -466,18 +471,15 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 //   dismissals_unreadable — the operator "not a duplicate" verdicts could
 //                        not be read; a merge decision never falls open
 //                        past them (display does, this does not)
-// respectUndoMergeSuppression: threaded straight to findDuplicateGroups —
-// false (default) for every manual caller (a human may deliberately
-// re-merge a pair they see in the still-reviewable queue after an undo);
-// executeMerge passes true here for its OWN mode:'auto' recheck, so the
-// automatic sweep's under-lock re-verification actually refuses a pair a
-// concurrent undo just suppressed (Codex round 1 P1 — the lock alone
-// serializes with revertMerge, but re-deriving eligibility without this
-// flag would still see the pair as eligible and re-merge it right after).
-async function duplicatePairEligibility(winnerId, loserId, database = db, { respectUndoMergeSuppression = false } = {}) {
+// Manual callers only: this reads the queue as a human sees it, so an
+// undo-merge sentinel does NOT hide the pair (a human may deliberately
+// re-merge a pair from the still-reviewable queue after an undo). The
+// automatic sweep's under-lock recheck is lockedPairAutoEligibility, which
+// refuses on that sentinel and never rebuilds the queue.
+async function duplicatePairEligibility(winnerId, loserId, database = db) {
   let groups;
   try {
-    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true, respectUndoMergeSuppression });
+    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
   } catch (e) {
     logger.warn(`[customer-dedupe] duplicatePairEligibility: dismissals unreadable, refusing: ${e.message}`);
     return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
@@ -494,6 +496,41 @@ async function duplicatePairEligibility(winnerId, loserId, database = db, { resp
     return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
   }
   return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
+// The auto sweep's under-lock eligibility recheck, scoped to ONE pair: the
+// two locked customer rows (already read FOR UPDATE by executeMerge), this
+// pair's dismissal row (ANY verdict refuses — an operator's "not a
+// duplicate" and revertMerge's undo sentinel alike; the manual path is the
+// only one allowed past the sentinel), and the loser's own blocker probes.
+// Fails CLOSED on an unreadable dismissals table, like the sweep's snapshot.
+async function lockedPairAutoEligibility(trx, winner, loser) {
+  const [a, b] = pairKey(winner.id, loser.id);
+  let verdicts;
+  try {
+    verdicts = await trx('customer_duplicate_dismissals')
+      .where({ customer_id_a: a, customer_id_b: b })
+      .select('reason');
+  } catch (e) {
+    logger.warn(`[customer-dedupe] locked pair recheck: dismissals unreadable, refusing: ${e.message}`);
+    return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
+  }
+  if (verdicts.length) {
+    const undone = verdicts.some((v) => v.reason === UNDO_MERGE_DISMISSAL_REASON);
+    return { eligible: false, code: undone ? 'undo_merge_suppressed' : 'dismissed', reason: 'Pair was adjudicated since the sweep snapshot', candidate: null };
+  }
+  const stillLive = winner.active !== false && loser.active !== false
+    && !winner.deleted_at && !loser.deleted_at
+    && phone10(winner.phone) && phone10(winner.phone) === phone10(loser.phone);
+  if (!stillLive) {
+    return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer a live duplicate candidate', candidate: null };
+  }
+  const blockers = (await batchAutoBlockers(trx, [loser])).get(loser.id) || [];
+  const verdict = classifyPair(winner, loser, blockers);
+  if (verdict.tier !== 'green') {
+    return { eligible: false, code: verdict.tier === 'red' ? 'red_pair' : 'not_green', reason: `Pair is no longer green (${verdict.reasons.join(', ')})`, candidate: verdict };
+  }
+  return { eligible: true, code: 'eligible', reason: null, candidate: verdict };
 }
 
 // ---------------------------------------------------------------------------
@@ -1528,7 +1565,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // undo just restored. A manual merge (mode !== 'auto') never respects
       // it — that path exists precisely so a human can re-merge a pair from
       // the still-reviewable queue after an undo.
-      const eligibility = await duplicatePairEligibility(winnerId, loserId, trx, { respectUndoMergeSuppression: mode === 'auto' });
+      // The auto sweep's recheck is PAIR-SCOPED (Codex round 3 P2): it reads
+      // this pair's dismissal row and re-derives the tier from the two rows
+      // already locked above plus the loser's own blocker probes — never a
+      // full findDuplicateGroups rebuild (every active customer + every
+      // blocker table for every duplicate member) per candidate while the
+      // row locks are held.
+      const eligibility = mode === 'auto'
+        ? await lockedPairAutoEligibility(trx, winner, loser)
+        : await duplicatePairEligibility(winnerId, loserId, trx);
       const admitted = eligibility.eligible || (allowAddressConflict && eligibility.code === 'address_conflict');
       if (!admitted) {
         const err = new Error(`executeMerge: the pair is no longer mergeable (${eligibility.code}) — review a fresh proposal`);
@@ -2561,7 +2606,7 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
     logger.warn(`[customer-dedupe] red-pair auto-dismiss aborted — dismissals unreadable: ${e.message}`);
     return { dismissed: [], aborted: 'dismissals_unreadable' };
   }
-  const results = { dismissed: [], skippedStale: 0 };
+  const results = { dismissed: [], skippedStale: 0, alreadyDismissed: 0 };
   for (const group of groups) {
     for (const candidate of group.candidates) {
       if (candidate.tier !== 'red') continue;
@@ -2586,15 +2631,34 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
             && normName(rowA.last_name) !== normName(rowB.last_name)
             && ADDRESS_CONFLICTS.has(addressCompat(rowA, rowB).status));
           if (!stillRed) return 'no_longer_red';
+          await acquirePairAdjudicationLock(trx, a, b);
+          const redReason = `auto-dismissed: red tier (${candidate.reasons.join(', ')})`.slice(0, 500);
+          // Under the pair lock, the existing verdict decides the write
+          // (Codex round 3 P2): revertMerge's undo sentinel is deliberately
+          // visible to this sweep's read, so an undone pair that is red gets
+          // selected every day — an ignored conflict would leave the
+          // sentinel in place and still report 'dismissed', a repeated
+          // false digest. Replace the sentinel with the real red verdict
+          // (the pair leaves the queue, as any red pair does); a real
+          // dismissal that raced in since the snapshot is already handled.
+          const existing = await trx('customer_duplicate_dismissals')
+            .where({ customer_id_a: a, customer_id_b: b })
+            .select('reason');
+          if (existing.length && existing.every((row) => row.reason === UNDO_MERGE_DISMISSAL_REASON)) {
+            await trx('customer_duplicate_dismissals')
+              .where({ customer_id_a: a, customer_id_b: b, reason: UNDO_MERGE_DISMISSAL_REASON })
+              .update({ reason: redReason, created_by: performedBy });
+            return 'dismissed';
+          }
+          if (existing.length) return 'already_dismissed';
           // Idempotent by the ordered-pair unique constraint — a re-run or a
           // race with a manual dismissal is an ignored conflict, never an
           // error.
-          await acquirePairAdjudicationLock(trx, a, b);
           await trx('customer_duplicate_dismissals')
             .insert({
               customer_id_a: a,
               customer_id_b: b,
-              reason: `auto-dismissed: red tier (${candidate.reasons.join(', ')})`.slice(0, 500),
+              reason: redReason,
               created_by: performedBy,
             })
             .onConflict(['customer_id_a', 'customer_id_b'])
@@ -2603,6 +2667,10 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
         });
         if (outcome === 'dismissed') {
           results.dismissed.push({ winnerId: group.winner.id, loserId: candidate.loser.id });
+        } else if (outcome === 'already_dismissed') {
+          // A verdict landed between the snapshot and the lock — nothing to
+          // write, nothing to report.
+          results.alreadyDismissed += 1;
         } else {
           // Counted in the digest metadata; the pair simply stays queued for
           // the next sweep to re-classify.
@@ -5427,6 +5495,8 @@ module.exports = {
   UNDO_MERGE_DISMISSAL_REASON,
   // exported for tests
   _test: {
+    classifyPair,
+    lockedPairAutoEligibility,
     EMAIL_BOUND_SURFACES,
     REPOINT_PK_COLUMNS,
     countActivityRows,

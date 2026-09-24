@@ -26,6 +26,7 @@ jest.mock('../services/customer-dedupe', () => ({
   CONSENT_CRITICAL_TABLES: new Set(),
   countActivityRows: jest.fn(),
   activityColumnsFor: jest.fn(),
+  UNDO_MERGE_DISMISSAL_REASON: 'undo_merge',
 }));
 
 const router = require('../routes/admin-customer-duplicates');
@@ -167,6 +168,31 @@ describe('dismiss', () => {
     const id = 'a0000000-0000-4000-8000-00000000000b';
     const res = await post('/dismiss', { customerIdA: id.toUpperCase(), customerIdB: id });
     expect(res.status).toBe(400);
+  });
+
+  // Codex round 3 P2: the undo-merge sentinel lives in this same free-text
+  // column. An operator typing exactly that word would record a verdict
+  // findDuplicateGroups reads as an undo suppression (pair stays visible
+  // and mergeable) instead of a real "not a duplicate" — reserved, refused.
+  test('refuses the reserved undo-merge sentinel as a free-text reason (400, nothing written)', async () => {
+    const db = require('../models/db');
+    db.transaction = jest.fn();
+    const res = await post('/dismiss', { customerIdA: LOSER, customerIdB: WINNER, reason: '  undo_merge ' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/reserved/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a reason that merely contains the sentinel word is ordinary free text', async () => {
+    const db = require('../models/db');
+    const chain = {};
+    for (const m of ['insert', 'onConflict']) chain[m] = jest.fn(() => chain);
+    chain.merge = jest.fn(async () => 1);
+    const trx = jest.fn(() => chain);
+    db.transaction = jest.fn(async (cb) => cb(trx));
+    const res = await post('/dismiss', { customerIdA: LOSER, customerIdB: WINNER, reason: 'not an undo_merge case, separate tenants' });
+    expect(res.status).toBe(200);
+    expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ reason: 'not an undo_merge case, separate tenants' }));
   });
 
   // Codex round 1 P1: revertMerge stamps this same table with the

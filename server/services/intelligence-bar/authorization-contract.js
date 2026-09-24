@@ -241,6 +241,15 @@ const ADDRESS_UPDATE_KEYS = ['address_line1', 'address_line2', 'city', 'state', 
 // single (leads-tools updateLeadStatus) and bulk paths. The exact-effects
 // contract must disclose them, keyed off the SAME status→stage mapping the
 // bridge consumes so the disclosure fires exactly when the funnel write does.
+// One entry per excluded terminal stop, as assign_technician /
+// swap_tech_assignments report them (`{ id, status, customer? }`): the card
+// names WHICH stops stay behind, never just how many (Codex round 3 P1).
+function describeSkippedTerminal(skipped) {
+  return skipped
+    .map((st) => `${st.customer ? `${st.customer} ` : ''}#${st.id} (${st.status || 'terminal'})`)
+    .join(', ');
+}
+
 function pushLeadStatusDerivedEffects(push, newStatus, { bulk = false } = {}) {
   const { LEAD_STATUS_TO_FUNNEL_STAGE } = require('../lead-funnel-bridge');
   const stage = LEAD_STATUS_TO_FUNNEL_STAGE[newStatus];
@@ -482,8 +491,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // `preview.stops` and reports them separately as `skipped_terminal` —
     // without this, the operator-facing card never said so, even though
     // the model-facing preview text did.
+    // Named, not counted (Codex round 3 P1): the operator approves leaving
+    // these exact stops behind, so the card lists each one — the same
+    // entries the fingerprint binds.
     if (Array.isArray(preview?.skipped_terminal) && preview.skipped_terminal.length) {
-      push('operational', `${preview.skipped_terminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be reassigned`);
+      push('operational', `${preview.skipped_terminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be reassigned — ${describeSkippedTerminal(preview.skipped_terminal)}`);
     }
     const grouped = preview.stops.filter((st) => st && st.grouped_visit_id);
     if (grouped.length) {
@@ -510,7 +522,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // sets and reports them as `skipped_terminal` — disclose them the same
     // way assign_technician's card does.
     if (Array.isArray(preview?.skipped_terminal) && preview.skipped_terminal.length) {
-      push('operational', `${preview.skipped_terminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be swapped`);
+      push('operational', `${preview.skipped_terminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be swapped — ${describeSkippedTerminal(preview.skipped_terminal)}`);
     }
     const allSwap = Object.values(preview.stops).flat().filter(Boolean);
     const grouped = allSwap.filter((st) => st.grouped_visit_id);
