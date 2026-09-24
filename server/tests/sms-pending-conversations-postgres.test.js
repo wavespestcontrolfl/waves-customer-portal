@@ -7,7 +7,7 @@ jest.mock('../models/db', () => {
 
 const { randomUUID } = require('node:crypto');
 const { createSmsResponseTables } = require('./fixtures/sms-response-postgres');
-const { countPendingSmsConversations } = require('../services/sms-pending-conversations');
+const { loadPendingSmsConversations, countPendingSmsConversations } = require('../services/sms-pending-conversations');
 
 const connection = process.env.UNREAD_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -137,6 +137,50 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
   });
 
+  test.each(['manual', 'ai_approved'])('a legacy-only %s reply closes canonical work for badge and digest', async (messageType) => {
+    const candidate = await seed({ body: 'Please answer this question' });
+    const metadata = {};
+    if (messageType === 'ai_approved') {
+      const draftId = randomUUID();
+      await mockTrx('message_drafts').insert({
+        id: draftId, sms_log_id: candidate.smsLogId, intent: 'customer_reply',
+      });
+      metadata.draft_id = draftId;
+    }
+    const reply = await seed({ direction: 'outbound', messageType, metadata });
+    await mockTrx('messages').where({ twilio_sid: reply.sid }).del();
+
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+    await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([]);
+  });
+
+  test('legacy-only inbound work remains watcher-only', async () => {
+    const inbound = await seed({ body: 'Canonical persistence failed' });
+    await mockTrx('messages').where({ twilio_sid: inbound.sid }).del();
+    await expect(countPendingSmsConversations({ includePending: true })).resolves.toEqual({
+      conversations: 0, messages: 0, pendingMessageIds: [],
+    });
+    await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([
+      expect.objectContaining({ id: inbound.smsLogId, source: 'legacy' }),
+    ]);
+  });
+
+  test.each([
+    ['courtesy', 'Thanks!', { courtesyOnly: true }],
+    ['spam', 'Synthetic pitch', { spam_verdict: { enforced: true } }],
+  ])('a legacy-only %s closer retires canonical work and a newer canonical question reopens it', async (_kind, body, metadata) => {
+    await seed({ body: 'Can you confirm the appointment?' });
+    const closer = await seed({ body, metadata });
+    await mockTrx('messages').where({ twilio_sid: closer.sid }).del();
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+    await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([]);
+
+    const reopened = await seed({ body: 'Can you come tomorrow?' });
+    await expect(countPendingSmsConversations({ includePending: true })).resolves.toEqual({
+      conversations: 1, messages: 1, pendingMessageIds: [reopened.messageId],
+    });
+  });
+
   test('approval replies require an exact canonical anchor to the candidate', async () => {
     const oldInbound = await seed({ body: 'An older ask' });
     const candidate = await seed({ body: 'The current ask' });
@@ -252,14 +296,25 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(countPendingSmsConversations({ excludePhones: ['+19415550101'] })).resolves.toEqual({ conversations: 1, messages: 1 });
   });
 
-  test('peer-wide STOP and canonical customer phone changes align scoped state', async () => {
-    const owned = await seed({ customerId: 'new', body: 'Can you call me?' });
-    await seed({ customerId: 'new', body: 'STOP', messageType: 'opt_out' });
-    await expect(countPendingSmsConversations({ customerId: owned.customerId })).resolves.toEqual({ conversations: 0, messages: 0 });
-    await mockTrx('conversations').where({ customer_id: owned.customerId }).update({ contact_phone: null });
-    await mockTrx('customers').where({ id: owned.customerId }).update({ phone: '+19415550109' });
-    await seed({ customerId: owned.customerId, phone: '+19415550109', body: 'Can you call tomorrow?' });
-    await expect(countPendingSmsConversations({ customerId: owned.customerId })).resolves.toEqual({ conversations: 1, messages: 1 });
+  test.each(['receipt', 'legacy'])('a canonical STOP stays on its original phone after a customer phone change via %s', async (provenance) => {
+    const oldQuestion = await seed({ customerId: 'new', body: 'Old phone question' });
+    const newQuestion = await seed({ phone: '+19415550109', ours: '+19415550191', body: 'New phone question' });
+    const stop = await seed({
+      customerId: oldQuestion.customerId, ours: '+19415550192', body: 'STOP', messageType: 'opt_out',
+    });
+    await mockTrx('conversations').whereIn('id', [oldQuestion.conversationId, stop.conversationId])
+      .update({ contact_phone: null });
+    if (provenance === 'receipt') {
+      await mockTrx('sms_log').where({ twilio_sid: stop.sid }).del();
+      await mockTrx('inbound_sms_optout_receipts').insert({
+        message_sid: stop.sid, phone: '+19415550100', applied_at: stop.createdAt,
+      });
+    }
+    await mockTrx('customers').where({ id: oldQuestion.customerId }).update({ phone: '+19415550109' });
+
+    await expect(countPendingSmsConversations({ includePending: true })).resolves.toEqual({
+      conversations: 1, messages: 1, pendingMessageIds: [newQuestion.messageId],
+    });
   });
 
   test('planner materializes outbound history once', async () => {
