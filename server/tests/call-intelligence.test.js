@@ -60,6 +60,20 @@ describe('buildCallIntelligence', () => {
     expect(view.processing).toMatchObject({ status: 'processed', phase: 'complete', generation: 2, timings: { total_ms: 4200 } });
   });
 
+  test('service_request.price passes through next to quoted_price_usd (call-agent audit 2026-09-23)', () => {
+    const priced = { amount_usd: 90, amount_max_usd: 100, unit: 'per_quarter', accepted: false, stated_by: 'agent', prepay_term: null, tier_mentioned: null, evidence_quote: 'ninety to a hundred a quarter' };
+    const call = { ...CALL, ai_extraction_enriched: JSON.stringify({ ...V2, service_request: { ...V2.service_request, price: priced } }) };
+    const view = buildCallIntelligence({ call, commitments: [] });
+    expect(view.prices.price).toEqual(priced);
+    // Still passes through the unchanged, narrower quoted_price_usd field.
+    expect(view.prices.quoted_price_usd).toBe(149);
+  });
+
+  test('price is null when the extraction did not include it', () => {
+    const view = buildCallIntelligence({ call: CALL, commitments: [] });
+    expect(view.prices.price).toBeNull();
+  });
+
   test('an operator customer link is reported as human-set with who/when and the previous value', () => {
     const call = { ...CALL, metadata: JSON.stringify({ customer_link_override: { customer_id: 'cust-2', previous_customer_id: 'cust-1', by: 'tech-1', at: '2026-09-01T15:00:00Z' } }), customer_id: 'cust-2' };
     const view = buildCallIntelligence({ call, commitments: [] });
