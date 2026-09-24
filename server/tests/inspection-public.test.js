@@ -2973,6 +2973,29 @@ describe('POST /:token/waitlist', () => {
     expect(res.statusCode).toBe(404);
   });
 
+  // Codex #4737 r19 P0: eligibility and both writes run in ONE transaction
+  // under the booking's inspection-lead lock.
+  test('the waitlist takes the inspection-lead lock inside a transaction before writing', async () => {
+    firstResults.leads = LEAD_ROW;
+    const openAtInsert = [];
+    const res = await (async () => {
+      const origTx = db.transaction.getMockImplementation();
+      db.transaction.mockImplementationOnce(async (fn) => origTx(async (trx) => {
+        const wrapped = (table) => {
+          if (table === 'newsletter_subscribers' || table === 'lead_activities') openAtInsert.push(db._openTransactions);
+          return trx(table);
+        };
+        Object.assign(wrapped, trx);
+        return fn(wrapped);
+      }));
+      return callWaitlist(mintLeadConsultationToken(LEAD_ID), { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
+    })();
+    expect(res.statusCode).toBe(200);
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['inspection-lead', LEAD_ID]);
+    expect(openAtInsert.length).toBeGreaterThanOrEqual(2);
+    expect(openAtInsert.every((n) => n > 0)).toBe(true);
+  });
+
   test('the region is the ticket\'s, never a caller-supplied county', async () => {
     firstResults.leads = LEAD_ROW;
     const res = await callWaitlist(mintLeadConsultationToken(LEAD_ID), { email: 'someone@example.com', county: 'Fake County', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });

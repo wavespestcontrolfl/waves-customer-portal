@@ -2181,49 +2181,59 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
     // a caller-supplied county — and anything else is the generic 404.
     const ticket = verifyWaitlistTicket(req.body?.waitlist_ticket, lead.id);
     if (!ticket) return res.status(404).json({ error: 'not_found' });
-    // Lead-wide, every trusted profile (Codex #4737 r17 P0).
-    const eligibility = await readEligibility(lead, await loadTrustedCustomer(db, lead, verified), verified, { includeRescheduleUrl: false });
-    if (eligibility.state !== 'ok') return res.status(404).json({ error: 'not_found' });
-    const county = ticket.county || '';
+    // Eligibility and BOTH writes in ONE transaction under the same
+    // inspection-lead lock the booking takes (Codex #4737 r19 P0): a
+    // concurrent commit either finished first (and is seen here) or waits.
+    const written = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['inspection-lead', String(lead.id)]);
+      const freshLead = await loadLead(trx, lead.id);
+      if (!freshLead) return false;
+      // Lead-wide, every trusted profile (Codex #4737 r17 P0).
+      const eligibility = await readEligibility(freshLead, await loadTrustedCustomer(trx, freshLead, verified), verified, { conn: trx, includeRescheduleUrl: false });
+      if (eligibility.state !== 'ok') return false;
+      const county = ticket.county || '';
 
-    // status: 'waitlist' — deliberately NOT 'active' (Codex pre-push P1,
-    // 2026-09-24: an 'active' row enrols in ordinary newsletter sends —
-    // buildSubscriberQuery in newsletter-sender.js selects on status='active'
-    // with no source exclusion — and this token never proved ownership of
-    // the typed email, so it must not be treated as a confirmed subscriber
-    // either). Also deliberately NOT 'pending': that status has its own live
-    // meaning (server/services/newsletter-subscribers.js's double-opt-in) —
-    // a future unrelated admin CSV import matching this email would queue it
-    // a REAL confirmation email (admin-newsletter.js's
-    // status='pending' AND confirmation_sent_at IS NULL sweep), which is
-    // exactly the send this route must never trigger. 'waitlist' is a new,
-    // otherwise-unused value on this free-text column (no CHECK constraint)
-    // — invisible to every existing status-keyed query, so this row is held
-    // only for a future expansion announcement (owner ruling, scope doc
-    // lead-inspection-link-scope.md §7), never today's newsletter.
-    await db('newsletter_subscribers')
-      .insert({
-        email,
-        source: `expansion_waitlist:${county || 'unknown'}`,
-        status: 'waitlist',
-        subscribed_at: new Date(),
-      })
-      .onConflict('email')
-      .ignore();
+      // status: 'waitlist' — deliberately NOT 'active' (Codex pre-push P1,
+      // 2026-09-24: an 'active' row enrols in ordinary newsletter sends —
+      // buildSubscriberQuery in newsletter-sender.js selects on status='active'
+      // with no source exclusion — and this token never proved ownership of
+      // the typed email, so it must not be treated as a confirmed subscriber
+      // either). Also deliberately NOT 'pending': that status has its own live
+      // meaning (server/services/newsletter-subscribers.js's double-opt-in) —
+      // a future unrelated admin CSV import matching this email would queue it
+      // a REAL confirmation email (admin-newsletter.js's
+      // status='pending' AND confirmation_sent_at IS NULL sweep), which is
+      // exactly the send this route must never trigger. 'waitlist' is a new,
+      // otherwise-unused value on this free-text column (no CHECK constraint)
+      // — invisible to every existing status-keyed query, so this row is held
+      // only for a future expansion announcement (owner ruling, scope doc
+      // lead-inspection-link-scope.md §7), never today's newsletter.
+      await trx('newsletter_subscribers')
+        .insert({
+          email,
+          source: `expansion_waitlist:${county || 'unknown'}`,
+          status: 'waitlist',
+          subscribed_at: new Date(),
+        })
+        .onConflict('email')
+        .ignore();
 
-    // The expansion interest itself lives on the LEAD (local audit P1): the
-    // subscriber insert above is ignored for an email already on file
-    // (active, unsubscribed, or an earlier waitlist row), and that row's
-    // consent/opt-out must stay exactly as it is. This activity row is
-    // always written, so the request is never silently lost.
-    await db('lead_activities').insert({
-      lead_id: lead.id,
-      activity_type: 'expansion_waitlist',
-      description: `Asked to hear when Waves serves ${county || 'their area'}`,
-      performed_by: 'consultation_page',
-      metadata: JSON.stringify({ email, county: county || null }),
+      // The expansion interest itself lives on the LEAD (local audit P1): the
+      // subscriber insert above is ignored for an email already on file
+      // (active, unsubscribed, or an earlier waitlist row), and that row's
+      // consent/opt-out must stay exactly as it is. This activity row is
+      // always written, so the request is never silently lost.
+      await trx('lead_activities').insert({
+        lead_id: lead.id,
+        activity_type: 'expansion_waitlist',
+        description: `Asked to hear when Waves serves ${county || 'their area'}`,
+        performed_by: 'consultation_page',
+        metadata: JSON.stringify({ email, county: county || null }),
+      });
+
+      return true;
     });
-
+    if (!written) return res.status(404).json({ error: 'not_found' });
     return res.json({ ok: true });
   } catch (err) {
     next(err);
