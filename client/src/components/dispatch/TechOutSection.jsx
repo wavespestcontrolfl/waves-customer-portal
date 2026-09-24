@@ -392,7 +392,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         <div className="text-14 text-ink-primary mb-3">
           {parkedCount} stop{parkedCount === 1 ? '' : 's'} parked in the Action Queue — decide who to move
         </div>
-        <div className="text-12 text-ink-tertiary mb-3">
+        <div className="text-14 text-ink-tertiary mb-3">
           Parked stops are in the Action Queue as &quot;Needs a decision&quot;.
         </div>
         {autoMoveEnabled && parkedCount > 0 && (
@@ -401,14 +401,14 @@ export default function TechOutSection({ techId, techName, onChanged }) {
               {autoAssigning ? 'Assigning…' : 'Auto-assign parked stops'}
             </Button>
             {autoAssignResult && (
-              <div className="text-12 text-ink-tertiary mt-1">
+              <div className="text-14 text-ink-tertiary mt-1">
                 {/* Moved only: the live parked count above is the authoritative
                     remainder — it counts every stop of a grouped visit, which a
                     per-card tally here would undercount (Codex r4 P2). */}
                 Moved {autoAssignResult.moved} {autoAssignResult.moved === 1 ? 'stop' : 'stops'} automatically.
               </div>
             )}
-            {autoAssignError && <div className="text-12 text-alert-fg mt-1">{autoAssignError}</div>}
+            {autoAssignError && <div className="text-14 text-alert-fg mt-1">{autoAssignError}</div>}
           </div>
         )}
         {submitError && <div className="text-14 text-alert-fg mb-3">{submitError}</div>}

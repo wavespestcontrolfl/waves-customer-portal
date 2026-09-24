@@ -58,7 +58,7 @@ const DATE = '2026-09-24';
 
 function query(result) {
   const self = {};
-  ['where', 'whereNot', 'whereNull', 'whereIn', 'whereNotIn', 'whereRaw', 'select', 'orderBy', 'orderByRaw', 'leftJoin', 'forShare']
+  ['where', 'whereNot', 'whereNull', 'whereIn', 'whereNotIn', 'whereRaw', 'select', 'orderBy', 'orderByRaw', 'leftJoin', 'forShare', 'whereExists']
     .forEach((m) => { self[m] = jest.fn(() => self); });
   self.first = jest.fn(async () => (Array.isArray(result) ? (result[0] ?? null) : result));
   self.update = jest.fn(() => {
@@ -70,6 +70,18 @@ function query(result) {
     Array.isArray(result) ? result : (result == null ? [] : [result]),
   ).then(resolve, reject);
   return self;
+}
+
+// The conditional annotation matching no row: the stop left the absent day
+// (or the card resolved) between the read and the write.
+function staleUpdate() {
+  const q = query({});
+  q.update = jest.fn(() => {
+    const updated = Promise.resolve(0);
+    updated.returning = jest.fn(async () => []);
+    return updated;
+  });
+  return q;
 }
 
 function baseAlert(overrides = {}) {
@@ -144,8 +156,8 @@ describe('autoAssignParkedAlert', () => {
   });
 
   test('grouped alert (visit_member_ids > 1): left parked, annotated, never calls the mover', async () => {
-    const queue = [query(baseAlert({ payload: { date: DATE, visit_member_ids: [JOB_ID, 'job-2'] } })), query({})];
-    db.mockImplementation(() => queue.shift());
+    const queue = [query(baseAlert({ payload: { date: DATE, visit_member_ids: [JOB_ID, 'job-2'] } })), query(baseStop({ visit_id: 'v1' })), query({})];
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID, actorId: 'staff-1' });
 
@@ -158,9 +170,23 @@ describe('autoAssignParkedAlert', () => {
     expect(JSON.parse(rawCall[1][0])).toMatchObject({ auto_attempt: { reason: 'grouped_visit_manual' } });
   });
 
+  test('a grouped card whose own stop already left the absent day is closed, not refused as grouped', async () => {
+    const queue = [
+      query(baseAlert({ payload: { date: DATE, visit_member_ids: [JOB_ID, 'job-2'] } })),
+      query(baseStop({ visit_id: 'v1', technician_id: 'someone-else' })),
+    ];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, auto: true }));
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+
   test('a stop already grouped since it was parked (visit_id set now): same manual-decision reason', async () => {
     const queue = [query(baseAlert()), query(baseStop({ visit_id: 'visit-9' }))];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -170,7 +196,7 @@ describe('autoAssignParkedAlert', () => {
 
   test('en_route status: out of scope, left parked with reason live_status', async () => {
     const queue = [query(baseAlert()), query(baseStop({ status: 'en_route' }))];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -180,7 +206,7 @@ describe('autoAssignParkedAlert', () => {
 
   test.each(['en_route', 'on_property'])('confirmed status but live tracker state %s: left parked as live_status', async (trackState) => {
     const queue = [query(baseAlert()), query(baseStop({ status: 'confirmed', track_state: trackState })), query({})];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -193,7 +219,7 @@ describe('autoAssignParkedAlert', () => {
     ['a call-review source not yet customer-confirmed', { status: 'confirmed', source_action: REVIEW_SOURCE, customer_confirmed: false }],
   ])('office review pending (%s): left parked, the mover is never called', async (_label, overrides) => {
     const queue = [query(baseAlert()), query(baseStop(overrides)), query({})];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -203,7 +229,7 @@ describe('autoAssignParkedAlert', () => {
 
   test.each(['completed', 'cancelled', 'skipped', 'no_show', 'on_site'])('a %s stop no longer needs reassigning: stale, card closed, never annotated', async (status) => {
     const queue = [query(baseAlert()), query(baseStop({ status }))];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -218,9 +244,9 @@ describe('autoAssignParkedAlert', () => {
     const queue = [
       query(baseAlert()), query(baseStop()), query([CANDIDATE, second]),
       query([]), query([]), query([]), query([]),
-      query(baseStop({ technician_id: 'someone-else' })), // re-read after the 409
+      staleUpdate(), // the conditional annotation finds the stop gone
     ];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -231,7 +257,7 @@ describe('autoAssignParkedAlert', () => {
 
   test('a superseded (rescheduled) row is stale: no move, and its card is closed as a systemic resolution', async () => {
     const queue = [query(baseAlert()), query(baseStop({ status: 'rescheduled' }))];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -242,7 +268,7 @@ describe('autoAssignParkedAlert', () => {
 
   test('idempotent: the stop already moved off the absent tech — no-op skip, no mover call, no re-annotation', async () => {
     const queue = [query(baseAlert()), query(baseStop({ technician_id: 'someone-else' }))];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -255,7 +281,7 @@ describe('autoAssignParkedAlert', () => {
 
   test('idempotent: an already-resolved alert is a no-op', async () => {
     const queue = [query(baseAlert({ resolved_at: new Date().toISOString() }))];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
     expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
@@ -263,8 +289,8 @@ describe('autoAssignParkedAlert', () => {
 
   test('no eligible candidate: every tech fails the dated eligibility check', async () => {
     assertAssignableTechnician.mockRejectedValue(Object.assign(new Error('out'), { code: NOT_ASSIGNABLE }));
-    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query(baseStop()), query({})];
-    db.mockImplementation(() => queue.shift());
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query({}), query({})];
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -282,7 +308,7 @@ describe('autoAssignParkedAlert', () => {
       query([]),                 // fitsWindow fallback: other visits that day
       query([]),                 // fitsWindow fallback: tech_schedule_blocks
     ];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID, actorId: 'staff-1' });
 
@@ -339,10 +365,9 @@ describe('autoAssignParkedAlert', () => {
       query([CANDIDATE]),
       query([]),
       query([]),
-      query(baseStop()), // re-read after the 409: still parked on the absent tech
       query({}),
     ];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -355,8 +380,8 @@ describe('autoAssignParkedAlert', () => {
 
   test('a membership-change CAS miss reports the grouped-visit reason, not a generic failure', async () => {
     SmartRebooker.reschedule.mockRejectedValue(Object.assign(new Error('grouped concurrently'), { code: 'VISIT_MEMBERSHIP_CHANGED' }));
-    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([]), query(baseStop()), query({})];
-    db.mockImplementation(() => queue.shift());
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([]), query({}), query({})];
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
     expect(res.reason).toBe('grouped_visit_manual');
@@ -366,8 +391,8 @@ describe('autoAssignParkedAlert', () => {
 describe('selection matches the commit policy', () => {
   test('the mover\'s own commit probe finds the window occupied: parked as window_occupied, no candidate tried', async () => {
     SmartRebooker.previewMoveConflicts.mockResolvedValue([{ id: 'other-stop' }]);
-    const queue = [query(baseAlert()), query(baseStop()), query(baseStop()), query({})];
-    db.mockImplementation(() => queue.shift());
+    const queue = [query(baseAlert()), query(baseStop()), query({}), query({})];
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -379,20 +404,23 @@ describe('selection matches the commit policy', () => {
 
   test('a stop reassigned by hand while the probe ran: the early refusal closes the stale card instead of annotating it', async () => {
     SmartRebooker.previewMoveConflicts.mockResolvedValue([{ id: 'other-stop' }]);
-    const queue = [query(baseAlert()), query(baseStop()), query(baseStop({ technician_id: 'someone-else' }))];
-    db.mockImplementation(() => queue.shift());
+    const annotate = staleUpdate();
+    const queue = [query(baseAlert()), query(baseStop()), annotate, query({})];
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
     expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
     expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, auto: true }));
-    expect(db.raw).not.toHaveBeenCalled();
+    // One statement: annotate only while the stop is still on the absent day.
+    expect(annotate.whereExists).toHaveBeenCalledTimes(1);
+    expect(emitAlert).not.toHaveBeenCalled();
   });
 
   test('the move passes no excludeServiceIds and pins the duration it fitted', async () => {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
     const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([])];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -406,7 +434,7 @@ describe('selection matches the commit policy', () => {
     const { _test: { fitsWindow } } = require('../services/tech-out-auto-move');
     const others = query([]);
     const queue = [others, query([])];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const fit = await fitsWindow(baseStop(), CANDIDATE, DATE);
 
@@ -452,7 +480,7 @@ describe('in-transaction fit recheck (moveGuard)', () => {
   async function capturedMoveGuard() {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
     const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([])];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
     await autoAssignParkedAlert({ alertId: ALERT_ID });
     return SmartRebooker.reschedule.mock.calls[0][5].moveGuard;
   }
@@ -480,7 +508,7 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
   async function capturedGuard() {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
     const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([])];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
     await autoAssignParkedAlert({ alertId: ALERT_ID });
     return SmartRebooker.reschedule.mock.calls[0][5].beforeMove;
   }
@@ -516,7 +544,7 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
     SmartRebooker.reschedule.mockRejectedValue(Object.assign(new Error('cleared'), { code: 'TECH_OUT_CLEARED' }));
     const second = { id: 'tech-3', name: 'Tech Three' };
     const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE, second]), query([]), query([]), query([]), query([])];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
 
@@ -553,10 +581,10 @@ describe('autoAssignTechDay', () => {
       query(baseAlert({ id: 'alert-b', job_id: 'job-b' })),
       query(baseStop({ id: 'job-b' })),
       query([]),
-      query(baseStop({ id: 'job-b' })), // re-read before recording the refusal
+      query({}), // exists-subquery builder for the conditional annotation
       query({}),
     ];
-    db.mockImplementation(() => queue.shift());
+    db.mockImplementation(() => queue.shift() || query({}));
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
 
     const res = await autoAssignTechDay({ technicianId: ABSENT_TECH, date: DATE, actorId: 'staff-1' });

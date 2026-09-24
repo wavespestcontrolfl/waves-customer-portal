@@ -112,6 +112,20 @@ export function useDispatchAlerts() {
   const alertsRef = useRef(alerts);
   alertsRef.current = alerts;
   const resolvedIdsRef = useRef(new Set());
+
+  // Every way a card resolves — the socket broadcast, this tab's own PATCH,
+  // resolve-all — records the tombstone (so a late dispatch:alert cannot
+  // resurrect it, even if the socket packet was lost) and relays a tech-out
+  // card change to the drawer, then drops the cards.
+  const markResolved = useCallback((ids) => {
+    const gone = new Set(ids);
+    if (!gone.size) return;
+    for (const id of gone) {
+      resolvedIdsRef.current.add(id);
+      relayTechOutAlertChange(alertsRef.current.find((a) => a.id === id));
+    }
+    setAlerts((prev) => prev.filter((a) => !gone.has(a.id)));
+  }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -174,13 +188,9 @@ export function useDispatchAlerts() {
 
     function handleResolved(payload) {
       if (!payload || !payload.id) return;
-      // Drop the resolved alert by id. The PATCH caller already did
-      // the same removal optimistically, so this is a no-op for that
-      // session and the actual drop for every other dispatcher.
-      const known = alertsRef.current.find((a) => a.id === payload.id);
-      resolvedIdsRef.current.add(payload.id);
-      setAlerts((prev) => prev.filter((a) => a.id !== payload.id));
-      relayTechOutAlertChange(known);
+      // The PATCH caller already dropped it optimistically, so this is a
+      // no-op for that session and the actual drop for everyone else.
+      markResolved([payload.id]);
     }
 
     socket.on('dispatch:alert', handleAlert);
@@ -209,9 +219,9 @@ export function useDispatchAlerts() {
       { method: 'PATCH', headers: adminAuthHeaders() }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    setAlerts((prev) => prev.filter((a) => a.id !== id));
+    markResolved([id]);
     return res.json();
-  }, []);
+  }, [markResolved]);
 
   const clearAlerts = useCallback(async () => {
     const res = await fetch(
@@ -220,12 +230,9 @@ export function useDispatchAlerts() {
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    const clearedIds = new Set(Array.isArray(data.alert_ids) ? data.alert_ids : []);
-    setAlerts((prev) => (
-      clearedIds.size > 0 ? prev.filter((a) => !clearedIds.has(a.id)) : prev
-    ));
+    markResolved(Array.isArray(data.alert_ids) ? data.alert_ids : []);
     return data;
-  }, []);
+  }, [markResolved]);
 
   return { alerts, loading, error, resolveAlert, clearAlerts };
 }

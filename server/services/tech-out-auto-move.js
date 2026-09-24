@@ -233,11 +233,25 @@ async function mergePayload(trx, alertId, patch) {
     });
 }
 
-async function annotateAttempt(alertId, reason) {
+/**
+ * Stamp payload.auto_attempt on a still-open card and re-broadcast it.
+ * `stillParked` ({ jobId, absentTechId, date }) makes the write conditional,
+ * in the same statement, on the stop still being an open stop on the absent
+ * tech's day — so a reassignment that landed after our read can never be
+ * annotated onto a now-stale card. Returns whether a row was written.
+ */
+async function annotateAttempt(alertId, reason, stillParked = null) {
   try {
-    const [row] = await db('dispatch_alerts')
+    const q = db('dispatch_alerts')
       .where({ id: alertId })
-      .whereNull('resolved_at')
+      .whereNull('resolved_at');
+    if (stillParked) {
+      q.whereExists(db('scheduled_services')
+        .select(db.raw('1'))
+        .where({ id: stillParked.jobId, technician_id: stillParked.absentTechId, scheduled_date: stillParked.date })
+        .whereNotIn('status', ABSENT_STOP_EXCLUDE_STATUSES));
+    }
+    const [row] = await q
       .update({
         payload: db.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ auto_attempt: { at: new Date().toISOString(), reason } })]),
       })
@@ -245,8 +259,10 @@ async function annotateAttempt(alertId, reason) {
     // Re-broadcast the still-open card so every open board shows the reason
     // now (useDispatchAlerts merges a known id), not after a reload.
     if (row) emitAlert(row);
+    return !!row;
   } catch (err) {
     logger.warn(`[tech-out-auto-move] failed to annotate alert ${alertId} (${reason}): ${err.message}`);
+    return true; // unknown — never close a card on a failed write
   }
 }
 
@@ -394,32 +410,28 @@ async function loadMovableStop(alertId) {
   const date = payload.date;
   const absentTechId = alert.tech_id;
 
-  // Grouped units are a human decision (PR B scope) — never auto-moved.
   const memberIds = Array.isArray(payload.visit_member_ids) ? payload.visit_member_ids : null;
-  if (memberIds && memberIds.length > 1) {
-    await annotateAttempt(alertId, 'grouped_visit_manual');
-    return { done: { moved: false, alert_id: alertId, reason: 'grouped_visit_manual' } };
-  }
-
   const jobId = alert.job_id || (memberIds && memberIds[0]) || null;
   if (!jobId) {
     await annotateAttempt(alertId, 'no_job_reference');
     return { done: { moved: false, alert_id: alertId, reason: 'no_job_reference' } };
   }
 
+  // Stale check FIRST, grouped cards included: a card whose own stop left
+  // the absent day is closed, never re-annotated as a grouped refusal.
   const stop = await readStop(jobId);
-  const refusal = stopMoveRefusal(stop, absentTechId, date);
-  if (refusal) {
-    if (!refusal.skipped) await annotateAttempt(alertId, refusal.reason);
-    // A stale card left open would keep counting in parked_open_count while
-    // the run reports nothing left: close it as a systemic resolution.
-    if (refusal.stale) await resolveStaleAlert(alertId);
-    return {
-      done: refusal.skipped
-        ? { moved: false, alert_id: alertId, skipped: refusal.reason }
-        : { moved: false, alert_id: alertId, reason: refusal.reason },
-    };
+  const staleCheck = stopMoveRefusal(stop, absentTechId, date);
+  if (staleCheck && staleCheck.stale) {
+    await resolveStaleAlert(alertId);
+    return { done: { moved: false, alert_id: alertId, skipped: 'already_resolved' } };
   }
+  // Grouped units are a human decision (PR B scope) — never auto-moved.
+  if (memberIds && memberIds.length > 1) {
+    return { done: await refuseOrClose(alertId, 'grouped_visit_manual', jobId, absentTechId, date) };
+  }
+
+  // Any other refusal (scope exclusion) is worth telling a dispatcher about.
+  if (staleCheck) return { done: await refuseOrClose(alertId, staleCheck.reason, jobId, absentTechId, date) };
   return { stop, date, absentTechId };
 }
 
@@ -598,16 +610,18 @@ async function autoAssignParkedAlert({ alertId, actorId, qualityDates = null } =
 /**
  * The ONE exit for a refusal after the stop was loaded. The stop may have
  * left the absent tech's day while this run ranked / probed / attempted (a
- * racing manual reassignment, a status change) — re-read it first: a stale
- * card is closed, never annotated and left open as a phantom.
+ * racing manual reassignment, a status change): a stale card is closed,
+ * never annotated and left open as a phantom.
  */
 async function refuseOrClose(alertId, reason, stopId, absentTechId, date) {
-  const refusal = stopMoveRefusal(await readStop(stopId), absentTechId, date);
-  if (refusal && refusal.stale) {
+  // One conditional statement: annotate only while the stop is still open on
+  // the absent day; nothing written ⇒ the card went stale (or was resolved)
+  // meanwhile, so close it. The 5-minute sweep reconciles anything later.
+  const written = await annotateAttempt(alertId, reason, { jobId: stopId, absentTechId, date });
+  if (!written) {
     await resolveStaleAlert(alertId);
     return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
   }
-  await annotateAttempt(alertId, reason);
   return { moved: false, alert_id: alertId, reason };
 }
 

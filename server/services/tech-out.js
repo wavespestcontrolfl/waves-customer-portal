@@ -327,6 +327,30 @@ async function sweepAbsentTechDays({ now } = {}) {
 }
 
 /** One absence's sweep transaction — see sweepAbsentTechDays. */
+/**
+ * Reconcile (inside the sweep's fenced transaction): an OPEN overflow card
+ * whose stop is no longer an open stop on the absent tech-day — reassigned
+ * by hand, moved, completed, cancelled — is stale, and nothing else closes
+ * it (a manual reassignment never resolves tech_out_overflow). Closed as a
+ * systemic resolution, which covers nothing, so a grouped card's siblings
+ * still on the absent tech are re-parked as their own unit in the same
+ * tick. Mutates the passed alert rows to their resolved state; returns the
+ * number closed.
+ */
+async function closeStaleOverflowCards(trx, alerts, stops) {
+  const openStopIds = new Set(stops.map((s) => String(s.id)));
+  let closed = 0;
+  for (const alert of alerts) {
+    if (alert.resolved_at || !alert.job_id || openStopIds.has(String(alert.job_id))) continue;
+    const row = await resolveAlert({ id: alert.id, resolvedBy: null, trx, auto: true });
+    if (!row) continue;
+    alert.resolved_at = row.resolved_at;
+    alert.payload = row.payload;
+    closed += 1;
+  }
+  return closed;
+}
+
 async function sweepOneAbsence({ absence, technicianId, date }) {
   return db.transaction(async (trx) => {
       // Fence first, same order as every assignment writer (markTechOut's
@@ -344,14 +368,17 @@ async function sweepOneAbsence({ absence, technicianId, date }) {
       if (!stillOut) return { total: 0, units: 0, skipped: 'cleared' };
 
       const stops = await openStopsForTechDay(trx, { technicianId, date });
-      if (stops.length === 0) return { total: 0, units: 0 };
 
       // Open AND resolved alerts for this tech-day: the resolved ones are
       // kept only when a human dismissed them for THIS absence (header).
       const alerts = await trx('dispatch_alerts')
         .where({ type: ALERT_TYPE, tech_id: technicianId })
         .whereRaw("payload->>'date' = ?", [date])
-        .select('job_id', 'payload', 'resolved_at');
+        .select('id', 'job_id', 'payload', 'resolved_at');
+
+      const reconciled = await closeStaleOverflowCards(trx, alerts, stops);
+      if (stops.length === 0) return { total: 0, units: 0, reconciled };
+
       const covered = new Set();
       for (const alert of alerts) {
         const payload = (typeof alert.payload === 'string' ? JSON.parse(alert.payload) : alert.payload) || {};
@@ -371,7 +398,7 @@ async function sweepOneAbsence({ absence, technicianId, date }) {
       }
 
       const uncovered = stops.filter((s) => !covered.has(s.id));
-      if (uncovered.length === 0) return { total: 0, units: 0 };
+      if (uncovered.length === 0) return { total: 0, units: 0, reconciled };
 
       const tech = await trx('technicians').where({ id: technicianId }).first('id', 'name');
       const swept = await parkStops(trx, {
