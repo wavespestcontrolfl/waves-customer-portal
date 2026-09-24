@@ -1563,3 +1563,73 @@ describe('financialStateDrifted (round 21 P1: financial CAS alongside the add-on
     expect(financialStateDrifted(snap, { parent: { ...snap.parent }, addons: [] })).toBe(false);
   });
 });
+
+// Pre-push fallback audit P1 on #4657 round 24 (admin-schedule.js:9902): the
+// single-service (no addons array) save path computed basePrice =
+// Number(estimatedPrice) with no >= 0 check, so a caller posting a negative
+// estimatedPrice with no `addons` key persisted a negative estimated_price.
+// The refusal now sits at the top of BOTH routes, before any read.
+describe('negativePricePosted — a negative primary price is refused at the route input (fallback audit P1, #4657 round 24)', () => {
+  const { negativePricePosted } = require('../routes/admin-schedule')._test;
+
+  test('pure decision: finite negatives refuse; blank, undefined, NaN, zero and positives do not', () => {
+    expect(negativePricePosted({ estimatedPrice: -50 })).toBe(true);
+    expect(negativePricePosted({ estimatedPrice: '-0.01' })).toBe(true);
+    expect(negativePricePosted({ primaryLinePrice: -1, estimatedPrice: 100 })).toBe(true);
+    expect(negativePricePosted({ estimatedPrice: 0 })).toBe(false);
+    expect(negativePricePosted({ estimatedPrice: '0' })).toBe(false);
+    expect(negativePricePosted({ estimatedPrice: 90 })).toBe(false);
+    expect(negativePricePosted({ estimatedPrice: '' })).toBe(false);
+    expect(negativePricePosted({ estimatedPrice: undefined, primaryLinePrice: null })).toBe(false);
+    expect(negativePricePosted({ estimatedPrice: 'abc' })).toBe(false);
+    expect(negativePricePosted({ estimatedPrice: -Infinity })).toBe(false); // non-finite: each branch's own existing handling
+    expect(negativePricePosted({})).toBe(false);
+  });
+
+  const router = require('../routes/admin-schedule');
+  const db = require('../models/db');
+  function findHandler(method, path) {
+    const layer = router.stack.find((l) => l.route?.path === path && l.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  }
+  async function run(method, path, body) {
+    const handler = findHandler(method, path);
+    const req = { params: { id: 'visit-1' }, query: {}, body, headers: {} };
+    let statusCode = 200;
+    let payload = null;
+    const res = { status(code) { statusCode = code; return this; }, json(p) { payload = p; return this; } };
+    let nextErr = null;
+    await handler(req, res, (err) => { nextErr = err; });
+    return { statusCode, payload, nextErr };
+  }
+  const DB_TOUCHED = new Error('db must not be touched before the refusal');
+  beforeEach(() => { db.mockReset(); db.mockImplementation(() => { throw DB_TOUCHED; }); });
+
+  test('PUT /:id/update-details with estimatedPrice -50 and NO addons array: 422 NEGATIVE_PRICE, the db never touched', async () => {
+    const { statusCode, payload } = await run('put', '/:id/update-details', { estimatedPrice: -50, notes: 'x' });
+    expect(statusCode).toBe(422);
+    expect(payload?.code).toBe('NEGATIVE_PRICE');
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('PUT with a negative primaryLinePrice (desktop gross convention) is refused the same way', async () => {
+    const { statusCode, payload } = await run('put', '/:id/update-details', { primaryLinePrice: -1, estimatedPrice: 100, addons: [] });
+    expect(statusCode).toBe(422);
+    expect(payload?.code).toBe('NEGATIVE_PRICE');
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('POST /:id/update-details/preview with a negative price is refused identically, so the preview never confirms a total the save would refuse', async () => {
+    const { statusCode, payload } = await run('post', '/:id/update-details/preview', { estimatedPrice: -50 });
+    expect(statusCode).toBe(422);
+    expect(payload?.code).toBe('NEGATIVE_PRICE');
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a non-negative price passes the refusal and the handler proceeds (reaches the db read)', async () => {
+    const { nextErr } = await run('put', '/:id/update-details', { estimatedPrice: 90, notes: 'x' });
+    // Not our refusal — the handler went on into the route and hit the
+    // throwing db mock, which is exactly the proof that the guard let it through.
+    expect(nextErr).toBe(DB_TOUCHED);
+  });
+});

@@ -1973,6 +1973,24 @@ function toMoney(v) {
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
 }
 
+// Pre-push fallback audit P1 on #4657 round 24 (:9902): the single-service
+// (no `addons` array) branch of computeUpdateDetailsFinancialPlan computed
+// `basePrice = Number(estimatedPrice)` gated only by !isNaN, so a caller
+// posting estimatedPrice -50 with no addons array persisted a NEGATIVE
+// estimated_price — while the addons branch (toMoney) and the client
+// (parseFinitePrice) both reject negatives. Decided ONCE at the route
+// input, before any read or write, for the save AND the preview: a
+// finite negative primary price is never a price. Blank/undefined/NaN
+// are left to each branch's own existing handling.
+function negativePricePosted({ estimatedPrice, primaryLinePrice }) {
+  return [estimatedPrice, primaryLinePrice].some((v) => {
+    if (v == null || v === '') return false;
+    const n = Number(v);
+    return Number.isFinite(n) && n < 0;
+  });
+}
+const NEGATIVE_PRICE_MESSAGE = 'A price can’t be negative. Enter $0 or more.';
+
 function calculateDiscountDollars(row, baseAmount, clientAmount) {
   if (!row || !(baseAmount > 0)) return { amount: 0, dollars: 0 };
   const amount = normalizeDiscountAmount(row, clientAmount);
@@ -11171,6 +11189,10 @@ async function computeUpdateDetailsFinancialPlan({
 
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
+    // First statement, before any read: see negativePricePosted.
+    if (negativePricePosted(req.body || {})) {
+      throw Object.assign(httpError(422, NEGATIVE_PRICE_MESSAGE), { code: 'NEGATIVE_PRICE' });
+    }
     const propertyId = req.body.propertyId;
     if (propertyId !== undefined) {
       if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
@@ -14258,6 +14280,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 // stays only for instant optimistic text while a request is in flight.
 router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) => {
   try {
+    // Same refusal as the save (negativePricePosted's own comment), before
+    // any read, so the preview never confirms a total the PUT would refuse.
+    if (negativePricePosted(req.body || {})) {
+      throw Object.assign(httpError(422, NEGATIVE_PRICE_MESSAGE), { code: 'NEGATIVE_PRICE' });
+    }
     const id = req.params.id;
     const cols = await db('scheduled_services').columnInfo();
     const {
@@ -14486,7 +14513,9 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     });
   } catch (err) {
     if (err.status) {
-      return res.status(err.status).json({ error: err.message });
+      // Forward the code like the save route does, so the client can tell
+      // a NEGATIVE_PRICE refusal from any other 4xx on the preview.
+      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
     next(err);
   }
@@ -21832,6 +21861,7 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  negativePricePosted,
   addonRowIdsDrifted,
   financialStateDrifted,
   previewTotalDrifted,
