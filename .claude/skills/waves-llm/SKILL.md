@@ -96,8 +96,12 @@ a provider issue never causes a gap:
 - Gemini vision → retry `GEMINI_VISION_FALLBACK_MODEL` only when it names a
   different model (the default equals BEST, so the retry rung is skipped),
   THEN Claude VISION only if both Gemini rungs miss. **Owner ruling
-  2026-09-24: every photo-vision lane is now Gemini-first, Claude-fallback-
-  only — no more parallel fan-out + averaging/merging anywhere.**
+  2026-09-24: the four customer photo-scoring lanes below (lawn, pest,
+  tree-shrub, satellite) are Gemini-first ladders — no parallel fan-out or
+  averaging.** The ruling does NOT cover every vision lane: `property_trio`,
+  `property_v2_vision`, and `turf_ocr` remain intentional consensus fan-outs,
+  and `visionAnalysis` lanes (vision-delta, lawn quality gate, hero alt,
+  WDO brief) stay Anthropic-first — don't remove those without a new ruling.
   `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day),
   `pest-identification.js#analyzePhoto`/`identifyPest`, and
   `tree-shrub-assessment.js#analyzePhoto` all call Gemini only; Claude runs
@@ -109,8 +113,9 @@ a provider issue never causes a gap:
   `averageScores`/`mergeModelResults` still exist and still work with two
   results handed to them directly (tests, or any future caller), but live
   scoring never calls either with two live results anymore.
-  `satellite-analyzer.js` is the same idea with a third rung: Gemini, then
-  Claude (FLAGSHIP), then OpenAI as the true last resort, stopping at the
+  `satellite-analyzer.js` is the same idea with a third rung: Gemini (one
+  call — no `GEMINI_VISION_FALLBACK_MODEL` retry), then Claude (FLAGSHIP),
+  then OpenAI as the true last resort, stopping at the
   first schema-valid result — no more three-way parallel fan-out with
   agreement-based confidence. A single-source satellite result now always
   reads `confidence: 'single_model'`, never `'high'` (which used to require

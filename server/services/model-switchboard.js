@@ -801,7 +801,7 @@ function getSwitchboard() {
     // On a `skipsEqualLeg` lane the implementation guards `FALLBACK !== MODEL`
     // and never calls a leg that resolves to the same model as the one before
     // it. The leg is MARKED, not dropped: its selector still moves the lane (a
-    // split GEMINI_VISION_FALLBACK_MODEL re-arms six photo ladders), so the
+    // split GEMINI_VISION_FALLBACK_MODEL re-arms five photo ladders), so the
     // change composer and previews keep the dependency; the card hides
     // `skipped` legs from the chain sentence. Ladders without the flag (e.g.
     // video_gen) call every leg regardless, so nothing is marked there.

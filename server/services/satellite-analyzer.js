@@ -27,7 +27,6 @@ const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENA
 // registry's GEMINI_VISION_FALLBACK only when it names a different model (one
 // Gemini model by default — owner ruling 2026-09-02).
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
 const VISION_PROMPT = `Analyze this satellite/aerial image of a residential property in Southwest Florida. Estimate the following measurements and features as accurately as possible from the image.
 
@@ -176,11 +175,10 @@ class SatelliteAnalyzer {
       gemini ? { provider: 'gemini', analysis: gemini } : null,
     ].filter(Boolean));
 
-    // A rung the ladder never reached is neither "configured but failed" nor
-    // corroborating — leave `available` unset for it (rather than `false`) so
-    // a consumer that treats `available === false` as "this provider tried
-    // and had nothing" (see EstimatePage's ChatGPT warning) doesn't wrongly
-    // read "skipped because we didn't need it" as a real miss.
+    // A rung the ladder never reached gets no providerStatus entry at all:
+    // the estimate pages warn on `configured === false` OR `available === false`
+    // (buildAiProviderWarnings), and "not needed" is neither a missing key nor
+    // a real miss.
     return {
       ...merged,
       imageUrl,
@@ -188,9 +186,9 @@ class SatelliteAnalyzer {
       lat, lng,
       aiSources: merged.aiSources || merged._sources || merged.source?.split('+') || [],
       providerStatus: {
-        claude: { configured: !!process.env.ANTHROPIC_API_KEY, ...(attempted.claude ? { available: !!claude } : {}) },
-        openai: { configured: !!process.env.OPENAI_API_KEY, ...(attempted.openai ? { available: !!openai } : {}) },
-        gemini: { configured: !!GEMINI_KEY, ...(attempted.gemini ? { available: !!gemini } : {}) },
+        ...(attempted.claude ? { claude: { configured: !!process.env.ANTHROPIC_API_KEY, available: !!claude } } : {}),
+        ...(attempted.openai ? { openai: { configured: !!process.env.OPENAI_API_KEY, available: !!openai } } : {}),
+        ...(attempted.gemini ? { gemini: { configured: !!GEMINI_KEY, available: !!gemini } } : {}),
       },
       models: {
         claude: claude ? { available: true, raw: claude } : { available: false },
@@ -330,21 +328,15 @@ class SatelliteAnalyzer {
   async analyzeWithGemini(imageBase64s) {
     if (!GEMINI_KEY) return null;
 
-    // Live model first, then the prior model on any miss (skip the retry if an
-    // override has pinned both to the same id).
-    const models = GEMINI_VISION_FALLBACK_MODEL && GEMINI_VISION_FALLBACK_MODEL !== GEMINI_VISION_MODEL
-      ? [GEMINI_VISION_MODEL, GEMINI_VISION_FALLBACK_MODEL]
-      : [GEMINI_VISION_MODEL];
-
-    for (const model of models) {
-      try {
-        const parsed = await this.geminiAttempt(model, imageBase64s);
-        if (parsed) return parsed;
-      } catch (err) {
-        logger.error(`Gemini vision failed (${model}): ${err.message}`);
-      }
+    // One Gemini call: Claude and then OpenAI follow in the ladder, so the
+    // shared GEMINI_VISION_FALLBACK_MODEL retry is not part of this lane
+    // (keeps the switchboard's primary → fallback → retry chain exact).
+    try {
+      return await this.geminiAttempt(GEMINI_VISION_MODEL, imageBase64s);
+    } catch (err) {
+      logger.error(`Gemini vision failed (${GEMINI_VISION_MODEL}): ${err.message}`);
+      return null;
     }
-    return null;
   }
 
   /**

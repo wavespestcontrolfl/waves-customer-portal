@@ -127,3 +127,30 @@ describe('analyzePhoto — incomplete Gemini scores are a miss, not a result', (
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
   });
 });
+
+// Codex r2 P1: overwatering_signal must be validated BEFORE boolean coercion,
+// or a missing/null flag silently becomes false and skips the Claude fallback.
+describe('analyzePhoto — overwatering flag must be explicit', () => {
+  it.each([
+    ['missing', (({ overwatering_signal, ...rest }) => rest)(GEMINI_SCORES)],
+    ['null', { ...GEMINI_SCORES, overwatering_signal: null }],
+    ['garbage string', { ...GEMINI_SCORES, overwatering_signal: 'maybe' }],
+  ])('%s → falls back to Claude', async (_label, body) => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse(body));
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(CLAUDE_SCORES) }] });
+
+    const result = await analyzePhoto('base64photo', 'image/jpeg', {});
+
+    expect(result.gemini).toBeNull();
+    expect(result.composite.overwatering_signal).toBe(true);
+  });
+
+  it('string "True"/"false" still normalizes to a boolean', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_SCORES, overwatering_signal: 'True' }));
+
+    const result = await analyzePhoto('base64photo', 'image/jpeg', {});
+
+    expect(result.gemini.overwatering_signal).toBe(true);
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+});

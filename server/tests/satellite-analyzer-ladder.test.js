@@ -102,7 +102,11 @@ describe('analyze() — Gemini → Claude → OpenAI ladder, stopping at first v
 
     expect(result.source).toBe('gemini');
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
-    expect(result.providerStatus.openai.available).toBeUndefined();
+    // Rungs the ladder never reached get no status entry, so the estimate
+    // pages' "ChatGPT skipped" warning (configured === false) cannot fire.
+    expect(result.providerStatus.claude).toBeUndefined();
+    expect(result.providerStatus.gemini).toEqual({ configured: true, available: true });
+    expect(result.providerStatus.openai).toBeUndefined();
     expect(result.confidence).toBe('single_model');
   });
 
@@ -114,7 +118,7 @@ describe('analyze() — Gemini → Claude → OpenAI ladder, stopping at first v
 
     expect(result.source).toBe('claude');
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
-    expect(result.providerStatus.openai.available).toBeUndefined();
+    expect(result.providerStatus.openai).toBeUndefined();
     expect(result.confidence).toBe('single_model');
   });
 

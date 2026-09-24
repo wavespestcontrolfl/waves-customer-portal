@@ -153,8 +153,8 @@ const VISION_GRASS_TYPE_VALUES = new Set(['st_augustine', 'bermuda', 'zoysia', '
 // truthy object — without this check it reads as a real score set, skips the
 // Claude fallback, and lets mapToDisplayScores turn the missing fields into
 // false "zero density" stress findings. Validates the VISION_PROMPT contract
-// field-by-field; called AFTER strictBool/normalizeDetectedGrass have already
-// normalized overwatering_signal / grass_type on the parsed object.
+// field-by-field; called AFTER normalizeDetectedGrass / normalizeVisionScores
+// have normalized grass_type and the formatting noise on the parsed object.
 // Models sometimes quote numbers ("82") or capitalize enums ("None"). Coerce
 // those in place first so the validator rejects only genuinely missing or
 // out-of-range fields, not formatting noise.
@@ -166,6 +166,13 @@ function normalizeVisionScores(parsed) {
   }
   for (const field of ['fungal_activity', 'insect_damage', 'drought_stress', 'mechanical_damage', 'thatch_visibility']) {
     if (typeof parsed[field] === 'string') parsed[field] = parsed[field].trim().toLowerCase();
+  }
+  // Only an explicit true/false (or its string form) becomes a boolean. A
+  // missing or null flag stays as-is so the validator rejects it — strictBool
+  // would turn it into false and hide an overwatering finding (Codex r2 P1).
+  if (typeof parsed.overwatering_signal === 'string') {
+    const lower = parsed.overwatering_signal.trim().toLowerCase();
+    if (lower === 'true' || lower === 'false') parsed.overwatering_signal = strictBool(lower);
   }
   return parsed;
 }
@@ -207,7 +214,6 @@ async function callClaudeVision(base64Image, mimeType, context = {}) {
     const text = anthropicText(response);
     if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
     parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
     normalizeVisionScores(parsed);
     if (!isValidVisionScores(parsed)) {
@@ -250,7 +256,6 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
   if (!text) return null;
 
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-  parsed.overwatering_signal = strictBool(parsed.overwatering_signal);
   parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
   normalizeVisionScores(parsed);
   if (!isValidVisionScores(parsed)) {
