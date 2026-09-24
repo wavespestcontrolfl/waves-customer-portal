@@ -152,6 +152,27 @@ const MODE_TOGGLE = {
   auto_send: { next: "suggest", label: "Back to suggest" },
 };
 const modeToggle = (mode) => MODE_TOGGLE[mode] || MODE_TOGGLE.shadow;
+const GENERAL_AUTO_SEND_UI = {
+  blockedFallback: "Sends fall back to review cards; unused cards re-enter the judge pool. Demote to shadow to rebuild evidence faster.",
+  gateOff: "GATE_SMS_AUTO_SEND is off — the mode saves, but drafts keep going to the review queue until the gate is enabled.",
+  confirmationGateOff: "Note: GATE_SMS_AUTO_SEND is currently OFF, so drafts keep going to the review queue until the gate is enabled.",
+};
+const AUTO_SEND_UI_BY_BASIS = {
+  fixed_copy_exam: {
+    blockedFallback: "Gratitude replies remain shadow-only until qualification passes again.",
+    gateOff: "GATE_SMS_GRATITUDE_REPLIES is off — the mode saves, but gratitude replies remain shadow-only until the gate is enabled.",
+    confirmationGateOff: "Note: GATE_SMS_GRATITUDE_REPLIES is currently OFF, so gratitude replies remain shadow-only until the gate is enabled.",
+  },
+};
+const autoSendUi = row => AUTO_SEND_UI_BY_BASIS[row.graduation?.qualification?.basis] || GENERAL_AUTO_SEND_UI;
+const isFixedCopy = row => autoSendUi(row) === AUTO_SEND_UI_BY_BASIS.fixed_copy_exam;
+const modeToggleForRow = (row) => {
+  if (!isFixedCopy(row)) return modeToggle(row.mode);
+  return row.mode === "shadow" ? null : { next: "shadow", label: "Back to shadow" };
+};
+const canPromoteToAutoSend = row => !row.locked
+  && row.graduation?.eligibleFor === "auto_send"
+  && (row.mode === "suggest" || (isFixedCopy(row) && row.mode === "shadow"));
 
 function ShadowConfirmationDialog({ confirmation, busy, error, onCancel, onConfirm }) {
   return (
@@ -182,6 +203,7 @@ function ShadowConfirmationDialog({ confirmation, busy, error, onCancel, onConfi
 function GraduationNote({ g }) {
   const j = g.judge || {};
   const rungLabel = g.nextRung === "auto_send" ? "auto-send" : g.nextRung;
+  const laneUi = autoSendUi({ graduation: g });
   const context = [];
   if (j.judged > 0) context.push(`${j.judged} live judged (${Math.round((j.unsafeRate || 0) * 100)}% unsafe)`);
   if (j.backfillJudged > 0) context.push(`${j.backfillJudged} backfill excluded`);
@@ -201,7 +223,7 @@ function GraduationNote({ g }) {
         <>
           <Badge tone="alert">Auto-send gated: {g.autoSendHealth.blockers?.[0] || "readiness not met"}</Badge>
           <span>
-            Sends fall back to review cards; unused cards re-enter the judge pool. Demote to shadow to rebuild evidence faster.
+            {laneUi.blockedFallback}
           </span>
         </>
       )}
@@ -219,15 +241,18 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
   const tone = row.locked ? MODE_TONES.locked : MODE_TONES[row.mode] || MODE_TONES.shadow;
   const s = row.suggest || {};
   const hasHistory = (s.suggested || 0) > 0;
-  // The intent has EARNED auto-send and is sitting at suggest → offer the
-  // one-click promote. The server re-checks eligibility (409 if it slipped).
-  const canPromote = !row.locked && row.mode === "suggest" && row.graduation?.eligibleFor === "auto_send";
+  const laneUi = autoSendUi(row);
+  // Most intents promote from suggest; the fixed-copy gratitude lane promotes
+  // directly from shadow. The server re-checks eligibility (409 if it slipped).
+  const canPromote = canPromoteToAutoSend(row);
+  const toggle = modeToggleForRow(row);
+  const showToggle = !row.locked && toggle !== null;
   return (
     <Card className="p-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="break-words text-14 font-medium text-zinc-900">{intentLabel(row.intent)}</span>
         <Chip tone={tone}>{tone.label}</Chip>
-        {!row.locked && (
+        {showToggle && (
           <Button
             type="button"
             disabled={busy}
@@ -236,7 +261,7 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
             variant="secondary"
             className="ml-auto"
           >
-            {modeToggle(row.mode).label}
+            {toggle.label}
           </Button>
         )}
       </div>
@@ -263,7 +288,7 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
       )}
       {(canPromote || row.mode === "auto_send") && autoSendGateOff && (
         <ActionFeedback error>
-          GATE_SMS_AUTO_SEND is off — the mode saves, but drafts keep going to the review queue until the gate is enabled.
+          {laneUi.gateOff}
         </ActionFeedback>
       )}
       {row.updatedBy && row.updatedBy !== "migration" && (
@@ -904,11 +929,9 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   }, [applyProposalReview, requestConfirmation]);
 
   const toggleMode = useCallback(async (row) => {
-    // Step shadow⇄suggest, or demote auto_send→suggest — always an explicit,
-    // correctly-labeled action (never an accidental demote of an active
-    // autonomous-send intent). Promotion into auto_send is eligibility-gated
-    // and goes through the API, not this toggle.
-    const nextMode = modeToggle(row.mode).next;
+    // Step shadow⇄suggest for general intents. Fixed-copy gratitude has no
+    // review-card rung, so its active mode demotes directly to shadow.
+    const nextMode = modeToggleForRow(row).next;
     setModeBusy(row.intent);
     setError("");
     setErrorRetry(null);
@@ -964,13 +987,15 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
 
   const promoteToAutoSend = useCallback((row, trigger) => {
     // Enabling autonomous customer sends — confirm deliberately.
+    const laneUi = autoSendUi(row);
+    const autoSendGateEnabled = row.autoSendGateEnabled ?? modes?.autoSendGateEnabled;
     requestConfirmation({
       title: `Enable AUTONOMOUS auto-send for "${intentLabel(row.intent)}"?`,
       description:
         `Verified house-voice drafts for this intent will be sent to customers automatically, with NO human review. ` +
         `The server re-checks readiness on every send, and escalation / scheduling messages never auto-send.` +
-        (modes?.autoSendGateEnabled === false
-          ? `\n\nNote: GATE_SMS_AUTO_SEND is currently OFF, so drafts keep going to the review queue until the gate is enabled.`
+        (autoSendGateEnabled === false
+          ? `\n\n${laneUi.confirmationGateOff}`
           : ``),
       confirmLabel: "Enable auto-send",
       run: () => promoteToAutoSendNow(row),
@@ -1003,7 +1028,7 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
                 busy={modeBusy === row.intent}
                 onToggle={toggleMode}
                 onPromote={promoteToAutoSend}
-                autoSendGateOff={modes.autoSendGateEnabled === false}
+                autoSendGateOff={(row.autoSendGateEnabled ?? modes.autoSendGateEnabled) === false}
               />
             ))}
           </div>
