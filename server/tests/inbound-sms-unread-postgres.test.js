@@ -129,6 +129,12 @@ postgres('SMS needs-response count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
   });
 
+  test('an unknown business endpoint cannot prove a courtesy closer', async () => {
+    await seedEvent({ direction: 'outbound', ours: '', body: 'The work is complete' });
+    await seedEvent({ ours: '', body: 'Thanks!' });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+  });
+
   test('successful human reply closes; automated or failed outbound does not', async () => {
     await seedEvent({ body: 'Please call me' });
     await seedEvent({ direction: 'outbound', messageType: 'reminder', body: 'Appointment reminder' });

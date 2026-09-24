@@ -321,17 +321,11 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
     HUMAN_REPLY_TYPES,
     NON_ACTIONABLE_INBOUND_TYPES,
     inboundNeedsResponse,
+    phoneIdentitySql,
   } = require('./sms-response-policy');
-  const phoneKey = (column) => {
-    const digits = `REGEXP_REPLACE(COALESCE(${column}, ''), '[^0-9]', '', 'g')`;
-    return `(CASE WHEN ${digits} = '' THEN ''
-      WHEN ${digits} ~ '^1[0-9]{10}$' THEN RIGHT(${digits}, 10)
-      WHEN ${digits} ~ '^[0-9]{10}$' AND COALESCE(${column}, '') NOT LIKE '+%' THEN ${digits}
-      ELSE '+' || ${digits} END)`;
-  };
-  const eventPeer = phoneKey('base.contact_phone');
-  const eventEndpoint = phoneKey('base.our_endpoint_id');
-  const blockedPeer = phoneKey('b.number');
+  const eventPeer = phoneIdentitySql('base.contact_phone');
+  const eventEndpoint = phoneIdentitySql('base.our_endpoint_id');
+  const blockedPeer = phoneIdentitySql('b.number');
   const { rows = [] } = await db.raw(`
     WITH base_sms AS MATERIALIZED (
       SELECT m.id, m.direction, m.body AS message_body, m.created_at,
@@ -387,7 +381,7 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
     SELECT li.id, li.peer, li.endpoint, li.customer_id, li.message_body,
            li.message_type, li.metadata, li.media, li.created_at,
            (SELECT prev.message_body FROM sms_events prev
-            WHERE prev.direction = 'outbound'
+            WHERE prev.direction = 'outbound' AND li.endpoint <> ''
               AND prev.delivery_status IN ('queued', 'sent', 'delivered')
               AND prev.message_type <> 'internal_alert'
               AND prev.peer = li.peer AND prev.endpoint = li.endpoint
