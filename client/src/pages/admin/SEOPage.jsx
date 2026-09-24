@@ -3872,7 +3872,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   const [data, setData] = useState(null);
   const [drafting, setDrafting] = useState(null);
   const [placementUrls, setPlacementUrls] = useState({});
-  const [error, setError] = useState(null);
+  const [readError, setReadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [busy, setBusy] = useState(null);
   const [amounts, setAmounts] = useState({});
   const [notes, setNotes] = useState({});
@@ -3923,14 +3924,14 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   };
   const load = async () => {
     const gen = ++loadGen.current;
-    setError(null);
+    setReadError(null);
     try {
       const r = await adminFetch("/admin/backlink-agent/owner-queue");
       if (gen !== loadGen.current) return;
       setData(r);
     } catch (e) {
       if (gen !== loadGen.current) return;
-      setError(e?.message || "Owner queue load failed");
+      setReadError(e?.message || "Owner queue load failed");
     }
   };
   useEffect(() => {
@@ -3965,7 +3966,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     )
       return;
     beginAction(card.domain.id);
-    setError(null);
+    setActionError(null);
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}`, {
         method: "PATCH",
@@ -3974,7 +3975,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       clearLocalValue(setPlacementUrls, card.submission_ambiguity.id);
       refresh();
     } catch (e) {
-      setError(e?.message || "Submission verdict failed");
+      setActionError(e?.message || "Submission verdict failed");
     } finally {
       setBusy(null);
     }
@@ -4001,7 +4002,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         : "";
   const approve = async (card, row) => {
     beginAction(row.id);
-    setError(null);
+    setActionError(null);
     setResult(null);
     const body = {};
     if (row.dimension === "payment") {
@@ -4010,7 +4011,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       // binary float — 10.075 * 100 rounds to 1007); a blank field or >2 decimals is refused, not defaulted.
       const cents = dollarsToCents(displayedAmount(card, row));
       if (cents === null) {
-        setError(
+        setActionError(
           "Enter the amount in dollars with at most two decimals, greater than zero.",
         );
         setBusy(null);
@@ -4029,7 +4030,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       });
       await refresh();
     } catch (e) {
-      setError(e?.message || "Approve failed");
+      setActionError(e?.message || "Approve failed");
     } finally {
       setBusy(null);
     }
@@ -4039,7 +4040,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   // its inbox and domain are released on the closure sweep — the queue never sends an owner-routed follow-up
   const skipFollowUp = async (card, row) => {
     beginAction(row.id);
-    setError(null);
+    setActionError(null);
     setResult(null);
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/outreach/reconcile`, { method: "POST", body: { outcome: "skip", follow_up: true } });
@@ -4049,7 +4050,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       });
       await refresh();
     } catch (e) {
-      setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Skip failed");
+      setActionError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Skip failed");
     } finally {
       setBusy(null);
     }
@@ -4058,7 +4059,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   // the send click IS the approval of a communication row (§6.3 2c)
   const send = async (card, row) => {
     beginAction(row.id);
-    setError(null);
+    setActionError(null);
     setResult(null);
     const lookupHash = row.draft?.recipient_review?.lookup_hash || "";
     const ackKey = `${row.id}:${lookupHash}`; // the acknowledgement is bound to the hash it was given for
@@ -4080,7 +4081,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       });
       await refresh();
     } catch (e) {
-      setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
+      setActionError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
       // the match changed under the card (or the lookup now yields one): drop the stale acknowledgement and reload so
       // the owner reviews the CURRENT match — the server sends only against the hash it just computed
       if (REVIEW_RESET_CODES.has(e?.code)) {
@@ -4096,7 +4097,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   };
   const decide = async (card, action) => {
     beginAction(card.domain.id);
-    setError(null);
+    setActionError(null);
     setResult(null);
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/domains/${card.domain.id}/${action}`, { method: "POST", body: { note: notes[card.domain.id] || null } });
@@ -4107,14 +4108,14 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       });
       await refresh();
     } catch (e) {
-      setError(e?.message || `${action} failed`);
+      setActionError(e?.message || `${action} failed`);
     } finally {
       setBusy(null);
     }
   };
   const matchBacklink = async (card) => {
     beginAction(card.domain.id);
-    setError(null);
+    setActionError(null);
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/reconcile-backlink`, { method: "POST", body: { backlink_id: card.backlink_match.id } });
       setResult({
@@ -4123,7 +4124,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       });
       await refresh();
     } catch (e) {
-      setError(e?.message || "Could not match backlink");
+      setActionError(e?.message || "Could not match backlink");
     } finally {
       setBusy(null);
     }
@@ -4156,9 +4157,14 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         contact@ — that click is its approval. Nothing else here signs or pays —
         the runner does that later, against the approval.
       </div>
-      {error && (
+      {actionError && (
+        <div className="[margin-bottom:8px] text-ui-body text-alert-fg">
+          {actionError}
+        </div>
+      )}
+      {readError && (
         <div className="[margin-bottom:8px] text-ui-body text-alert-fg flex items-center justify-between [gap:8px]">
-          <span>{error}</span>
+          <span>{readError}</span>
           <Button onClick={load} disabled={busy !== null} variant="secondary">
             Retry
           </Button>
@@ -4174,7 +4180,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
           {result.text}
         </div>
       )}
-      {!data && !error && (
+      {!data && !readError && (
         <div className="text-ui-body text-ink-secondary">Loading…</div>
       )}
       {data && cards.length === 0 && (

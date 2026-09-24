@@ -271,4 +271,107 @@ describe("SEOPage workspace navigation", () => {
     });
     expect(screen.queryByText("stale.example")).not.toBeInTheDocument();
   });
+
+  it("keeps an owner action error through failed and recovered queue refreshes", async () => {
+    const ownerQueue = {
+      gateOn: true,
+      cards: [
+        {
+          domain: {
+            id: "domain-1",
+            domain: "owner.example",
+            domain_rating: 20,
+            organic_traffic: 100,
+            spam_score: 1,
+            score: 50,
+            competitors_linked: 0,
+          },
+          placement: {
+            id: "placement-1",
+            status: "placed",
+            location_key: "-",
+            claimed_at: null,
+            follow_up_status: null,
+          },
+          path: null,
+          rows: [
+            {
+              id: "row-1",
+              dimension: "communication",
+              action: "outreach_followup",
+              level: "owner",
+              reason: "Owner follow-up",
+              approvable: true,
+              approved: false,
+              draft: {
+                to: "editor@example.com",
+                subject: "Following up",
+                body: "Hello",
+                review: { clean: true },
+                recipient_review: { kind: "clear" },
+              },
+            },
+          ],
+          decidable: false,
+          d30_confidence: null,
+          price_tolerance_cents: 0,
+        },
+      ],
+    };
+    let ownerQueueReads = 0;
+    let readMode = "success";
+    fetch.mockImplementation((url, options = {}) => {
+      const route = String(url);
+      if (route.endsWith("/admin/backlink-agent/owner-queue")) {
+        ownerQueueReads += 1;
+        if (readMode === "fail") {
+          return Promise.reject(new Error("Owner queue read failed"));
+        }
+        return jsonResponse(ownerQueue);
+      }
+      if (
+        route.endsWith(
+          "/admin/backlink-agent/prospects/placement-1/outreach/reconcile",
+        ) && options.method === "POST"
+      ) {
+        return Promise.reject(new Error("Skip action failed"));
+      }
+      if (route.endsWith("/admin/backlink-agent/stats")) {
+        return jsonResponse({ total: 0, pending: 0 });
+      }
+      if (route.endsWith("/admin/backlink-agent/profiles")) {
+        return jsonResponse({ profiles: [] });
+      }
+      if (route.endsWith("/admin/backlink-agent/targets")) {
+        return jsonResponse({ targets: [] });
+      }
+      if (route.includes("/admin/backlink-agent/queue?")) {
+        return jsonResponse({ items: [] });
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Agent" }));
+    expect(await screen.findByText("owner.example")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Skip the follow-up" }));
+    expect(await screen.findByText("Skip action failed")).toBeInTheDocument();
+
+    readMode = "fail";
+    const readsBeforeFailure = ownerQueueReads;
+    fireEvent(window, new Event("online"));
+    await waitFor(() => expect(ownerQueueReads).toBeGreaterThan(readsBeforeFailure));
+    expect(await screen.findByText("Owner queue read failed")).toBeInTheDocument();
+    expect(screen.getByText("Skip action failed")).toBeInTheDocument();
+
+    readMode = "success";
+    const readsBeforeRecovery = ownerQueueReads;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(ownerQueueReads).toBeGreaterThan(readsBeforeRecovery));
+    await waitFor(() =>
+      expect(screen.queryByText("Owner queue read failed")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Skip action failed")).toBeInTheDocument();
+  });
 });
