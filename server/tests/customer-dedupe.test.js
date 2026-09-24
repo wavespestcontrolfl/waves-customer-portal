@@ -2361,9 +2361,13 @@ describe('runAutoMergeSweep', () => {
       if (table === 'customer_duplicate_dismissals') return [];
       return [];
     });
-    // Merge path (transaction mock)
+    // Merge path (transaction mock). Codex round 1 P1: the auto sweep now
+    // passes requireQueueEligibility:true, so executeMerge re-derives
+    // duplicatePairEligibility (findDuplicateGroups) on THIS SAME trx before
+    // committing — the customers row-lock read and that detection read both
+    // want the same two rows.
     const trx = jest.fn((table) => makeChain(table, (q) => {
-      if (table === 'customers' && q.called('forUpdate')) return [winnerRow, loserRow];
+      if (table === 'customers') return [winnerRow, loserRow];
       if (table === 'customer_merge_journal') return [{ id: 'j1' }];
       if (q.called('update')) return 1;
       return [];
@@ -2378,6 +2382,59 @@ describe('runAutoMergeSweep', () => {
     const { notifyAdmin } = require('../services/notification-service');
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(notifyAdmin.mock.calls[0][3].link).toBe(`/admin/customers?customerId=${winnerRow.id}`);
+  });
+
+  // Codex round 1 P1 concurrency regression: the outer snapshot
+  // (findDuplicateGroups on the module-level db) sees the pair as green
+  // BEFORE a concurrent operator undo lands. By the time this candidate's
+  // turn comes up, executeMerge's own requireQueueEligibility recheck runs
+  // duplicatePairEligibility on the LOCKED trx — which must now see the
+  // undo-merge dismissal a concurrent revertMerge just committed and refuse,
+  // never re-merge the pair the operator just split back apart.
+  it('a candidate undone by a CONCURRENT revertMerge between the snapshot and this turn is refused, not re-merged', async () => {
+    const winnerRow = {
+      id: 'cccccccc-0000-0000-0000-000000000001',
+      first_name: 'Diana', last_name: 'Blowers', phone: '+16124074763',
+      address_line1: '4414 Ozark Ave', zip: '34207',
+      pipeline_stage: 'new_lead', created_at: '2026-07-08',
+    };
+    const loserRow = {
+      id: 'cccccccc-0000-0000-0000-000000000002',
+      first_name: 'Diana', last_name: null, phone: '6124074763',
+      address_line1: null, zip: null,
+      pipeline_stage: 'new_lead', created_at: '2026-07-09',
+    };
+    // Detection path (module-level db mock): the OUTER snapshot the sweep
+    // loop iterates over — no dismissal yet, so the pair is a green candidate.
+    installDb((table) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      if (table === 'customer_duplicate_dismissals') return [];
+      return [];
+    });
+    // Merge path (transaction mock): by the time executeMerge's locked
+    // recheck runs, a CONCURRENT revertMerge has already committed the
+    // undo-merge sentinel for this exact pair.
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      if (table === 'customer_duplicate_dismissals') {
+        return [{ customer_id_a: winnerRow.id, customer_id_b: loserRow.id, reason: dedupe.UNDO_MERGE_DISMISSAL_REASON }];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+
+    expect(results.merged).toHaveLength(0);
+    expect(results.skipped).toHaveLength(1);
+    expect(results.skipped[0]).toMatchObject({ loserId: loserRow.id, tier: 'green' });
+    const { notifyAdmin } = require('../services/notification-service');
+    expect(notifyAdmin).not.toHaveBeenCalled();
   });
 });
 

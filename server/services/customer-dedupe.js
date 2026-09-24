@@ -466,10 +466,18 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 //   dismissals_unreadable — the operator "not a duplicate" verdicts could
 //                        not be read; a merge decision never falls open
 //                        past them (display does, this does not)
-async function duplicatePairEligibility(winnerId, loserId, database = db) {
+// respectUndoMergeSuppression: threaded straight to findDuplicateGroups —
+// false (default) for every manual caller (a human may deliberately
+// re-merge a pair they see in the still-reviewable queue after an undo);
+// executeMerge passes true here for its OWN mode:'auto' recheck, so the
+// automatic sweep's under-lock re-verification actually refuses a pair a
+// concurrent undo just suppressed (Codex round 1 P1 — the lock alone
+// serializes with revertMerge, but re-deriving eligibility without this
+// flag would still see the pair as eligible and re-merge it right after).
+async function duplicatePairEligibility(winnerId, loserId, database = db, { respectUndoMergeSuppression = false } = {}) {
   let groups;
   try {
-    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
+    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true, respectUndoMergeSuppression });
   } catch (e) {
     logger.warn(`[customer-dedupe] duplicatePairEligibility: dismissals unreadable, refusing: ${e.message}`);
     return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
@@ -1513,7 +1521,14 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // this the route let the pair in and the executor refused it 100%).
     if (requireQueueEligibility) {
       await acquirePairAdjudicationLock(trx, winnerId, loserId);
-      const eligibility = await duplicatePairEligibility(winnerId, loserId, trx);
+      // Codex round 1 P1: an 'auto' merge must re-check the undo-merge
+      // suppression under this SAME lock a concurrent revertMerge takes —
+      // without it, a sweep candidate snapshotted just before an operator's
+      // undo would still read 'eligible' here and re-merge the pair the
+      // undo just restored. A manual merge (mode !== 'auto') never respects
+      // it — that path exists precisely so a human can re-merge a pair from
+      // the still-reviewable queue after an undo.
+      const eligibility = await duplicatePairEligibility(winnerId, loserId, trx, { respectUndoMergeSuppression: mode === 'auto' });
       const admitted = eligibility.eligible || (allowAddressConflict && eligibility.code === 'address_conflict');
       if (!admitted) {
         const err = new Error(`executeMerge: the pair is no longer mergeable (${eligibility.code}) — review a fresh proposal`);
@@ -2476,6 +2491,12 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
           performedBy,
           mode: 'auto',
           evidence: candidate.evidence,
+          // Codex round 1 P1: re-check eligibility (incl. the undo-merge
+          // suppression, via mode:'auto') under the pair adjudication lock
+          // right before committing — the snapshot this loop iterates over
+          // was read before the loop started and can be stale by the time
+          // any given candidate's turn comes up.
+          requireQueueEligibility: true,
         });
         const name = [group.winner.first_name, group.winner.last_name].filter(Boolean).join(' ') || 'Unknown';
         results.merged.push({ winnerId: group.winner.id, loserId: candidate.loser.id, winnerName: name });
