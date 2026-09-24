@@ -506,13 +506,36 @@ describe('next_step branches', () => {
     });
   });
 
-  test('tree_shrub: reservice access uses the lawn lane (tree has no lane of its own)', async () => {
-    mockReserviceAccess.mockResolvedValue({ token: 'tok-tree', lanes: ['lawn'] });
+  test('tree_shrub: never reservice-eligible even when the customer has lawn-lane access (codex r5 P1)', async () => {
+    // reservice-scheduler.js explicitly excludes tree & shrub from both
+    // lanes — lawn-lane coverage must not be read as covering tree & shrub.
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-tree', lanes: ['pest', 'lawn'] });
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
       const body = await res.json();
+      expect(body.next_step.kind).toBe('request');
+      expect(body.next_step.url).toBeUndefined();
+    });
+  });
+
+  test('pest: a lawn-targeting pest (chinch bugs) checks the lawn lane, not the pest lane', async () => {
+    mockIdentifyPest.mockResolvedValue(pestResultFor('chinch-bug'));
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-lawn2', lanes: ['lawn'] }); // no 'pest' lane
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      const body = await res.json();
       expect(body.next_step.kind).toBe('reservice');
-      expect(body.next_step.url).toBe('/reservice/tok-tree');
+      expect(body.next_step.url).toBe('/reservice/tok-lawn2');
+    });
+  });
+
+  test('pest: a mosquito identification is never reservice-eligible, whatever the customer\'s plan covers', async () => {
+    mockIdentifyPest.mockResolvedValue(pestResultFor('mosquito'));
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-both', lanes: ['pest', 'lawn'] });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('request');
     });
   });
 });

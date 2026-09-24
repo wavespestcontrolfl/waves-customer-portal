@@ -63,10 +63,6 @@ const TYPE_TABLE = {
   tree_shrub: 'tree_shrub_assessments',
 };
 
-// tree_shrub has no re-service lane of its own (reservice-scheduler.js only
-// tracks 'pest' and 'lawn') — a tree & shrub finding rides the lawn lane.
-const RESERVICE_LANE = { pest: 'pest', lawn: 'lawn', tree_shrub: 'lawn' };
-
 const REQUEST_CATEGORY = { pest: 'pest_issue', lawn: 'lawn_concern', tree_shrub: 'lawn_concern' };
 
 // ── Dark until Adam flips the gate — authenticate first (every handler needs
@@ -161,10 +157,13 @@ function buildNextStep(kind, { url, prefill } = {}) {
 
 // Resolve the non-terminal ('reservice' vs 'request') branch — the only part
 // that depends on the customer's current plan coverage, so it is looked up
-// once per request/listing and shared across items.
-function laneOutcomeKind(type, access) {
-  const lane = RESERVICE_LANE[type];
-  return (access && Array.isArray(access.lanes) && access.lanes.includes(lane)) ? 'reservice' : 'request';
+// once per request/listing and shared across items. Takes the resolved
+// re-service LANE directly (not the upload type — see pestReserviceLane and
+// the tree_shrub call sites below, codex r5 P1): reservice-scheduler.js's
+// only two lanes are 'pest' and 'lawn', so a null lane (mosquito, termite,
+// rodent, tree & shrub — anything else) can never resolve to 'reservice'.
+function laneOutcomeKind(lane, access) {
+  return (lane && access && Array.isArray(access.lanes) && access.lanes.includes(lane)) ? 'reservice' : 'request';
 }
 
 function prefillFor(type, { location, note } = {}) {
@@ -199,12 +198,25 @@ function pestPublicResult(contract) {
 // returns ok:true as soon as ONE photo merges successfully, so a benign
 // photo succeeding while an actual pest photo silently fails must not read
 // as "nothing to worry about" either.
-function pestNextStepKind(result, idLabel, type, access, partial) {
+//
+// `lane` is the RESOLVED re-service lane for what was actually identified —
+// see pestReserviceLane — never the upload type. A general ant/roach call
+// checks the 'pest' lane; a lawn-targeting pest (chinch bugs, sod webworms,
+// white grubs) checks 'lawn'; mosquito/termite/rodent/tree-shrub-style pest
+// findings resolve to a null lane and can never read as 'reservice' (codex
+// r5 P1: those families are never self-serve reservice-eligible, whatever
+// lanes the customer's OWN plan happens to cover).
+function pestNextStepKind(result, idLabel, lane, access, partial) {
   if (result.recommendation && result.recommendation.inspection_required) return 'inspection';
   if (partial) return 'unclear';
   if (idLabel.hedged && idLabel.specificity === 'generic') return 'unclear';
   if (result.not_a_pest) return 'none';
-  return laneOutcomeKind(type, access);
+  return laneOutcomeKind(lane, access);
+}
+
+function pestReserviceLane(contract) {
+  const line = contract?.service?.line;
+  return line === 'pest' || line === 'lawn' ? line : null;
 }
 
 async function handlePest(req, res, { note, location }) {
@@ -253,7 +265,7 @@ async function handlePest(req, res, { note, location }) {
   const pestResult = pestPublicResult(contract);
   const idLabel = publicIdentificationLabel(contract);
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = pestNextStepKind(pestResult, idLabel, 'pest', access, partial);
+  const kind = pestNextStepKind(pestResult, idLabel, pestReserviceLane(contract), access, partial);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('pest', { location, note }),
@@ -440,7 +452,11 @@ async function handleTreeShrub(req, res, { note, location }) {
 
   const noUsableScores = treeResult.scores.overall == null;
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = (noUsableScores || partial) ? 'unclear' : laneOutcomeKind('tree_shrub', access);
+  // Tree & shrub is never a self-serve reservice lane (reservice-scheduler.js
+  // explicitly excludes it from both 'pest' and 'lawn' — codex r5 P1) — a
+  // null lane always resolves to 'request', whatever the customer's plan
+  // covers.
+  const kind = (noUsableScores || partial) ? 'unclear' : laneOutcomeKind(null, access);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('tree_shrub', { location, note }),
@@ -512,7 +528,7 @@ function pestNextStepKindFromRow(row, access) {
   const publicReport = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
   const idLabel = publicIdentificationLabel(contract);
   const partial = !!parseJsonSafe(row.ai_analysis).partial;
-  return pestNextStepKind(publicReport, idLabel, 'pest', access, partial);
+  return pestNextStepKind(publicReport, idLabel, pestReserviceLane(contract), access, partial);
 }
 
 function lawnNextStepKindFromRow(row, access) {
@@ -529,7 +545,7 @@ function treeShrubIsPartial(row) {
 
 function treeNextStepKindFromRow(row, access) {
   if (row.overall_score == null || treeShrubIsPartial(row)) return 'unclear';
-  return laneOutcomeKind('tree_shrub', access);
+  return laneOutcomeKind(null, access); // tree & shrub is never reservice-eligible — see handleTreeShrub
 }
 
 // GET /api/photo-id
@@ -585,7 +601,7 @@ router.get('/:type/:id', async (req, res, next) => {
       const pestResult = pestPublicResult(contract);
       const idLabel = publicIdentificationLabel(contract);
       const partial = !!parseJsonSafe(row.ai_analysis).partial;
-      const kind = pestNextStepKind(pestResult, idLabel, 'pest', access, partial);
+      const kind = pestNextStepKind(pestResult, idLabel, pestReserviceLane(contract), access, partial);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
         prefill: prefillFor('pest', { location: row.location, note: row.note }),
