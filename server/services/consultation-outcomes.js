@@ -96,14 +96,18 @@ function makeError(message, statusCode, code) {
 // on that row no matter what recordOutcome itself explicitly pre-locks —
 // so no in-code lock ORDER inside consultation-outcomes.js can satisfy
 // both callers' orders simultaneously. The fix widens the chokepoint
-// instead: the migration (server/models/migrations/
-// 20260923000010_consultation_outcomes.js, this PR's own, unmerged — safe
-// to rewrite in place) DROPS the foreign key on `lead_id` (keeps the
-// column and its index; leads are soft-deleted only, so there was no
-// cascade behavior riding on the FK). With no FK, the INSERT takes NO lock
-// of any kind on the referenced lead row — recordOutcome's transaction
-// now holds `customers` FOR NO KEY UPDATE and, by construction, NO OTHER
-// ROW LOCK. `customers` is the only resource recordOutcome and
+// instead: 20260923000010_consultation_outcomes.js (the table's own
+// migration) is already on this PR's pushed branch and cannot be edited —
+// Railway's preview has already run it, so an in-place edit is a silent
+// no-op there, and the pre-push migration guard blocks the edit anyway. A
+// SEPARATE migration, server/models/migrations/
+// 20260924000003_drop_consultation_outcomes_lead_fk.js, DROPS the foreign
+// key constraint on `lead_id` (keeps the column and its index; leads are
+// soft-deleted only, so there was no cascade behavior riding on the FK).
+// With no FK, the INSERT takes NO lock of any kind on the referenced lead
+// row — recordOutcome's transaction now holds `customers` FOR NO KEY
+// UPDATE and, by construction, NO OTHER ROW LOCK. `customers` is the only
+// resource recordOutcome and
 // markWonForCustomer's lock ever contend on, so a cycle needs two
 // transactions to touch two SHARED resources in reversed order — with
 // exactly one shared resource, taken as each side's very first touch of
