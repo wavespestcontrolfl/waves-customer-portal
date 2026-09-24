@@ -35,11 +35,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
-const {
-  isAssessmentServiceRow,
-  isAssessmentServiceType,
-  isAssessmentBooking,
-} = require('./assessment-booking');
+const { isAssessmentBooking } = require('./assessment-booking');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
@@ -269,16 +265,6 @@ async function lockCustomerRow(database, customerId) {
 const RETRYABLE_TX_SQLSTATES = new Set(['40P01', '40001']);
 function isRetryableTxError(err) {
   return !!(err && RETRYABLE_TX_SQLSTATES.has(err.code));
-}
-
-// Sync check for a caller that already has a scheduled_services row (with or
-// without the joined catalog columns) — reuses the shared predicate rather
-// than re-deriving it. Callers that only have a bare service_type string, or
-// need the catalog-FK fallback for a legacy row, use isAssessmentBooking
-// (async, DB-aware) directly instead.
-function isConsultationVisit(svcRow) {
-  if (!svcRow) return false;
-  return isAssessmentServiceType(svcRow.service_type) || isAssessmentServiceRow(svcRow);
 }
 
 // The lead this visit's outcome belongs to. Mirrors admin-leads.js
@@ -533,7 +519,7 @@ function effectiveBookingTimestamp(booking) {
  * or null.
  */
 async function findSaleEvidenceForConsultation(database, {
-  customerId, scheduledDateStr, now = new Date(),
+  customerId, scheduledDateStr, windowStart = null, now = new Date(),
 }) {
   if (!customerId) return null;
 
@@ -553,7 +539,12 @@ async function findSaleEvidenceForConsultation(database, {
   // evidence reads. lowerBound is the visit's scheduled_date at ET midnight;
   // upperBound is upperBoundStr's ET day, +999ms so the final sub-second of
   // that day is inclusive (mirrors admin-leads.js's parseInclusiveEnd).
-  const lowerBound = parseETDateTime(`${scheduledDateStr}T00:00:00`);
+  // The window opens at the consultation's own arrival time (Codex #4710 r9
+  // P2), not ET midnight — an estimate accepted or a visit booked that
+  // morning, before an afternoon consultation, preceded it and is not its
+  // sale. No window on file → the start of the day, as before.
+  const startClock = windowStart ? `${String(windowStart).slice(0, 5)}:00` : '00:00:00';
+  const lowerBound = parseETDateTime(`${scheduledDateStr}T${startClock}`);
   const upperBound = new Date(parseETDateTime(`${upperBoundStr}T23:59:59`).getTime() + 999);
 
   // Round 12, P2 :520: gather one candidate per source (never return on
@@ -638,11 +629,11 @@ async function findSaleEvidenceForConsultation(database, {
 // error — best-effort is the CALLER's responsibility (each logs its own
 // context), not this shared piece.
 async function attemptEvidenceBasedWin(database, {
-  outcomeRowId, customerId, scheduledDateStr, now,
+  outcomeRowId, customerId, scheduledDateStr, windowStart = null, now,
 }) {
   let won = null;
   await database.transaction(async (sp) => {
-    const evidence = await findSaleEvidenceForConsultation(sp, { customerId, scheduledDateStr, now });
+    const evidence = await findSaleEvidenceForConsultation(sp, { customerId, scheduledDateStr, windowStart, now });
     if (!evidence) return;
     // One guarded UPDATE per prior outcome so pre_win_outcome is a plain
     // literal (no raw column reference) — at most one of the two can match.
@@ -695,12 +686,12 @@ async function attemptEvidenceBasedWin(database, {
 // re-selected by the sweep's own WHERE outcome IN (warm,cold) again either
 // way.
 async function reconcileOneOpenOutcome(database, {
-  outcomeRowId, customerId, scheduledDateStr, now,
+  outcomeRowId, customerId, scheduledDateStr, windowStart = null, now,
 }) {
   return database.transaction(async (locked) => {
     await lockCustomerRow(locked, customerId);
     const won = await attemptEvidenceBasedWin(locked, {
-      outcomeRowId, customerId, scheduledDateStr, now,
+      outcomeRowId, customerId, scheduledDateStr, windowStart, now,
     });
     await locked('consultation_outcomes').where({ id: outcomeRowId }).update({ last_reconciled_at: now });
     return won;
@@ -712,6 +703,68 @@ async function reconcileOneOpenOutcome(database, {
  * Never accepts outcome 'won' — that is stamped only by markWonForCustomer
  * when a real booking/accept closes.
  */
+// The ET instant a visit's arrival window opens, or null when it has no
+// usable date/window.
+function visitWindowOpensMs(visit) {
+  if (!visit.scheduled_date || !visit.window_start) return null;
+  const opens = parseETDateTime(`${toDateOnlyString(visit.scheduled_date)}T${String(visit.window_start).slice(0, 5)}`);
+  return Number.isNaN(opens?.getTime?.()) ? null : opens.getTime();
+}
+
+// Guards on the visit, re-read under the customer lock; first match refuses.
+const HELD_VISIT_GUARDS = [
+  {
+    fails: (v, c) => v.customer_id !== undefined && String(v.customer_id || '') !== String(c.customerId || ''),
+    status: 409, code: 'CUSTOMER_CHANGED', message: 'The consultation customer changed — retry',
+  },
+  {
+    fails: (v) => DEAD_CONSULTATION_STATUSES.includes(v.status),
+    status: 409, code: 'CONSULTATION_NOT_HELD', message: 'That consultation was marked no-show, cancelled or skipped — its outcome cannot be recorded',
+  },
+  {
+    fails: (v) => Boolean(v.scheduled_date) && toDateOnlyString(v.scheduled_date) > etDateString(new Date()),
+    status: 409, code: 'CONSULTATION_IN_FUTURE', message: 'That consultation has not happened yet — record its outcome on or after the visit day',
+  },
+  {
+    fails: (v, c) => (visitWindowOpensMs(v) ?? -Infinity) > c.nowMs,
+    status: 409, code: 'CONSULTATION_IN_FUTURE', message: 'That consultation has not started yet — record its outcome once the visit window opens',
+  },
+  {
+    fails: (v, c) => Boolean(c.actingTechnicianId) && !c.actingIsAdmin && String(v.technician_id || '') !== String(c.actingTechnicianId),
+    status: 403, code: 'NOT_ASSIGNED', message: 'Not assigned to this consultation',
+  },
+];
+
+// An open outcome a later sale may convert: warm, cold, or lost for any
+// reason but a no-show.
+function isConvertibleOutcome(row) {
+  return CONVERTIBLE_OUTCOMES.includes(row.outcome) && !(row.outcome === 'lost' && row.lost_reason === 'no_show');
+}
+
+// Empty strings as SQL NULL for optional text columns.
+function blankToNull(fields) {
+  return Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v === '' || v == null ? null : v]));
+}
+
+// Input validation for recordOutcome, first failing rule wins (Codex #4710
+// r9 P2 — one table instead of a chain of branches).
+const OUTCOME_INPUT_RULES = [
+  { fails: (p) => !p.scheduledServiceId, message: 'scheduledServiceId is required' },
+  {
+    fails: (p) => p.outcome === 'won',
+    message: "outcome 'won' cannot be recorded directly — it is stamped only when a real booking or accept closes",
+  },
+  { fails: (p) => !OUTCOME_VALUES.includes(p.outcome), message: `outcome must be one of ${OUTCOME_VALUES.join(', ')}` },
+  { fails: (p) => p.outcome === 'lost' && !p.lostReason, message: 'lostReason is required when outcome is lost' },
+  { fails: (p) => p.lostReason && !LOST_REASON_VALUES.includes(p.lostReason), message: `lostReason must be one of ${LOST_REASON_VALUES.join(', ')}` },
+  { fails: (p) => p.quotedCadence && !CADENCE_VALUES.includes(p.quotedCadence), message: `quotedCadence must be one of ${CADENCE_VALUES.join(', ')}` },
+  { fails: (p) => p.interests != null && !Array.isArray(p.interests), message: 'interests must be an array' },
+  {
+    fails: (p) => !isValidFollowUpAt(p.followUpAt),
+    message: 'followUpAt must be a valid date/time — a naive local time like "2026-09-25T09:00" is read as ET, or pass an ISO string with an explicit offset/Z',
+  },
+];
+
 async function recordOutcome(params = {}, opts = {}) {
   try {
     return await recordOutcomeOnce(params, opts);
@@ -732,37 +785,10 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     actingTechnicianId = null, actingIsAdmin = false,
   } = params;
 
-  if (!scheduledServiceId) throw makeError('scheduledServiceId is required', 400, 'VALIDATION');
-  if (outcome === 'won') {
-    throw makeError(
-      "outcome 'won' cannot be recorded directly — it is stamped only when a real booking or accept closes",
-      400,
-      'VALIDATION',
-    );
-  }
-  if (!OUTCOME_VALUES.includes(outcome)) {
-    throw makeError(`outcome must be one of ${OUTCOME_VALUES.join(', ')}`, 400, 'VALIDATION');
-  }
-  if (outcome === 'lost' && !lostReason) {
-    throw makeError('lostReason is required when outcome is lost', 400, 'VALIDATION');
-  }
-  if (lostReason && !LOST_REASON_VALUES.includes(lostReason)) {
-    throw makeError(`lostReason must be one of ${LOST_REASON_VALUES.join(', ')}`, 400, 'VALIDATION');
-  }
-  if (quotedCadence && !CADENCE_VALUES.includes(quotedCadence)) {
-    throw makeError(`quotedCadence must be one of ${CADENCE_VALUES.join(', ')}`, 400, 'VALIDATION');
-  }
-  if (interests != null && !Array.isArray(interests)) {
-    throw makeError('interests must be an array', 400, 'VALIDATION');
-  }
+  // One rule table (Codex #4710 r9 P2): the first failing rule is the 400.
+  const invalid = OUTCOME_INPUT_RULES.find((rule) => rule.fails(params));
+  if (invalid) throw makeError(invalid.message, 400, 'VALIDATION');
   const normalizedQuotedAmount = normalizeQuotedAmount(quotedAmount);
-  if (!isValidFollowUpAt(followUpAt)) {
-    throw makeError(
-      'followUpAt must be a valid date/time — a naive local time like "2026-09-25T09:00" is read as ET, or pass an ISO string with an explicit offset/Z',
-      400,
-      'VALIDATION',
-    );
-  }
 
   const svcRow = await database('scheduled_services').where({ id: scheduledServiceId }).first();
   if (!svcRow) throw makeError('Scheduled service not found', 404, 'NOT_FOUND');
@@ -781,10 +807,8 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     lost_reason: outcome === 'lost' ? lostReason : null,
     interests: JSON.stringify(Array.isArray(interests) ? interests : []),
     quoted_amount: normalizedQuotedAmount,
-    quoted_cadence: quotedCadence || null,
-    quote_notes: quoteNotes || null,
+    ...blankToNull({ quoted_cadence: quotedCadence, quote_notes: quoteNotes, recorded_by: recordedBy }),
     follow_up_at: defaultFollowUpAt(outcome, followUpAt),
-    recorded_by: recordedBy || null,
     recorded_at: now,
     updated_at: now,
   };
@@ -813,36 +837,14 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     // A customer merge that repointed the visit between the first read and
     // this lock would otherwise write the retired customer_id (Codex #4710
     // r6 P2) — retried once from the top against the surviving customer.
-    if (liveVisit && String(liveVisit.customer_id || '') !== String(customerId || '')) {
-      throw makeError('The consultation customer changed — retry', 409, 'CUSTOMER_CHANGED');
-    }
-    if (liveVisit && DEAD_CONSULTATION_STATUSES.includes(liveVisit.status)) {
-      throw makeError('That consultation was marked no-show, cancelled or skipped — its outcome cannot be recorded', 409, 'CONSULTATION_NOT_HELD');
-    }
-    // A consultation scheduled after today (ET) cannot have happened yet
-    // (Codex #4710 r7 P2) — the same rule dispatch applies to field
-    // lifecycle actions on future visits.
-    if (liveVisit?.scheduled_date && toDateOnlyString(liveVisit.scheduled_date) > etDateString(new Date())) {
-      throw makeError('That consultation has not happened yet — record its outcome on or after the visit day', 409, 'CONSULTATION_IN_FUTURE');
-    }
-    // ...nor before today's arrival window opens (Codex #4710 r8 P2) — the
-    // same instant dispatch's lifecycle guard uses.
-    if (liveVisit?.scheduled_date && liveVisit.window_start) {
-      const windowOpens = parseETDateTime(`${toDateOnlyString(liveVisit.scheduled_date)}T${String(liveVisit.window_start).slice(0, 5)}`);
-      if (windowOpens instanceof Date && !Number.isNaN(windowOpens.getTime()) && Date.now() < windowOpens.getTime()) {
-        throw makeError('That consultation has not started yet — record its outcome once the visit window opens', 409, 'CONSULTATION_IN_FUTURE');
-      }
-    }
-    if (actingTechnicianId && !actingIsAdmin && String(liveVisit?.technician_id || '') !== String(actingTechnicianId)) {
-      throw makeError('Not assigned to this consultation', 403, 'NOT_ASSIGNED');
-    }
+    // The held-visit guards, as one table (Codex #4710 r6/r7/r8 + P2s;
+    // r9 P2 table-driven): a customer merge mid-write retries, a visit that
+    // never happened or has not started is refused, and a technician no
+    // longer assigned cannot write.
+    const guardCtx = { customerId, actingTechnicianId, actingIsAdmin, nowMs: Date.now() };
+    const refused = HELD_VISIT_GUARDS.find((guard) => guard.fails(liveVisit || {}, guardCtx));
+    if (refused) throw makeError(refused.message, refused.status, refused.code);
 
-    // Atomic upsert guard (waves-db-adjacent — no read-then-write TOCTOU
-    // against markWonForCustomer's concurrent reconciliation): the conflict
-    // UPDATE only fires while the existing row's outcome is NOT 'won'. A
-    // genuine insert (no conflicting row) is unaffected by this WHERE — it
-    // only gates the UPDATE branch — so `saved` is undefined in exactly one
-    // case: a conflicting row exists AND it is already 'won'.
     const [saved] = await locked('consultation_outcomes')
       .insert(row)
       .onConflict('scheduled_service_id')
@@ -879,12 +881,13 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     // path — this call site inlines the customer-row lock above because it
     // ALSO has the insert/merge to run under it first; the sweep has no
     // insert, so it locks + attempts in one step via reconcileOneOpenOutcome.
-    if (CONVERTIBLE_OUTCOMES.includes(saved.outcome) && !(saved.outcome === 'lost' && saved.lost_reason === 'no_show')) {
+    if (isConvertibleOutcome(saved)) {
       try {
         const won = await attemptEvidenceBasedWin(locked, {
           outcomeRowId: saved.id,
           customerId,
           scheduledDateStr: toDateOnlyString(svcRow.scheduled_date),
+          windowStart: svcRow.window_start,
           now,
         });
         if (won) return won;
@@ -1006,13 +1009,13 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date(), evid
         // is never won — even if its best-effort no-show write failed and
         // the row is still open.
         .whereNotIn('ss.status', DEAD_CONSULTATION_STATUSES)
-        .select('co.id as outcome_id', 'co.outcome', 'co.lost_reason', 'ss.scheduled_date');
+        .select('co.id as outcome_id', 'co.outcome', 'co.lost_reason', 'ss.scheduled_date', 'ss.window_start');
 
       for (const row of candidates) {
-        if (row.outcome === 'lost' && row.lost_reason === 'no_show') continue;
+        if (!isConvertibleOutcome(row)) continue;
          
         const evidence = await findSaleEvidenceForConsultation(sp, {
-          customerId, scheduledDateStr: toDateOnlyString(row.scheduled_date), now,
+          customerId, scheduledDateStr: toDateOnlyString(row.scheduled_date), windowStart: row.window_start || null, now,
         }) || { won_via: via, won_at: now, booking_id: evidenceBookingId };
          
         const updated = await whereConvertible(sp('consultation_outcomes').where({ id: row.outcome_id }), row.outcome)
@@ -1113,7 +1116,7 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
       .where('ss.scheduled_date', '<=', nowDateStr)
       .orderBy([{ column: 'co.last_reconciled_at', order: 'asc', nulls: 'first' }, { column: 'co.recorded_at', order: 'asc' }])
       .limit(limit)
-      .select('co.id as outcome_id', 'co.customer_id', 'ss.scheduled_date');
+      .select('co.id as outcome_id', 'co.customer_id', 'ss.scheduled_date', 'ss.window_start');
   } catch (err) {
     logger.error(`[consultation-outcomes] reconcile sweep query failed: ${err.message}`);
     result.errors += 1;
@@ -1127,6 +1130,7 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
         outcomeRowId: row.outcome_id,
         customerId: row.customer_id,
         scheduledDateStr: toDateOnlyString(row.scheduled_date),
+        windowStart: row.window_start || null,
         now,
       });
       if (wonRow) result.won += 1;
@@ -1148,6 +1152,27 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
 // re-judge it against whatever evidence still stands. Each reopen is a
 // guarded UPDATE keyed on the same evidence id, so a row re-won meanwhile by
 // other evidence is left alone. Mutates `result` in place.
+// The open outcome a cleared win returns to: its recorded prior outcome, or
+// warm when none was recorded.
+function restoredOutcome(preWinOutcome) {
+  return CONVERTIBLE_OUTCOMES.includes(preWinOutcome) ? preWinOutcome : 'warm';
+}
+
+// Whether a booking win's evidence booking is still this consultation
+// customer's real sale: present, owned by the same customer, qualifying by
+// isQualifyingSaleBooking, and not itself an assessment.
+async function winBookingStillQualifies(locked, row) {
+  const booking = await locked('scheduled_services')
+    .where({ id: row.won_evidence_booking_id })
+    .first(
+      'id', 'service_type', 'service_id', 'status', 'source_action', 'customer_confirmed',
+      'is_callback', 'recurring_parent_id', 'followup_included', 'estimated_price',
+      'annual_prepay_term_id', 'is_recurring', 'create_invoice_on_complete', 'customer_id',
+    );
+  if (!booking || String(booking.customer_id || '') !== String(row.customer_id || '')) return false;
+  return isQualifyingSaleBooking(booking) && !(await isAssessmentBooking(booking, locked));
+}
+
 async function reopenWinsWithDeadEvidence({ now, limit, result }) {
   result.reopened = 0;
   let rows;
@@ -1173,82 +1198,42 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
        
       const changed = await db.transaction(async (locked) => {
         if (row.customer_id) await lockCustomerRow(locked, row.customer_id);
-        // The CONSULTATION must still have happened (Codex #4710 r4 P2):
-        // every initial win path excludes a no-show/cancelled/skipped visit,
-        // so a win on one that died afterwards is cleared — a no-show to
-        // lost/no_show (markNoShow's own shape), anything else back to its
-        // prior outcome.
-        const consultation = await locked('scheduled_services').where({ id: row.scheduled_service_id }).first('status');
+        // Every write here is one of three shapes (Codex #4710 r9 P2 —
+        // unified): stamp only, re-point to surviving evidence, or clear the
+        // win back to an open (or no-show) outcome.
+        const stampOnly = () => locked('consultation_outcomes').where({ id: row.id }).update({ last_reconciled_at: now }).then(() => 0);
+        const clearWin = (outcome, extra = {}) => ({
+          outcome, ...extra, won_at: null, won_via: null, won_evidence_booking_id: null, pre_win_outcome: null, last_reconciled_at: now, updated_at: now,
+        });
+        // The CONSULTATION must still have happened (Codex #4710 r4 P2): a
+        // no-show becomes lost/no_show (markNoShow's own shape); a cancelled,
+        // skipped or rescheduled one returns to its prior outcome.
+        const consultation = await locked('scheduled_services').where({ id: row.scheduled_service_id }).first('status', 'scheduled_date', 'window_start');
         if (!consultation || DEAD_CONSULTATION_STATUSES.includes(consultation.status)) {
-          const noShow = consultation && consultation.status === 'no_show';
-          return locked('consultation_outcomes').where({ id: row.id, outcome: 'won' }).update({
-            outcome: noShow ? 'lost' : (CONVERTIBLE_OUTCOMES.includes(row.pre_win_outcome) ? row.pre_win_outcome : 'warm'),
-            ...(noShow ? { lost_reason: 'no_show' } : {}),
-            won_at: null,
-            won_via: null,
-            won_evidence_booking_id: null,
-            pre_win_outcome: null,
-            last_reconciled_at: now,
-            updated_at: now,
-          });
+          const cleared = consultation?.status === 'no_show'
+            ? clearWin('lost', { lost_reason: 'no_show' })
+            : clearWin(restoredOutcome(row.pre_win_outcome));
+          return locked('consultation_outcomes').where({ id: row.id, outcome: 'won' }).update(cleared);
         }
-        // An estimate win (no booking behind it) on a live consultation
-        // stands; nothing else to re-judge.
-        if (!row.won_evidence_booking_id) {
-          await locked('consultation_outcomes').where({ id: row.id }).update({ last_reconciled_at: now });
-          return 0;
-        }
-        // The win's booking still has to be a real sale by the SAME rule the
-        // win pass applies (local audit P1) — not merely uncancelled: an
-        // office edit can turn a priced booking into a free re-service
-        // (is_callback, $0) without cancelling it.
-        const evidenceBooking = await locked('scheduled_services')
-          .where({ id: row.won_evidence_booking_id })
-          .first(
-            'id', 'service_type', 'service_id', 'status', 'source_action', 'customer_confirmed',
-            'is_callback', 'recurring_parent_id', 'followup_included', 'estimated_price',
-            'annual_prepay_term_id', 'is_recurring', 'create_invoice_on_complete', 'customer_id',
-          );
-        // ...and still THIS consultation's customer's (local audit P1): a
-        // booking moved to another customer (e.g. a merge reverted) is no
-        // longer this consultation's sale.
-        const stillOwned = evidenceBooking && String(evidenceBooking.customer_id || '') === String(row.customer_id || '');
-        if (evidenceBooking && stillOwned && isQualifyingSaleBooking(evidenceBooking)
-          && !(await isAssessmentBooking(evidenceBooking, locked))) {
-          await locked('consultation_outcomes').where({ id: row.id }).update({ last_reconciled_at: now });
-          return 0;
-        }
-        // Surviving evidence first (local audit P1): the win pass below only
-        // selects consultations inside the sweep's selection window, so an
-        // old consultation must be re-judged HERE, against its own 90-day
-        // window, before its win is cleared.
-        const visit = await locked('scheduled_services').where({ id: row.scheduled_service_id }).first('scheduled_date');
-        const evidence = visit && row.customer_id
+        // An estimate win (no booking behind it) on a live consultation stands.
+        if (!row.won_evidence_booking_id) return stampOnly();
+        // A booking win stands while its booking is still THIS customer's
+        // real sale (local audit P1s: full sale rule, ownership).
+        if (await winBookingStillQualifies(locked, row)) return stampOnly();
+        // Surviving in-window evidence re-points the win (local audit P1),
+        // regardless of the consultation's age; none → cleared.
+        const evidence = row.customer_id
           ? await findSaleEvidenceForConsultation(locked, {
             customerId: row.customer_id,
-            scheduledDateStr: toDateOnlyString(visit.scheduled_date),
+            scheduledDateStr: toDateOnlyString(consultation.scheduled_date),
+            windowStart: consultation.window_start,
             now,
           })
           : null;
         const guard = { id: row.id, outcome: 'won', won_evidence_booking_id: row.won_evidence_booking_id };
-        if (evidence) {
-          return locked('consultation_outcomes').where(guard).update({
-            won_at: evidence.won_at,
-            won_via: evidence.won_via,
-            won_evidence_booking_id: evidence.booking_id || null,
-            last_reconciled_at: now,
-            updated_at: now,
-          });
-        }
-        return locked('consultation_outcomes').where(guard).update({
-          outcome: CONVERTIBLE_OUTCOMES.includes(row.pre_win_outcome) ? row.pre_win_outcome : 'warm',
-          won_at: null,
-          won_via: null,
-          won_evidence_booking_id: null,
-          pre_win_outcome: null,
-          last_reconciled_at: now,
-          updated_at: now,
-        });
+        return locked('consultation_outcomes').where(guard).update(evidence
+          ? { won_at: evidence.won_at, won_via: evidence.won_via, won_evidence_booking_id: evidence.booking_id || null, last_reconciled_at: now, updated_at: now }
+          : clearWin(restoredOutcome(row.pre_win_outcome)));
       });
       if (changed) result.reopened += 1;
     } catch (err) {
@@ -1405,6 +1390,41 @@ function etDaysBetween(laterDate, earlierDateStr) {
  * (ET calendar dates, default: the last 90 days) — a cohort view, joined to
  * whatever outcome each visit eventually got (may be after `to`).
  */
+// consultationStats helpers (Codex #4710 r9 P2 — table-driven).
+// The per-reason / per-channel breakdown each counted outcome feeds.
+const OUTCOME_BREAKDOWNS = {
+  lost: { bucket: 'lost_by_reason', field: 'lost_reason' },
+  won: { bucket: 'won_by_via', field: 'won_via' },
+};
+
+// The outcome a visit counts under, or null. A consultation cancelled,
+// skipped or rescheduled after its outcome was recorded never happened
+// (Codex #4710 r9 P2), so its outcome is not counted; a no-show still counts
+// under its lost/no_show outcome.
+function countedOutcome(v) {
+  if (!v.outcome) return null;
+  if (DEAD_CONSULTATION_STATUSES.includes(v.status) && v.status !== 'no_show') return null;
+  return v.outcome;
+}
+
+// Credit goes to the technician who RECORDED the outcome (its snapshot),
+// falling back to the visit's assignee when nothing is recorded yet — a
+// dispatch reassignment after closeout never moves the credit.
+function creditedTechnician(v) {
+  const id = v.outcome_technician_id || v.technician_id || null;
+  const name = (v.outcome_technician_id ? v.outcome_technician_name : v.technician_name) || 'Unassigned';
+  return { id, name, key: id || 'unassigned' };
+}
+
+function bump(counts, key) {
+  counts[key] = (counts[key] || 0) + 1;
+}
+
+function groupEntry(map, key, create) {
+  if (!map.has(key)) map.set(key, create());
+  return map.get(key);
+}
+
 async function consultationStats({ from, to, trx } = {}) {
   const database = trx || db;
   const now = new Date();
@@ -1483,48 +1503,29 @@ async function consultationStats({ from, to, trx } = {}) {
 
   for (const v of visits) {
     const showed = v.status === 'completed';
+    const outcome = countedOutcome(v);
     if (showed) stats.showed += 1;
     if (v.status === 'no_show') stats.no_show += 1;
-    if (v.outcome === 'warm') stats.warm += 1;
-    else if (v.outcome === 'cold') stats.cold += 1;
-    else if (v.outcome === 'lost') {
-      stats.lost += 1;
-      const reason = v.lost_reason || 'unspecified';
-      stats.lost_by_reason[reason] = (stats.lost_by_reason[reason] || 0) + 1;
-    } else if (v.outcome === 'won') {
-      stats.won += 1;
-      const via = v.won_via || 'unspecified';
-      stats.won_by_via[via] = (stats.won_by_via[via] || 0) + 1;
-      if (v.won_at) {
-        // P1-1: v.scheduled_date is a DATE column — toDateOnlyString reads
-        // its calendar fields directly rather than routing it through
-        // etDateString (which would treat it as an instant and convert to
-        // ET, shifting a UTC-midnight date back a day under Railway's
-        // TZ=UTC).
-        closeDurations.push(etDaysBetween(new Date(v.won_at), toDateOnlyString(v.scheduled_date)));
-      }
+    if (outcome) {
+      stats[outcome] += 1;
+      const breakdown = OUTCOME_BREAKDOWNS[outcome];
+      if (breakdown) bump(stats[breakdown.bucket], v[breakdown.field] || 'unspecified');
     }
-
-    const creditedTechId = v.outcome_technician_id || v.technician_id || null;
-    const creditedTechName = v.outcome_technician_id ? v.outcome_technician_name : v.technician_name;
-    const techKey = creditedTechId || 'unassigned';
-    if (!techMap.has(techKey)) {
-      techMap.set(techKey, {
-        technician_id: creditedTechId,
-        name: creditedTechName || 'Unassigned',
-        showed: 0,
-        won: 0,
-      });
+    if (outcome === 'won' && v.won_at) {
+      // P1-1: v.scheduled_date is a DATE column — toDateOnlyString reads its
+      // calendar fields directly (never etDateString, which would shift a
+      // UTC-midnight date back a day under Railway's TZ=UTC).
+      closeDurations.push(etDaysBetween(new Date(v.won_at), toDateOnlyString(v.scheduled_date)));
     }
-    const techEntry = techMap.get(techKey);
-    if (showed) techEntry.showed += 1;
-    if (v.outcome === 'won') techEntry.won += 1;
-
-    const sourceKey = v.lead_source || 'unknown';
-    if (!sourceMap.has(sourceKey)) sourceMap.set(sourceKey, { lead_source: sourceKey, showed: 0, won: 0 });
-    const sourceEntry = sourceMap.get(sourceKey);
-    if (showed) sourceEntry.showed += 1;
-    if (v.outcome === 'won') sourceEntry.won += 1;
+    const tech = creditedTechnician(v);
+    const source = v.lead_source || 'unknown';
+    for (const entry of [
+      groupEntry(techMap, tech.key, () => ({ technician_id: tech.id, name: tech.name, showed: 0, won: 0 })),
+      groupEntry(sourceMap, source, () => ({ lead_source: source, showed: 0, won: 0 })),
+    ]) {
+      if (showed) entry.showed += 1;
+      if (outcome === 'won') entry.won += 1;
+    }
   }
 
   stats.by_technician = Array.from(techMap.values());
@@ -1539,7 +1540,6 @@ module.exports = {
   LOST_REASON_VALUES,
   CADENCE_VALUES,
   WON_WINDOW_DAYS,
-  isConsultationVisit,
   isQualifyingSaleBooking,
   recordOutcome,
   markWonForCustomer,

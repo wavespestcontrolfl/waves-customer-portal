@@ -1557,6 +1557,17 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
     return () => builder;
   }
 
+  test('Codex #4710 r9 P2: an outcome on a consultation later cancelled is not counted; a no-show still counts as lost', async () => {
+    const visits = [
+      { status: 'cancelled', scheduled_date: '2026-09-10', technician_id: 't1', technician_name: 'Adam', outcome: 'warm' },
+      { status: 'no_show', scheduled_date: '2026-09-11', technician_id: 't1', technician_name: 'Adam', outcome: 'lost', lost_reason: 'no_show' },
+    ];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    expect(stats.warm).toBe(0);
+    expect(stats.lost).toBe(1);
+    expect(stats.lost_by_reason).toEqual({ no_show: 1 });
+  });
+
   test('Codex #4710 r3 P2: an even cohort reports the arithmetic midpoint (2 and 3 days → 2.5), not a rounded value', async () => {
     const visits = [
       { status: 'completed', scheduled_date: '2026-09-10', technician_id: 't1', technician_name: 'Adam', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T16:00:00Z') },
@@ -1823,6 +1834,21 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
     expect(result.reopened).toBe(1);
     expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'warm', won_evidence_booking_id: null });
+  });
+
+  test('Codex #4710 r9 P2: a sale earlier the SAME day, before the consultation window, is not its evidence', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', window_start: '14:00', customer_id: 'cust-1' },
+      ],
+      estimates: [{ id: 'est-am', customer_id: 'cust-1', status: 'accepted', accepted_at: parseETDateTime('2026-09-10T09:00') }],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'warm', recorded_at: new Date('2026-09-10T20:00:00Z') },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.won).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('warm');
   });
 
   test('a live evidence booking, or a win with no recorded evidence, is left won', async () => {
