@@ -390,7 +390,23 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       requestNotification: { id, status: 'resolved', version: 0 } };
     const routing = require('../services/messaging/push-channel-routing');
     expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
-    expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
+    const originalAcceptedAt = new Date(Date.now() - 3600000);
+    await mockPg('notifications').where({ recipient_id: property }).update({
+      metadata: mockPg.raw("metadata - 'pushAcceptedAt'"),
+    });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del(); // Simulate missing first-attempt proof.
+    const originalSend = Push.sendToCustomer.bind(Push);
+    const send = jest.spyOn(Push, 'sendToCustomer').mockImplementationOnce(async (...args) => {
+      // Acceptance lands after notifyCustomer reads its notification snapshot.
+      await mockPg('notifications').where({ recipient_id: property }).update({
+        metadata: mockPg.raw("metadata || ?::jsonb", [JSON.stringify({ pushAcceptedAt: originalAcceptedAt.toISOString() })]),
+      });
+      return originalSend(...args);
+    });
+    let replay;
+    try { replay = await routing.attemptPushFirst(input); } finally { send.mockRestore(); }
+    expect(replay.delivered).toBe(true);
+    expect(replay.acceptedAt).toEqual(originalAcceptedAt);
     expect(apns.send).toHaveBeenCalledTimes(1);
     expect(require('../services/conversations').recordTouchpoint).not.toHaveBeenCalled();
     const notice = await mockPg('notifications').where({ recipient_id: property }).first();

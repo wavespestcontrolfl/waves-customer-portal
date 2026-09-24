@@ -118,6 +118,13 @@ describe('routeOverride — pinned single-provider leg', () => {
         create: () => Promise.resolve({ content: [{ text: JSON.stringify(verdicts.shift()) }] }),
       },
     };
+    llmCall.dispatchWithFallback
+      .mockResolvedValueOnce({
+        ok: true, text: DRAFT_JSON, model: 'exam-model', servedModel: 'provider-model-first-pass',
+      })
+      .mockResolvedValueOnce({
+        ok: true, text: DRAFT_JSON, model: 'exam-model', servedModel: 'provider-model-final-pass',
+      });
     const route = { provider: MODELS.PROVIDER.ANTHROPIC, model: 'exam-model' };
     const r = await generateGroundedDraft({
       client,
@@ -127,6 +134,7 @@ describe('routeOverride — pinned single-provider leg', () => {
       routeOverride: route,
     });
     expect(r.passes).toBe(2);
+    expect(r).toMatchObject({ model: 'exam-model', servedModel: 'provider-model-final-pass' });
     expect(llmCall.dispatchWithFallback).toHaveBeenCalledTimes(2); // draft + revise
     for (const call of llmCall.dispatchWithFallback.mock.calls) {
       expect(call[0].primary).toBe(route);

@@ -12,11 +12,14 @@ jest.mock('../utils/recruiting-thread-scope', () => {
   const real = jest.requireActual('../utils/recruiting-thread-scope');
   return { ...real, isRecruitingPhone: jest.fn(async () => false) };
 });
-jest.mock('../services/twilio', () => ({}));
+jest.mock('../services/twilio', () => ({
+  deriveOutboundNumber: jest.fn(async () => '+19413529161'),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
+  debug: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -84,12 +87,13 @@ jest.mock('../services/sms-suggest-mode', () => ({
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),
   parkThreadSuggestions: jest.fn(async () => []),
-  createReplyHoldingReservation: jest.fn(async () => 'resv-1'),
+  createReplyHoldingReservation: jest.fn(async () => '44444444-4444-4444-8444-444444444444'),
   settleReplyHoldingReservation: jest.fn(async () => true),
   reopenScheduledSuggestions: jest.fn(async () => 0),
   ignoreParkedSuggestions: jest.fn(async () => 0),
   sweepStaleSuggestionsAfterReply: jest.fn(async () => undefined),
   lockSuggestThread: jest.fn(async () => {}),
+  suggestionAnchorIsStale: jest.fn(async () => false),
 }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
 // reply under the park lock. Default to "none in flight" so the send tests
@@ -142,9 +146,13 @@ jest.mock('../services/short-url', () => ({
 // Controllable gates: the auto-send interlock (claim check + reservation row)
 // is gated on smsAutoSend, OFF by default so the manual send path is unchanged
 // for the existing tests. One test flips it on via mockGates.smsAutoSend.
-const mockGates = { smsAutoSend: false };
+const mockGates = { smsAutoSend: false, smsGratitudeReplies: true };
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: (gate) => (gate === 'smsAutoSend' ? mockGates.smsAutoSend : true),
+  isEnabled: (gate) => {
+    if (gate === 'smsAutoSend') return mockGates.smsAutoSend;
+    if (gate === 'smsGratitudeReplies') return mockGates.smsGratitudeReplies;
+    return true;
+  },
   gates: {},
   logGateStatus: jest.fn(),
 }));
@@ -167,6 +175,10 @@ function makeQueryBuilder(rows = []) {
   const calls = { limit: [], offset: [] };
   const builder = {
     calls,
+    clone: jest.fn(() => makeQueryBuilder(rows)),
+    clearSelect: jest.fn(() => builder),
+    clearOrder: jest.fn(() => builder),
+    whereIn: jest.fn(() => builder),
     leftJoin: jest.fn(() => builder),
     joinRaw: jest.fn(() => builder),
     whereNull: jest.fn(() => builder),
@@ -181,6 +193,7 @@ function makeQueryBuilder(rows = []) {
     orWhereNull: jest.fn(() => builder),
     orWhere: jest.fn(() => builder),
     orWhereRaw: jest.fn(() => builder),
+    orderByRaw: jest.fn(() => builder),
     limit: jest.fn((value) => {
       calls.limit.push(value);
       return builder;
@@ -212,7 +225,7 @@ function makeUniversalBuilder() {
   for (const m of ['where', 'whereNull', 'whereNot', 'whereIn', 'whereRaw', 'leftJoin', 'join', 'joinRaw', 'select', 'orderBy', 'groupBy', 'distinct', 'limit', 'offset', 'insert', 'update', 'onConflict', 'ignore', 'merge', 'count']) {
     b[m] = jest.fn(chain);
   }
-  b.returning = jest.fn(() => Promise.resolve([{ id: 'resv-1' }]));
+  b.returning = jest.fn(() => Promise.resolve([{ id: '44444444-4444-4444-8444-444444444444' }]));
   b.first = jest.fn(() => Promise.resolve(null));
   b.del = jest.fn(() => Promise.resolve(1));
   b.pluck = jest.fn(() => Promise.resolve([]));
@@ -268,6 +281,7 @@ describe('admin communications SMS route', () => {
     jest.clearAllMocks();
     db.mockReset();
     mockGates.smsAutoSend = false;
+    mockGates.smsGratitudeReplies = true;
   });
 
   test('cleans rewrite model labels and quotes before returning SMS copy', () => {
@@ -1739,7 +1753,7 @@ describe('admin communications SMS route', () => {
       expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledWith(db, expect.objectContaining({
         parkedDecisionIds: ['parked-1'],
       }));
-      expect(suggestMode.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: 'resv-1', uncertain: true });
+      expect(suggestMode.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: '44444444-4444-4444-8444-444444444444', uncertain: true });
       expect(suggestMode.reopenScheduledSuggestions).not.toHaveBeenCalled();
     });
   });
@@ -1816,6 +1830,22 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('sender lookup failure stays retryable before reservation or provider entry', async () => {
+    db.mockImplementation(() => makeUniversalBuilder());
+    require('../services/twilio').deriveOutboundNumber.mockRejectedValueOnce(new Error('db down'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Hi there' }),
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ retryable: true, code: 'PROVIDER_HANDOFF_PREPARATION_FAILED' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
+
   test('a gate-on manual send without fromNumber reserves and still sends (no 503)', async () => {
     // Regression: the reservation insert must resolve a non-null from_phone
     // without referencing an out-of-scope customer. With the gate on and no
@@ -1833,7 +1863,134 @@ describe('admin communications SMS route', () => {
 
       expect(res.status).toBe(200);
       expect(sendCustomerMessage).toHaveBeenCalled();
+      const sentInput = sendCustomerMessage.mock.calls[0][0];
+      expect(require('../services/messaging/provider-handoff-reservation')
+        .isProviderHandoffHandle(sentInput.providerHandoffReservation)).toBe(true);
+      expect(sentInput.providerHandoffReservation.context).toMatchObject({
+        fromNumber: '+19413529161', to: '+15551234567', body: 'Hi there', messageType: 'manual',
+      });
+      expect(sentInput.metadata.fromNumber).toBe('+19413529161');
     });
+  });
+
+  test('bearer customer adoption re-derives and corrects the reserved and canonical sender', async () => {
+    mockGates.smsAutoSend = true;
+    const reservationUpdates = [];
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      builder.update.mockImplementation((values) => {
+        if (table === 'sms_log') reservationUpdates.push(values);
+        return builder;
+      });
+      return builder;
+    });
+    const bearer = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, customerId: 'cust-A' });
+    const derive = require('../services/twilio').deriveOutboundNumber;
+    derive.mockResolvedValueOnce('+19413529161').mockResolvedValueOnce('+19413529999');
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: `SM${'9'.repeat(32)}`,
+    });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Validated bearer send', messageType: 'manual' }),
+        });
+        expect(response.status).toBe(200);
+      });
+    } finally {
+      bearer.mockRestore();
+    }
+
+    expect(derive).toHaveBeenNthCalledWith(1, { customerId: null });
+    expect(derive).toHaveBeenNthCalledWith(2, { customerId: 'cust-A' });
+    expect(reservationUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from_phone: '+19413529999', customer_id: 'cust-A' }),
+    ]));
+    const sentInput = sendCustomerMessage.mock.calls[0][0];
+    expect(sentInput).toMatchObject({
+      customerId: 'cust-A',
+      metadata: expect.objectContaining({ fromNumber: '+19413529999' }),
+      providerHandoffReservation: expect.objectContaining({
+        context: expect.objectContaining({ fromNumber: '+19413529999' }),
+      }),
+    });
+  });
+
+  test('review-request customer adoption re-derives before its reservation and canonical handoff', async () => {
+    mockGates.smsAutoSend = true;
+    const reservationUpdates = [];
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      if (table === 'review_requests') builder.first.mockResolvedValue({
+        id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null,
+        triggered_by: 'auto_inline', token: 'tok-abc123',
+      });
+      if (table === 'customers') builder.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      builder.update.mockImplementation((values) => {
+        if (table === 'sms_log') reservationUpdates.push(values);
+        return builder;
+      });
+      return builder;
+    });
+    const derive = require('../services/twilio').deriveOutboundNumber;
+    derive.mockResolvedValueOnce('+19413529161').mockResolvedValueOnce('+19413529998');
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: `SM${'8'.repeat(32)}`,
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567', body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual', reviewRequestId: 'rr-1',
+        }),
+      });
+      expect(response.status).toBe(200);
+    });
+
+    expect(derive).toHaveBeenNthCalledWith(1, { customerId: null });
+    expect(derive).toHaveBeenNthCalledWith(2, { customerId: 'cust-A' });
+    expect(reservationUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from_phone: '+19413529998', customer_id: 'cust-A' }),
+    ]));
+    const sentInput = sendCustomerMessage.mock.calls[0][0];
+    expect(sentInput).toMatchObject({
+      customerId: 'cust-A',
+      metadata: expect.objectContaining({ fromNumber: '+19413529998' }),
+      providerHandoffReservation: expect.objectContaining({
+        context: expect.objectContaining({ fromNumber: '+19413529998' }),
+      }),
+    });
+  });
+
+  test('gate-off bearer adoption preserves the legacy sender path', async () => {
+    mockGates.smsGratitudeReplies = false;
+    db.mockImplementation(() => makeUniversalBuilder());
+    const bearer = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, customerId: 'cust-A' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-legacy' });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Legacy bearer send', messageType: 'manual' }),
+        });
+        expect(response.status).toBe(200);
+      });
+    } finally {
+      bearer.mockRestore();
+    }
+    expect(require('../services/twilio').deriveOutboundNumber).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-A', providerHandoffReservation: null,
+      metadata: expect.objectContaining({ fromNumber: undefined }),
+    }));
   });
 
   test('rejects an MMS whose media exceeds Twilio\'s 5MB total per-message cap', async () => {
@@ -1919,6 +2076,7 @@ describe('admin communications SMS route', () => {
         responseIsAnswer: false,
       });
       expect(body.messages[0]).not.toHaveProperty('metadata');
+      expect(body.messages[0]).not.toHaveProperty('responseNeedsResponse');
       expect(body).toMatchObject({
         page: 1,
         limit: 500,
@@ -1927,6 +2085,54 @@ describe('admin communications SMS route', () => {
       });
       expect(builder.calls.limit).toEqual([501]);
       expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test('a historical linked row with a changed customer phone produces a send-safe phone-only payload', async () => {
+    const originalPhone = '+15551234567';
+    const builder = makeQueryBuilder([smsMessageRow({
+      customer_id: 'customer-1',
+      customer_phone: '+15557654321',
+      contact_phone: '+15557654321',
+      effective_contact_phone: originalPhone,
+      effective_our_endpoint_id: '+19413187612',
+    })]);
+    db.mockReturnValue(builder);
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, providerMessageId: 'SM1234567890abcdef1234567890abcdef',
+    });
+
+    await withServer(async (baseUrl) => {
+      const logRes = await fetch(`${baseUrl}/admin/communications/log`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const recipient = (await logRes.json()).messages[0];
+      expect(recipient).toMatchObject({
+        customerId: null,
+        customerName: 'Ada Lovelace',
+        from: originalPhone,
+      });
+
+      // Reuse the exact recipient fields a Text back action receives. With no
+      // stale customer id, the send stays on the phone-only validation path.
+      db.mockReset();
+      const sendRes = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: recipient.from,
+          customerId: recipient.customerId,
+          body: 'We can help with the original address.',
+          messageType: 'manual',
+        }),
+      });
+      expect(sendRes.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        to: originalPhone,
+        customerId: undefined,
+        audience: 'lead',
+        identityTrustLevel: 'phone_provided_unverified',
+      }));
     });
   });
 
@@ -1999,6 +2205,80 @@ describe('admin communications SMS route', () => {
       expect(body.limit).toBe(500);
       expect(builder.calls.limit).toEqual([501]);
       expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test('filters the SMS log to exact pending candidate ids', async () => {
+    const builder = makeQueryBuilder([smsMessageRow({
+      id: 'pending-message',
+      created_at: new Date('2026-05-20T12:03:00Z'),
+      response_created_at: new Date('2026-05-20T12:01:00Z'),
+    })]);
+    db.mockReturnValue(builder);
+    db.raw.mockImplementation(async (sql) => (
+      typeof sql === 'string' && sql.includes('WITH canonical_sms AS MATERIALIZED')
+        ? { rows: [{
+          id: 'pending-message', source: 'canonical',
+          peer: '9415550100', endpoint: '9415550190',
+          message_body: 'Can you confirm the visit?', metadata: {}, media: [],
+        }] }
+        : { rows: [] }
+    ));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?needsResponse=true`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('= ANY (?::text[])'), [['9415550100']]);
+      expect(builder.orderByRaw).toHaveBeenCalledWith(expect.stringContaining('messages.id = ANY'), [['pending-message']]);
+      const body = await res.json();
+      expect(body.messages.map((message) => message.id)).toEqual(['pending-message']);
+      expect(body.messages[0]).toMatchObject({
+        responseNeedsResponse: true,
+        createdAt: '2026-05-20T12:03:00.000Z',
+        responseCreatedAt: '2026-05-20T12:01:00.000Z',
+      });
+    });
+  });
+
+  test('searches pending conversations while retaining the pending row and scoped history', async () => {
+    const builder = makeQueryBuilder([
+      smsMessageRow({ id: 'pending-message', body: 'Can you confirm the visit?' }),
+      smsMessageRow({ id: 'older-match', direction: 'outbound', body: 'Earlier estimate details' }),
+    ]);
+    db.mockReturnValue(builder);
+    db.raw.mockImplementation(async (sql) => (
+      typeof sql === 'string' && sql.includes('WITH canonical_sms AS MATERIALIZED')
+        ? { rows: [{
+          id: 'pending-message', source: 'canonical',
+          peer: '9415550100', endpoint: '9415550190',
+          message_body: 'Can you confirm the visit?', metadata: {}, media: [],
+        }] }
+        : { rows: [] }
+    ));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?needsResponse=true&search=estimate`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      const conversationSearch = builder.clone.mock.results[0].value;
+
+      expect(res.status).toBe(200);
+      expect(conversationSearch.orWhere).toHaveBeenCalledWith('messages.body', 'ilike', '%estimate%');
+      expect(builder.whereIn).toHaveBeenCalledWith(expect.anything(), conversationSearch);
+      expect(body.messages.map((message) => message.id)).toEqual(['pending-message', 'older-match']);
+      expect(body.messages.map((message) => message.responseNeedsResponse)).toEqual([true, false]);
+    });
+  });
+
+  test('rejects an invalid needs-response filter', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?needsResponse=yes`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(400);
     });
   });
 
@@ -2109,7 +2389,7 @@ describe('Communications review ask serialization', () => {
     reviews.releaseInlineClaim.mockReset().mockResolvedValue(undefined);
     sendCustomerMessage.mockReset().mockResolvedValue({ sent: true, providerMessageId: 'SM-test' });
     suggestMode.parkThreadSuggestions.mockReset().mockResolvedValue([]);
-    suggestMode.createReplyHoldingReservation.mockReset().mockResolvedValue('resv-1');
+    suggestMode.createReplyHoldingReservation.mockReset().mockResolvedValue('44444444-4444-4444-8444-444444444444');
     suggestMode.settleReplyHoldingReservation.mockReset().mockResolvedValue(true);
     suggestMode.reopenScheduledSuggestions.mockReset().mockResolvedValue(0);
     suggestMode.ignoreParkedSuggestions.mockReset().mockResolvedValue(0);
@@ -2144,7 +2424,7 @@ describe('Communications review ask serialization', () => {
           selected = {
             ...values,
             metadata: typeof values.metadata === 'string' ? JSON.parse(values.metadata) : values.metadata,
-            id: `resv-${reservations.length + 1}`,
+            id: `00000000-0000-4000-8000-${String(reservations.length + 1).padStart(12, '0')}`,
           };
           reservations.push(selected);
           b.returning.mockResolvedValue([{ id: selected.id }]);
@@ -2332,11 +2612,11 @@ describe('Communications review ask serialization', () => {
     });
     // The claimed-link seam now reserves BEFORE dispatchReviewAsk's own
     // spacing check runs, and passes excludeReservationId so this same
-    // attempt's own row (the default builder always returns id 'resv-1')
+    // attempt's own row (the default builder always returns id '44444444-4444-4444-8444-444444444444')
     // doesn't self-block it — a later request (no exclude, or a different
     // id) still sees it as durable spacing evidence.
     history.lastManualAskAt.mockImplementation(async (_customerId, opts = {}) =>
-      (reserved && opts.excludeReservationId !== 'resv-1') ? new Date() : null);
+      (reserved && opts.excludeReservationId !== '44444444-4444-4444-8444-444444444444') ? new Date() : null);
     sendCustomerMessage.mockImplementation(async () => {
       expect(reserved).toBe(true);
       if (mode.includes('throw')) throw Object.assign(new Error('audit unavailable'), { providerOutcome: { sent: true, providerMessageId: 'SM-accepted' } });
@@ -2558,4 +2838,240 @@ describe('Communications review ask serialization', () => {
       expect(locks.runExclusive).not.toHaveBeenCalled();
     });
   });
+});
+
+// Pre-push Codex P1: an earlier round rerouted a lead-only consultation
+// send to POST /admin/leads/:id/send-sms, bypassing THIS route's own
+// interlocks (the Agent Review draft's atomic claim, pending-suggestion
+// thread parking, the active auto-send check). The send stays on THIS
+// route; leadId rides in the body and the SAME audit trail
+// /admin/leads/:id/send-sms records (lead_activities row, first-response
+// stamp, new→contacted transition) is recorded here too, via the shared
+// server/services/lead-outreach.js.
+describe('leadId in the body (consultation lead-only fallback): the send stays on /sms, records the lead audit trail, interlocks still run', () => {
+  const send = (baseUrl, overrides = {}) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: '+15551234567', body: "Pick a time for us to stop by.", leadId: 'aaaaaaaa-1111-4111-8111-111111111111', ...overrides }),
+  });
+
+  // Codex #4709 r17 P2: outreach is recorded only for a lead the send check
+  // actually validated a consultation link for — stubbed here as validated.
+  let consultationSpy;
+  beforeEach(() => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-lead-outreach' });
+    consultationSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: 'aaaaaaaa-1111-4111-8111-111111111111' });
+  });
+  afterEach(() => { consultationSpy.mockRestore(); });
+
+  test('a leadId on a text with NO validated consultation link records nothing', async () => {
+    consultationSpy.mockResolvedValue({ ok: true });
+    const leadActivities = [];
+    let leadUpdated = null;
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'new' }));
+        b.update = jest.fn(async (patch) => { leadUpdated = patch; return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'Running a bit late today.' });
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities.some((r) => r.activity_type === 'sms_sent')).toBe(false);
+    expect(leadUpdated?.status).not.toBe('contacted');
+  });
+
+  test('records the lead_activities row, first-response stamp, and new→contacted transition — same as POST /admin/leads/:id/send-sms', async () => {
+    const leadActivities = [];
+    let leadUpdated = null;
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'new', response_time_minutes: null, first_contact_at: new Date(Date.now() - 60000).toISOString() };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        b.update = jest.fn(async (patch) => { leadUpdated = patch; Object.assign(lead, patch); return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    // logFirstResponse also writes its own lead_activities row (first_response)
+    // since response_time_minutes started null — both are expected.
+    expect(leadActivities).toContainEqual(expect.objectContaining({ lead_id: lead.id, activity_type: 'sms_sent' }));
+    expect(leadActivities).toContainEqual(expect.objectContaining({ lead_id: lead.id, activity_type: 'first_response' }));
+    expect(leadUpdated).toEqual(expect.objectContaining({ status: 'contacted' }));
+  });
+
+  // Pre-push Codex P1: trustedLeadId only passed a UUID-format check —
+  // nothing bound it to the actual destination. A changed recipient or a
+  // crafted request must not mark an unrelated lead contacted with a false
+  // audit row. Re-bound with the same rule resolveConsultationLeadOnly
+  // (the /customer-link lead-only path) applies: the lead's own phone must
+  // match the destination's last ten digits.
+  test('a leadId whose own phone does NOT match the destination records nothing — the send still goes through', async () => {
+    const leadActivities = [];
+    let leadUpdateCalled = false;
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+19995550000', status: 'new', response_time_minutes: null };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        b.update = jest.fn(async () => { leadUpdateCalled = true; return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl); // to: '+15551234567' — different last 10 than the lead's own phone
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
+    expect(leadUpdateCalled).toBe(false);
+  });
+
+  // Same binding rule, the other guarded predicate: a converted/closed lead
+  // (isOpenLeadRow false) records nothing even with a matching phone.
+  test('a leadId that matches the phone but has already converted records nothing', async () => {
+    const leadActivities = [];
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'won', converted_at: new Date('2026-01-01').toISOString() };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
+  });
+
+  test('a resolved customerId takes priority — no lead outreach recorded even with leadId also present', async () => {
+    const leadActivities = [];
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ id: 'cust-A', phone: '+15551234567' }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { customerId: 'cust-A' });
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
+  });
+
+  test('the Agent Review draft claim interlock still runs for a leadId send — not bypassed by rerouting', async () => {
+    const claimUpdates = [];
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'contacted', response_time_minutes: 5 };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async () => [1]);
+        return b;
+      }
+      // The verify query joins agent_decisions AS ad — a distinct table
+      // string from the plain 'agent_decisions' the claim/settle updates use.
+      if (table === 'agent_decisions as ad') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({
+          id: 'dec-1', customer_id: null, sms_log_id: null,
+          suggested_message: "Pick a time for us to stop by.",
+          inbound_created_at: null, sms_from_phone: '+15551234567', sms_to_phone: null, customer_phone: null,
+        }));
+        return b;
+      }
+      if (table === 'agent_decisions') {
+        const b = makeUniversalBuilder();
+        b.update = jest.fn(async (patch) => { claimUpdates.push(patch); return 1; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {
+        agentDecisionId: 'dec-1',
+        agentDraft: "Pick a time for us to stop by.",
+      });
+      expect(res.status).toBe(200);
+    });
+    // The atomic claim (pending_review -> scheduled) ran BEFORE the
+    // provider call — proof the interlock was not skipped for this send.
+    expect(claimUpdates.some((u) => u.status === 'scheduled')).toBe(true);
+    // ...and settled (scheduled/pending_review -> accepted) after a real send.
+    expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
+  });
+});
+
+// Codex #4709 r3 P1: a lead-only consultation text to a number that is also
+// an active job applicant must not divert onto the recruiting rail, where
+// the consultation gate/expiry/lead checks and the lead audit never run.
+test('a consultation link to an active applicant phone is refused before the recruiting diversion', async () => {
+  const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+  isRecruitingPhone.mockResolvedValue(true);
+  sendCustomerMessage.mockClear();
+  db.mockImplementation((table) => {
+    const b = makeUniversalBuilder();
+    if (table === 'short_codes') {
+      b.select = jest.fn(async () => [{ code: 'cons1', expires_at: new Date(Date.now() + 86400e3), lead_id: 'aaaaaaaa-1111-4111-8111-111111111111', target_url: `https://portal.wavespestcontrol.com/inspection/${require('../utils/lead-consultation-token').mintLeadConsultationToken('aaaaaaaa-1111-4111-8111-111111111111')}` }]);
+    }
+    return b;
+  });
+  try {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Pick a time: wavespest.co/l/cons1', leadId: 'aaaaaaaa-1111-4111-8111-111111111111' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/active job applicant/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  } finally {
+    isRecruitingPhone.mockResolvedValue(false);
+  }
 });

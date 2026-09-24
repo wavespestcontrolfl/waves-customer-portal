@@ -13,6 +13,7 @@ const { authenticate } = require('../middleware/auth');
 const { getLatestTurfHeight, getTurfHeightTrend } = require('../services/turf-height-service');
 const { buildMowingHeightContext } = require('../services/service-report/turf-height');
 const logger = require('../services/logger');
+const { pairBeforeAfterPhotos } = require('../services/lawn-visit-input');
 
 const CARD_PRIORITY_RANK = { high: 1, medium: 2, low: 3 };
 
@@ -222,13 +223,15 @@ router.get('/:customerId', async (req, res, next) => {
     // Build before/after data
     let beforeAfter = null;
     if (assessments.length >= 2) {
-      const initialPhotos = await db('lawn_assessment_photos')
-        .where({ assessment_id: initial.id, customer_visible: true })
-        .orderByRaw('is_best_photo DESC, quality_score DESC')
-        .limit(1);
+      const pairCandidates = (assessmentId) => db('lawn_assessment_photos')
+        .where({ assessment_id: assessmentId, customer_visible: true })
+        .orderByRaw('is_best_photo DESC, quality_score DESC, photo_order ASC');
+      // Every photo, not the 5-photo gallery slice: the Front may rank lower.
+      const [initialPhotos, latestCandidates] = await Promise.all([pairCandidates(initial.id), pairCandidates(latest.id)]);
 
-      const latestBest = latestPhotos.find(p => p.is_best_photo) || latestPhotos[0];
-      const initialBest = initialPhotos[0] || null;
+      // Same pairing rule as the service report: Front pairs Front; close-up
+      // and trouble photos never stand in as progress.
+      const { before: initialBest, after: latestBest } = pairBeforeAfterPhotos(initialPhotos, latestCandidates);
 
       const calcOverall = (a) => lawnOverall(a);
 

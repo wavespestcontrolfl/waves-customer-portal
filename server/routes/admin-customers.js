@@ -1653,31 +1653,9 @@ async function attachMatchedCustomerToAccount(trx, customer) {
   if (!customer) return null;
   if (customer.account_id) return customer.account_id;
 
-  const accountId = customer.id;
-  await trx('customer_accounts')
-    .insert({
-      id: accountId,
-      first_name: customer.first_name,
-      last_name: customer.last_name,
-      phone: customer.phone || null,
-      email: customer.email ? String(customer.email).trim().toLowerCase() : null,
-      company_name: customer.company_name || null,
-      created_at: customer.created_at || new Date(),
-      updated_at: new Date(),
-    })
-    .onConflict('id')
-    .ignore();
-
-  await trx('customers')
-    .where({ id: customer.id })
-    .update({
-      account_id: accountId,
-      is_primary_profile: customer.is_primary_profile === false ? false : true,
-      profile_label: customer.profile_label || 'Primary',
-      updated_at: new Date(),
-    });
-
-  return accountId;
+  // Shared write (Codex #4737 r9 P1) — see services/customer-account-attach.js.
+  const { attachCustomerToNewAccount } = require('../services/customer-account-attach');
+  return attachCustomerToNewAccount(trx, customer);
 }
 
 // Phone-first account match (last-10 digits). `matchEmail` (default OFF —
@@ -1970,7 +1948,11 @@ async function ensureCustomerAccount(trx, input) {
     company_name: input.companyName || null,
   }).returning('*');
 
-  return { accountId: account.id, existingCustomer: null, matchType: null };
+  // `created: true` ONLY on this mint path: a caller that rolls an account
+  // back on a refused request must not infer "minted here" from a null
+  // matchType, which an existing profile-less account satisfies too
+  // (pre-push audit P1 on #4667).
+  return { accountId: account.id, existingCustomer: null, matchType: null, created: true };
 }
 
 async function accountPropertySummary(accountId, excludeCustomerId = null) {
@@ -3054,7 +3036,7 @@ router.get('/:id', async (req, res, next) => {
         .orderBy('service_records.service_date', 'desc')
         .limit(20),
       db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
-      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
+      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'), db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),
       // Upcoming, active-only — drives Customer 360's next appointment.
@@ -4745,7 +4727,14 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
       return result;
     });
     logger.info(`[customers] Restored customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
-    res.json({ success: true });
+    // Restore never re-arms billing (see the disarm note above); say so to
+    // the caller so the office knows Auto Pay is still off (#4684 deferred
+    // r5 P2).
+    res.json({
+      success: true,
+      billing_rearmed: false,
+      message: 'Customer restored. Auto Pay and automatic charges stay off; re-enable Auto Pay from their profile if needed.',
+    });
   } catch (err) {
     if (err && err.restoreNotDeleted) return res.status(404).json({ error: err.message });
     next(err);
@@ -5942,6 +5931,12 @@ router._private = {
   deliverySettledLiveCredit,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
+  // Namespace constant for the per-customer annual-prepay term-creation
+  // advisory lock (Codex GitHub r4 P1) — exported so a consumer needing to
+  // serialize against it (recurring-series-topup's own try-lock in
+  // admin-schedule.js) uses the SAME namespace value rather than a second
+  // hardcoded 0x4150 that could silently drift from this one.
+  ANNUAL_PREPAY_LOCK_NS,
 };
 
 router.ensureCustomerAccount = ensureCustomerAccount;

@@ -755,6 +755,13 @@ describe('mixForProduct', () => {
     } finally { delete process.env.GATE_LABEL_PIPELINE; }
   });
 
+  test('a categoryless (legacy/manual) misting-system visit gets no searched dose (Codex #4779 r8 P1)', async () => {
+    const mistingVisit = { ...visit, service_type: 'Mosquito Misting System Service', service_category: null, service_key: null };
+    const dbh = makeDb({ scheduled_services: [mistingVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), evaluateApprovals: approve() }, ...at });
+    expect(out).toMatchObject({ amount: null, reason: 'No treatment protocol for this visit (no catalog identity)' });
+  });
+
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] } });
@@ -1752,6 +1759,11 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       const out = await run({ serviceType: 'Rodent Trapping Service', serviceCategory: 'rodent', serviceKey });
       expect([serviceKey, out.lines, out.note]).toEqual([serviceKey, [], 'No treatment protocol for this service (rodent)']);
     }
+    // Mosquito misting SYSTEM (design visit / equipment service): mosquito by catalog, but no barrier chemical plan, primary or add-on. Barrier keys keep the program.
+    const misting = await run({ serviceType: 'Mosquito Misting System Service', serviceCategory: 'mosquito', serviceKey: 'mosquito_misting_system' });
+    expect([misting.lines, misting.note]).toEqual([[], 'No treatment protocol for this service (mosquito)']);
+    const mistingAddon = await run({ addons: [{ name: 'Mosquito Misting System Service', category: 'mosquito', serviceKey: 'mosquito_misting_system' }] });
+    expect(mistingAddon.addons).toMatchObject([{ name: 'Mosquito Misting System Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (mosquito)' }]);
     // The bait-station services keep the program: the trap-only add-on gets no Contrac Blox line, the quarterly bait service does (r9 P1).
     const rodentProtocols = { ...protocols, rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }, { visit: 2, month: 'Any', primary: 'Install exterior bait stations — Contrac Blox\nSet snap traps in attic zones' }] } };
     const rodent = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: 'Rodent Trapping Service', category: 'rodent', serviceKey: 'rodent_trapping' }, { name: 'Quarterly Rodent Bait Station Service', category: 'rodent', serviceKey: 'rodent_bait_quarterly' }] }, protocols: rodentProtocols, catalog: [...catalog, { id: 'blox', name: 'Contrac Blox' }], dbh: () => ({}) });
@@ -1765,6 +1777,89 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       { name: 'Lawn Care', products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' },
       { name: 'Rodent Sanitation — Light', products: 0, visit: null, note: 'No treatment protocol for this add-on (rodent)' },
     ]);
+  });
+
+  test('the misting-system NAME alone (no serviceKey) suppresses the barrier program, primary and add-on; barrier rows are unchanged (Codex round-2 P1)', async () => {
+    // Real barrier program with a real treatment line, so a suppressed
+    // misting-system result and a resolved barrier result are distinguishable.
+    const protocols = {
+      mosquito: { visits: [{ visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' }] },
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] },
+    };
+    const catalog = [{ id: 't', name: 'Talstar P' }, { id: 'd', name: 'Demand CS' }];
+
+    // Primary, name-only: the appointment carries no service_key_snapshot at
+    // all (a pre-catalog-link booking, or a snapshot that failed to persist)
+    // — the matcher already returns a null program for this name, but
+    // addonProgramKey's category fallback would otherwise still hand it the
+    // barrier program.
+    const primary = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Mosquito Misting System Service', serviceCategory: 'mosquito', scheduledDate: '2026-09-04', addons: [] },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect([primary.lines, primary.note]).toEqual([[], 'No treatment protocol for this service (mosquito)']);
+
+    // Add-on, name-only.
+    const addon = await jobCard.resolveVisitLines({
+      facts: {
+        isLawn: false,
+        serviceType: 'Quarterly Pest Control',
+        serviceCategory: 'pest_control',
+        scheduledDate: '2026-09-04',
+        addons: [{ name: 'Mosquito Misting System Service', category: 'mosquito' }],
+      },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect(addon.addons).toMatchObject([
+      { name: 'Mosquito Misting System Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (mosquito)' },
+    ]);
+
+    // Barrier rows are unchanged: same category, also no key, but not the
+    // misting-system name — still resolves the real barrier program.
+    const barrier = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Mosquito Control', serviceCategory: 'mosquito', scheduledDate: '2026-09-04', addons: [] },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect(barrier.lines.map((l) => l.product.id)).toEqual(['t']);
+    expect(barrier.visit).toMatchObject({ visit: 1, month: 'Any' });
+  });
+
+  test('a keyless install/maintenance-named misting row gets the standard no-protocol note, never barrier steps; a DIFFERENT future key is not silently suppressed by the name (Codex round-3 P1)', async () => {
+    const protocols = {
+      mosquito: { visits: [{ visit: 1, month: 'Any', primary: 'Talstar P 1 fl oz/gal' }] },
+    };
+    const catalog = [{ id: 't', name: 'Talstar P' }];
+
+    // Keyless, name says "Install" — not the design consultation (no key to
+    // claim it), and there is no live install protocols.json program either
+    // — must land on the standard no-protocol note, not barrier steps.
+    const install = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Mosquito Misting System Install', serviceCategory: 'mosquito', scheduledDate: '2026-09-04', addons: [] },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect([install.lines, install.note]).toEqual([[], 'No treatment protocol for this service (mosquito)']);
+
+    // A DIFFERENT, not-yet-built catalog key ('mosquito_misting_install') is
+    // NOT swept in by the name phrase — key-first means this predicate does
+    // not apply to it, so it falls through to the ordinary name-based
+    // resolution (today: the barrier program, since no dedicated
+    // install/maintenance program exists yet — a future PR would give this
+    // key its own protocols.json program instead).
+    const futureKeyed = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Mosquito Misting System Install', serviceCategory: 'mosquito', serviceKey: 'mosquito_misting_install', scheduledDate: '2026-09-04', addons: [] },
+      protocols,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect(futureKeyed.lines.map((l) => l.product.id)).toEqual(['t']);
   });
 
   test('the tank search withholds every dose on a rodent sanitation appointment (r8 P1)', async () => {

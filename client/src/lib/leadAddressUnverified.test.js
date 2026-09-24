@@ -1,0 +1,90 @@
+import { describe, expect, it } from 'vitest';
+import { leadAddressUnverified, leadAddressUnverifiedNotice } from './leadAddressUnverified';
+
+const flag = {
+  source: 'county_roll',
+  reason: 'The Sample county roll could not match house number 1260 on EXAMPLE ST.',
+  county: 'Sample',
+  house_number: '1260',
+  street_exists: true,
+  nearest_numbers: ['1251', '1254', '1255'],
+};
+
+describe('leadAddressUnverified', () => {
+  it('reads the flag from jsonb and from a JSON string', () => {
+    expect(leadAddressUnverified({ extracted_data: { address_unverified: flag } })).toEqual({
+      reason: flag.reason, county: 'Sample', houseNumber: '1260', nearestNumbers: ['1251', '1254', '1255'],
+    });
+    expect(leadAddressUnverified({ extracted_data: JSON.stringify({ address_unverified: flag }) })?.houseNumber).toBe('1260');
+  });
+
+  it('hides the flag once the lead address no longer matches the one the roll judged', () => {
+    const stamped = { ...flag, address_line1: '1260 Example St', zip: '34219' };
+    expect(leadAddressUnverified({ address: '1260 EXAMPLE ST., Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    expect(leadAddressUnverified({ address: '1260 Example St', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    expect(leadAddressUnverified({ address: '1250 Example St, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).toBeNull();
+    expect(leadAddressUnverified({ address: '1260 Example St', zip: '34221', extracted_data: { address_unverified: stamped } })).toBeNull();
+    // A hash-prefixed unit after a designator is the same house number.
+    expect(leadAddressUnverified({ address: '1260 Example St Apt #4, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    expect(leadAddressUnverified({ address: '1260 Example St #4, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    // The geocoder's "Lp" is the server's LOOP.
+    const loop = { ...flag, address_line1: '12 Example Loop', zip: '34219' };
+    expect(leadAddressUnverified({ address: '12 Example Lp, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: loop } })).not.toBeNull();
+    // A suffix spelling difference is the same street.
+    expect(leadAddressUnverified({ address: '1260 Example Street, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    // A unit added inline is the same audited house number.
+    expect(leadAddressUnverified({ address: '1260 Example St Apt 4, Parrish, FL 34219', zip: '34219', extracted_data: { address_unverified: stamped } })).not.toBeNull();
+    // A five-digit house number is not the ZIP when the lead's zip column is empty.
+    const bigNumber = { ...flag, address_line1: '12345 Example St', zip: '34219' };
+    expect(leadAddressUnverified({ address: '12345 Example St, Parrish, FL 34219', extracted_data: { address_unverified: bigNumber } })).not.toBeNull();
+    expect(leadAddressUnverified({ address: '12345 Example St, Parrish, FL 34221', extracted_data: { address_unverified: bigNumber } })).toBeNull();
+    // A city change alone (ZIP-less lead) retires it too.
+    const cityStamped = { ...flag, address_line1: '1260 Example St', city: 'Parrish' };
+    expect(leadAddressUnverified({ address: '1260 Example St, Bradenton, FL', extracted_data: { address_unverified: cityStamped } })).toBeNull();
+    expect(leadAddressUnverified({ address: '1260 Example St', city: 'Parrish', extracted_data: { address_unverified: cityStamped } })).not.toBeNull();
+    // An older flag with no stamped address still shows.
+    expect(leadAddressUnverified({ address: '1250 Example St', extracted_data: { address_unverified: flag } })).not.toBeNull();
+  });
+
+  it('is null for an unflagged, malformed, or missing lead', () => {
+    expect(leadAddressUnverified({ extracted_data: {} })).toBeNull();
+    expect(leadAddressUnverified({ extracted_data: { address_unverified: { county: 'Sample' } } })).toBeNull();
+    expect(leadAddressUnverified({ extracted_data: '{not json' })).toBeNull();
+    expect(leadAddressUnverified(null)).toBeNull();
+  });
+
+  it('shows the audit\'s own reason, then what to do — never a paraphrase', () => {
+    expect(leadAddressUnverifiedNotice({ extracted_data: { address_unverified: flag } })).toBe(
+      'Address unverified — The Sample county roll could not match house number 1260 on EXAMPLE ST. Confirm the address on the callback before sending an estimate.',
+    );
+    // A snap to a neighbour where BOTH numbers exist is a different ask and
+    // must reach the card as written.
+    const snapped = 'Typed house number 1260, but the property record below describes 1250 — the geocoder snapped to a nearby premise. Both numbers exist on the Sample county roll — confirm which property is the customer\'s before pricing';
+    expect(leadAddressUnverifiedNotice({ extracted_data: { address_unverified: { reason: snapped } } })).toBe(
+      `Address unverified — ${snapped}. Confirm the address on the callback before sending an estimate.`,
+    );
+    expect(leadAddressUnverifiedNotice({ extracted_data: { address_unverified: { reason: '  spaced   out  ' } } })).toBe(
+      'Address unverified — spaced out. Confirm the address on the callback before sending an estimate.',
+    );
+    expect(leadAddressUnverifiedNotice({ extracted_data: {} })).toBeNull();
+  });
+
+  it('reads the city past a dedicated unit segment or a unit-first form (codex #4667 r33 P2)', () => {
+    const flag = { source: 'county_roll', reason: 'r', address_line1: '1260 Example St', city: 'Sarasota', zip: '34219', flagged_at: '2026-09-24T00:00:00Z' };
+    const base = { extracted_data: { address_unverified: flag } };
+    expect(leadAddressUnverified({ ...base, address: '1260 Example St, Apt 4, Sarasota, FL 34219' })).toBeTruthy();
+    expect(leadAddressUnverified({ ...base, address: 'Apt 4, 1260 Example St, Sarasota, FL 34219' })).toBeTruthy();
+    expect(leadAddressUnverified({ ...base, address: '1260 Example St, Apt 4, Bradenton, FL 34219' })).toBeNull();
+  });
+
+  it('strips a compound trailing unit before matching (codex #4667 r35 P2)', () => {
+    const flag = { source: 'county_roll', reason: 'r', address_line1: '1260 Example St', city: 'Sarasota', zip: '34219', flagged_at: '2026-09-24T00:00:00Z' };
+    expect(leadAddressUnverified({ extracted_data: { address_unverified: flag }, address: '1260 Example St Bldg 2 Apt 4, Sarasota, FL 34219' })).toBeTruthy();
+  });
+
+  it('keeps the street of a comma-free unit-first segment (codex #4667 r36 P2)', () => {
+    const flag = { source: 'county_roll', reason: 'r', address_line1: '123 Main St', city: 'Sarasota', zip: '34236', flagged_at: '2026-09-24T00:00:00Z' };
+    expect(leadAddressUnverified({ extracted_data: { address_unverified: flag }, address: 'Unit 204 123 Main St, Sarasota, FL 34236' })).toBeTruthy();
+    expect(leadAddressUnverified({ extracted_data: { address_unverified: flag }, address: '#204 123 Main St, Sarasota, FL 34236' })).toBeTruthy();
+  });
+});

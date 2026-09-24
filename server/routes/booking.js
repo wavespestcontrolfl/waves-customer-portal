@@ -1717,6 +1717,22 @@ function seededRowPin(row, offerLat, offerLng) {
 // transaction, and post-commit seeding/reminders/SMS/lead-conversion. Does NOT check
 // the selfBooking gate (the caller decides). Returns a discriminated result
 // { ok:true, body } | { ok:false, status, error }; throws on unexpected errors.
+// County records could not confirm the house number the quote was priced
+// at (public-quote address_unverified): the office confirms the address on
+// the callback before anything is scheduled. Same shape as the other
+// createSelfBooking refusals (the route maps status + error to the reply).
+// `lead` is an untrusted correlation value: a malformed one is ignored
+// (never cast into a UUID column — 22P02 would 500 an otherwise valid
+// booking; codex r9 P2).
+const LEAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const ADDRESS_UNVERIFIED_REFUSAL = () => ({
+  ok: false,
+  status: 409,
+  code: 'ADDRESS_UNVERIFIED',
+  error: 'County records could not confirm this house number. Our office will verify the address with you before scheduling.',
+});
+
 async function createSelfBooking(payload = {}) {
     const {
       estimate_id, estimate_share_token, pricing_estimate_id, estimate_token, customer_id, lead_id,
@@ -1741,15 +1757,25 @@ async function createSelfBooking(payload = {}) {
       callbackVisit,
     } = payload;
 
-    // callbackVisit is INTERNAL-ONLY (reservice-public.js): a server-resolved
-    // { serviceKey, serviceId, serviceType, durationMinutes } describing a
-    // free re-service callback (services/re-service.js). It swaps the funnel
-    // catalog resolution for the caller's catalog row, marks the committed
-    // visit is_callback so completion never bills it, and skips the
-    // funnel-only follow-ons (signed-offer gate, card-capture step, ad
-    // attribution). Like authedCustomer/payAtVisit, it must be set AFTER the
-    // body spread at every public call site (/confirm nulls it) — a crafted
-    // body must never mint itself a free callback or skip the offer sig.
+    // callbackVisit is INTERNAL-ONLY (reservice-public.js, inspection-public.js):
+    // a server-resolved { serviceKey, serviceId, serviceType, durationMinutes,
+    // isCallback?, dedupeLane?, expectedIdentity?, expectedLocation?, alertLabel? } describing a free internal-
+    // caller booking. It swaps the funnel catalog resolution for the caller's
+    // catalog row and skips the funnel-only follow-ons (signed-offer gate,
+    // card-capture step, ad attribution, customer promotion, quarterly
+    // follow-up seeding). isCallback (default true) additionally marks the
+    // visit is_callback so completion never bills it and callback reporting
+    // counts it — false for a non-re-service internal booking (an assessment
+    // is free without being a warranty callback). dedupeLane (default true)
+    // additionally takes the reservice-lane advisory lock and re-checks the
+    // RESERVICE_LANES-keyed open-callback dedupe — false for a caller whose
+    // serviceKey isn't a re-service lane (that check's fallback classification
+    // would false-hit on an unrelated open pest/lawn re-service); such a
+    // caller owns its own pre-commit idempotency check. alertLabel overrides
+    // the default "🔁 Free re-service self-booked:" internal SMS line. Like
+    // authedCustomer/payAtVisit, callbackVisit must be set AFTER the body
+    // spread at every public call site (/confirm nulls it) — a crafted body
+    // must never mint itself a free callback or skip the offer sig.
 
     if (!slot_date || !slot_start) {
       return { ok: false, status: 400, error: 'slot_date and slot_start required' };
@@ -1912,6 +1938,36 @@ async function createSelfBooking(payload = {}) {
     // the customer would bypass the phone-on-file guard. It is used only as a
     // "this booking came from an estimate deep link" signal for the
     // customer-derived lead conversion after the booking commits (see below).
+    // …and, fail-closed, as the carrier of the quote's county-roll address
+    // verdict (public-quote address_unverified): a bare /book link minted
+    // by a run with no draft has no handoff token for the draft predicate
+    // to refuse, so the flag is enforced here — against the ADDRESS being
+    // booked, never as identity (a forged lead id can only block a booking
+    // at a premise the roll could not match, never enable one). Only when
+    // the submitted address is the flagged premise (codex #4667 r6 P1).
+    // The lead-named verdict is judged ONLY inside the booking transaction
+    // below, where it can be reconciled with newer clean verdicts for the
+    // contact pair under the shared advisory lock (codex r11 P2).
+    // The same verdict on a TOKEN-VERIFIED pricing handoff, checked
+    // unconditionally — before any booking write and regardless of the
+    // customers-only gate or an authenticated customer: the draft
+    // predicate's refusal only ever ran inside the gate branch, so an
+    // earlier valid handoff could still create a single appointment at the
+    // flagged address (pre-push audit P1 on #4667).
+    if (pricing_estimate_id && estimate_token) {
+      try {
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+          const handoffDraft = await db('estimates').where({ id: pricing_estimate_id }).first('estimate_data');
+          const data = typeof handoffDraft?.estimate_data === 'string'
+            ? (() => { try { return JSON.parse(handoffDraft.estimate_data); } catch { return null; } })()
+            : handoffDraft?.estimate_data;
+          if (data?.addressUnverified === true) return ADDRESS_UNVERIFIED_REFUSAL();
+        }
+      } catch (handoffErr) {
+        logger.warn(`[booking] handoff address-verdict check failed: ${handoffErr.code || handoffErr.name || 'error'}`);
+      }
+    }
 
     // Customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY, owner directive
     // 2026-07-23): with no verified customer (portal bearer) and no
@@ -2314,6 +2370,11 @@ async function createSelfBooking(payload = {}) {
     // catch below rolls the profile back for the failures that can only be
     // detected under the advisory locks.)
     let createdCustomerId = null;
+    // The parent customer_accounts row this request minted (none when the
+    // contact attached to an existing account) — rolled back with the
+    // profile on a refused booking, or each retry would strand another
+    // unreachable account (codex #4667 r16 P2).
+    let createdAccountId = null;
     if (willCreateCustomer) {
       // Account layer: attach-or-create so the new profile is login-complete
       // (portal refresh sessions FK customer_accounts). The phone-on-file gate
@@ -2327,6 +2388,10 @@ async function createSelfBooking(payload = {}) {
         phone: phoneDigits,
         email: new_customer.email || null,
       });
+      // Only an account this request PROVABLY minted (the helper's explicit
+      // flag) is ever rolled back — never an existing profile-less account
+      // that merely looks unmatched (pre-push audit P1).
+      if (account?.accountId && account.created === true) createdAccountId = account.accountId;
       const [created] = await db('customers').insert(applyContactNormalization({
         account_id: account.accountId,
         is_primary_profile: !account.existingCustomer,
@@ -2759,10 +2824,76 @@ async function createSelfBooking(payload = {}) {
       // of the self-serve notice window — unset (default) skips the lock
       // AND the re-check below; the primitives themselves are unchanged.
       if (selfBookDayCapEnabled()) await acquireSelfBookingDayCapLock(trx, slotDateStr);
+      // The county-roll ADDRESS-VERDICT contact-pair locks, BEFORE the
+      // customer-comms fence (pre-push audit P1 after r41): the staff
+      // revision of a flagged draft and the website publication both take
+      // address-verdict first and customer-comms after, so this booking's
+      // former comms → address-verdict order could deadlock against them.
+      // Pair identities are read here (reads, not evidence); the verdict
+      // itself is still judged after the comms fence, before any row is
+      // written.
+      let contactEmail = null;
+      let namedPairEmail = null;
+      let namedPairPhone = null;
+      let customerPairEmail = null;
+      let customerPairPhone = null;
+      const reconcilePairs = [];
+      {
+      // The contact pair's email: the form's, else the email of the lead
+      // the link NAMES — a bare /book?lead=<id> link with the optional
+      // email cleared must still be judged against the newer flagged
+      // lead a repeat lookup minted for the same phone and premise
+      // (codex r28 P1). The named lead's email is an identity, not
+      // evidence, so it is read before the lock.
+      contactEmail = String(new_customer?.email || '').trim() || null;
+      // …and the named lead's STORED pair, always (codex r37 P1): the form
+      // lets the visitor edit both fields, so a newer flagged lead under
+      // the original pair must still be judged — this pair is negative-
+      // only evidence (it can refuse, never clear).
+      if (LEAD_ID_RE.test(String(lead_id || ''))) {
+        const namedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').first('email', 'phone');
+        namedPairEmail = String(namedLead?.email || '').trim() || null;
+        namedPairPhone = String(namedLead?.phone || '').replace(/\D/g, '') || null;
+        if (!contactEmail) contactEmail = namedPairEmail;
+      }
+      // …and the RESOLVED customer's stored pair when the form supplied no
+      // contact (an authenticated or reservice booking carries the account,
+      // not new_customer): the stored premise it books can still carry a
+      // matching flagged lead (codex r37 P1).
+      // …ALWAYS, not only when the form omitted a field: a confirm that
+      // changes either contact value would otherwise skip the stored pair
+      // and a flagged lead under it (codex r39 P1).
+      if (custId) {
+        const storedCustomer = await trx('customers').where({ id: custId }).whereNull('deleted_at').first('email', 'phone');
+        customerPairEmail = String(storedCustomer?.email || '').trim() || null;
+        customerPairPhone = String(storedCustomer?.phone || '').replace(/\D/g, '') || null;
+      }
+      if (contactEmail && phoneDigits) reconcilePairs.push([contactEmail, phoneDigits]);
+      if (customerPairEmail && customerPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === customerPairEmail.toLowerCase() && p.slice(-10) === customerPairPhone.slice(-10))) {
+        reconcilePairs.push([customerPairEmail, customerPairPhone]);
+      }
+      if (namedPairEmail && namedPairPhone && !reconcilePairs.some(([e, p]) => e.toLowerCase() === namedPairEmail.toLowerCase() && p.slice(-10) === namedPairPhone.slice(-10))) {
+        reconcilePairs.push([namedPairEmail, namedPairPhone]);
+      }
+      {
+        const { contactPairLockKey } = require('../services/lead-address-unverified');
+        // Both pairs' locks, in deterministic key order.
+        const keys = [...new Set(reconcilePairs.map(([e, p]) => contactPairLockKey(e, p)))].sort();
+        for (const key of keys) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
+        }
+      }
+      }
       // Rung 6 (occupancy.js ORDERING CONTRACT): the appointment insert
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
       // absence probes — after the scheduling rungs, BEFORE every row lock.
+      // The consultation page fences EVERY profile its lead touches first,
+      // in sorted order (Codex #4737 r22 P0 — the same order the waitlist
+      // uses); re-taking this customer's own fence below is a no-op.
+      if (typeof callbackVisit?.leadDedupe?.fenceIds === 'function') {
+        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);
+      }
       await lockCustomerComms(trx, custId);
       if (custId) {
         const freshBookingCustomer = await trx('customers')
@@ -2773,6 +2904,21 @@ async function createSelfBooking(payload = {}) {
             isOperational: true,
             code: 'CUSTOMER_CHANGED_RETRY',
           });
+        }
+        // callbackVisit.expectedLocation (consultation page only, Codex #4737
+        // r5 P1): the location the caller validated the slot for must still be
+        // the customer's, checked under this fence — another commit can have
+        // replaced the address after the caller's own lock released.
+        if (callbackVisit?.expectedLocation) {
+          const pin = await trx('customers').where({ id: custId }).first('latitude', 'longitude');
+          const same = (a, b) => a != null && Math.abs(parseFloat(a) - Number(b)) < 1e-6;
+          if (!pin || !same(pin.latitude, callbackVisit.expectedLocation.lat) || !same(pin.longitude, callbackVisit.expectedLocation.lng)) {
+            throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'LOCATION_CHANGED_RETRY',
+            });
+          }
         }
         // Estimate linkage revalidates under the fence too (r35): a
         // journaled estimate a merge-undo just returned no longer belongs
@@ -2796,6 +2942,137 @@ async function createSelfBooking(payload = {}) {
         }
       }
 
+      // The county-roll address verdict, rechecked UNDER ROW LOCKS held
+      // through this transaction — the unlocked reads above can observe a
+      // clean draft / lead while a concurrent /calculate commits the flag
+      // before the appointment rows below are inserted (pre-push audit
+      // P1 on #4667). The ROW locks below are taken AFTER every scheduling
+      // rung and the customer-comms lock (the ordering contract in
+      // scheduling/occupancy.js: a merge-undo holds comms before it locks
+      // journaled estimates — locking the estimate first would deadlock
+      // against it), and BEFORE either booking row is written; the route
+      // maps ADDRESS_UNVERIFIED to the same 409 as the early checks.
+      {
+        const { recoverAddressUnverified, flagCoversAddress } = require('../services/lead-address-unverified');
+        const parseData = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
+        const refuse = () => {
+          throw Object.assign(new Error('County records could not confirm this house number. Our office will verify the address with you before scheduling.'), {
+            statusCode: 409, isOperational: true, code: 'ADDRESS_UNVERIFIED',
+          });
+        };
+        // The contact-pair advisory lock is taken BEFORE any estimate row
+        // lock — the same order the lookup stage and /calculate use
+        // (advisory lock, then estimate rows), so a flagged lookup
+        // withdrawing this draft and this confirm cannot deadlock (codex
+        // r19 P2).
+        // The contact pairs and their advisory locks were taken ABOVE, before
+        // the customer-comms fence (pre-push audit P1 after r41).
+        // The customer row BEFORE the DRAFT estimate row (codex r38 P2): the
+        // Customer 360 edit and the website publication lock the customer
+        // first and then the draft, so the reverse order here would
+        // deadlock a booking against them. Only the draft handoff — a
+        // PUBLISHED row (the share-token entry) is locked estimate-first by
+        // acceptance and the service-mix mutations, so that path keeps the
+        // estimate-first order (codex r39 P1). A re-lock later is a no-op.
+        if (custId && pricing_estimate_id && estimate_token) {
+          await trx('customers').where({ id: custId }).forUpdate().first('id');
+        }
+        if (pricing_estimate_id && estimate_token) {
+          const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+          if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+            const lockedDraft = await trx('estimates').where({ id: pricing_estimate_id }).forUpdate().first('estimate_data');
+            if (parseData(lockedDraft?.estimate_data)?.addressUnverified === true) refuse();
+          }
+        }
+        // The share-token estimate entry (estimate_id + estimate_share_token)
+        // resolves a customer from the estimate itself; its own stored
+        // verdict is rechecked under the row lock too (pre-push audit P1).
+        if (estimate?.id && estimate_share_token && String(estimate.token || '') === String(estimate_share_token)) {
+          const lockedShared = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
+          if (parseData(lockedShared?.estimate_data)?.addressUnverified === true) refuse();
+        }
+        // The premise being booked: the submitted new-customer address, else
+        // the resolved customer's on-file address (an existing customer
+        // booking without an address payload — pre-push audit P1).
+        let submitted = new_customer?.address_line1 ? {
+          line1: new_customer.address_line1, city: new_customer.city, state: new_customer.state, zip: new_customer.zip,
+        } : null;
+        if (!submitted && custId) {
+          const onFileCustomer = await trx('customers').where({ id: custId }).first('address_line1', 'city', 'state', 'zip');
+          if (onFileCustomer?.address_line1) {
+            submitted = { line1: onFileCustomer.address_line1, city: onFileCustomer.city, state: onFileCustomer.state, zip: onFileCustomer.zip };
+          }
+        }
+        // Serialized with /calculate's verdict publication on the same
+        // contact pair (codex r11 P1): a flag being persisted for this
+        // email + phone lands before or after this whole recheck, never
+        // as a phantom row in between.
+        const { cleanVerdictCovers } = require('../services/lead-address-unverified');
+        // Newest clean verdict for this premise across the contact pair —
+        // computed FIRST so the lead-named flag below can be superseded by
+        // it too (codex r11 P2).
+        // …PER contact pair (codex r41 P1): a clean verdict a visitor just
+        // earned under a different email + phone must not supersede the
+        // flag an older link's pair still carries for the same premise —
+        // only evidence from the SAME pair supersedes that pair's flag.
+        const pairKeyOf = (row) => `${String(row?.email || '').toLowerCase()}|${String(row?.phone || '').replace(/\D/g, '').slice(-10)}`;
+        const newestCleanByPair = new Map();
+        let contactSnapshots = [];
+        if (submitted && reconcilePairs.length) {
+          const contactLeads = await trx('leads')
+            .whereNull('deleted_at')
+            .where((q) => {
+              for (const [e, p] of reconcilePairs) {
+                q.orWhere((pair) => pair
+                  .whereRaw('LOWER(email) = ?', [e.toLowerCase()])
+                  .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [p.slice(-10)]));
+              }
+            })
+            .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+            .forUpdate()
+            .select('id', 'email', 'phone', 'extracted_data');
+          contactSnapshots = contactLeads
+            .map((row) => ({ pairKey: pairKeyOf(row), snap: parseData(row.extracted_data) }))
+            .filter((entry) => entry.snap);
+          // The lead the link NAMES is judged on the unit-insensitive
+          // premise alone (a staff confirmation of a street-only intake
+          // carries no locality); other leads need the complete locality
+          // (codex r20 P1) — the same rule /calculate and the lookup apply.
+          const namedLeadId = LEAD_ID_RE.test(String(lead_id || '')) ? String(lead_id) : null;
+          for (const row of contactLeads) {
+            const own = namedLeadId != null && String(row.id) === namedLeadId;
+            const snap = parseData(row.extracted_data);
+            if (!snap || !cleanVerdictCovers(snap, submitted, { requireLocality: !own })) continue;
+            const at = Date.parse(snap.address_verdict?.at || '') || 0;
+            const key = pairKeyOf(row);
+            newestCleanByPair.set(key, Math.max(newestCleanByPair.get(key) || 0, at));
+          }
+        }
+        if (LEAD_ID_RE.test(String(lead_id || '')) && submitted) {
+          const lockedLead = await trx('leads').where({ id: String(lead_id) }).whereNull('deleted_at').forUpdate().first('email', 'phone', 'extracted_data');
+          const flag = recoverAddressUnverified(parseData(lockedLead?.extracted_data));
+          const cleanForPair = lockedLead ? (newestCleanByPair.get(pairKeyOf(lockedLead)) || 0) : 0;
+          if (flag && flagCoversAddress(flag, submitted) && !(cleanForPair && cleanForPair > (Date.parse(flag.flagged_at || '') || 0))) refuse();
+        }
+        // The CURRENT contact-and-premise verdict too, not only the lead
+        // the link names: a repeat lookup mints a NEW lead whose flag
+        // commits before the shared draft is re-locked, and an old link
+        // confirming in that window would see only the older clean lead
+        // (codex r9 P1). Both typed contact factors bind the lookup.
+        if (submitted && contactSnapshots.length) {
+          for (const { pairKey, snap } of contactSnapshots) {
+            const flag = recoverAddressUnverified(snap);
+            // Stamped flags only across leads (an unstamped one would match
+            // any address) — pre-push audit P1.
+            if (!flag || !flag.address_line1 || !flagCoversAddress(flag, submitted)) continue;
+            const flaggedAt = Date.parse(flag.flagged_at || '') || 0;
+            const cleanForPair = newestCleanByPair.get(pairKey) || 0;
+            if (cleanForPair && cleanForPair > flaggedAt) continue;
+            refuse();
+          }
+        }
+      }
+
 
       // Free re-service lane dedupe (codex P1 #3194): the reservice route's
       // page-level open-callback check is advisory — two parallel commits
@@ -2808,11 +3085,54 @@ async function createSelfBooking(payload = {}) {
       // the other writers is possible. Placed BEFORE the replay lookup only
       // for lock-order clarity — the replay return below still wins for an
       // exact double-submit, so retries never see this 409.
-      if (callbackVisit) {
+      //
+      // callbackVisit.dedupeLane (default true — reservice-public's only
+      // caller never sets it, so its lock + lane-dedupe stay byte-identical):
+      // false opts an internal caller OUT of the reservice-LANE namespace and
+      // the RESERVICE_LANES-keyed ALREADY_BOOKED check right below (inspection-
+      // public.js: a Waves Assessment isn't a pest/lawn re-service lane, and
+      // laneForCallbackRow's default 'pest' fallback would otherwise false-hit
+      // on an unrelated open pest re-service). Such a caller owns its own
+      // idempotency check before calling in.
+      if (callbackVisit && callbackVisit.dedupeLane !== false) {
         await trx.raw(
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['reservice-lane', `${custId}:${callbackVisit.serviceKey}`],
         );
+      }
+      // callbackVisit.leadDedupe (consultation page only, Codex #4737 r9 P1):
+      // one lead can book through several property profiles, so its
+      // dedupe is LEAD-scoped too — a lead lock taken after the per-customer
+      // lane lock (same order in every commit), then the open-assessment
+      // check across every profile of the lead, below.
+      if (callbackVisit?.leadDedupe?.leadId) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['inspection-lead', String(callbackVisit.leadDedupe.leadId)],
+        );
+        // The caller's authority over this customer, re-checked HERE under
+        // the lead lock (Codex #4737 r10 pre-push P0): a phone change or
+        // relink after the caller's own locks released must not still
+        // book (and hand back a reschedule bearer).
+        // It also answers the lead's eligibility (r10 pre-push P1): a lead
+        // converted, or given another visit, since phase 1 is refused like
+        // any duplicate (ALREADY_BOOKED — the page resolves the real state).
+        const { revalidate } = callbackVisit.leadDedupe;
+        const verdict = typeof revalidate === 'function' ? await revalidate(trx) : 'ok';
+        if (verdict === 'ineligible') {
+          throw Object.assign(new Error('You already have a consultation on the books.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'ALREADY_BOOKED',
+          });
+        }
+        if (verdict !== 'ok') {
+          throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'CUSTOMER_CHANGED_RETRY',
+          });
+        }
       }
 
       // Idempotent replay: same customer, same day, same start time →
@@ -2828,7 +3148,25 @@ async function createSelfBooking(payload = {}) {
         .whereNot('status', 'cancelled');
       if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);
       const existing = await replayQuery.first();
-      if (existing) return { existing };
+      if (existing) {
+        // A callback/consultation replay (round-10 P2) must also confirm the
+        // VISIT it is replaying is still live — an admin can cancel the
+        // linked scheduled_services row (scheduled_services.self_booking_id)
+        // without touching this self_booked_appointments row's own status,
+        // and replaying that as success would silently refuse a genuine
+        // rebooking attempt for an assessment nobody is actually holding
+        // anymore. Non-callback replays (paid /book) are unaffected — they
+        // never carried this extra check before.
+        const replayIsLive = !callbackVisit || Boolean(await trx('scheduled_services')
+          .where({ self_booking_id: existing.id })
+          // Any dead visit status, not only cancelled (skipped/rescheduled
+          // rows no longer hold the booking either).
+          .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
+          .first('id'));
+        if (replayIsLive) return { existing };
+        // Else: the linked assessment was cancelled — fall through to a
+        // normal insert instead of replaying a dead booking.
+      }
 
       // Self-serve notice window (owner ruling 2026-09-23), replacing the old
       // same-day-only "already passed" floor: a customer can't self-book a
@@ -2847,7 +3185,7 @@ async function createSelfBooking(payload = {}) {
         });
       }
 
-      if (callbackVisit) {
+      if (callbackVisit && callbackVisit.dedupeLane !== false) {
         const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
         const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
         if (await openCallbackExistsForLane(trx, custId, lane)) {
@@ -2856,6 +3194,24 @@ async function createSelfBooking(payload = {}) {
             isOperational: true,
             code: 'ALREADY_BOOKED',
           });
+        }
+      }
+      if (callbackVisit?.leadDedupe?.leadId) {
+        const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
+        const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
+        // The profile set is read HERE, inside the lead lock (Codex #4737 r9
+        // pre-push P1) — a caller-captured list could miss a profile another
+        // commit created and booked in between.
+        const profileIds = await callbackVisit.leadDedupe.resolveCustomerIds(trx);
+        for (const profileId of profileIds) {
+          if (String(profileId) === String(custId)) continue;
+          if (await openCallbackExistsForLane(trx, profileId, lane)) {
+            throw Object.assign(new Error('You already have a consultation on the books.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'ALREADY_BOOKED',
+            });
+          }
         }
       }
 
@@ -2956,7 +3312,8 @@ async function createSelfBooking(payload = {}) {
           lat: Number.isFinite(offerLat) ? offerLat : null,
           lng: Number.isFinite(offerLng) ? offerLng : null,
           // Same credit buildBookingAvailability offered this window under.
-          expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration),
+          // expectedIdentity: consultation page only (#4737 r1 P2).
+          expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
         },
       });
       if (globalClash.length) {
@@ -3064,8 +3421,18 @@ async function createSelfBooking(payload = {}) {
         // invoice suppression (same server-side derivation admin-schedule
         // performs from the catalog row); service_id keys completion-profile
         // resolution to the re-service catalog row.
+        //
+        // callbackVisit.isCallback (default true — reservice-public never
+        // sets it): false for an internal caller whose visit is NOT a re-
+        // service warranty callback (inspection-public.js's Waves Assessment)
+        // — is_callback also drives dispatch/reporting's "callback" badge and
+        // billing-lane's re-service completion posture, both wrong for an
+        // assessment. service_id still links the catalog row either way
+        // (completion-profile resolution + isAssessmentServiceRow also match
+        // on it), and no-invoice-on-complete is correct for both: neither
+        // visit ever bills.
         ...(callbackVisit ? {
-          is_callback: true,
+          is_callback: callbackVisit.isCallback !== false,
           service_id: callbackVisit.serviceId || null,
           create_invoice_on_complete: false,
         } : {}),
@@ -3182,7 +3549,15 @@ async function createSelfBooking(payload = {}) {
       // crossed the notice boundary while this request waited — another
       // "pick another slot" outcome that must not strand a just-created
       // profile.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE') {
+      // CUSTOMER_CHANGED_RETRY too (Codex #4737 r9 P2) — the same race seen
+      // through the comms fingerprint (an address TEXT edit), checked first.
+      // LOCATION_CHANGED_RETRY rides it too (Codex #4737 r8 P2): the
+      // customer's stored pin moved under the fence (callbackVisit's
+      // expectedLocation check above) — a "pick a time again at the
+      // customer's CURRENT address" outcome the consultation page's
+      // sendBookingFailure answers the same way it answers a slot race
+      // (409, refreshed availability), never the global error handler.
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -3196,6 +3571,16 @@ async function createSelfBooking(payload = {}) {
           await db('customers').where({ id: createdCustomerId }).del().catch((delErr) => {
             logger.warn(`[booking:confirm] Could not roll back just-created customer ${createdCustomerId}: ${delErr.message}`);
           });
+          if (createdAccountId) {
+            // Only while nothing else references the account (the profile
+            // above was its sole child).
+            const stillReferenced = await db('customers').where({ account_id: createdAccountId }).first('id').catch(() => ({ id: 'unknown' }));
+            if (!stillReferenced) {
+              await db('customer_accounts').where({ id: createdAccountId }).del().catch((delErr) => {
+                logger.warn(`[booking:confirm] Could not roll back just-created account: ${delErr.code || delErr.name || 'error'}`);
+              });
+            }
+          }
         }
         // code rides along so the reservice route can distinguish the lane
         // dedupe from a slot race; /confirm's response shape is unchanged
@@ -4942,8 +5327,10 @@ async function createSelfBooking(payload = {}) {
         // Callbacks announce themselves as what they are — the office reads
         // "re-service" and knows the 5-business-day callback protocol
         // (original tech first) applies, instead of parsing a generic booking.
+        // callbackVisit.alertLabel overrides the re-service default for a
+        // different internal caller (inspection-public.js's free consultation).
         const alertHead = callbackVisit
-          ? '🔁 Free re-service self-booked:'
+          ? (callbackVisit.alertLabel || '🔁 Free re-service self-booked:')
           : '📱 New self-booked appointment:';
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
           `${alertHead}\n${customer.first_name} ${customer.last_name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city}\nSource: ${source || 'portal'}\nCode: ${confCode}`,
@@ -5159,6 +5546,9 @@ router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async
     if (!result.ok) {
       return res.status(result.status).json({
         error: result.error,
+        // The documented conflict code (ADDRESS_UNVERIFIED and the slot
+        // races) so clients can tell this 409 from the others.
+        ...(result.code ? { code: result.code } : {}),
         // Customers-only refusal carries its forward action (the quote
         // wizard) so the client never renders a dead end.
         ...(result.customersOnly ? { customersOnly: true, quoteUrl: result.quoteUrl } : {}),

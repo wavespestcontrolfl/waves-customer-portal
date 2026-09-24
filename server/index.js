@@ -384,6 +384,35 @@ app.use('/api/public/a2a', (req, res, next) => {
   }
   next();
 });
+// Consultation booking page (routes/inspection-public.js): same
+// unobservable-when-dark contract as the public MCP/A2A guards above — ahead
+// of the global /api limiter and JSON parsing, so while
+// GATE_LEAD_INSPECTION_LINK is off every request is a uniform 404, never a
+// 429/413/400 (Codex #4737 r2 P0). Call-time gate read.
+// Privacy headers first (Codex #4737 r4 P0), exactly as the careers
+// interview surface does: the dark 404 and any global-limiter 429 for a
+// bearer-token URL still carry Cache-Control/X-Robots-Tag/Referrer-Policy.
+app.use('/api/public/inspection', require('./middleware/no-store').noStore);
+app.use('/api/public/inspection', (req, res, next) => {
+  if (!require('./config/feature-gates').leadInspectionLinkLive()) {
+    return res.status(404).json({ error: 'not_found' });
+  }
+  // A token that is not even validly SIGNED is a uniform 404 here, before
+  // the global limiter and body parsers (Codex #4737 r5 P0). Expiry is not
+  // checked here (nowSec 0) — an expired-but-genuine link still reaches the
+  // router, which answers GET { state: 'expired' }.
+  let token = String(req.path || '').split('/').filter(Boolean)[0] || '';
+  try { token = decodeURIComponent(token); } catch { token = ''; }
+  // GET keeps an expired-but-genuine link alive for its { state: 'expired' }
+  // page (signature only, nowSec 0); every other method needs a LIVE token
+  // here, before parsing (Codex #4737 r6 P0).
+  const { verifyLeadConsultationToken } = require('./utils/lead-consultation-token');
+  const live = req.method === 'GET' ? verifyLeadConsultationToken(token, 0) : verifyLeadConsultationToken(token);
+  if (!token || !live) {
+    return res.status(404).json({ error: 'not_found' });
+  }
+  next();
+});
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 app.use('/api/', limiter);
 
@@ -527,6 +556,26 @@ for (const publicAnalyzePrefix of ['/api/public/lawn-assessment/analyze', '/api/
 // parser so those uploads don't 413 under the 1 MB default, without widening
 // the ceiling for everything else. Authenticated + per-customer throttled.
 app.use('/api/requests', express.json({ limit: '30mb' }));
+// Customer Photo ID (dark, GATE_CUSTOMER_PHOTO_ID) carries up to 3 base64
+// photos through the same request-photo-validation caps as /api/requests —
+// same rationale, same limit. Authenticated + per-customer throttled.
+//
+// UNLIKE /api/requests above, this surface has a dark-gate contract (every
+// handler 404s while the gate is off) and the router's own `authenticate`
+// doesn't run until AFTER a body parser has already parsed up to 30 MB
+// (codex GH r1 P1) — an anonymous caller could force that parse even while
+// dark, and a malformed/oversized anonymous request would surface the
+// parser's own 400/413 instead of the promised 404. Gate-check, THEN a
+// signature-only customer-token guard (mirrors requireStaffTokenForLargeBody
+// for /api/admin /api/tech above; the route's own `authenticate` still does
+// the full DB-backed check), THEN the large parser.
+function requireCustomerPhotoIdGateOpen(req, res, next) {
+  if (!require('./config/feature-gates').isEnabled('customerPhotoId')) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
+app.use('/api/photo-id', require('./middleware/large-body-auth').requireCustomerTokenForLargeBody);
+app.use('/api/photo-id', express.json({ limit: '30mb' }));
 // Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
 // the verify hook stores them for /api/integrations/*-worker paths only.
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
@@ -564,6 +613,7 @@ app.use('/api/schedule', scheduleRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/requests', requestRoutes);
+app.use('/api/photo-id', require('./routes/photo-id'));
 app.use('/api/bouncie', bouncieRoutes);
 app.use('/api/lawn-health', lawnHealthRoutes);
 app.use('/api/feed', feedRoutes);
@@ -681,6 +731,10 @@ app.use('/api/public/reschedule', require('./routes/reschedule-public'));
 // Token-gated on customers.reservice_token; every route 404s until
 // GATE_RESERVICE_SELF_SERVE is on.
 app.use('/api/public/reservice', require('./routes/reservice-public'));
+// Lead-scoped consultation-booking link ("Book with Adam" — the free Waves
+// Assessment). Token-gated on the signed lead-consultation token; every
+// route 404s until GATE_LEAD_INSPECTION_LINK is on.
+app.use('/api/public/inspection', require('./routes/inspection-public'));
 // Customer appointment page (24h reminder + booking confirmation link
 // target). Token-gated on the same reschedule_token; every route 404s
 // until GATE_APPOINTMENT_PAGE is on.
@@ -832,6 +886,7 @@ app.use('/api/admin/timesheets', require('./routes/admin-timesheet-approval'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/tech/pay-growth', require('./routes/tech-pay-growth'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
+app.use('/api/admin/consultations', require('./routes/admin-consultations'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));
 app.use('/api/admin/ical-history', require('./routes/admin-ical-history'));
 app.use('/api/admin/mileage', require('./routes/admin-mileage'));

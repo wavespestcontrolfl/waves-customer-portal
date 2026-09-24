@@ -654,8 +654,21 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // 4th consumer: planUpdateDetailsRecurrenceDates (update-details' pre-trx
     // rung-1 date peek) anchors its extend plan on the same helper.
     // Lapse-alert display also uses the shared current-series end.
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(5);
-    // The occupied-dates preload is shared the same way (same 4th consumer).
+    // 5th: topUpRecurringSeriesLocked's own horizon-vs-latest-booked-date
+    // check (the nightly top-up loop) — extendSeriesOnceLocked's internal
+    // call (moved out of runRecurringSeriesMaintenanceLocked, net zero) is
+    // the completion path's existing occurrence, not a new one.
+    // (Two short-lived extra consumers — isSupersededSeries' own
+    // winner-selection loop and resolveTopUpProbeCandidateDate's
+    // candidate-date search — were introduced and then deleted within the
+    // same PR (#4782): round 3's review replaced that hand-rolled
+    // ranking/billability-probe approach with a direct reuse of the
+    // canonical duplicate-series guard, findActiveRecurringSeries — see
+    // isDuplicateActiveSeries's own comment. Back to the 6 pre-existing
+    // consumers below.)
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(6);
+    // The occupied-dates preload is shared the same way — same 4th
+    // consumer.
     expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
 
@@ -1492,7 +1505,9 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     // Byte-identical key derivation with the maintenance wrapper + dispatch
     // cancel lives in the shared helper.
     expect(src).toContain("['recurring-series-maintenance', String(parentId)],");
-    expect((src.match(/await acquireRecurringSeriesMaintenanceLock\(trx, parentId\);/g) || []).length).toBe(2);
+    // 3rd consumer: topUpRecurringSeries' own runLocked (the nightly top-up
+    // wrapper) takes the exact same per-parent lock before its horizon loop.
+    expect((src.match(/await acquireRecurringSeriesMaintenanceLock\(trx, parentId\);/g) || []).length).toBe(3);
   });
 });
 

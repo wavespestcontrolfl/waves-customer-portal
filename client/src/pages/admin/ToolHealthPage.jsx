@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
@@ -6,7 +6,6 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
-  RefreshCw,
   Timer,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -27,6 +26,7 @@ import {
   UiSurface,
   cn,
 } from "../../components/ui";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -79,23 +79,33 @@ export default function ToolHealthPage() {
   const [data, setData] = useState(null);
   const [hours, setHours] = useState(24);
   const [err, setErr] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState({});
   const [adminUser, setAdminUser] = useState(null);
+  const requestRef = useRef(0);
 
   const load = useCallback(() => {
-    adminFetch(`/admin/tool-health?hours=${hours}`)
+    const request = ++requestRef.current;
+    setLoading(true);
+    return adminFetch(`/admin/tool-health?hours=${hours}`)
       .then((d) => {
+        if (request !== requestRef.current) return;
         setData(d);
         setErr(null);
       })
-      .catch((e) => setErr(e.message));
+      .catch((e) => {
+        if (request === requestRef.current) setErr(e.message);
+      })
+      .finally(() => {
+        if (request === requestRef.current) setLoading(false);
+      });
   }, [hours]);
 
   useEffect(() => {
     load();
-    const id = setInterval(load, 30_000);
-    return () => clearInterval(id);
   }, [load]);
+
+  useVisiblePageRefresh(load, { intervalMs: 30_000, enabled: !loading });
 
   useEffect(() => {
     adminFetch("/admin/auth/me")
@@ -115,24 +125,24 @@ export default function ToolHealthPage() {
         sections={TOOL_HEALTH_WINDOWS}
         activeKey={hours}
         onSectionChange={setHours}
-        action={{ label: "Refresh", icon: RefreshCw, variant: "ghost", onClick: load }}
         navGridClassName="grid-cols-3"
       />
 
-      {err ? (
+      {err && (
         <ActionFeedback error onRetry={load} className="min-h-20">
           Failed to load: {err}
         </ActionFeedback>
-      ) : !data ? (
+      )}
+      {!data && !err ? (
         <ActionFeedback className="min-h-20">Loading tool health...</ActionFeedback>
-      ) : (
+      ) : data ? (
         <ToolHealthContent
           data={data}
           adminUser={adminUser}
           expanded={expanded}
           setExpanded={setExpanded}
         />
-      )}
+      ) : null}
     </UiSurface>
   );
 }

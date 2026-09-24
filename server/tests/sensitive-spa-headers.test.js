@@ -10,6 +10,7 @@ const {
   isContractPath,
   isAppointmentPath,
   isCareersInterviewPath,
+  isInspectionPath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -22,6 +23,22 @@ function mockResponse() {
 }
 
 describe('sensitive SPA document headers', () => {
+  // Codex #4737 r16 P2: a percent-encoded consultation token still gets the
+  // privacy headers.
+  test('protects the consultation page, including a percent-encoded token', () => {
+    for (const path of [
+      '/inspection/5b8d1c9e-4a2f-4b6e-9c3d-8e7f6a5b4c3d.1790000000.abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
+      '/inspection/5b8d1c9e-4a2f-4b6e-9c3d-8e7f6a5b4c3d%2E1790000000%2Eabcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
+      '/inspection/anything',
+    ]) {
+      expect(isInspectionPath(path)).toBe(true);
+      const res = mockResponse();
+      applySensitiveSpaHeaders(path, res);
+      expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    }
+    expect(isInspectionPath('/inspections')).toBe(false);
+  });
+
   test('protects issued combined visit summary documents', () => {
     const path = `/visit/${'a'.repeat(64)}`;
     const res = mockResponse();

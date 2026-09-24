@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey, cleanVerdictCovers, cachedAuditSuperseded, auditEvidenceAt, samePremiseDisplay, countyRollAnswered } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -69,7 +70,10 @@ function publicPropertySummary(record) {
 // so the block is dropped from both the response and the lead snapshot.
 function publicEnrichedProfile(enriched) {
   if (!enriched || typeof enriched !== 'object') return enriched ?? null;
-  const { subdivisionMedian, ...rest } = enriched;
+  // addressVerdict is a server-owned trust marker (the lead's verdict is
+  // derived from it server-side) — never part of the public payload
+  // (codex #4667 r11 P0).
+  const { subdivisionMedian, addressVerdict, ...rest } = enriched;
   if (!subdivisionMedian || !Array.isArray(rest.fieldVerifyFlags)) return rest;
   // The homeSqFt verify flag spells the same figures out in prose — swap in
   // the median-free vacant-parcel copy (one shared string, never a regex).
@@ -415,6 +419,72 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     const propertyRecord = publicPropertySummary(result.propertyRecord || result.rentcast);
     const enriched = publicEnrichedProfile(result.enriched);
 
+    // A lead this run re-attached to (prefill token) may already carry a
+    // county-roll flag from an earlier run: a GIS outage on THIS lookup must
+    // not erase it through the merge below — only a clean roll answer, or
+    // a changed address, clears it (pre-push audit P1). Token-verified own
+    // row; the server-written key only.
+    let priorAddressUnverified = null;
+    if (attachedToExistingLead) {
+      try {
+        const own = await db('leads').where({ id: lead.id }).first('extracted_data');
+        const snapshot = typeof own?.extracted_data === 'string' ? JSON.parse(own.extracted_data) : own?.extracted_data;
+        // The attach above already merged THIS run's address into the
+        // snapshot, so judge the flag on its own stamped address.
+        // A STAMPED flag only: an unstamped (older) flag would pass the
+        // permissive cover check while the snapshot's own address is no
+        // longer the flag's — the attach above already overwrote it
+        // (pre-push audit P1).
+        const recovered = recoverAddressUnverified(snapshot);
+        if (recovered && recovered.address_line1 && flagCoversAddress(recovered, normalizedAddress)) priorAddressUnverified = recovered;
+      } catch (priorErr) {
+        logger.warn(`[public-property-lookup] prior address flag re-read failed: ${priorErr.code || priorErr.name || 'error'}`);
+      }
+    }
+    // A CACHED audit (no new evidence this run) is outranked by a staff
+    // clean verdict for this premise stamped on any of the contact pair's
+    // leads AFTER it was cached and after every matching flag — otherwise
+    // a repeat lookup re-derives the flag staff already overruled and the
+    // next /calculate blocks the booking again (pre-push audit P1). A
+    // live lookup is fresh evidence and always stands.
+    // Newest staff / lookup CLEAN verdict for this premise across the
+    // contact pair, newer than every matching flag — read pre-lock for the
+    // derivation and AGAIN under the contact-pair lock below, so a
+    // confirmation that commits while this lookup runs is honoured rather
+    // than merely ordered before a stale overwrite (codex r19 P1).
+    const resolveStaffCleanAt = async (conn) => {
+      if (!email || !normPhone) return null;
+      try {
+        // ONE shared read with /calculate's reconciliation (codex r44 P2).
+        const { loadContactVerdicts } = require('../services/lead-address-unverified');
+        const verdicts = await loadContactVerdicts(conn, { email, phone: normPhone, premise: normalizedAddress, ownLeadId: lead.id });
+        resolveStaffCleanAt.lastNewestFlag = verdicts.newestFlag;
+        resolveStaffCleanAt.lastNewestFlagAt = verdicts.newestFlagAt;
+        return verdicts.newestCleanAt && verdicts.newestCleanAt > verdicts.newestFlagAt ? new Date(verdicts.newestCleanAt).toISOString() : null;
+      } catch (cleanErr) {
+        logger.warn(`[public-property-lookup] contact-pair clean verdict re-read failed: ${cleanErr.code || cleanErr.name || 'error'}`);
+        return null;
+      }
+    };
+    let staffCleanAt = (result?.meta?.cache === 'hit' && result?.enriched) ? await resolveStaffCleanAt(db) : null;
+    let cachedAuditStale = cachedAuditSuperseded({
+      leadCleanVerdict: !!staffCleanAt, profileFound: !!result?.enriched, cachedAt: auditEvidenceAt(result), cleanEvidenceAt: staffCleanAt,
+    });
+    let addressUnverified = cachedAuditStale
+      ? null
+      // The cached audit's own evidence time, never this request's: an old
+      // negative audit revisited today must not outrank a newer clean cached
+      // result (codex r37 P1) — the same option /calculate passes.
+      : nextAddressUnverified({ enriched: result.enriched, profileFound: !!result?.enriched, prior: priorAddressUnverified, evidenceAt: auditEvidenceAt(result) });
+    if (addressUnverified && !addressUnverified.address_line1) {
+      Object.assign(addressUnverified, {
+        address_line1: String(normalizedAddress.line1 || '').trim() || null,
+        city: String(normalizedAddress.city || '').trim() || null,
+        state: String(normalizedAddress.state || '').trim().toUpperCase().slice(0, 2) || null,
+        zip: (String(normalizedAddress.zip || '').match(/\d{5}/) || [''])[0] || null,
+      });
+    }
+
     // Persist the enriched profile on the lead so a stale/abandoned row is
     // still useful for follow-up. On an attached call-pipeline lead, MERGE so
     // the voicemail provenance keys survive (same rule as the attach above).
@@ -434,6 +504,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         landing_url: attr?.landing_url || null,
         address: normalizedAddress,
         ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
+        // County roll could not vouch for the typed house number (see
+        // lead-address-unverified). Derived from the SERVER result, so an
+        // abandoned row already carries the callback ask; /calculate
+        // re-derives it (or recovers this one when its cache read misses).
       };
       await db('leads').where({ id: lead.id }).update({
         extracted_data: attachedToExistingLead
@@ -443,6 +517,151 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       });
     } catch (e) {
       logger.error(`[public-property-lookup] lead update failed: ${e.message}`);
+    }
+    // The verdict keys are published UNDER the contact-pair advisory lock
+    // the booking confirm takes, never in the unlocked write above
+    // (pre-push audit P1). FAIL CLOSED: a rolled-back verdict/quarantine
+    // (a deadlock, the withdrawal, its critical audit row) must not answer
+    // as a successful lookup while an earlier publication stays
+    // acceptable at the flagged number (codex r20 P1). The visitor retries.
+    try {
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(email, normPhone)]);
+        // Re-reconciled UNDER the lock (codex r19 P1): a clean verdict that
+        // committed since the pre-lock read outranks this run's audit when
+        // it is newer than the audit's own evidence time (a live audit is
+        // stamped now and always stands).
+        // …BOTH ways, whatever the pre-lock value (codex r21 P1): a flag
+        // another request committed since (a recordless county audit is
+        // never cached, so nothing else could recover it) outranks this
+        // run's clean answer when it is newer than this run's evidence.
+        // The reconciled clean verdict's own timestamp, kept when this
+        // lookup supplies no new county evidence (codex r30 P1).
+        let reconciledCleanAt = null;
+        {
+          const lockedCleanAt = await resolveStaffCleanAt(trx);
+          reconciledCleanAt = lockedCleanAt || null;
+          // Evidence time ONLY for an actual county answer: an unanswered
+          // lookup (outage, no record) has no clean evidence, so an older
+          // matching flag on the contact pair must still win and carry the
+          // warning through the outage (codex r30 P0).
+          const evidenceAt = countyRollAnswered(result?.enriched)
+            ? (Date.parse(auditEvidenceAt(result) || '') || Date.parse(result?.meta?.timestamp || '') || 0)
+            : 0;
+          const newerFlag = resolveStaffCleanAt.lastNewestFlag;
+          const newerFlagAt = resolveStaffCleanAt.lastNewestFlagAt || 0;
+          // ONE shared precedence decision (codex r45 P2): cached audit
+          // superseded by a newer staff verdict; a clean run adopting a
+          // newer covering flag; an already-superseded run persisting the
+          // newer under-lock clean timestamp; an already-flagged run
+          // adopting a newer stored flag.
+          const { applyLookupVerdictPrecedence } = require('../services/lead-address-unverified');
+          ({ addressUnverified, staffCleanAt, cachedAuditStale } = applyLookupVerdictPrecedence({
+            addressUnverified, staffCleanAt, cachedAuditStale,
+            lockedCleanAt, newerFlag, newerFlagAt, evidenceAt, profileFound: !!result?.enriched, cachedAt: auditEvidenceAt(result),
+          }));
+        }
+        // A FLAGGED verdict quarantines the visitor's earlier publications
+        // for this premise right here — a visitor who abandons before
+        // /calculate must not keep an acceptable link from a clean run
+        // (codex r17 P1). Same transaction and lock as the verdict.
+        if (addressUnverified) {
+          const { withdrawFlaggedPublications } = require('../services/website-quote-withdrawal');
+          await withdrawFlaggedPublications(trx, {
+            leadId: lead.id, contactEmail: email, contactPhone: normPhone, fullAddress: normalizedAddress.fullAddress || lookupAddress, flag: addressUnverified,
+          });
+        } else if (cachedAuditStale || countyRollAnswered(result?.enriched)) {
+          // The CLEAN counterpart (codex r27 P1): a clean county answer (or
+          // a staff verdict that superseded the cached audit) lifts the
+          // block on this pair's legacy rows at the same premise, under the
+          // same lock — the withdrawal service's own inverse.
+          const { liftLegacyBlocksForCleanVerdict } = require('../services/website-quote-withdrawal');
+          const lifted = await liftLegacyBlocksForCleanVerdict(trx, {
+            contactEmail: email, contactPhone: normPhone, fullAddress: normalizedAddress.fullAddress || lookupAddress,
+          });
+          if (lifted) logger.info(`[public-property-lookup] clean verdict lifted the address block on ${lifted} legacy estimate(s)`);
+        }
+        await trx('leads').where({ id: lead.id }).update({
+          extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+            address_unverified: addressUnverified,
+            // Server-owned verdict for this address (clean / flagged /
+            // unanswered) — a clean one supersedes older warnings downstream.
+            address_verdict: (() => {
+              if (!cachedAuditStale) {
+                const verdict = buildAddressVerdict({ flag: addressUnverified, enriched: result.enriched, profileFound: !!result?.enriched, address: normalizedAddress });
+                // A clean answer served from the cache is evidence from the
+                // audit's own time, never this request's: a revisit of an
+                // older spelling must not out-date a newer flag on an
+                // equivalent premise (codex #4667 r16 P1).
+                // …and a LIVE clean audit keeps its own auditedAt too (pre-push
+                // audit P1 after r45): with overlapping lookups a clean audit
+                // obtained BEFORE a rejection could otherwise persist later
+                // with the write's timestamp and falsely supersede it.
+                // A live county_record match carries no audit stamp — its
+                // profile timestamp is the evidence time, the same fallback
+                // the locked reconciliation uses (pre-push audit P1 after r45).
+                const evidenceAt = auditEvidenceAt(result) || result?.meta?.timestamp || null;
+                // …and never OLDER than a clean verdict the reconciliation
+                // accepted under the lock (a staff confirmation newer than
+                // this delayed live audit): the newest accepted clean
+                // timestamp is persisted (pre-push audit P1 after r48).
+                const newestCleanAt = [evidenceAt, reconciledCleanAt].filter(Boolean)
+                  .sort((a, b) => (Date.parse(b) || 0) - (Date.parse(a) || 0))[0] || null;
+                if (verdict.status === 'clean' && newestCleanAt) verdict.at = newestCleanAt;
+                // An UNANSWERED lookup (a county outage) that reattached to a
+                // lead the reconciliation found clean for this premise must
+                // not overwrite that clean verdict with 'unanswered' — an
+                // older flagged sibling lead would win the next /calculate
+                // and re-block the confirmed address. The reconciled verdict
+                // stands, at its original timestamp (codex r30 P1).
+                if (verdict.status === 'unanswered' && !addressUnverified && reconciledCleanAt) {
+                  return { ...buildAddressVerdict({ flag: null, enriched: { addressVerdict: 'audited' }, profileFound: true, address: normalizedAddress }), at: reconciledCleanAt };
+                }
+                return verdict;
+              }
+              // The staff verdict is the evidence, at ITS timestamp.
+              return { ...buildAddressVerdict({ flag: null, enriched: { addressVerdict: 'audited' }, profileFound: true, address: normalizedAddress }), at: staffCleanAt };
+            })(),
+          })]),
+          updated_at: new Date(),
+        });
+      });
+    } catch (verdictErr) {
+      logger.error(`[public-property-lookup] address verdict publication failed — refusing the lookup: ${verdictErr.code || verdictErr.name || 'error'}`);
+      // The captured lead already committed WITHOUT its flag (the stage
+      // write above): a visitor who abandons after this 503 would leave a
+      // pipeline row with no callback warning and no send guards. Fail
+      // CLOSED: mark the derived flag on the lead outside the rolled-back
+      // transaction, best-effort (codex r37 P1).
+      // …in its OWN transaction under the same contact-pair lock, with
+      // precedence rechecked (codex r49 P1): a booking confirmation holding
+      // that lock reads the lead's verdict and inserts its appointment as
+      // one unit, so the fallback lands before or after it, never between;
+      // and a clean verdict newer than this flag (a staff confirmation) is
+      // not overwritten.
+      // …NEVER when the rollback WAS a live delivery claim (codex r51 P1):
+      // the sender's estimate-only claim check would pass while this flag
+      // lands on the lead, and /booking/confirm would then refuse the link
+      // it just delivered. The 503 sends the visitor back through the
+      // lookup once the claim lapses (its TTL is minutes).
+      if (addressUnverified && lead?.id && verdictErr?.code !== 'DELIVERY_CLAIM_LIVE') {
+        await db.transaction(async (ftrx) => {
+          await ftrx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(email, normPhone)]);
+          const { loadContactVerdicts } = require('../services/lead-address-unverified');
+          const verdicts = (email && normPhone)
+            ? await loadContactVerdicts(ftrx, { email, phone: normPhone, premise: normalizedAddress, ownLeadId: lead.id })
+            : { newestCleanAt: 0 };
+          if (verdicts.newestCleanAt > (Date.parse(addressUnverified.flagged_at || '') || 0)) return;
+          await ftrx('leads').where({ id: lead.id }).update({
+            extracted_data: ftrx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+              address_unverified: addressUnverified,
+              address_verdict: buildAddressVerdict({ flag: addressUnverified, enriched: result?.enriched, profileFound: !!result?.enriched, address: normalizedAddress }),
+            })]),
+            updated_at: new Date(),
+          });
+        }).catch((markErr) => logger.error(`[public-property-lookup] fail-closed lead mark failed: ${markErr.code || markErr.name || 'error'}`));
+      }
+      return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
 
     res.json({

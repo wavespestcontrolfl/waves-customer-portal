@@ -2,6 +2,7 @@ const { phoneIdentityKey } = require('../utils/phone');
 const {
   draftIdSql,
   draftReplyToMessageIdSql,
+  inboundSmsReceiptProjectionSql,
   loadPriorOutboundBodies,
 } = require('./sms-response-policy');
 const { signMediaForClient } = require('./sms-media');
@@ -381,7 +382,7 @@ function mapCommsMessage(message, customer, twilioNumbers) {
     answeredBy: message.answered_by, isRead: !!message.is_read,
     courtesyOnly, spamEnforced,
     deliveryStatus: message.delivery_status, recordingSid: message.recording_sid,
-    createdAt: message.created_at, ourEndpointId: message.our_endpoint_id,
+    createdAt: message.effective_created_at || message.created_at, ourEndpointId: message.our_endpoint_id,
     ourEndpointLabel: numberCfg?.label || null,
     contactPhone: message.contact_phone || customer.phone || null,
   };
@@ -405,6 +406,9 @@ async function listCustomerComms(db, customer, query = {}) {
   const readBefore = parsed.cursor?.readBefore || new Date().toISOString();
   const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', m.metadata->>'draft_id')");
   const responseReplyToMessageId = draftReplyToMessageIdSql('mdx.sms_log_id');
+  const receiptProjection = inboundSmsReceiptProjectionSql({
+    messageAlias: 'm', legacyAlias: 'sms_response', receiptAlias: 'sms_optout_receipt',
+  });
   const selectCommsColumns = queryBuilder => queryBuilder
     .joinRaw(`LEFT JOIN LATERAL (
       SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
@@ -412,6 +416,7 @@ async function listCustomerComms(db, customer, query = {}) {
       WHERE sl.twilio_sid = m.twilio_sid AND sl.direction = m.direction
       ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
     ) sms_response ON true`)
+    .joinRaw(receiptProjection.joinSql)
     .joinRaw(`LEFT JOIN LATERAL (
       SELECT mal.metadata
       FROM messaging_audit_log mal
@@ -432,13 +437,14 @@ async function listCustomerComms(db, customer, query = {}) {
       'c.customer_id', 'c.our_endpoint_id', 'c.contact_phone',
     )
     .select(
-      'sms_response.message_type as response_message_type',
+      db.raw(`${receiptProjection.responseMessageTypeSql} as response_message_type`),
       'sms_response.status as response_status',
       'sms_response.metadata as response_metadata',
       'sms_response.created_at as response_created_at',
       'sms_audit.metadata as response_audit_metadata',
       'sms_answer.is_click_followup as response_is_click_followup',
       'sms_answer.reply_to_message_id as response_reply_to_message_id',
+      db.raw(`${receiptProjection.effectiveCreatedAtSql} as effective_created_at`),
     );
   const rowsQuery = selectCommsColumns(db('messages as m')
     .leftJoin('conversations as c', 'm.conversation_id', 'c.id')
@@ -496,7 +502,7 @@ async function listCustomerComms(db, customer, query = {}) {
         END = ?`,
         [primaryPhoneKey],
       ))
-      .orderBy('m.created_at', 'desc')
+      .orderByRaw(`${receiptProjection.effectiveCreatedAtSql} DESC`)
       .orderBy('m.id', 'desc')
       .limit(1);
     const composerPriorOutboundBodies = await loadPriorOutboundBodies(db, composerRows, {

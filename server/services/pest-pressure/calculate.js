@@ -32,6 +32,21 @@ const INPUT_KEY_TO_WEIGHT_KEY = Object.freeze({
 
 const INPUT_KEYS = Object.freeze(Object.keys(INPUT_KEY_TO_WEIGHT_KEY));
 
+// Component key recorded when a technician's direct rating is the score.
+const DIRECT_COMPONENT_KEY = 'technicianActivityRating';
+// calculation_version stamped on direct-score rows (column is varchar(20)).
+const DIRECT_CALCULATION_VERSION = 'direct-1.0';
+
+function scoreSourceFromComponents(componentScores) {
+  let parsed = componentScores;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+  }
+  return parsed && typeof parsed === 'object' && parsed[DIRECT_COMPONENT_KEY]
+    ? 'technician_rating'
+    : 'blended';
+}
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -158,6 +173,22 @@ function calculatePestPressureScore(input, config) {
     }
   }
 
+  // Owner ruling 2026-09-24: when the technician taps a rating directly on
+  // the completion form (client_pest_rating_source === 'technician'), that
+  // tap IS the report score — not one of five blended components. Callers
+  // (orchestrate.js) pass this as a separate pure-engine input so the
+  // blended path below stays untouched for customer-submitted ratings.
+  // Its audit is the tap itself (one technicianActivityRating component at
+  // 100%, calculation_version 'direct-1.0') — see `audit` below.
+  if (
+    input.technicianDirectRating !== null
+    && input.technicianDirectRating !== undefined
+    && (!isValidRating(input.technicianDirectRating) || !Number.isInteger(input.technicianDirectRating))
+  ) {
+    throw new RangeError('calculatePestPressureScore: technicianDirectRating must be an integer between 0 and 5');
+  }
+  const hasTechnicianDirectRating = isValidRating(input.technicianDirectRating) && Number.isInteger(input.technicianDirectRating);
+
   const allComponents = buildComponents(input, config.weights);
   const missingComponents = allComponents.filter((c) => !c.present).map((c) => c.key);
   const present = allComponents.filter((c) => c.present);
@@ -176,7 +207,12 @@ function calculatePestPressureScore(input, config) {
     configSnapshot: baseSnapshot,
   });
 
-  if (!meetsMinimum(allComponents, config.minimumDataRequired)) {
+  // A direct technician tap always has enough data to score, even when the
+  // blended engine's own minimum/weight gates would otherwise report
+  // insufficient — the tap doesn't need corroborating components.
+  const meetsMin = meetsMinimum(allComponents, config.minimumDataRequired);
+
+  if (!meetsMin && !hasTechnicianDirectRating) {
     const summary = resolveCustomerSummary({ trend: 'insufficient_data', label: null, dataCompleteness: 'insufficient' });
     return {
       score: null,
@@ -190,15 +226,13 @@ function calculatePestPressureScore(input, config) {
     };
   }
 
-  const { components: scoringComponents, weightDenominator } = applyMissingDataBehavior(
-    allComponents,
-    config.missingDataBehavior,
-    config.minimumDataRequired,
-  );
+  const { components: scoringComponents, weightDenominator } = meetsMin
+    ? applyMissingDataBehavior(allComponents, config.missingDataBehavior, config.minimumDataRequired)
+    : { components: [], weightDenominator: 0 };
 
-  const score = computeWeightedScore(scoringComponents, weightDenominator);
+  const blendedScore = computeWeightedScore(scoringComponents, weightDenominator);
 
-  if (score === null) {
+  if (blendedScore === null && !hasTechnicianDirectRating) {
     const summary = resolveCustomerSummary({ trend: 'insufficient_data', label: null, dataCompleteness: 'insufficient' });
     return {
       score: null,
@@ -211,11 +245,35 @@ function calculatePestPressureScore(input, config) {
       ...buildSharedAudit([], 0),
     };
   }
+
+  // Owner ruling 2026-09-24: the technician's direct tap IS the score,
+  // exactly (5 → 5.0), never blended with clientRating/technicianRating/
+  // reServiceImpact/riskFactor. `scoreSource` flags that score/label/trend
+  // below came from the direct tap rather than the blend.
+  const score = hasTechnicianDirectRating
+    ? roundToOneDecimal(clamp(input.technicianDirectRating, 0, 5))
+    : blendedScore;
 
   const label = resolveLabel(score, config.labels);
   const { trend, delta } = resolveTrend(score, input.previousScore ?? null, config.trendThresholds);
-  const dataCompleteness = present.length === allComponents.length ? 'complete' : 'partial';
+  const dataCompleteness = hasTechnicianDirectRating || present.length === allComponents.length ? 'complete' : 'partial';
   const summary = resolveCustomerSummary({ trend, label, dataCompleteness });
+  // A direct tap is the whole score, so the audit says exactly that — one
+  // component at 100% — rather than the blended weights that produced
+  // nothing. The persisted component_scores key is the provenance
+  // (technicianActivityRating ⇔ scoreSource 'technician_rating').
+  const audit = hasTechnicianDirectRating
+    ? {
+      componentScores: { [DIRECT_COMPONENT_KEY]: { value: score, weight: 100, present: true } },
+      componentWeights: { [DIRECT_COMPONENT_KEY]: 100 },
+      missingComponents: [],
+      // A different algorithm from the weighted blend, so a different
+      // version: blended rows keep the config's version (that formula is
+      // unchanged); direct rows are reconstructable from this alone.
+      calculationVersion: DIRECT_CALCULATION_VERSION,
+      configSnapshot: baseSnapshot,
+    }
+    : buildSharedAudit(scoringComponents, weightDenominator);
 
   return {
     score,
@@ -224,13 +282,17 @@ function calculatePestPressureScore(input, config) {
     trend,
     trendDelta: delta,
     dataCompleteness,
+    scoreSource: hasTechnicianDirectRating ? 'technician_rating' : 'blended',
     summary,
-    ...buildSharedAudit(scoringComponents, weightDenominator),
+    ...audit,
   };
 }
 
 module.exports = {
   INPUT_KEYS,
+  DIRECT_COMPONENT_KEY,
+  DIRECT_CALCULATION_VERSION,
+  scoreSourceFromComponents,
   INPUT_KEY_TO_WEIGHT_KEY,
   calculatePestPressureScore,
   // Exposed for tests

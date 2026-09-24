@@ -76,8 +76,15 @@ const LEGACY_ESTIMATE_SLUG = /^[a-z0-9][a-z0-9-]*-[a-f0-9]{8}$/i;
 const SECURE_CARD_BEARER_PARENTS = new Set(['secure', 'secure-card']);
 const SECURE_CARD_SHORT_TOKEN = /^[A-Za-z0-9_-]{22}$/;
 
+// The consultation page's lead bearer (Codex #4737 r5 P1) —
+// `<leadId>.<exp>[.<channel>].<sig>` under /inspection/ (SPA) and
+// /api/public/inspection/ (API). Its dotted shape matches none of the
+// generic rules below, so any segment under that parent is redacted.
+const CONSULTATION_TOKEN_PARENTS = new Set(['inspection']);
+
 function isTokenLikePathSegment(segment, previousSegment) {
   const decoded = decodeQueryPart(segment);
+  if (CONSULTATION_TOKEN_PARENTS.has(String(previousSegment || '').toLowerCase())) return true;
   if (/^[a-f0-9]{32,}$/i.test(decoded)) return true;
   if (/^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(decoded)) return true;
   if (/^WPC-[A-HJ-NP-Z2-9]{4,}$/.test(decoded)) return true;

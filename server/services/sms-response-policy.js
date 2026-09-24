@@ -29,6 +29,76 @@ function phoneIdentitySql(column) {
     ELSE '+' || ${digits} END)`;
 }
 
+function assertSqlAliases(aliases) {
+  for (const identifier of aliases) {
+    if (!/^[a-z_][a-z0-9_]*$/i.test(identifier || '')) throw new Error('Invalid SMS SQL alias');
+  }
+}
+
+// Immutable canonical event addresses fall back through message metadata
+// before the mutable thread/customer records. Webhook writes stamp both
+// metadata fields, while older backfills may only have the thread/customer.
+function canonicalSmsFallbackAddressSql({ messageAlias, conversationAlias, customerAlias }) {
+  assertSqlAliases([messageAlias, conversationAlias, customerAlias]);
+  return {
+    contactPhoneSql: `COALESCE(NULLIF(${messageAlias}.metadata->>'sms_contact_phone', ''), NULLIF(${conversationAlias}.contact_phone, ''), ${customerAlias}.phone, '')`,
+    endpointSql: `COALESCE(NULLIF(${messageAlias}.metadata->>'sms_our_endpoint_id', ''), ${conversationAlias}.our_endpoint_id, '')`,
+  };
+}
+
+// Resolve the exact legacy event linked to one canonical message. Provider
+// SIDs are authoritative. Historical null-SID backfills are linked only when
+// their event fields identify one unique legacy row.
+function canonicalSmsLegacyLinkSql({ messageAlias, conversationAlias }) {
+  assertSqlAliases([messageAlias, conversationAlias]);
+  const legacyEndpoint = phoneIdentitySql("CASE WHEN sl.direction = 'inbound' THEN sl.to_phone ELSE sl.from_phone END");
+  const legacyPeer = phoneIdentitySql("CASE WHEN sl.direction = 'inbound' THEN sl.from_phone ELSE sl.to_phone END");
+  const canonicalEndpoint = phoneIdentitySql(`COALESCE(NULLIF(${messageAlias}.metadata->>'sms_our_endpoint_id', ''), ${conversationAlias}.our_endpoint_id)`);
+  const canonicalThreadPeer = phoneIdentitySql(`${conversationAlias}.contact_phone`);
+  return `SELECT candidates.* FROM (
+    SELECT sl.*, 1::bigint AS match_count
+    FROM sms_log sl
+    WHERE ${messageAlias}.twilio_sid IS NOT NULL
+      AND sl.twilio_sid = ${messageAlias}.twilio_sid
+      AND sl.direction = ${messageAlias}.direction
+    UNION ALL
+    SELECT sl.*, count(*) OVER () AS match_count
+    FROM sms_log sl
+    WHERE ${messageAlias}.twilio_sid IS NULL AND sl.twilio_sid IS NULL
+      AND sl.direction = ${messageAlias}.direction
+      AND sl.created_at = ${messageAlias}.created_at
+      AND NULLIF(sl.message_body, '') IS NOT DISTINCT FROM ${messageAlias}.body
+      AND sl.customer_id IS NOT DISTINCT FROM ${conversationAlias}.customer_id
+      AND ${legacyEndpoint} = ${canonicalEndpoint}
+      AND (${conversationAlias}.customer_id IS NOT NULL
+        OR ${legacyPeer} = ${canonicalThreadPeer})
+  ) candidates
+  WHERE ${messageAlias}.twilio_sid IS NOT NULL OR candidates.match_count = 1
+  ORDER BY candidates.created_at DESC, candidates.id DESC
+  LIMIT 1`;
+}
+
+function canonicalSmsAddressProjectionSql({
+  messageAlias,
+  conversationAlias,
+  customerAlias,
+  legacyAlias,
+}) {
+  assertSqlAliases([legacyAlias]);
+  const fallback = canonicalSmsFallbackAddressSql({ messageAlias, conversationAlias, customerAlias });
+  const contactPhoneSql = `(CASE WHEN ${messageAlias}.direction = 'inbound'
+    THEN COALESCE(NULLIF(${legacyAlias}.from_phone, ''), ${fallback.contactPhoneSql})
+    ELSE COALESCE(NULLIF(${legacyAlias}.to_phone, ''), ${fallback.contactPhoneSql}) END)`;
+  const endpointSql = `(CASE WHEN ${messageAlias}.direction = 'inbound'
+    THEN COALESCE(NULLIF(${legacyAlias}.to_phone, ''), ${fallback.endpointSql})
+    ELSE COALESCE(NULLIF(${legacyAlias}.from_phone, ''), ${fallback.endpointSql}) END)`;
+  return {
+    contactPhoneSql,
+    endpointSql,
+    peerSql: phoneIdentitySql(contactPhoneSql),
+  };
+}
+
 function draftIdSql(metadataExpression) {
   const value = `(${metadataExpression})`;
   return `(CASE WHEN ${value} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -50,6 +120,35 @@ function draftReplyToMessageIdSql(draftSmsLogIdExpression) {
       AND draft_inbound.direction = 'inbound')`;
 }
 
+// A signed STOP can commit its durable receipt before a delayed retry repairs
+// the canonical inbox row. Readers must use that receipt for both command
+// classification and chronology without rewriting history. Keep the
+// canonical message_type available to authorization scopes (notably job_*);
+// these expressions are only for the client-facing response projection.
+function inboundSmsReceiptProjectionSql({
+  messageAlias,
+  legacyAlias,
+  receiptAlias,
+}) {
+  for (const identifier of [messageAlias, legacyAlias, receiptAlias]) {
+    if (!/^[a-z_][a-z0-9_]*$/i.test(identifier || '')) throw new Error('Invalid SMS receipt projection alias');
+  }
+  const receiptMatch = `${receiptAlias}.message_sid IS NOT NULL
+    AND ${messageAlias}.channel = 'sms'
+    AND ${messageAlias}.direction = 'inbound'`;
+  return {
+    joinSql: `LEFT JOIN inbound_sms_optout_receipts ${receiptAlias}
+      ON ${receiptAlias}.message_sid = ${messageAlias}.twilio_sid
+     AND ${messageAlias}.channel = 'sms'
+     AND ${messageAlias}.direction = 'inbound'`,
+    responseMessageTypeSql: `(CASE WHEN ${receiptMatch} THEN 'opt_out'
+      ELSE COALESCE(${legacyAlias}.message_type, ${messageAlias}.message_type) END)`,
+    effectiveCreatedAtSql: `(CASE WHEN ${receiptMatch}
+      THEN LEAST(${messageAlias}.created_at, ${receiptAlias}.applied_at)
+      ELSE ${messageAlias}.created_at END)`,
+  };
+}
+
 async function loadPriorOutboundBodies(db, messages, {
   customerScoped = false,
   fallbackCustomerPhone = null,
@@ -59,8 +158,8 @@ async function loadPriorOutboundBodies(db, messages, {
   )).map((message) => ({
     message_id: message.id,
     inbound_at: message.created_at,
-    peer_key: phoneIdentityKey(message.contact_phone || message.customer_phone || fallbackCustomerPhone),
-    endpoint_key: phoneIdentityKey(message.our_endpoint_id),
+    peer_key: phoneIdentityKey(message.effective_contact_phone || message.contact_phone || message.customer_phone || fallbackCustomerPhone),
+    endpoint_key: phoneIdentityKey(message.effective_our_endpoint_id || message.our_endpoint_id),
     customer_id: message.customer_id || null,
   })).filter((context) => (
     context.message_id && context.inbound_at && context.peer_key && context.endpoint_key
@@ -198,8 +297,12 @@ module.exports = {
   DRAFT_REPLY_TYPES,
   NON_ACTIONABLE_INBOUND_TYPES,
   phoneIdentitySql,
+  canonicalSmsFallbackAddressSql,
+  canonicalSmsLegacyLinkSql,
+  canonicalSmsAddressProjectionSql,
   draftIdSql,
   draftReplyToMessageIdSql,
+  inboundSmsReceiptProjectionSql,
   loadPriorOutboundBodies,
   responseFlags,
   inboundNeedsResponse,

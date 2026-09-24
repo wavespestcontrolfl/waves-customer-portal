@@ -29,7 +29,9 @@ test('the scoped dashboard uses visit dates consistently in scores, trends, befo
   history.latestForCustomer.mockResolvedValue(assessments);
   db.mockImplementation((table) => {
     if (table !== 'lawn_assessment_photos') throw new Error(`Unexpected table ${table}`);
-    const query = { where: () => query, orderByRaw: () => query, limit: async () => [] };
+    // Thenable like a knex builder: the gallery ends in .limit(); the
+    // before/after pairing query is awaited directly.
+    const query = { where: () => query, orderByRaw: () => query, limit: async () => [], then: (resolve, reject) => Promise.resolve([]).then(resolve, reject) };
     return query;
   });
   const res = { json: jest.fn() };

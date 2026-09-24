@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LeadsSection } from './LeadsTabs';
@@ -14,7 +14,10 @@ vi.mock('../../components/admin/customer360/CustomerSmsPanel', () => ({
 }));
 const lead = { id: 'lead-qa', first_name: 'QA', last_name: 'Prospect', status: 'estimate_viewed', service_interest: 'Mosquito', first_contact_at: new Date().toISOString() };
 let calls;
-function Location() { return <output aria-label="Current route">{useLocation().search}</output>; }
+function Location() {
+  const navigate = useNavigate();
+  return <><output aria-label="Current route">{useLocation().search}</output><button onClick={() => navigate(-1)}>Browser back</button></>;
+}
 function mount(url = '/admin/pipeline', props = {}) {
   return render(<MemoryRouter initialEntries={[url]}><LeadsSection {...props} /><Location /></MemoryRouter>);
 }
@@ -26,7 +29,7 @@ beforeEach(() => {
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
     const path = String(url); calls.push({ path, options });
-    const body = path.includes('/admin/leads?') ? { leads: [lead], total: 63 } : path.endsWith('/sources') ? { sources: [] } : {};
+    const body = path.includes('/admin/leads?') ? { leads: [lead], total: 63, consultationLinksEnabled: true } : path.endsWith('/sources') ? { sources: [] } : {};
     return { ok: true, json: async () => body };
   }));
 });
@@ -151,6 +154,47 @@ describe('Pipeline queue navigation', () => {
     await waitFor(() => expect(calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length).toBeGreaterThan(before));
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
+  it('keeps status reconciliation off by default', async () => {
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    await waitFor(() => expect(calls.some(({ path }) => path === '/api/admin/leads/lead-qa')).toBe(true));
+    expect(calls.some(({ path }) => path.includes('leadReview=1'))).toBe(false);
+    expect(screen.queryByLabelText('Status review')).not.toBeInTheDocument();
+  });
+  it('shows the read-only status review inside an expanded lead when opted in', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => String(url).endsWith('/admin/leads/lead-qa?leadReview=1')
+      ? {
+        ok: true,
+        json: async () => ({
+          activities: [], calls: [],
+          reconciliation: {
+            mode: 'read_only', status: 'review',
+            summary: 'Evidence needs review before anyone changes this lead status.',
+            findings: [{
+              code: 'historical_contact_transition',
+              message: 'Verified evidence previously moved this lead from New to Contacted.',
+              evidence: { type: 'live_conversation', id: 'call-1', occurred_at: '2026-09-01T13:00:00.000Z' },
+            }],
+            scope: { assessment_limit: 6, assessment_truncated: true },
+          },
+        }),
+      }
+      : base(url, opts));
+    mount('/admin/pipeline?leadReview=1');
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    const panel = await screen.findByLabelText('Status review');
+    expect(panel).toHaveTextContent('Review needed');
+    expect(panel).toHaveTextContent('Verified evidence previously moved this lead');
+    expect(panel).toHaveTextContent('No status changes or customer messages were made');
+    expect(panel).toHaveTextContent('Shows up to 6 recent assessments');
+    expect(panel).toHaveTextContent('Older assessments were not checked');
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/admin/leads/lead-qa?leadReview=1',
+      expect.anything(),
+    );
+    expect(calls.some(({ options }) => options?.method && options.method !== 'GET')).toBe(false);
+  });
   it('shows the effective callback deadline on the lead', async () => {
     const base = fetch.getMockImplementation();
     fetch.mockImplementation(async (url, opts) => String(url).includes('/commitments/open')
@@ -201,7 +245,7 @@ describe('Pipeline queue navigation', () => {
     fetch.mockImplementation(async (url, opts) => String(url).includes('/contact-matches?')
       ? { ok: true, json: async () => ({ matches: [lead], total: 1 }) }
       : base(url, opts));
-    mount('/admin/pipeline', { newLeadRequest: 1 });
+    mount('/admin/pipeline?leadReview=1&leadStatus=lost&leadPage=2&leadSearch=old', { newLeadRequest: 1 });
     fireEvent.change(screen.getByLabelText('Phone'), { target: { value: '9415550100' } });
     expect(await screen.findByText(/Possible existing leads with this contact/)).toBeInTheDocument();
     expect(calls.some(({ options }) => options?.method === 'POST')).toBe(false);
@@ -210,7 +254,158 @@ describe('Pipeline queue navigation', () => {
     fireEvent.click(match);
     await waitFor(() => expect(queueCalls().at(-1).path).toContain('id=lead-qa'));
     expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=lead-qa');
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('leadReview=1');
+    expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadStatus=');
+    expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadPage=');
+    expect(screen.getByLabelText('Current route')).not.toHaveTextContent('leadSearch=');
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
 
+  // Pre-push Codex P2: CustomerSmsPanel's initialDraft only seeds an EMPTY
+  // draft — an existing per-lead draft in sessionStorage silently wins and
+  // the consultation text never lands. "Send consultation link" must pass
+  // appendDraft (joined onto whatever draft already exists) instead of
+  // initialDraft, and still carry leadId so the send gets the leads-page
+  // audit trail (lead_activities row, new→contacted transition).
+  // Pre-push Codex P2: row expand fetches AVAILABILITY only (GET) — never
+  // mints a short code; the actual mint (POST, a real DB insert handing
+  // out a live 14-day bearer token) fires only on the Send click.
+  it('row expand only checks availability (GET); Send consultation link mints (POST) on click, appends via appendDraft, and carries leadId', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      if (String(url).includes('/consultation-link')) {
+        calls.push({ path: String(url), options: opts });
+        if (opts?.method === 'POST') {
+          return { ok: true, json: async () => ({ url: 'https://waves.link/l/abc123', line: "Hi QA, it's Waves. Pick a time...\n\n", standalone: true }) };
+        }
+        return { ok: true, json: async () => ({ enabled: true, available: true }) };
+      }
+      return base(url, opts);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    const sendLinkBtn = await screen.findByRole('button', { name: 'Send consultation link' });
+    await waitFor(() => expect(sendLinkBtn).not.toBeDisabled());
+    const consultationCalls = () => calls.filter(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'));
+    expect(consultationCalls()).toHaveLength(1);
+    expect(consultationCalls()[0].options?.method).not.toBe('POST');
+    fireEvent.click(sendLinkBtn);
+    await waitFor(() => expect(openMessages).toHaveBeenCalled());
+    const [, options] = openMessages.mock.calls.at(-1);
+    expect(options.leadId).toBe('lead-qa');
+    expect(options.appendDraft).toBe("Hi QA, it's Waves. Pick a time...\n\n");
+    expect(options.initialDraft).toBeUndefined();
+    // The mint (POST) fired exactly once, only after the click.
+    expect(consultationCalls().filter((c) => c.options?.method === 'POST')).toHaveLength(1);
+  });
+
+  // Codex #4709 r3 P1: with GATE_LEAD_INSPECTION_LINK dark the probe says
+  // enabled:false and the Leads page renders no consultation button at all.
+  // Codex #4709 r6 P1: the gate is read once from the lead list response;
+  // while it is off no row ever probes availability and no button renders.
+  it('omits Send consultation link and never probes per row while the gate is dark', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      const path = String(url);
+      if (path.includes('/admin/leads?')) {
+        calls.push({ path, options: opts });
+        return { ok: true, json: async () => ({ leads: [lead], total: 63, consultationLinksEnabled: false }) };
+      }
+      return base(url, opts);
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    await screen.findByRole('button', { name: 'Message' });
+    expect(screen.queryByRole('button', { name: 'Send consultation link' })).toBeNull();
+    expect(calls.some(({ path }) => path.includes('/consultation-link'))).toBe(false);
+  });
+
+  // Pre-push Codex P2: the ?lead= deep-link expansion path skipped the
+  // consultation loader that row-click expansion (expandLead) already runs
+  // — the Send consultation link button showed no link at all until the
+  // operator manually collapsed and re-expanded the row.
+  it('the ?lead= deep link runs the consultation loader too', async () => {
+    mount('/admin/pipeline?lead=lead-qa');
+    await screen.findByRole('button', { name: 'QA Prospect' });
+    await waitFor(() => expect(calls.some(({ path }) => path.includes('/admin/leads/lead-qa/consultation-link'))).toBe(true));
+  });
+
+});
+
+describe('Linked lead history preview', () => {
+  function linkedFixture(status = 'won') {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options) => {
+      if (String(url).includes('/admin/leads/lead-qa?leadReview=1')) {
+        calls.push({ path: String(url), options });
+        return { ok: true, json: async () => ({ activities: [], calls: [], linkedHistory: {
+          canonical: { id: 'primary-qa', first_name: 'Original', last_name: 'Example', status, service_interest: 'Lawn' },
+          original: null, linked: [], unresolved: false, hasMore: false,
+        } }) };
+      }
+      return base(url, options);
+    });
+  }
+  it('requires explicit preview opt-in', async () => {
+    linkedFixture();
+    mount('/admin/pipeline?lead=lead-qa');
+    await screen.findByText('No activities logged');
+    expect(screen.queryByRole('region', { name: 'Linked lead history' })).not.toBeInTheDocument();
+    expect(calls.some(c => c.path.includes('leadReview=1'))).toBe(false);
+  });
+  it('keeps historical links with a missing status readable', async () => {
+    linkedFixture(null);
+    mount('/admin/pipeline?lead=lead-qa&leadReview=1');
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Unknown status');
+    expect(screen.getByRole('button', { name: 'Review record' })).toBeEnabled();
+  });
+  it('opens the exact linked record and preserves review mode', async () => {
+    linkedFixture();
+    mount('/admin/pipeline?leadReview=1&leadStatus=estimate_viewed&leadSearch=QA&leadPage=3&source_name=Paid');
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect', exact: true }));
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
+    fireEvent.click(screen.getByRole('button', { name: 'Review record' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=primary-qa'));
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('leadReview=1');
+    await waitFor(() => expect(queueCalls().some(c => {
+      const params = new URL(c.path, 'http://localhost').searchParams;
+      return params.get('id') === 'primary-qa' && params.get('page') === '1'
+        && !params.has('status') && !params.has('search') && !params.has('source_name');
+    })).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=lead-qa'));
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
+  });
+  it('explains automated contact evidence only when lead review is enabled', async () => {
+    const base = fetch.getMockImplementation();
+    const activities = [
+      { id: 'activity-live', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'AI Call Processor', created_at: '2040-09-05T17:00:00Z', metadata: JSON.stringify({ evidenceType: 'live_conversation', evidenceId: 'call-evidence-1234567890' }) },
+      { id: 'activity-booked', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'Fixture operator', created_at: '2040-09-05T18:00:00Z', metadata: { evidenceType: 'assessment_booked', evidenceId: 'booking_fixture_2' } },
+      { id: 'activity-completed', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'system', created_at: '2040-09-05T19:00:00Z', metadata: JSON.stringify({ evidenceType: 'assessment_completed', evidenceId: '<unsafe>' }) },
+      { id: 'activity-unsupported', activity_type: 'status_change', description: 'Unsupported automation remains visible', performed_by: 'system', created_at: '2040-09-05T20:00:00Z', metadata: JSON.stringify({ evidenceType: '__proto__', evidenceId: 'unsupported-fixture' }) },
+    ];
+    fetch.mockImplementation(async (url, opts) => new URL(String(url), 'http://localhost').pathname === '/api/admin/leads/lead-qa'
+      ? { ok: true, json: async () => ({ lead, activities, calls: [] }) }
+      : base(url, opts));
+    mount('/admin/pipeline?leadReview=1');
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    expect(await screen.findByText('Contacted after a live conversation')).toBeInTheDocument();
+    expect(screen.getByText('Contacted after an assessment was booked')).toBeInTheDocument();
+    expect(screen.getByText('Contacted after an assessment was completed')).toBeInTheDocument();
+    expect(screen.getByText(/Evidence reference call-evi.*7890/)).toBeInTheDocument();
+    expect(screen.queryByText(/unsafe/)).not.toBeInTheDocument();
+    expect(screen.getByText(/AI Call Processor/)).toBeInTheDocument();
+    expect(screen.getByText('Unsupported automation remains visible')).toBeInTheDocument();
+  });
+  it('keeps automated contact evidence hidden by default', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => new URL(String(url), 'http://localhost').pathname === '/api/admin/leads/lead-qa'
+      ? { ok: true, json: async () => ({ lead, activities: [{ id: 'activity-live', activity_type: 'status_change', description: 'Status: new → contacted', performed_by: 'AI Call Processor', created_at: '2040-09-05T17:00:00Z', metadata: { evidenceType: 'live_conversation', evidenceId: 'call-fixture' } }], calls: [] }) }
+      : base(url, opts));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    expect(await screen.findByText('Status: new → contacted')).toBeInTheDocument();
+    expect(screen.queryByText('Contacted after a live conversation')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Evidence reference/)).not.toBeInTheDocument();
+  });
 });

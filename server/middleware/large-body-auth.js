@@ -12,8 +12,19 @@ const STAFF_LARGE_BODY_AUTH_MIN = 1 * 1024 * 1024;
 // bodiless request (no Content-Length and no Transfer-Encoding — e.g. a GET
 // OAuth callback) is small; a chunked/streamed body has unknown length and is
 // treated as large so it can't slip past a Content-Length-only check.
+//
+// Content-Encoding (codex GH r12 P1): every parser this guards mounts with
+// body-parser's default `inflate: true`, which decompresses gzip/deflate
+// bodies BEFORE the size limit is enforced against the DECOMPRESSED bytes.
+// Content-Length only ever reflects the wire (compressed) size, so a gzipped
+// body under 1 MB on the wire can inflate to the parser's full 30/50 MB limit
+// — an anonymous caller could force that decompression + parse work while
+// looking "proven small". Any non-identity Content-Encoding is therefore
+// never provably small, whatever Content-Length says.
 function bodyProvenSmall(req) {
   if (req.headers['transfer-encoding']) return false;
+  const encoding = req.headers['content-encoding'];
+  if (encoding && String(encoding).trim().toLowerCase() !== 'identity') return false;
   const raw = req.headers['content-length'];
   if (raw === undefined) return true;
   const len = Number(raw);
@@ -46,9 +57,41 @@ function requireStaffTokenForLargeBody(req, res, next) {
   return res.status(401).json({ error: 'Authentication required' });
 }
 
+// A valid CUSTOMER access token — signature-only (no DB lookup, kept out of
+// the hot path; the route's own `authenticate` middleware does the full,
+// DB-backed check afterward). Customer tokens carry no `type` claim at all
+// (only a refresh token does, `type: 'refresh'` — see middleware/auth.js
+// generateToken / authenticateCore), so "not a refresh token, and it claims
+// to be SOME customer" is the whole signature-only contract here.
+function hasValidCustomerToken(authorizationHeader) {
+  const header = authorizationHeader || '';
+  if (!header.startsWith('Bearer ')) return false;
+  try {
+    const decoded = jwt.verify(header.slice(7), config.jwt.secret);
+    return decoded.type !== 'refresh' && !!decoded.customerId;
+  } catch {
+    return false;
+  }
+}
+
+// Guards server/routes/photo-id.js's 30 MB body parser (codex GH r1 P1): an
+// anonymous caller could otherwise force parsing of up to 30 MB per request
+// even while GATE_CUSTOMER_PHOTO_ID is off, and a malformed/oversized
+// anonymous request would surface the PARSER's 400/413 instead of the
+// route's promised dark 404. Mounted with the gate check ahead of it (see
+// server/index.js) so an unauthenticated OR dark-gate request never reaches
+// the large parser at all.
+function requireCustomerTokenForLargeBody(req, res, next) {
+  if (bodyProvenSmall(req)) return next();
+  if (hasValidCustomerToken(req.headers.authorization)) return next();
+  return res.status(401).json({ error: 'Authentication required' });
+}
+
 module.exports = {
   requireStaffTokenForLargeBody,
+  requireCustomerTokenForLargeBody,
   bodyProvenSmall,
   hasValidStaffToken,
+  hasValidCustomerToken,
   STAFF_LARGE_BODY_AUTH_MIN,
 };

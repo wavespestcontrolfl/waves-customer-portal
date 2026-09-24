@@ -218,3 +218,97 @@ describe('catalog service keys', () => {
     expect(matchServiceProtocol(protocols, 'Quarterly Pest Control', { serviceKey: 'pest_quarterly' })).toEqual(matchServiceProtocol(protocols, 'Quarterly Pest Control'));
   });
 });
+
+describe('mosquito misting SYSTEM is a consultation, not the barrier protocol', () => {
+  // Codex P1 (PR #4762 follow-up): mosquito_misting_system is the automatic
+  // misting SYSTEM (design visit → install → maintenance), not the barrier
+  // PROGRAM's foliage/backpack spray — it must never resolve mosquito_barrier
+  // (or any other program), by the catalog key OR the display name.
+  test('the misting-system catalog key gets no protocol, regardless of the display name', () => {
+    const result = matchServiceProtocol(protocols, 'Mosquito Misting System Service', { serviceKey: 'mosquito_misting_system' });
+    expect(result).toEqual({
+      programKey: null,
+      program: null,
+      matchedVisit: null,
+      matched: false,
+      reason: 'misting_system_consultation',
+    });
+  });
+
+  test.each(['Mosquito Misting-System Service', 'Mosquito misting_system service'])('separator variant %s (no key) is still the consultation, never barrier', (name) => {
+    const result = matchServiceProtocol(protocols, name, {});
+    expect(result.programKey).toBeNull();
+    expect(result.reason).toBe('misting_system_consultation');
+  });
+
+  test('a "misting system" name with no catalog key also gets no protocol', () => {
+    // The plain design-visit identity (no install/maintenance/refill
+    // qualifier) is the free-consultation reason.
+    const designVisit = matchServiceProtocol(protocols, 'Automatic Misting System Design Visit');
+    expect(designVisit).toEqual({
+      programKey: null,
+      program: null,
+      matchedVisit: null,
+      matched: false,
+      reason: 'misting_system_consultation',
+    });
+  });
+
+  test('a keyless name that reads as install/maintenance/refill gets its OWN "unconfigured" reason, not consultation and not barrier (Codex round-3 P1)', () => {
+    // There is no live install/maintenance protocols.json program yet —
+    // this must be neither the design consultation nor a barrier match.
+    for (const name of ['Mosquito Misting System Install', 'Mosquito Misting System Maintenance', 'Mosquito Misting System Refill']) {
+      const result = matchServiceProtocol(protocols, name);
+      expect([name, result]).toEqual([name, {
+        programKey: null,
+        program: null,
+        matchedVisit: null,
+        matched: false,
+        reason: 'misting_system_service_unconfigured',
+      }]);
+    }
+  });
+
+  test('a present serviceKey is key-first: only the exact mosquito_misting_system key is the consultation, even with an install/maintenance name; a DIFFERENT future key is not swept in by the name phrase at all (Codex round-3 P1)', () => {
+    // The explicit key always wins over an install/maintenance-sounding name.
+    expect(matchServiceProtocol(protocols, 'Mosquito Misting System Install', { serviceKey: 'mosquito_misting_system' }).reason)
+      .toBe('misting_system_consultation');
+
+    // A DIFFERENT, not-yet-built catalog key must not be silently suppressed
+    // by the name phrase — key-first means this predicate does not apply to
+    // it at all, so it falls through to the matcher's ordinary name-based
+    // resolution (today: the barrier program, since no dedicated
+    // install/maintenance protocols.json program exists yet — building one
+    // is a future, separate change, not invented here).
+    const futureKeyed = matchServiceProtocol(protocols, 'Mosquito Misting System Install', { serviceKey: 'mosquito_misting_install' });
+    expect(futureKeyed.reason).not.toBe('misting_system_consultation');
+    expect(futureKeyed.reason).not.toBe('misting_system_service_unconfigured');
+    expect(futureKeyed.programKey).toBe('mosquito');
+  });
+
+  test('bare "misting" (the barrier program\'s own cycle-length wording) still routes to the barrier protocol', () => {
+    // Legacy barrier copy uses "21-day misting" for cycle length — only the
+    // two-word "misting system" phrase or the explicit key suppresses.
+    expect(match('21-Day Misting Service')).toEqual({
+      programKey: 'mosquito',
+      visit: 1,
+      reason: 'mosquito_barrier',
+    });
+  });
+
+  test('the plain barrier mosquito keys and word are unchanged', () => {
+    const byKey = (serviceType, serviceKey) => {
+      const r = matchServiceProtocol(protocols, serviceType, { serviceKey });
+      return [r.programKey, r.matchedVisit?.visit, r.reason];
+    };
+    expect(match('Mosquito Control')).toEqual({
+      programKey: 'mosquito',
+      visit: 1,
+      reason: 'mosquito_barrier',
+    });
+    expect(byKey('Mosquito Monthly Service', 'mosquito_monthly')).toEqual(['mosquito', 1, 'mosquito_barrier']);
+    expect(byKey('Mosquito Seasonal Service', 'mosquito_seasonal')).toEqual(['mosquito', 1, 'mosquito_barrier']);
+    expect(byKey('Mosquito One-Time Service', 'mosquito_one_time')).toEqual(['mosquito', 1, 'mosquito_barrier']);
+    expect(byKey('Mosquito Event Service', 'mosquito_event')).toEqual(['mosquito', 3, 'mosquito_event_service']);
+  });
+});

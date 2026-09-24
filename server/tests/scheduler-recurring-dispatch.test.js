@@ -63,9 +63,11 @@ test('the existing IB retention tick purges tasks and threads while their write 
 test.each([false, true])('handoff alerts stay registered with cronJobs off and autoDispatch=%s', async (autoDispatch) => {
   isEnabled.mockImplementation((name) => name === 'autoDispatch' && autoDispatch);
   await tick();
-  // Only the handoff tick and the job_health dead-running settle (ledger
-  // maintenance, registered above the cronJobs early return) survive.
-  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['10 4 * * *', '3,18,33,48 * * * *']);
+  // Only the handoff tick, the job_health dead-running settle (ledger
+  // maintenance) and the consultation-outcome reconcile sweep (#4710 — a
+  // completeness guarantee, not a feature cron) are registered above the
+  // cronJobs early return and survive.
+  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['10 4 * * *', '27 * * * *', '3,18,33,48 * * * *']);
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
   expect(runAutoDispatch).not.toHaveBeenCalled();
 });

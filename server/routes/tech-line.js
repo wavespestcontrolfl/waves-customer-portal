@@ -160,6 +160,16 @@ async function textFromLine({ req, ctx, target, body }) {
   // cannot reopen a reply the customer may already hold. Provider evidence
   // can settle the held decisions later.
   const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, ambiguous: true, reviewedBy: req.technicianId }).catch(() => {});
+  const providerHandoffReservation = reply.reservationId
+    ? require('../services/messaging/provider-handoff-reservation').borrowProviderHandoffReservation({
+      reservationId: reply.reservationId,
+      to: target.to,
+      fromNumber: ctx.line.number,
+      body,
+      messageType: 'manual',
+      adminUserId: req.technicianId,
+    })
+    : null;
   let result;
   try {
     result = await sendCustomerMessage({
@@ -171,6 +181,7 @@ async function textFromLine({ req, ctx, target, body }) {
       customerId: target.customer.id,
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'tech_line_text',
+      providerHandoffReservation,
       metadata: {
         original_message_type: 'manual',
         tech_line: true,
@@ -187,7 +198,12 @@ async function textFromLine({ req, ctx, target, body }) {
     // invited to send it again (codex #4072 r2 P1).
     const accepted = err?.providerOutcome?.sent === true && isRealProviderSend(err.providerOutcome);
     if (!accepted && isAmbiguousProviderOutcome(err?.providerOutcome)) await settleAmbiguous();
-    else await settleHumanReply({ ...reply, sent: accepted, reviewedBy: req.technicianId }).catch(() => {});
+    else await settleHumanReply({
+      ...reply,
+      sent: accepted,
+      acceptedResult: accepted ? err.providerOutcome : null,
+      reviewedBy: req.technicianId,
+    }).catch(() => {});
     if (!accepted) throw err;
     logger.error(`[tech-line] text accepted but its audit write failed (${String(err.code || err.name || 'error')}) for visit ${target.visit.id}`);
     // The customer has the text: it is a first response too (codex r13 P2).
@@ -216,7 +232,7 @@ async function textFromLine({ req, ctx, target, body }) {
       },
     };
   }
-  await settleHumanReply({ ...reply, sent: true, reviewedBy: req.technicianId }).catch(() => {});
+  await settleHumanReply({ ...reply, sent: true, acceptedResult: result, reviewedBy: req.technicianId }).catch(() => {});
   await stampTechFirstResponse({ to: target.to, technicianId: req.technicianId });
   return { status: 200, json: { success: true, from: publicLine(ctx) } };
 }

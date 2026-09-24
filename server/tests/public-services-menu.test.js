@@ -46,6 +46,11 @@ describe('public services menu', () => {
     expect(PUBLIC_INSTANT_QUOTE_KEYS.has('rodent_inspection')).toBe(true);
     expect(PUBLIC_INSTANT_QUOTE_KEYS.has('wdo_inspection')).toBe(false);
   });
+  test('Mosquito Misting System (20260924000020) is selectable but quote-on-request — no engine pricer yet', () => {
+    const mistingRow = row({ service_key: 'mosquito_misting_system', name: 'Mosquito Misting System Service', category: 'mosquito' });
+    expect(menuItem(mistingRow)).toMatchObject({ mode: 'one_time', family: 'Mosquito Control', public_instant_quote: false });
+    expect(PUBLIC_INSTANT_QUOTE_KEYS.has('mosquito_misting_system')).toBe(false);
+  });
   test('menu is empty (not an error) before the column exists', async () => {
     expect(await loadPublicServicesMenu(fakeConn([row({ service_key: 'x', name: 'X Service' })], { hasColumn: false }))).toEqual([]);
   });
@@ -125,7 +130,10 @@ describe('instant-quote set stays in step with the public quote engine', () => {
     for (const k of ['wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
       'palm_injection', 'bed_bug_treatment', 'dethatching', 'termite_trenching', 'termite_slab_pretreat',
       'lawn_care_one_time', 'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy', 'bee_wasp_removal',
-      'plugging', 'top_dressing', 'rodent_exclusion_only']) {
+      'plugging', 'top_dressing', 'rodent_exclusion_only',
+      // Mosquito Misting System (20260924000020): lead-only, no engine
+      // pricer yet — quoted after an on-site design visit.
+      'mosquito_misting_system']) {
       expect({ k, instant: PUBLIC_INSTANT_QUOTE_KEYS.has(k) }).toEqual({ k, instant: false });
     }
   });
@@ -236,6 +244,17 @@ describe('keyed quote-on-request rides the standard manual-quote lifecycle', () 
     expect(est.lineItems[0]).toMatchObject({ service: 'wdo_inspection', name: 'WDO Inspection Service', reason: 'quote_on_request' });
     expect(est.summary).toMatchObject({ recurringMonthlyAfterDiscount: 0, oneTimeTotal: 0 });
     expect(est.property).toMatchObject({ homeSqFt: 1800, turfFlags: [] });
+  });
+  test('a mosquito_misting_system submit takes the same quote-on-request path — service_key + catalog name, zero totals, no price', () => {
+    const rows = [row({ service_key: 'mosquito_misting_system', name: 'Mosquito Misting System Service', category: 'mosquito' })];
+    expect(PUBLIC_QUOTE_REQUESTS).not.toHaveProperty('mosquito_misting_system');
+    const est = _internals.quoteOnRequestEstimate({ service_key: 'mosquito_misting_system', name: 'Mosquito Misting System Service' }, { property: { homeSqFt: 1800 } });
+    expect(_internals.isManualQuoteLine(est.lineItems[0])).toBe(true);
+    expect(est.lineItems[0]).toMatchObject({ service: 'mosquito_misting_system', serviceKey: 'mosquito_misting_system', name: 'Mosquito Misting System Service', quoteRequired: true, reason: 'quote_on_request' });
+    expect(est.summary).toMatchObject({ recurringMonthlyAfterDiscount: 0, oneTimeTotal: 0 });
+    return publicSelectableService('mosquito_misting_system', fakeConn(rows)).then((resolved) => {
+      expect(resolved).toEqual({ service_key: 'mosquito_misting_system', name: 'Mosquito Misting System Service', instant: false, booking_enabled: true });
+    });
   });
 });
 

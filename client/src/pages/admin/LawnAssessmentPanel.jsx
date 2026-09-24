@@ -250,10 +250,10 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       const adjustedScores = {
         ...(techScores || result.adjustedScores || result.displayScores || {}),
       };
-      // This panel still edits Fungus/Thatch directly (no consolidated Stress chip),
-      // so never post a stale stress_damage — /confirm would treat it as an explicit
-      // override and ignore the Fungus/Thatch correction. Drop it so the server
-      // re-derives Stress from the corrected fungus/thatch.
+      // Stress is never edited here (this panel only ever fills Fungus/Thatch
+      // when the AI left them blank) — drop it so the server always derives
+      // it itself from whatever Fungus/Thatch end up known, rather than
+      // echoing back a value the client happens to be holding.
       delete adjustedScores.stress_damage;
       const protocol_field_checks = Object.fromEntries(
         Object.entries(protocolChecks).filter(
@@ -304,15 +304,17 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     setSelectedCustomer(null);
   };
 
-  // Clamp + step the tech-edited score. Range matches the AI display
-  // scale (0–100, integers). Step 5 keeps the UX coarse enough that
-  // a tech can't generate noise by tapping +/- repeatedly.
-  const adjustTechScore = (key, delta) => {
+  // Owner ruling 2026-09-24: lawn health scores are read-only from photos.
+  // The only manual entry allowed is filling a metric the AI left blank —
+  // this control only renders for those metrics; the server enforces the
+  // same rule independently.
+  const fillTechScore = (key, rawValue) => {
     setTechScores((prev) => {
       if (!prev) return prev;
-      const current = Number.isFinite(prev[key]) ? prev[key] : 0;
-      const next = Math.min(100, Math.max(0, Math.round(current + delta)));
-      return { ...prev, [key]: next };
+      if (rawValue === "") return { ...prev, [key]: null };
+      const n = Number(rawValue);
+      if (!Number.isFinite(n)) return prev;
+      return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(n))) };
     });
   };
 
@@ -678,17 +680,18 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 </ActionFeedback>
               );
             })()}
-            {/* Scores — AI value on top, tech-confirmed value below with
-                +/- nudge buttons. Tech edits feed adjustedScores on
-                /confirm, which is what recordTechCalibration measures
-                AI-vs-tech delta against. Step 5 to keep the input
-                coarse and the calibration signal stable. */}
+            {/* Scores — read-only from the AI (owner ruling 2026-09-24): a
+                metric the AI scored is fixed and shown twice (AI / TECH) for
+                provenance only. The one exception is a metric the AI left
+                blank (aiVal == null), which gets a small numeric input so the
+                tech can fill it — the server enforces the same rule
+                independently. */}
             <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
               {[
-                // Tech review stays granular so the tech can correct the
-                // underlying signals (disease/thatch) that drive Stress
-                // derivation and tech calibration. Customers see the four
-                // consolidated categories on the report.
+                // Tech review stays granular so a blank underlying signal
+                // (disease/thatch) can still be filled to complete Stress
+                // derivation. Customers see the four consolidated categories
+                // on the report.
                 { key: "turf_density", label: "Turf Density" },
                 { key: "weed_suppression", label: "Weed Suppression" },
                 { key: "color_health", label: "Color Health" },
@@ -748,42 +751,27 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                           overridden ? "text-zinc-900" : "text-ink-secondary",
                         )}
                       >
-                        TECH {overridden ? "· EDITED" : ""}
+                        TECH {overridden ? "· FILLED" : ""}
                       </div>{" "}
-                      <div className="mt-1 flex items-center justify-center gap-1.5">
-                        {" "}
-                        <Button
-                          type="button"
-                          onClick={() => adjustTechScore(m.key, -5)}
-                          aria-label={`Decrease ${m.label}`}
-                          variant="secondary"
-                          className="!w-11 !min-w-11 !p-0 text-16"
-                        >
-                          −
-                        </Button>{" "}
+                      {aiVal == null ? (
+                        <Input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={techVal ?? ""}
+                          aria-label={`Enter ${m.label}`}
+                          placeholder="0-100"
+                          onChange={(e) => fillTechScore(m.key, e.target.value)}
+                          className="mt-1 text-center"
+                        />
+                      ) : (
                         <div
-                          style={
-                            techVal == null
-                              ? undefined
-                              : { color: scoreColor(techVal) }
-                          }
-                          className={cn(
-                            "min-w-14 u-nums text-20 font-medium",
-                            techVal == null && "text-ink-secondary",
-                          )}
+                          style={{ color: scoreColor(techVal) }}
+                          className="mt-1 u-nums text-20 font-medium"
                         >
-                          {techVal == null ? "—" : `${techVal}%`}
-                        </div>{" "}
-                        <Button
-                          type="button"
-                          onClick={() => adjustTechScore(m.key, 5)}
-                          aria-label={`Increase ${m.label}`}
-                          variant="secondary"
-                          className="!w-11 !min-w-11 !p-0 text-16"
-                        >
-                          +
-                        </Button>{" "}
-                      </div>{" "}
+                          {techVal}%
+                        </div>
+                      )}{" "}
                     </div>{" "}
                   </Card>
                 );

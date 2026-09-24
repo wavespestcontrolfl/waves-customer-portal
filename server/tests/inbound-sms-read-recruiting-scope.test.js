@@ -31,15 +31,11 @@ test('a technician read scope excludes hidden recruiting rows; an admin scope do
   expect(adminScoped).toBe(false);
 });
 
-test('countUnreadInboundSms fails closed: no role → recruiting rows excluded; admin role → counted', async () => {
+test('countUnreadInboundSms excludes recruiting rows from the customer SMS response rail', async () => {
   const { countUnreadInboundSms } = require('../services/inbound-sms-read');
-  const calls = [];
-  db.mockImplementation((table) => { const q = chain([]); q.count = jest.fn(() => q); q.groupBy = jest.fn(() => q); q.whereNotExists = jest.fn((fn) => { fn.call(q, q); return q; }); q.from = jest.fn(() => q); calls.push([table, q]); return q; });
-  await countUnreadInboundSms({}).catch(() => {});
-  expect(calls.filter(([t]) => t === 'messages').some(([, q]) => q.orWhere.mock.calls.some((c) => c[0] === 'messages.message_type'))).toBe(true);
-  calls.length = 0;
-  await countUnreadInboundSms({ role: 'admin' }).catch(() => {});
-  expect(calls.filter(([t]) => t === 'messages').some(([, q]) => q.orWhere.mock.calls.some((c) => c[0] === 'messages.message_type'))).toBe(false);
+  db.raw.mockResolvedValue({ rows: [] });
+  await countUnreadInboundSms({ role: 'admin' });
+  expect(db.raw.mock.calls.at(-1)[0]).toContain("s.message_type NOT LIKE 'job\\_%'");
 });
 
 test('an application scope reads that application\'s applicant replies up to the snapshot and clears its bells through the notification service (PR #4623 r20)', async () => {

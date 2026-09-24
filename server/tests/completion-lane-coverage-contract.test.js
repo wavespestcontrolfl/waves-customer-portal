@@ -143,6 +143,33 @@ describe('completion-lane registry (static)', () => {
     expect(missing.flags).toContain('assessment_experience_missing_profile:falls_through_to_generic_report');
   });
 
+  test('mosquito misting system (20260924000020) is decided: consultation posture, lead-only, no report lane', () => {
+    // A lead-only row with no engine pricer — the on-site design visit is
+    // advisory, like the Waves Assessment, never a completed treatment.
+    const healthy = classifyCatalogRow({
+      service_key: 'mosquito_misting_system',
+      billing_type: 'one_time',
+      completion_mode: 'internal_only',
+      project_type: null,
+      delivery_mode: 'disabled',
+      profile_active: true,
+    });
+    expect(healthy.lane).toBe('assessment_experience');
+    expect(healthy.flags).toEqual([]);
+    // A bare generic service_report profile would auto-send a customer
+    // report the moment this lead-only row is ever completed — the exact
+    // Codex P1 this registry entry exists to prevent.
+    const live = classifyCatalogRow({
+      service_key: 'mosquito_misting_system',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: null,
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(live.flags).toContain('assessment_experience_report_lane_active:service_report_expected_internal_only');
+  });
+
   test('billing rider suppression requires the internal_only consultation mode', () => {
     // service_report is a live report lane regardless of delivery_mode —
     // resolveCompletionDeliveryPosture ignores delivery on generic profiles.

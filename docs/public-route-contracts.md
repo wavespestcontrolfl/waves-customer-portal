@@ -55,6 +55,20 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Pest Pressure technician direct score (owner ruling 2026-09-24): on the
+service-report payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), when the visit's rating was entered by staff
+(`client_pest_rating_source = 'technician'`) `pestPressure.score` /
+`displayScore` equal that 0–5 rating exactly, and `label` resolves from the
+active six-band labels (0 None · 1 Very Low · 2 Low · 3 Moderate · 4 Elevated ·
+5 High; a customized label set is kept). When `showComponentBreakdownToCustomer`
+is on, such reports' `components` object is a single
+`technicianActivityRating` entry (`{ value, weight: 100, present: true }`)
+instead of the five weighted components; customer-rated reports keep the
+five-component blend. Customer-visible pressure numbers no longer floor at
+0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
+unchanged.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may
@@ -393,6 +407,13 @@ runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
+the photo-text triage (`services/photo-text-triage.js`) likewise runs after
+acknowledgment under `GATE_PHOTO_TRIAGE` (default off) for an ordinary
+inbound carrying an image: the admin photo assessment (paid vision, one run
+per message, capped per ET day by `PHOTO_TRIAGE_DAILY_CAP`, default 20; its
+caption classifier by `PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP`) and one pending
+owner-approval reply draft, which replaces the legacy AI draft for that
+message — never a send, no response change;
 unknown domain/van-tracking SMS stays unlinked in the inbox and does not
 create customer/account rows or guess a customer name from message prose.
 Substantive messages ring a per-message `new_lead` bell/push linking to the
@@ -913,6 +934,123 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+Address-verification guard (2026-09-23): when the SERVER-trusted property
+profile (the cache-only `performPropertyLookup` re-read, or the lookup
+stage's own server-written `extracted_data.address_unverified` on the
+visitor's ownership-matched lead row — never the client's `enriched`
+payload) carries a HIGH `address` verify flag from the county-roll
+house-number audit, the run withholds the self-book handoff entirely: no
+`/book` link, no estimate handoff token, no website publication
+(`booking_url` null). The price still returns and the lead / estimate
+still persist; the lead's `extracted_data.address_unverified` records the
+audit (reason, county, typed number, nearest roll numbers, the judged
+street/city/state/ZIP) for the callback, and a later run over a clean
+address clears it (the key is always written, null when clean). The draft
+estimate carries the same verdict as `estimate_data.addressUnverified`
+(always written), which `wizardDraftSelfServeBookable` refuses — so a
+booking link minted by an EARLIER clean run over the same draft dies on
+its live recheck at `/api/booking/confirm` once the address is flagged,
+and a staff revision of the draft preserves the marker. A website estimate
+an earlier run already PUBLISHED for the same lead — or, since a repeat
+lookup mints a new lead row, for the same typed email AND phone AND the
+complete judged premise (street with any unit stripped, and a city and ZIP
+present on both sides and equal) — is archived on the flagged run
+(expired rows included when they were delivered or viewed, since the
+public extension could otherwise revive them; a never-delivered expired
+legacy row is left alone, having no revival path; the block on an
+expired row is lifted by a later clean county answer, otherwise the
+office re-quotes; and the withdrawal refuses with a retryable 503 while
+any matched row carries a live delivery claim, checked again on each
+write), with
+the sent/viewed, unarchived, not-price-locked predicates re-applied on
+the archive write itself (`website_quote_withdrawn_address_unverified`
+audit event), so its old token neither renders nor accepts — and the row's
+`estimate_data.addressUnverified` marker is itself an off-customer-surface
+verdict (`estimateOffCustomerSurface`: view, server page, accept, asks;
+`/decline`'s guard answers the same generic 404 for it, never the
+re-price hold's 409),
+so a generic unarchive or a withdrawal that failed to land still cannot
+revive the link; the archived row keeps the verdict
+(`estimate_data.addressUnverified` + `addressUnverifiedFlag`), and a later
+run for the same email, phone and complete premise recovers it when the
+roll does not answer. Each stage also records a server-owned
+`extracted_data.address_verdict` (clean / flagged / unanswered, stamped
+with the judged premise): a CLEAN verdict from the lookup stage stands in
+for a roll answer at `/calculate` (record-less clean lookups are never
+cached) and supersedes older lead, draft and withdrawn-publication
+warnings for that premise — including the verdict on withdrawn
+publications for the same email, phone and premise, which a clean run
+marks superseded (`addressUnverifiedSupersededAt`) so no later outage run
+can recover it. A bare `/book?lead=<id>` link (a run that minted no draft
+carries no handoff token) is enforced at `/api/booking/confirm` too: when
+the lead named by `lead` carries a server-written `address_unverified`
+flag that covers the submitted premise, the booking is refused with 409
+`code: "ADDRESS_UNVERIFIED"` — the lead id stays untrusted for identity (a forged
+id can only block a booking at a flagged premise, never enable one). A
+token-verified pricing handoff (`pricing_estimate_id` + `estimate_token`)
+whose draft carries `addressUnverified: true` is refused the same way,
+unconditionally — before any booking write, whatever the customers-only
+gate or the bearer's authentication; both verdicts are rechecked under row
+locks inside the booking transaction itself, so a flag committed between
+the early read and the insert still refuses (409, code
+`ADDRESS_UNVERIFIED`), and the in-transaction recheck also consults every
+lead for the typed email AND phone whose flag covers the submitted premise
+(a repeat lookup's newer lead). If the flagged run's publication
+withdrawal transaction fails, `/calculate` answers 503 (retry) rather than
+leaving an earlier publication live. The public lookup response never carries the profile's
+internal `addressVerdict` trust marker (stripped with `subdivisionMedian`);
+the lead-level verdict is derived server-side. `/calculate` publishes the
+lead's verdict under a contact-pair advisory lock (`address-verdict`,
+email + last-ten-digit phone) that `/api/booking/confirm` takes before its
+recheck, so no flag lands as a phantom row between that recheck and the
+insert. Staff clear the draft's marker by
+revising the estimate with a changed PREMISE (house number / street /
+locality — a unit-only edit is not a correction) or an explicit
+`confirmAddress: true` on the revise request (the builder's "I confirmed
+this address" control; edit-source reports the standing flag as
+`addressUnverified`); the admin send guard refuses a still-flagged
+estimate with 409 `ADDRESS_UNVERIFIED` since the customer link would not
+render. A staff confirmation stamps a clean verdict on the linked lead
+that outranks the CACHED county audit it answered (a cache-only re-read on
+the next `/calculate` obtains no new evidence); only a profile cached after
+the confirmation may flag the premise again (the lookup stage applies the
+same rule to a cache-hit audit; the audit's own `auditedAt` stamp is the
+evidence time, so a live backfill on a cache hit is fresh), and a cached
+clean answer is evidence from its cache time, so a flag committed after that
+stamp outranks it. A flag on the visitor's own lookup-stage lead is recovered by lead id
+alone (a negative verdict, so a corrected email does not drop it); a
+premise correction on the estimate moves the lead's address columns with
+it; every send claim and the final pre-provider check reassert the block.
+The locked reconciliation runs both ways: a newer
+clean verdict (a staff confirmation, a clean lookup) supersedes a recovered
+flag and a newer flag supersedes a recovered clean verdict, judged by
+timestamps under the contact-pair lock; the visitor's own lead's clean
+verdict is judged on the unit-insensitive premise alone (its locality may
+be incomplete), other leads' need the complete locality. Withdrawn-publication
+verdicts are superseded only after the locked reconciliation, and a flagged rerun withdraws website publications in
+every non-terminal delivery state (sent, viewed, scheduled, sending,
+send_failed) and stamps the block on matching legacy quote-wizard rows
+(any of those states or draft) without archiving them; a clean verdict that
+supersedes the warning also lifts the block on those unarchived legacy
+rows; `/calculate` re-reconciles under the
+contact-pair lock again right before it persists a draft verdict (a flag
+committed meanwhile is carried onto the draft, never overwritten by a
+stale clean marker); a lookup whose verdict/quarantine transaction rolls
+back answers 503, never a successful lookup; the lookup stage
+re-reconciles the contact pair under the lock before publishing (a newer
+clean verdict outranks a cached audit) and takes the advisory lock before
+any estimate row lock, the same order the booking confirm uses; it
+applies the same quarantine when it persists a flagged verdict
+(`services/website-quote-withdrawal.js`). A premise correction on the
+estimate moves the linked customer through the established address-change
+path (coordinates cleared, primary property synced, snapshots fanned out,
+guarded re-geocode after commit) when that customer still lived at the
+rejected premise. A roll that never answered (GIS
+outage) is not a fresh flag — but it does not clear one either: the prior
+server-written flag for the same address carries forward until the roll
+answers clean, and an existing draft's own `addressUnverified` marker is
+carried over under its row lock (handoff withheld) when the run got no
+roll answer and the draft's address is unchanged.
 Request shape: either `services` keyed by the engine
 keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 `serviceKey` / `service_key` from the `/api/public/services/menu` payload,
@@ -962,6 +1100,24 @@ lookup-measured or customer-confirmed lot (owner ruling 2026-09-03; the
 recurring program joined this contract then, so a direct-API caller that
 posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
 quote where it previously received a price)).
+
+Keyed quote-on-request (a catalog `serviceKey`/`service_key` whose row is
+`public_quote_selectable=true` but carries NO `PUBLIC_QUOTE_REQUESTS` entry,
+`services/public-services-menu.js`): the route skips the pricing engine
+entirely and calls `quoteOnRequestEstimate` (`routes/public-quote.js`) —
+the lead is captured with `leads.service_key` + `service_interest` set to
+the catalog name verbatim, zero totals, no self-book handoff — and the
+response is `202 { quote_required: true, service, reason:
+'quote_on_request', service_interest, message }`. `message` is a generic
+"{catalog name} is priced by our team, not the calculator — we'll send
+your estimate shortly." UNLESS the key carries its own service-specific
+copy. `mosquito_misting_system` (Mosquito Misting System Service, catalog
+row `20260924000020_mosquito_misting_catalog_row`; no engine pricer —
+misting is quoted after an on-site design visit) is the one keyed
+exception today: its `message` is "Mosquito misting systems are designed
+and priced on site — we'll call to schedule your free design visit."
+instead of the generic copy. No pricing, no self-book slot, no new auth
+surface — additive response-copy branching only.
 
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
@@ -1592,6 +1748,153 @@ booking window, READ-ONLY, no raw query logging. Generic 404 for
 bad/unknown tokens and while the gate is off. Treat the reservice token,
 the lane-eligibility gates, and the $0/is_callback commit contract as
 security-critical).
+`/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
+`POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
+with Adam" consultation link — booking.js's free Waves Assessment (owner
+ruling 2026-09-08: an assessment is NOT a win, `services/assessment-
+booking.js`) for a lead, modeled directly on reservice-public's shell and
+anti-forgery model but scoped to a LEAD rather than a standing customer
+token. Whole surface is dark behind GATE_LEAD_INSPECTION_LINK
+(`leadInspectionLinkLive()`, fail-closed `==='true'` in every env — every
+route 404s while off). Token: `mintLeadConsultationToken` /
+`verifyLeadConsultationToken` (`utils/lead-consultation-token.js`) — a
+14-day HMAC namespaced `lead-consultation:` (never interchangeable with the
+lead-prefill token) carrying the lead id IN the token
+(`<leadId>.<exp>.<sig>`, or `<leadId>.<exp>.<channel>.<sig>` when minted
+with an optional signed `channel` claim — the only claim
+`leadContactVerified` trusts is the phone-bound `smsChannelFor(lead.phone)`
+value (`sms-<digest of the phone's last ten digits>`), which
+`buildLeadConsultationLink(id, { channel: 'sms' })` signs from the freshly
+loaded lead phone; a bare `'sms'` claim is rejected, and a claim for any
+other phone stops counting once the lead's phone changes. Omitted by
+default, which is UNVERIFIED delivery), so no DB lookup is needed to resolve
+identity. A
+well-formed but past-TTL token answers 200 `{ state: 'expired' }` (re-
+verified with the TTL check isolated to nowSec=0, which never trips since
+`exp` is always minted positive); a malformed/mis-signed token 404s. 60
+req/min router limit, 10 req/min on the commit POST, 15 req/min on
+find-slots/availability/waitlist, noStore privacy headers, and the SPA
+shell (`/inspection/<token>`) carries noindex/no-referrer/no-store via
+sensitive-spa-headers. GET returns `{ state, lead: { first_name,
+phone_masked, has_address, address_display }, visit?, availability?,
+rescheduleUrl?, county?, service_area_unavailable? }`. States: `ok`;
+`already_booked` (the lead's linked customer already has an open,
+non-terminal Waves Assessment visit — hands back that visit's
+`/reschedule/:token` URL via `services/reschedule-link.js`); `converted`
+(the lead converted, or already has a future booked NON-assessment visit —
+same shape as already_booked); `gone` (lead deleted/missing); `out_of_area`
+(a resolved address — commonly the linked customer's own stored one — sits
+outside the service area; 200, not an error, since the page still has to
+render the out-of-area stop card with the waitlist prompt: `{ state:
+'out_of_area', county, lead, waitlist_ticket }`, no `availability` key at
+all). Availability
+needs coordinates (the linked customer's stored coords, else a geocode of
+whichever address is on file); with none resolvable, `availability: null`
+and `needs_address: true` — the page asks for an address via `POST
+/:token/availability { address }` (not persisted by the availability
+call; the commit persists the validated, in-area address onto the customer
+in its phase 1 and KEEPS it even if the booking attempt then fails — owner
+ruling 2026-09-24, since undoing it raced concurrent bookings that had
+already adopted it; a retry with a different address writes that one)
+before showing times. GET is routed through the SAME
+`finalizeBookingLocation` every other producer of a booking location in
+this file uses (resolveServiceAddress wrapped by checkServiceArea) — a
+stored address that resolves is never taken as "covered" without also
+clearing the area check (Codex pre-push P1, 2026-09-24: GET previously
+called resolveServiceAddress directly and could answer `needs_address:
+false` with an empty calendar for an out-of-area stored address instead of
+stopping the page). When the area check itself can't run (Google key
+configured, county lookup returns null/throws), GET stays at `state: 'ok'`
+with `lead`, `needs_address: false`, `availability: null`, and
+`service_area_unavailable: true` — recoverable, not a verdict either way,
+so the page shows a retry message where the calendar would be rather than
+an empty one. `POST /:token/find-slots` is the same natural-language search
+reservice uses, READ-ONLY, same booking-window clamp on both ends, and
+(same P1) is likewise routed through `finalizeBookingLocation` rather than
+a raw `resolveServiceAddress` — a directly supplied out-of-area address
+422s `{ error: 'out_of_area', county, waitlist_ticket }` or 503s
+`{ error: 'service_area_unavailable' }` instead of returning slot
+availability for a location that could never survive the commit handler's
+own area check. `resolveServiceAddress` and `checkServiceArea` have no
+callers anywhere in this file outside `finalizeBookingLocation`'s own body
+— a structural test on the route file's source enforces it. `POST
+/:token` commit:
+body `{ date, time, address?, notes? }`; idempotent — a lead whose customer
+already holds an open assessment short-circuits to the SAME `already_booked`
+shape (200, before geocoding or creating anything) instead of a second
+visit. Address required only when neither the lead nor its (existing)
+customer has one on file (`resolveServiceAddress`: stored address wins only
+when it actually geocodes — never merely by being present — else a
+supplied one is tried), parsed with `parseRawAddress` and geocoded with
+street-level quality filtering but `requireInServiceArea:false` (the box
+alone is never grounds to discard a geocode as unresolvable); checked
+against the service area via `checkServiceArea`, applied uniformly to every
+resolved location including a customer's stored coordinates: county via
+`services/address-validation`'s `reverseGeocodeCounty` when a Google key is
+configured (a null county is NOT permission — 503
+`{ error: 'service_area_unavailable' }`, recoverable), else the box test
+`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
+address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
+The slot is re-validated against a fresh single-day
+availability build (same anti-forgery model as reservice-public) before
+committing through `createSelfBooking`'s `callbackVisit` option with
+`isCallback: false` and `dedupeLane` left at its default (on). booking.js
+skips the funnel's signed-offer/card-capture/ad-attribution/customer-promotion
+machinery like a re-service callback, without setting `is_callback`. The lane
+dedupe runs on a dedicated `assessment` lane (`laneForCallbackRow` in
+`services/reservice-scheduler.js` classifies `lawn_inspection` before the
+pest/lawn cases): the check and the insert share one transaction under
+`pg_advisory_xact_lock(['reservice-lane', customerId:assessment])`, so two
+concurrent commits at different slots can never both book, and an unrelated
+open pest/lawn re-service never false-hits. A duplicate returns the same
+`already_booked` shape GET does. The lead gets
+(or keeps) a customer row and is linked (`leads.customer_id`) but nothing
+else on the lead changes — status/pipeline_stage/converted_at/member_since
+all stay untouched (`promoteCustomerOnBooking`'s own
+`isAssessmentServiceType` guard, matching `admin-leads.js`'s identical
+assessment posture). A lead that is ALREADY linked to a customer
+(`leads.customer_id`) is trusted only when the link is proven
+(`loadTrustedCustomer`): the lead's contact is verified (below) AND the
+linked customer's phone is the lead's own — `customer_id` alone is never
+proof, since public-quote.js links quote leads to existing customers from
+unverified submitted contact info. An unproven link is treated as no link:
+none of that customer's address, visits or reschedule links are returned,
+and a booking goes onto a separate prospect while the existing link is left
+untouched. An unlinked lead whose phone matches an existing
+customer (`leadContactVerified`) only reuses that customer when the phone
+is independently corroborated and still the lead's CURRENT phone — an
+inbound-call lead whose phone equals its originating `call_log.from_phone`,
+or an SMS-delivered token whose signed `channel` claim is `smsChannelFor`
+of this exact phone — never a bare public-form
+submission; otherwise it always gets its own separate prospect profile and
+never sees another customer's visit data, reschedule URL, or booking
+(Codex pre-push P1, 2026-09-24). The free-text note rides
+`scheduled_services.internal_notes` (never `notes`, which is customer/tech
+visible) via a best-effort post-commit update. `SLOT_TAKEN` 409 mirrors
+reservice-public's shape (fresh `availability` attached). Office alert:
+`createSelfBooking`'s internal Twilio alert with `alertLabel` swapped to
+"🔁 Free consultation self-booked:" — no customer comms beyond
+`createSelfBooking`'s own standard confirmation. `POST /:token/waitlist`
+(the out-of-area stop's one-field ask): body `{ email, waitlist_ticket }`.
+`waitlist_ticket` is the short-lived (1h) HMAC ticket minted ONLY with a
+server-verified out-of-area answer (GET `out_of_area`, or the
+`/availability`, `/find-slots` and commit 422s above), binding this lead
+and the region the server found; a caller-supplied `county` is ignored.
+No/invalid/expired ticket, another lead's ticket, or a lead no longer
+eligible (closed, converted, already booked) → the generic 404 and nothing
+is written. With a valid ticket it inserts
+(idempotent on email, `onConflict('email').ignore()`) a
+`newsletter_subscribers` row tagged `expansion_waitlist:<county>` at status
+`waitlist` (deliberately not `active` — buildSubscriberQuery selects
+status='active' with no source exclusion, so an active row would enrol in
+ordinary newsletter sends and this token never proved ownership of the
+typed email; deliberately not `pending` either — that status has its own
+live double-opt-in meaning elsewhere, incl. a future admin CSV import
+queuing it a real confirmation email); no email sent. Generic 404 for
+bad/unknown tokens and while the gate is off. Treat the lead-consultation
+token, the assessment-not-a-win invariant, and the out-of-area/no-booking
+contract as security-critical).
 `/api/reviews/featured` (read-only public featured Google reviews for the
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).

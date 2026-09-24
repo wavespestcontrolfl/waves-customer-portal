@@ -342,6 +342,42 @@ async function buildReferralLink(customerId) {
   };
 }
 
+/**
+ * Consultation link (lead-inspection-link-scope.md §4) for the Insert Link
+ * sheet's `consultation` kind. The composer has no lead picker of its own,
+ * so the row it inserts for is the resolved customer's newest non-deleted,
+ * still-OPEN lead (leads.customer_id = customerId, applyOpenLeadPredicate
+ * — lead-statuses.js's canonical status IN OPEN_LEAD_STATUSES AND
+ * converted_at IS NULL, pre-push Codex P1: an existing customer's won/lost
+ * lead must never mint a free-consultation invitation). No caller-supplied
+ * lead override (Codex #4709 r15 P2): the composer never sends one, and a
+ * lead-scoped send belongs on the Leads page. Renders the same
+ * admin-editable lead_consultation_link SMS template the Leads page action
+ * uses (buildLeadConsultationSmsLine) so both surfaces send identical copy
+ * and never drift.
+ */
+async function buildConsultationLink(customerId) {
+  const { buildLeadConsultationSmsLine } = require('./lead-consultation-link');
+  const { applyOpenLeadPredicate } = require('./lead-statuses');
+  const lead = await applyOpenLeadPredicate(
+    db('leads').where({ customer_id: customerId }).whereNull('deleted_at')
+  )
+    .orderBy('created_at', 'desc')
+    .first('id', 'first_name', 'phone');
+  if (!lead) return { url: null, line: '', reason: 'No lead on file for this customer' };
+  // Codex #4709 r4 P2: the send check requires the lead's own phone to be
+  // the destination (this customer's number). Refuse before minting rather
+  // than hand back an unsendable draft and a live, unused short code.
+  const destination = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('phone');
+  if (!digitsLast10(destination?.phone) || digitsLast10(lead.phone) !== digitsLast10(destination.phone)) {
+    return { url: null, line: '', reason: "This lead's phone differs from the customer's number — send the link from the Leads page" };
+  }
+  // The chosen lead rides back so the composer's send can bind the link to
+  // it even with customer context (Codex #4709 r9 P1).
+  const built = await buildLeadConsultationSmsLine(lead.id, lead.first_name);
+  return built?.url ? { ...built, leadId: lead.id } : built;
+}
+
 // Every skip requestAutopaySetupLink can return, phrased for the composer
 // (same vocabulary as cardLinkStatus.describeAutopaySetupLinkResult on the
 // Customers page — one plain sentence per outcome, unknown reasons stay
@@ -472,6 +508,91 @@ const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 function decodedRuns(body) {
   return String(body || '').split(/\s+/).filter(Boolean).map(decodeLinkText);
 }
+// A URL fragment percent-decoded until stable (bounded) — a wrapper may
+// encode the inner link more than once.
+// Until stable, not a fixed depth (Codex #4709 r19 P1): every pass
+// decodes each %XX escape byte-wise (never throws on a malformed sequence,
+// so one bad escape cannot shield the rest), and each pass that changes
+// the text shortens it, so the loop is bounded by the input length; the
+// cap is a backstop. Callers treat escapes that SURVIVE as fail-closed
+// (stillEncoded).
+const DECODE_PASS_CAP = 64;
+function fullyDecoded(text) {
+  let out = String(text || '');
+  for (let i = 0; i < DECODE_PASS_CAP; i += 1) {
+    const next = out.replace(/%([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+function stillEncoded(text) {
+  return /%[0-9a-f]{2}/i.test(text);
+}
+// A consultation credential ANYWHERE in the message other than a canonical
+// owned consultation link (Codex #4709 r12–r17 P1 — widened after four
+// rounds of URL-shape gaps: path, query, fragment, hostname, userinfo, no
+// trailing slash, candidate cap). No URL parsing decides what is scanned:
+// every whitespace run that is not itself a canonical owned /l/<code> or
+// /inspection/<token> link is fully percent-decoded and split into
+// token-shaped pieces (dots split too, so hostname labels are pieces), and
+// EVERY piece is checked — signed tokens by signature, short codes in one
+// batched short_codes lookup per 500 candidates, never truncated. A hit
+// means the bearer rides somewhere other than a link the send check
+// validates, so the send is refused.
+// short-url.js generateCode's ambiguity-free alphabet; consultation codes
+// are 10–11 chars of it with no prefix.
+// A run on a host we own is scanned without that host (our own hostname
+// cannot carry a bearer, and its labels are code-shaped); any other run is
+// scanned whole.
+function ownedHostStripped(run, hosts) {
+  try {
+    const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
+    if ([].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, '')) && !url.username && !url.password) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+  } catch { /* not a URL — scanned whole */ }
+  return run;
+}
+const CODE_ALPHABET_RUN_RE = /[a-hjkmnp-z2-9]{10,}/gi;
+// A signed consultation token's shape: <leadId>.<exp>[.<channel>].<43-char
+// base64url signature>; the lead id is tried whole and as its trailing
+// uuid, so a prefix glued onto it cannot hide the token.
+const SIGNED_TOKEN_RE = /([A-Za-z0-9-]+)(\.\d{9,11}(?:\.sms-[0-9a-f]{16})?\.[A-Za-z0-9_-]{43})/g;
+async function strayConsultationCredentialPresent(runs, hosts) {
+  const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
+  const codes = new Set();
+  for (const raw of runs) {
+    const run = raw.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, '');
+    const canonical = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME)
+      || canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME);
+    if (canonical) continue;
+    const decoded = fullyDecoded(ownedHostStripped(run, hosts));
+    // Escapes that survive the cap could still hide a bearer — refuse.
+    if (stillEncoded(decoded)) return true;
+    // Signed tokens by their own fixed shape ANYWHERE in the text (Codex
+    // #4709 r20 P1): uuid.exp[.channel].43-char signature, so affixes glued
+    // on either side never hide one.
+    for (const m of decoded.matchAll(SIGNED_TOKEN_RE)) {
+      if (verifyLeadConsultationToken(m[0], 0) || verifyLeadConsultationToken(`${m[1].slice(-36)}${m[2]}`, 0)) return true;
+    }
+    // Short codes: every 10- and 11-char window of every run of the code
+    // alphabet (r20 P1 — "<code>_go", "x<code>" and the like).
+    for (const m of decoded.matchAll(CODE_ALPHABET_RUN_RE)) {
+      const text = m[0].toLowerCase();
+      for (const len of [10, 11]) {
+        for (let i = 0; i + len <= text.length; i += 1) codes.add(text.slice(i, i + len));
+      }
+    }
+  }
+  const all = [...codes];
+  for (let i = 0; i < all.length; i += 500) {
+    const rows = await db('short_codes').whereIn('code', all.slice(i, i + 500)).where({ kind: 'consultation' }).select('code', 'kind');
+    if ((rows || []).some((r) => r.kind === 'consultation')) return true;
+  }
+  return false;
+}
+
 function linkRuns(runs, fragmentRe) {
   return runs
     .filter((run) => fragmentRe.test(run))
@@ -742,7 +863,13 @@ async function shortRowDestination(row, hosts) {
   if (payTarget && (row.kind === 'receipt' || await payLinkOpensReceipt(payTarget))) {
     return { kind: 'receipt', token: payTarget, payTarget: true };
   }
-  if (['appointment', 'service_report', 'receipt'].includes(row.kind)) return { kind: row.kind, token: null };
+  // Consultation is always short-wrapped (buildLeadConsultationLink never
+  // hands out the long /inspection/:token form), so its own target never
+  // matches a regex above — trusted by row.kind like the other three,
+  // token: null since there is nothing further to re-verify here (this
+  // fence only needs presence; consultation carries no account-bound
+  // send-time re-check the way appointment/service_report/receipt do).
+  if (['appointment', 'service_report', 'receipt', 'consultation'].includes(row.kind)) return { kind: row.kind, token: null };
   return null;
 }
 // /l/:code answers 410 past expires_at (public-shortlinks) — the same
@@ -802,6 +929,18 @@ async function immediateOnlyLinkSendCheck(body) {
   if (appointmentLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Appointment page' };
   if (reportLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Service report' };
   if (shortRows.some((row) => row.kind === 'receipt')) return { present: true, label: 'Receipt' };
+  // Consultation's 14-day token TTL (pre-push Codex P1): the short form by
+  // short_codes.kind like appointment/service_report/receipt above, AND a
+  // pasted long /inspection/<token> URL (local audit P1 on #4709 r5 — the
+  // send-time check reads both, so the fence must too). Presence only: any
+  // owned-host /inspection/ path parks the message, valid token or not.
+  if (shortRows.some((row) => row.kind === 'consultation')) return { present: true, label: 'Consultation link' };
+  if (linkRuns(runs, /\/inspection\//i).some((run) => canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME))) {
+    return { present: true, label: 'Consultation link' };
+  }
+  // ...and a consultation credential anywhere in a FOREIGN URL (Codex #4709
+  // r12–r15 P1): parked here so the send-time check refuses it.
+  if (await strayConsultationCredentialPresent(runs, hosts)) return { present: true, label: 'Consultation link' };
   return { present: false };
 }
 
@@ -1281,6 +1420,197 @@ async function checkContractLinks(ctx, contracts) {
   return null;
 }
 
+// Consultation short codes, re-checked at the actual SEND boundary (pre-push
+// Codex P1) — distinct from immediateOnlyLinkSendCheck/scheduledSmsLinkRefusal,
+// which only fence SCHEDULING it (never re-run at delivery, since the
+// scheduler and draft approve/revise dispatch straight into
+// sendCustomerMessage). An immediate send still needs the insert-time mint
+// re-verified now: the gate can flip off, the lead can close/convert, or
+// (rare, given the 14-day TTL) the token itself can expire between insert
+// and send. Exported and called from BOTH routes that can carry one — this
+// file's own bearerLinkSendCheck (POST /admin/communications/sms) and
+// admin-leads.js's POST /:id/send-sms, which has no OTHER bearer link kind
+// to check and so calls this directly rather than the whole
+// bearerLinkSendCheck (which needs customer/account context this route
+// doesn't have). Always short-wrapped (buildLeadConsultationLink never
+// hands out the long /inspection/:token form), so presence is judged by
+// short_codes.kind like the scheduling fence judges it, never a long-form
+// path regex. Binds by the LAST TEN DIGITS of the recipient — the same
+// primitive every other bearer check in this file binds by — rather than a
+// customerId/leadId param, so the identical check works unmodified from
+// either route: the consultation lead's OWN phone must be the destination.
+// Every consultation link a body carries, short OR long form (empty when
+// none). Short /l/ codes resolve through short_codes; a pasted long
+// /inspection/<token> URL (Codex #4709 r5 P1 — e.g. copied after opening
+// the short link in a browser) is verified directly. Each entry is
+// { lead_id, expired, invalid }: a long-form token on our host that fails
+// its signature is `invalid`, never ignored.
+async function consultationLinkRows(body) {
+  const runs = decodedRuns(body);
+  const hosts = ownedPortalHosts();
+  // An explicit http:// link is remembered as plaintext (Codex #4709 r7
+  // P2): the 14-day bearer would ride the first unencrypted request before
+  // any HTTPS redirect, so the send check refuses it.
+  const isPlaintext = (run) => /^http:\/\//i.test(run);
+  const shortRuns = linkRuns(runs, /\/l\//i);
+  const codes = [...new Set(
+    shortRuns
+      .map((run) => canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME))
+      .filter(Boolean)
+      .map((code) => code.toLowerCase())
+  )];
+  const plaintextCodes = new Set(shortRuns.filter(isPlaintext)
+    .map((run) => canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, ANY_SCHEME))
+    .filter(Boolean)
+    .map((code) => code.toLowerCase()));
+  const rows = [];
+  if (codes.length) {
+    const shortRows = await db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id', 'target_url');
+    const { verifyLeadConsultationToken: verifyTarget } = require('../utils/lead-consultation-token');
+    for (const row of shortRows) {
+      // The redirect's own signed target, re-verified at send (Codex #4709
+      // r19 P2): a rotated signing secret leaves the short row live while
+      // the /inspection token it points at no longer verifies.
+      const targetToken = (/\/inspection\/([A-Za-z0-9._-]+)/.exec(String(row.target_url || '')) || [])[1];
+      const signed = targetToken ? verifyTarget(targetToken, 0) : null;
+      rows.push({
+        lead_id: row.lead_id,
+        expired: expiredShortRow(row) || Boolean(signed && !verifyTarget(targetToken)),
+        invalid: !signed || String(signed.leadId) !== String(row.lead_id),
+        plaintext: plaintextCodes.has(String(row.code).toLowerCase()),
+      });
+    }
+  }
+  // A consultation bearer anywhere inside a URL on a host we do NOT own is
+  // refused outright: the third party could harvest the 14-day bearer.
+  if (await strayConsultationCredentialPresent(runs, hosts)) {
+    rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
+  }
+  const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
+  const longRuns = linkRuns(runs, /\/inspection\//i);
+  const tokenRuns = longRuns
+    .map((run) => ({ run, token: canonicalPortalToken(run, hosts, /^\/inspection\/([A-Za-z0-9._-]+)$/i, ANY_SCHEME) }))
+    .filter((t) => t.token);
+  if (tokenRuns.length) {
+    for (const { run, token } of tokenRuns) {
+      const signed = verifyLeadConsultationToken(token, 0); // signature only, expiry ignored
+      rows.push(signed
+        ? { lead_id: signed.leadId, expired: !verifyLeadConsultationToken(token), invalid: false, plaintext: isPlaintext(run) }
+        : { lead_id: null, expired: false, invalid: true, plaintext: isPlaintext(run) });
+    }
+  }
+  return rows;
+}
+
+// Codex #4709 r3 P1: the composer route checks this BEFORE its phone-only
+// recruiting diversion, so a consultation text never rides an applicant
+// thread past the consultation checks.
+async function bodyCarriesConsultationLink(body) {
+  return (await consultationLinkRows(body)).length > 0;
+}
+
+// Per-row refusals for a consultation link's own state, in order.
+const CONSULTATION_ROW_REFUSALS = [
+  { fails: (row) => row.foreignHost, message: 'This consultation link is wrapped in another website\'s address — remove it and insert a fresh one.' },
+  { fails: (row) => row.plaintext, message: 'Consultation links must use https — remove the http:// link and insert a fresh one.' },
+  { fails: (row) => row.invalid, message: 'This consultation link is not valid — remove it and insert a fresh one.' },
+  { fails: (row) => row.expired, message: 'This consultation link has expired — remove it and insert a fresh one.' },
+  { fails: (row) => !row.lead_id, message: 'This consultation link no longer resolves to a lead — remove it and insert a fresh one.' },
+];
+
+// A lead linked to a customer: that customer must be live, still on this
+// phone, and the one selected for the send. Null when the lead has none.
+async function linkedCustomerRefusal(lead, toLast10, ctx) {
+  if (!lead.customer_id) return null;
+  // A lead linked to a customer must still be reachable at that customer's
+  // CURRENT phone (Codex #4709 r10 P1): a stale or reassigned intake
+  // number must never carry this lead's bearer to whoever owns it now.
+  const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
+  // An archived (soft-deleted) linked customer fails closed too (Codex
+  // #4709 r11 P1): the lead's retained number may belong to someone
+  // else by now.
+  if (!owner) {
+    return refuseSend("This lead's customer record is archived — update the lead before sending the consultation link.");
+  }
+  // Full identity (Codex #4709 r19 P1): the destination is US-only (the
+  // bearer rule), so its identity is its last ten; an international owner
+  // number sharing them is a different phone.
+  const { phoneIdentityKey } = require('../utils/phone');
+  if (phoneIdentityKey(owner.phone) !== String(toLast10 || '')) {
+    return refuseSend("This lead's customer has a different phone on file now — update the lead before sending the consultation link.");
+  }
+  // A shared phone must not let one customer's lead bearer ride another
+  // customer's send (Codex #4709 r14 P1): the selected customer is the
+  // lead's own.
+  if (ctx?.trustedCustomerId && String(ctx.trustedCustomerId) !== String(lead.customer_id)) {
+    return refuseSend('This consultation link belongs to a different customer — remove it before sending.');
+  }
+  return null;
+}
+
+// expectedLeadId (Codex #4709 r3 P1): when the sending route knows which
+// lead it is texting (the Leads page's /:id/send-sms, or the composer's
+// lead-only leadId), every consultation link in the body must belong to
+// THAT lead. Two open leads sharing a phone otherwise let lead A's bearer
+// go out while the activity lands on lead B.
+// usDestination (Codex #4709 r5 P1): the standalone Leads send path has no
+// bearerLinkSendCheck around it, so it passes its own destination verdict
+// and the shared US-only rule is enforced here; bearerLinkSendCheck callers
+// get it from that function instead (ctx.bearers).
+async function checkConsultationLinkSend(body, toLast10, ctx = null, expectedLeadId = null, { usDestination = true } = {}) {
+  const rows = await consultationLinkRows(body);
+  if (!rows.length) return null;
+  const { leadInspectionLinkLive } = require('../config/feature-gates');
+  if (!leadInspectionLinkLive()) {
+    return refuseSend('Consultation links are switched off (GATE_LEAD_INSPECTION_LINK) — remove the link before sending.');
+  }
+  if (!ctx && !usDestination) return refuseSend(NON_US_REFUSAL);
+  // The template kill switch, re-read at the send (Codex #4709 r5 P1): an
+  // admin disabling lead_consultation_link after a link was inserted stops
+  // the stale draft too. Missing, inactive or unreadable fails closed.
+  try {
+    const template = await db('sms_templates').where({ template_key: 'lead_consultation_link' }).first('is_active');
+    if (!template || template.is_active === false) {
+      return refuseSend('The consultation text template is switched off — remove the link before sending.');
+    }
+  } catch (err) {
+    logger.warn(`[composer-customer-links] consultation template check failed: ${err.message}`);
+    return refuseSend('Could not confirm the consultation text template — try again in a moment.');
+  }
+  // Send-time keep-list check (Codex #4709 r4 P1): both composers are
+  // editable, so the operator can delete the STOP line after inserting the
+  // link. Same hasStopLine the template save and render checks use.
+  if (!require('../routes/admin-sms-templates').hasStopLine(body)) {
+    return refuseSend('Consultation texts must keep "Reply STOP to opt out." — add it back before sending.');
+  }
+  const { isOpenLeadRow } = require('./lead-statuses');
+  for (const row of rows) {
+    const rowRefusal = CONSULTATION_ROW_REFUSALS.find((rule) => rule.fails(row));
+    if (rowRefusal) return refuseSend(rowRefusal.message);
+    const lead = await db('leads').where({ id: row.lead_id }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at', 'customer_id');
+    if (!lead || !isOpenLeadRow(lead)) {
+      return refuseSend('This lead has already converted or closed — remove the consultation link before sending.');
+    }
+    const ownerRefusal = await linkedCustomerRefusal(lead, toLast10, ctx);
+    if (ownerRefusal) return ownerRefusal;
+    if (require('../utils/phone').phoneIdentityKey(lead.phone) !== String(toLast10 || '')) {
+      return refuseSend('This consultation link belongs to a different lead — remove it before sending.');
+    }
+    if (ctx) ctx.consultationLeadIds = [...new Set([...(ctx.consultationLeadIds || []), String(row.lead_id)])];
+    if (expectedLeadId && String(row.lead_id) !== String(expectedLeadId)) {
+      return refuseSend('This consultation link was made for a different lead — remove it and insert a fresh one.');
+    }
+    // Pre-push Codex P1: a verified consultation link is a bearer like any
+    // other — omitted from ctx.bearers, it silently skipped the shared
+    // non-US-destination rejection and customer-owner recovery below. ctx is
+    // only supplied by bearerLinkSendCheck; the standalone call from
+    // admin-leads.js's lead-only send-sms route (no customer/owner recovery
+    // to run there) passes none.
+    if (ctx) ctx.bearers += 1;
+  }
+  return null;
+}
+
 // Visit-lane card request links (kind 'visit'; the Auto Pay seam judges kind
 // 'customer'): status must still be pending, never texted, owned by the
 // recipient, AND the canonical funnel (requestCardForAppointment, inline)
@@ -1334,7 +1664,9 @@ async function checkCardLinks(ctx, cards) {
 // would pass ownership and even adopt that customer while the provider
 // texts the other country (GH Codex #3844 r10 P1) — a bearer never goes to
 // a non-US destination.
-async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestination = true, contractId = null } = {}) {
+async function bearerLinkSendCheck(body, toLast10, {
+  trustedCustomerId, usDestination = true, contractId = null, expectedLeadId = null,
+} = {}) {
   const ctx = {
     runs: decodedRuns(body),
     body,
@@ -1344,6 +1676,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     usDestination,
     bearers: 0, // verified bearers seen — the owner rule below applies to any
     contractId,
+    expectedLeadId,
   };
   const cards = [];
   const contracts = [];
@@ -1356,12 +1689,22 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     () => checkStatementLinks(ctx, statements),
     () => checkAccountBoundLinks(ctx, projectReports),
     () => checkCardLinks(ctx, cards),
+    // Pre-push Codex P1: consultation is lead-bound, not account-bound —
+    // checked by destination phone alone (ctx.toLast10), independent of
+    // ctx.trustedCustomerId, so this same check works unmodified from the
+    // lead-only /admin/leads/:id/send-sms route too (see that route).
+    () => checkConsultationLinkSend(ctx.body, ctx.toLast10, ctx, ctx.expectedLeadId),
   ];
   for (const check of checks) {
     const refusal = await check();
     if (refusal) return refusal;
   }
   if (ctx.bearers && !ctx.usDestination) return refuseSend(NON_US_REFUSAL);
+  // One text, one consultation lead (Codex #4709 r20 P2): links for two
+  // leads would leave neither auditable and compete in one message.
+  if ((ctx.consultationLeadIds?.length || 0) > 1) {
+    return refuseSend('This text has consultation links for more than one lead — keep just one and send again.');
+  }
   const out = {
     ok: true,
     ...(cards.length ? { cards } : {}),
@@ -1369,6 +1712,9 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     ...(statements.length ? { statements } : {}),
     ...(preps.length ? { preps } : {}),
     ...(projectReports.length ? { projectReports } : {}),
+    // The one lead a validated consultation link belongs to (Codex #4709
+    // r13 P2) — so a pasted link still gets its lead outreach bookkeeping.
+    ...(ctx.consultationLeadIds?.length === 1 ? { consultationLeadId: ctx.consultationLeadIds[0] } : {}),
   };
   // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
   // goes to a phone that may be a customer's, and /sms applies that
@@ -2300,11 +2646,14 @@ module.exports = {
   resolveConfirmationEstimate,
   appendEstimateAcceptLine,
   buildReferralLink,
+  buildConsultationLink,
   AUTOPAY_SKIP_REASONS,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
   immediateOnlyLinkSendCheck,
   bearerLinkSendCheck,
+  checkConsultationLinkSend,
+  bodyCarriesConsultationLink,
   markStatementsSent,
   markPrepGuidesSent,
   recheckPrepLinks,

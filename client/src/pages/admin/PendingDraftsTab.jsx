@@ -3,7 +3,8 @@
  *
  * The owner-approval queue for message_drafts rows parked at
  * status='pending' (click follow-ups, campaign/upsell drafts, seasonal
- * reactivation, estimate clarify asks, legacy webhook drafts). The
+ * reactivation, estimate clarify asks, photo-text triage replies, legacy
+ * webhook drafts). The
  * approve/revise/reject API (/api/admin/drafts) has existed since the
  * lanes shipped — this is its first list surface; until now a pending
  * draft was reachable only through a ?draftId= deep link nothing
@@ -17,6 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { adminFetch } from "../../utils/admin-fetch";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 const D = {
   bg: "#F4F4F5",
@@ -34,13 +36,15 @@ const D = {
 
 // Lane = which pipeline parked the draft. campaign_type is authoritative
 // when present (the campaign writers: 'reactivation' | 'upsell'); the
-// click-followup and estimate-clarify writers store NO campaign_type and
-// identify their rows by intent alone (click-followup.js,
-// estimate-clarify-asks.js), and the webhook/reply drafter rows carry only
-// a classifier intent — those fall through to the reply lane.
+// click-followup, estimate-clarify and photo-triage writers store NO
+// campaign_type and identify their rows by intent alone (click-followup.js,
+// estimate-clarify-asks.js, photo-text-triage.js), and the webhook/reply
+// drafter rows carry only a classifier intent — those fall through to the
+// reply lane.
 const INTENT_LANES = {
   click_followup: "click_followup",
   estimate_clarify: "estimate_clarify",
+  photo_triage: "photo_triage",
 };
 
 function laneOf(draft) {
@@ -53,6 +57,7 @@ const LANE_LABELS = {
   upsell: "Upsell",
   reactivation: "Seasonal",
   estimate_clarify: "Estimate clarify",
+  photo_triage: "Photo triage",
   reply_draft: "Reply draft",
 };
 
@@ -70,6 +75,24 @@ function communicationsHref(draft) {
   const to = draft.recipientPhone || draft.customerPhone;
   if (to) params.set("phone", to);
   return `/admin/communications?${params.toString()}`;
+}
+
+const ASSESSMENT_TYPES = new Set(["lawn", "pest"]);
+
+// Photo-triage drafts carry the assessment they were written from
+// (flags.assessment_type / assessment_id, stamped server-side by
+// photo-text-triage.js); the link opens its detail sheet on the
+// assessments page (?open=<type>:<id>). Every other draft renders nothing.
+function AssessmentLink({ draft }) {
+  const type = draft.flags?.assessment_type;
+  const id = draft.flags?.assessment_id;
+  if (draft.intent !== "photo_triage" || !ASSESSMENT_TYPES.has(type) || !id) return null;
+  const params = new URLSearchParams({ open: `${type}:${id}` });
+  return (
+    <a href={`/admin/lawn-assessments?${params.toString()}`} style={{ fontSize: 14, color: D.blue, textDecoration: "none" }}>
+      View assessment
+    </a>
+  );
 }
 
 function timeLabel(value) {
@@ -157,11 +180,15 @@ function ActionButton({ children, onClick, disabled, tone }) {
   );
 }
 
-function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
+function DraftCard({ draft, busy, onApprove, onRevise, onReject, onRevisionStateChange }) {
   const [revising, setRevising] = useState(false);
   const [revisedText, setRevisedText] = useState("");
   const lane = laneOf(draft);
   const toPhone = draft.recipientPhone || draft.customerPhone;
+
+  useEffect(() => () => {
+    onRevisionStateChange(draft.id, false);
+  }, [draft.id, onRevisionStateChange]);
 
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
@@ -205,7 +232,11 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
             <ActionButton tone="primary" disabled={busy || !revisedText.trim()} onClick={() => onRevise(draft, revisedText.trim())}>
               Send revised
             </ActionButton>
-            <ActionButton disabled={busy} onClick={() => { setRevising(false); setRevisedText(""); }}>
+            <ActionButton disabled={busy} onClick={() => {
+              onRevisionStateChange(draft.id, false);
+              setRevising(false);
+              setRevisedText("");
+            }}>
               Cancel
             </ActionButton>
           </div>
@@ -215,7 +246,11 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
           <ActionButton tone="primary" disabled={busy} onClick={() => onApprove(draft)}>
             Approve &amp; send
           </ActionButton>
-          <ActionButton disabled={busy} onClick={() => { setRevising(true); setRevisedText(draft.draftResponse || ""); }}>
+          <ActionButton disabled={busy} onClick={() => {
+            onRevisionStateChange(draft.id, true);
+            setRevising(true);
+            setRevisedText(draft.draftResponse || "");
+          }}>
             Revise
           </ActionButton>
           <ActionButton tone="danger" disabled={busy} onClick={() => onReject(draft)}>
@@ -227,6 +262,7 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
           >
             Open in Communications
           </a>
+          <AssessmentLink draft={draft} />
         </div>
       )}
     </div>
@@ -244,25 +280,61 @@ export default function PendingDraftsTab({ embedded = false }) {
   const [busyId, setBusyId] = useState(null);
   const [laneFilter, setLaneFilter] = useState("all");
   // Monotonic load sequence: a mutation bumps it, and a GET that started
-  // before the bump throws its response away — otherwise a Refresh in
+  // before the bump throws its response away — otherwise a background read in
   // flight across an approve could resolve late and restore the actioned
   // card (already sent/rejected) to the list.
   const loadSeq = useRef(0);
+  const revisionEditRef = useRef({ epoch: 0, openIds: new Set() });
+  const [openRevisionIds, setOpenRevisionIds] = useState(() => new Set());
 
-  const load = useCallback(async () => {
+  const setRevisionOpen = useCallback((draftId, open) => {
+    const current = revisionEditRef.current;
+    if (current.openIds.has(draftId) === open) return;
+    const openIds = new Set(current.openIds);
+    if (open) openIds.add(draftId);
+    else openIds.delete(draftId);
+    revisionEditRef.current = { epoch: current.epoch + 1, openIds };
+    setOpenRevisionIds(openIds);
+  }, []);
+
+  const load = useCallback(async ({ background = false, visibleCount = 0 } = {}) => {
+    const editEpoch = revisionEditRef.current.epoch;
+    const revisionBlocksRefresh = () => background && (
+      editEpoch !== revisionEditRef.current.epoch || revisionEditRef.current.openIds.size > 0
+    );
+    if (revisionBlocksRefresh()) return;
     const seq = ++loadSeq.current;
-    setLoading(true);
+    if (!background) setLoading(true);
     setError(null);
     try {
-      const data = await adminFetch("/admin/drafts?status=pending");
-      if (seq !== loadSeq.current) return; // superseded by a mutation
-      setDrafts(Array.isArray(data?.drafts) ? data.drafts : []);
+      let data = await adminFetch("/admin/drafts?status=pending");
+      const refreshed = [...(Array.isArray(data?.drafts) ? data.drafts : [])];
+      const seen = new Set(refreshed.map((draft) => draft.id));
+      while (background && refreshed.length < visibleCount && data?.nextCursor) {
+        if (seq !== loadSeq.current || revisionBlocksRefresh()) return;
+        const cursor = data.nextCursor;
+        const next = await adminFetch(`/admin/drafts?status=pending&before=${encodeURIComponent(cursor)}`);
+        const older = Array.isArray(next?.drafts) ? next.drafts : [];
+        for (const draft of older) {
+          if (!seen.has(draft.id)) {
+            seen.add(draft.id);
+            refreshed.push(draft);
+          }
+        }
+        data = next;
+        if (next?.nextCursor === cursor || older.length === 0) break;
+      }
+      if (seq !== loadSeq.current || revisionBlocksRefresh()) return;
+      setDrafts(refreshed);
       setPendingCount(Number(data?.pendingCount) || 0);
       setNextCursor(data?.nextCursor || null);
     } catch (err) {
-      if (seq === loadSeq.current) setError(err.message || "Failed to load drafts");
+      if (seq === loadSeq.current && !revisionBlocksRefresh()) {
+        setError(err.message || "Failed to load drafts");
+      }
     } finally {
-      setLoading(false);
+      // The winning read also finishes any foreground load it superseded.
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, []);
 
@@ -272,7 +344,7 @@ export default function PendingDraftsTab({ embedded = false }) {
   // Without paging, older drafts past the first page silently starve.
   const loadOlder = useCallback(async () => {
     if (!nextCursor) return;
-    const seq = loadSeq.current;
+    const seq = ++loadSeq.current;
     setLoadingMore(true);
     try {
       const data = await adminFetch(`/admin/drafts?status=pending&before=${encodeURIComponent(nextCursor)}`);
@@ -294,6 +366,12 @@ export default function PendingDraftsTab({ embedded = false }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  const hasOpenRevision = drafts.some((draft) => openRevisionIds.has(draft.id));
+  useVisiblePageRefresh(() => load({ background: true, visibleCount: drafts.length }), {
+    intervalMs: 30_000,
+    enabled: !loading && !loadingMore && busyId === null && !hasOpenRevision,
+  });
 
   const lanes = useMemo(() => {
     const seen = new Map();
@@ -373,7 +451,7 @@ export default function PendingDraftsTab({ embedded = false }) {
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
-          {loading ? "Loading pending drafts" : `${pendingCount} pending draft${pendingCount === 1 ? "" : "s"}`}
+          {loading && drafts.length === 0 ? "Loading pending drafts" : `${pendingCount} pending draft${pendingCount === 1 ? "" : "s"}`}
           {!loading && drafts.length < pendingCount && (
             <span style={{ fontWeight: 500, color: D.muted }}> (showing {drafts.length})</span>
           )}
@@ -390,24 +468,23 @@ export default function PendingDraftsTab({ embedded = false }) {
             ))}
           </div>
         )}
-        <button
-          type="button"
-          onClick={load}
-          disabled={loading || busyId !== null}
-          style={{ marginLeft: "auto", background: "#FFFFFF", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: "5px 12px", fontSize: 13, fontWeight: 500, cursor: loading ? "default" : "pointer" }}
-        >
-          Refresh
-        </button>
       </div>
 
       {notice && (
         <div style={{ fontSize: 14, color: notice.tone === "ok" ? D.green : D.red }}>{notice.text}</div>
       )}
-      {error && <div style={{ fontSize: 14, color: D.red }}>{error}</div>}
+      {error && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, fontSize: 14, color: D.red }} role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={load} disabled={loading || busyId !== null} style={{ background: "#FFFFFF", color: D.red, border: `1px solid ${D.red}`, borderRadius: 8, padding: "5px 12px", fontSize: 13, fontWeight: 500, cursor: loading ? "default" : "pointer" }}>
+            {loading ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      )}
 
       {!loading && !error && visible.length === 0 && (
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 24, fontSize: 14, color: D.muted }}>
-          No pending drafts. Parked drafts from the click follow-up, campaign, seasonal, and estimate-clarify lanes land here for approval.
+          No pending drafts. Parked drafts from the click follow-up, campaign, seasonal, estimate-clarify, and photo-triage lanes land here for approval.
         </div>
       )}
 
@@ -422,12 +499,13 @@ export default function PendingDraftsTab({ embedded = false }) {
           // EVERY card locks while any mutation is in flight: busyId can
           // name only one draft, so a second action started meanwhile
           // would overwrite it and whichever request finished first would
-          // re-enable Refresh with the other still pending — reopening
+          // re-enable the other cards with one request still pending — reopening
           // the stale-reload window the seq guard closes.
           busy={busyId !== null || loading || loadingMore}
           onApprove={approve}
           onRevise={revise}
           onReject={reject}
+          onRevisionStateChange={setRevisionOpen}
         />
       ))}
 

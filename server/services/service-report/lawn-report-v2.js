@@ -16,6 +16,7 @@ const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-d
 const { buildLawnInsightCards } = require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
+const { photoZoneLabel } = require('../lawn-visit-input');
 
 // Classify an applied product into a customer-facing purpose. Prefers the catalog's
 // approved report summary; falls back to category/active-ingredient heuristics so a
@@ -606,7 +607,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     .slice(0, 6)
     // Label = WHERE the photo was taken (zone) — "Best view" told the
     // customer nothing (owner 2026-07-21); isBest still drives ordering.
-    .map((p) => ({ url: p.url, label: p.zone || null }));
+    .map((p) => ({ url: p.url, label: photoZoneLabel(p.zone) }));
   const photoSummary = String(
     lawnAssessment.observations || lawnAssessment.aiSummary || lawnAssessment.customerSummary || '',
   ).trim() || null;

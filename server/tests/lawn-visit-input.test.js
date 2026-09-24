@@ -66,12 +66,26 @@ describe('photo contract', () => {
     expect(visit.validateVisitPhotos([]).error).toMatch(/at least one/i);
     expect(visit.validateVisitPhotos(Array.from({ length: 7 }, () => photo('a'))).error).toMatch(/at most 6/i);
     expect(visit.validateVisitPhotos([photo('')]).error).toMatch(/base64/i);
-    expect(visit.validateVisitPhotos([photo('a', 'garage')]).error).toMatch(/front, back, side/);
-    expect(visit.validateVisitPhotos([photo('a', 'Front'), photo('b'), photo('c', 'side')])).toEqual({ error: null, zones: ['front', null, 'side'] });
+    expect(visit.validateVisitPhotos([photo('a', 'garage')]).error).toMatch(/front, close_up, trouble/);
+    expect(visit.validateVisitPhotos([photo('a', 'Front'), photo('b'), photo('c', 'trouble')])).toEqual({ error: null, zones: ['front', null, 'trouble'] });
+    expect(visit.validateVisitPhotos([photo('a', 'front'), photo('b', 'front')]).error).toMatch(/only one photo can be the front/i);
+    // Retired zone labels (pre 2026-09-24 rename) are no longer accepted for a
+    // NEW photo upload — no live caller sends them.
+    expect(visit.validateVisitPhotos([photo('a', 'back')]).error).toMatch(/front, close_up, trouble/);
+  });
+
+  test('normalizeDetailZone accepts the current picker plus retired back/side (technician-detail round-trip), never an arbitrary string', () => {
+    expect(visit.normalizeDetailZone('Front')).toBe('front');
+    expect(visit.normalizeDetailZone('back')).toBe('back');
+    expect(visit.normalizeDetailZone('Side')).toBe('side');
+    expect(visit.normalizeDetailZone('roof')).toBeNull();
+    expect(visit.normalizeDetailZone(null)).toBeNull();
   });
 
   test('zone labels drive the stored photo type; the label is the only zone claim', () => {
     expect(visit.photoTypeForZone('front')).toBe('front_yard');
+    expect(visit.photoTypeForZone('close_up')).toBe('close_up');
+    expect(visit.photoTypeForZone('trouble')).toBe('trouble_spot');
     expect(visit.photoTypeForZone(null)).toBe('general');
     expect(visit.photoLabel(0, 'front')).toBe('Photo 1 (front)');
     expect(visit.photoLabel(1, null)).toBe('Photo 2');
@@ -122,4 +136,41 @@ describe('prompt input digest', () => {
     expect(visit.contextHash({ ...original, photos: [{ ...original.photos[0], data: `${unpadded}\n` }] })).toBe(expected);
     expect(visit.contextHash({ ...original, photos: [photo('different bytes')] })).not.toBe(expected);
   });
+});
+
+// One pairing rule feeds both the service report and the customer portal's
+// /api/lawn-health slider (Codex #4768 r1).
+describe('pairBeforeAfterPhotos', () => {
+  const { pairBeforeAfterPhotos } = require('../services/lawn-visit-input');
+  const p = (id, zone = null) => ({ id, zone });
+
+  test('Front pairs with Front even when it is not the best-ranked photo', () => {
+    expect(pairBeforeAfterPhotos([p('b1', 'close_up'), p('b2', 'front')], [p('a1'), p('a2', 'front')]))
+      .toEqual({ before: p('b2', 'front'), after: p('a2', 'front') });
+  });
+
+  test('two close-ups never pair and never fill the fallback', () => {
+    expect(pairBeforeAfterPhotos([p('b', 'close_up')], [p('a', 'close_up')])).toEqual({ before: null, after: null });
+  });
+
+  test('a trouble photo is never the "before" of a front photo', () => {
+    expect(pairBeforeAfterPhotos([p('b', 'trouble')], [p('a', 'front')])).toEqual({ before: null, after: null });
+  });
+
+  test('unlabeled photos fall back best-vs-best, skipping close-up and trouble', () => {
+    expect(pairBeforeAfterPhotos([p('b1', 'trouble'), p('b2')], [p('a1', 'close_up'), p('a2')]))
+      .toEqual({ before: p('b2'), after: p('a2') });
+  });
+
+  test('zoned but disjoint same-spot zones show no after photo', () => {
+    expect(pairBeforeAfterPhotos([p('b', 'front')], [p('a', 'back')])).toEqual({ before: p('b', 'front'), after: null });
+  });
+});
+
+// Customer-facing slot labels (V2 photo strip, Codex #4768): never the raw
+// stored value.
+test('photoZoneLabel turns stored zones into customer wording', () => {
+  const { photoZoneLabel } = require('../services/lawn-visit-input');
+  expect(['front', 'close_up', 'trouble', 'back', 'side', null, 'garage'].map(photoZoneLabel))
+    .toEqual(['Front yard', 'Close-up', 'Trouble spot', 'Back yard', 'Side yard', null, null]);
 });

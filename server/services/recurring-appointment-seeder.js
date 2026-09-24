@@ -720,7 +720,16 @@ async function findActiveRecurringSeries(conn, {
   const targetKey = serviceType ? familyKeyOf(serviceType) : null;
   const matches = [];
   for (const historicalParent of parents || []) {
-    const parent = { ...historicalParent, ...require('./booking/visit-financial-stamps').recurringServiceAddress(historicalParent) };
+    // Classify each candidate by its CURRENT template: a series reassigned
+    // via recurring_template_overrides.service_type/service_id must be
+    // compared as its future service, exactly as the caller's own parent is
+    // (overlayRecurringTemplateOverrides, same gate) — otherwise two roots
+    // can see each other asymmetrically and a guard meant to be symmetric
+    // lets one side refill (codex #4782 r8 P1).
+    const parent = {
+      ...require('./recurring-template-overrides').overlayRecurringTemplateOverrides(historicalParent, columns),
+      ...require('./booking/visit-financial-stamps').recurringServiceAddress(historicalParent),
+    };
     const idMatch = serviceId != null && parent.service_id != null
       && String(parent.service_id) === String(serviceId);
     const keyMatch = targetKey != null && parent.service_type

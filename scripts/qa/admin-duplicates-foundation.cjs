@@ -1,5 +1,5 @@
 'use strict';
-/* global localStorage, document, innerWidth, getComputedStyle */
+/* global window, Event, localStorage, document, innerWidth, getComputedStyle */
 // Actual route, synthetic duplicates only. Every merge/dismiss/revert is mocked.
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path');
@@ -53,8 +53,8 @@ async function main(){
    assert.deepEqual(writes.at(-1),{key:'POST /api/admin/customer-duplicates/dismiss',body:{customerIdA:'qa-keep',customerIdB:'qa-distinct'}});
    await page.getByRole('button',{name:'Undo merge',exact:true}).click();await page.getByRole('alert').filter({hasText:'1 item(s) could not be restored'}).waitFor();
    assert.deepEqual(writes.at(-1),{key:'POST /api/admin/customer-duplicates/merges/qa-journal/revert',body:{}});
-   fail=true;await page.getByRole('button',{name:'Refresh',exact:true}).click();await page.getByRole('alert').filter({hasText:'Synthetic load failure'}).waitFor();
-   fail=false;empty=true;await page.getByRole('button',{name:'Refresh',exact:true}).click();await page.getByText('No duplicate customers pending review.').waitFor();
+   fail=true;await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.getByRole('alert').filter({hasText:'Synthetic load failure'}).waitFor();
+   fail=false;empty=true;await page.getByRole('button',{name:'Try again',exact:true}).click();await page.getByText('No duplicate customers pending review.').waitFor();
    await page.screenshot({path:path.join(output,`empty-${width}.png`),fullPage:true});
    report.scenarios.push({width,controls,confirmationCancellation:true,mergePayload:true,addressConflictGuard:true,partialResultFeedback:true,dismissAndRevert:true,readRecovery:true});
    await context.setOffline(true);await context.close();

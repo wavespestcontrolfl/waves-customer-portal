@@ -117,6 +117,90 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// /confirm's legacy (no-run) branch. Owner ruling 2026-09-24: lawn health
+// scores are READ-ONLY from photos. adjustedScores is honored ONLY for a key
+// the AI's own read left null on this assessment row — a blank AI read is
+// the one thing a technician may fill in. A key the AI DID determine keeps
+// its stored value regardless of what the client sends. Stress/Damage is
+// fixed the same way when AI-known — never re-derived from a component edit,
+// since an AI-known fungus/thatch can't be moved either. Only a genuinely
+// AI-blank Stress accepts a tech entry, falling back to the prior
+// derivation: worst of the fungus + thatch scores and the AI worst-spot
+// floor stored at /assess (which already folds in insect/drought/mechanical
+// and the worst per-photo disease/thatch). Pre-stress_damage rows (null
+// floor) fall back to worst-of(fungus, thatch) — never 0.
+const LEGACY_SCORE_KEYS = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
+// The AI's read for a legacy (no-run) row: the adjusted_scores snapshot /assess
+// wrote (a pending save never rewrites it). A missing or score-less snapshot
+// (very old rows, or a normalized {}) falls back to the columns. One helper
+// for /confirm and the reload response, so the drawer and server agree.
+function legacyAiRead(assessment) {
+  const snapshot = parseJsonObject(assessment.adjusted_scores, null);
+  const hasScores = snapshot && LEGACY_SCORE_KEYS.some((key) => key in snapshot);
+  return hasScores ? snapshot : null;
+}
+function legacyAiScores(assessment) {
+  const aiRead = legacyAiRead(assessment);
+  return Object.fromEntries(LEGACY_SCORE_KEYS.map((key) => {
+    const value = aiRead ? aiRead[key] : assessment[key];
+    return [key, value == null || value === '' ? null : scoreValue(value)];
+  }));
+}
+
+// Whether a legacy Stress is a real value (AI-read or typed now) rather than
+// a derivation — only a real value is stored on a pending save.
+function legacyStressIsFixed(assessment, adjustedScores) {
+  const aiRead = legacyAiRead(assessment);
+  const ai = aiRead ? aiRead.stress_damage : assessment.stress_damage;
+  const typedStress = adjustedScores?.stress_damage;
+  const stressCleared = adjustedScores != null && Object.prototype.hasOwnProperty.call(adjustedScores, 'stress_damage')
+    && !(typedStress != null && typedStress !== '' && Number.isFinite(Number(typedStress)));
+  const earlierEntry = aiRead && !stressCleared && assessment.stress_damage != null && assessment.stress_damage !== '';
+  return (ai != null && ai !== '') || earlierEntry
+    || (typedStress != null && typedStress !== '' && Number.isFinite(Number(typedStress)));
+}
+
+function legacyConfirmFinalScores(assessment, adjustedScores) {
+  // The AI's read is the adjusted_scores snapshot /assess wrote; a pending
+  // save never rewrites it, so a technician's earlier fill (stored in the
+  // columns) stays correctable. Very old rows without a snapshot fall back to
+  // the columns.
+  const aiRead = legacyAiRead(assessment);
+  const aiValue = (key) => (aiRead ? aiRead[key] : assessment[key]);
+  const aiKnown = (key) => aiValue(key) != null && aiValue(key) !== '';
+  // The drawer posts only typed keys, so a key that is neither AI-known nor
+  // typed keeps the earlier saved fill, else stays unknown (null) — never
+  // scoreValue's 0 default.
+  const typed = (key) => adjustedScores?.[key] != null && adjustedScores[key] !== ''
+    && Number.isFinite(Number(adjustedScores[key]));
+  // A key posted as null/blank clears an earlier fill; an omitted key keeps it.
+  const cleared = (key) => adjustedScores != null && Object.prototype.hasOwnProperty.call(adjustedScores, key) && !typed(key);
+  const saved = (key) => (!cleared(key) && assessment[key] != null ? scoreValue(assessment[key]) : null);
+  const finalScores = Object.fromEntries(
+    ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
+      .map((key) => [key, aiKnown(key) ? scoreValue(aiValue(key)) : (typed(key) ? scoreValue(adjustedScores[key]) : saved(key))]),
+  );
+  if (aiKnown('stress_damage')) {
+    finalScores.stress_damage = scoreValue(aiValue('stress_damage'));
+    return finalScores;
+  }
+  if (typed('stress_damage')) {
+    finalScores.stress_damage = scoreValue(adjustedScores.stress_damage);
+    return finalScores;
+  }
+  // A pending save stores Stress only when it is real (AI-read or typed —
+  // legacyStressIsFixed), so a stored Stress the AI didn't read is the
+  // technician's earlier entry: keep it.
+  if (!cleared('stress_damage') && assessment.stress_damage != null && assessment.stress_damage !== '' && !assessment.confirmed_by_tech) {
+    finalScores.stress_damage = scoreValue(assessment.stress_damage);
+    return finalScores;
+  }
+  // Derive from the KNOWN components only, with the 95 floor.
+  const parts = [finalScores.fungus_control, finalScores.thatch_level, 95].filter((v) => v != null);
+  finalScores.stress_damage = Math.min(...parts);
+  return finalScores;
+}
+
 function normalizeProtocolFieldChecks(input = {}) {
   const source = input && typeof input === 'object' ? input : {};
   const errors = [];
@@ -369,9 +453,15 @@ router.post('/assess', async (req, res, next) => {
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
     // Gate on: up to six photos, each optionally labeled with the zone the
-    // technician shot (front / back / side) — the only source of a zone claim.
+    // technician shot (front / close_up / trouble) — the only source of a zone claim.
     const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos) : null;
     if (visitPhotos?.error) return res.status(400).json({ error: visitPhotos.error });
+    // Gate off still records a chosen slot (photoFieldsAt below), so the
+    // one-Front rule is enforced on this path too.
+    if (!visitAssessmentEnabled && Array.isArray(photos)
+      && photos.filter((photo) => visitInput.normalizePhotoZone(photo?.zone) === 'front').length > 1) {
+      return res.status(400).json({ error: 'Only one photo can be the Front photo' });
+    }
 
     // Verify customer exists. The premise AND the move stamp are read in one
     // transaction under the prefs advisory lock — a move committing between
@@ -842,7 +932,15 @@ router.post('/assess', async (req, res, next) => {
     // and the only recorded zone (the report pairs before/after photos by it).
     const photoFieldsAt = visitAssessmentEnabled
       ? (i) => ({ photo_type: visitInput.photoTypeForZone(visitPhotos.zones[i]), zone: visitPhotos.zones[i] })
-      : (i) => ({ photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') });
+      : (i) => {
+        // Gate off: a technician-chosen slot is still recorded (the drawer's
+        // picker is ungated), so close-up/trouble photos stay out of the
+        // report's pairing and fallback. Unlabeled photos keep the legacy
+        // upload-order type.
+        const zone = visitInput.normalizePhotoZone(photos[i]?.zone);
+        if (zone) return { photo_type: visitInput.photoTypeForZone(zone), zone };
+        return { photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') };
+      };
     const photoRecords = [];
     // The stored row per prompt position, with an explicit gap where an
     // insert failed: the run's findings cite 1-based prompt positions, so its
@@ -1040,6 +1138,57 @@ function normalizeStressFlags(input) {
   return { errors, normalized };
 }
 
+// Legacy (no-run) confirmation, mirroring visitRuns.confirmRun: one
+// transaction, same lock order (baseline advisory -> turf profile fence ->
+// assessment row FOR UPDATE), so two sessions filling different AI-blank
+// scores merge instead of overwriting each other. A blank score keeps it
+// pending: scores, notes, flags and checks are saved; nothing is confirmed,
+// no baseline is installed, and adjusted_scores (the AI read) is untouched.
+async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyHistoryEnabled, stressFlags, persistChecks }, knex) {
+  return knex.transaction(async (trx) => {
+    const original = await trx('lawn_assessments').where({ id: assessmentId }).first('customer_id');
+    if (!original) throw Object.assign(new Error('Assessment not found'), { status: 404 });
+    await lawnAssessment.lockCustomerBaseline(original.customer_id, trx);
+    const write = async (conn) => {
+      const assessment = await conn('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+      const finalScores = legacyConfirmFinalScores(assessment, adjustedScores);
+      const missingScores = visitScores.missingScores(finalScores);
+      const pending = missingScores.length > 0;
+      const textUpdate = adjustedScores?.observations != null ? { observations: adjustedScores.observations } : {};
+      const updateData = {
+        ...finalScores,
+        updated_at: new Date(),
+        ...textUpdate,
+        // Persist stress_flags only if any allowed key was sent; {} means
+        // "tech confirmed no flags set", distinct from null (no signal).
+        ...(stressFlags !== null ? { stress_flags: JSON.stringify(stressFlags) } : {}),
+        ...(pending
+          // A derived Stress is not stored while pending: it would read as
+          // AI-known on the next save and freeze.
+          ? { stress_damage: legacyStressIsFixed(assessment, adjustedScores) ? finalScores.stress_damage : null, overall_score: null }
+          : {
+            confirmed_by_tech: true,
+            confirmed_at: new Date(),
+            overall_score: calculateOverallScore(finalScores),
+            ...(adjustedScores ? {
+              adjusted_scores: JSON.stringify({ ...parseJsonObject(assessment.adjusted_scores), ...finalScores, ...textUpdate }),
+            } : {}),
+          }),
+      };
+      const updated = !pending && propertyHistoryEnabled
+        ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: conn })
+        : (await conn('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
+      if (persistChecks) await persistChecks(updated, conn);
+      return { assessment: updated, confirmed: !pending, missingScores };
+    };
+    if (propertyHistoryEnabled || persistChecks) {
+      const { withTurfProfileFence } = require('../services/customer-pricing-ai');
+      return withTurfProfileFence(trx, original.customer_id, write);
+    }
+    return write(trx);
+  });
+}
+
 router.post('/confirm', async (req, res, next) => {
   try {
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
@@ -1089,67 +1238,21 @@ router.post('/confirm', async (req, res, next) => {
         });
       }
     } else {
-      const finalScores = Object.fromEntries(
-        ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
-          .map((key) => [key, scoreValue(adjustedScores?.[key], assessment[key])]),
-      );
-      // Stress/Damage. The tech now corrects a single "Stress" score directly on
-      // the completion screen, so honor an explicit adjustedScores.stress_damage
-      // when sent. When it isn't (older clients, or a prefill re-confirm that only
-      // carries the AI values), fall back to the prior derivation: worst of the
-      // fungus + thatch scores and the AI worst-spot floor stored at /assess (which
-      // already folds in insect/drought/mechanical and the worst per-photo
-      // disease/thatch). Pre-stress_damage rows (null floor) fall back to
-      // worst-of(fungus, thatch) — never 0.
-      {
-        const aiFloor = Number.isFinite(Number(assessment.stress_damage))
-          ? Number(assessment.stress_damage)
-          : 95;
-        const derivedStress = Math.min(
-          Number(finalScores.fungus_control),
-          Number(finalScores.thatch_level),
-          aiFloor,
-        );
-        finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
-      }
-
-      const updateData = {
-        confirmed_by_tech: true,
-        confirmed_at: new Date(),
-        updated_at: new Date(),
-        ...finalScores,
-        overall_score: calculateOverallScore(finalScores),
-      };
-
-      // If tech provided adjusted scores, apply them
-      if (adjustedScores) {
-        const textUpdate = adjustedScores.observations != null ? { observations: adjustedScores.observations } : {};
-        Object.assign(updateData, textUpdate);
-        updateData.adjusted_scores = JSON.stringify({
-          ...parseJsonObject(assessment.adjusted_scores),
-          ...finalScores,
-          ...textUpdate,
-        });
-      }
-
-      // Persist stress_flags only if any allowed key was sent. An empty
-      // object {} is treated as "tech confirmed no flags set" and
-      // stored — distinguishable from null (no signal).
-      if (normalizedStressFlags !== null) {
-        updateData.stress_flags = JSON.stringify(normalizedStressFlags);
-      }
-
-      if (propertyHistoryEnabled) {
-        updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
-      } else {
-        [updated] = await db('lawn_assessments')
-          .where({ id: assessmentId })
-          .update(updateData)
-          .returning('*');
-      }
-      if (protocolFieldChecksProvided) {
-        await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
-        Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
+      confirmation = await confirmLegacyAssessment({
+        assessmentId, adjustedScores, propertyHistoryEnabled,
+        stressFlags: normalizedStressFlags,
+        persistChecks: protocolFieldChecksProvided
+          ? async (current, trx) => {
+            await persistProtocolFieldChecks({ assessment: current, checks: protocolFieldChecks, trx });
+            Object.assign(current, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
+          }
+          : undefined,
+      }, db);
+      updated = confirmation.assessment;
+      // Same rule as the run-backed path: a blank score keeps the assessment
+      // pending — no baseline, wiki link, or delivery until it is filled.
+      if (!confirmation.confirmed) {
+        return res.json({ success: true, confirmed: false, missingScores: confirmation.missingScores, assessment: updated });
       }
     }
 
@@ -1187,8 +1290,14 @@ router.post('/confirm', async (req, res, next) => {
         // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
         await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
 
-        // 3. Tech calibration — record AI vs tech score differences
-        if (adjustedScores) {
+        // 3. Tech calibration — record AI vs tech score differences. The
+        // drawer posts only typed keys now, so compare against the FINAL saved
+        // scores (the confirmed row), never the sparse request payload.
+        const confirmedScores = Object.fromEntries(
+          ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage']
+            .map((key) => [key, updated?.[key] ?? null]),
+        );
+        if (updated) {
           const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
           const aiScores = calibrationBaseline
             ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
@@ -1197,13 +1306,15 @@ router.post('/confirm', async (req, res, next) => {
           // calibration would write ai_stress_damage=null and skip the delta. Seed it
           // the same way the UI/confirm fallback does — min(fungus, thatch, 95) — so a
           // tech's Stress correction on a legacy row records a real delta, not zero.
+          // Only genuinely numeric components count: Number(null) is 0, which
+          // would fabricate an AI Stress of 0 for a score the AI never read.
           if (aiScores && aiScores.stress_damage == null) {
-            const f = Number(aiScores.fungus_control);
-            const t = Number(aiScores.thatch_level);
-            const parts = [f, t, 95].filter(Number.isFinite);
-            if (parts.length > 1) aiScores.stress_damage = Math.min(...parts);
+            const parts = [aiScores.fungus_control, aiScores.thatch_level]
+              .filter((v) => v != null && v !== '' && Number.isFinite(Number(v)))
+              .map(Number);
+            if (parts.length) aiScores.stress_damage = Math.min(...parts, 95);
           }
-          await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
+          await LawnIntel.recordTechCalibration(assessmentId, aiScores, confirmedScores);
         }
 
         // 4. Lawn health → customer health signal
@@ -1235,7 +1346,7 @@ router.post('/confirm', async (req, res, next) => {
     res.json({
       success: true,
       assessment: updated,
-      ...(confirmation ? {
+      ...(visitRun ? {
         confirmed: true, missingScores: [], visitAssessment: visitRuns.responseForRun(confirmation.run),
       } : {}),
     });
@@ -1272,6 +1383,9 @@ router.get('/service/:serviceId', async (req, res, next) => {
         photo_records: photos,
       },
       visitAssessment: visitRuns.responseForRun(visitRun),
+      // Legacy rows: the server's own AI read, so the drawer locks exactly
+      // what /confirm will ignore (run-backed rows carry visitAssessment.aiScores).
+      ...(visitRun ? {} : { aiScores: legacyAiScores(assessment) }),
     });
   } catch (err) {
     next(err);

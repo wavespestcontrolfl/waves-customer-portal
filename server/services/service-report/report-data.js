@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { pairBeforeAfterPhotos } = require('../lawn-visit-input');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
@@ -2190,7 +2191,10 @@ class PinnedAssessmentUnavailable extends Error {
 // derived inches + system toggle) — prefs edits must invalidate cached PDFs.
 // p4: watering advice resolves structured moisture evidence, not observation
 // wording. Regenerate older lawn PDFs so they agree with the current report.
-const LAWN_RENDER_STRATEGY = 'p4';
+// p5: before/after pairing is Front-only; close-up / trouble photos never
+// pair or fill the fallback (owner ruling 2026-09-24). PDFs rendered under
+// the old any-zone pairing must not be reused.
+const LAWN_RENDER_STRATEGY = 'p5';
 
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
@@ -2557,6 +2561,15 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // fall back to best-vs-best; when both sides record zones but none match,
     // drop the photo pair (the score delta still reports) rather than show a
     // false comparison.
+    //
+    // Owner ruling 2026-09-24: the technician zone vocabulary is now front /
+    // close_up / trouble. Only 'front' is the same spot every visit, so only
+    // 'front' pairs across visits going forward. 'close_up' and 'trouble' are
+    // a different spot each time and must NEVER pair, even when both sides
+    // happen to record the same zone value. Legacy 'back'/'side' rows
+    // (recorded before this rename, no longer accepted as new input) still
+    // pair with each other — a same-legacy-zone match is still a real
+    // same-location comparison, so history keeps its existing pairs.
     const photosFor = (assessmentId) => knex('lawn_assessment_photos')
       .where({ assessment_id: assessmentId, customer_visible: true })
       .orderBy('is_best_photo', 'desc')
@@ -2573,26 +2586,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // keying on it would falsely pair two arbitrary first-selected photos as
     // the same area (codex P1 #3038 r3). Photos without real zones fall back
     // to best-vs-best, same as before this change.
-    const zoneKey = (p) => String(p?.zone || '').trim().toLowerCase();
-    let beforePhoto = null;
-    let afterPhoto = null;
-    for (const candidate of beforeCandidates) {
-      const zone = zoneKey(candidate);
-      if (!zone) continue;
-      const match = afterCandidates.find((p) => zoneKey(p) === zone);
-      if (match) {
-        beforePhoto = candidate;
-        afterPhoto = match;
-        break;
-      }
-    }
-    if (!beforePhoto) {
-      const bothSidesZoned = beforeCandidates.some((p) => zoneKey(p))
-        && afterCandidates.some((p) => zoneKey(p));
-      beforePhoto = beforeCandidates[0] || null;
-      // Zones recorded on both sides but disjoint → no honest pair exists.
-      afterPhoto = bothSidesZoned ? null : (afterCandidates[0] || null);
-    }
+    const { before: beforePhoto, after: afterPhoto } = pairBeforeAfterPhotos(beforeCandidates, afterCandidates);
     beforeAfter = {
       before: {
         date: initialRow.service_date,

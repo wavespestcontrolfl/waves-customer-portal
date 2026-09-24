@@ -62,7 +62,7 @@ import React, {
   useRef,
 } from "react";
 import useLinkLibrary from "../../hooks/useLinkLibrary";
-import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause } from "../../lib/composerLinks";
+import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause, combineAppendedDraft, consultationLineOf, removeConsultationClause } from "../../lib/composerLinks";
 import {
   Bell,
   Bot,
@@ -318,6 +318,11 @@ function smsMessageMatchesLine(message, lineNumber) {
 function mergeSmsMessages(existing, incoming) {
   return [...new Map([...existing, ...incoming].map((message) => [message.id, message])).values()]
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+}
+
+function smsMessageThreadKey(message) {
+  const contactPhone = message?.direction === "outbound" ? message.to : message?.from;
+  return smsThreadKey(contactPhone);
 }
 
 function StatCardV2({ label, value, sub, active, alert, onClick }) {
@@ -785,6 +790,7 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "pay_balance", name: "Pay balance link", keywords: "pay payment invoice bill billing owe money", dynamic: true },
   { key: "estimate", name: "Latest estimate link", keywords: "estimate proposal open pending price quote", dynamic: true },
   { key: "referral", name: "Referral link", keywords: "refer friend neighbor share reward", dynamic: true },
+  { key: "consultation", name: "Free consultation", description: "Pick a time page for this lead. 14-day link.", keywords: "consultation inspection lead book adam free visit assessment", dynamic: true },
   { key: "autopay_setup", name: "Auto Pay setup link", keywords: "autopay auto pay card on file save payment method bank ach enroll secure", dynamic: true },
   { key: "appointment", name: "Appointment page link", keywords: "appointment visit details confirm calendar upcoming next", dynamic: true },
   { key: "card_request", name: "Card request link", keywords: "card request secure appointment hold card on file first visit", dynamic: true },
@@ -809,7 +815,7 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
 }
 
 const ANALYZE_PHOTOS_MAX = 5;
-// Mirrors MESSAGE_PHOTO_ALLOWED_MIME in server/routes/admin-photo-assessments.js
+// Mirrors MESSAGE_PHOTO_ALLOWED_MIME in server/services/photo-assessment-create.js
 // — only these get resized+analyzed server-side; a non-image MMS (video,
 // audio, vcard) must never appear in the picker or count toward "has photos".
 const ANALYZE_PHOTOS_ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
@@ -943,6 +949,7 @@ function AnalyzePhotosDialog({ open, onClose, photos, fixedCustomerId, fixedCust
           <Select value={type} onChange={(e) => setType(e.target.value)} disabled={busy}>
             <option value="lawn">Lawn assessment</option>
             <option value="pest">Pest identification</option>
+            <option value="tree_shrub">Tree &amp; shrub assessment</option>
           </Select>
         </div>
         {fixedCustomerId ? (
@@ -1028,7 +1035,7 @@ function AnalyzePhotosAction({ active, isAdmin, activeThread, customerMessages, 
       <Button
         variant="secondary"
         onClick={() => setOpen(true)}
-        title="Run a lawn or pest assessment on photos from this thread"
+        title="Run a lawn, pest, or tree & shrub assessment on photos from this thread"
         aria-label="Analyze photos"
         className="sms-writing-tool ui-icon-action"
         aria-haspopup="dialog"
@@ -1058,6 +1065,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // still gets the prefilled text/recipient, but sends as a plain manual
   // SMS — the AI draft stays pending for the owner (codex P2).
   const smsOutletContext = useOutletContext();
+  const location = useLocation();
+  const routeNeedsResponse = new URLSearchParams(location.search).get("needsResponse") === "true";
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
   const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
@@ -1139,12 +1148,18 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
   useEffect(() => { if (linkRequest > 0) setShowLinkSheet(true); }, [linkRequest]);
-  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled } = useLinkLibrary(active && showLinkSheet);
+  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled, consultationLinksEnabled } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
   // strip contract as insertedResched/insertedReservice above.
   const [insertingCustomerLink, setInsertingCustomerLink] = useState(null);
+  // The last "Free consultation" clause inserted into THIS draft — kept
+  // separately from insertedCustomerLinks so an operator's edit to the
+  // inserted link (which makes that kind's tracked url unrecognizable)
+  // doesn't lose the memory a repeat insert needs to find and replace it.
+  // { line, recipientKey, customerId } | null. See insertCustomerLinkLine.
+  const consultationLineRef = useRef(null);
 
   // Filters
   const [dirFilter, setDirFilter] = useState("all");
@@ -1165,7 +1180,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
   // PR 4 — status filter chips, reply-from lock.
-  const [statusFilter, setStatusFilter] = useState("all");
+  const initialStatusFilter = routeNeedsResponse ? "unanswered" : "all";
+  const [statusFilter, setStatusFilter] = useState(initialStatusFilter);
+  const statusFilterRef = useRef(initialStatusFilter);
+  const routeLocationKeyRef = useRef(location.key);
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
   const [smsHasMore, setSmsHasMore] = useState(false);
@@ -1173,9 +1191,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
   const smsRequestRef = useRef(null);
+  const activeThreadRef = useRef(activeThread);
+  activeThreadRef.current = activeThread;
   const approvalDraftRequestRef = useRef(0);
   const smsPageRef = useRef(1);
   const smsLoadedSearchRef = useRef(null);
+  const smsLoadedStatusFilterRef = useRef(null);
   const rewriteContextRef = useRef({
     toNumber: "",
     selectedCustomerId: null,
@@ -1238,6 +1259,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();
     const normalizedSearch = search.trim();
+    const requestedStatusFilter = options.statusFilter || statusFilterRef.current;
     const page = options.page || 1;
     const append = !!options.append;
     if (options.background && smsRequestRef.current) return Promise.resolve();
@@ -1251,27 +1273,105 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       page: String(page),
     });
     if (normalizedSearch) params.set("search", normalizedSearch);
+    if (requestedStatusFilter === "unanswered") params.set("needsResponse", "true");
     const logUrl = `/admin/communications/log?${params.toString()}`;
+    const refreshesLoadedDataset = options.refresh
+      && smsLoadedSearchRef.current === normalizedSearch
+      && smsLoadedStatusFilterRef.current === requestedStatusFilter;
+    const loadedPageCount = options.refresh
+      && requestedStatusFilter === "unanswered"
+      && refreshesLoadedDataset
+      ? Math.max(page, smsPageRef.current)
+      : page;
+    const loadedPagesRequest = loadedPageCount > page
+      ? Promise.all(Array.from({ length: loadedPageCount }, (_, index) => {
+        const pageParams = new URLSearchParams(params);
+        pageParams.set("page", String(index + 1));
+        return adminFetch(`/admin/communications/log?${pageParams.toString()}`, { signal: controller.signal });
+      })).then((pages) => {
+        const hasInvalidPage = pages.some((pageData) => !Array.isArray(pageData?.messages) || pageData.error);
+        if (hasInvalidPage) return { error: "One or more message pages could not be refreshed." };
+        return {
+          messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
+          hasMore: !!pages.at(-1)?.hasMore,
+          page: pages.at(-1)?.page || loadedPageCount,
+        };
+      })
+      : adminFetch(logUrl, { signal: controller.signal });
+    const logRequest = Promise.resolve(loadedPagesRequest).then(async (logData) => {
+      if (
+        !refreshesLoadedDataset
+        || requestedStatusFilter !== "unanswered"
+        || append
+        || !logData?.hasMore
+        || !Array.isArray(logData.messages)
+        || logData.error
+      ) {
+        return logData;
+      }
+      const openPhone = activeThreadRef.current?.contactPhone;
+      const openKey = openPhone ? smsThreadKey(openPhone) : "";
+      if (!openKey || logData.messages.some((message) => smsMessageThreadKey(message) === openKey)) {
+        return logData;
+      }
+
+      // A newer pending peer can push the open conversation just beyond the
+      // loaded page boundary. Confirm that peer directly before closing it.
+      // Reuse the active search/filter scope so this check answers the same
+      // question as the refreshed inbox.
+      const peerParams = new URLSearchParams(params);
+      peerParams.set("page", "1");
+      peerParams.set("phone", openPhone);
+      const peerData = await adminFetch(`/admin/communications/log?${peerParams.toString()}`, { signal: controller.signal });
+      if (!Array.isArray(peerData?.messages) || peerData.error) {
+        throw new Error("The open conversation could not be confirmed.");
+      }
+      const hasUnexpectedPeer = peerData.messages.some((message) => smsMessageThreadKey(message) !== openKey);
+      if (hasUnexpectedPeer) {
+        throw new Error("The open conversation returned mismatched history.");
+      }
+      if (peerData.messages.length && !peerData.messages.some((message) => message.responseNeedsResponse === true)) {
+        throw new Error("The open conversation returned incomplete pending state.");
+      }
+      return {
+        ...logData,
+        messages: mergeSmsMessages(logData.messages, peerData.messages),
+        confirmedAbsentPeerKey: peerData.messages.length ? null : openKey,
+      };
+    });
     return Promise.allSettled([
-      adminFetch(logUrl, { signal: controller.signal }),
+      logRequest,
       options.background ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
       options.background ? null : adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
     ]).then(([logResult, statsResult, blockedResult]) => {
       if (
         controller.signal.aborted ||
         requestSeq !== smsLoadSeqRef.current ||
-        normalizedSearch !== smsSearchRef.current
+        normalizedSearch !== smsSearchRef.current ||
+        requestedStatusFilter !== statusFilterRef.current
       ) {
         return;
       }
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
-        const retainHistory = options.refresh && smsLoadedSearchRef.current === normalizedSearch;
+        const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
+        if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
+          const openPhone = activeThreadRef.current?.contactPhone;
+          const openKey = openPhone ? smsThreadKey(openPhone) : "";
+          const openThreadStillLoaded = openKey
+            && logData.messages.some((message) => smsMessageThreadKey(message) === openKey);
+          const absenceConfirmed = !logData.hasMore || logData.confirmedAbsentPeerKey === openKey;
+          if (openKey && !openThreadStillLoaded && absenceConfirmed) {
+            setActiveThread(null);
+            setSmsView("threads");
+          }
+        }
         smsPageRef.current = logData.page || page;
         setSmsPage(smsPageRef.current);
         setSmsHasMore(!!logData.hasMore);
         smsLoadedSearchRef.current = normalizedSearch;
+        smsLoadedStatusFilterRef.current = requestedStatusFilter;
         setSmsLoadError("");
       } else {
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
@@ -1292,6 +1392,17 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSmsRefreshing(false);
     });
   }, [customer?.id]);
+
+  useEffect(() => {
+    if (!active || customer || routeLocationKeyRef.current === location.key) return;
+    routeLocationKeyRef.current = location.key;
+    const nextFilter = routeNeedsResponse ? "unanswered" : "all";
+    statusFilterRef.current = nextFilter;
+    setStatusFilter(nextFilter);
+    setSmsView("threads");
+    setActiveThread(null);
+    void loadData(smsSearchRef.current, { statusFilter: nextFilter });
+  }, [active, customer, loadData, location.key, routeNeedsResponse]);
 
   useEffect(() => {
     smsSearchRef.current = smsSearch.trim();
@@ -1751,12 +1862,26 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           text: `Scheduled for ${formatScheduledForToast(scheduledFor)}.`,
         });
       } else {
+        // Consultation can resolve to a lead with no customer row at all —
+        // the resolved lead rides on the inserted link (server: the
+        // lead-only fallback in /customer-link). The send stays on THIS
+        // route (pre-push Codex P1) — rerouting it to POST
+        // /admin/leads/:id/send-sms, as an earlier round did, bypasses this
+        // route's own interlocks (the Agent Review draft's atomic claim,
+        // pending-suggestion thread parking, the active auto-send check).
+        // leadId rides in the body instead; the server records the lead
+        // audit trail (mirroring /admin/leads/:id/send-sms's own via a
+        // shared function) when no customer resolved.
+        // Sent with or without a selected customer, so the server binds the
+        // link to its lead and records the outreach (Codex #4709 r9 P1).
+        const consultationLeadId = insertedCustomerLinks.consultation?.leadId || null;
         const sent = await adminFetch("/admin/communications/sms", {
           method: "POST",
           body: JSON.stringify({
             to: toNumber.trim(),
             body: msgBody.trim(),
             customerId: selectedCustomerId || undefined,
+            leadId: consultationLeadId || undefined,
             // The inbox row this answers: a recruiting row keeps the reply on the
             // recruiting rail even when the shared phone is a linked customer's.
             replyToMessageId: carriedReplyToMessageId,
@@ -1803,7 +1928,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
       if (customer) await onSent?.();
-      else await loadData(smsSearch.trim());
+      else await loadData(smsSearch.trim(), { refresh: true });
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
@@ -2233,6 +2358,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         : "Pay link added.",
     estimate: (d) => `Estimate link added${d.estimate?.serviceType ? ` — ${d.estimate.serviceType}` : ""}.`,
     referral: (d) => `Referral link added${d.firstName ? ` — ${d.firstName}'s personal link` : ""}.`,
+    consultation: (d) => `Consultation link added${d.firstName ? ` for ${d.firstName}` : ""}.`,
     autopay_setup: () => "Auto Pay setup link added — nothing is charged until they save a payment method.",
     appointment: (d) => `Appointment page link added${d.appointment?.scheduledDate ? ` — visit on ${d.appointment.scheduledDate}` : ""}.`,
     card_request: (d) =>
@@ -2302,16 +2428,46 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // canceled — reuse means the fresh insert hands back the same shared row
   // anyway. A standalone line (Auto Pay: the reviewed SMS template, already
   // greeted) goes in as-is; the generic prefill wraps the others.
+  //
+  // Consultation is a special case (Codex #4709 P2): its short link mints a
+  // FRESH short code on every insert (a new 14-day token), so prevUrl above
+  // never matches a repeat insert's literal URL the way a static link does
+  // — and an operator edit to even one character of the inserted URL makes
+  // that insert's OWN url unrecognizable too, so the recipient-change
+  // effect below silently forgets the tracked entry and a re-insert then
+  // has nothing to strip: the edited dead link stays AND a second full
+  // invitation (with its own STOP disclosure) gets appended. Reuses
+  // CustomerSmsPanel's already-reviewed merge (composerLinks.js): exact
+  // remembered line → remembered line's URL still present → wording+host
+  // heuristic, with the replaced invite's own footer lines dropped so
+  // they're never doubled. consultationLineRef survives independently of
+  // insertedCustomerLinks so an edit that makes bodyHasLink(url) false
+  // doesn't lose the memory needed to find and replace it.
   const insertCustomerLinkLine = ({ kind, channel, d, requestRecipientKey, linkCustomerId }) => {
     const clause = String(d.line || "").trim() || `${d.url}`;
     const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
-    const prevUrl = insertedCustomerLinks[kind]?.url || null;
-    setMsgBody((b) => {
-      const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
-      return base.trim()
-        ? `${base.replace(/\s+$/, "")}\n\n${clause}`
-        : prefill || clause;
-    });
+    if (kind === "consultation") {
+      const addition = prefill || clause;
+      const remembered = consultationLineRef.current
+        && consultationLineRef.current.recipientKey === requestRecipientKey
+        && consultationLineRef.current.customerId === (linkCustomerId || null)
+        ? consultationLineRef.current.line
+        : null;
+      setMsgBody((b) => combineAppendedDraft(b, addition, remembered));
+      consultationLineRef.current = {
+        line: consultationLineOf(addition),
+        recipientKey: requestRecipientKey,
+        customerId: linkCustomerId || null,
+      };
+    } else {
+      const prevUrl = insertedCustomerLinks[kind]?.url || null;
+      setMsgBody((b) => {
+        const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
+      });
+    }
     setInsertedCustomerLinks((m) => ({
       ...m,
       [kind]: {
@@ -2320,6 +2476,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         customerId: linkCustomerId,
         requestId: d.requestId || null,
         contractId: d.contract?.id || null,
+        // Consultation's lead-only fallback (no customer row yet): the
+        // resolved lead id, so the send can route through the leads-page
+        // send route and get its audit trail (pre-push Codex P2).
+        leadId: d.leadId || null,
         // Both: the send posts reviewRequestEmail so the same ask is
         // emailed once the text has really gone out.
         emailToo: channel === "both",
@@ -2437,16 +2597,35 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     }
   }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId, sending]);
 
+  // The remembered consultation clause follows the same recipient rule even
+  // after an edit made its tracked URL unrecognizable (Codex #4709 r20 P2):
+  // a recipient/customer change strips it and forgets it.
+  useEffect(() => {
+    const remembered = consultationLineRef.current;
+    if (!remembered || sending) return;
+    const currentRecipient = toNumber.trim();
+    const currentRecipientKey = currentRecipient ? smsThreadKey(currentRecipient) : "";
+    if (currentRecipientKey === remembered.recipientKey && (selectedCustomerId || null) === remembered.customerId) return;
+    consultationLineRef.current = null;
+    const stripped = removeConsultationClause(msgBody, remembered.line);
+    if (stripped !== msgBody) {
+      setMsgBody(stripped);
+      setSendResult({ ok: true, text: "Customer link removed — the recipient changed." });
+    }
+  }, [msgBody, toNumber, selectedCustomerId, sending]);
+
   // The sheet's full list: the customer group first, then the library rows.
   // Every dynamic row dispatches to a requireAdmin endpoint (reschedule-link,
   // reservice-link, customer-link) — a technician selecting one would only
   // get a 403, so those rows are admin-only; the static rows stay staff-wide.
   const insertSheetLinks = useMemo(
     () => [
-      ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim())) && (l.key !== "receipt" || receiptLinksEnabled)),
+      ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim()))
+        && (l.key !== "receipt" || receiptLinksEnabled)
+        && (l.key !== "consultation" || consultationLinksEnabled)),
       ...(libraryLinks || []),
     ],
-    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled],
+    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled, consultationLinksEnabled],
   );
 
   const handleInsertSheetPick = (link, channel = null) => {
@@ -2594,8 +2773,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     );
     if (nextThread && nextThread !== activeThread) {
       setActiveThread(nextThread);
+    } else if (!nextThread && statusFilter === "unanswered" && !smsHasMore) {
+      // A reply can remove the peer from the server-backed pending result.
+      // Do not leave the operator inside a stale unanswered conversation.
+      setActiveThread(null);
+      setSmsView("threads");
     }
-  }, [threads, activeThread?.contactPhone]);
+  }, [threads, activeThread?.contactPhone, statusFilter, smsHasMore]);
 
   // Deep-link from a notification: /admin/communications?thread=<customerId>
   // opens that customer's SMS conversation. The sms_reply notification carries
@@ -3437,6 +3621,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             onClick={() => {
               setSmsView("log");
               setActiveThread(null);
+              if (statusFilterRef.current === "unanswered") {
+                statusFilterRef.current = "all";
+                setStatusFilter("all");
+                void loadData(smsSearchRef.current, { statusFilter: "all" });
+              }
             }}
             className={cn(
               "px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors",
@@ -3501,7 +3690,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             <Select
               id="sms-thread-filter"
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => {
+                const nextFilter = e.target.value;
+                statusFilterRef.current = nextFilter;
+                setStatusFilter(nextFilter);
+                void loadData(smsSearchRef.current, { statusFilter: nextFilter });
+              }}
             >
               {[
                 { key: "all", label: "All", count: chipCounts.all },

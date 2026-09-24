@@ -119,4 +119,123 @@ describe('ReportIssueOverlay mount safety', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(screen.queryByText('Upcoming visit')).not.toBeInTheDocument();
   });
+
+  // Photo ID (PhotoId.jsx) hands off here via `initialValues`. The overlay
+  // stays mounted across opens, so every field must be REPLACED (including
+  // empty ones) on a handoff, and cleared again on close — otherwise a
+  // stale category/note/photo from an earlier handoff (or a cancelled one)
+  // survives into the next open (Codex r2 P1).
+  it('a Photo ID handoff replaces every field and clears them again on close, so a later handoff never inherits stale values', async () => {
+    echo.value = undefined;
+    const { rerender } = render(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{ category: 'pest_issue', location: 'inside_home', note: 'Found ants by the sink', photos: [{ preview: 'data:image/jpeg;base64,aaa', data: 'data:image/jpeg;base64,aaa', name: 'a.jpg' }] }}
+      />,
+    );
+    await screen.findByRole('button', { name: /submit request/i });
+    expect(screen.getByRole('button', { name: /pest issue/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText("Describe what's happening")).toHaveValue('Found ants by the sink');
+    expect(screen.getByRole('button', { name: 'Inside Home' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('Remove photo 1')).toBeInTheDocument();
+
+    // Close (cancel) — PortalPage nulls its prefill on this same close.
+    rerender(
+      <ReportIssueOverlay
+        open={false} onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={null}
+      />,
+    );
+
+    // A second, DIFFERENT handoff (a history result with no location/photos)
+    // must show ONLY its own values, never the previous handoff's leftovers.
+    rerender(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{ category: 'lawn_concern', location: '', note: '', photos: [] }}
+      />,
+    );
+    await screen.findByRole('button', { name: /submit request/i });
+    expect(screen.getByRole('button', { name: /lawn concern/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText("Describe what's happening")).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Inside Home' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByLabelText('Remove photo 1')).not.toBeInTheDocument();
+  });
+
+  // Photo ID's 'request' / 'inspection' / 'unclear' next steps land here
+  // specifically because the server decided this is NOT an automatic
+  // re-service (a 'reservice' next step links straight to /reservice/:token
+  // from the sheet itself and never opens this overlay). The generic
+  // schedule-derived streamline handoff must not second-guess that and swap
+  // the prefilled ticket for its own "book a free re-service" CTA — doing so
+  // would silently drop the note/photos the customer already provided
+  // (Codex r3 P1).
+  it('a Photo ID handoff is never overridden by the generic reservice streamline, even when that lane is granted', async () => {
+    echo.value = undefined;
+    const api = (await import('../utils/api')).default;
+    api.getSchedule.mockResolvedValueOnce({
+      upcoming: [], overlayHandoff: true, reservice: { url: '/reservice/tok-1', lanes: ['pest'] }, propertyScope: undefined,
+    });
+    render(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{ category: 'pest_issue', location: 'inside_home', note: 'Found ants by the sink', photos: [] }}
+      />,
+    );
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    expect(screen.getByLabelText("Describe what's happening")).toHaveValue('Found ants by the sink');
+    expect(screen.queryByText('Covered — book your free re-service')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Book a free re-service' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /submit request/i })).toBeInTheDocument();
+  });
+
+  // Same granted lane, but reached the ORDINARY way (no Photo ID handoff) —
+  // the streamline CTA must still appear. Pins that the suppression above is
+  // scoped to the handoff, not a global regression of the existing feature.
+  it('the same granted reservice lane still streamlines an ordinary (non-Photo-ID) pest ticket', async () => {
+    echo.value = undefined;
+    const api = (await import('../utils/api')).default;
+    const { fireEvent } = await import('@testing-library/react');
+    api.getSchedule.mockResolvedValueOnce({
+      upcoming: [], overlayHandoff: true, reservice: { url: '/reservice/tok-1', lanes: ['pest'] }, propertyScope: undefined,
+    });
+    render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope />);
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: /pest issue/i }));
+    expect(await screen.findByText('Covered — book your free re-service')).toBeInTheDocument();
+    // Rendered twice (body card + sticky footer CTA) when the lane is granted.
+    for (const link of screen.getAllByRole('link', { name: 'Book a free re-service' })) {
+      expect(link).toHaveAttribute('href', '/reservice/tok-1');
+    }
+  });
+
+  // The overlay stays mounted across opens, so urgency (like every other
+  // field) can carry a stale value into a later Photo ID handoff — Photo ID
+  // never sets urgency itself, so a handoff must always land on the routine
+  // default (Codex r7 P2).
+  it('a Photo ID handoff resets urgency to routine, not an Urgent left over from a cancelled manual entry', async () => {
+    echo.value = undefined;
+    const { fireEvent } = await import('@testing-library/react');
+    const { rerender } = render(
+      <ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope />,
+    );
+    await screen.findByRole('button', { name: /submit request/i });
+    fireEvent.click(screen.getByRole('button', { name: /pest issue/i }));
+    await screen.findByText('Priority');
+    fireEvent.click(screen.getByRole('button', { name: /urgent/i }));
+    expect(screen.getByRole('button', { name: /urgent/i })).toHaveAttribute('aria-pressed', 'true');
+
+    // Cancel without submitting — an unseeded (manual) close leaves state as-is.
+    rerender(<ReportIssueOverlay open={false} onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope />);
+
+    rerender(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{ category: 'pest_issue', location: '', note: 'From Photo ID', photos: [] }}
+      />,
+    );
+    await screen.findByText('Priority');
+    expect(screen.getByRole('button', { name: /routine/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /urgent/i })).toHaveAttribute('aria-pressed', 'false');
+  });
 });

@@ -141,6 +141,91 @@ it('preserves every confirmed endpoint and payload behind the shared dialog', as
   ]);
 });
 
+it('uses the gratitude gate and promotes qualified fixed-copy gratitude directly from shadow', async () => {
+  mockShadowData(undefined, async (url) => (url.endsWith('/intent-modes') ? {
+    gateEnabled: true,
+    autoSendGateEnabled: false,
+    intents: [{
+      intent: 'gratitude_reply',
+      mode: 'shadow',
+      autoSendGateEnabled: true,
+      suggest: {},
+      graduation: {
+        eligibleFor: 'auto_send',
+        nextRung: 'auto_send',
+        qualification: { basis: 'fixed_copy_exam' },
+        judge: {},
+      },
+    }],
+  } : undefined));
+  render(<AgentShadowDraftsPage />);
+
+  expect(await screen.findByRole('button', { name: 'Enable auto-send' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Enable suggest' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/GATE_SMS_AUTO_SEND is off/)).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Enable auto-send' }));
+  expect(within(screen.getByRole('dialog')).queryByText(/currently OFF/)).not.toBeInTheDocument();
+});
+
+it('shows the narrow gratitude gate and shadow-only behavior in the row and confirmation', async () => {
+  mockShadowData(undefined, async (url) => (url.endsWith('/intent-modes') ? {
+    gateEnabled: true,
+    autoSendGateEnabled: true,
+    intents: [{
+      intent: 'gratitude_reply',
+      mode: 'shadow',
+      autoSendGateEnabled: false,
+      suggest: {},
+      graduation: {
+        eligibleFor: 'auto_send',
+        nextRung: 'auto_send',
+        qualification: { basis: 'fixed_copy_exam' },
+        judge: {},
+      },
+    }],
+  } : undefined));
+  render(<AgentShadowDraftsPage />);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'GATE_SMS_GRATITUDE_REPLIES is off — the mode saves, but gratitude replies remain shadow-only until the gate is enabled.',
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Enable auto-send' }));
+  expect(within(screen.getByRole('dialog')).getByText(/GATE_SMS_GRATITUDE_REPLIES is currently OFF/))
+    .toHaveTextContent('gratitude replies remain shadow-only');
+});
+
+it('demotes fixed-copy gratitude to shadow and describes blocked readiness without review cards', async () => {
+  mockShadowData(async (url) => (url.endsWith('/intent-modes/gratitude_reply')
+    ? { intent: 'gratitude_reply', mode: 'shadow' }
+    : {}), async (url) => (url.endsWith('/intent-modes') ? {
+    gateEnabled: true,
+    autoSendGateEnabled: true,
+    intents: [{
+      intent: 'gratitude_reply',
+      mode: 'auto_send',
+      autoSendGateEnabled: true,
+      suggest: {},
+      graduation: {
+        eligibleFor: null,
+        nextRung: null,
+        qualification: { basis: 'fixed_copy_exam' },
+        autoSendHealth: { sendReady: false, blockers: ['Qualification expired.'] },
+        judge: {},
+      },
+    }],
+  } : undefined));
+  render(<AgentShadowDraftsPage />);
+
+  expect(await screen.findByText('Gratitude replies remain shadow-only until qualification passes again.')).toBeInTheDocument();
+  expect(screen.queryByText(/review cards/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Back to shadow' }));
+  await waitFor(() => expect(mutationCalls()).toContainEqual([
+    '/admin/agents/intent-modes/gratitude_reply',
+    { method: 'PUT', body: JSON.stringify({ mode: 'shadow' }) },
+  ]));
+});
+
 it('guards a pending confirmation from duplicate writes and keeps a failed action retryable', async () => {
   let rejectFirstAttempt;
   let attempts = 0;

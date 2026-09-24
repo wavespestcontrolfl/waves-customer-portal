@@ -93,7 +93,13 @@ function providerMediaUrls(input) {
   return urls;
 }
 
-async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
+async function sendViaTwilio(input, {
+  preSendCheck, providerPreSendCheck, withSmsHandoff, providerHandoffReservation,
+} = {}) {
+  const providerCoordination = require('../provider-handoff-reservation');
+  const internalProviderReservation = providerCoordination.isProviderHandoffHandle(providerHandoffReservation)
+    ? providerHandoffReservation
+    : null;
   // metadata.original_message_type lets a caller force a specific
   // legacy messageType (e.g. 'lead_response', 'invoice', 'manual')
   // through to TwilioService.sendSMS so the existing
@@ -140,7 +146,8 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.
       operatorInitiated: input.operatorInitiated === true,
-      fromNumber: input.metadata && input.metadata.fromNumber,
+      fromNumber: internalProviderReservation?.context?.fromNumber
+        || (input.metadata && input.metadata.fromNumber),
       mediaUrls: providerMediaUrls(input),
       media: input.metadata && input.metadata.media,
       customerLocationId: input.metadata && input.metadata.customerLocationId,
@@ -170,7 +177,16 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       // handoff, after sendSMS's own internal awaits (redirect check,
       // template lookup, customer/location query).
       preSendCheck,
+      providerPreSendCheck,
       withSmsHandoff,
+      providerHandoffReservation: internalProviderReservation,
+      // The opaque owner token is issued only from the complete canonical
+      // input and callback contract. Raw Twilio callers cannot bypass the
+      // generic reservation merely by reusing the ai_gratitude message type.
+      providerReservationOwner: providerCoordination.gratitudeReservationOwner(input, {
+        providerPreSendCheck,
+        withSmsHandoff,
+      }),
     });
 
     if (!result) {

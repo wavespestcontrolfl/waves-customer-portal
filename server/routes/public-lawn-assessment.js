@@ -523,6 +523,9 @@ function isPlausibleAnalyzeBody(body) {
 
 module.exports = router;
 module.exports.isPlausibleAnalyzeBody = isPlausibleAnalyzeBody;
+// Named export for services/photo-text-triage.js: its draft reply is built
+// from THIS teaser (the pre-capture allowlist), never from the raw contract.
+module.exports.buildTeaser = buildTeaser;
 // Shared with routes/public-pest-identifier.js (same claim contract).
 module.exports.sanitizeAttribution = sanitizeAttribution;
 module.exports._test = {

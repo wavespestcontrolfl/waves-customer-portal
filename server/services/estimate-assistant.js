@@ -5,6 +5,7 @@ const { WAVEGUARD } = require('./pricing-engine/constants');
 const { serviceCountsTowardWaveGuardTier } = require('./pricing-engine/discount-engine');
 const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
 const { dispatch } = require('./llm/call');
+const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -606,6 +607,12 @@ function buildEstimateAssistantContext({
     recurringServices: recurringServices.map(rowWithSummary),
     setupFee,
     firstVisitFees,
+    // Identity-only (no amounts) quote-required one-time rows that the
+    // one-time block above hides, so a recurring-mode quote that also carries a
+    // lead-only line (e.g. mosquito_misting_system) still knows it's there.
+    quoteOnlyItems: quoteRequired && !exposeOneTimeContext
+      ? oneTimeServices.map((row) => ({ service: row.service || row.key || null, label: row.label || row.name || null }))
+      : [],
     oneTime: exposeOneTimeContext ? {
       amount: oneTimeContextAmount,
       amountText: oneTimeContextAmount ? fmtMoney(oneTimeContextAmount) : null,
@@ -1180,6 +1187,63 @@ function estimateContextHasBoraCare(context = {}) {
   return rows.some(isBoraCareContextRow);
 }
 
+// True when the estimate itself is the mosquito misting SYSTEM (lead-only,
+// quote-on-request — mosquito_misting_system) via the shared predicate on
+// either row's catalog key or label/name, mirroring estimateContextHasBoraCare.
+function mistingContextRows(context = {}) {
+  return [
+    ...(Array.isArray(context.services) ? context.services : []),
+    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+    ...(Array.isArray(context.quoteOnlyItems) ? context.quoteOnlyItems : []),
+    // Retained recurring rows too: in one_time mode the builder moves the
+    // plan's recurring services here, and a mixed estimate must not read as
+    // misting-only.
+    ...(Array.isArray(context.recurringServices) ? context.recurringServices : []),
+  ];
+}
+
+function estimateContextHasMistingSystem(context = {}) {
+  const rows = mistingContextRows(context);
+  return rows.some((row) => isMistingSystemService({ serviceKey: row?.service || row?.key, name: row?.label || row?.name }));
+}
+
+// A mixed estimate (misting + another service) only routes a question to the
+// misting fallback when the question is about the misting system; questions
+// about the other service keep their own branches.
+function estimateContextIsMistingOnly(context = {}) {
+  const rows = mistingContextRows(context);
+  return rows.length > 0 && rows.every((row) => isMistingSystemService({ serviceKey: row?.service || row?.key, name: row?.label || row?.name }));
+}
+
+function isMistingSystemQuestion(q = '') {
+  // Bare "mist"/"misting" is barrier wording ("21-day misting") and does not count.
+  return isMistingSystemService({ text: q }) || /\b(misters?|nozzles?|design\s*visit|reservoir)\b/i.test(q);
+}
+
+// Misting-system copy, sourced from wiki/protocols/mosquito-misting-systems.md
+// (the tech protocol — the source of truth for every fact below).
+//
+// Deliberately ONE fixed answer, not a keyword intent router. Seven Codex
+// rounds on #4779 kept finding natural-language collisions in regex routing
+// ("how much wind", "cycle schedule", "tech inspect after a hurricane",
+// "will it come on if it rains", "service appointment"...). A misrouted
+// answer here is worse than a complete one, so every misting question gets
+// the same short answer covering the design visit, placement and re-entry,
+// weather and storm pauses, maintenance, label precautions, exposure, and the
+// no-disease-prevention line. It never states a price and never offers online
+// booking (the system is design-visit-first, not self-bookable —
+// wiki/services/service-dispatch-rules.md).
+function mistingSystemFallbackAnswer(_question, phone) {
+  return [
+    `Misting systems are designed and priced at a free on-site design visit — there is no published price and it is not booked online; the Waves team will call to schedule it (or call or text ${phone}).`,
+    'Once installed, nozzles sit under 10 ft, aimed away from pools, ponds, dining areas, and air intakes, and cycles run at dawn and dusk; stay out of the misted area until the mist has settled and treated surfaces are dry, as the product label directs, and your technician will confirm re-entry timing.',
+    'Cycles should be paused for rain, fog, wind over 10 mph, or temperatures below 50°F — by an optional weather sensor where one is installed, otherwise from the app — and before a named storm we pause systems, then inspect them before resuming.',
+    'The service plan covers monthly checks and refills plus quarterly nozzle cleaning and a filter change; only Waves-licensed techs refill the solution.',
+    '"Botanical" products can still be toxic to bees or fish, so the specific product label decides; if you suspect any exposure, pause the system and call the office right away.',
+    'The system reduces adult mosquitoes in the treated zone; it does not prevent disease.',
+  ].join(' ');
+}
+
 // A question is a Bora-Care intent only when it names Bora-Care/borate, or pairs
 // "wood" with a treatment/pest term. Bare "beetle"/"fungi" do NOT qualify, so on a
 // mixed estimate a lawn-fungus or shrub-beetle question still reaches the relevant
@@ -1209,6 +1273,22 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // question on a mixed estimate still reaches the relevant service branch.
   if (estimateContextHasBoraCare(context) && isBoraCareIntent(q)) {
     return `Bora-Care is a borate treatment applied to bare wood — attic framing and surface areas like the foundation and block. It treats the wood for termites, wood-boring beetles, and wood-decay fungi. Your technician follows the product label directions; for specifics on your home, call or text Waves at ${phone}.`;
+  }
+
+  // The mosquito misting SYSTEM (mosquito_misting_system) is lead-only and
+  // quote-required by design — no engine pricer exists yet, so every branch
+  // below that answers a normal quote-required estimate is wrong for it: the
+  // scheduling branch offers "pick a time to book online" and the system is
+  // NOT self-bookable (wiki/services/service-dispatch-rules.md), and no
+  // branch may ever state a price for it (pricing is owner-pending).
+  // Answered here, ahead of every other branch, so no phrasing of the
+  // question can reach the wrong copy — but intent-routed within itself
+  // (mistingSystemFallbackAnswer) so a weather, safety, or maintenance
+  // question gets its own protocol-sourced answer instead of design-visit/
+  // pricing copy on every question.
+  if (context.billing?.quoteRequired && estimateContextHasMistingSystem(context)
+    && (estimateContextIsMistingOnly(context) || isMistingSystemQuestion(q))) {
+    return mistingSystemFallbackAnswer(question, phone);
   }
 
   if (/\b(include|included|cover|coverage|what.*get|plan)\b/.test(q)) {

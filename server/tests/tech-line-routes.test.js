@@ -15,10 +15,11 @@ jest.mock('../services/call-bridge', () => ({
   activeBridgeCall: jest.fn(async () => null),
 }));
 jest.mock('../services/lead-estimate-link', () => ({ stampFirstResponseByContact: jest.fn(async () => 1) }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-real' })) }));
+const mockAcceptedSid = `SM${'a'.repeat(32)}`;
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: mockAcceptedSid })) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/sms-suggest-mode', () => ({
-  reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: ['dec-1'], reservationId: 'resv-1', autoSendInFlight: false })),
+  reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: ['dec-1'], reservationId: '22222222-2222-4222-8222-222222222222', autoSendInFlight: false })),
   settleHumanReply: jest.fn(async () => undefined),
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => undefined) }));
@@ -108,9 +109,15 @@ describe('POST /sms', () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415550100', body: 'On my way.', channel: 'sms', audience: 'customer', purpose: 'conversational',
       customerId: 'c1', identityTrustLevel: 'phone_matches_customer', entryPoint: 'tech_line_text',
+      providerHandoffReservation: expect.any(Object),
       metadata: expect.objectContaining({ original_message_type: 'manual', tech_line: true, scheduled_service_id: VISIT, adminUserId: 'tech-1', fromNumber: '+19413529161', parkedDecisionIds: ['dec-1'] }),
     }));
-    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ parkedDecisionIds: ['dec-1'], reservationId: 'resv-1', sent: true, reviewedBy: 'tech-1' }));
+    expect(require('../services/messaging/provider-handoff-reservation')
+      .isProviderHandoffHandle(sendCustomerMessage.mock.calls[0][0].providerHandoffReservation)).toBe(true);
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
+      parkedDecisionIds: ['dec-1'], reservationId: '22222222-2222-4222-8222-222222222222', sent: true,
+      acceptedResult: { sent: true, providerMessageId: mockAcceptedSid }, reviewedBy: 'tech-1',
+    }));
     expect(r.body).toEqual({ success: true, from: LINE });
   });
 
@@ -158,7 +165,7 @@ describe('POST /sms', () => {
     expect(r.body).toMatchObject({ code: 'PROVIDER_TIMEOUT', mayHaveSent: true });
     expect(chains.sms_send_claims).toBeUndefined(); // claim kept
     // Reservation row cleared, parked suggestions neither reopened nor ignored.
-    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ reservationId: 'resv-1', parkedDecisionIds: [], sent: false }));
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ reservationId: '22222222-2222-4222-8222-222222222222', parkedDecisionIds: [], sent: false }));
     // A validator block is definitive even when flagged retryable: released + reopened.
     primeVisit(); settleHumanReply.mockClear();
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, retryable: true, code: 'QUIET_HOURS', reason: 'Quiet hours' });
@@ -241,11 +248,14 @@ describe('POST /sms', () => {
 
   test('a throw AFTER Twilio accepted settles the thread as answered and reports Sent — never a retry invitation', async () => {
     primeVisit();
-    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('insert into messaging_audit_log — pg down'), { providerOutcome: { sent: true, providerMessageId: 'SM-real' } }));
+    const providerOutcome = { sent: true, providerMessageId: mockAcceptedSid };
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('insert into messaging_audit_log — pg down'), { providerOutcome }));
     const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } });
     expect(r.statusCode).toBe(200);
     expect(r.body).toEqual({ success: true, from: LINE });
-    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: true, reviewedBy: 'tech-1' }));
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
+      sent: true, acceptedResult: providerOutcome, reviewedBy: 'tech-1',
+    }));
     // The customer has the text: first response stamped, claim kept (codex r13 P2).
     expect(stampFirstResponseByContact).toHaveBeenCalledWith({ phone: '+19415550100', performedBy: 'tech:tech-1' });
     expect(chains.sms_send_claims.where).not.toHaveBeenCalledWith({ claim_key: expect.any(String) });

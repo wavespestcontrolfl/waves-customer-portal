@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
+const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const MAX_SEARCH_TERMS = 10;
@@ -43,6 +44,19 @@ const REPO_CONTEXT_FILES = [
 
 const REPO_CONTEXT_DIRS = ['wiki', 'docs'];
 const REPO_CONTEXT_FILE_LIMIT = 80;
+
+// The misting-system protocol competes with the mosquito BARRIER program's
+// own repo matches (waveguard-tier-logic.md, protocols.json, the pricing
+// README, ...) for the same 5-result cap in loadRepoContext below, and those
+// fixed/discovered files are scanned first — a misting question can lose the
+// one file that actually answers it before the loader ever reaches it. Guard
+// it in explicitly, but ONLY when the question (or a service label in
+// context) is actually about the misting SYSTEM (the shared
+// isMistingSystemService predicate — bare "misting", the barrier program's
+// own "21-day misting" cycle-length wording, must NOT trigger this, or a
+// barrier customer's question would pull the wrong protocol), so an
+// unrelated question never pays for it.
+const MISTING_PROTOCOL_FILE = 'wiki/protocols/mosquito-misting-systems.md';
 
 const EXTERNAL_REFERENCES = {
   general: [
@@ -863,16 +877,36 @@ function snippetFromFile(relativePath, terms) {
   };
 }
 
-function loadRepoContext(terms) {
+function loadRepoContext(terms, question = '') {
   if (!terms.length) return [];
   const discovered = [];
   for (const dir of REPO_CONTEXT_DIRS) {
     discovered.push(...discoverMarkdownFiles(dir));
   }
-  return unique([...REPO_CONTEXT_FILES, ...discovered])
+  // The raw question is checked too, not just `terms` — searchTermsFromContext
+  // tokenizes free-text question words individually ("misting" and "system"
+  // land as two separate single-word terms), so the two-word "misting
+  // system" phrase would never appear intact in `terms` unless a service
+  // LABEL already carries it verbatim.
+  const mistingRequested = isMistingSystemService({ text: question })
+    || terms.some((term) => isMistingSystemService({ text: term }));
+
+  // Scored normally, the misting protocol can rank BEHIND five other
+  // matches (barrier-program repo hits sharing "mosquito") and never survive
+  // the cap below — pull it out of the normal scan and guarantee it a slot
+  // up front instead, but only on a question that is actually about
+  // misting; otherwise it competes for the cap like any other file.
+  const results = unique([...REPO_CONTEXT_FILES, ...discovered])
+    .filter((file) => !(mistingRequested && file === MISTING_PROTOCOL_FILE))
     .map((file) => snippetFromFile(file, terms))
-    .filter(Boolean)
-    .slice(0, 5);
+    .filter(Boolean);
+
+  if (mistingRequested) {
+    const mistingSnippet = snippetFromFile(MISTING_PROTOCOL_FILE, terms);
+    if (mistingSnippet) results.unshift(mistingSnippet);
+  }
+
+  return results.slice(0, 5);
 }
 
 function discoverMarkdownFiles(relativeDir) {
@@ -1009,7 +1043,7 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
     serviceLibrary: publicServiceLibrary,
     productCatalog: productCatalogResult.rows,
     productCatalogTruncated: productCatalogResult.truncated,
-    repositoryFiles: loadRepoContext(searchTerms),
+    repositoryFiles: loadRepoContext(searchTerms, question),
     externalSources: externalReferencesFor(serviceKeys),
   };
 }

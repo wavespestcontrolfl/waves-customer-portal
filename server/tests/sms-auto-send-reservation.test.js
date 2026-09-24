@@ -10,7 +10,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   hasRedactionPlaceholder: jest.fn(() => false), hasPriceQuote: jest.fn(() => false),
   lockSuggestThread: jest.fn(async () => {}), threadHasLiveAnswer: jest.fn(async () => null),
   parkThreadSuggestions: jest.fn(async () => ['parked-1']),
-  createReplyHoldingReservation: jest.fn(async () => 'reservation-1'),
+  createReplyHoldingReservation: jest.fn(async () => '33333333-3333-4333-8333-333333333333'),
   settleReplyHoldingReservation: jest.fn(async () => true),
   reopenScheduledSuggestions: jest.fn(async () => 1),
   ignoreParkedSuggestions: jest.fn(async () => 1),
@@ -23,6 +23,7 @@ const db = require('../models/db');
 const suggest = require('../services/sms-suggest-mode');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const autoSend = require('../services/sms-auto-send');
+let decisions;
 
 function chain(overrides = {}) {
   const q = {};
@@ -39,7 +40,7 @@ beforeEach(() => {
     created_at: new Date(), from_phone: '+12025550101', to_phone: '+19413529161',
   })) });
   const activeClaim = chain();
-  const decisions = chain();
+  decisions = chain();
   const drafts = chain();
   db.trx = jest.fn((table) => {
     if (table === 'sms_log') return inbound;
@@ -49,7 +50,7 @@ beforeEach(() => {
     return chain();
   });
   db.trx.raw = jest.fn(async () => undefined);
-  suggest.createReplyHoldingReservation.mockResolvedValue('reservation-1');
+  suggest.createReplyHoldingReservation.mockResolvedValue('33333333-3333-4333-8333-333333333333');
   suggest.settleReplyHoldingReservation.mockResolvedValue(true);
   suggest.ignoreParkedSuggestions.mockResolvedValue(1);
   sendCustomerMessage.mockResolvedValue({
@@ -78,9 +79,27 @@ test('an uncertainty-arm failure prevents provider entry', async () => {
 test('accepted bookkeeping failure preserves the accepted reservation for recovery', async () => {
   suggest.ignoreParkedSuggestions.mockResolvedValueOnce(0);
   await expect(attempt()).resolves.toMatchObject({ sent: true, providerMessageId: expect.stringMatching(/^SM/) });
-  expect(suggest.settleReplyHoldingReservation).toHaveBeenNthCalledWith(1, { reservationId: 'reservation-1', uncertain: true });
+  const borrowed = sendCustomerMessage.mock.calls[0][0].providerHandoffReservation;
+  expect(require('../services/messaging/provider-handoff-reservation').isProviderHandoffHandle(borrowed)).toBe(true);
+  expect(borrowed.context).toMatchObject({
+    to: '+12025550101', fromNumber: expect.any(String), body: 'Hi there', messageType: 'ai_autosent',
+  });
+  expect(suggest.settleReplyHoldingReservation).toHaveBeenNthCalledWith(1, { reservationId: '33333333-3333-4333-8333-333333333333', uncertain: true });
   expect(suggest.settleReplyHoldingReservation).toHaveBeenNthCalledWith(2, expect.objectContaining({
-    reservationId: 'reservation-1', acceptedResult: expect.objectContaining({ deliveryOutcome: 'accepted' }),
+    reservationId: '33333333-3333-4333-8333-333333333333', acceptedResult: expect.objectContaining({ deliveryOutcome: 'accepted' }),
   }));
+  expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledTimes(2);
+});
+
+test('accepted promotion failure leaves the claim and parked decisions held', async () => {
+  suggest.settleReplyHoldingReservation
+    .mockResolvedValueOnce(true)
+    .mockResolvedValueOnce(false);
+
+  await expect(attempt()).resolves.toMatchObject({
+    sent: true, providerMessageId: expect.stringMatching(/^SM/),
+  });
+  expect(decisions.update).not.toHaveBeenCalled();
+  expect(suggest.ignoreParkedSuggestions).not.toHaveBeenCalled();
   expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledTimes(2);
 });

@@ -181,10 +181,17 @@ async function gratitudeThreadAdvanced(dbh, { inboundId, fromPhone, toPhone, ski
         AND ${phoneIdentitySql("BTRIM(COALESCE(to_phone, ''))")} = ?)
       OR
       (direction = 'outbound'
-        AND ${phoneIdentitySql("BTRIM(COALESCE(from_phone, ''))")} = ?
+        AND (
+          ${phoneIdentitySql("BTRIM(COALESCE(from_phone, ''))")} = ?
+          OR (
+            metadata->>'channel' = 'push'
+            AND metadata->>'providerAccepted' = 'true'
+            AND ${phoneIdentitySql("BTRIM(COALESCE(metadata->>'provider_from_number', ''))")} = ?
+          )
+        )
         AND ${phoneIdentitySql("BTRIM(COALESCE(to_phone, ''))")} = ?
         AND status IN ('accepted','queued','sent','delivered','scheduled','sending'))
-    )`, [fromKey, toKey, toKey, fromKey]);
+    )`, [fromKey, toKey, toKey, toKey, fromKey]);
   if (skipReservationId) query.whereNot('id', skipReservationId);
   return Boolean(await query.first('id'));
 }

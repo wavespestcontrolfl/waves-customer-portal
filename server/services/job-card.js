@@ -36,6 +36,7 @@ const contextAggregator = require('./context-aggregator');
 
 const { redactAccessCodes } = contextAggregator;
 const { matchServiceProtocol } = require('./protocol-matcher');
+const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 const {
   buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
   itemHasNitrogen, itemHasPhosphorus, parseProtocolLines,
@@ -335,6 +336,10 @@ async function loadAddons(dbh, serviceId) {
 const ADDON_PROGRAMS = Object.freeze({
   pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
   lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
+  // mosquito_misting_system (the misting SYSTEM's design-visit identity) is
+  // suppressed by the shared isMistingDesignConsultation predicate in
+  // addonProgramKey below — key-first, name only for a keyless row — so it
+  // no longer needs its own nonChemical entry here.
   mosquito: { any: ['mosquito'], fallback: 'mosquito' },
   termite: { any: ['termite'], fallback: 'termite' },
   rodent: {
@@ -355,6 +360,17 @@ const ADDON_PROGRAMS = Object.freeze({
 function addonProgramKey(category, name, protocols, serviceKey = null) {
   const rule = ADDON_PROGRAMS[category];
   if (!rule) return null;
+  // The misting SYSTEM's design-visit identity is a consultation, not a
+  // treatment — checked key-first (the shared predicate), so a name-only
+  // appointment with no serviceKey attached is suppressed the same as a
+  // keyed one, instead of falling through to `rule.fallback` below
+  // (matchServiceProtocol already returns a null programKey for this
+  // identity, but `rule.any.includes(null)` is false, so the fallback would
+  // otherwise still hand it the category's chemical program). A keyless row
+  // naming a different, not-yet-built phase (install/maintenance/refill)
+  // also gets no protocol here — there is no live program for it either,
+  // and it must not fall through to the barrier program's `fallback`.
+  if (isMistingDesignConsultation({ serviceKey, name }) || isMistingSystemServiceUnconfigured({ serviceKey, name })) return null;
   if (serviceKey && rule.nonChemical?.includes(serviceKey)) return null;
   if (serviceKey && rule.keys?.[serviceKey]) return rule.keys[serviceKey];
   const picked = matchServiceProtocol(protocols, name, { serviceKey })?.programKey;
@@ -1721,7 +1737,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     // The visit's catalog identity is not a treatment (inspection,
     // assessment, the specialty grab-bag) and no booked add-on's protocol
     // names the product: the search is not a way to dose on an inspection.
-    [!treatment && !protocolLine, `No treatment protocol for this visit (${svc.service_category})`],
+    [!treatment && !protocolLine, `No treatment protocol for this visit (${svc.service_category || 'no catalog identity'})`],
     // A booked lawn add-on has no plan on this visit: a product no primary /
     // add-on protocol names is not dosed off the catalog past the lawn
     // plan's turf, ordinance, stress and approval guards.
@@ -1777,7 +1793,14 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
  */
 async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
   const protocols = deps.protocols || require('../config/protocols.json');
-  const primaryKey = svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined;
+  // A categoryless misting-system visit (legacy/manual, no catalog row) is a
+  // non-treatment too: resolve it to null (no program) rather than undefined
+  // (unknown treatment), so the mix path never doses a searched product.
+  const mistingNonTreatment = isMistingDesignConsultation({ serviceKey: svc.service_key, name: svc.service_type })
+    || isMistingSystemServiceUnconfigured({ serviceKey: svc.service_key, name: svc.service_type });
+  const primaryKey = mistingNonTreatment
+    ? null
+    : (svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined);
   const treatment = primaryKey !== null;
   const primaryIsLawn = treatment && (primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn');
   const addons = (await loadAddons(dbh, serviceId))

@@ -622,6 +622,18 @@ async function markBookingForInspectionCredit(trx, {
     // boundary would compare the wrong instant and lose its credit.
     created_at: bookedAt ? new Date(bookedAt) : new Date(),
   };
+  // A free Waves Assessment is never recorded as credit evidence (Codex
+  // #4737 r5 P1). Savepoint-isolated: a failed read must not abort the
+  // caller's booking transaction.
+  try {
+    const isAssessment = await trx.transaction(async (sp) => {
+      const booked = await sp('scheduled_services').where({ id: scheduledServiceId }).first('service_type', 'service_id');
+      return Boolean(booked) && require('./assessment-booking').isAssessmentBooking(booked, sp);
+    });
+    if (isAssessment) return 0;
+  } catch (err) {
+    logger.warn(`[inspection-credit] assessment check failed for ${scheduledServiceId}: ${err.message}`);
+  }
   try {
     await trx.transaction(async (sp) => {
       const insertQ = sp('inspection_credit_booking_events')
@@ -734,6 +746,19 @@ async function markBookingForInspectionCredit(trx, {
 // that new purchase adoptable again.
 const CREDIT_FREE_CARD_EVENT_SOURCE = 'ib_card_credit_free';
 
+// Free Waves Assessments are never credit evidence (Codex #4737 r5 P1) —
+// excluded when evidence is RECORDED and when it is SELECTED, not only at
+// the final mint, so an assessment can never be chosen as a (then-refused)
+// alternate or consume the sweep's limit. `alias` is the scheduled_services
+// alias in the calling query ('' for an unaliased table). Mirrors
+// assessment-booking.js's isAssessmentServiceType / isAssessmentServiceRow.
+function notAssessmentSql(alias) {
+  const col = (c) => (alias ? `${alias}.${c}` : c);
+  return `lower(trim(COALESCE(${col('service_type')}, ''))) <> 'waves assessment'
+    AND (${col('service_id')} IS NULL OR ${col('service_id')} NOT IN (
+      SELECT id FROM services WHERE service_key = 'lawn_inspection' OR lower(trim(name)) = 'waves assessment'))`;
+}
+
 /**
  * The earliest PROVEN customer booking inside a window — the shared
  * evidence test for redemption, rebinding and late-offer adoption.
@@ -748,6 +773,7 @@ async function provenBookingInWindow({ customerId, from, to, excludeIds = [] }) 
     // COALESCE: the column defaults false, but a null must not exclude a
     // real booking under SQL three-valued logic.
     .whereRaw('COALESCE(s.is_callback, false) = false')
+    .whereRaw(notAssessmentSql('s'))
     // Card-approved credit-free bookings are never adoptable evidence —
     // see CREDIT_FREE_CARD_EVENT_SOURCE.
     .whereRaw("COALESCE(e.source, '') <> ?", [CREDIT_FREE_CARD_EVENT_SOURCE])
@@ -808,7 +834,7 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
       const bookingRow = await trx('scheduled_services')
         .where({ id: bookingId })
         .forUpdate()
-        .first('status', 'customer_id', 'is_callback');
+        .first('status', 'customer_id', 'is_callback', 'service_type', 'service_id');
       if (!bookingRow
         || NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingRow.status || '').toLowerCase())
         || (bookingRow.customer_id != null && String(bookingRow.customer_id) !== String(customerId))) {
@@ -825,6 +851,14 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
       // member-covered and included-child bookings legitimately carry.
       if (bookingRow.is_callback === true) {
         const e = new Error('booking is a free callback — no credit to mint against');
+        e.inspectionCreditSkip = 'booking_not_live';
+        throw e;
+      }
+      // A free Waves Assessment (the consultation-booking page books one
+      // with is_callback false) carries no collectible work either — never
+      // a credit to mint against (Codex #4737 r2 P1).
+      if (await require('./assessment-booking').isAssessmentBooking(bookingRow, trx)) {
+        const e = new Error('booking is a free assessment — no credit to mint against');
         e.inspectionCreditSkip = 'booking_not_live';
         throw e;
       }
@@ -1331,6 +1365,7 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         // enough free re-service events inside open windows would spend
         // the limit on unmintable rows every run and starve real recovery.
         .whereRaw('COALESCE(s.is_callback, false) = false')
+        .whereRaw(notAssessmentSql('s'))
         // Card-approved credit-free bookings never mint — see
         // CREDIT_FREE_CARD_EVENT_SOURCE.
         .whereRaw("COALESCE(e.source, '') <> ?", [CREDIT_FREE_CARD_EVENT_SOURCE])
@@ -1440,12 +1475,14 @@ async function rebindRedeemedOffer(offerId, bookingId) {
       const booking = await trx('scheduled_services')
         .where({ id: bookingId })
         .forUpdate()
-        .first('status', 'is_callback');
+        .first('status', 'is_callback', 'service_type', 'service_id');
       if (!booking
         || NON_LIVE_APPOINTMENT_STATUSES.includes(String(booking.status || '').toLowerCase())
         // A free callback can never hold a credit (r36 P2) — the same
-        // exclusion the mint's locked revalidation applies.
-        || booking.is_callback === true) {
+        // exclusion the mint's locked revalidation applies; a free
+        // assessment likewise (Codex #4737 r2 P1).
+        || booking.is_callback === true
+        || await require('./assessment-booking').isAssessmentBooking(booking, trx)) {
         return;
       }
       await trx('inspection_credit_offers')
@@ -1642,6 +1679,7 @@ async function reverseInspectionCreditForBooking({
               // A callback child is not a collectible booking (r36 P2) —
               // same exclusion the mint and evidence probes apply.
               .whereRaw('COALESCE(is_callback, false) = false')
+              .whereRaw(notAssessmentSql(''))
               .orderBy('scheduled_date', 'asc')
               .first('id');
           }
@@ -1672,6 +1710,7 @@ async function reverseInspectionCreditForBooking({
                 .whereNot({ id: scheduledServiceId })
                 .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
                 .whereRaw('COALESCE(is_callback, false) = false')
+                .whereRaw(notAssessmentSql(''))
                 .orderBy('scheduled_date', 'asc')
                 .first('id');
             }

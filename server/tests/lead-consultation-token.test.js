@@ -9,9 +9,11 @@
  * pricing authority on a money path.
  */
 
+const crypto = require('crypto');
 const {
   mintLeadConsultationToken,
   verifyLeadConsultationToken,
+  smsChannelFor,
   TTL_SECONDS,
 } = require('../utils/lead-consultation-token');
 const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
@@ -98,5 +100,81 @@ describe('lead consultation token', () => {
     const consultToken = mintLeadConsultationToken(LEAD, NOW);
     const [, exp, sig] = consultToken.split('.');
     expect(verifyLeadPrefillToken(LEAD, `${exp}.${sig}`, NOW)).toBe(false);
+  });
+
+  // Round 11 — Codex pre-push P1, 2026-09-24: the optional `channel` claim
+  // (server/services/lead-consultation-link.js passes it through from a
+  // future SMS send) is signed IN, not just appended — inspection-public.js's
+  // leadContactVerified trusts `channel === 'sms'` as proof this exact link
+  // reached the lead's own phone, so it must be exactly as tamper-proof as
+  // the lead id and expiry.
+  describe('optional channel claim', () => {
+    test('mint → verify round-trip with a channel carries it as a 4th segment', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW, 'sms');
+      expect(token).toEqual(expect.stringMatching(new RegExp(`^${LEAD}\\.\\d+\\.sms\\.[A-Za-z0-9_-]+$`)));
+      expect(verifyLeadConsultationToken(token, NOW)).toEqual({ leadId: LEAD, channel: 'sms' });
+    });
+
+    test('no channel passed → byte-identical 3-segment token to every existing caller, no channel key on the payload', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW);
+      expect(token).toEqual(expect.stringMatching(new RegExp(`^${LEAD}\\.\\d+\\.[A-Za-z0-9_-]+$`)));
+      expect(verifyLeadConsultationToken(token, NOW)).toEqual({ leadId: LEAD });
+    });
+
+    test('splicing a channel segment onto an unchanneled token does not verify (signature does not match)', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW);
+      const [leadId, exp, sig] = token.split('.');
+      expect(verifyLeadConsultationToken(`${leadId}.${exp}.sms.${sig}`, NOW)).toBeNull();
+    });
+
+    test('stripping the channel segment off a channeled token does not downgrade it to verify unchanneled', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW, 'sms');
+      const [leadId, exp, , sig] = token.split('.');
+      expect(verifyLeadConsultationToken(`${leadId}.${exp}.${sig}`, NOW)).toBeNull();
+    });
+
+    test('swapping the channel value does not verify (a different channel is a different signed payload)', () => {
+      const token = mintLeadConsultationToken(LEAD, NOW, 'sms');
+      const [leadId, exp, , sig] = token.split('.');
+      expect(verifyLeadConsultationToken(`${leadId}.${exp}.email.${sig}`, NOW)).toBeNull();
+    });
+  });
+
+  // Round 8 — Codex P1: smsChannelFor must be keyed with the server secret,
+  // not a bare sha256(phone). The page reveals the last 4 digits, so an
+  // unsalted digest would let anyone with the claim brute-force the
+  // remaining 6 digits offline (10^6 guesses) and recover the full phone.
+  describe('smsChannelFor is secret-keyed, not a bare phone digest', () => {
+  // Codex #4737 r13 pre-push P0: full phone identity — an international
+  // number sharing a US number's last ten digits gets a different claim.
+  test('an international number never shares a US number\'s SMS claim', () => {
+    const { smsChannelFor } = require('../utils/lead-consultation-token');
+    expect(smsChannelFor('+19415550101')).toBe(smsChannelFor('9415550101'));
+    expect(smsChannelFor('+449415550101')).not.toBe(smsChannelFor('9415550101'));
+  });
+
+    const PHONE = '9415550101';
+
+    test('differs from a plain unsalted sha256 of the phone (not brute-forceable from the claim alone)', () => {
+      const plainSha256 = `sms-${crypto.createHash('sha256').update(`lead-consultation-sms:${PHONE}`).digest('hex').slice(0, 16)}`;
+      expect(smsChannelFor(PHONE)).not.toBe(plainSha256);
+    });
+
+    test('is stable for the same phone', () => {
+      expect(smsChannelFor(PHONE)).toBe(smsChannelFor(PHONE));
+      expect(smsChannelFor('+1 (941) 555-0101')).toBe(smsChannelFor(PHONE));
+    });
+
+    test('changes if the server secret changes (keyed with the signing secret, not a fixed salt)', () => {
+      const withOriginalSecret = smsChannelFor(PHONE);
+      process.env.LEAD_PREFILL_SECRET = 'a-completely-different-secret';
+      expect(smsChannelFor(PHONE)).not.toBe(withOriginalSecret);
+    });
+
+    test('fails closed with no secret configured', () => {
+      delete process.env.LEAD_PREFILL_SECRET;
+      delete process.env.JWT_SECRET;
+      expect(smsChannelFor(PHONE)).toBeNull();
+    });
   });
 });

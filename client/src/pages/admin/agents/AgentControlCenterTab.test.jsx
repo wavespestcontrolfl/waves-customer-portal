@@ -97,6 +97,13 @@ beforeEach(() => {
 });
 
 describe("AgentControlCenterTab", () => {
+  it("uses a mobile-sized retry target after a failed read", async () => {
+    adminFetch.mockRejectedValueOnce(new Error("Unavailable"));
+    renderTab();
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(retry).toHaveClass("h-11", "md:h-8");
+  });
+
   it("reads once per URL scope and renders the server counts, cards, and dashes with reasons", async () => {
     renderTab("/admin/agents?tab=overview&area=sms&window=today&status=attention");
     expect(await screen.findByText("SMS reply draft")).toBeInTheDocument();
@@ -231,12 +238,12 @@ describe("AgentControlCenterTab", () => {
     expect(within(card).getByText("600 in · 120 out")).toBeInTheDocument();
   });
 
-  it("registers the hub refresh handle and shows the fetch error", async () => {
-    const setRefreshHandler = vi.fn();
+  it("shows the fetch error with a retry action", async () => {
     adminFetch.mockRejectedValueOnce(new Error("boom"));
-    renderTab("/admin/agents?tab=overview", { setRefreshHandler });
+    renderTab("/admin/agents?tab=overview");
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
-    expect(setRefreshHandler).toHaveBeenCalledWith(expect.any(Function), expect.any(Boolean));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("SMS reply draft")).toBeInTheDocument();
   });
 });
 
