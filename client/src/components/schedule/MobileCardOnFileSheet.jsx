@@ -54,8 +54,12 @@ function formatUsd(amount) {
 
 // ADMIN-BUG-R47: the exact amount that will move — including the funding-
 // aware card surcharge and any post-credit reduction — priced by the same
-// /charge-card-quote endpoint CreateProjectModal already uses, so this sheet
-// never charges a figure nobody on the admin side saw first.
+// /charge-card-quote endpoint CreateProjectModal already uses. The sheet
+// shows this line and binds its total into the charge as expectedTotal so
+// the server refuses if the invoice moved since it was priced. It stays
+// ONE tap (quote, show, charge — no confirm step between): whether to add
+// an explicit confirm is the open owner decision F0348 in
+// docs/design/DECISIONS.md, deliberately not taken here.
 function quoteAmountLabel(quote) {
   if (!quote) return null;
   const total = formatUsd(quote.total);
