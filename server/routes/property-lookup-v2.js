@@ -2649,6 +2649,15 @@ function countyRecordVouchesTypedNumber(address, rc) {
   if (!typedStreet || !recordStreet || typedStreet !== recordStreet) return false;
   const recordZip = String(rc?.zipCode || rc?._parcel?.zip || '').match(/\d{5}/)?.[0] || null;
   if (typedParsed.zip && recordZip && typedParsed.zip !== recordZip) return false;
+  // …and an EXPLICIT city / state mismatch (a ZIP-less request resolving to
+  // the same number and street in another town) — pre-push audit P1 after
+  // r50. Absent values on either side are not a mismatch.
+  const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+  const recordCity = cityKey(rc?.city || rc?._parcel?.city);
+  if (typedParsed.city && recordCity && cityKey(typedParsed.city) !== recordCity) return false;
+  const stateKey = (v) => String(v || '').trim().toUpperCase().slice(0, 2);
+  const recordState = stateKey(rc?.state || rc?._parcel?.state);
+  if (typedParsed.state && recordState && stateKey(typedParsed.state) !== recordState) return false;
   return true;
 }
 
