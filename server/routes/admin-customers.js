@@ -3793,26 +3793,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // stage-flip residue on a repeat run.
     let suppressChurnMembershipEmail = false;
     if (updates.pipeline_stage === 'churned') {
-      const decision = await LifecycleGuard.churnGuardForRow(db, req.params.id);
-      if (decision.blocked) {
-        return res.status(409).json({
-          error: 'customer_still_billing_or_scheduled',
-          message: decision.liveVisit
-            ? `${LifecycleGuard.describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
-            : decision.liveTerm
-              ? 'This customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.'
-              : `This customer ${decision.error}.`,
-          liveVisit: decision.liveVisit,
-          liveTerm: decision.liveTerm,
-          pendingPrepayInvoice: decision.pendingPrepayInvoice,
-        });
-      }
-      // Billing was just wound down by churnGuardForRow itself (the
-      // canonical cancellation-processor.js write) — `updates` never
-      // carries active/autopay_enabled/next_charge_date, so this commits as
-      // its own write rather than inside the transaction below; both are
-      // idempotent, so a failure of the transaction below leaves billing
-      // safely wound down rather than leaving it live.
+      // The guard + wind-down themselves run INSIDE the transaction below,
+      // after the row lock (pre-push audit P1 on 04edd43204): the guard's
+      // disarm is a real write, and a combined churn+contact edit that a
+      // later 409 refuses must roll that write back too, not report "save
+      // failed" with billing already disabled. `active` is an editable
+      // field on this route — never let a payload's active=true ride over
+      // the disarm in the same UPDATE.
+      delete updates.active;
       suppressChurnMembershipEmail = true;
     }
     if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
@@ -3928,6 +3916,34 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
           contactAuditAt = new Date();
+          // ADMIN-BUG-R10 (round 3): on EVERY write of pipeline_stage=
+          // 'churned' — including a re-save on an already-churned row, so a
+          // pre-fix residue row self-heals — refuse while a future visit, an
+          // active prepay term or an unpaid pending prepay invoice is still
+          // on file, otherwise churnGuardForRow winds billing down through
+          // the canonical cancellation-processor.js write ON THIS
+          // TRANSACTION, under the row lock, so any later refusal (the
+          // catch below maps this one to its 409) rolls the disarm back
+          // with everything else.
+          if (updates.pipeline_stage === 'churned') {
+            const decision = await LifecycleGuard.churnGuardForRow(trx, req.params.id);
+            if (decision.blocked) {
+              const err = new Error('customer_still_billing_or_scheduled');
+              err.churnBlocked = true;
+              err.payload = {
+                error: 'customer_still_billing_or_scheduled',
+                message: decision.liveVisit
+                  ? `${LifecycleGuard.describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+                  : decision.liveTerm
+                    ? 'This customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.'
+                    : `This customer ${decision.error}.`,
+                liveVisit: decision.liveVisit,
+                liveTerm: decision.liveTerm,
+                pendingPrepayInvoice: decision.pendingPrepayInvoice,
+              };
+              throw err;
+            }
+          }
           // Directory saves submit the complete form, including an unchanged
           // tier. An auto-derived label stays auto when the LOCKED row confirms
           // the submitted tier is unchanged; only an actual tier choice earns
@@ -4090,6 +4106,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           }
         });
       } catch (e) {
+        if (e && e.churnBlocked) return res.status(409).json(e.payload);
         if (e && e.code === '23505') {
           return res.status(409).json({
             error: 'address_matches_existing_property',
