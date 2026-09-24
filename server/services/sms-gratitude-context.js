@@ -158,7 +158,10 @@ async function pendingGratitudeWork(dbh, { customerId, threadLast10 }) {
 async function gratitudeThreadAdvanced(dbh, { inboundId, fromPhone, toPhone, skipReservationId = null }) {
   if (!inboundId || !fromPhone || !toPhone) return true;
   const query = dbh('sms_log').whereNot('id', inboundId)
-    .whereRaw('created_at >= (SELECT created_at FROM sms_log WHERE id = ?)', [inboundId])
+    // Any still-pending outbound owns the exchange, even if queued before
+    // this inbound. Only the caller's exact reservation may be excluded.
+    .whereRaw(`(created_at >= (SELECT created_at FROM sms_log WHERE id = ?)
+      OR (direction = 'outbound' AND status IN ('queued','scheduled','sending')))`, [inboundId])
     .whereRaw(`(
       (direction = 'inbound' AND from_phone = ? AND to_phone = ?)
       OR
@@ -214,7 +217,7 @@ async function readGratitudeContext({
     .whereRaw(`(
       (direction = 'inbound' AND from_phone = ? AND to_phone = ?)
       OR
-      (direction = 'outbound' AND from_phone = ? AND to_phone = ? AND status IN ('queued','sent','delivered'))
+      (direction = 'outbound' AND from_phone = ? AND to_phone = ? AND status IN ('sent','delivered'))
     )`, [from, to, to, from])
     .orderBy('created_at', 'desc').limit(201)
     .select('id', 'direction', 'message_body', 'message_type', 'status', 'metadata', 'created_at');

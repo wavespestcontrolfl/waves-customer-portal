@@ -153,6 +153,7 @@ test('thread advancement SQL excludes only anchor and owned reservation', async 
   expect(queries).toHaveLength(1);
   expect(queries[0].sql.match(/not "id" = \?/g)).toHaveLength(2);
   expect(queries[0].sql).toContain("status IN ('queued','sent','delivered','scheduled','sending')");
+  expect(queries[0].sql).toContain("OR (direction = 'outbound' AND status IN ('queued','scheduled','sending'))");
   expect(queries[0].bindings).toEqual(expect.arrayContaining([
     '00000000-0000-4000-8000-000000000002',
     '00000000-0000-4000-8000-000000000099',
