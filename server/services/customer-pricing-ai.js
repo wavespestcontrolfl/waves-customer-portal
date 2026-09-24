@@ -177,8 +177,14 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
     // reordered, so it can never be options[0]. Enhanced stays first so the
     // portal panel (which auto-selects options[0]) defaults to the
     // 9-application plan.
+    // A DB re-enable (lawn_pricing_v2.tiers.standard.hidden=false) brings
+    // 6x back AFTER enhanced, so options[0] stays the 9x default.
+    const { LAWN_TIERS } = require('./pricing-engine/constants');
     const all = [
       { id: 'lawn-enhanced', serviceKey, label: 'Lawn care — 9x applications/yr', tier: 'enhanced', lawnFreq: 9, cadence: '9 applications/yr' },
+      ...(LAWN_TIERS.standard && !LAWN_TIERS.standard.hidden
+        ? [{ id: 'lawn-standard', serviceKey, label: 'Lawn care — 6x applications/yr', tier: 'standard', lawnFreq: 6, cadence: '6 applications/yr' }]
+        : []),
       { id: 'lawn-premium', serviceKey, label: 'Lawn care — 12x applications/yr', tier: 'premium', lawnFreq: 12, cadence: '12 applications/yr' },
     ];
     if (generic) return all.filter(o => o.id === 'lawn-enhanced');

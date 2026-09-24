@@ -19,6 +19,7 @@ import {
   fmt,
   fmtInt,
   isCommercialEstimateInput,
+  applyServerLawnTierConfig,
   isLawnStandardSold,
   resolveLookupPropertyTypeAutofill,
   rodentBaitPolicyNote,
@@ -2647,6 +2648,7 @@ export default function EstimateToolViewV2({
   // failure / older server all keep the option hidden rather than offering
   // a control the engine would reject with a 400.
   const [bermudaSuppressionAvailable, setBermudaSuppressionAvailable] = useState(false);
+  const [lawnStandardSold, setLawnStandardSold] = useState(() => isLawnStandardSold());
   useEffect(() => {
     let active = true;
     (async () => {
@@ -2654,7 +2656,12 @@ export default function EstimateToolViewV2({
         const r = await adminFetch("/admin/pricing-config/lawn_pricing_v2");
         if (!r.ok) return;
         const row = await r.json();
-        if (active) setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
+        if (active) {
+          setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
+          // Same row carries tier sellability (6x hidden 2026-09-24); a DB
+          // re-enable must reach this estimator on a direct load too.
+          setLawnStandardSold(applyServerLawnTierConfig(row?.data));
+        }
       } catch {
         /* ignore — stays unavailable */
       }
@@ -5400,7 +5407,7 @@ export default function EstimateToolViewV2({
                       <SelectV2
                         k="lawnFreq"
                         options={[
-                          ...(isLawnStandardSold() ? [{ value: "6", label: "6 — Bi-monthly" }] : []),
+                          ...(lawnStandardSold ? [{ value: "6", label: "6 — Bi-monthly" }] : []),
                           { value: "9", label: "9 — Every 6 weeks" },
                           { value: "12", label: "12 — Monthly" },
                         ]}

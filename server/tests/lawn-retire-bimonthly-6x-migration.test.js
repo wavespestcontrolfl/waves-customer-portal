@@ -24,6 +24,7 @@ function fakeKnex(db) {
       },
       whereIn(col, vals) { filters.push((r) => vals.includes(r[col])); return q; },
       select() { return Promise.resolve(rows(table).filter(matches).map((r) => ({ ...r }))); },
+      forUpdate() { return q; },
       async first() { const r = rows(table).find(matches); return r ? { ...r } : null; },
       async update(patch) {
         let n = 0;

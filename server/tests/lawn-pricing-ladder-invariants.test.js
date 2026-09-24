@@ -96,8 +96,9 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
     // negative values are malformed), so a default-config scan is clean.
     const { violations, cellsChecked, shapeChecks } = scanLadderGrid();
     expect(shapeChecks).toBe(false); // per-app shape check stays opt-in until Phase 2 repricing
-    // 41 sizes x 4 tracks x 2 sold cadences (6x hidden 2026-09-24) = 328.
-    expect(cellsChecked).toBeGreaterThan(300);
+    // 41 sizes x 4 tracks x 3 priced cadences (6x anchor scanned via
+    // includeHiddenTiers although hidden from sale) = 492.
+    expect(cellsChecked).toBeGreaterThan(400);
     expect(violations).toEqual([]);
   });
 });

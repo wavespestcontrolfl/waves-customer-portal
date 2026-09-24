@@ -30,6 +30,19 @@ describe('variantsForService — lawn_care', () => {
     expect(all.some((o) => o.tier === 'standard' || o.lawnFreq === 6)).toBe(false);
   });
 
+  test('a live DB re-enable of 6x brings Standard back after Enhanced (codex #4744 r2)', () => {
+    const { LAWN_TIERS } = require('../services/pricing-engine/constants');
+    const was = LAWN_TIERS.standard.hidden;
+    try {
+      LAWN_TIERS.standard.hidden = false;
+      expect(variantsForService('lawn_care', 'lawn care please').map((o) => o.id))
+        .toEqual(['lawn-enhanced', 'lawn-standard', 'lawn-premium']);
+      expect(variantsForService('lawn_care', '', true).map((o) => o.id)).toEqual(['lawn-enhanced']);
+    } finally {
+      LAWN_TIERS.standard.hidden = was;
+    }
+  });
+
   test('generic request returns the enhanced default only', () => {
     const generic = variantsForService('lawn_care', '', true);
     expect(generic.map((o) => o.id)).toEqual(['lawn-enhanced']);

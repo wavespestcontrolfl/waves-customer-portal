@@ -475,14 +475,21 @@ export function applyServerLawnPricingConfig(config) {
   // the kill-value pattern.
   const version = typeof config?.pricingVersion === 'string' ? config.pricingVersion.trim() : '';
   LAWN_PRICING_V2.pricingVersion = version || LAWN_PRICING_V2_DEFAULT_VERSION;
-  // 6x/standard sellability — mirrors db-bridge: tiers.standard.hidden wins,
-  // else customerFacing is its inverse; absent restores the in-code default
-  // (hidden since 2026-09-24), so a DB re-enable reaches this engine too.
+  applyServerLawnTierConfig(config);
+  return LAWN_PRICING_V2.programMinimumMonthly;
+}
+
+// 6x/standard sellability — mirrors db-bridge: tiers.standard.hidden wins,
+// else customerFacing is its inverse; absent restores the in-code default
+// (hidden since 2026-09-24), so a DB re-enable reaches this engine too.
+// Exported alone for surfaces (EstimateToolViewV2) that read only the tier
+// metadata off the lawn_pricing_v2 row.
+export function applyServerLawnTierConfig(config) {
   const standardMeta = config?.tiers?.standard;
   if (typeof standardMeta?.hidden === 'boolean') lawnStandardHidden = standardMeta.hidden;
   else if (typeof standardMeta?.customerFacing === 'boolean') lawnStandardHidden = !standardMeta.customerFacing;
   else lawnStandardHidden = true;
-  return LAWN_PRICING_V2.programMinimumMonthly;
+  return !lawnStandardHidden;
 }
 
 // Is the 6x lawn tier currently sold? The estimator dropdown reads this.
