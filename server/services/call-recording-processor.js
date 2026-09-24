@@ -16480,28 +16480,35 @@ const CallRecordingProcessor = {
     if (!CALL_EXTRACTION_V2_DRIVES_ROUTING && houseNumberDisputed && (!houseNumberConflictFiled || disputeClaimedUnrecorded)
       && extracted.appointment_confirmed && !appointmentResult?.scheduledServiceId) {
       try {
-        await db('triage_items')
-          .insert(buildTriageItem({
-            callLogId: call.id,
-            flag: 'auto_booking_skipped_after_approval',
-            // The booking-authority snapshot (legacy in shadow mode), never
-            // a V2 blob that may say 'none' (codex r11 P1).
-            extraction: disputeSchedulingAuthority || v2CanonicalExtraction || undefined,
-            extraPayload: {
-              skipped_reason: 'house_number_dispute_card_unfiled',
-              preferred_date_time: extracted.preferred_date_time || null,
-              service: extracted.matched_service || extracted.requested_service || null,
-            },
-          }))
-          // A standing task (open OR claimed) is REFRESHED with the current
-          // service / window rather than left stale — the same merge the
-          // settlement path applies (codex r20 P1).
-          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-          .merge({
-            payload: db.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
-            summary: db.raw('EXCLUDED.summary'),
-            updated_at: new Date(),
-          });
+        // Under the triage-call lock (the lock every verdict / Resolve
+        // takes): a refresh must not slip between an action's version check
+        // and its status write, or the newer appointment evidence closes
+        // unreviewed (codex r31 P1).
+        await db.transaction(async (ttrx) => {
+          await lockTriageCall(ttrx, call.id);
+          await ttrx('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'auto_booking_skipped_after_approval',
+              // The booking-authority snapshot (legacy in shadow mode), never
+              // a V2 blob that may say 'none' (codex r11 P1).
+              extraction: disputeSchedulingAuthority || v2CanonicalExtraction || undefined,
+              extraPayload: {
+                skipped_reason: 'house_number_dispute_card_unfiled',
+                preferred_date_time: extracted.preferred_date_time || null,
+                service: extracted.matched_service || extracted.requested_service || null,
+              },
+            }))
+            // A standing task (open OR claimed) is REFRESHED with the current
+            // service / window rather than left stale — the same merge the
+            // settlement path applies (codex r20 P1).
+            .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .merge({
+              payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+              summary: ttrx.raw('EXCLUDED.summary'),
+              updated_at: new Date(),
+            });
+        });
       } catch (fallbackErr) {
         logger.warn(`[call-proc] shadow-mode dispute fallback card failed for ${maskSid(callSid)}: ${fallbackErr.code || fallbackErr.name || 'db_error'}`);
       }

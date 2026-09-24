@@ -325,7 +325,7 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(src).toContain("where({ id: retainedId, source_call_log_id: item.call_log_id })");
     // Recovery tasks: version-bound on /verdict, never swept by a sibling verdict, obsolete retained fields nulled (codex r31 P1).
     expect(src).toContain("if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {");
-    expect(src).toContain("if (item.reason_code !== 'auto_booking_skipped_after_approval') q.whereNot({ reason_code: 'auto_booking_skipped_after_approval' });");
+    expect(src).toContain("...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),");
     expect(src).toContain("retained_service_id: retained ? retained.id : null,");
     const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).

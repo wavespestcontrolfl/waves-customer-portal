@@ -1007,12 +1007,14 @@ router.post('/:id/verdict', async (req, res) => {
         // …and an owed follow-up visit the dispute hold kept from being
         // created: settling the address dispute answers nothing about
         // visit 2, so its card survives the call verdict (codex r10 P1).
-        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked'])
+        // …and a recovery task (its window / retained visit refreshed in
+        // place by a settlement) is settled only by ITS OWN version-bound
+        // verdict, never swept by a sibling card's verdict (codex r31 P1).
+        .whereNotIn('reason_code', [
+          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked',
+          ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
+        ])
         .modify((q) => { if (conflictLeftForOwnVerdict) q.whereNot({ id: heldConflict.id }); })
-        // A recovery task (its window / retained visit refreshed in place by
-        // a settlement) is settled only by ITS OWN version-bound verdict,
-        // never swept by a sibling card's verdict (codex r31 P1).
-        .modify((q) => { if (item.reason_code !== 'auto_booking_skipped_after_approval') q.whereNot({ reason_code: 'auto_booking_skipped_after_approval' }); })
         .whereRaw("payload->'reschedule_proposal' IS NULL")
         .whereIn('status', OPEN_STATES)
         .update({
