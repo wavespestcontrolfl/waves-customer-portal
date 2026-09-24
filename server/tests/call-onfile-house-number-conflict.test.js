@@ -202,6 +202,14 @@ describe('triage auto-resolve: house_number_adopted', () => {
       .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
+  test('a card recording a retained same-call visit is left to staff (codex r38 P1)', () => {
+    const withRetained = item({
+      customer_address_line1: '1250 Example Street',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null, retained_service_id: 'svc-9' },
+    });
+    expect(classifyTriageItem(withRetained, {}, { now: NOW })).toBeNull();
+  });
+
   test('a card recording a promised follow-up is left to staff', () => {
     const withPlan = item({
       customer_address_line1: '1250 Example Street',

@@ -1059,7 +1059,11 @@ const CLASSIFY_RULES = [
       // A card that also records a PROMISED follow-up (visit 2 the hold
       // kept from booking) is settled by staff: booking evidence for the
       // primary says nothing about visit 2 (local audit P1 after r20).
-      && !parseMaybeJson(item.payload)?.follow_up_plan },
+      && !parseMaybeJson(item.payload)?.follow_up_plan
+      // …and one that records a RETAINED same-call visit still carrying the
+      // disputed number: another booking covering the ask says nothing
+      // about that visit's address — staff settle it (codex r38 P1).
+      && !parseMaybeJson(item.payload)?.retained_service_id },
   { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
   { rule: 'advisory_aged', action: 'dismiss',
     when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },
