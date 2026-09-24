@@ -33,62 +33,98 @@ function makeError(message, statusCode, code) {
   return err;
 }
 
-// P1-A (round 4 on this branch): a customer-scoped, transaction-level
-// advisory lock serializing recordOutcome's write+evidence-check against
-// markWonForCustomer's reconciling UPDATE. Without it, both reconciliation
-// directions can miss a concurrent sale:
-//   - markWonForCustomer runs first and finds zero open rows (the outcome
-//     hasn't been recorded yet) — it commits having done nothing;
-//   - recordOutcome's own evidence check then runs (and commits) before
-//     that markWonForCustomer's writer fully commits, so it can't see it
-//     either — a warm/cold row can be inserted whose sale already closed
-//     and never gets reconciled either way.
-// A SAVEPOINT does not fix this — a savepoint isolates a FAILURE inside a
-// transaction from the rest of it; it does nothing about two SEPARATE,
-// concurrently-committing transactions each missing the other's write.
-// Serializing both sides on ONE lock does: whichever side takes it first
-// runs to completion (commit or rollback) before the other proceeds, so
-// the second side's reads are always against the first side's fully
-// committed state.
+// P1-A (round 5 — the round-4 advisory lock was itself a real deadlock,
+// caught by the pre-push auditor): recordOutcome's write+evidence-check
+// must serialize against markWonForCustomer's reconciling UPDATE, or both
+// reconciliation directions can miss a concurrent sale — markWonForCustomer
+// runs first, finds zero open rows (the outcome hasn't been recorded yet),
+// and commits having done nothing; recordOutcome's own evidence check then
+// runs (and commits) before that write is visible, so it can't see it
+// either. A warm/cold row can be inserted whose sale already closed and
+// never gets reconciled either way. A SAVEPOINT does not fix this — a
+// savepoint isolates a FAILURE inside a transaction from the rest of it; it
+// does nothing about two SEPARATE, concurrently-committing transactions
+// each missing the other's write.
 //
-// Both callers take this SAME key, FIRST — before either touches
-// consultation_outcomes/leads/estimates/scheduled_services for that
-// customer: recordOutcome at the top of the transaction wrapping its
-// insert/merge + evidence check (see recordOutcome below); markWonForCustomer
-// at the top of the caller's own booking/estimate-accept transaction,
-// before its reconciling UPDATE.
+// Round 4 closed that gap with a customer-scoped pg_advisory_xact_lock, but
+// introduced a NEW deadlock: recordOutcome's insert into
+// consultation_outcomes implicitly takes an FK KEY SHARE lock on the
+// `customers` (and `leads`) rows it references, taken AFTER the advisory
+// lock; a caller of markWonForCustomer (estimate-converter.js's accept
+// path: `customers` FOR UPDATE; admin-leads.js's schedule-appointment:
+// `leads` FOR UPDATE) already holds that row lock BEFORE it reaches
+// markWonForCustomer's advisory-lock call, further down the same
+// transaction. FOR UPDATE conflicts with KEY SHARE — TxA (recordOutcome)
+// holds the advisory lock and waits on the row (held FOR UPDATE by TxB);
+// TxB holds the row FOR UPDATE and waits on the advisory lock (held by
+// TxA). Classic ABBA.
 //
-// Key convention: same two-arg pg_advisory_xact_lock(hashtext(namespace),
-// hashtext(id::text)) idiom as triage-locks.js / customer-comms-lock.js's
-// lockSmsPhone (grepped for `pg_advisory_xact_lock` first) — a distinct
-// namespace string, not string concatenation, so this key space can never
-// collide with theirs.
+// FIX: the row lock IS the serialization point — no separate advisory key.
+// recordOutcome takes `customers` FOR NO KEY UPDATE (lockCustomerRow,
+// below) as the FIRST statement of the transaction that also does its
+// insert/merge + evidence check (see recordOutcome). FOR NO KEY UPDATE
+// conflicts with FOR UPDATE, with a plain UPDATE's own implicit lock, and
+// with itself — so it serializes against every caller exactly as the
+// advisory lock intended — and it does NOT conflict with the KEY SHARE the
+// insert itself then takes on that SAME row (already held, a no-op
+// re-acquisition in the same transaction), which is what removes the ABBA
+// cycle: there is no second resource (advisory key) left to reverse-order
+// against. markWonForCustomer takes the identical lock, on the identical
+// row, as the first statement INSIDE its own savepoint (not on `trx`
+// directly — see markWonForCustomer) — never leads, only customers (see
+// "why customers only" below).
 //
-// DEADLOCK CHECK: every existing markWonForCustomer caller (admin-leads.js
-// schedule-appointment, proposal-win.js promoteLinkedCustomerForProposalWin,
-// estimate-converter.js's accept path) already holds an UPDATE-acquired row
-// lock on the SAME customer's `customers` row (and, in admin-leads.js, a
-// `leads` FOR UPDATE row lock plus the occupancy/customer-comms advisory
-// locks) by the time it calls markWonForCustomer — i.e. this new advisory
-// lock is acquired AFTER those row locks in that transaction, which on its
-// face looks like it violates the repo's documented "advisory-before-row"
-// order (estimate-manual-acceptance.js). That convention exists to prevent
-// TWO transactions that both take the SAME set of locks from taking them in
-// different orders. It does not apply here: recordOutcome — the only other
-// taker of THIS key — never locks or updates a `customers` or `leads` row
-// (deriveLinkage and findSaleEvidenceForConsultation only run plain,
-// non-FOR-UPDATE SELECTs). So there is no resource recordOutcome holds that
-// a markWonForCustomer caller's earlier row locks would ever wait on — the
-// two sides only ever contend on this one advisory key, which cannot form a
-// cycle by itself.
-const CONSULTATION_LOCK_NAMESPACE = 'consultation-outcome';
-
-async function lockConsultationOutcome(database, customerId) {
+// VERIFIED CALLER ORDER (do not "leads before customers" by assumption —
+// admin-leads.js's own comment says otherwise): admin-leads.js's
+// schedule-appointment rebook branch explicitly locks `customers` FOR NO
+// KEY UPDATE BEFORE `leads` FOR UPDATE ("Customer 360 and lead tools lock
+// customer before lead. This row may be promoted below, so acquire its
+// write lock in that order."). estimate-converter.js's accept path locks
+// only `customers` FOR UPDATE (no leads). Locking `customers` FIRST, as
+// recordOutcome's only explicit row lock, matches every caller's order.
+//
+// WHY CUSTOMERS ONLY, NOT LEADS: recordOutcome's insert also references
+// lead_id (nullable FK), so its own INSERT still takes an implicit KEY
+// SHARE lock on that lead row — never a second EXPLICIT pre-lock. Three
+// reasons this is both sufficient and the safer choice:
+//   1. Every markWonForCustomer caller that could race an EXISTING
+//      customer's consultation always locks `customers` in its "both
+//      exist" path — admin-leads.js's FIRST-conversion branch (no
+//      customerId yet) only locks `leads`, but a not-yet-created customer
+//      cannot already have a consultation_outcomes row to race against, so
+//      there is nothing for recordOutcome to contend with there.
+//      Serializing on `customers` alone is provably sufficient — locking
+//      `leads` too adds no additional protection any real caller needs.
+//   2. estimate-manual-acceptance.js has its OWN, narrower `leads` FOR
+//      UPDATE (a call-linkage-correction guard, gated on
+//      `eng?.callLogId` + a specific lead_linkage marker) taken BEFORE its
+//      `customers` lock — the OPPOSITE relative order from admin-leads.js.
+//      That pre-existing cross-file inconsistency is unrelated to this
+//      lane and out of scope to resolve here; NOT locking `leads` from
+//      consultation-outcomes.js side-steps it entirely rather than
+//      guessing which of two contradictory orders to match.
+//   3. Because `customers` is the ONLY resource recordOutcome and
+//      markWonForCustomer's lock ever contend on (no advisory keys, no
+//      `leads`, no other table), a cycle needs two transactions to touch
+//      two SHARED resources in reversed order — with exactly one shared
+//      resource, taken as each side's very first touch of it, no cycle is
+//      possible.
+async function lockCustomerRow(database, customerId) {
   if (!customerId) return;
-  await database.raw(
-    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-    [CONSULTATION_LOCK_NAMESPACE, String(customerId)],
-  );
+  await database('customers').where({ id: customerId }).forNoKeyUpdate().first('id');
+}
+
+// Postgres SQLSTATEs a genuine lock conflict can surface as — Postgres's
+// own deadlock detector aborts one side (40P01), or a stricter isolation
+// level's write conflict (40001, not used here under READ COMMITTED but
+// mapped defensively) — never a caller bug. Same convention as
+// estimate-public.js's accept-transaction `.catch`: map to the retryable
+// 409 shape the route already returns for an operational error, instead of
+// an unmapped 500 that reads as "your save failed" when a retry would
+// simply succeed.
+const RETRYABLE_TX_SQLSTATES = new Set(['40P01', '40001']);
+function isRetryableTxError(err) {
+  return !!(err && RETRYABLE_TX_SQLSTATES.has(err.code));
 }
 
 // Sync check for a caller that already has a scheduled_services row (with or
@@ -183,7 +219,11 @@ function toDateOnlyString(value) {
  *   (b) an accepted estimate for this customer (estimates.status='accepted',
  *       accepted_at),
  *   (c) a non-assessment scheduled_services row for this customer created
- *       after the visit (another consultation is never itself a sale).
+ *       after the visit that is a genuine NEW booking — another
+ *       consultation (P1-B: nor a free callback [is_callback] or a
+ *       recurring-series child spawned onto an EXISTING plan
+ *       [recurring_parent_id] — neither is a new sale) is never itself a
+ *       sale.
  * Returns { won_via, won_at } for the first match, or null.
  */
 async function findSaleEvidenceForConsultation(database, { customerId, scheduledDateStr, now = new Date() }) {
@@ -235,9 +275,20 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
     .where('created_at', '>=', lowerBound)
     .where('created_at', '<=', upperBound)
     .orderBy('created_at', 'asc')
-    .select('id', 'service_type', 'service_id', 'created_at');
+    .select('id', 'service_type', 'service_id', 'created_at', 'is_callback', 'recurring_parent_id');
   for (const booking of bookings) {
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale
+    // P1-B: a free re-service callback (the persisted flag every
+    // completion/billing path already keys off — server/services/
+    // re-service.js) is not a purchase; neither is a recurring-series
+    // child the scheduler auto-spawns onto an EXISTING plan
+    // (recurring_parent_id set — server/services/recurring-appointment-
+    // seeder.js stamps `is_recurring: true, recurring_parent_id: <root
+    // id>` on every occurrence it generates). The series ROOT itself
+    // (is_recurring true, recurring_parent_id null — a customer's first
+    // enrollment) is unaffected and still qualifies as a genuine new sale.
+    if (booking.is_callback) continue;
+    if (booking.recurring_parent_id) continue;
     return { won_via: 'office_booking', won_at: new Date(booking.created_at) };
   }
 
@@ -317,16 +368,16 @@ async function recordOutcome(params = {}, { trx } = {}) {
   };
 
   // P1-A: the insert/merge below AND the evidence check that follows it must
-  // run as ONE unit under the shared per-customer advisory lock (see
-  // lockConsultationOutcome above) — a transaction of its own (a SAVEPOINT
-  // when `database` is already a caller transaction), starting with the
-  // lock, BEFORE either the write or the evidence reads. This is what
-  // closes the round-4 race: whichever of this call and a concurrent
-  // markWonForCustomer takes the lock first now runs to completion — write
-  // AND evidence check together — before the other proceeds, so the second
-  // side's reads are always against the first side's committed state.
-  return database.transaction(async (locked) => {
-    await lockConsultationOutcome(locked, customerId);
+  // run as ONE unit under the shared customer row lock (see lockCustomerRow
+  // above) — a transaction of its own (a SAVEPOINT when `database` is
+  // already a caller transaction), starting with the lock, BEFORE either
+  // the write or the evidence reads. This is what closes the race:
+  // whichever of this call and a concurrent markWonForCustomer takes the
+  // lock first now runs to completion — write AND evidence check together
+  // — before the other proceeds, so the second side's reads are always
+  // against the first side's committed state.
+  const txResult = database.transaction(async (locked) => {
+    await lockCustomerRow(locked, customerId);
 
     // Atomic upsert guard (waves-db-adjacent — no read-then-write TOCTOU
     // against markWonForCustomer's concurrent reconciliation): the conflict
@@ -390,6 +441,24 @@ async function recordOutcome(params = {}, { trx } = {}) {
 
     return saved;
   });
+
+  // P1-A: a genuine lock conflict (40P01 deadlock-victim abort, or a
+  // serialization failure) is retryable, not a caller error — surface it
+  // as the same 409 operational-error shape ALREADY_WON above uses, so the
+  // route's existing `isOperational && statusCode` mapping (no route
+  // change needed) returns 409 instead of falling through to an unmapped
+  // 500 that reads as "your save failed" to a technician who just needs to
+  // tap Save again.
+  return txResult.catch((txErr) => {
+    if (isRetryableTxError(txErr)) {
+      throw makeError(
+        'A concurrent update interrupted this save — please try again',
+        409,
+        'CONCURRENT_UPDATE',
+      );
+    }
+    throw txErr;
+  });
 }
 
 /**
@@ -406,14 +475,34 @@ async function recordOutcome(params = {}, { trx } = {}) {
 async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {}) {
   if (!customerId || !trx || !via) return 0;
   try {
-    // P1-A: take the shared per-customer lock FIRST — on the caller's own
-    // already-open transaction, before the savepoint below and before any
-    // read of leads/consultation_outcomes/scheduled_services for this
-    // customer. See lockConsultationOutcome for the full contract and the
-    // deadlock check against this function's existing callers' locks.
-    await lockConsultationOutcome(trx, customerId);
     let winCount = 0;
+    // P1-A: the lock statement sits INSIDE the savepoint, as its first
+    // statement — never directly on `trx` before the savepoint opens (that
+    // was round 4's placement, and it was doubly wrong: it both created the
+    // FK-KEY-SHARE ABBA cycle described above AND put a failure on that
+    // statement outside any savepoint's ROLLBACK TO SAVEPOINT safety net —
+    // a genuine deadlock there would have aborted the CALLER's whole
+    // transaction (the booking/accept itself), not just this best-effort
+    // reconciliation, defeating the entire point of running in a
+    // savepoint. With the lock as `sp`'s first statement, ANY failure here
+    // — the lock, the reconciling UPDATE, a future addition — is contained
+    // by knex's automatic ROLLBACK TO SAVEPOINT before the outer `catch`
+    // below ever sees it, so `trx` is always left valid for the caller to
+    // keep writing to.
+    //
+    // Defense-in-depth, not reliance on the caller (P1-A follow-up):
+    // proposal-win.js's promoteLinkedCustomerForProposalWin only UPDATEs
+    // (and so only locks) `customers` when commercialWinPromotionStamps
+    // returns a non-empty patch — a repeat-commercial customer already at
+    // active_customer/active/unchurned/non-deleted produces an EMPTY
+    // patch, so that caller reaches markWonForCustomer holding NO lock on
+    // `customers` at all in that case. Taking the SAME lockCustomerRow
+    // here too closes that gap unconditionally, rather than depending on
+    // every current AND future caller happening to lock the row first —
+    // re-acquiring a lock this transaction already holds (the common
+    // case, e.g. admin-leads.js, estimate-converter.js) is a no-op.
     await trx.transaction(async (sp) => {
+      await lockCustomerRow(sp, customerId);
       const leadRows = await sp('leads').where({ customer_id: customerId }).select('id');
       const leadIds = leadRows.map((r) => r.id);
       const cutoff = etDateString(addETDays(now, -WON_WINDOW_DAYS));

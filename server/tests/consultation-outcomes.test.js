@@ -129,6 +129,11 @@ function makeFakeDb(seed = {}) {
       select: (...cols) => Promise.resolve(filtered.map((r) => pick(r, cols))),
       first: (...cols) => Promise.resolve(filtered[0] ? pick(filtered[0], cols) : undefined),
       insert(payload) { insertPayload = { ...payload }; return api; },
+      // P1-A (round 5): the row-lock read (`.forNoKeyUpdate().first('id')`)
+      // — a chainable no-op here, same as onConflict; the shim has no real
+      // lock-conflict semantics, only the call-ORDER assertions the
+      // P1-A-specific tests below build with their own spy wrapper.
+      forNoKeyUpdate() { return api; },
       onConflict() { return api; },
       // ON CONFLICT ... DO UPDATE SET ... [WHERE ...] — matches real Postgres:
       // no conflicting row -> insert always applies, the WHERE never runs;
@@ -177,11 +182,6 @@ function makeFakeDb(seed = {}) {
     return api;
   }
   table.transaction = async (fn) => fn(table);
-  // P1-A: recordOutcome/markWonForCustomer take an advisory lock via
-  // `database.raw(...)` before their write/reconciliation — a no-op stub is
-  // enough for tests that don't care about lock ORDER; the P1-A-specific
-  // tests below install their own spying `.raw` to assert it.
-  table.raw = async () => ({ rows: [] });
   table.__store = store;
   return table;
 }
@@ -336,7 +336,6 @@ describe('recordOutcome — success + upsert', () => {
     const tableCalls = [];
     const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
     spyDb.transaction = async (fn) => fn(spyDb);
-    spyDb.raw = (...args) => fakeDb.raw(...args);
 
     await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb }))
       .rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_WON' });
@@ -347,24 +346,49 @@ describe('recordOutcome — success + upsert', () => {
     expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(1);
   });
 
-  test('P1-A: takes the customer-scoped advisory lock FIRST, before the insert/merge (also on the ALREADY_WON path)', async () => {
+  test('P1-A (round 5): locks the `customers` row FOR NO KEY UPDATE FIRST, before the insert/merge (also on the ALREADY_WON path) — no advisory key', async () => {
     const fakeDb = seededDb();
     const calls = [];
     const spyDb = (name) => { calls.push({ type: 'table', name }); return fakeDb(name); };
     spyDb.transaction = async (fn) => fn(spyDb);
-    spyDb.raw = (sql, bindings) => { calls.push({ type: 'raw', sql, bindings }); return fakeDb.raw(sql, bindings); };
+    // The round-4 advisory lock is gone entirely — a `.raw()` call here
+    // would be a regression back toward it. Fail loudly instead of
+    // silently no-op'ing so a reintroduced advisory-lock call breaks this
+    // test rather than passing unnoticed.
+    spyDb.raw = () => { throw new Error('unexpected trx.raw() call — the advisory lock should be gone (P1-A round 5)'); };
 
     await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb });
 
-    const rawIdx = calls.findIndex((c) => c.type === 'raw');
+    const customersIdx = calls.findIndex((c) => c.type === 'table' && c.name === 'customers');
     const outcomesIdx = calls.findIndex((c) => c.type === 'table' && c.name === 'consultation_outcomes');
-    expect(rawIdx).toBeGreaterThanOrEqual(0);
-    expect(calls[rawIdx].sql).toMatch(/pg_advisory_xact_lock/);
-    expect(calls[rawIdx].bindings).toEqual(['consultation-outcome', 'cust-1']);
-    // The lock precedes the write it's meant to serialize — and by
+    expect(customersIdx).toBeGreaterThanOrEqual(0);
+    // The row lock precedes the write it's meant to serialize — and by
     // extension the evidence check that follows it in the same locked
     // transaction (see the reconciliation describe block below).
-    expect(outcomesIdx).toBeGreaterThan(rawIdx);
+    expect(outcomesIdx).toBeGreaterThan(customersIdx);
+  });
+
+  test('P1-A (round 5): a deadlock-abort (SQLSTATE 40P01) on the locked transaction surfaces as a retryable 409, not an unmapped 500', async () => {
+    const fakeDb = seededDb();
+    const spyDb = (name) => fakeDb(name);
+    spyDb.transaction = async () => {
+      const err = new Error('deadlock detected');
+      err.code = '40P01';
+      throw err;
+    };
+
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONCURRENT_UPDATE' });
+  });
+
+  test('P1-A (round 5): a non-deadlock error from the locked transaction is NOT remapped — it propagates as-is', async () => {
+    const fakeDb = seededDb();
+    const spyDb = (name) => fakeDb(name);
+    const boom = new Error('some unrelated failure');
+    spyDb.transaction = async () => { throw boom; };
+
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb }))
+      .rejects.toBe(boom);
   });
 });
 
@@ -411,6 +435,40 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     fakeDb.__store.scheduled_services.push(
       { id: 'visit-2', service_type: 'Waves Assessment', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z') }, // another consultation — not a sale
       { id: 'visit-3', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-17T00:00:00Z') },
+    );
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('office_booking');
+    expect(new Date(saved.won_at).toISOString()).toBe(new Date('2026-09-17T00:00:00Z').toISOString());
+  });
+
+  test('P1-B: a free re-service callback (is_callback) is NOT sale evidence — stays warm', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push(
+      { id: 'visit-cb', service_type: 'Pest Control Re-Service', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z'), is_callback: true },
+    );
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('warm');
+  });
+
+  test('P1-B: a recurring-series child spawned onto an EXISTING plan (recurring_parent_id set) is NOT sale evidence — stays warm', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push(
+      { id: 'visit-child', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-14T00:00:00Z'), is_recurring: true, recurring_parent_id: 'parent-visit-0' },
+    );
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('warm');
+  });
+
+  test('P1-B: a genuine new booking (neither a callback nor a recurring child) still flips warm to won, even alongside a same-day callback/child that must be skipped', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push(
+      // Both dated BEFORE the real sale — proves the loop doesn't just skip
+      // the first non-qualifying row and stop; it keeps scanning until it
+      // finds (or exhausts) real evidence.
+      { id: 'visit-cb', service_type: 'Pest Control Re-Service', customer_id: 'cust-1', created_at: new Date('2026-09-12T00:00:00Z'), is_callback: true },
+      { id: 'visit-child', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-13T00:00:00Z'), recurring_parent_id: 'parent-visit-0' },
+      { id: 'visit-real', service_type: 'Quarterly Pest Control', customer_id: 'cust-1', created_at: new Date('2026-09-17T00:00:00Z') },
     );
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
     expect(saved.outcome).toBe('won');
@@ -581,7 +639,6 @@ describe('markWonForCustomer', () => {
     const tableCalls = [];
     const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
     spyDb.transaction = async (fn) => fn(spyDb);
-    spyDb.raw = (...args) => fakeDb.raw(...args);
 
     const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
     expect(count).toBe(2);
@@ -593,7 +650,9 @@ describe('markWonForCustomer', () => {
     // 90-day check rides inside the UPDATE's WHERE as a subquery.
     expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(1);
     expect(tableCalls.filter((n) => n === 'scheduled_services')).toHaveLength(0);
-    expect(tableCalls).toEqual(['leads', 'consultation_outcomes']);
+    // 'customers' first (P1-A round 5's row lock), then leads, then the
+    // atomic UPDATE.
+    expect(tableCalls).toEqual(['customers', 'leads', 'consultation_outcomes']);
 
     // And the guard is real, not just "fewer calls": a row whose outcome is
     // NOT warm/cold at UPDATE time is provably excluded by the same
@@ -603,23 +662,40 @@ describe('markWonForCustomer', () => {
     expect(byId['co-already-lost'].outcome).toBe('lost');
   });
 
-  test('P1-A: takes the customer-scoped advisory lock FIRST, before any read/write of leads or consultation_outcomes', async () => {
+  test('P1-A (round 5): locks the `customers` row FOR NO KEY UPDATE FIRST — inside the savepoint, no advisory key', async () => {
     const fakeDb = seededDb();
     const calls = [];
     const spyDb = (name) => { calls.push({ type: 'table', name }); return fakeDb(name); };
     spyDb.transaction = async (fn) => fn(spyDb);
-    spyDb.raw = (sql, bindings) => { calls.push({ type: 'raw', sql, bindings }); return fakeDb.raw(sql, bindings); };
+    // Same regression guard as recordOutcome's companion test — the
+    // advisory lock is gone entirely; a `.raw()` call would be a
+    // reintroduction of it.
+    spyDb.raw = () => { throw new Error('unexpected trx.raw() call — the advisory lock should be gone (P1-A round 5)'); };
 
     await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
 
-    // The SAME key convention recordOutcome's companion test asserts
-    // (namespace 'consultation-outcome', hashtext(id::text)) — the two
-    // sides only ever serialize correctly if they take the identical key.
-    expect(calls[0]).toMatchObject({ type: 'raw' });
-    expect(calls[0].sql).toMatch(/pg_advisory_xact_lock/);
-    expect(calls[0].bindings).toEqual(['consultation-outcome', 'cust-1']);
+    // The customer row is THE lock — taken as the very first statement
+    // inside the savepoint, same key/row recordOutcome locks, so whichever
+    // side gets there first fully commits before the other proceeds.
+    expect(calls[0]).toMatchObject({ type: 'table', name: 'customers' });
     expect(calls.slice(1).some((c) => c.type === 'table' && c.name === 'leads')).toBe(true);
     expect(calls.slice(1).some((c) => c.type === 'table' && c.name === 'consultation_outcomes')).toBe(true);
+  });
+
+  test('P1-A (round 5): the lock sits inside the savepoint — a failure there is swallowed (best-effort), never thrown', async () => {
+    // Placement regression guard: round 4 took the (now-removed) lock
+    // directly on `trx`, BEFORE the savepoint opened — a failure there
+    // would have had no savepoint to roll back to, aborting the caller's
+    // WHOLE transaction (not just this reconciliation). Simulating the
+    // savepoint itself throwing on its first statement proves the outer
+    // best-effort contract still holds regardless of what that first
+    // statement is.
+    const fakeDb = seededDb();
+    const spyDb = (name) => fakeDb(name);
+    spyDb.transaction = async () => { throw new Error('simulated lock failure inside the savepoint'); };
+
+    await expect(markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW }))
+      .resolves.toBe(0);
   });
 });
 

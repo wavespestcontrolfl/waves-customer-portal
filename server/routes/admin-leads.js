@@ -1787,7 +1787,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // that converted BEFORE a consultation outcome was recorded must still
       // reconcile when it later books again. Best-effort, savepoint-isolated
       // inside markWonForCustomer (waves-db §5b).
-      if (!assessmentVisit) {
+      // P1-B: gated on `appt` (this same INSERT's own RETURNING row) rather
+      // than a fresh re-query — this manual booking form never sets
+      // is_callback/recurring_parent_id (not in insertData above, so both
+      // come back at their DB defaults), but a free callback or a
+      // recurring-series child spawned onto an EXISTING plan is never
+      // itself a sale (server/services/re-service.js,
+      // recurring-appointment-seeder.js), so the guard stays correct if
+      // this endpoint's insertData ever grows either field.
+      if (!assessmentVisit && !appt.is_callback && !appt.recurring_parent_id) {
         await require('../services/consultation-outcomes')
           .markWonForCustomer(customerId, { via: 'office_booking', trx });
       }

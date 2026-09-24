@@ -725,6 +725,34 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
     });
   });
 
+  // This endpoint's own insertData never sets is_callback/recurring_parent_id
+  // today (a manual staff booking is never a free callback or an
+  // auto-spawned recurring child) — these two prove the GUARD ITSELF is
+  // correct, using the same insert-returning row the route reads, so it
+  // stays correct if that ever changes rather than relying on today's
+  // insertData shape as an unstated invariant.
+  it.each([
+    ['a free callback (is_callback on the inserted row)', (row) => ({ ...row, is_callback: true })],
+    ['a recurring-series child (recurring_parent_id on the inserted row)', (row) => ({ ...row, recurring_parent_id: 'parent-visit-0' })],
+  ])('P1-B: does NOT reconcile consultation outcomes when the booked visit is %s', async (_label, stampAppt) => {
+    const { markWonForCustomer } = require('../services/consultation-outcomes');
+    markWonForCustomer.mockClear();
+    const calls = [];
+    const baseResolver = makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked });
+    const resolver = (table, state) => {
+      if (table === 'scheduled_services' && state.terminal?.op === 'insert') {
+        return [stampAppt({ id: 'appt-1', ...state.terminal.args[0] })];
+      }
+      return baseResolver(table, state);
+    };
+    install(makeKnex(resolver, calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(200);
+      expect(markWonForCustomer).not.toHaveBeenCalled();
+    });
+  });
+
   it('occupancy: date lock is the FIRST statement of the trx, before comms lock and lead FOR UPDATE', async () => {
     const calls = [];
     install(makeKnex(makeResolver({ preLead: linkedLead(), lockedLead: lockedLinked }), calls));
