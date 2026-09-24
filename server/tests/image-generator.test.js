@@ -108,11 +108,11 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).not.toMatch(/Framing:/);
   });
   test('every scene mode pins the real Waves uniform (owner directive 2026-09-23); infographics skip it', () => {
-    const uniform = /red short-sleeve polo .* a baseball cap that is either light blue or red, and plain black or dark navy work pants/;
+    const uniform = /red long-sleeve polo .* a baseball cap that is either light blue or red, and plain black or dark navy work pants/;
     expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(uniform);
     expect(buildPrompt({ keyword: 'k', topic: 'lead', mode: 'blog-body', shot: 'action' })).toMatch(uniform);
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(uniform);
-    expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/never a blue shirt, never a long-sleeve, never khaki or tan pants/);
+    expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/never a blue shirt, never khaki or tan pants/);
     const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' } });
     expect(info).not.toMatch(uniform);
     expect(info).toMatch(/plain light background/);

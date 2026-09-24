@@ -291,7 +291,7 @@ const STANDARD_GUARDS = [
 // tile can all put a person in frame — only the plain-background infographic
 // skips it. The logo itself stays OFF the shirt/cap: generators render marks as
 // gibberish and the post-generation text/logo screen would reject the image.
-const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red short-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never a long-sleeve, never khaki or tan pants; shirt and cap carry no readable logo or lettering.';
+const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering.';
 
 function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [] }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
