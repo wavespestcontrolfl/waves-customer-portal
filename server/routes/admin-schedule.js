@@ -10302,6 +10302,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           .where({ id: req.params.id })
           .first('estimated_price', 'primary_line_price', 'discount_type', 'discount_amount',
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
+            ...(cols.service_id ? ['service_id'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
           .catch(() => null);
@@ -10380,11 +10381,30 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           : null;
         const discountAmountChanged = discountAmount !== undefined
           && Math.abs((nextDiscountAmount || 0) - (existingDiscountAmount || 0)) >= 0.005;
+        // Codex round 1 (P1) on the ADMIN-BUG-R01 fix: a same-priced SERVICE
+        // SWAP can move the row out of (or into) the stored appointment
+        // discount's scope even when neither the price nor any discount
+        // field was posted — the desktop modal omits discount inputs on
+        // every save (it never seeds them), so a service change alone would
+        // otherwise take the no-op path below and keep a discount stamped
+        // for a service that no longer qualifies (or drop one a NEW service
+        // should carry). Mirrors the identical `primaryServiceChanged` check
+        // the multi-line (addons) branch above already applies — `updates.*`
+        // only carries these keys when THIS save actually resolved a service
+        // pick, so presence still isn't change; each is checked against the
+        // stored row's own value.
+        const primaryServiceChanged = (updates.service_id !== undefined
+          && String(updates.service_id ?? '') !== String(existingPrice?.service_id ?? ''))
+          || (updates.service_key_snapshot !== undefined
+            && String(updates.service_key_snapshot ?? '') !== String(existingPrice?.service_key_snapshot ?? ''))
+          || (updates.service_category_snapshot !== undefined
+            && String(updates.service_category_snapshot ?? '') !== String(existingPrice?.service_category_snapshot ?? ''));
         // appointmentDiscountChanged folds in the preset identity (a
         // same-valued preset switch): the replacement preset must still run
         // eligibility and the scope-aware recomputation before its id/name/
         // filters persist (Codex #3531 r6 P1).
-        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
+        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged
+          || appointmentDiscountChanged || primaryServiceChanged;
         if (!shouldRebaseStoredDiscounts) {
           // Genuinely unchanged: leave the stored economics — the NET
           // `estimated_price` AND the discount stamp — exactly as they are.

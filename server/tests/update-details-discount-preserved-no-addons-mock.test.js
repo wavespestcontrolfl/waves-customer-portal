@@ -75,7 +75,7 @@ const COLS = {
   primary_line_price: {}, discount_type: {}, discount_amount: {}, discount_dollars: {},
   discount_id: {}, discount_name: {}, line_discount_id: {}, line_discount_name: {},
   line_discount_type: {}, line_discount_amount: {}, line_discount_dollars: {},
-  service_key_snapshot: {}, service_category_snapshot: {}, notes: {}, is_recurring: {},
+  service_id: {}, service_key_snapshot: {}, service_category_snapshot: {}, notes: {}, is_recurring: {},
   recurring_parent_id: {}, technician_id: {},
 };
 
@@ -84,7 +84,7 @@ const STORED = {
   id: 'svc-1', customer_id: 'cust-1', scheduled_date: '2099-01-15', status: 'pending',
   estimated_price: 90, primary_line_price: 100, discount_type: 'percentage', discount_amount: 10,
   discount_dollars: 10, is_recurring: false, recurring_parent_id: null, technician_id: null,
-  service_key_snapshot: 'pest_control', service_category_snapshot: 'pest',
+  service_id: 'svc-old', service_key_snapshot: 'pest_control', service_category_snapshot: 'pest',
   window_start: null, window_end: null,
 };
 
@@ -132,6 +132,22 @@ function mockDbWithAddonRow(storedRowOverrides) {
     const c = chain(table);
     if (table === 'scheduled_services') c.first = jest.fn(async () => ({ ...storedRow }));
     return c;
+  });
+}
+
+// Resolves `db('services').where({ id }).first(...)` to a fixed catalog row —
+// used to simulate the operator picking a service from the dropdown (the
+// route's own service-resolution block, upstream of the price branches,
+// stamps updates.service_id/service_key_snapshot/service_category_snapshot
+// from whatever this resolves to).
+function mockDbWithServiceLookup(serviceRow) {
+  db.mockImplementation((table) => {
+    if (table === 'services') {
+      const c = chain(table);
+      c.first = jest.fn(async () => ({ ...serviceRow }));
+      return c;
+    }
+    return chain(table);
   });
 }
 
@@ -239,4 +255,52 @@ test('Codex round-1 P0: a genuine mobile price change on a row WITH existing add
   expect(write).toBeDefined();
   // The genuine price change must actually land — never silently discarded.
   expect(Number(write.payload.estimated_price)).toBeCloseTo(100, 2);
+});
+
+test('Codex round 1 P1: a same-priced SERVICE SWITCH must rebase the discount, not silently keep it stamped for the old service', async () => {
+  // Stored row is $100 gross / $90 net / 10% off, stamped for
+  // service_id='svc-old' (service_key 'pest_control'). The operator switches
+  // the primary service to a DIFFERENT catalog service while leaving the
+  // Price field exactly as it was (100, gross) — the desktop modal never
+  // reseeds discount fields either way, so this save posts no discountType/
+  // discountAmount. Because neither the price NOR any discount field
+  // changed, the no-op check alone would (before this fix) preserve the OLD
+  // service's discount stamp on a visit that may no longer be in that
+  // discount's scope.
+  mockDbWithServiceLookup({ id: 'svc-new', service_key: 'termite_bond', category: 'termite', name: 'Termite Bond' });
+  const { status, body } = await put({
+    estimatedPrice: 100, primaryLinePrice: 100, serviceId: 'svc-new', notes: 'switch to termite bond',
+  });
+  const write = captured.find((c) => c.table === 'scheduled_services');
+  console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
+  expect(write).toBeDefined();
+  // The new service identity must land.
+  expect(write.payload.service_id).toBe('svc-new');
+  expect(write.payload.service_key_snapshot).toBe('termite_bond');
+  // The discount stamp must be ACTIVELY rebased (explicitly nulled, since no
+  // discount was reposted for the new service) — never left as the stale
+  // 'percentage'/10 stamp scoped to the OLD service. An explicit null here
+  // (as opposed to the key being absent) proves this went through the
+  // rebase path, not the no-op path.
+  expect(write.payload.discount_type).toBeNull();
+  expect(write.payload.discount_amount).toBeNull();
+});
+
+test('Codex round 1 P1 control: same gross AND same service is still a true no-op', async () => {
+  // The operator "picks" the SAME service the visit already has (e.g. the
+  // dropdown re-submits the current selection) with an unchanged price.
+  // Posting a serviceId at all must not by itself force a rebase — only an
+  // ACTUAL identity change should.
+  mockDbWithServiceLookup({ id: 'svc-old', service_key: 'pest_control', category: 'pest', name: 'General Pest Control' });
+  const { status, body } = await put({
+    estimatedPrice: 100, primaryLinePrice: 100, serviceId: 'svc-old', notes: 'gate code 1234',
+  });
+  const write = captured.find((c) => c.table === 'scheduled_services');
+  console.log('status', status, JSON.stringify(body), 'captured scheduled_services update:', JSON.stringify(write?.payload));
+  expect(write).toBeDefined();
+  if (write.payload.estimated_price !== undefined) {
+    expect(Number(write.payload.estimated_price)).toBeCloseTo(90, 2);
+  }
+  expect(write.payload.discount_type).not.toBeNull();
+  expect(write.payload.discount_amount).not.toBeNull();
 });
