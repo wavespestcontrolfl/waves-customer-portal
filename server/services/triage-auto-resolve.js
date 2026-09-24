@@ -1026,7 +1026,11 @@ const CLASSIFY_RULES = [
     when: (item, ev) => item.reason_code === 'on_file_house_number_conflict'
       && !item.customer_deleted_at
       && recordCarriesStatedStreet(item)
-      && !cardConfirmedUnbooked(item, ev) },
+      && !cardConfirmedUnbooked(item, ev)
+      // A card that also records a PROMISED follow-up (visit 2 the hold
+      // kept from booking) is settled by staff: booking evidence for the
+      // primary says nothing about visit 2 (local audit P1 after r20).
+      && !parseMaybeJson(item.payload)?.follow_up_plan },
   { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
   { rule: 'advisory_aged', action: 'dismiss',
     when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },

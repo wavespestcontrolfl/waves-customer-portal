@@ -181,6 +181,14 @@ describe('triage auto-resolve: house_number_adopted', () => {
       .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
   });
 
+  test('a card recording a promised follow-up is left to staff', () => {
+    const withPlan = item({
+      customer_address_line1: '1250 Example Street',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null, follow_up_plan: { scheduled_date: '2026-10-09', window_start: '10:00' } },
+    });
+    expect(classifyTriageItem(withPlan, {}, { now: NOW })).toBeNull();
+  });
+
   test('a stated unit must be on the record before the ask is settled', () => {
     const unitCard = item({
       customer_address_line1: '1250 Example Street', customer_address_line2: 'Apt 3',
