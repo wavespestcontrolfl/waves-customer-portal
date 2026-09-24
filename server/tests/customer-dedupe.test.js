@@ -2452,7 +2452,10 @@ describe('runAutoMergeSweep', () => {
       id: 'cccccccc-0000-0000-0000-000000000005',
       first_name: 'Sweepfixture', last_name: 'Pairscope', phone: '+15555550143',
       address_line1: '2 Fixture Ln', zip: '00000',
-      pipeline_stage: 'new_lead', created_at: '2026-07-08',
+      // A real customer on the line: under the group-level recheck the loser's
+      // late Stripe profile must read as a BLOCKER on this pair, not flip the
+      // line's winner (which would refuse as not_in_queue instead).
+      pipeline_stage: 'active_customer', created_at: '2026-07-08',
     };
     const loserRow = {
       id: 'cccccccc-0000-0000-0000-000000000006',
@@ -2468,7 +2471,7 @@ describe('runAutoMergeSweep', () => {
     const trxCustomerReads = [];
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers') {
-        trxCustomerReads.push(q._calls.map(([m]) => m));
+        trxCustomerReads.push(q._calls);
         // Under the lock the loser now carries a Stripe profile — a
         // review-queue blocker the snapshot never saw.
         return [winnerRow, { ...loserRow, stripe_customer_id: 'cus_fixture_late' }];
@@ -2488,14 +2491,134 @@ describe('runAutoMergeSweep', () => {
     expect(results.merged).toHaveLength(0);
     expect(results.skipped).toHaveLength(1);
     expect(results.skipped[0].reasons[0]).toMatch(/not_green/);
-    // Every customers read on the trx is the pair row lock — never
-    // findDuplicateGroups' unbounded active-customers scan (whereRaw on
-    // phone with no id filter).
+    // Every customers read on the trx is either the pair row lock or the
+    // PHONE-GROUP re-read scoped to this line's normalized digits (Codex
+    // round 4 P1) — never findDuplicateGroups' unbounded active-customers
+    // scan (the `COALESCE(phone, '') <> ''` whereRaw with no phone key).
     expect(trxCustomerReads.length).toBeGreaterThan(0);
     for (const calls of trxCustomerReads) {
-      expect(calls).toContain('whereIn');
-      expect(calls).not.toContain('whereRaw');
+      const names = calls.map(([m]) => m);
+      if (names.includes('whereIn')) continue;
+      expect(names).toContain('whereRaw');
+      const [sql, bindings] = calls.find(([m]) => m === 'whereRaw')[1];
+      expect(sql).not.toMatch(/<> ''/);
+      expect(bindings).toEqual(['5555550143']);
     }
+  });
+
+  // Codex round 4 P1: the queue's verdict on a pair is GROUP-level. A third
+  // active customer on the same line — a different person, created after
+  // the sweep snapshot — makes the group multi-identity, which the queue
+  // build demotes to review (group_has_identity_conflict). The under-lock
+  // recheck must re-read the phone group and refuse exactly as a fresh
+  // queue read would, not classify the two locked rows in isolation.
+  it('a third same-phone identity that appeared after the snapshot demotes the pair under the lock — refused, not merged', async () => {
+    const winnerRow = {
+      id: 'cccccccc-0000-0000-0000-000000000007',
+      first_name: 'Sweepfixture', last_name: 'Groupscope', phone: '+15555550144',
+      address_line1: '3 Fixture Ln', zip: '00000',
+      pipeline_stage: 'new_lead', created_at: '2026-07-08',
+    };
+    const loserRow = {
+      id: 'cccccccc-0000-0000-0000-000000000008',
+      first_name: 'Sweepfixture', last_name: null, phone: '5555550144',
+      address_line1: null, zip: null,
+      pipeline_stage: 'new_lead', created_at: '2026-07-09',
+    };
+    // A different household on the same line: different last name at a
+    // positively different address → its own identity cluster.
+    const thirdRow = {
+      id: 'cccccccc-0000-0000-0000-000000000009',
+      first_name: 'Otherfixture', last_name: 'Neighbor', phone: '(555) 555-0144',
+      address_line1: '9 Elsewhere Ave', zip: '11111',
+      pipeline_stage: 'new_lead', created_at: '2026-07-10',
+    };
+    installDb((table) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      if (table === 'customer_duplicate_dismissals') return [];
+      return [];
+    });
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        // The pair lock (whereIn) still sees just the pair; the phone-group
+        // re-read (whereRaw on the normalized digits) now sees the third row.
+        return q.called('whereRaw') ? [winnerRow, loserRow, thirdRow] : [winnerRow, loserRow];
+      }
+      if (table === 'customer_duplicate_dismissals') return [];
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+
+    expect(results.merged).toHaveLength(0);
+    expect(results.skipped).toHaveLength(1);
+    expect(results.skipped[0]).toMatchObject({ loserId: loserRow.id, tier: 'green' });
+    expect(results.skipped[0].reasons[0]).toMatch(/not_green/);
+    const { notifyAdmin } = require('../services/notification-service');
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    // The demotion is the queue's own group-level rule, not a pair verdict:
+    // the locked recheck reports the same reason findDuplicateGroups would.
+    const direct = await dedupe._test.lockedPairAutoEligibility(trx, winnerRow, loserRow);
+    expect(direct).toMatchObject({ eligible: false, code: 'not_green' });
+    expect(direct.candidate.reasons).toContain('group_has_identity_conflict');
+  });
+
+  // Codex round 4 P1 (winner drift): a same-identity row with a stronger
+  // signal (a Stripe profile) that appeared after the snapshot becomes the
+  // line's winner in a fresh queue read; the approved pair no longer exists
+  // under the snapshot's winner. Refuse (not_in_queue) rather than retire
+  // the loser into a row the queue would no longer keep.
+  it('a stronger same-identity row that appeared after the snapshot changes the winner — pair refused as not_in_queue', async () => {
+    const winnerRow = {
+      id: 'cccccccc-0000-0000-0000-000000000010',
+      first_name: 'Sweepfixture', last_name: 'Windrift', phone: '+15555550145',
+      address_line1: '4 Fixture Ln', zip: '00000',
+      pipeline_stage: 'new_lead', created_at: '2026-07-08',
+    };
+    const loserRow = {
+      id: 'cccccccc-0000-0000-0000-000000000011',
+      first_name: 'Sweepfixture', last_name: null, phone: '5555550145',
+      address_line1: null, zip: null,
+      pipeline_stage: 'new_lead', created_at: '2026-07-09',
+    };
+    const strongerRow = {
+      id: 'cccccccc-0000-0000-0000-000000000012',
+      first_name: 'Sweepfixture', last_name: 'Windrift', phone: '5555550145',
+      address_line1: '4 Fixture Ln', zip: '00000', stripe_customer_id: 'cus_fixture_strong',
+      pipeline_stage: 'new_lead', created_at: '2026-07-10',
+    };
+    installDb((table) => {
+      if (table === 'customers') return [winnerRow, loserRow];
+      if (table === 'customer_duplicate_dismissals') return [];
+      return [];
+    });
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        return q.called('whereRaw') ? [winnerRow, loserRow, strongerRow] : [winnerRow, loserRow];
+      }
+      if (table === 'customer_duplicate_dismissals') return [];
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const results = await dedupe.runAutoMergeSweep({ performedBy: 'test' });
+
+    expect(results.merged).toHaveLength(0);
+    expect(results.skipped).toHaveLength(1);
+    expect(results.skipped[0].reasons[0]).toMatch(/not_in_queue/);
+    const { notifyAdmin } = require('../services/notification-service');
+    expect(notifyAdmin).not.toHaveBeenCalled();
   });
 });
 

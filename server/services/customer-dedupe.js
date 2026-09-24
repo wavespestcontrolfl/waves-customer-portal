@@ -298,6 +298,97 @@ function classifyPair(winner, loser, blockers) {
   return { loser, tier, reasons, namesOk, addrStatus: addr.status };
 }
 
+// Every column the group build + blocker probes + winner pick read — ONE
+// list so the queue read and the sweep's under-lock group re-read can't
+// drift apart in what they see.
+const DUPLICATE_GROUP_COLUMNS = ['id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
+  'address_line2', 'city', 'zip', 'stripe_customer_id', 'password_hash',
+  'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode', 'monthly_rate'];
+
+// ONE phone group → its identity clusters, each with a picked winner and the
+// classified (tier + reasons) candidates under it — group-level demotion
+// included. Pure over the member rows + their blocker lists. Shared by
+// findDuplicateGroups' queue build and the auto sweep's under-lock recheck
+// (lockedPairAutoEligibility), so a pair the queue would demote or re-win
+// can never read green under the lock (Codex #4694 round 4 P1).
+function buildPhoneGroupCandidates(members, blockersById) {
+  const evaluatePair = (winner, loser) => classifyPair(winner, loser, blockersById.get(loser.id) || []);
+  // Partition the phone group into IDENTITY CLUSTERS: repeatedly pick the
+  // strongest remaining row and pull in every name-compatible member.
+  // Multiple clusters = the phone is shared by multiple identities. Each
+  // cluster gets its own group + winner, so loser-vs-loser duplicates of a
+  // second identity are surfaced and mergeable — not stuck behind a single
+  // picked winner they conflict with.
+  //
+  // Cluster SEEDS must have a known name: a blank/"Unknown" row is
+  // name-compatible with everyone, so seeding from it would collapse
+  // genuinely distinct identities into one cluster and hide the conflict.
+  // Unnamed rows attach to the single known identity when there is exactly
+  // one; with multiple known identities they are unattributable and form
+  // their own cluster, which flips multiIdentity and demotes everything to
+  // review.
+  // Weight = COUNT of business signals (billing tables + active stage),
+  // excluding stripe/portal which winnerScore already weighs — a Stripe-only
+  // shell (24 under a binary boost) must never outrank a row with actual
+  // invoices/services.
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+  const hasKnownName = (m) => !!(normName(m.first_name) || normName(m.last_name));
+  let pool = members.filter(hasKnownName);
+  const unnamed = members.filter((m) => !hasKnownName(m));
+  const clusters = [];
+  while (pool.length) {
+    const w = pickWinner(pool, businessBoost);
+    const mine = [w];
+    const rest = [];
+    for (const m of pool) {
+      if (m.id === w.id) continue;
+      (namesCompatible(w, m) ? mine : rest).push(m);
+    }
+    clusters.push(mine);
+    pool = rest;
+  }
+  if (unnamed.length) {
+    if (clusters.length === 1) {
+      clusters[0].push(...unnamed);
+    } else {
+      const w = pickWinner(unnamed, businessBoost);
+      clusters.push([w, ...unnamed.filter((m) => m.id !== w.id)]);
+    }
+  }
+  // Re-pick each cluster's winner AFTER membership settles: named rows seed
+  // clusters (identity), but an unnamed row appended later can be the real
+  // account (invoices/Stripe/active) — it must be the kept row, with the
+  // name backfilled from the merged duplicate, not retired under a shell.
+  const finalClusters = clusters.map((cluster) => {
+    const w = pickWinner(cluster, businessBoost);
+    return [w, ...cluster.filter((m) => m.id !== w.id)];
+  });
+  // Conflict evidence is structural (cluster count), NOT queue-visibility:
+  // dismissing a red pair hides it from the queue, but the other identity
+  // still exists as a cluster, so the shells stay demoted below.
+  const multiIdentity = finalClusters.length > 1;
+
+  return finalClusters.map((cluster, idx) => {
+    const winner = cluster[0];
+    const candidates = cluster.slice(1).map((loser) => evaluatePair(winner, loser));
+    // Cross-identity pairs surface once, on the first cluster's card, so
+    // the shared-phone conflict stays visible and dismissable.
+    if (idx === 0) {
+      for (const other of finalClusters.slice(1)) candidates.push(evaluatePair(winner, other[0]));
+    }
+    if (multiIdentity) {
+      for (const c of candidates) {
+        if (c.tier === 'green') {
+          c.tier = 'yellow';
+          c.reasons.push('group_has_identity_conflict');
+        }
+      }
+    }
+    return { winner, candidates };
+  });
+}
+
 async function findDuplicateGroups(database = db, { failClosedOnDismissals = false, respectUndoMergeSuppression = false } = {}) {
   // Live ROWS only (active + not deleted) — deliberately NOT restricted to
   // whereLiveCustomer's real-customer stages: the duplicates this tool exists
@@ -313,9 +404,7 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
     .where('active', true)
     .whereNull('deleted_at')
     .whereRaw("COALESCE(phone, '') <> ''")
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
-      'address_line2', 'city', 'zip', 'stripe_customer_id', 'password_hash',
-      'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode', 'monthly_rate');
+    .select(...DUPLICATE_GROUP_COLUMNS);
   const byPhone = new Map();
   for (const row of rows) {
     const p10 = phone10(row.phone);
@@ -355,83 +444,10 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
   }
   const blockersById = await batchAutoBlockers(database, allMembers);
 
-  const evaluatePair = (winner, loser) => classifyPair(winner, loser, blockersById.get(loser.id) || []);
-
   const groups = [];
   for (const [p10, members] of byPhone) {
     if (members.length < 2) continue;
-    // Partition the phone group into IDENTITY CLUSTERS: repeatedly pick the
-    // strongest remaining row and pull in every name-compatible member.
-    // Multiple clusters = the phone is shared by multiple identities. Each
-    // cluster gets its own group + winner, so loser-vs-loser duplicates of a
-    // second identity are surfaced and mergeable — not stuck behind a single
-    // picked winner they conflict with.
-    //
-    // Cluster SEEDS must have a known name: a blank/"Unknown" row is
-    // name-compatible with everyone, so seeding from it would collapse
-    // genuinely distinct identities into one cluster and hide the conflict.
-    // Unnamed rows attach to the single known identity when there is exactly
-    // one; with multiple known identities they are unattributable and form
-    // their own cluster, which flips multiIdentity and demotes everything to
-    // review.
-    // Weight = COUNT of business signals (billing tables + active stage),
-    // excluding stripe/portal which winnerScore already weighs — a Stripe-only
-    // shell (24 under a binary boost) must never outrank a row with actual
-    // invoices/services.
-    const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
-      .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
-    const hasKnownName = (m) => !!(normName(m.first_name) || normName(m.last_name));
-    let pool = members.filter(hasKnownName);
-    const unnamed = members.filter((m) => !hasKnownName(m));
-    const clusters = [];
-    while (pool.length) {
-      const w = pickWinner(pool, businessBoost);
-      const mine = [w];
-      const rest = [];
-      for (const m of pool) {
-        if (m.id === w.id) continue;
-        (namesCompatible(w, m) ? mine : rest).push(m);
-      }
-      clusters.push(mine);
-      pool = rest;
-    }
-    if (unnamed.length) {
-      if (clusters.length === 1) {
-        clusters[0].push(...unnamed);
-      } else {
-        const w = pickWinner(unnamed, businessBoost);
-        clusters.push([w, ...unnamed.filter((m) => m.id !== w.id)]);
-      }
-    }
-    // Re-pick each cluster's winner AFTER membership settles: named rows seed
-    // clusters (identity), but an unnamed row appended later can be the real
-    // account (invoices/Stripe/active) — it must be the kept row, with the
-    // name backfilled from the merged duplicate, not retired under a shell.
-    const finalClusters = clusters.map((cluster) => {
-      const w = pickWinner(cluster, businessBoost);
-      return [w, ...cluster.filter((m) => m.id !== w.id)];
-    });
-    // Conflict evidence is structural (cluster count), NOT queue-visibility:
-    // dismissing a red pair hides it from the queue, but the other identity
-    // still exists as a cluster, so the shells stay demoted below.
-    const multiIdentity = finalClusters.length > 1;
-
-    finalClusters.forEach((cluster, idx) => {
-      const winner = cluster[0];
-      const candidates = cluster.slice(1).map((loser) => evaluatePair(winner, loser));
-      // Cross-identity pairs surface once, on the first cluster's card, so
-      // the shared-phone conflict stays visible and dismissable.
-      if (idx === 0) {
-        for (const other of finalClusters.slice(1)) candidates.push(evaluatePair(winner, other[0]));
-      }
-      if (multiIdentity) {
-        for (const c of candidates) {
-          if (c.tier === 'green') {
-            c.tier = 'yellow';
-            c.reasons.push('group_has_identity_conflict');
-          }
-        }
-      }
+    for (const { winner, candidates } of buildPhoneGroupCandidates(members, blockersById)) {
       // Dismissals filter the VISIBLE queue only — after demotion, so
       // adjudicating one pair never re-greens the rest of the group.
       const visible = candidates.filter((c) => {
@@ -450,7 +466,7 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
           })),
         });
       }
-    });
+    }
   }
   return groups;
 }
@@ -525,8 +541,39 @@ async function lockedPairAutoEligibility(trx, winner, loser) {
   if (!stillLive) {
     return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer a live duplicate candidate', candidate: null };
   }
-  const blockers = (await batchAutoBlockers(trx, [loser])).get(loser.id) || [];
-  const verdict = classifyPair(winner, loser, blockers);
+  // Re-read the whole PHONE GROUP under the lock (Codex round 4 P1): the
+  // queue's verdict on this pair is group-level — a third active customer
+  // on the same line created or renamed since the sweep snapshot makes the
+  // group multi-identity (every green demoted to review) or changes which
+  // row wins. Classifying only the two locked rows would read green where
+  // a fresh queue read would refuse. Same normalized-phone predicate the
+  // other phone lookups use (contact-correction-queue,
+  // call-created-customer-line-type); scoped to this line's rows, never
+  // the queue's all-customers scan. Same live-ROW filter as the queue
+  // build (active + not deleted, any pipeline stage).
+  const p10 = phone10(winner.phone);
+  let members;
+  try {
+    members = await trx('customers')
+      .where('active', true)
+      .whereNull('deleted_at')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [p10])
+      .select(...DUPLICATE_GROUP_COLUMNS);
+  } catch (e) {
+    logger.warn(`[customer-dedupe] locked pair recheck: phone group unreadable, refusing: ${e.message}`);
+    return { eligible: false, code: 'group_unreadable', reason: 'The phone group could not be re-read under the lock — refusing to treat this pair as mergeable right now', candidate: null };
+  }
+  // The two locked rows are the authoritative versions of themselves; every
+  // other member is a third row on the line the snapshot may never have seen.
+  const lockedById = new Map([[winner.id, winner], [loser.id, loser]]);
+  const group = [winner, loser, ...members.filter((m) => !lockedById.has(m.id))]
+    .filter((m) => phone10(m.phone) === p10);
+  const blockersById = await batchAutoBlockers(trx, group);
+  const cluster = buildPhoneGroupCandidates(group, blockersById).find((g) => g.winner.id === winner.id);
+  const verdict = cluster?.candidates.find((c) => c.loser.id === loser.id) || null;
+  if (!verdict) {
+    return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer a queue candidate under this winner (the line\'s winner or cluster membership changed)', candidate: null };
+  }
   if (verdict.tier !== 'green') {
     return { eligible: false, code: verdict.tier === 'red' ? 'red_pair' : 'not_green', reason: `Pair is no longer green (${verdict.reasons.join(', ')})`, candidate: verdict };
   }
