@@ -12,7 +12,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
-const { draftIdSql, phoneIdentitySql } = require('../services/sms-response-policy');
+const { draftIdSql, loadPriorOutboundBodies } = require('../services/sms-response-policy');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -1664,10 +1664,6 @@ router.post('/call', async (req, res, next) => {
 router.get('/log', async (req, res, next) => {
   try {
     const { customerId, direction, messageType, page, limit, search } = req.query;
-    const currentPeer = phoneIdentitySql("COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '')");
-    const currentEndpoint = phoneIdentitySql("COALESCE(conversations.our_endpoint_id, '')");
-    const priorPeer = phoneIdentitySql("COALESCE(NULLIF(prior_conversation.contact_phone, ''), prior_customer.phone, '')");
-    const priorEndpoint = phoneIdentitySql("COALESCE(prior_conversation.our_endpoint_id, '')");
     const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')");
 
     let query = db('messages')
@@ -1692,28 +1688,6 @@ router.get('/log', async (req, res, next) => {
         WHERE mdx.id = ${responseDraftId}
         LIMIT 1
       ) sms_answer ON true`)
-      .joinRaw(`LEFT JOIN LATERAL (
-        SELECT prior.body
-        FROM messages prior
-        JOIN conversations prior_conversation ON prior_conversation.id = prior.conversation_id
-        LEFT JOIN customers prior_customer ON prior_customer.id = prior_conversation.customer_id
-        LEFT JOIN LATERAL (
-          SELECT sl.message_type, sl.status
-          FROM sms_log sl
-          WHERE sl.twilio_sid = prior.twilio_sid AND sl.direction = prior.direction
-          ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
-        ) prior_legacy ON true
-        WHERE messages.direction = 'inbound' AND prior.channel = 'sms'
-          AND prior.direction = 'outbound'
-          AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
-          AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
-          AND (CAST(? AS uuid) IS NULL OR prior_conversation.customer_id = conversations.customer_id)
-          AND ${currentPeer} <> '' AND ${currentEndpoint} <> ''
-          AND ${priorPeer} = ${currentPeer} AND ${priorEndpoint} = ${currentEndpoint}
-          AND prior.created_at < messages.created_at
-          AND prior.created_at > messages.created_at - interval '24 hours'
-        ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1
-      ) sms_prior_outbound ON true`, [customerId || null])
       .where('messages.channel', 'sms')
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
@@ -1730,7 +1704,6 @@ router.get('/log', async (req, res, next) => {
         'sms_audit.metadata as response_audit_metadata',
         'sms_answer.is_click_followup as response_is_click_followup',
         'sms_answer.has_draft_provenance as response_has_draft_provenance',
-        'sms_prior_outbound.body as response_prior_outbound_body',
       )
       .orderBy('messages.created_at', 'desc');
 
@@ -1781,6 +1754,12 @@ router.get('/log', async (req, res, next) => {
       .offset((requestedPage - 1) * effectiveLimit);
     const hasMore = rowsPlusOne.length > effectiveLimit;
     const rows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    const priorOutboundBodies = await loadPriorOutboundBodies(db, rows, { customerScoped: !!customerId });
+    for (const row of rows) {
+      if (priorOutboundBodies.has(String(row.id))) {
+        row.response_prior_outbound_body = priorOutboundBodies.get(String(row.id));
+      }
+    }
 
     const fallbackCustomers = await resolveSmsLogCustomerFallbacks(rows);
 

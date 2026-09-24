@@ -166,4 +166,27 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     expect(status).toBe(200);
     expect(body.messages.find((message) => message.body === 'Malformed draft metadata')).toBeDefined();
   });
+
+  test('loads prior outbound context set-wise for courtesy classification', async () => {
+    const conversationId = randomUUID();
+    await mockPg('conversations').insert({
+      id: conversationId, channel: 'sms', our_endpoint_id: '+19415550199',
+      unknown_contact: true, contact_phone: '+19415559877',
+    });
+    const insertMessage = (createdAt, direction, body) => mockPg('messages').insert({
+      id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction, body,
+      author_type: direction === 'inbound' ? 'customer' : 'admin',
+      delivery_status: direction === 'outbound' ? 'sent' : 'received',
+      message_type: direction === 'outbound' ? 'manual' : 'inbound', created_at: createdAt,
+    });
+    await insertMessage('2026-09-23T12:00:00Z', 'outbound', 'Does 9am work?');
+    await insertMessage('2026-09-23T12:01:00Z', 'inbound', 'Okay');
+    await insertMessage('2026-09-23T12:02:00Z', 'outbound', 'Your service is complete. Reply STOP to opt out.');
+    await insertMessage('2026-09-23T12:03:00Z', 'inbound', 'Thanks!');
+
+    const { status, body } = await getLog();
+    expect(status).toBe(200);
+    expect(body.messages.find((message) => message.body === 'Okay').courtesyOnly).toBe(false);
+    expect(body.messages.find((message) => message.body === 'Thanks!').courtesyOnly).toBe(true);
+  });
 });

@@ -2,6 +2,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => {
   const fn = jest.fn();
+  fn.raw = jest.fn(async () => ({ rows: [] }));
   // The /sms route wraps suggestion parking and the post-send sweep in
   // db.transaction; pass the mock itself through as the trx handle.
   fn.transaction = jest.fn(async (cb) => cb(fn));
