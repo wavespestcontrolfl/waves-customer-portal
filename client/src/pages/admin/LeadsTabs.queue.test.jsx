@@ -214,3 +214,35 @@ describe('Pipeline queue navigation', () => {
   });
 
 });
+
+describe('Linked lead history preview', () => {
+  function linkedFixture() {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options) => {
+      if (String(url).includes('/admin/leads/lead-qa?leadReview=1')) {
+        calls.push({ path: String(url), options });
+        return { ok: true, json: async () => ({ activities: [], calls: [], linkedHistory: {
+          canonical: { id: 'primary-qa', first_name: 'Original', last_name: 'Example', status: 'won', service_interest: 'Lawn' },
+          original: null, linked: [], unresolved: false, hasMore: false,
+        } }) };
+      }
+      return base(url, options);
+    });
+  }
+  it('requires explicit preview opt-in', async () => {
+    linkedFixture();
+    mount('/admin/pipeline?lead=lead-qa');
+    await screen.findByText('No activities logged');
+    expect(screen.queryByRole('region', { name: 'Linked lead history' })).not.toBeInTheDocument();
+    expect(calls.some(c => c.path.includes('leadReview=1'))).toBe(false);
+  });
+  it('opens the exact linked record and preserves review mode', async () => {
+    linkedFixture();
+    mount('/admin/pipeline?lead=lead-qa&leadReview=1');
+    expect(await screen.findByRole('region', { name: 'Linked lead history' })).toHaveTextContent('Primary record: Original Example');
+    fireEvent.click(screen.getByRole('button', { name: 'Review record' }));
+    await waitFor(() => expect(screen.getByLabelText('Current route')).toHaveTextContent('lead=primary-qa'));
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('leadReview=1');
+    await waitFor(() => expect(queueCalls().some(c => new URL(c.path, 'http://localhost').searchParams.get('id') === 'primary-qa')).toBe(true));
+  });
+});
