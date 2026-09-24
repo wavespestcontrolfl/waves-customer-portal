@@ -4216,8 +4216,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // is the existing, wanted lifecycle send (Codex #3011/#1859).
       // A stage-flip churn (suppressChurnMembershipEmail) stays silent even
       // when the UI opted in — it is not an operator-initiated cancellation.
-      const notifyCustomer = req.body.notifyCustomer === true;
-      if (notifyCustomer && updates.active === false && committedBefore.active !== false && beforeHasMembership && !suppressChurnMembershipEmail) {
+      // suppressChurnMembershipEmail gates the WHOLE chain, not just the
+      // canceled branch (GitHub Codex r4 P1): a Churned save combined with a
+      // tier/rate edit still carries membership fields in committedAfter,
+      // so the started/updated branches could otherwise email a customer
+      // who was just churned. `false` is the only way to skip the chain
+      // entirely — no stage-flip churn sends any plan email.
+      const notifyCustomer = req.body.notifyCustomer === true && !suppressChurnMembershipEmail;
+      if (suppressChurnMembershipEmail) {
+        // No membership email of any kind on a stage-flip churn.
+      } else if (notifyCustomer && updates.active === false && committedBefore.active !== false && beforeHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
