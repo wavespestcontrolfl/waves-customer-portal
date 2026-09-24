@@ -119,4 +119,46 @@ describe('ReportIssueOverlay mount safety', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(screen.queryByText('Upcoming visit')).not.toBeInTheDocument();
   });
+
+  // Photo ID (PhotoId.jsx) hands off here via `initialValues`. The overlay
+  // stays mounted across opens, so every field must be REPLACED (including
+  // empty ones) on a handoff, and cleared again on close — otherwise a
+  // stale category/note/photo from an earlier handoff (or a cancelled one)
+  // survives into the next open (Codex r2 P1).
+  it('a Photo ID handoff replaces every field and clears them again on close, so a later handoff never inherits stale values', async () => {
+    echo.value = undefined;
+    const { rerender } = render(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{ category: 'pest_issue', location: 'inside_home', note: 'Found ants by the sink', photos: [{ preview: 'data:image/jpeg;base64,aaa', data: 'data:image/jpeg;base64,aaa', name: 'a.jpg' }] }}
+      />,
+    );
+    await screen.findByRole('button', { name: /submit request/i });
+    expect(screen.getByRole('button', { name: /pest issue/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText("Describe what's happening")).toHaveValue('Found ants by the sink');
+    expect(screen.getByRole('button', { name: 'Inside Home' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('Remove photo 1')).toBeInTheDocument();
+
+    // Close (cancel) — PortalPage nulls its prefill on this same close.
+    rerender(
+      <ReportIssueOverlay
+        open={false} onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={null}
+      />,
+    );
+
+    // A second, DIFFERENT handoff (a history result with no location/photos)
+    // must show ONLY its own values, never the previous handoff's leftovers.
+    rerender(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{ category: 'lawn_concern', location: '', note: '', photos: [] }}
+      />,
+    );
+    await screen.findByRole('button', { name: /submit request/i });
+    expect(screen.getByRole('button', { name: /lawn concern/i })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText("Describe what's happening")).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Inside Home' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByLabelText('Remove photo 1')).not.toBeInTheDocument();
+  });
 });

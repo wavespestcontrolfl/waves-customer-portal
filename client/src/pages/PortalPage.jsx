@@ -14383,15 +14383,34 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // Photo ID hands off here with a category/location/note/photos it already
   // gathered (see PhotoId.jsx) — seed the form on the open transition only,
   // so it never clobbers what the customer types after the sheet lands.
+  // Every field is REPLACED (including empty ones), not merged — the overlay
+  // stays mounted across opens, so a truthy-only seed would let a stale
+  // value from an earlier session (manual or a different Photo ID handoff)
+  // survive into this one (Codex r2 P1: "open a history result with
+  // photos: [] still shows the previous identification's photos"). The
+  // handoff-seeded state is then cleared again when THIS session closes
+  // (submitted or cancelled), so a later plain "New Request" open — or the
+  // next handoff — never inherits it either.
   const wasOpenRef = useRef(false);
+  const seededByHandoffRef = useRef(false);
   useEffect(() => {
-    if (open && !wasOpenRef.current && initialValues) {
-      if (initialValues.category) setCategory(initialValues.category);
-      if (initialValues.note) setDescription(initialValues.note);
-      if (initialValues.location) setLocation(initialValues.location);
-      if (Array.isArray(initialValues.photos) && initialValues.photos.length) {
-        setPhotos(initialValues.photos.slice(0, photoLimit));
+    if (open && !wasOpenRef.current) {
+      if (initialValues) {
+        seededByHandoffRef.current = true;
+        setCategory(initialValues.category || '');
+        setDescription(initialValues.note || '');
+        setLocation(initialValues.location || '');
+        setPhotos(Array.isArray(initialValues.photos) ? initialValues.photos.slice(0, photoLimit) : []);
+      } else {
+        seededByHandoffRef.current = false;
       }
+    } else if (!open && wasOpenRef.current && seededByHandoffRef.current) {
+      setCategory('');
+      setDescription('');
+      setUrgency('routine');
+      setLocation('');
+      setPhotos([]);
+      seededByHandoffRef.current = false;
     }
     wasOpenRef.current = open;
   }, [open, initialValues]);

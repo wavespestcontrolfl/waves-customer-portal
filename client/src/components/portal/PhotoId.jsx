@@ -302,6 +302,11 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     genRef.current += 1;
     setSelectedType(value);
     setPhotos([]);
+    // Bumping genRef alone leaves a mid-flight photo read/resize's own
+    // `finally` unable to clear this (its generation no longer matches) —
+    // reset it here so Add/Identify don't stay stuck disabled after
+    // switching type mid-capture (Codex r2 P1).
+    setBusyPhotos(false);
     setNote('');
     setLocation('');
     setSubmitError('');

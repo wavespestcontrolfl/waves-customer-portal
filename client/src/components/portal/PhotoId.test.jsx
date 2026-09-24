@@ -410,4 +410,33 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
     expect(onOpenRequest).toHaveBeenCalledTimes(1);
     expect(onOpenRequest.mock.calls[0][0].photos).toHaveLength(0);
   });
+
+  it('switching type mid photo-read resets the busy flag instead of leaving Add stuck disabled', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    // A FileReader whose read never completes on its own — held open so the
+    // test controls exactly when (if ever) it resolves.
+    class DeferredFileReader {
+      readAsDataURL() { DeferredFileReader.pending.push(this); }
+    }
+    DeferredFileReader.pending = [];
+    vi.stubGlobal('FileReader', DeferredFileReader);
+
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    expect(await screen.findByText('Adding…')).toBeInTheDocument();
+
+    // Abandon this read: go back and pick a different type while it's still
+    // pending — Add must not stay stuck on "Adding…" (Codex r2 P1).
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(screen.getByText('Lawn spot'));
+    expect(screen.getByText('Add')).toBeInTheDocument();
+    expect(screen.queryByText('Adding…')).not.toBeInTheDocument();
+
+    // The abandoned read finally resolves — must not resurrect a photo here.
+    DeferredFileReader.pending[0].onload({ target: { result: 'data:image/jpeg;base64,cGhvdG8=' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  });
 });
