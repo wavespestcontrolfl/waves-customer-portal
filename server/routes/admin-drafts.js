@@ -391,6 +391,11 @@ function uncertainSendResponse(res) {
   });
 }
 
+function priorManualSendStillUnresolved(outcome) {
+  return outcome?.code === 'MANUAL_REPLY_OUTCOME_UNRESOLVED'
+    && manualSmsDeliveryState(outcome) === 'uncertain';
+}
+
 // sms_log.message_type for approved campaign sends — aligned with what the
 // legacy workflows historically logged ('reactivation' / 'upsell') so the
 // campaign cooldown's CAMPAIGN_SMS_TYPES filter and readers like
@@ -885,6 +890,12 @@ router.put('/:id/approve', async (req, res, next) => {
       throw sendErr;
     }
     if (manualSmsDeliveryState(smsResult) === 'uncertain') {
+      // This outcome describes an older wrapper reservation; this draft never
+      // reached the provider. Keep the older reservation as the no-retry
+      // fence, but hand back only this draft's newly-taken approval claim.
+      if (priorManualSendStillUnresolved(smsResult)) {
+        await releaseFailedSendClaim(draft, clarifyGuard);
+      }
       return uncertainSendResponse(res);
     }
     if (!smsResult.sent) {
@@ -1042,6 +1053,9 @@ router.put('/:id/revise', async (req, res, next) => {
       throw sendErr;
     }
     if (manualSmsDeliveryState(smsResult) === 'uncertain') {
+      if (priorManualSendStillUnresolved(smsResult)) {
+        await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
+      }
       return uncertainSendResponse(res);
     }
     if (!smsResult.sent) {

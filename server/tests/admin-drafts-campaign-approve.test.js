@@ -438,6 +438,33 @@ describe('PUT /admin/drafts/:id/approve', () => {
     expect(updates.find((u) => u.payload.sent_at)).toBeUndefined();
   });
 
+  test('an older unresolved manual send blocks approve but releases this unsent draft claim', async () => {
+    const draft = campaignDraft();
+    enqueueApproveHappyPath(draft);
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'uncertain',
+      code: 'MANUAL_REPLY_OUTCOME_UNRESOLVED',
+      manualSmsInterlock: { deliveryState: 'uncertain' },
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        code: 'SMS_DELIVERY_UNCERTAIN', mayHaveSent: true, retryable: false,
+      });
+    });
+
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release?.payload).toMatchObject({ approved_by: null, approved_at: null });
+    expect(updates.find((u) => u.payload.sent_at)).toBeUndefined();
+  });
+
   test('template-disabled sentinel is NOT a send: 422, claim released, draft not finalized, no pitched flip', async () => {
     const draft = campaignDraft();
     enqueueApproveHappyPath(draft);
@@ -604,6 +631,41 @@ describe('PUT /admin/drafts/:id/revise', () => {
     expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
     expect(updates.find((u) => u.payload.status === 'pending')).toBeUndefined();
     expect(updates.find((u) => u.payload.revised_response === null)).toBeUndefined();
+  });
+
+  test('an older unresolved manual send blocks revise but releases this unsent draft claim and edit', async () => {
+    const draft = campaignDraft();
+    enqueue('message_drafts', { returning: [draft] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'uncertain',
+      code: 'MANUAL_REPLY_OUTCOME_UNRESOLVED',
+      manualSmsInterlock: { deliveryState: 'uncertain' },
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Edited copy.' }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        code: 'SMS_DELIVERY_UNCERTAIN', mayHaveSent: true, retryable: false,
+      });
+    });
+
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
+    const release = updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+    expect(release?.payload).toMatchObject({
+      approved_by: null,
+      approved_at: null,
+      revised_response: null,
+      final_response: null,
+    });
+    expect(updates.find((u) => u.payload.sent_at)).toBeUndefined();
   });
 
   test('a definite revise miss releases the claim and clears edited fields', async () => {
