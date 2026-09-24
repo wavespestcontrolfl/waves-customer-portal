@@ -1219,6 +1219,37 @@ describe('POST /:token commit', () => {
 
     // Codex #4737 r7 pre-push P0: that provenance is an existing account's
     // property — an unverified token never inherits it.
+    // Codex #4737 r7 pre-push P1: an UNVERIFIED lead whose own prospect's
+    // assessment was cancelled books a corrected address — the new profile
+    // keeps the flow's outright trust, so a retry finds it (no second prospect).
+    test('cancel → different-address booking → retry: the own prospect\'s new property stays trusted', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: null };
+      firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
+      firstResults.customers = { id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101', address_line1: '1 Typo St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      // History (the cancelled assessment) but no open visit.
+      listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-cancelled' }] : []);
+      listResults.customers = [firstResults.customers];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.45, lng: -82.55 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '1 Right St, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(200);
+      const provenance = insertCalls.find((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect');
+      const meta = JSON.parse(provenance.payload.metadata);
+      expect(meta).toEqual({ customer_id: 'new-cust-1' });
+
+      // The retry: that provenance is trusted on the same unverified token.
+      const { loadTrustedCustomer } = inspectionPublicRouter._test;
+      const profile = { id: 'new-cust-1', phone: '9415550101' };
+      const dbConn = (table) => ({
+        where() { return this; }, whereNull() { return this; }, orderBy() { return this; },
+        first: async () => (table === 'lead_activities' ? { metadata: JSON.stringify(meta) } : profile),
+      });
+      expect(await loadTrustedCustomer(dbConn, { ...LEAD_ROW }, null)).toEqual(profile);
+    });
+
     test('provenance that requires verification is not trusted on an unverified token', async () => {
       const { loadTrustedCustomer } = inspectionPublicRouter._test;
       const lead = { id: LEAD_ID, phone: '9415550101', first_contact_channel: 'web', customer_id: null };

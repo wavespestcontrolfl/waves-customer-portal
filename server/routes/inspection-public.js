@@ -323,11 +323,7 @@ async function loadTrustedCustomer(dbConn, lead, token) {
   // retry would mint another prospect and slip the assessment dedupe. Only
   // this route writes this activity type, so it is server-owned provenance,
   // unlike leads.customer_id.
-  const created = await dbConn('lead_activities')
-    .where({ lead_id: lead.id, activity_type: CONSULTATION_PROSPECT_ACTIVITY })
-    .orderBy('created_at', 'desc')
-    .first('metadata');
-  const meta = typeof created?.metadata === 'string' ? JSON.parse(created.metadata) : created?.metadata;
+  const meta = await latestProvenance(dbConn, lead.id);
   if (meta?.customer_id) {
     const prospect = await loadCustomer(dbConn, meta.customer_id);
     // A property of an EXISTING account (requires_verification — Codex
@@ -340,6 +336,15 @@ async function loadTrustedCustomer(dbConn, lead, token) {
   const customer = await loadCustomer(dbConn, lead.customer_id);
   if (!customer) return null;
   return (await verifiedForCustomer(lead, customer, token, dbConn)) ? customer : null;
+}
+
+// The newest consultation_prospect provenance metadata for a lead, or null.
+async function latestProvenance(dbConn, leadId) {
+  const row = await dbConn('lead_activities')
+    .where({ lead_id: leadId, activity_type: CONSULTATION_PROSPECT_ACTIVITY })
+    .orderBy('created_at', 'desc')
+    .first('metadata');
+  return typeof row?.metadata === 'string' ? JSON.parse(row.metadata) : (row?.metadata || null);
 }
 
 // The lead's contact is verified AND the customer is on the lead's phone.
@@ -992,13 +997,18 @@ async function resolveOtherAccountProperty(trx, freshLead, linked, resolved) {
   // The selected property becomes this lead's consultation provenance
   // (Codex #4737 r7 pre-push P1): loadTrustedCustomer prefers it, so a
   // reopened link and every retry see THIS profile and its assessment.
+  // Extending the flow's OWN outright-trusted prospect keeps that trust
+  // (Codex #4737 r7 pre-push P1): only an independently existing account's
+  // property needs the verified-phone proof.
   if (chosen.customer) {
+    const prior = await latestProvenance(trx, freshLead.id);
+    const ownProspect = prior?.customer_id === linked.id && !prior.requires_verification;
     await trx('lead_activities').insert({
       lead_id: freshLead.id,
       activity_type: CONSULTATION_PROSPECT_ACTIVITY,
       description: 'Consultation page booked an additional property for this lead',
       performed_by: 'consultation_page',
-      metadata: JSON.stringify({ customer_id: chosen.customer.id, requires_verification: true }),
+      metadata: JSON.stringify({ customer_id: chosen.customer.id, ...(ownProspect ? {} : { requires_verification: true }) }),
     });
   }
   return chosen;
