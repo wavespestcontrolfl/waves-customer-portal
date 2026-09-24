@@ -4,7 +4,6 @@
 // fans a series-level payment across siblings and reconstructs the "visit X of
 // Y · N more covered" context for the appointment detail UI.
 const { recordAuditEvent } = require('./audit-log');
-const logger = require('./logger');
 
 // Statuses that should NOT receive a prepayment stamp. A completed visit
 // already has its books closed; cancelled / no-show / skipped are dead rows
@@ -206,13 +205,19 @@ async function stampSeriesPrepaid(db, {
     // signals (not is_recurring alone) keeps this from misfiring on a row
     // that is simply not flagged recurring but still carries a real
     // cadence (schedule-integrity fixtures do this) — that row is not a
-    // booster and must not be dropped from the split. Only exclude
-    // boosters when the family actually has cadence rows to receive their
-    // share — a lone booster stamped on its own (applyToSeries on a family
-    // of one) still gets its full stamp, unaffected.
-    const cadenceRows = eligible.filter((row) => row.is_recurring === true);
-    const boosterRows = eligible.filter((row) => row.is_recurring === false && !row.recurring_pattern);
-    stampTargets = (cadenceRows.length > 0 && boosterRows.length > 0) ? cadenceRows : eligible;
+    // booster and must not be dropped from the split. stampTargets is
+    // every eligible row MINUS the identified boosters (not merely the
+    // is_recurring===true subset — a legitimately-patterned but
+    // not-flagged-recurring row must survive alongside a real booster in
+    // the same family). Only exclude when at least one non-booster row
+    // remains — a lone booster stamped on its own (applyToSeries on a
+    // family of one) still gets its full stamp, unaffected.
+    const boosterIds = new Set(
+      eligible.filter((row) => row.is_recurring === false && !row.recurring_pattern).map((row) => row.id),
+    );
+    stampTargets = (boosterIds.size > 0 && boosterIds.size < eligible.length)
+      ? eligible.filter((row) => !boosterIds.has(row.id))
+      : eligible;
     if (Math.round(amount * 100) < stampTargets.length) {
       const err = new Error('Series prepayment must allocate at least one cent to every covered visit');
       err.status = 400;
@@ -220,6 +225,18 @@ async function stampSeriesPrepaid(db, {
       err.isOperational = true;
       throw err;
     }
+    // stampSeriesPrepaid is a general-purpose "record what the office
+    // collected across this family" writer (an explicit repair from
+    // Customer 360 can legitimately record a different total than
+    // visitCount x catalog price — a price change, a negotiated amount).
+    // It is deliberately NOT the layer that validates totalAmount against
+    // catalog pricing: that reconciliation (ADMIN-BUG-R09 variant B) is the
+    // booking ROUTE's job, done BEFORE this is ever called, against the
+    // rows it actually placed (admin-schedule.js:
+    // assertPrepayTotalMatchesPricing with the placed count, not the
+    // requested plannedCount). Here we only ever split whatever total the
+    // caller passed evenly across the resolved stampTargets.
+    slices = splitTotalAcrossVisits(amount, stampTargets.length);
     // An explicit series restamp is an amendment, including a repair after a
     // visit was cleared. Retire the prior allocation evidence atomically
     // before writing the replacement; a single-visit clear remains the path
@@ -229,25 +246,6 @@ async function stampSeriesPrepaid(db, {
       parentId,
       ids: stampTargets.map((row) => row.id),
     });
-    slices = splitTotalAcrossVisits(amount, stampTargets.length);
-    // When every targeted row carries its own known price, never stamp a
-    // row above that price — an even split across fewer rows than were
-    // planned (blackout/day-off exhaustion placed 3 of 4) would otherwise
-    // over-stamp each placed row and still leave the eventual extra visit
-    // unstamped (ADMIN-BUG-R09 variant B). Cap each slice at the row's own
-    // price and report whatever the caps left unallocated instead of
-    // hiding it inside an inflated per-visit stamp; rows without a known
-    // price (legacy data, mocked fixtures) fall back to the plain even
-    // split so unrelated behaviour is unchanged.
-    const rowPrices = stampTargets.map((row) => Number(row.estimated_price));
-    if (rowPrices.every((price) => Number.isFinite(price) && price > 0)) {
-      slices = slices.map((slice, i) => Math.min(slice, rowPrices[i]));
-      const allocated = Math.round(slices.reduce((sum, v) => sum + v, 0) * 100) / 100;
-      const unallocated = Math.round((amount - allocated) * 100) / 100;
-      if (unallocated > 0.005) {
-        logger.warn(`[prepaid-series] $${unallocated.toFixed(2)} of a $${amount} series prepayment for parent ${parentId} could not be allocated across ${stampTargets.length} visit(s) at their own price — the office collected more than the placed visits are worth; reconcile the series.`);
-      }
-    }
     for (let i = 0; i < stampTargets.length; i++) {
       const row = stampTargets[i];
       const amt = slices[i];

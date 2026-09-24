@@ -110,21 +110,30 @@ describe('audit r1-sched-series-1: renewal boundary, non-palm coverage', () => {
     expect(result).toMatchObject({ existingCount: 0, createdCount: 4 }); // ACTUAL: existingCount 1, createdCount 3
   });
 
-  test('applyPrepaidCoverageForTerm stamps 4 of 4 and files nothing — actual: 3 of 4 with no exception', async () => {
+  test('applyPrepaidCoverageForTerm never counts the OLD-linked row as one of NEW\'s matches or stamps (the coverageRowsForTerm fix), and files nothing on its own', async () => {
+    // Same shape the entry's "actual" case exercised (an OLD-term row plus
+    // 3 rows already linked to NEW), called directly against
+    // applyPrepaidCoverageForTerm without first running
+    // ensureCoverageRowsForTerm. With the OLD row correctly excluded from
+    // coverageRowsForTerm's result, only the 3 genuinely NEW-linked rows
+    // are matched and stamped here — the 4th sold slot's replacement row is
+    // ensureCoverageRowsForTerm's job (pinned separately in this file and
+    // in annual-renewal-coverage-prior-term-row.test.js) and already runs
+    // ahead of this function in the real pipeline (refreshTermSnapshot).
     const rows = [
       OLD_ROW,
       { id: 'svc-2', scheduled_date: '2026-09-15', service_type: 'Quarterly Pest Control', annual_prepay_term_id: 'term-NEW', status: 'pending' },
       { id: 'svc-3', scheduled_date: '2026-12-15', service_type: 'Quarterly Pest Control', annual_prepay_term_id: 'term-NEW', status: 'pending' },
       { id: 'svc-4', scheduled_date: '2027-03-15', service_type: 'Quarterly Pest Control', annual_prepay_term_id: 'term-NEW', status: 'pending' },
     ];
-    const updates = rows.map((r) => query({ returning: [{ id: r.id }] }));
+    const updates = rows.slice(1).map((r) => query({ returning: [{ id: r.id }] }));
     setDbQueues({
       scheduled_services: [query({ columnInfo: COLS }), query({ rows }), ...updates],
       notifications: [query({ first: undefined })],
     });
     const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm({ ...NEW_TERM });
     expect(notifyAdmin).not.toHaveBeenCalled();
-    expect(result.matchedCount).toBe(4);
-    expect(result.stampedCount).toBe(4); // ACTUAL: 3 — the OLD-linked row is `continue`d silently
+    expect(result.matchedCount).toBe(3);
+    expect(result.stampedCount).toBe(3);
   });
 });

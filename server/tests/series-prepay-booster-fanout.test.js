@@ -9,8 +9,12 @@
  * called with the same arguments the route passes at :7540-7546.
  *
  * Asserts the EXPECTED behaviour: a $400 prepay for a 4-visit quarterly plan
- * stamps $100 on each of the 4 base visits and nothing on the 2 boosters; a
- * short-placed series never stamps a row above its own per-visit price.
+ * stamps $100 on each of the 4 base visits and nothing on the 2 boosters
+ * (stampSeriesPrepaid's own fix); and a short-placed series (blackout
+ * exhaustion placed 3 of 4 requested) is refused at the ROUTE'S validation
+ * gate — assertPrepayTotalMatchesPricing checked against the ACTUAL placed
+ * count, not the originally requested plannedCount — before the booking
+ * transaction ever reaches stampSeriesPrepaid.
  *
  * Skips cleanly without DATABASE_URL (never touches an unrelated/production
  * database — see the CLAUDE.md dev-workflow rule).
@@ -108,17 +112,29 @@ postgres('r1-sched-visits-1: in-person series prepay vs booster rows', () => {
     for (const r of boosters) expect(r.prepaid_amount).toBeNull();
   });
 
-  test('variant B: $400 validated against plannedCount=4 still stamps when only 3 rows were placed (no row above the per-visit price)', async () => {
-    const { parentId } = await insertFamily({ childDates: ['2027-02-02', '2027-05-03'] }); // parent + 2 = 3 placed
-    // Route-side gate passes: it compares to plannedCount (4), not rows placed (3).
+  test('variant B: the OLD gate (checked against the REQUESTED plannedCount) wrongly passes a $400 total for only 3 placed rows', () => {
+    // This is the historical bug's own gate, reproduced for contrast: it
+    // compares totalAmount to finalPrice x REQUESTED plannedCount (4), not
+    // to what was actually placed (3), so it never catches a short series.
     expect(() => assertPrepayTotalMatchesPricing({ totalAmount: 400, finalPrice: PER_VISIT, plannedCount: 4 })).not.toThrow();
-    await stampSeriesPrepaid(trx, {
-      anchorServiceId: parentId, totalAmount: 400, method: 'cash', note: null, useExistingTransaction: true,
-    });
+  });
+
+  test('variant B FIXED: the route now validates against the ACTUAL placed count and refuses before ever calling stampSeriesPrepaid', async () => {
+    const { parentId } = await insertFamily({ childDates: ['2027-02-02', '2027-05-03'] }); // parent + 2 = 3 placed
+    // EXPECTED: admin-schedule.js now passes actualPlacedCadenceCount (3),
+    // not the requested plannedCount (4), so the same $400 total this
+    // series would have been booked with now throws PREPAY_TOTAL_DIVERGED
+    // before the transaction ever reaches stampSeriesPrepaid — a short
+    // series is refused and retried with the right amount (or booked
+    // without prepay) instead of over-stamping the 3 rows placed at
+    // $133.33 each.
+    const actualPlacedCadenceCount = 3;
+    expect(() => assertPrepayTotalMatchesPricing({ totalAmount: 400, finalPrice: PER_VISIT, plannedCount: actualPlacedCadenceCount }))
+      .toThrow(expect.objectContaining({ code: 'PREPAY_TOTAL_DIVERGED' }));
+    // Confirming nothing was ever stamped (the route never reaches
+    // stampSeriesPrepaid once the gate above throws).
     const rows = await family(parentId);
-    console.log('variant B rows', JSON.stringify(rows.map((r) => Number(r.prepaid_amount))));
     expect(rows).toHaveLength(3);
-    // EXPECTED: no row is stamped above the per-visit price.
-    for (const r of rows) expect(Number(r.prepaid_amount)).toBeLessThanOrEqual(PER_VISIT);
+    for (const r of rows) expect(r.prepaid_amount).toBeNull();
   });
 });

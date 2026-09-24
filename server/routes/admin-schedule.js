@@ -7537,7 +7537,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
           // leaves nothing committed at all, matching the sibling
           // DISCOUNT_STACKING_GATE_DIVERGED check's own "before any write"
           // contract for its own field).
-          assertPrepayTotalMatchesPricing({ totalAmount, finalPrice: pricing.finalPrice, plannedCount });
+          //
+          // Validated against the cadence rows ACTUALLY PLACED (parent +
+          // plannedChildDates), not the originally REQUESTED plannedCount
+          // (ADMIN-BUG-R09 variant B): blackout/day-off exhaustion can place
+          // fewer visits than requested (the route already warns about this
+          // above, bookingWarnings), and the client's totalAmount is
+          // computed from the requested count. Validating against the
+          // stale requested count let a short-placed series pass this gate
+          // and then fan the full amount across fewer rows than it prices
+          // for, over-stamping every placed visit above its own price.
+          const actualPlacedCadenceCount = 1 + plannedChildDates.length;
+          assertPrepayTotalMatchesPricing({ totalAmount, finalPrice: pricing.finalPrice, plannedCount: actualPlacedCadenceCount });
           await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
             totalAmount,

@@ -7,7 +7,15 @@
  * Real Postgres (DATABASE_URL must point at a private clone of waves_audit_tpl).
  * The real admin-schedule router runs; only adminAuthenticate is stubbed to
  * inject the role (same pattern as tests/admin-tech-role-scoping.test.js).
+ *
+ * Skips cleanly without DATABASE_URL, and every fixture write rides a
+ * per-test transaction rolled back in afterEach — same harness as
+ * tests/delete-prepaid-annual-coverage.test.js and
+ * tests/series-prepay-booster-fanout.test.js — so this never commits rows
+ * against, or requires, whichever database happens to be configured.
  */
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(60000);
 
@@ -25,6 +33,14 @@ jest.mock('../middleware/admin-auth', () => {
     },
   };
 });
+jest.mock('../models/db', () => {
+  const db = (...args) => db.connection(...args);
+  db.raw = (...args) => db.connection.raw(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
+  Object.defineProperty(db, 'schema', { get: () => db.connection.schema });
+  Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
+  return db;
+});
 
 const express = require('express');
 const db = require('../models/db');
@@ -32,62 +48,77 @@ const scheduleRouter = require('../routes/admin-schedule');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-let server; let baseUrl;
-beforeAll((done) => {
-  const app = express();
-  app.use(express.json());
-  app.use('/api/admin/schedule', scheduleRouter);
-  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
-  server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; done(); });
-});
-afterAll(async () => { await new Promise((r) => server.close(r)); await db.destroy(); });
-
-async function call(method, path) {
-  const res = await fetch(`${baseUrl}${path}`, { method, headers: { 'content-type': 'application/json' } });
-  let json = null; try { json = await res.json(); } catch { /* none */ }
-  return { status: res.status, body: json || {} };
-}
-
 const SERVICE = 'Quarterly Pest Control';
-async function seed({ children = 0 } = {}) {
-  const [customer] = await db('customers').insert({
-    first_name: 'Audit', last_name: 'Series2', phone: `555${Date.now() % 10000000}`, email: `audit-s2-${Date.now()}-${Math.random()}@example.com`,
-  }).returning('id');
-  const customerId = customer.id || customer;
-  const [tech] = await db('technicians').insert({
-    name: 'Tech Repro', email: `tech-s2-${Date.now()}-${Math.random()}@example.com`, role: 'technician', active: true,
-  }).returning('id');
-  const techId = tech.id || tech;
-  const [term] = await db('annual_prepay_terms').insert({
-    customer_id: customerId, term_start: etDateString(addETDays(new Date(), -30)), term_end: etDateString(addETDays(new Date(), 335)),
-    status: 'active', prepay_amount: 400, coverage_service_type: SERVICE, coverage_visit_count: 4, plan_label: 'Quarterly',
-  }).returning('id');
-  const termId = term.id || term;
-  const stamp = { prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', prepaid_at: new Date(), annual_prepay_term_id: termId };
-  const [parent] = await db('scheduled_services').insert({
-    customer_id: customerId, technician_id: techId, scheduled_date: etDateString(addETDays(new Date(), 3)), service_type: SERVICE,
-    status: 'pending', is_recurring: children > 0, estimated_price: 100, ...stamp,
-  }).returning('id');
-  const parentId = parent.id || parent;
-  const childIds = [];
-  for (let i = 1; i <= children; i++) {
-    const [c] = await db('scheduled_services').insert({
-      customer_id: customerId, technician_id: techId, scheduled_date: etDateString(addETDays(new Date(), 3 + 90 * i)), service_type: SERVICE,
-      status: 'pending', is_recurring: true, recurring_parent_id: parentId, estimated_price: 100, ...stamp,
-    }).returning('id');
-    childIds.push(c.id || c);
+
+postgres('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
+  let database;
+  let trx;
+  let server;
+  let baseUrl;
+
+  beforeAll(() => new Promise((resolve) => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use a disposable local clone');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    db.connection = database;
+    const app = express();
+    app.use(express.json());
+    app.use('/api/admin/schedule', scheduleRouter);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; resolve(); });
+  }));
+  beforeEach(async () => {
+    trx = await database.transaction();
+    db.connection = trx;
+  });
+  afterEach(async () => { if (trx) await trx.rollback(); });
+  afterAll(async () => { await new Promise((r) => server.close(r)); await database?.destroy(); });
+
+  async function call(method, path) {
+    const res = await fetch(`${baseUrl}${path}`, { method, headers: { 'content-type': 'application/json' } });
+    let json = null; try { json = await res.json(); } catch { /* none */ }
+    return { status: res.status, body: json || {} };
   }
-  return { customerId, techId, termId, parentId, childIds };
-}
 
-const row = (id) => db('scheduled_services').where({ id }).first('id', 'status', 'prepaid_amount', 'prepaid_method', 'annual_prepay_term_id', 'technician_id');
+  async function seed({ children = 0 } = {}) {
+    const [customer] = await trx('customers').insert({
+      first_name: 'Audit', last_name: 'Series2', phone: `555${Date.now() % 10000000}`, email: `audit-s2-${Date.now()}-${Math.random()}@example.com`,
+    }).returning('id');
+    const customerId = customer.id || customer;
+    const [tech] = await trx('technicians').insert({
+      name: 'Tech Repro', email: `tech-s2-${Date.now()}-${Math.random()}@example.com`, role: 'technician', active: true,
+    }).returning('id');
+    const techId = tech.id || tech;
+    const [term] = await trx('annual_prepay_terms').insert({
+      customer_id: customerId, term_start: etDateString(addETDays(new Date(), -30)), term_end: etDateString(addETDays(new Date(), 335)),
+      status: 'active', prepay_amount: 400, coverage_service_type: SERVICE, coverage_visit_count: 4, plan_label: 'Quarterly',
+    }).returning('id');
+    const termId = term.id || term;
+    const stamp = { prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', prepaid_at: new Date(), annual_prepay_term_id: termId };
+    const [parent] = await trx('scheduled_services').insert({
+      customer_id: customerId, technician_id: techId, scheduled_date: etDateString(addETDays(new Date(), 3)), service_type: SERVICE,
+      status: 'pending', is_recurring: children > 0, estimated_price: 100, ...stamp,
+    }).returning('id');
+    const parentId = parent.id || parent;
+    const childIds = [];
+    for (let i = 1; i <= children; i++) {
+      const [c] = await trx('scheduled_services').insert({
+        customer_id: customerId, technician_id: techId, scheduled_date: etDateString(addETDays(new Date(), 3 + 90 * i)), service_type: SERVICE,
+        status: 'pending', is_recurring: true, recurring_parent_id: parentId, estimated_price: 100, ...stamp,
+      }).returning('id');
+      childIds.push(c.id || c);
+    }
+    return { customerId, techId, termId, parentId, childIds };
+  }
 
-describe('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
+  const row = (id) => trx('scheduled_services').where({ id }).first('id', 'status', 'prepaid_amount', 'prepaid_method', 'annual_prepay_term_id', 'technician_id');
+
   test('single form, TECHNICIAN token on own live visit: 200, stamp wiped, term id left, coverage gate now false', async () => {
     const { techId, parentId } = await seed();
     global.__TECH_ID = techId; mockCurrentRole = 'technician';
     const before = await row(parentId);
-    expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(before, db)).toBe(true); // covered before
+    expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(before, trx)).toBe(true); // covered before
 
     const res = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid`);
     const after = await row(parentId);
@@ -96,7 +127,7 @@ describe('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
     // EXPECTED (symmetry with POST /:id/prepaid at admin-schedule.js:13384-13388): refusal
     expect(res.status).toBe(409);
     expect(after.prepaid_method).toBe('annual_prepay_invoice');
-    expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, db)).toBe(true);
+    expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx)).toBe(true);
   });
 
   test('series form, ADMIN token: every stamped sibling wiped in one call, term ids left, gate false on all', async () => {
@@ -104,7 +135,7 @@ describe('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
     global.__TECH_ID = techId; mockCurrentRole = 'admin';
     const res = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid?series=1`);
     const rows = await Promise.all([parentId, ...childIds].map(row));
-    const covered = await Promise.all(rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r, db)));
+    const covered = await Promise.all(rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r, trx)));
     console.log('series/admin DELETE ->', res.status, JSON.stringify(res.body), '\nrows after:', JSON.stringify(rows.map((r) => [r.prepaid_method, r.annual_prepay_term_id != null])), 'covered:', JSON.stringify(covered));
 
     // EXPECTED (symmetry with stampSeriesPrepaid prepaid-series.js:188): 409 'annual prepay coverage'
