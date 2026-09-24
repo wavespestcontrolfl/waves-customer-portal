@@ -56,24 +56,36 @@ jest.mock('../models/db', () => {
   const state = { scheduledServices: [], writes: [] };
   const norm = (c) => String(c).replace(/^scheduled_services\./, '');
   const matches = (row, where) => Object.entries(where).every(([k, v]) => row[norm(k)] === v);
+  const cmpOp = (a, op, v) => (op === '>=' ? a >= v : op === '>' ? a > v : op === '<=' ? a <= v : op === '<' ? a < v : a === v);
   const dbFn = (table) => {
-    const b = { _where: {} };
-    b.where = (w, op) => {
+    const b = { _where: {}, _notIn: {}, _cmp: [] };
+    b.where = (w, opOrVal, val) => {
       if (typeof w === 'function') { w.call(b); return b; }
-      if (w && typeof w === 'object') Object.assign(b._where, w);
-      else b._where[norm(w)] = op;
+      if (w && typeof w === 'object') { Object.assign(b._where, w); return b; }
+      if (val !== undefined) { b._cmp.push([norm(w), opOrVal, val]); return b; }
+      b._where[norm(w)] = opOrVal;
       return b;
     };
     b.andWhere = (...a) => b.where(...a);
     b.modify = (fn) => { fn(b); return b; };
-    for (const m of ['whereNot', 'whereNotIn', 'whereIn', 'whereNull', 'whereRaw', 'orWhere', 'leftJoin', 'forUpdate', 'orderBy']) b[m] = () => b;
+    b.whereNotIn = (col, vals) => { b._notIn[norm(col)] = vals; return b; };
+    b.whereNot = (col, val) => { b._notIn[norm(col)] = [val]; return b; };
+    for (const m of ['whereIn', 'whereNull', 'whereRaw', 'orWhere', 'leftJoin', 'forUpdate', 'orderBy']) b[m] = () => b;
     b.select = () => b;
     b.returning = (cols) => { b._returning = cols; return b; };
     b.first = async (...cols) => {
       const rows = table === 'scheduled_services' ? state.scheduledServices : [];
-      const found = rows.find((r) => matches(r, b._where));
+      const found = rows.find((r) => matches(r, b._where)
+        && Object.entries(b._notIn).every(([k, vals]) => !vals.includes(r[norm(k)]))
+        && b._cmp.every(([k, op, v]) => cmpOp(r[norm(k)], op, v)));
       if (!found) return undefined;
-      const out = cols.length ? Object.fromEntries(cols.map((c) => [c, found[c]])) : { ...found };
+      // The only raw() column expression these routes select is the
+      // "to_char(scheduled_date, 'YYYY-MM-DD') as day" reorder helper —
+      // recognize it by its SQL text and answer with the ET date string.
+      const colKey = (c) => (typeof c === 'string' && c.includes('as day') ? 'day' : c);
+      const out = cols.length
+        ? Object.fromEntries(cols.map((c) => [colKey(c), colKey(c) === 'day' ? String(found.scheduled_date).slice(0, 10) : found[c]]))
+        : { ...found };
       // Fires a scripted concurrent reassignment right after THIS read
       // returns its (pre-race) snapshot — models a dispatcher's
       // assignDispatchJob landing between the route's ownership-check read
@@ -99,7 +111,22 @@ jest.mock('../models/db', () => {
   };
   dbFn.fn = { now: () => new Date() };
   dbFn.raw = (sql) => sql;
-  dbFn.transaction = async (cb) => cb((table) => dbFn(table));
+  dbFn.transaction = async (cb) => {
+    // Models a reassignment transaction that committed in the instant
+    // before ours acquires its FOR UPDATE lock — the realistic race for a
+    // route whose ENTIRE read+write now runs inside one transaction (the
+    // note route): a concurrent updater would block on our lock once we
+    // hold it, so the only way it can still land is by committing first.
+    if (state.raceOnTransaction) {
+      const { to } = state.raceOnTransaction;
+      state.raceOnTransaction = null;
+      const row = state.scheduledServices.find((r) => r.id === 'svc-1');
+      if (row) row.technician_id = to;
+    }
+    const trx = (table) => dbFn(table);
+    trx.raw = dbFn.raw;
+    return cb(trx);
+  };
   dbFn.__state = state;
   return dbFn;
 });
@@ -173,8 +200,8 @@ test('control: a SAME-DAY rain-out (no date change) is unaffected by the gate', 
   expect(mockCommit).toHaveBeenCalledTimes(1);
 });
 
-test("P1: PATCH /:id/note — the ownership pre-check sees tech-A still owns it, but a reassignment lands immediately after; the update's OWN technician_id predicate (not the earlier check) is what refuses the write", async () => {
-  db.__state.raceAfterNextRead = { to: 'tech-B' };
+test('P1: PATCH /:id/note — a reassignment that commits the instant before this request acquires its row lock is refused (403), never overwritten', async () => {
+  db.__state.raceOnTransaction = { to: 'tech-B' };
   const { status, body } = await call('PATCH', '/api/admin/dispatch/svc-1/note', { notes: 'should not land' });
   expect(status).toBe(403);
   expect(body).toEqual({ error: 'Not assigned to this service', code: 'service_not_assigned' });
@@ -196,4 +223,19 @@ test("P1: reschedule pins the rebooker's CAS to the authenticated technician_id 
   expect(mockReschedule).toHaveBeenCalledTimes(1);
   const options = mockReschedule.mock.calls[0][5];
   expect(options.expect).toMatchObject({ technician_id: 'tech-A' });
+});
+
+test("codex round-3: PATCH /:id/note now rejects a STALE (>7 days old) or COMPLETED visit for a technician — lockOwnedLiveVisit's technicianLiveVisitFilter, not a bare technician_id compare", async () => {
+  db.__state.scheduledServices[0].scheduled_date = '2020-01-01';
+  const { status, body } = await call('PATCH', '/api/admin/dispatch/svc-1/note', { notes: 'too old' });
+  expect(status).toBe(403);
+  expect(body).toEqual({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+});
+
+test('codex round-3: PUT /:id/reorder now rejects a stale visit for a technician too', async () => {
+  db.__state.scheduledServices[0].scheduled_date = '2020-01-01';
+  const res = await fetch(`${baseUrl}/api/admin/dispatch/svc-1/reorder`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ routeOrder: 3 }),
+  });
+  expect(res.status).toBe(403);
 });

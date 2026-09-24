@@ -1730,7 +1730,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
 // How long a Quick Move series-text claim (series_moves.notified_at with
 // customer_notified=false) stays exclusive before a retry may reclaim it.
 const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false, requireAssignedTechnicianId = null }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -2156,8 +2156,21 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // it is the fallback after a series attempt (the visit moves ALONE
           // by design) or the sheet asked for a single move.
           seriesPolicy: 'single',
-          ...(wantsSeriesShift
-            ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
+          ...(wantsSeriesShift || requireAssignedTechnicianId
+            ? {
+                expect: {
+                  ...(wantsSeriesShift ? { scheduled_date: job.scheduled_date, window_start: job.window_start } : {}),
+                  // codex-review P1 (PR #4673): a technician-initiated
+                  // rain-out fences the ACTUAL write, not just the route's
+                  // pre-check — a reassignment landing between that check
+                  // and this call now makes the write miss and 409, the
+                  // same concurrent-change fence every other CAS field in
+                  // rebooker.reschedule already gets. Admin-initiated
+                  // rain-outs (requireAssignedTechnicianId null) stay
+                  // unscoped.
+                  ...(requireAssignedTechnicianId ? { technician_id: requireAssignedTechnicianId } : {}),
+                },
+              }
             : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);

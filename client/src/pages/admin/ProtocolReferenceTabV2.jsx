@@ -477,13 +477,18 @@ function LabelLinks({ product, className }) {
   );
 }
 
-function ProtocolMixCard({
+export function ProtocolMixCard({
   plan,
   selectedConditionalIds,
   onToggleConditional,
 }) {
   if (!plan) return null;
   const selectedItems = plan.selectedItems || [];
+  // codex round-3 P2: a technician response has viewerRole:'technician' and
+  // no materialCostSummary at all (server-side price projection) — that is
+  // NOT the same thing as "nothing is priced yet", so the Material Cost
+  // card/column is hidden rather than shown as a fabricated "0/N priced".
+  const pricingRestricted = plan.viewerRole === "technician";
   const materialSummary = plan.materialCostSummary || {};
   const materialTotal =
     materialSummary.pricedLineCount > 0 ? materialSummary.total : null;
@@ -678,18 +683,20 @@ function ProtocolMixCard({
                 {fmtNumber(plan.equipment?.tankCoverageSqft, " sq ft")}
               </div>{" "}
             </div>{" "}
-            <div className="rounded-sm border-hairline border-zinc-200 p-3">
-              {" "}
-              <div className="u-label text-ink-tertiary">
-                Material Cost
-              </div>{" "}
-              <div className="u-nums text-16 font-medium text-zinc-900">
-                {fmtMoney(materialTotal)}
+            {!pricingRestricted && (
+              <div className="rounded-sm border-hairline border-zinc-200 p-3">
+                {" "}
+                <div className="u-label text-ink-tertiary">
+                  Material Cost
+                </div>{" "}
+                <div className="u-nums text-16 font-medium text-zinc-900">
+                  {fmtMoney(materialTotal)}
+                </div>
+                <div className="text-11 text-ink-tertiary mt-0.5">
+                  {materialSummary.pricedLineCount || 0}/{materialSummary.selectedLineCount ?? selectedItems.length} lines priced
+                </div>{" "}
               </div>
-              <div className="text-11 text-ink-tertiary mt-0.5">
-                {materialSummary.pricedLineCount || 0}/{materialSummary.selectedLineCount ?? selectedItems.length} lines priced
-              </div>{" "}
-            </div>{" "}
+            )}{" "}
           </div>{" "}
           <div className="text-12 text-ink-secondary leading-normal mb-4">
             {plan.visit?.objective || "No objective available for this visit."}
@@ -718,9 +725,11 @@ function ProtocolMixCard({
                       <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                         Area Mix
                       </th>
-                      <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
-                        Mat$
-                      </th>
+                      {!pricingRestricted && (
+                        <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
+                          Mat$
+                        </th>
+                      )}
                       <th className="px-3 py-2 text-right text-11 u-label text-ink-tertiary">
                         {fullTankLabel}
                       </th>
@@ -741,9 +750,11 @@ function ProtocolMixCard({
                         <td className="px-3 py-3 text-right whitespace-nowrap">
                           {row.areaMix}
                         </td>
-                        <td className="px-3 py-3 text-right whitespace-nowrap">
-                          {row.matCost}
-                        </td>
+                        {!pricingRestricted && (
+                          <td className="px-3 py-3 text-right whitespace-nowrap">
+                            {row.matCost}
+                          </td>
+                        )}
                         <td className="px-3 py-3 text-right whitespace-nowrap">
                           {row.tankMix}
                         </td>
@@ -763,15 +774,17 @@ function ProtocolMixCard({
                 {row.product}
                 {row.hasProduct && row.label}
                 {hasAnyMix && (
-                  <div className="grid grid-cols-3 gap-2 border-t border-hairline border-zinc-100 pt-2">
+                  <div className={`grid ${pricingRestricted ? "grid-cols-2" : "grid-cols-3"} gap-2 border-t border-hairline border-zinc-100 pt-2`}>
                     <div>
                       <div className="u-label text-ink-tertiary">Area mix</div>
                       {row.areaMix}
                     </div>
-                    <div>
-                      <div className="u-label text-ink-tertiary">Mat$</div>
-                      {row.matCost}
-                    </div>
+                    {!pricingRestricted && (
+                      <div>
+                        <div className="u-label text-ink-tertiary">Mat$</div>
+                        {row.matCost}
+                      </div>
+                    )}
                     <div>
                       <div className="u-label text-ink-tertiary">{fullTankLabel}</div>
                       {row.tankMix}

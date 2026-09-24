@@ -30,11 +30,32 @@ jest.mock('../middleware/admin-auth', () => {
 let mockVisitRow = null;
 let mockOpenMembers = [];
 jest.mock('../models/db', () => {
+  const norm = (col) => String(col).replace(/^scheduled_services\./, '');
+  const cmp = (a, op, v) => (op === '>=' ? a >= v : op === '>' ? a > v : op === '<=' ? a <= v : op === '<' ? a < v : a === v);
   const chain = () => {
-    const c = {};
-    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'join', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
+    const c = { _eq: {}, _notIn: {}, _cmp: [] };
+    c.where = (w, opOrVal, val) => {
+      if (typeof w === 'function') { w.call(c); return c; }
+      if (w && typeof w === 'object') Object.assign(c._eq, w);
+      else if (val !== undefined) c._cmp.push([norm(w), opOrVal, val]);
+      else c._eq[norm(w)] = opOrVal;
+      return c;
+    };
+    c.whereNotIn = (col, vals) => { c._notIn[norm(col)] = vals; return c; };
+    c.whereNot = (col, val) => { c._notIn[norm(col)] = [val]; return c; };
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'forUpdate', 'leftJoin', 'join', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
     c.select = async () => mockOpenMembers;
-    c.first = async () => mockVisitRow;
+    // Real (if minimal) predicate matching — this is what lets
+    // lockOwnedLiveVisit's technicianLiveVisitFilter actually refuse a row
+    // that fails the check, instead of returning mockVisitRow unconditionally
+    // regardless of what the caller's WHERE asked for.
+    c.first = async () => {
+      if (!mockVisitRow) return mockVisitRow;
+      const eqOk = Object.entries(c._eq).every(([k, v]) => mockVisitRow[k] === v);
+      const notInOk = Object.entries(c._notIn).every(([k, vals]) => !vals.includes(mockVisitRow[k]));
+      const cmpOk = c._cmp.every(([k, op, v]) => cmp(mockVisitRow[k], op, v));
+      return (eqOk && notInOk && cmpOk) ? mockVisitRow : undefined;
+    };
     c.then = (resolve) => Promise.resolve([]).then(resolve);
     return c;
   };

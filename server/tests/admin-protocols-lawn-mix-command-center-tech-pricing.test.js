@@ -82,7 +82,11 @@ beforeEach(() => {
   const calibration = {
     id: 'calibration-fixture', equipment_system_id: 'tank-fixture',
     system_name: 'Fixture tank', system_type: 'tank',
-    carrier_gal_per_1000: 2, tank_capacity_gal: 40, expires_at: null,
+    // A real Date instance — codex round-3 P1: deepStripPriceTokens
+    // recursed into it like a plain object (Object.entries(date) is [])
+    // and turned it into {}; ProtocolTankSheet then read expiresAt as
+    // missing and hid the calibration/quantity it gates.
+    carrier_gal_per_1000: 2, tank_capacity_gal: 40, expires_at: new Date('2030-06-01T00:00:00.000Z'),
   };
   protocols.lawn.st_augustine.visits = [{
     month: 'Sep', visit: 9, notes: '', primary: 'K-Flow 0-0-25 ($2.18)', secondary: '',
@@ -114,6 +118,13 @@ test('lawn-mix: a technician token gets no per-product vendor pricing and no mat
   expect(product).not.toHaveProperty('costUnit');
   expect(body.materialCostSummary?.total ?? null).toBeNull();
   expect(body.items[0].jobMix?.materialCost ?? null).toBeNull();
+});
+
+test('codex round-3 P1: a Date field (equipment.expiresAt) survives deepStripPriceTokens intact — never corrupted into {}', async () => {
+  const body = await callAsTechnician('/lawn-mix', { track: 'st_augustine', month: 'Sep', lawnSqft: '8000' });
+  expect(body.equipment).toBeTruthy();
+  expect(body.equipment.expiresAt).not.toEqual({});
+  expect(new Date(body.equipment.expiresAt).getTime()).toBe(new Date('2030-06-01T00:00:00.000Z').getTime());
 });
 
 test("lawn-mix: codex round-1 P1 — item.raw and visit.primary/secondary still carried the priced-line text verbatim (ProtocolReferenceTabV2.jsx renders it unconditionally); no '$' digit anywhere in the technician response now", async () => {

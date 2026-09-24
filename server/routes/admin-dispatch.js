@@ -20,7 +20,7 @@ const db = require('../models/db');
 const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -1008,38 +1008,30 @@ router.get('/:date?', async (req, res, next) => {
 // PATCH /api/admin/dispatch/:serviceId/note — save the staff-facing appointment note
 router.patch('/:serviceId/note', async (req, res, next) => {
   try {
-    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('id', 'technician_id');
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-    // Ownership: this route replaces the note wholesale with no history — a
-    // technician token must not be able to wipe another tech's visit notes
-    // (ADMIN-BUG-R35).
-    {
-      const ownershipError = completionOwnershipError({
-        role: req.techRole,
-        actorTechnicianId: req.technicianId,
-        assignedTechnicianId: svc.technician_id,
-      });
-      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
-    }
     const { notes } = req.body;
     const text = (notes == null ? '' : String(notes)).slice(0, 2000);
-    // codex-review P1: pin the atomic write to the technician_id the
-    // ownership check above just verified — a reassignment landing between
-    // that read and this write then makes the update miss (0 rows) instead
-    // of silently letting the FORMER technician overwrite the reassigned
-    // visit's notes. Admin requests stay unscoped.
-    const updated = await db('scheduled_services')
-      .where({ id: req.params.serviceId })
-      .modify((q) => { if (req.techRole !== 'admin') q.where({ technician_id: req.technicianId }); })
-      .update({ notes: text, updated_at: new Date() })
-      .returning(['id', 'notes']);
-    if (!updated.length) {
-      return req.techRole === 'admin'
-        ? res.status(404).json({ error: 'Service not found' })
-        : res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    let updatedNotes = null;
+    // codex-review (PR #4673): the row is now locked FOR UPDATE and
+    // re-verified through the canonical technicianLiveVisitFilter predicate
+    // (ADMIN-BUG-R35 fixed the bare technician_id compare; this closes the
+    // remaining reassignment race — a mismatch lands INSIDE the same lock
+    // this update runs under, not a second unlocked SELECT that only
+    // narrows the window).
+    await db.transaction(async (trx) => {
+      await lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id']);
+      const updated = await trx('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .update({ notes: text, updated_at: new Date() })
+        .returning(['id', 'notes']);
+      updatedNotes = updated[0]?.notes ?? text;
+    });
+    res.json({ success: true, notes: updatedNotes });
+  } catch (err) {
+    if (err && err.status && err.code) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
     }
-    res.json({ success: true, notes: updated[0].notes });
-  } catch (err) { next(err); }
+    next(err);
+  }
 });
 
 // PATCH /api/admin/dispatch/:serviceId/time-on-site — after-the-fact
@@ -2252,24 +2244,19 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // takeover); an unverified explicit confirm still commits, just as an
         // OFFICE confirm — the card funnel runs, which is the fail-closed
         // direction.
-        // codex round-1 P1: ownership was decided from the pre-transaction
-        // `svc` snapshot — assignDispatchJob (or any other reassignment)
-        // landing between that read and this transaction leaves the status
-        // CAS itself untouched (it keys on fromStatus, not technician_id),
-        // so the FORMER technician's transition still commits against the
-        // newly-reassigned visit. Every ordinary technician transition now
-        // gets the SAME row-locked re-verification the field-confirm path
-        // already ran only for itself; a mismatch aborts before
-        // transitionJobStatus ever runs.
-        let lockedRow = null;
-        if (req.techRole === 'technician' && req.technicianId) {
-          lockedRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
-            .first('technician_id', 'customer_confirmed', 'status');
-          const stillAssigned = !!lockedRow && String(lockedRow.technician_id || '') === String(req.technicianId);
-          if (!stillAssigned) {
-            throw Object.assign(new Error('Not assigned to this service'), { code: 'REASSIGNED_MID_FLIGHT' });
-          }
-        }
+        // codex-review (PR #4673): ownership was decided from the
+        // pre-transaction `svc` snapshot — assignDispatchJob (or any other
+        // reassignment) landing between that read and this transaction
+        // leaves the status CAS itself untouched (it keys on fromStatus,
+        // not technician_id), so the FORMER technician's transition still
+        // committed against the newly-reassigned visit. The shared
+        // lockOwnedLiveVisit helper re-verifies the row under a FOR UPDATE
+        // lock through the canonical technicianLiveVisitFilter predicate
+        // (dead statuses, completed rows, and the 7-day access window all
+        // fail it too, not just a technician_id compare) before
+        // transitionJobStatus ever runs — the SAME check the field-confirm
+        // path below reuses instead of re-verifying itself.
+        const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status']);
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
           fieldConfirmVerified = !!locked
@@ -2345,8 +2332,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       });
     } catch (err) {
-      if (err && err.code === 'REASSIGNED_MID_FLIGHT') {
-        return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+      if (err && err.status && err.code) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
       }
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
@@ -2876,22 +2863,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 router.put('/:serviceId/reorder', async (req, res, next) => {
   try {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-    let found = true;
     let reorderedDay = null;
     await db.transaction(async (trx) => {
-      const prov = await trx('scheduled_services')
-        .where({ id: req.params.serviceId })
-        .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-      if (!prov) { found = false; return; } // pre-fence behavior: unknown id was a silent no-op
-      // Ownership: prov.technician_id was previously used only as a stale-row
-      // fence, never checked against the caller — a technician token could
-      // rewrite another tech's route order (ADMIN-BUG-R35).
-      const ownershipError = completionOwnershipError({
-        role: req.techRole,
-        actorTechnicianId: req.technicianId,
-        assignedTechnicianId: prov.technician_id,
-      });
-      if (ownershipError) throw Object.assign(new Error(ownershipError.payload.error), { code: 'NOT_ASSIGNED', ownershipError });
+      // codex-review (PR #4673): the FOR UPDATE lock + technicianLiveVisitFilter
+      // predicate here is the real fence — prov.technician_id in the final
+      // update's WHERE below is now a belt-and-suspenders stale-row check,
+      // not the primary ownership gate it used to be (ADMIN-BUG-R35).
+      const prov = await lockOwnedLiveVisit(trx, req, req.params.serviceId, ['technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day")]);
       await lockTechDays(trx, [{ techId: prov.technician_id, date: prov.day }]);
       const updated = await trx('scheduled_services')
         .where({ id: req.params.serviceId })
@@ -2911,10 +2889,10 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
         logger.error(`[dispatch] reorder route quality refresh failed: ${e.message}`);
       }
     }
-    res.json({ success: true, ...(found ? {} : { updated: 0 }) });
+    res.json({ success: true });
   } catch (err) {
+    if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
     if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
-    if (err.code === 'NOT_ASSIGNED') return res.status(err.ownershipError.status).json(err.ownershipError.payload);
     next(err);
   }
 });
@@ -2931,22 +2909,25 @@ router.put('/reorder/bulk', async (req, res, next) => {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
     const reorderedDays = new Set();
     await db.transaction(async (trx) => {
+      // codex-review (PR #4673): FOR UPDATE up front, on the whole batch —
+      // the same reassignment-race fence lockOwnedLiveVisit gives a single
+      // visit, kept batched here since the tech-day lock below needs every
+      // row's technician_id/day together anyway.
       const rows = await trx('scheduled_services')
         .whereIn('id', (order || []).map((i) => i.serviceId))
-        .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+        .forUpdate()
+        .select('id', 'technician_id', 'status', 'scheduled_date', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
       const byId = new Map(rows.map((r) => [String(r.id), r]));
       await lockTechDays(trx, rows.map((r) => ({ techId: r.technician_id, date: r.day })));
       for (const item of order || []) {
         const prov = byId.get(String(item.serviceId));
         if (!prov) continue; // pre-fence behavior: unknown id was a silent no-op
-        // Ownership: a technician token may only reorder its OWN visits — a
-        // row belonging to another tech is skipped, same as an unknown id
-        // (ADMIN-BUG-R35).
-        if (completionOwnershipError({
-          role: req.techRole,
-          actorTechnicianId: req.technicianId,
-          assignedTechnicianId: prov.technician_id,
-        })) continue;
+        // Ownership: a technician token may only reorder its OWN CURRENT
+        // visits — a row belonging to another tech, a dead-status row, or
+        // one outside the 7-day access window is skipped, same as an
+        // unknown id (ADMIN-BUG-R35 / codex-review: not just a bare
+        // technician_id compare).
+        if (!technicianVisitRowInScope(req, prov)) continue;
         const updated = await trx('scheduled_services')
           .where({ id: item.serviceId })
           .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [prov.day])
@@ -4213,17 +4194,21 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
     }
 
-    // codex-review P1: the ownership decision above reads a snapshot;
-    // RainOut.commit does its own (unlocked) re-read of the row rather than
-    // accepting a caller-supplied CAS predicate, so re-verify assignment as
-    // late as possible, immediately before handing off, to shrink the
-    // window a mid-flight reassignment could land in.
+    // codex-review (PR #4673): re-verify assignment as late as possible,
+    // immediately before handing off, through the canonical
+    // technicianLiveVisitFilter predicate (FOR UPDATE lock, released as
+    // soon as this pre-check transaction commits) — this narrows the
+    // window but RainOut.commit still does its own unlocked re-read with
+    // no caller-supplied CAS on the visit itself, so the REAL fence is
+    // requireAssignedTechnicianId below, which threads technician_id into
+    // the rebooker's own atomic write predicate (options.expect) the same
+    // way rescheduleOptions.expect does for POST /:id/reschedule.
     if (req.techRole !== 'admin') {
-      const stillAssigned = await db('scheduled_services')
-        .where({ id: req.params.serviceId, technician_id: req.technicianId })
-        .first('id');
-      if (!stillAssigned) {
-        return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+      try {
+        await db.transaction((trx) => lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id']));
+      } catch (err) {
+        if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+        throw err;
       }
     }
 
@@ -4246,6 +4231,11 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // Authenticated dispatch-board click — the moved SMS is exempt from
       // the 8AM-8PM send window (operator-initiated, not machine-initiated).
       operatorInitiated: true,
+      // Fences the SINGLE-JOB write itself (rain-out.js merges this into
+      // the rebooker's options.expect CAS) — a reassignment landing after
+      // the lock above releases still makes the write miss and 409, instead
+      // of silently letting the former technician's move commit.
+      requireAssignedTechnicianId: req.techRole !== 'admin' ? req.technicianId : null,
     });
 
     if (!result.ok) {
@@ -4958,19 +4948,23 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Ownership: this route found the anchor visit by bare id with no
     // ownership predicate — a technician token could move any customer's
     // (or a whole recurring plan's) visit (ADMIN-BUG-R35). Admin requests
-    // stay unscoped and skip this extra lookup entirely — completionOwnershipError
-    // is a no-op for role==='admin' anyway, and several existing admin-path
-    // tests exercise pure window-format validation before anything selects
-    // this row.
+    // stay unscoped and skip this extra lookup entirely — several existing
+    // admin-path tests exercise pure window-format validation before
+    // anything selects this row. lockOwnedLiveVisit's FOR UPDATE lock is
+    // released as soon as this pre-check transaction commits (the atomic
+    // write itself happens later, inside the rebooker's own transaction) —
+    // it exists to apply the canonical technicianLiveVisitFilter predicate
+    // (dead statuses, completed rows, the 7-day window) up front, same as
+    // every other technician-reachable per-visit write in this file. The
+    // ACTUAL race fence for the write is rescheduleOptions.expect below,
+    // which pins technician_id into the rebooker's own atomic CAS.
     if (req.techRole !== 'admin') {
-      const anchor = await db('scheduled_services').where({ id: req.params.serviceId }).first('id', 'technician_id');
-      if (!anchor) return res.status(404).json({ error: 'Service not found' });
-      const ownershipError = completionOwnershipError({
-        role: req.techRole,
-        actorTechnicianId: req.technicianId,
-        assignedTechnicianId: anchor.technician_id,
-      });
-      if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+      try {
+        await db.transaction((trx) => lockOwnedLiveVisit(trx, req, req.params.serviceId, ['id']));
+      } catch (err) {
+        if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+        throw err;
+      }
     }
     // Blast-radius: scope='series' moves every future occurrence of the
     // plan — admin-only even on the tech's own visit (same rationale as

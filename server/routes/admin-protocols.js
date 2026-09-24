@@ -840,7 +840,12 @@ function stripPriceTokensFromText(text) {
 function deepStripPriceTokens(value) {
   if (typeof value === 'string') return stripPriceTokensFromText(value);
   if (Array.isArray(value)) return value.map(deepStripPriceTokens);
-  if (value && typeof value === 'object') {
+  // codex-review P1: a Date (equipment.expiresAt, product.labelVerifiedAt)
+  // has no OWN enumerable properties, so recursing into it like a plain
+  // object produced {} — ProtocolTankSheet then rendered a quantity/expiry
+  // as missing. Only recurse into an actual plain object; every other
+  // object type (Date, RegExp, Buffer, …) passes through untouched.
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
     const out = {};
     for (const [key, val] of Object.entries(value)) out[key] = deepStripPriceTokens(val);
     return out;
@@ -1028,6 +1033,12 @@ router.get('/lawn-mix', async (req, res, next) => {
     const payload = {
       track: { key: trackKey, name: track.name },
       month,
+      // codex round-3 P2: ProtocolReferenceTabV2.jsx rendered the now-absent
+      // materialCostSummary as "0/N lines priced" — a stripped-for-role
+      // response looking identical to a genuinely-unpriced one. This flag
+      // lets the client tell the difference and hide the Material Cost
+      // card/column instead of showing a fabricated zero.
+      viewerRole: seesPricing ? 'admin' : 'technician',
       visit: {
         visit: visit.visit,
         objective: visit.notes,

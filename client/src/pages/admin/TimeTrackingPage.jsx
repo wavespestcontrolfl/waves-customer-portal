@@ -514,7 +514,14 @@ export function DashboardTab({ showToast }) {
                     {active.onBreak
                       ? "On Break"
                       : active.currentJob
-                        ? `Job: ${active.currentJob.first_name || ""} ${active.currentJob.last_name || ""}`.trim()
+                        ? isRestrictedViewer
+                          // codex round-3 P2: the server never sends a
+                          // restricted (technician) viewer a coworker's
+                          // customer name (techSafeActiveShift projects
+                          // currentJob down to service_type only) — render
+                          // that instead of the now-always-empty "Job: ".
+                          ? `Job: ${active.currentJob.service_type || "on a job"}`
+                          : `Job: ${active.currentJob.first_name || ""} ${active.currentJob.last_name || ""}`.trim()
                         : "Between jobs"}
                   </div>
                 )}
@@ -618,13 +625,19 @@ export function DashboardTab({ showToast }) {
           {" "}
           <span style={{ fontSize: 12, color: D.muted }}>
             Week total: {fmtHrs(weekShiftMin)}
-            {!isRestrictedViewer && <> | Revenue: {fmt(weekRevenue)}</>} |{" "}
-            OT: {fmtHrs(weekOT)}
+            {!isRestrictedViewer && <> | Revenue: {fmt(weekRevenue)}</>}
+            {/* overtime_minutes is a per-tech field the server never sends a
+                restricted viewer (techSafeDailySummary) — this weekly OT
+                figure is a flat 40h/week heuristic on total_shift_minutes,
+                not that field, but it's still coworker performance framing
+                a technician viewer shouldn't see. */}
+            {!isRestrictedViewer && <> | OT: {fmtHrs(weekOT)}</>}
           </span>{" "}
         </div>{" "}
         <WeekBarChart
           weekDailies={weekDailies}
           weekStart={data.weekStart}
+          isRestrictedViewer={isRestrictedViewer}
         />{" "}
       </div>{" "}
     </div>
@@ -702,7 +715,7 @@ function UtilRing({ pct, size = 32 }) {
   );
 }
 
-function WeekBarChart({ weekDailies, weekStart }) {
+function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
   const maxMin = 720; // 12 hours as max bar
   const barH = 120;
   const barW = isMobile ? 28 : 50;
@@ -724,7 +737,12 @@ function WeekBarChart({ weekDailies, weekStart }) {
           (s, d) => s + parseFloat(d.total_shift_minutes || 0),
           0,
         );
-        const otMin = dayData.reduce(
+        // codex round-3 P2: overtime_minutes is never sent to a restricted
+        // (technician) viewer (techSafeDailySummary) — reading it as 0
+        // wouldn't fabricate a number, but the OT/regular split it drives
+        // is still coworker performance framing, so skip the split (whole
+        // bar renders as regular time) for that viewer.
+        const otMin = isRestrictedViewer ? 0 : dayData.reduce(
           (s, d) => s + parseFloat(d.overtime_minutes || 0),
           0,
         );

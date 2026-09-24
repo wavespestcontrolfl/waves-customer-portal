@@ -34,7 +34,7 @@ let mockOpenMembers = [];
 jest.mock('../models/db', () => {
   const chain = () => {
     const c = {};
-    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'join', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'forUpdate', 'leftJoin', 'join', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
     c.select = async () => mockOpenMembers;
     c.first = async () => mockVisitRow;
     c.then = (resolve) => Promise.resolve([]).then(resolve);

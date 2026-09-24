@@ -63,6 +63,47 @@ it("hides Jobs Done / Utilization (and the per-tech Jobs/Revenue/Utilization) fo
   expect(screen.queryByText(/Revenue:/)).not.toBeInTheDocument();
 });
 
+it("codex round-3 P2: shows the current job's service_type (not a blank 'Job: ') for a restricted viewer, whose currentJob has no customer name", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  stubFetch({
+    ...BASE_RESPONSE,
+    viewerRole: "technician",
+    activeShifts: [
+      { id: "shift-1", technician_id: "tech-1", tech_name: "Field Tech", clock_in: new Date().toISOString(), onBreak: false, currentJob: { service_type: "Quarterly Pest Control" } },
+    ],
+  });
+  render(<DashboardTab showToast={() => {}} />);
+
+  await waitFor(() => expect(screen.getByText("Today's Labor")).toBeInTheDocument());
+  expect(screen.getByText(/Job: Quarterly Pest Control/)).toBeInTheDocument();
+});
+
+it("codex round-3 P2: hides the OT summary text and the bar chart's overtime split for a restricted viewer", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  stubFetch({
+    ...BASE_RESPONSE,
+    viewerRole: "technician",
+    weekDailies: [{ ...BASE_RESPONSE.weekDailies[0], overtime_minutes: 120 }],
+  });
+  render(<DashboardTab showToast={() => {}} />);
+
+  await waitFor(() => expect(screen.getByText("Today's Labor")).toBeInTheDocument());
+  expect(screen.queryByText(/OT:/)).not.toBeInTheDocument();
+});
+
+it("control: an admin viewer sees the OT summary text", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  stubFetch({
+    ...BASE_RESPONSE,
+    viewerRole: "admin",
+    weekDailies: [{ ...BASE_RESPONSE.weekDailies[0], overtime_minutes: 120 }],
+  });
+  render(<DashboardTab showToast={() => {}} />);
+
+  await waitFor(() => expect(screen.getByText("Today's Labor")).toBeInTheDocument());
+  expect(screen.getByText(/OT:/)).toBeInTheDocument();
+});
+
 it("control: an admin viewer still sees every tile (Revenue/Jobs Done/Utilization included)", async () => {
   localStorage.setItem("waves_admin_token", "synthetic-token");
   stubFetch({

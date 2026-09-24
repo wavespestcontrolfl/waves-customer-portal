@@ -52,6 +52,7 @@ jest.mock('../models/db', () => {
       whereNull() { return b; },
       whereNot() { return b; },
       whereNotIn() { return b; },
+      forUpdate() { return b; },
       modify(cb) { cb(b); return b; },
       select() { return b; },
       first(...cols) {
