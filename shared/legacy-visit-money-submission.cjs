@@ -35,6 +35,21 @@
 // derivation means for its own purposes.
 function deriveLegacyPrimarySubmission({ primaryLinePrice, estimatedPrice, addons }) {
   const addonsKnown = Array.isArray(addons);
+  // primaryLinePrice is the primary line's own GROSS (before any
+  // appointment-level discount — see the PUT route's own
+  // `updates.primary_line_price = primaryGross`); estimatedPrice is the
+  // visit's stored NET total. A KNOWN gross is always the seed, zero add-on
+  // lines included. Round 5 on #4657 (:6083) briefly seeded a zero-add-on
+  // visit from the NET instead, because an untouched save then echoed the
+  // gross and wiped the stored appointment discount — but that echo is the
+  // SERVER's job (computeSingleServiceEstimatedPricePlan's own
+  // isUnchangedGrossEcho backstop, added in that same round), and the net
+  // seed itself was wrong money: the single-service save path applies a
+  // CHANGED appointment discount to whatever this field posts as the
+  // gross, so replacing 10%-off on a $100 primary stored at $90 with a 20%
+  // preset compounded onto the net and persisted $72 instead of $80
+  // (GitHub Codex round 10 on #4657, P1, :49). A legacy row with NO stored
+  // gross still falls through to the total below, unchanged.
   if (addonsKnown && primaryLinePrice != null && primaryLinePrice !== '') {
     const structured = Number(primaryLinePrice);
     return Number.isFinite(structured) ? structured : null;

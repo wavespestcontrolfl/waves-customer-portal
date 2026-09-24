@@ -8,7 +8,13 @@ import { EditServiceModal } from './SchedulePage';
 vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
 vi.mock('../../components/schedule/useBestTimes', () => ({ useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: [] }) }));
 const service = { id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account', serviceType: 'Pest Control', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00', status: 'confirmed', notes: 'Existing note' };
-const writes = () => fetch.mock.calls.filter(([, options]) => options?.method && options.method !== 'GET');
+// Structural round 3 on #4657: the debounced money preview is a
+// non-GET call too (POST .../update-details/preview) but never
+// persists anything — excluded so "a write happened" still means the
+// real PUT save.
+const writes = () => fetch.mock.calls.filter(([url, options]) => (
+  options?.method && options.method !== 'GET' && !url.includes('/update-details/preview')
+));
 
 beforeEach(() => {
   vi.stubGlobal('scrollTo', vi.fn());
@@ -74,10 +80,18 @@ it('retains edits after a failed save and prevents duplicate saves and dismissal
   const notes = screen.getByDisplayValue('Existing note');
   fireEvent.change(notes, { target: { value: 'Updated note' } });
   const save = screen.getByRole('button', { name: 'Save', exact: true });
+  // Every money figure now waits on a debounced server preview before Save
+  // enables (structural round 3 on #4657) — this test isn't about that
+  // round trip, so just let it land before exercising the double-click /
+  // failed-save flow it actually pins.
+  await waitFor(() => expect(save).toBeEnabled(), { timeout: 2000 });
   fireEvent.click(save);
   fireEvent.click(save);
+  // Codex pre-push audit P1 (round 4 on #4657, :2936): handleSave now
+  // re-probes the stacking gate on every save before it actually POSTs —
+  // the write lands one microtask after the click.
+  await waitFor(() => expect(writes()).toHaveLength(1));
   fireEvent.keyDown(document, { key: 'Escape' });
-  expect(writes()).toHaveLength(1);
   expect(screen.getByRole('dialog', { name: 'Edit appointment' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
   await act(async () => rejectSave(new Error('Synthetic save failure')));
