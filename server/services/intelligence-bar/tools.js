@@ -1168,26 +1168,12 @@ async function updateCustomer(customerId, updates, expectedVersion) {
   if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
     return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
   }
-  // ADMIN-BUG-R10 (round 3): runs on EVERY write of pipeline_stage='churned'
-  // — including a re-save on an already-churned row — so a pre-fix residue
-  // row self-heals. Refuses (naming what's still live) rather than silently
-  // repointing the account into a still-billing churn label; otherwise
-  // churnGuardForRow winds billing down itself through the canonical
-  // cancellation-processor.js write.
-  if (clean.pipeline_stage === 'churned') {
-    const { churnGuardForRow, describeLiveVisit } = require('../customer-lifecycle-guard');
-    const decision = await churnGuardForRow(db, customerId);
-    if (decision.blocked) {
-      return {
-        error: decision.liveVisit
-          ? `Cannot mark Churned: ${describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
-          : decision.liveTerm
-            ? 'Cannot mark Churned: this customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.'
-            : `Cannot mark Churned: this customer ${decision.error}.`,
-        preview_changed: true,
-      };
-    }
-  }
+  // ADMIN-BUG-R10 (round 3): the churn guard + billing wind-down run INSIDE
+  // the transaction below, after the row lock and the expectedVersion
+  // check — churnGuardForRow's own disarm write bumps customers.updated_at,
+  // so running it here (before the version compare) would disarm billing
+  // and then reject the churn as stale against its own write (pre-push
+  // audit P1). See the guard block in the transaction.
   if (clean.pipeline_stage) {
     Object.assign(clean, stageLifecycleStamps(
       before.pipeline_stage, clean.pipeline_stage, before, { today: etDateString() },
@@ -1253,6 +1239,28 @@ async function updateCustomer(customerId, updates, expectedVersion) {
         const current = await trx('customers').where('id', customerId).first(trx.raw('updated_at::text AS version'));
         if (current.version !== expectedVersion) {
           const err = new Error('Customer changed since this action was prepared. Review a fresh proposal.');
+          err.previewChanged = true;
+          throw err;
+        }
+      }
+      // ADMIN-BUG-R10 (round 3): runs on EVERY write of pipeline_stage=
+      // 'churned' — including a re-save on an already-churned row — so a
+      // pre-fix residue row self-heals. Refuses (naming what's still live)
+      // rather than silently repointing the account into a still-billing
+      // churn label; otherwise churnGuardForRow winds billing down itself
+      // through the canonical cancellation-processor.js write, on THIS
+      // transaction, after the version check above — a refusal rolls the
+      // whole thing back, and the disarm's updated_at bump can never
+      // invalidate the version this same action was prepared against.
+      if (clean.pipeline_stage === 'churned') {
+        const { churnGuardForRow, describeLiveVisit } = require('../customer-lifecycle-guard');
+        const decision = await churnGuardForRow(trx, customerId);
+        if (decision.blocked) {
+          const err = new Error(decision.liveVisit
+            ? `Cannot mark Churned: ${describeLiveVisit(decision.liveVisit)}. Use "Cancel plan…" to wind down billing and visits together, then mark Churned.`
+            : decision.liveTerm
+              ? 'Cannot mark Churned: this customer still has an active prepay term. Use "Cancel plan…" to wind down billing and coverage together, then mark Churned.'
+              : `Cannot mark Churned: this customer ${decision.error}.`);
           err.previewChanged = true;
           throw err;
         }

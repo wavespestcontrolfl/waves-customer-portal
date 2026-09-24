@@ -205,4 +205,35 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
     expect(conflict).not.toBeNull();
     expect(conflict.code).toBe('duplicate_series_conflict');
   });
+
+  test('a COMPLETED fixed-length series (recurring_ongoing=false, no upcoming child) is lapsed, not a live duplicate (pre-push audit P1)', async () => {
+    const winnerId = await makeCustomer({ address_line1: '11 Palm Ct', city: 'Bradenton', zip: '34205' });
+    const loserId = await makeCustomer({ address_line1: '11 Palm Ct', city: 'Bradenton', zip: '34205' });
+    await seedParent(winnerId, {}); // winner: a normal live parent.
+    // loser: historical series — completed parent, ongoing flag cleared,
+    // no children left. findActiveRecurringSeries judges this lapsed and
+    // the cancelled-but-ongoing union must not resurrect it.
+    const loserParentId = await seedParent(loserId, { parentStatus: 'completed', seedChild: false });
+    await db('scheduled_services').where({ id: loserParentId }).update({ recurring_ongoing: false, scheduled_date: '2026-01-05' });
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).toBeNull();
+  });
+
+  test('winner: normal series at A + this_only-cancelled ongoing anchor at B; loser live at B → still conflicts (pre-push audit P1)', async () => {
+    const winnerId = await makeCustomer({ address_line1: '13 Palm Ct', city: 'Bradenton', zip: '34205' });
+    const loserId = await makeCustomer({ address_line1: '77 Shell Ave', city: 'Bradenton', zip: '34205' });
+    const stampB = { service_address_line1: '77 Shell Ave', service_address_city: 'Bradenton', service_address_zip: '34205' };
+    await seedParent(winnerId, {}); // A: the winner's home, a normal live parent.
+    await seedParent(winnerId, { parentStatus: 'cancelled', seedChild: false, addressStamp: stampB }); // B: cancelled anchor, still ongoing.
+    await seedParent(loserId, { addressStamp: stampB }); // loser: live series at B.
+
+    const winner = await db('customers').where({ id: winnerId }).first();
+    const loser = await db('customers').where({ id: loserId }).first();
+    const conflict = await dedupe.dbLevelMergeConflict(db, winner, loser);
+    expect(conflict).not.toBeNull();
+    expect(conflict.code).toBe('duplicate_series_conflict');
+  });
 });

@@ -1428,6 +1428,7 @@ module.exports = {
   preferenceRowBlocksWeekends,
   etDateDiffDays,
   findActiveRecurringSeries,
+  duplicateGuardFamilyKey,
   seriesCreateLockKeys,
   inferRecurringPattern,
   SEASONAL_FEB_OCT,
