@@ -5582,7 +5582,10 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
         's.window_start',
         's.window_end'
       )
-      .orderBy('a.created_at', 'desc')
+      // Newest first; alerts written in one transaction share created_at
+      // (now() is per-transaction), so a tech-out batch orders by its own
+      // bump_order (#1 first). Rows without one keep pure recency.
+      .orderByRaw("a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
       .limit(limit);
 
     if (unresolved) q.whereNull('a.resolved_at');

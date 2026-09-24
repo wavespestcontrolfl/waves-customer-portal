@@ -77,6 +77,17 @@ describe('assignDispatchJob → tech notice', () => {
     });
   });
 
+  test('inside the writing trx the tech-day fence is taken BEFORE the technician row is read FOR SHARE (lock order shared with tech-out mark-out)', async () => {
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    const trx = assignmentTrx();
+    await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx });
+    const fenceOrder = lockTechDays.mock.invocationCallOrder[0];
+    const techReadIdx = trx.mock.calls.findIndex(([table]) => table === 'technicians');
+    expect(fenceOrder).toBeDefined();
+    expect(techReadIdx).toBeGreaterThanOrEqual(0);
+    expect(fenceOrder).toBeLessThan(trx.mock.invocationCallOrder[techReadIdx]);
+  });
+
   test('a caller that will rewrite the schedule in the same trx overrides the row snapshot (edit modal: tech + date)', async () => {
     const trx = assignmentTrx();
     await assignDispatchJob({
