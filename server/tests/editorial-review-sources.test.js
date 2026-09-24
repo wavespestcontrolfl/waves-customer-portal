@@ -36,6 +36,10 @@ test('preserves inline adjacency and separates unlisted block elements', () => {
     .toBe('20% EPA-registered.\nNext block.');
 });
 
+test('preserves attributed line breaks', () => {
+  expect(htmlText('<p>First<br class="mobile-only">Second</p>')).toBe('First\nSecond');
+});
+
 test('strips unterminated comments through the end of truncated HTML', () => {
   expect(htmlText('<p>Useful evidence.</p><!-- hidden noise')).toBe('Useful evidence.');
 });

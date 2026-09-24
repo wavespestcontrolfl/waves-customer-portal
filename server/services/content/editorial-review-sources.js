@@ -14,7 +14,7 @@ function htmlText(html) {
     .replace(/<(script|style|noscript|svg)\b[^>]*>[^]*?<\/\1>/gi, ' ')
     .replace(/<(script|style|noscript|svg)\b[^>]*>[^]*$/gi, ' ')
     .replace(/\s+/g, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<br\b[^>]*>/gi, '\n')
     .replace(/<\/p\s*>|<\/li\s*>|<\/h[1-6]\s*>/gi, '\n')
     .replace(/<\/?(?:address|article|aside|blockquote|div|dl|dt|dd|fieldset|figcaption|figure|footer|form|header|hr|main|nav|ol|pre|section|table|tbody|thead|tfoot|tr|td|th|ul)\b[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, '');
