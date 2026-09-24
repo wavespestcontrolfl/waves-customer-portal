@@ -1673,15 +1673,25 @@ async function createSelfBooking(payload = {}) {
       callbackVisit,
     } = payload;
 
-    // callbackVisit is INTERNAL-ONLY (reservice-public.js): a server-resolved
-    // { serviceKey, serviceId, serviceType, durationMinutes } describing a
-    // free re-service callback (services/re-service.js). It swaps the funnel
-    // catalog resolution for the caller's catalog row, marks the committed
-    // visit is_callback so completion never bills it, and skips the
-    // funnel-only follow-ons (signed-offer gate, card-capture step, ad
-    // attribution). Like authedCustomer/payAtVisit, it must be set AFTER the
-    // body spread at every public call site (/confirm nulls it) — a crafted
-    // body must never mint itself a free callback or skip the offer sig.
+    // callbackVisit is INTERNAL-ONLY (reservice-public.js, inspection-public.js):
+    // a server-resolved { serviceKey, serviceId, serviceType, durationMinutes,
+    // isCallback?, dedupeLane?, alertLabel? } describing a free internal-
+    // caller booking. It swaps the funnel catalog resolution for the caller's
+    // catalog row and skips the funnel-only follow-ons (signed-offer gate,
+    // card-capture step, ad attribution, customer promotion, quarterly
+    // follow-up seeding). isCallback (default true) additionally marks the
+    // visit is_callback so completion never bills it and callback reporting
+    // counts it — false for a non-re-service internal booking (an assessment
+    // is free without being a warranty callback). dedupeLane (default true)
+    // additionally takes the reservice-lane advisory lock and re-checks the
+    // RESERVICE_LANES-keyed open-callback dedupe — false for a caller whose
+    // serviceKey isn't a re-service lane (that check's fallback classification
+    // would false-hit on an unrelated open pest/lawn re-service); such a
+    // caller owns its own pre-commit idempotency check. alertLabel overrides
+    // the default "🔁 Free re-service self-booked:" internal SMS line. Like
+    // authedCustomer/payAtVisit, callbackVisit must be set AFTER the body
+    // spread at every public call site (/confirm nulls it) — a crafted body
+    // must never mint itself a free callback or skip the offer sig.
 
     if (!slot_date || !slot_start) {
       return { ok: false, status: 400, error: 'slot_date and slot_start required' };
@@ -2740,7 +2750,16 @@ async function createSelfBooking(payload = {}) {
       // the other writers is possible. Placed BEFORE the replay lookup only
       // for lock-order clarity — the replay return below still wins for an
       // exact double-submit, so retries never see this 409.
-      if (callbackVisit) {
+      //
+      // callbackVisit.dedupeLane (default true — reservice-public's only
+      // caller never sets it, so its lock + lane-dedupe stay byte-identical):
+      // false opts an internal caller OUT of the reservice-LANE namespace and
+      // the RESERVICE_LANES-keyed ALREADY_BOOKED check right below (inspection-
+      // public.js: a Waves Assessment isn't a pest/lawn re-service lane, and
+      // laneForCallbackRow's default 'pest' fallback would otherwise false-hit
+      // on an unrelated open pest re-service). Such a caller owns its own
+      // idempotency check before calling in.
+      if (callbackVisit && callbackVisit.dedupeLane !== false) {
         await trx.raw(
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['reservice-lane', `${custId}:${callbackVisit.serviceKey}`],
@@ -2779,7 +2798,7 @@ async function createSelfBooking(payload = {}) {
         });
       }
 
-      if (callbackVisit) {
+      if (callbackVisit && callbackVisit.dedupeLane !== false) {
         const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
         const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
         if (await openCallbackExistsForLane(trx, custId, lane)) {
@@ -2996,8 +3015,18 @@ async function createSelfBooking(payload = {}) {
         // invoice suppression (same server-side derivation admin-schedule
         // performs from the catalog row); service_id keys completion-profile
         // resolution to the re-service catalog row.
+        //
+        // callbackVisit.isCallback (default true — reservice-public never
+        // sets it): false for an internal caller whose visit is NOT a re-
+        // service warranty callback (inspection-public.js's Waves Assessment)
+        // — is_callback also drives dispatch/reporting's "callback" badge and
+        // billing-lane's re-service completion posture, both wrong for an
+        // assessment. service_id still links the catalog row either way
+        // (completion-profile resolution + isAssessmentServiceRow also match
+        // on it), and no-invoice-on-complete is correct for both: neither
+        // visit ever bills.
         ...(callbackVisit ? {
-          is_callback: true,
+          is_callback: callbackVisit.isCallback !== false,
           service_id: callbackVisit.serviceId || null,
           create_invoice_on_complete: false,
         } : {}),
@@ -4805,8 +4834,10 @@ async function createSelfBooking(payload = {}) {
         // Callbacks announce themselves as what they are — the office reads
         // "re-service" and knows the 5-business-day callback protocol
         // (original tech first) applies, instead of parsing a generic booking.
+        // callbackVisit.alertLabel overrides the re-service default for a
+        // different internal caller (inspection-public.js's free consultation).
         const alertHead = callbackVisit
-          ? '🔁 Free re-service self-booked:'
+          ? (callbackVisit.alertLabel || '🔁 Free re-service self-booked:')
           : '📱 New self-booked appointment:';
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
           `${alertHead}\n${customer.first_name} ${customer.last_name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city}\nSource: ${source || 'portal'}\nCode: ${confCode}`,

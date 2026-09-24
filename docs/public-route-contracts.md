@@ -1584,6 +1584,73 @@ booking window, READ-ONLY, no raw query logging. Generic 404 for
 bad/unknown tokens and while the gate is off. Treat the reservice token,
 the lane-eligibility gates, and the $0/is_callback commit contract as
 security-critical).
+`/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
+`POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
+with Adam" consultation link — booking.js's free Waves Assessment (owner
+ruling 2026-09-08: an assessment is NOT a win, `services/assessment-
+booking.js`) for a lead, modeled directly on reservice-public's shell and
+anti-forgery model but scoped to a LEAD rather than a standing customer
+token. Whole surface is dark behind GATE_LEAD_INSPECTION_LINK
+(`leadInspectionLinkLive()`, fail-closed `==='true'` in every env — every
+route 404s while off). Token: `mintLeadConsultationToken` /
+`verifyLeadConsultationToken` (`utils/lead-consultation-token.js`) — a
+14-day HMAC namespaced `lead-consultation:` (never interchangeable with the
+lead-prefill token) carrying the lead id IN the token
+(`<leadId>.<exp>.<sig>`), so no DB lookup is needed to resolve identity. A
+well-formed but past-TTL token answers 200 `{ state: 'expired' }` (re-
+verified with the TTL check isolated to nowSec=0, which never trips since
+`exp` is always minted positive); a malformed/mis-signed token 404s. 60
+req/min router limit, 10 req/min on the commit POST, 15 req/min on
+find-slots/availability/waitlist, noStore privacy headers, and the SPA
+shell (`/inspection/<token>`) carries noindex/no-referrer/no-store via
+sensitive-spa-headers. GET returns `{ state, lead: { first_name,
+phone_masked, has_address, address_display }, visit?, availability?,
+rescheduleUrl? }`. States: `ok`; `already_booked` (the lead's linked
+customer already has an open, non-terminal Waves Assessment visit — hands
+back that visit's `/reschedule/:token` URL via `services/reschedule-
+link.js`); `converted` (the lead converted, or already has a future booked
+NON-assessment visit — same shape as already_booked); `gone` (lead
+deleted/missing). Availability needs coordinates (the linked customer's
+stored coords, else a geocode of whichever address is on file); with none
+resolvable, `availability: null` and `needs_address: true` — the page asks
+for an address via `POST /:token/availability { address }` (ephemeral: not
+persisted until a visit actually books) before showing times. `POST
+/:token/find-slots` is the same natural-language search reservice uses,
+READ-ONLY, same booking-window clamp on both ends. `POST /:token` commit:
+body `{ date, time, address?, notes? }`; idempotent — a lead whose customer
+already holds an open assessment short-circuits to the SAME `already_booked`
+shape (200, before geocoding or creating anything) instead of a second
+visit. Address required only when neither the lead nor its (existing)
+customer has one on file, parsed with `parseRawAddress` and geocoded;
+checked against the service area (county via `services/address-
+validation`'s `reverseGeocodeCounty` when a Google key is configured, else
+the box test `services/geocoder.js` already enforces via
+`serviceAddress:true`) — out of area 422s `{ error: 'out_of_area', county }`
+and books nothing. The slot is re-validated against a fresh single-day
+availability build (same anti-forgery model as reservice-public) before
+committing through `createSelfBooking`'s `callbackVisit` option with
+`isCallback: false` and `dedupeLane: false` (booking.js: skips the funnel's
+signed-offer/card-capture/ad-attribution/customer-promotion machinery like a
+re-service callback, WITHOUT setting `is_callback` or taking the
+reservice-lane advisory lock/dedupe, which is keyed to pest/lawn re-service
+lanes and would false-hit on an unrelated open re-service). The lead gets
+(or keeps) a customer row and is linked (`leads.customer_id`) but nothing
+else on the lead changes — status/pipeline_stage/converted_at/member_since
+all stay untouched (`promoteCustomerOnBooking`'s own
+`isAssessmentServiceType` guard, matching `admin-leads.js`'s identical
+assessment posture). The free-text note rides
+`scheduled_services.internal_notes` (never `notes`, which is customer/tech
+visible) via a best-effort post-commit update. `SLOT_TAKEN` 409 mirrors
+reservice-public's shape (fresh `availability` attached). Office alert:
+`createSelfBooking`'s internal Twilio alert with `alertLabel` swapped to
+"🔁 Free consultation self-booked:" — no customer comms beyond
+`createSelfBooking`'s own standard confirmation. `POST /:token/waitlist`
+(the out-of-area stop's one-field ask): body `{ email, county? }`, inserts
+(idempotent on email, `onConflict('email').ignore()`) a
+`newsletter_subscribers` row tagged `expansion_waitlist:<county>`; no email
+sent. Generic 404 for bad/unknown tokens and while the gate is off. Treat
+the lead-consultation token, the assessment-not-a-win invariant, and the
+out-of-area/no-booking contract as security-critical).
 `/api/reviews/featured` (read-only public featured Google reviews for the
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).

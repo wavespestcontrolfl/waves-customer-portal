@@ -680,6 +680,10 @@ app.use('/api/public/reschedule', require('./routes/reschedule-public'));
 // Token-gated on customers.reservice_token; every route 404s until
 // GATE_RESERVICE_SELF_SERVE is on.
 app.use('/api/public/reservice', require('./routes/reservice-public'));
+// Lead-scoped consultation-booking link ("Book with Adam" — the free Waves
+// Assessment). Token-gated on the signed lead-consultation token; every
+// route 404s until GATE_LEAD_INSPECTION_LINK is on.
+app.use('/api/public/inspection', require('./routes/inspection-public'));
 // Customer appointment page (24h reminder + booking confirmation link
 // target). Token-gated on the same reschedule_token; every route 404s
 // until GATE_APPOINTMENT_PAGE is on.

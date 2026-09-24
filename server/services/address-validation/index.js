@@ -235,4 +235,4 @@ function buildAddressLines(serviceAddress) {
   return [line1, line2].filter(Boolean);
 }
 
-module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE };
+module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE, reverseGeocodeCounty };
