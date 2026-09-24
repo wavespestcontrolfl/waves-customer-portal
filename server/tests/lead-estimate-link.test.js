@@ -38,6 +38,7 @@ const {
   convertLeadFromEvent,
   linkLeadEstimatesToCustomer,
   attributeSelfBooking,
+  markLeadContactedFromEvidence,
 } = require('../services/lead-estimate-link');
 
 function makeDb(lead, estimate = null) {
@@ -3384,6 +3385,108 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
   });
 });
 
+describe('markLeadContactedFromEvidence', () => {
+  function makeLiveEvidenceDb(initialLead, { updateRows = 1 } = {}) {
+    const state = { lead: { ...initialLead }, updates: [], activities: [], transactions: 0 };
+    const database = (table) => {
+      const predicates = [];
+      const q = {
+        where(...args) {
+          if (args.length === 1 && args[0] && typeof args[0] === 'object') {
+            predicates.push((row) => Object.entries(args[0]).every(([key, value]) => row?.[key] === value));
+          } else {
+            const [key, value] = args;
+            predicates.push((row) => row?.[key] === value);
+          }
+          return q;
+        },
+        whereNull(key) { predicates.push((row) => row?.[key] == null); return q; },
+        forUpdate() { return q; },
+        first: async () => (table === 'leads' && predicates.every((fn) => fn(state.lead)) ? { ...state.lead } : null),
+        update: async (patch) => {
+          if (table !== 'leads' || !predicates.every((fn) => fn(state.lead)) || !updateRows) return 0;
+          state.updates.push(patch);
+          Object.assign(state.lead, patch);
+          return updateRows;
+        },
+        insert: async (row) => { state.activities.push(row); return [row]; },
+      };
+      return q;
+    };
+    database.transaction = async (fn) => {
+      state.transactions += 1;
+      database.isTransaction = true;
+      try { return await fn(database); } finally { database.isTransaction = false; }
+    };
+    database._state = state;
+    return database;
+  }
+
+  beforeEach(() => bridgeLeadFunnelStage.mockClear());
+
+  test('atomically advances new to contacted, stamps first response, audits, and bridges the funnel', async () => {
+    const database = makeLiveEvidenceDb({
+      id: 'lead-live', status: 'new', customer_id: 'customer-1', deleted_at: null,
+      first_contact_at: '2026-09-24T14:00:00.000Z', response_time_minutes: null,
+    });
+    const result = await markLeadContactedFromEvidence({
+      database, leadId: 'lead-live', customerId: 'customer-1',
+      evidenceType: 'live_conversation', evidenceId: 'call-1',
+      performedBy: 'AI Call Processor', respondedAt: '2026-09-24T14:12:00.000Z',
+    });
+
+    expect(result).toEqual({ contacted: true, responseMinutes: 12 });
+    expect(database._state.transactions).toBe(1);
+    expect(database._state.lead).toMatchObject({ status: 'contacted', response_time_minutes: 12 });
+    expect(database._state.activities).toEqual([
+      expect.objectContaining({ activity_type: 'first_response', description: 'First response in 12 minutes' }),
+      expect.objectContaining({
+        activity_type: 'status_change', description: 'Status: new → contacted',
+        metadata: JSON.stringify({ evidenceType: 'live_conversation', evidenceId: 'call-1' }),
+      }),
+    ]);
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith(
+      'lead-live', 'contacted', database,
+      { onlyIfLead: { status: 'contacted', customer_id: 'customer-1' } },
+    );
+  });
+
+  test.each(['contacted', 'estimate_sent', 'estimate_viewed', 'won', 'lost', 'unresponsive', 'disqualified', 'duplicate'])(
+    'preserves %s rather than rewriting it',
+    async (status) => {
+      const database = makeLiveEvidenceDb({ id: 'lead-existing', status, customer_id: 'customer-1', deleted_at: null });
+      const result = await markLeadContactedFromEvidence({
+        database, leadId: 'lead-existing', customerId: 'customer-1', evidenceType: 'live_conversation',
+      });
+      expect(result).toEqual({ contacted: false, reason: 'not_new_or_identity_changed' });
+      expect(database._state.lead.status).toBe(status);
+      expect(database._state.updates).toEqual([]);
+      expect(database._state.activities).toEqual([]);
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    ['another linked customer', { customer_id: 'customer-2', deleted_at: null }],
+    ['a soft-deleted lead', { customer_id: 'customer-1', deleted_at: new Date() }],
+  ])('refuses %s', async (_label, leadPatch) => {
+    const database = makeLiveEvidenceDb({ id: 'lead-guarded', status: 'new', ...leadPatch });
+    const result = await markLeadContactedFromEvidence({
+      database, leadId: 'lead-guarded', customerId: 'customer-1', evidenceType: 'assessment_booked',
+    });
+    expect(result.contacted).toBe(false);
+    expect(database._state.updates).toEqual([]);
+    expect(database._state.activities).toEqual([]);
+  });
+
+  test.each(['voicemail', 'failed_call', 'transcription'])('rejects %s as contact evidence before querying', async (evidenceType) => {
+    const database = jest.fn(() => { throw new Error('database must not be queried'); });
+    const result = await markLeadContactedFromEvidence({ database, leadId: 'lead-no-contact', customerId: null, evidenceType });
+    expect(result).toEqual({ contacted: false, reason: 'ineligible_evidence' });
+    expect(database).not.toHaveBeenCalled();
+  });
+});
+
 // ── stampFirstResponseByContact (loose SLA stamp, 2026-07-30) ──────────────
 // Chain-aware harness: the contact query is a thenable knex chain
 // (whereNull/whereNotNull/whereNotIn/where), unlike makeDb's lookup shapes.
@@ -3524,37 +3627,95 @@ describe('stampFirstResponseByContact', () => {
 });
 
 // An assessment is NOT a win (owner ruling 2026-09-08): the canonical
-// converter refuses when the event's visit is a Waves Assessment — booking
-// AND completion triggers pass their row — before resolving any lead.
+// converter refuses to record a win when the event's visit is a Waves
+// Assessment. It may still advance the exactly linked new lead to contacted.
 describe('convertLeadFromEvent — a Waves Assessment never converts', () => {
   beforeEach(() => leadAttribution.markConverted.mockClear());
 
-  test('assessment booking/completion returns converted:false without touching leads', async () => {
-    const database = jest.fn(() => { throw new Error('no lead lookup expected'); });
+  function makeAssessmentEventDb({ catalog = null, status = 'new' } = {}) {
+    const state = {
+      lead: { id: 'lead-assessment', status, customer_id: 'c1', deleted_at: null },
+      activities: [],
+    };
+    const database = (table) => ({
+      where(clauseOrColumn, value) {
+        if (table === 'services') return { first: async () => catalog };
+        if (table === 'estimates') return { first: async () => ({ id: 'e1', customer_id: 'c1' }) };
+        if (table === 'leads' && clauseOrColumn?.estimate_id) return Promise.resolve([{ ...state.lead }]);
+        const predicates = [];
+        if (clauseOrColumn && typeof clauseOrColumn === 'object') {
+          predicates.push((row) => Object.entries(clauseOrColumn).every(([key, expected]) => row?.[key] === expected));
+        } else predicates.push((row) => row?.[clauseOrColumn] === value);
+        const q = {
+          where(column, expected) { predicates.push((row) => row?.[column] === expected); return q; },
+          whereNull(column) { predicates.push((row) => row?.[column] == null); return q; },
+          whereIn(column, values) {
+            predicates.push((row) => values.includes(row?.[column]));
+            return Promise.resolve(predicates.every((fn) => fn(state.lead)) ? [{ ...state.lead }] : []);
+          },
+          forUpdate() { return q; },
+          first: async () => (predicates.every((fn) => fn(state.lead)) ? { ...state.lead } : null),
+          update: async (patch) => {
+            if (!predicates.every((fn) => fn(state.lead))) return 0;
+            Object.assign(state.lead, patch);
+            return 1;
+          },
+        };
+        return q;
+      },
+      insert: async (row) => { state.activities.push(row); return [row]; },
+    });
+    database.transaction = async (fn) => {
+      database.isTransaction = true;
+      try { return await fn(database); } finally { database.isTransaction = false; }
+    };
+    database._state = state;
+    return database;
+  }
+
+  test('assessment completion returns converted:false and advances the exact new lead to contacted', async () => {
+    const database = makeAssessmentEventDb();
     const result = await convertLeadFromEvent({
       source: 'service_completed',
+      estimateId: 'e1',
       customerId: 'c1',
       booking: { id: 'svc-1', service_type: 'Waves Assessment', service_id: null },
       database,
     });
-    expect(result).toEqual({ converted: false, reason: 'assessment_not_a_win' });
-    expect(database).not.toHaveBeenCalled();
+    expect(result).toEqual({ converted: false, reason: 'assessment_not_a_win', contactedIds: ['lead-assessment'] });
+    expect(database._state.lead.status).toBe('contacted');
+    expect(database._state.activities.map((row) => row.activity_type)).toEqual(['status_change']);
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+  });
+
+  test('an exact customer-linked new lead advances even when conversion first-close rules would treat the customer as established', async () => {
+    const database = makeAssessmentEventDb();
+    const result = await convertLeadFromEvent({
+      source: 'appointment_booked',
+      customerId: 'c1',
+      booking: { id: 'svc-2', service_type: 'Waves Assessment', service_id: null },
+      database,
+    });
+    expect(result).toEqual({ converted: false, reason: 'assessment_not_a_win', contactedIds: ['lead-assessment'] });
+    expect(database._state.lead.status).toBe('contacted');
     expect(leadAttribution.markConverted).not.toHaveBeenCalled();
   });
 
   test('the catalog FK identifies an assessment when the label does not', async () => {
-    const first = jest.fn(async () => ({ id: 'cat-1', service_key: 'lawn_inspection', name: 'Renamed' }));
-    const database = jest.fn((table) => {
-      if (table !== 'services') throw new Error(`unexpected table ${table}`);
-      return { where: () => ({ first }) };
+    const database = makeAssessmentEventDb({
+      catalog: { id: 'cat-1', service_key: 'lawn_inspection', name: 'Renamed' },
+      status: 'estimate_sent',
     });
     const result = await convertLeadFromEvent({
       source: 'appointment_booked',
+      estimateId: 'e1',
       customerId: 'c1',
       booking: { id: 'svc-1', service_type: 'Consultation', service_id: 'cat-1' },
       database,
     });
-    expect(result).toEqual({ converted: false, reason: 'assessment_not_a_win' });
+    expect(result).toEqual({ converted: false, reason: 'assessment_not_a_win', contactedIds: [] });
+    expect(database._state.lead.status).toBe('estimate_sent');
+    expect(database._state.activities).toEqual([]);
     expect(leadAttribution.markConverted).not.toHaveBeenCalled();
   });
 });

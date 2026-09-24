@@ -28,6 +28,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const omega = require('./omega-indexer');
 const { canonicalProspectDomain, TARGET_DOMAIN_CANONICAL_SQL } = require('./prospect-domain-lock');
+const { classifyPageBody } = require('./page-body-classifier');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
 const OUR_HOMEPAGE = `https://${OUR_DOMAIN}`;
@@ -477,18 +478,6 @@ function matchesExactTargetUrl(candidate, expected) {
   if (!candidate || !expected) return false;
   const strip = (u) => String(u).split('#')[0].split('?')[0].replace(/\/+$/, '');
   return strip(candidate) === strip(expected);
-}
-
-// A 200 that is not really the page: bot-challenge interstitials (Cloudflare
-// "Just a moment…", Turnstile, hCaptcha/reCAPTCHA walls, WAF blocks) or a
-// non-HTML body. Absence of our link in such a response proves nothing.
-const CHALLENGE_RE = /just a moment|attention required|verify you are human|checking your browser|cf-chl|challenge-platform|turnstile|hcaptcha|g-recaptcha|access denied|request blocked|enable javascript and cookies/i;
-function classifyPageBody(html, contentType) {
-  if (contentType && !/html|xhtml|text\/plain|^\s*$/i.test(String(contentType))) return 'non_html';
-  const head = String(html || '').slice(0, 20000);
-  if (!/<(html|body|a|div|p|title)\b/i.test(head)) return 'non_html';
-  if (CHALLENGE_RE.test(head) && !/wavespestcontrol\.com/i.test(html)) return 'challenge';
-  return 'html';
 }
 
 // Pure: find the first <a> in html pointing at the intended Waves target page.
