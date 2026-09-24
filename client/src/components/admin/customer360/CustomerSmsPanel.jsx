@@ -69,6 +69,33 @@ function writeDraft(customerId, value) {
   }
 }
 
+// The exact consultation-invite LINE last inserted for this identity,
+// remembered alongside the draft (pre-push Codex P1): every short link
+// shares the same host, so combineAppendedDraft below used to sweep ANY
+// line on that host — a pasted pay/review/estimate link, not just a prior
+// consultation clause. Session-scoped like the draft itself.
+const consultationLineKey = (identity) => {
+  const staffId = getAdminUser()?.id;
+  return staffId ? `c360:sms-consult-line:${staffId}:${identity}` : null;
+};
+function readConsultationLine(identity) {
+  try {
+    return sessionStorage.getItem(consultationLineKey(identity) || "") || "";
+  } catch {
+    return "";
+  }
+}
+function writeConsultationLine(identity, value) {
+  try {
+    const key = consultationLineKey(identity);
+    if (!key) return;
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+  } catch {
+    /* storage unavailable — falls back to the wording+host heuristic */
+  }
+}
+
 function stampLabel(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -152,18 +179,50 @@ function urlHost(url) {
 // operator collapsed and re-expanded the row, or clicked the button twice)
 // must not get a SECOND copy of the same invite appended below it
 // (pre-push Codex P2) — this is the only appendDraft caller in this
-// component today, so "an existing line whose URL shares the new
-// addition's short-link host" is unambiguously the prior consultation
-// clause; that line (and any blank line it left) is replaced in place
-// rather than appended twice.
-function combineAppendedDraft(existing, addition) {
+// component today, so the prior clause is replaced in place rather than
+// appended twice. Every short link shares the same short-link host
+// (pre-push Codex P1), so "any line whose URL shares the new addition's
+// host" is NOT unambiguously the prior consultation clause — it also
+// matches a pasted pay/review/estimate link, which this used to silently
+// delete. The exact line last inserted is remembered per identity
+// (sessionStorage, alongside the draft itself) and only THAT line is
+// removed; a wording+host match is a fallback for when nothing is
+// remembered yet (a fresh session, or storage unavailable) — narrower than
+// "same host alone" so an unrelated short link still survives on a first
+// insert.
+const CONSULTATION_WORDING_RE = /consultation/i;
+// The single line inside a consultation appendDraft that carries its URL —
+// what's remembered (by the caller, alongside the draft write) and what
+// combineAppendedDraft below matches on the NEXT insert. Pure: reads
+// nothing, has no side effect, so calling it twice (as the mount race
+// below does) is harmless.
+function consultationLineOf(addition) {
+  const text = String(addition || "");
+  const host = urlHost(firstUrlIn(text));
+  if (!host) return null;
+  const lines = text.split("\n");
+  return lines.find((line) => urlHost(firstUrlIn(line)) === host) || lines[0];
+}
+// combineAppendedDraft is PURE — it must never write the remembered
+// consultation line itself: it runs twice on mount (the identity-reset
+// effect clobbers the useState initializer's result back to the raw
+// stored draft, and the appendDraft effect below re-applies this function
+// to repair that in the same flush — existing behavior, not new here). A
+// write inside this function would corrupt the memory the second, REAL
+// application reads. The caller writes it once, via consultationLineOf,
+// at the same point it calls writeDraft.
+function combineAppendedDraft(existing, addition, identity) {
   if (!addition) return existing;
   const base = String(existing || "");
   const newHost = urlHost(firstUrlIn(addition));
   if (newHost) {
+    const remembered = identity ? readConsultationLine(identity) : "";
+    const isPriorClauseLine = (line) => (remembered
+      ? line === remembered
+      : urlHost(firstUrlIn(line)) === newHost && CONSULTATION_WORDING_RE.test(line));
     const withoutPriorClause = base
       .split("\n")
-      .filter((line) => urlHost(firstUrlIn(line)) !== newHost)
+      .filter((line) => !isPriorClauseLine(line))
       .join("\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
@@ -186,7 +245,7 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [draft, setDraft] = useState(() => (identity ? combineAppendedDraft(readDraft(identity) || initialDraft, appendDraft) : ""));
+  const [draft, setDraft] = useState(() => (identity ? combineAppendedDraft(readDraft(identity) || initialDraft, appendDraft, identity) : ""));
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const [sentNote, setSentNote] = useState("");
@@ -231,8 +290,11 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
   useEffect(() => {
     if (appendDraft && appendDraft !== appliedAppendDraftRef.current) {
       setDraft((prev) => {
-        const next = combineAppendedDraft(prev, appendDraft);
-        if (identity) writeDraft(identity, next);
+        const next = combineAppendedDraft(prev, appendDraft, identity);
+        if (identity) {
+          writeDraft(identity, next);
+          writeConsultationLine(identity, consultationLineOf(appendDraft));
+        }
         return next;
       });
     }

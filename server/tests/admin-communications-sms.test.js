@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
+  debug: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -2529,7 +2530,7 @@ describe('leadId in the body (consultation lead-only fallback): the send stays o
   test('records the lead_activities row, first-response stamp, and new→contacted transition — same as POST /admin/leads/:id/send-sms', async () => {
     const leadActivities = [];
     let leadUpdated = null;
-    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', status: 'new', response_time_minutes: null, first_contact_at: new Date(Date.now() - 60000).toISOString() };
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'new', response_time_minutes: null, first_contact_at: new Date(Date.now() - 60000).toISOString() };
     db.mockImplementation((table) => {
       if (table === 'leads') {
         const b = makeUniversalBuilder();
@@ -2553,6 +2554,63 @@ describe('leadId in the body (consultation lead-only fallback): the send stays o
     expect(leadActivities).toContainEqual(expect.objectContaining({ lead_id: lead.id, activity_type: 'sms_sent' }));
     expect(leadActivities).toContainEqual(expect.objectContaining({ lead_id: lead.id, activity_type: 'first_response' }));
     expect(leadUpdated).toEqual(expect.objectContaining({ status: 'contacted' }));
+  });
+
+  // Pre-push Codex P1: trustedLeadId only passed a UUID-format check —
+  // nothing bound it to the actual destination. A changed recipient or a
+  // crafted request must not mark an unrelated lead contacted with a false
+  // audit row. Re-bound with the same rule resolveConsultationLeadOnly
+  // (the /customer-link lead-only path) applies: the lead's own phone must
+  // match the destination's last ten digits.
+  test('a leadId whose own phone does NOT match the destination records nothing — the send still goes through', async () => {
+    const leadActivities = [];
+    let leadUpdateCalled = false;
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+19995550000', status: 'new', response_time_minutes: null };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        b.update = jest.fn(async () => { leadUpdateCalled = true; return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl); // to: '+15551234567' — different last 10 than the lead's own phone
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
+    expect(leadUpdateCalled).toBe(false);
+  });
+
+  // Same binding rule, the other guarded predicate: a converted/closed lead
+  // (isOpenLeadRow false) records nothing even with a matching phone.
+  test('a leadId that matches the phone but has already converted records nothing', async () => {
+    const leadActivities = [];
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'won', converted_at: new Date('2026-01-01').toISOString() };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
   });
 
   test('a resolved customerId takes priority — no lead outreach recorded even with leadId also present', async () => {
@@ -2579,7 +2637,7 @@ describe('leadId in the body (consultation lead-only fallback): the send stays o
 
   test('the Agent Review draft claim interlock still runs for a leadId send — not bypassed by rerouting', async () => {
     const claimUpdates = [];
-    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', status: 'contacted', response_time_minutes: 5 };
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', phone: '+15551234567', status: 'contacted', response_time_minutes: 5 };
     db.mockImplementation((table) => {
       if (table === 'leads') {
         const b = makeUniversalBuilder();

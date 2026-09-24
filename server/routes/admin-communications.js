@@ -1253,12 +1253,28 @@ router.post('/sms', async (req, res, next) => {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
         if (isRealProviderSend(result)) {
-          const { recordLeadSmsOutreach } = require('../services/lead-outreach');
-          await recordLeadSmsOutreach({
-            leadId: trustedLeadId,
-            message: cleanBody,
-            performedBy: req.technician?.name || [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin',
-          });
+          // trustedLeadId only passed a UUID-format check above — nothing
+          // yet confirms it's actually the lead THIS text went to (a
+          // changed recipient or a crafted request could otherwise mark an
+          // unrelated lead contacted with a false audit row — pre-push
+          // Codex P1). Re-bind it here with the SAME rule
+          // resolveConsultationLeadOnly (the /customer-link lead-only
+          // path) applies: the lead's own phone must match the
+          // destination's last ten digits, and the lead must still be
+          // open. A mismatch just skips recording — it never fails a send
+          // that already went out.
+          const { isOpenLeadRow } = require('../services/lead-statuses');
+          const boundLead = await db('leads').where({ id: trustedLeadId }).whereNull('deleted_at').first('id', 'phone', 'status', 'converted_at');
+          if (boundLead && fullPhoneLast10(boundLead.phone) === fullPhoneLast10(to) && isOpenLeadRow(boundLead)) {
+            const { recordLeadSmsOutreach } = require('../services/lead-outreach');
+            await recordLeadSmsOutreach({
+              leadId: trustedLeadId,
+              message: cleanBody,
+              performedBy: req.technician?.name || [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin',
+            });
+          } else {
+            logger.debug(`[admin-communications] lead outreach skipped — leadId ${trustedLeadId} does not bind to this destination`);
+          }
         }
       } catch (outreachErr) {
         logger.warn(`[admin-communications] lead outreach audit failed: ${outreachErr.message}`);
