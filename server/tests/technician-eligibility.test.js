@@ -12,6 +12,7 @@ const {
   applyAssignable,
   assertAssignableTechnician,
   employmentPatch,
+  absentTechDays,
 } = require('../services/technician-eligibility');
 
 function connReturning(row, { transaction = false } = {}) {
@@ -170,6 +171,59 @@ describe('technician eligibility', () => {
         });
         expect(absenceChain.where).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe('absentTechDays (slot-discovery counterpart to the date-scoped assert, codex #4678 pre-push auditor P1)', () => {
+    function connAbsenceRows(rows) {
+      const chain = {
+        whereBetween: jest.fn(() => chain),
+        whereNull: jest.fn(() => chain),
+        whereIn: jest.fn(() => chain),
+        select: jest.fn(async () => rows),
+      };
+      const conn = jest.fn(() => chain);
+      return { conn, chain };
+    }
+
+    test('returns technicianId:date keys, one Set entry per uncleared row in range', async () => {
+      const { conn } = connAbsenceRows([
+        { technician_id: 't1', absence_date: '2026-10-01' },
+        { technician_id: 't2', absence_date: '2026-10-02' },
+      ]);
+      const days = await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07' });
+      expect(days).toEqual(new Set(['t1:2026-10-01', 't2:2026-10-02']));
+    });
+
+    test('normalizes a Postgres DATE column (JS Date at UTC midnight) to YYYY-MM-DD', async () => {
+      const { conn } = connAbsenceRows([
+        { technician_id: 't1', absence_date: new Date('2026-10-01T00:00:00.000Z') },
+      ]);
+      const days = await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07' });
+      expect(days).toEqual(new Set(['t1:2026-10-01']));
+    });
+
+    test('no absences in range returns an empty Set', async () => {
+      const { conn } = connAbsenceRows([]);
+      const days = await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07' });
+      expect(days).toEqual(new Set());
+    });
+
+    test('queries only the given date range and, when technicianIds is passed, narrows to it', async () => {
+      const { conn, chain } = connAbsenceRows([]);
+      await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07', technicianIds: ['t1', 't2'] });
+      expect(chain.whereBetween).toHaveBeenCalledWith('absence_date', ['2026-10-01', '2026-10-07']);
+      expect(chain.whereNull).toHaveBeenCalledWith('cleared_at');
+      expect(chain.whereIn).toHaveBeenCalledWith('technician_id', ['t1', 't2']);
+    });
+
+    test('omitting technicianIds (or passing an empty array) reads every absence in range, no whereIn', async () => {
+      const { conn, chain } = connAbsenceRows([]);
+      await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07' });
+      expect(chain.whereIn).not.toHaveBeenCalled();
+      const { conn: conn2, chain: chain2 } = connAbsenceRows([]);
+      await absentTechDays(conn2, { dateFrom: '2026-10-01', dateTo: '2026-10-07', technicianIds: [] });
+      expect(chain2.whereIn).not.toHaveBeenCalled();
     });
   });
 });

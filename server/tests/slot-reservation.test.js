@@ -134,7 +134,10 @@ describe('slot reservation helpers', () => {
     const b = { where: jest.fn(() => b), forShare: jest.fn(() => b), first: jest.fn().mockResolvedValue(row) };
     return b;
   }
-  function makeTechnicianBuilder(row = { id: 'tech-1' }) {
+  // Default row is assignable (technician-eligibility.js's JS-side check,
+  // not a SQL filter, now decides this) — pass an explicit row (e.g. null)
+  // to exercise an ineligible/unknown technician.
+  function makeTechnicianBuilder(row = { id: 'tech-1', employment_status: 'active', field_dispatchable: true }) {
     return {
       where: jest.fn().mockReturnThis(),
       forShare: jest.fn().mockReturnThis(),
@@ -208,9 +211,17 @@ describe('slot reservation helpers', () => {
       if (table === 'estimates') return estimateBuilder;
       if (table === 'technicians') return technicianBuilder;
       if (table === 'scheduled_services') return scheduledBuilders.shift();
+      // reserveSlot's assignable-technician check now goes through
+      // assertAssignableTechnician (technician-eligibility.js), which reads
+      // technician_absences whenever a date is present — every reserveSlot
+      // call has one. No tech is marked out in these fixtures.
+      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
+    // Real knex transactions carry this; assertAssignableTechnician's FOR
+    // SHARE lock (technician-eligibility.js) is conditioned on it.
+    trx.isTransaction = true;
     return trx;
   }
 
@@ -244,10 +255,10 @@ describe('slot reservation helpers', () => {
         expiresAt: '2027-05-20T13:15:00.000Z',
       });
 
-      expect(technicianBuilder.where).toHaveBeenCalledWith({ 'technicians.id': 'tech-1' });
-      // Assignability (technician-eligibility.js), not just the legacy flag.
-      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.employment_status', 'active');
-      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.field_dispatchable', true);
+      // Assignability (technician-eligibility.js assertAssignableTechnician),
+      // not just the legacy flag — a JS-side eligibility check on the fetched
+      // row, not a SQL filter, since Codex #4678 r1.
+      expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-1' });
       // ORDERING CONTRACT (services/scheduling/occupancy.js): rung 1
       // (date-occupancy) → rung 3 (tech) → rung 4 (zone). The hold row this
       // inserts is COUNTED by findConflictingVisits, so the estimate path is
@@ -966,9 +977,45 @@ describe('slot reservation helpers', () => {
         estimateId: 'estimate-456',
         slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-ghost' }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
-      expect(technicianBuilder.where).toHaveBeenCalledWith({ 'technicians.id': 'tech-ghost' });
-      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.employment_status', 'active');
+      expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-ghost' });
       // Rejected before any scheduled_services query or insert.
+      expect(scheduledBuilders).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('reserveSlot refuses a hold on a tech marked out that date (technician_absences, GATE_TECH_OUT_REDISTRIBUTE, codex #4678 pre-push auditor P1)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Pest Control',
+      });
+      const technicianBuilder = makeTechnicianBuilder(); // otherwise eligible
+      const scheduledBuilders = [];
+      const trx = jest.fn((table) => {
+        if (table === 'estimates') return estimateBuilder;
+        if (table === 'technicians') return technicianBuilder;
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        // An uncleared absence on the requested date — same shape
+        // assertAssignableTechnician's date-scoped read consumes.
+        if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => ({ id: 'abs-1' }) }) }) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      trx.isTransaction = true;
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1' }),
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      // Rejected before any scheduled_services query or insert — same as the
+      // unknown/inactive technician case above; a hold is refused HERE, not
+      // accepted and only caught by the identical commit-time re-check.
       expect(scheduledBuilders).toHaveLength(0);
     } finally {
       jest.useRealTimers();

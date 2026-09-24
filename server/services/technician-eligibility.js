@@ -97,6 +97,50 @@ function employmentPatch(status) {
   return { employment_status: status, active: status === 'active' };
 }
 
+/** Normalize a technician_absences.absence_date read back from Postgres (a
+ * DATE column, returned as a JS Date at UTC midnight) to YYYY-MM-DD. A date
+ * already a plain string (fake-db tests, or a value this process wrote in
+ * the same tick) passes through unchanged. Mirrors tech-out.js's own
+ * absenceDateString — kept local rather than imported so this foundational
+ * module never depends on the feature module (tech-out.js) built on top of
+ * it. */
+function absenceDateString(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+/**
+ * Every (technician, date) pair an uncleared technician_absences row marks
+ * out within [dateFrom, dateTo] (inclusive, YYYY-MM-DD), as a Set of
+ * `${technicianId}:${date}` keys — GATE_TECH_OUT_REDISTRIBUTE's dated
+ * commit-time check (`date` on assertAssignableTechnician above) has a
+ * slot-discovery counterpart: every slot source loads this ONCE per request
+ * and skips a (tech, date) candidate it names, so a customer is never
+ * offered — and cannot hold — a slot on an absent tech's day that the
+ * commit-time check would then refuse (codex #4678 pre-push auditor P1).
+ *
+ * `technicianIds`, when given, narrows the read to the caller's own
+ * candidate tech list (every current caller already has one); omitted, it
+ * loads every open absence in range. No marked-out tech in range (gate off,
+ * or on with nothing marked) returns an empty Set, so every caller is
+ * byte-identical to before this helper existed.
+ */
+async function absentTechDays(conn, { dateFrom, dateTo, technicianIds = null } = {}) {
+  let query = conn('technician_absences')
+    .whereBetween('absence_date', [dateFrom, dateTo])
+    .whereNull('cleared_at');
+  if (Array.isArray(technicianIds) && technicianIds.length) {
+    query = query.whereIn('technician_id', technicianIds);
+  }
+  const rows = await query.select('technician_id', 'absence_date');
+  const days = new Set();
+  for (const row of rows) {
+    days.add(`${row.technician_id}:${absenceDateString(row.absence_date)}`);
+  }
+  return days;
+}
+
 module.exports = {
   EMPLOYMENT_STATUSES,
   NOT_ASSIGNABLE,
@@ -105,4 +149,5 @@ module.exports = {
   applyAssignable,
   assertAssignableTechnician,
   employmentPatch,
+  absentTechDays,
 };

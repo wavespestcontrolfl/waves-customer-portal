@@ -47,7 +47,10 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 
 function chain(result) {
   const c = {};
-  ['where'].forEach((m) => { c[m] = () => c; });
+  // whereBetween/whereNull/whereIn: findCapacitySlots' absentTechDays read
+  // (technician-eligibility.js) against 'technician_absences' — every other
+  // table in this suite only ever needs `where`.
+  ['where', 'whereBetween', 'whereNull', 'whereIn'].forEach((m) => { c[m] = () => c; });
   c.select = async () => result;
   return c;
 }
@@ -86,5 +89,28 @@ describe('capacity mode (GATE_SCHEDULING_CAPACITY) customer-grid admission', () 
     const { slots } = await findAvailableSlots(BASE);
     const startTimes = slots.map((s) => s.start_time);
     expect(startTimes).toContain('08:00');
+  });
+});
+
+// GATE_TECH_OUT_REDISTRIBUTE's slot-discovery counterpart (codex #4678
+// pre-push auditor P1), capacity path (findCapacitySlots).
+describe('absent tech-days (technician_absences, GATE_TECH_OUT_REDISTRIBUTE) — capacity mode', () => {
+  const NEXT_DATE = nextBookableDate(new Date(`${FUTURE_DATE}T12:00:00Z`)).toISOString().slice(0, 10);
+
+  beforeEach(() => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return chain([{ id: 'tech-1', name: 'A' }]);
+      if (table === 'technician_absences') return chain([{ technician_id: 'tech-1', absence_date: FUTURE_DATE }]);
+      return chain([]);
+    });
+  });
+  afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
+
+  test('the marked-out date yields no candidates while the other date in range still does', async () => {
+    const { slots } = await findAvailableSlots({ ...BASE, dateTo: NEXT_DATE });
+    const dates = new Set(slots.map((s) => s.date));
+    expect(dates.has(FUTURE_DATE)).toBe(false);
+    expect(dates.has(NEXT_DATE)).toBe(true);
   });
 });
