@@ -8,6 +8,7 @@ export const ADDRESS_ASK_REASONS = new Set([
   'address_unverifiable',
   'address_not_validated',
   'on_file_proof_customer_mismatch',
+  'on_file_house_number_conflict',
 ]);
 
 // Valid premises whose street still needs a read-back. Separate because the
@@ -37,6 +38,12 @@ const NOTICE_BY_REASON = new Map([
     unitOnly: false,
     readbackOnly: false,
     reason: 'the saved address was validated for a different customer and this service address still needs confirmation',
+  }],
+  ['on_file_house_number_conflict', {
+    rank: 0,
+    unitOnly: false,
+    readbackOnly: false,
+    reason: 'the caller gave a different house number than the one on file',
   }],
   ['address_recovered', {
     rank: 1,
@@ -76,6 +83,16 @@ function evidenceFromCard(card, unitOnly) {
   const heard = payload.address_as_heard
     || (heardSnapshot?.street_line_1 ? snapshotParts.join(', ') : heardSnapshot?.raw_text)
     || (snapshotParts.length > 0 ? snapshotParts.join(', ') : null)
+    // House-number disagreement cards carry the validated street the caller
+    // stated instead of an as-heard transcript line.
+    // …and when Address Validation CORRECTED the number, the caller's own
+    // line comes first with the validated line as the correction.
+    || (payload.stated_street
+      ? (() => {
+        const validated = payload.stated_unit ? `${payload.stated_street}, ${payload.stated_unit}` : payload.stated_street;
+        return payload.spoken_street ? `${payload.spoken_street} (validated as ${validated})` : validated;
+      })()
+      : null)
     || null;
   return {
     // A validated building is not transcription evidence.
@@ -85,17 +102,26 @@ function evidenceFromCard(card, unitOnly) {
   };
 }
 
+// A house-number conflict card a later pass positively CLEARED (the record's
+// own number validated) stands only for its unbooked scheduling ask — it is
+// no longer an address warning (codex #4666 r34 P2).
+export function isClearedConflictCard(card) {
+  if (!card || card.reason_code !== 'on_file_house_number_conflict') return false;
+  let payload = card.payload;
+  if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+  return !!(payload && payload.address_dispute_cleared_at);
+}
+const isAddressAsk = (i) => !!i && ADDRESS_ASK_REASONS.has(i.reason_code) && !isClearedConflictCard(i);
+
 /** The validation-ask cards out of a /admin/triage response's items. */
 export function filterAddressAsks(items) {
-  return (Array.isArray(items) ? items : []).filter(
-    (i) => i && ADDRESS_ASK_REASONS.has(i.reason_code),
-  );
+  return (Array.isArray(items) ? items : []).filter(isAddressAsk);
 }
 
 /** Every card that means "confirm this street before a tech drives to it". */
 export function filterAddressConfirmations(items) {
   return (Array.isArray(items) ? items : []).filter(
-    (i) => i && (ADDRESS_ASK_REASONS.has(i.reason_code) || ADDRESS_READBACK_REASONS.has(i.reason_code)),
+    (i) => i && (isAddressAsk(i) || ADDRESS_READBACK_REASONS.has(i.reason_code)),
   );
 }
 
@@ -119,7 +145,7 @@ export function addressAskNotice(asks) {
     state.hasUnitAsk ||= card.reason_code === 'missing_unit_number';
     state.hasLiveRecovery ||= card.reason_code === 'address_recovered'
       && !card.payload?.recovery_superseded_at;
-    state.hasCurrentAsk ||= ADDRESS_ASK_REASONS.has(card.reason_code);
+    state.hasCurrentAsk ||= isAddressAsk(card);
     callState.set(callKey, state);
   });
 
@@ -149,8 +175,9 @@ export function addressAskNotice(asks) {
     selected = sorted.find(({ card, callKey }) => card.reason_code === 'missing_unit_number'
       && callKey === lead.callKey) || lead;
   } else {
+    // A house-number conflict card carries its evidence as stated_street.
     selected = sorted.find(({ card, notice }) => notice.rank === lead.notice.rank
-      && card.payload?.address_as_heard) || lead;
+      && (card.payload?.address_as_heard || card.payload?.stated_street)) || lead;
   }
   const { card, notice } = selected;
   return {

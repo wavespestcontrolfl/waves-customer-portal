@@ -57,6 +57,27 @@ function isActionableInbound(message) {
 export function unansweredSmsReply(messages) {
   if (!Array.isArray(messages)) return null;
 
+  // The server-backed needs-response view marks every returned DTO with an
+  // authoritative boolean. Its result can contain only part of a peer's
+  // history, so do not reconstruct response state from the visible slice.
+  // Ordinary inbox responses omit the field and continue through the local
+  // fallback below.
+  if (messages.some((message) => typeof message?.responseNeedsResponse === "boolean")) {
+    const inbound = messages
+      .filter((message) => message?.direction === "inbound" && message.responseNeedsResponse === true)
+      .reduce((latest, message) => {
+        const createdAt = messageTime(message);
+        if (Number.isNaN(createdAt)) return latest;
+        return !latest || createdAt > latest.createdAt ? { createdAt, message } : latest;
+      }, null);
+    if (!inbound?.message?.to) return null;
+    return {
+      businessLine: inbound.message.to,
+      messageId: inbound.message.id,
+      messageType: inbound.message.messageType,
+    };
+  }
+
   const latestInboundByLine = new Map();
   let latestOptOutAt = -Infinity;
 

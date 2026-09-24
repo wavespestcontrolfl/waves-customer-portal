@@ -320,6 +320,11 @@ function mergeSmsMessages(existing, incoming) {
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
 }
 
+function smsMessageThreadKey(message) {
+  const contactPhone = message?.direction === "outbound" ? message.to : message?.from;
+  return smsThreadKey(contactPhone);
+}
+
 function StatCardV2({ label, value, sub, active, alert, onClick }) {
   const clickable = typeof onClick === "function";
   return (
@@ -1058,6 +1063,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // still gets the prefilled text/recipient, but sends as a plain manual
   // SMS — the AI draft stays pending for the owner (codex P2).
   const smsOutletContext = useOutletContext();
+  const location = useLocation();
+  const routeNeedsResponse = new URLSearchParams(location.search).get("needsResponse") === "true";
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
   const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
@@ -1165,7 +1172,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
   // PR 4 — status filter chips, reply-from lock.
-  const [statusFilter, setStatusFilter] = useState("all");
+  const initialStatusFilter = routeNeedsResponse ? "unanswered" : "all";
+  const [statusFilter, setStatusFilter] = useState(initialStatusFilter);
+  const statusFilterRef = useRef(initialStatusFilter);
+  const routeLocationKeyRef = useRef(location.key);
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
   const [smsHasMore, setSmsHasMore] = useState(false);
@@ -1173,9 +1183,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
   const smsRequestRef = useRef(null);
+  const activeThreadRef = useRef(activeThread);
+  activeThreadRef.current = activeThread;
   const approvalDraftRequestRef = useRef(0);
   const smsPageRef = useRef(1);
   const smsLoadedSearchRef = useRef(null);
+  const smsLoadedStatusFilterRef = useRef(null);
   const rewriteContextRef = useRef({
     toNumber: "",
     selectedCustomerId: null,
@@ -1238,6 +1251,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();
     const normalizedSearch = search.trim();
+    const requestedStatusFilter = options.statusFilter || statusFilterRef.current;
     const page = options.page || 1;
     const append = !!options.append;
     if (options.background && smsRequestRef.current) return Promise.resolve();
@@ -1251,27 +1265,105 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       page: String(page),
     });
     if (normalizedSearch) params.set("search", normalizedSearch);
+    if (requestedStatusFilter === "unanswered") params.set("needsResponse", "true");
     const logUrl = `/admin/communications/log?${params.toString()}`;
+    const refreshesLoadedDataset = options.refresh
+      && smsLoadedSearchRef.current === normalizedSearch
+      && smsLoadedStatusFilterRef.current === requestedStatusFilter;
+    const loadedPageCount = options.refresh
+      && requestedStatusFilter === "unanswered"
+      && refreshesLoadedDataset
+      ? Math.max(page, smsPageRef.current)
+      : page;
+    const loadedPagesRequest = loadedPageCount > page
+      ? Promise.all(Array.from({ length: loadedPageCount }, (_, index) => {
+        const pageParams = new URLSearchParams(params);
+        pageParams.set("page", String(index + 1));
+        return adminFetch(`/admin/communications/log?${pageParams.toString()}`, { signal: controller.signal });
+      })).then((pages) => {
+        const hasInvalidPage = pages.some((pageData) => !Array.isArray(pageData?.messages) || pageData.error);
+        if (hasInvalidPage) return { error: "One or more message pages could not be refreshed." };
+        return {
+          messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
+          hasMore: !!pages.at(-1)?.hasMore,
+          page: pages.at(-1)?.page || loadedPageCount,
+        };
+      })
+      : adminFetch(logUrl, { signal: controller.signal });
+    const logRequest = Promise.resolve(loadedPagesRequest).then(async (logData) => {
+      if (
+        !refreshesLoadedDataset
+        || requestedStatusFilter !== "unanswered"
+        || append
+        || !logData?.hasMore
+        || !Array.isArray(logData.messages)
+        || logData.error
+      ) {
+        return logData;
+      }
+      const openPhone = activeThreadRef.current?.contactPhone;
+      const openKey = openPhone ? smsThreadKey(openPhone) : "";
+      if (!openKey || logData.messages.some((message) => smsMessageThreadKey(message) === openKey)) {
+        return logData;
+      }
+
+      // A newer pending peer can push the open conversation just beyond the
+      // loaded page boundary. Confirm that peer directly before closing it.
+      // Reuse the active search/filter scope so this check answers the same
+      // question as the refreshed inbox.
+      const peerParams = new URLSearchParams(params);
+      peerParams.set("page", "1");
+      peerParams.set("phone", openPhone);
+      const peerData = await adminFetch(`/admin/communications/log?${peerParams.toString()}`, { signal: controller.signal });
+      if (!Array.isArray(peerData?.messages) || peerData.error) {
+        throw new Error("The open conversation could not be confirmed.");
+      }
+      const hasUnexpectedPeer = peerData.messages.some((message) => smsMessageThreadKey(message) !== openKey);
+      if (hasUnexpectedPeer) {
+        throw new Error("The open conversation returned mismatched history.");
+      }
+      if (peerData.messages.length && !peerData.messages.some((message) => message.responseNeedsResponse === true)) {
+        throw new Error("The open conversation returned incomplete pending state.");
+      }
+      return {
+        ...logData,
+        messages: mergeSmsMessages(logData.messages, peerData.messages),
+        confirmedAbsentPeerKey: peerData.messages.length ? null : openKey,
+      };
+    });
     return Promise.allSettled([
-      adminFetch(logUrl, { signal: controller.signal }),
+      logRequest,
       options.background ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
       options.background ? null : adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
     ]).then(([logResult, statsResult, blockedResult]) => {
       if (
         controller.signal.aborted ||
         requestSeq !== smsLoadSeqRef.current ||
-        normalizedSearch !== smsSearchRef.current
+        normalizedSearch !== smsSearchRef.current ||
+        requestedStatusFilter !== statusFilterRef.current
       ) {
         return;
       }
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
-        const retainHistory = options.refresh && smsLoadedSearchRef.current === normalizedSearch;
+        const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
+        if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
+          const openPhone = activeThreadRef.current?.contactPhone;
+          const openKey = openPhone ? smsThreadKey(openPhone) : "";
+          const openThreadStillLoaded = openKey
+            && logData.messages.some((message) => smsMessageThreadKey(message) === openKey);
+          const absenceConfirmed = !logData.hasMore || logData.confirmedAbsentPeerKey === openKey;
+          if (openKey && !openThreadStillLoaded && absenceConfirmed) {
+            setActiveThread(null);
+            setSmsView("threads");
+          }
+        }
         smsPageRef.current = logData.page || page;
         setSmsPage(smsPageRef.current);
         setSmsHasMore(!!logData.hasMore);
         smsLoadedSearchRef.current = normalizedSearch;
+        smsLoadedStatusFilterRef.current = requestedStatusFilter;
         setSmsLoadError("");
       } else {
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
@@ -1292,6 +1384,17 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSmsRefreshing(false);
     });
   }, [customer?.id]);
+
+  useEffect(() => {
+    if (!active || customer || routeLocationKeyRef.current === location.key) return;
+    routeLocationKeyRef.current = location.key;
+    const nextFilter = routeNeedsResponse ? "unanswered" : "all";
+    statusFilterRef.current = nextFilter;
+    setStatusFilter(nextFilter);
+    setSmsView("threads");
+    setActiveThread(null);
+    void loadData(smsSearchRef.current, { statusFilter: nextFilter });
+  }, [active, customer, loadData, location.key, routeNeedsResponse]);
 
   useEffect(() => {
     smsSearchRef.current = smsSearch.trim();
@@ -1803,7 +1906,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
       if (customer) await onSent?.();
-      else await loadData(smsSearch.trim());
+      else await loadData(smsSearch.trim(), { refresh: true });
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
@@ -2594,8 +2697,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     );
     if (nextThread && nextThread !== activeThread) {
       setActiveThread(nextThread);
+    } else if (!nextThread && statusFilter === "unanswered" && !smsHasMore) {
+      // A reply can remove the peer from the server-backed pending result.
+      // Do not leave the operator inside a stale unanswered conversation.
+      setActiveThread(null);
+      setSmsView("threads");
     }
-  }, [threads, activeThread?.contactPhone]);
+  }, [threads, activeThread?.contactPhone, statusFilter, smsHasMore]);
 
   // Deep-link from a notification: /admin/communications?thread=<customerId>
   // opens that customer's SMS conversation. The sms_reply notification carries
@@ -3437,6 +3545,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             onClick={() => {
               setSmsView("log");
               setActiveThread(null);
+              if (statusFilterRef.current === "unanswered") {
+                statusFilterRef.current = "all";
+                setStatusFilter("all");
+                void loadData(smsSearchRef.current, { statusFilter: "all" });
+              }
             }}
             className={cn(
               "px-3.5 py-2.5 md:py-1 min-h-[44px] md:min-h-0 text-14 md:text-12 normal-case md:uppercase tracking-normal md:tracking-label rounded-xs u-focus-ring transition-colors",
@@ -3501,7 +3614,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             <Select
               id="sms-thread-filter"
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => {
+                const nextFilter = e.target.value;
+                statusFilterRef.current = nextFilter;
+                setStatusFilter(nextFilter);
+                void loadData(smsSearchRef.current, { statusFilter: nextFilter });
+              }}
             >
               {[
                 { key: "all", label: "All", count: chipCounts.all },

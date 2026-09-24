@@ -66,7 +66,9 @@ const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionCharge
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
-const { firstVisitDefaultRating } = require('../services/pest-pressure/first-visit');
+const { FIRST_VISIT_DEFAULT_RATING, confirmFirstVisitUnderLock, firstVisitDefaultRating } = require('../services/pest-pressure/first-visit');
+const { activityScaleNames } = require('../services/pest-pressure/label');
+const { pestPressureConfigAllowsTechnicianRating } = require('../services/pest-pressure/technician-rating-gate');
 const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
@@ -1784,17 +1786,6 @@ function completionAllowsTechnicianPestRating({ typedFindingsType = null, isInte
   return !typedFindingsType && !isInternalOnlyCompletion;
 }
 
-function pestPressureConfigAllowsTechnicianRating({ pestPressureConfig = null, serviceLine = null } = {}) {
-  const techEntryAllowed = !!(pestPressureConfig
-    && pestPressureConfig.allowTechnicianClientRatingEntry === true);
-  const enabledLines = Array.isArray(pestPressureConfig && pestPressureConfig.enabledServiceLines)
-    ? pestPressureConfig.enabledServiceLines
-    : [];
-  const serviceLineAllowed = enabledLines.length === 0
-    || (serviceLine && enabledLines.includes(serviceLine));
-  return techEntryAllowed && serviceLineAllowed;
-}
-
 function photoCaptionBannedCopyPayload(captionBannedViolations = new Set()) {
   const violations = [...captionBannedViolations];
   return {
@@ -3501,6 +3492,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     } catch (err) {
       logger.warn(`[completion] first-visit rating default skipped: ${err?.message || err}`);
     }
+    // The default (not a rating the tech chose) is re-confirmed under a lock
+    // inside the record transaction — see confirmFirstVisitUnderLock.
+    const firstVisitDefaultApplied = effectiveClientPestRating === FIRST_VISIT_DEFAULT_RATING
+      && (clientPestRating == null || clientPestRatingPrefilled === true);
 
     // Gauge-reading capture (flag-gated; UAT → rollout). On a LAWN visit the tech
     // may log an OPTIONAL maintained-height reading and/or an OPTIONAL on-site
@@ -5026,7 +5021,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // 2026-07-30).
             observations: reportObservations,
             recommendations: reportRecommendations,
-            pestActivityRating: Number.isInteger(effectiveClientPestRating) ? effectiveClientPestRating : null,
+            // Only a rating the tech chose grounds the recap. The first-visit
+            // default is scoring policy, not an observation — and it is only
+            // confirmed later, under the lock in the record transaction, so
+            // copy written now must not depend on it.
+            pestActivityRating: !firstVisitDefaultApplied && Number.isInteger(effectiveClientPestRating) ? effectiveClientPestRating : null,
+            pestActivityScale: !firstVisitDefaultApplied && Number.isInteger(effectiveClientPestRating)
+              ? activityScaleNames((await loadPestPressureConfig(db).catch(() => null))?.labels)
+              : null,
             visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {
@@ -6456,6 +6458,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // data (column gets set but never read). Inline-load the
           // config inside the txn so we read a consistent snapshot with
           // the score calc that runs a few lines below.
+          if (firstVisitDefaultApplied
+            && !(await confirmFirstVisitUnderLock(trx, { customerId: svc.customer_id, serviceLine: reportServiceLine }))) {
+            // Another first visit on this line committed first — this one
+            // records no default (the tech never chose a rating).
+            effectiveClientPestRating = null;
+          }
           if (effectiveClientPestRating != null
             && completionAllowsTechnicianPestRating({ typedFindingsType, isInternalOnlyCompletion })
             && serviceRecordCols.client_pest_rating
