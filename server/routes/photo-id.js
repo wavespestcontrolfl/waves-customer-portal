@@ -394,13 +394,24 @@ function numericValues(list, key) {
 // non-null) is not the same as it carrying any usable evidence — an empty
 // {} still passes a truthy check. Counts as evidence when at least one
 // score or signal field the merge actually reads is present.
-function lawnCompositeHasEvidence(composite) {
-  if (!composite) return false;
-  const fields = [
-    'turf_density', 'weed_coverage', 'color_health',
-    'fungal_activity', 'insect_damage', 'mechanical_damage', 'drought_stress', 'thatch_visibility',
-  ];
-  return fields.some((key) => composite[key] != null && composite[key] !== '');
+const LAWN_EVIDENCE_FIELDS = [
+  'turf_density', 'weed_coverage', 'color_health',
+  'fungal_activity', 'insect_damage', 'mechanical_damage', 'drought_stress', 'thatch_visibility',
+];
+
+// codex GH r6 P1: lawn-assessment.js's OWN averageScores (the dual-model
+// merge lawnAssessment.analyzePhoto already ran before this route ever sees
+// a composite) fills a MISSING numeric field with `Number(undefined) || 0`
+// — a real, non-null zero — and leaves the categorical fields at their
+// FUNGAL_MAP default. So a composite from two vacuous (but non-throwing)
+// model responses is NEVER actually empty by the time it reaches this
+// route; checking the merged composite for evidence can't tell "genuinely
+// measured" from "defaulted from nothing" — it has to check the RAW
+// per-model output (analyzePhoto's own `claude/gemini`, before ITS merge
+// applies those defaults) instead.
+function lawnRawResultHasEvidence(raw) {
+  if (!raw) return false;
+  return LAWN_EVIDENCE_FIELDS.some((key) => raw[key] != null && raw[key] !== '');
 }
 
 function mergeLawnComposites(list) {
@@ -485,13 +496,14 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   const analyses = await Promise.all(photoInputs.map((photo) => lawnAssessment
     .analyzePhoto(photo.data, photo.mimeType, context)
     .catch((err) => { logger.warn(`[photo-id] lawn analyzePhoto failed: ${err.message}`); return null; })));
-  // codex GH r4 P1: a composite object existing is not the same as it
-  // carrying any usable evidence — an EMPTY {} composite is truthy and was
-  // passing the old `.filter(Boolean)` check, so a mixed batch (one real
-  // photo + one that returned nothing) counted as fully successful and
-  // merged a confident result off the single working photo alone. Only a
-  // composite carrying at least one score/signal field counts now.
-  const composites = analyses.filter(Boolean).map((a) => a.composite).filter(lawnCompositeHasEvidence);
+  // codex GH r4+r6 P1: a composite object existing is not the same as it
+  // carrying any usable evidence — analyzePhoto's OWN merge defaults a
+  // missing numeric field to a real 0 and a missing categorical field to
+  // its baseline, so even the POST-merge composite is never actually empty.
+  // Check the RAW per-model output (before that merge's defaults apply)
+  // instead — see lawnRawResultHasEvidence.
+  const withEvidence = analyses.filter((a) => a && (lawnRawResultHasEvidence(a.claude) || lawnRawResultHasEvidence(a.gemini)));
+  const composites = withEvidence.map((a) => a.composite).filter(Boolean);
   if (!composites.length) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }
@@ -560,10 +572,19 @@ function treeResultForResponse(treeResult, unreliable) {
 // (nothing flagged as partial). Same evidence-first fix as lawn's
 // lawnCompositeHasEvidence: a composite counts only when it carries at
 // least one field mergePhotoComposites actually reads.
-function treeShrubCompositeHasEvidence(composite) {
-  if (!composite) return false;
-  const fields = ['foliage_fullness', 'leaf_color_vigor', 'pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical'];
-  return fields.some((key) => composite[key] != null && composite[key] !== '');
+const TREE_SHRUB_EVIDENCE_FIELDS = ['foliage_fullness', 'leaf_color_vigor', 'pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical'];
+
+// codex GH r6 P1: tree-shrub-assessment.js's OWN averageScores (analyzePhoto's
+// dual-model merge, already run before this route ever sees a composite)
+// defaults EVERY missing severity field to 'none' — even when BOTH claude
+// and gemini came back empty — via `SEVERITY_REVERSE[cHas ? ci : (gHas ? gi
+// : 0)]`, where the final `: 0` fires with no real evidence at all. The
+// merged composite is therefore never actually empty; the RAW per-model
+// output (before that merge's defaults apply) is the only place a genuinely
+// vacuous response is still detectable.
+function treeShrubRawHasEvidence(raw) {
+  if (!raw) return false;
+  return TREE_SHRUB_EVIDENCE_FIELDS.some((key) => raw[key] != null && raw[key] !== '');
 }
 
 // Reimplements previewTreeShrubAssessment's own orchestration (analyze each
@@ -575,7 +596,8 @@ function treeShrubCompositeHasEvidence(composite) {
 async function previewTreeShrubWithEvidence(photoInputs) {
   const analyses = await Promise.all(photoInputs.map((photo) => analyzeTreeShrubPhoto(photo.data, photo.mimeType)
     .catch((err) => { logger.warn(`[photo-id] tree-shrub analyzePhoto failed: ${err.message}`); return null; })));
-  const composites = analyses.filter(Boolean).map((a) => a.composite).filter(treeShrubCompositeHasEvidence);
+  const withEvidence = analyses.filter((a) => a && (treeShrubRawHasEvidence(a.claude) || treeShrubRawHasEvidence(a.gemini)));
+  const composites = withEvidence.map((a) => a.composite).filter(Boolean);
   if (!composites.length) return null;
   const mergedRaw = mergeTreeShrubComposites(composites);
   const scores = toCategoryScores(mergedRaw);
