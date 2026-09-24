@@ -87,13 +87,17 @@ function ymdMonth(ymd) { const p = etParts(noon(ymd)); return p.year * 12 + p.mo
 
   test('quarterly: tail cadence slot moved once (this visit only) into the next month must still extend 3 months after the cadence month, not the moved month', async () => {
     const cadenceDate = nextWeekday(14, 2); // a Tuesday, comfortably future
-    const movedDate = plusDays(cadenceDate, 35); // crosses a month boundary
+    const cp = etParts(noon(cadenceDate));
+    // Exactly one calendar month after the cadence slot (day clamped to 28
+    // so this never skips a short month) — a fixed +N-day offset can cross
+    // TWO month boundaries when cadenceDate falls late in a long month
+    // (e.g. Jan 26 + 35 days lands in March, not February).
+    const movedDate = etDateString(new Date(Date.UTC(cp.year, cp.month, Math.min(cp.day, 28), 16)));
     expect(ymdMonth(movedDate)).toBe(ymdMonth(cadenceDate) + 1);
     // Parent completed 3 months before the cadence slot, same day-of-month
     // (quarterly re-anchors on the parent's nth-weekday, so only the MONTH
     // of the anchor matters for this assertion — see the primary reproducer
     // series-extend-anchor-ignores-exception.test.js for the same method).
-    const cp = etParts(noon(cadenceDate));
     const parentDate = etDateString(new Date(Date.UTC(cp.year, cp.month - 1 - 3, Math.min(cp.day, 28), 16)));
     const { parentId, tailId } = await seedSeries({
       pattern: 'quarterly', parentDate, tailCadenceDate: cadenceDate, tailMovedDate: movedDate,

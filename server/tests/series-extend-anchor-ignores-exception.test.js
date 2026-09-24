@@ -113,12 +113,16 @@ postgres('r2-reschedule-move-engine-reminders-2: auto-extend anchors on a this-v
     } finally { await cleanup(f); }
   });
 
-  test('quarterly series: sole upcoming visit pushed 5 weeks into the next month "this visit only" must still extend 3 months after the cadence month', async () => {
+  test('quarterly series: sole upcoming visit pushed into the next month "this visit only" must still extend 3 months after the cadence month', async () => {
     const cadenceDate = nextWeekday(7, 2); // a Tuesday
-    const movedDate = plusDays(cadenceDate, 35); // crosses a month boundary
+    const cp = etParts(noon(cadenceDate));
+    // Exactly one calendar month after the cadence slot (day clamped to 28
+    // so this never skips a short month) — a fixed +N-day offset can cross
+    // TWO month boundaries when cadenceDate falls late in a long month
+    // (e.g. Jan 26 + 35 days lands in March, not February).
+    const movedDate = etDateString(new Date(Date.UTC(cp.year, cp.month, Math.min(cp.day, 28), 16)));
     expect(ymdMonth(movedDate)).toBe(ymdMonth(cadenceDate) + 1);
     // Completed 3 months before the cadence slot.
-    const cp = etParts(noon(cadenceDate));
     const completedDate = etDateString(new Date(Date.UTC(cp.year, cp.month - 1 - 3, Math.min(cp.day, 28), 16)));
     const f = await seedSeries({ pattern: 'quarterly', completedDate, cadenceDate, movedDate });
     try {
