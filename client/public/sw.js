@@ -760,12 +760,22 @@ async function applyAppBadge(count, seq) {
   } catch { /* badge is garnish — never fail the push handler over it */ }
 }
 
+async function notifyVisibleClientsOfPush() {
+  try {
+    const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of windowClients) {
+      if (client.visibilityState === 'visible') client.postMessage({ type: 'waves:push-received' });
+    }
+  } catch { /* a page refresh is best-effort; the next visibility event also refreshes */ }
+}
+
 self.addEventListener('push', event => {
   const data = event.data?.json() || {};
   const requireInteraction = data.priority === 'urgent';
   if (Number.isInteger(data.badge)) {
     event.waitUntil(applyAppBadge(data.badge, Number(data.badgeAt)));
   }
+  event.waitUntil(notifyVisibleClientsOfPush());
   let destination = '/';
   try {
     const candidate = new URL(data.url || '/', self.location.origin);

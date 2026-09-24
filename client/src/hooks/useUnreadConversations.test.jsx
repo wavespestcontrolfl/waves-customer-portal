@@ -58,3 +58,29 @@ it("does not restore an old count when a poll finishes after the read refresh", 
   await act(async () => { resolvePoll({ conversations: 3 }); });
   expect(result.current).toBe(0);
 });
+
+it.each([{}, { conversations: -1 }, { conversations: "2" }])("retains the confirmed badge for an invalid count payload: %j", async (payload) => {
+  adminFetch.mockResolvedValueOnce({ conversations: 3 }).mockResolvedValue(payload);
+  const { result } = renderHook(() => useUnreadConversations());
+  await waitFor(() => expect(result.current).toBe(3));
+  act(notifyUnreadChanged);
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(2));
+  expect(result.current).toBe(3);
+});
+
+it("refreshes from a visible push and removes its listener on unmount", async () => {
+  const worker = new EventTarget();
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: worker });
+  try {
+    adminFetch.mockResolvedValueOnce({ conversations: 2 }).mockResolvedValue({ conversations: 4 });
+    const { result, unmount } = renderHook(() => useUnreadConversations());
+    await waitFor(() => expect(result.current).toBe(2));
+    act(() => worker.dispatchEvent(new MessageEvent("message", { data: { type: "waves:push-received" } })));
+    await waitFor(() => expect(result.current).toBe(4));
+    unmount();
+    act(() => worker.dispatchEvent(new MessageEvent("message", { data: { type: "waves:push-received" } })));
+    expect(adminFetch).toHaveBeenCalledTimes(2);
+  } finally {
+    delete navigator.serviceWorker;
+  }
+});

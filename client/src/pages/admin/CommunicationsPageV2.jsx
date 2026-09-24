@@ -70,6 +70,7 @@ import {
   Headphones,
   Inbox,
   Loader2,
+  Link2,
   Mail,
   MessageSquare,
   Ban,
@@ -944,7 +945,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const selectedDraft = setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
       const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
       if (hasDraft && (draft.selectedCustomerId || null) !== (customerId || null)) {
-        setSendResult({ ok: false, text: "Saved draft kept with its original customer. Clear the draft before choosing another customer on this phone number." });
+        setSendResult({ ok: false, text: "Saved draft kept with its original customer. This phone number is shared with another customer." });
         return {};
       }
       if (hasDraft && draft.fromNumber && ourNumber
@@ -1371,7 +1372,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       return;
     }
     if (loadedMessageDraft?.id && scheduledFor) {
-      setSendResult({ ok: false, text: "Send draft SMS now, or clear the draft before scheduling." });
+      setSendResult({ ok: false, text: "Approval drafts must be sent immediately and cannot be scheduled." });
       return;
     }
     if (loadedMessageDraft?.id && attachments.length > 0) {
@@ -1523,6 +1524,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         }
         setSendResult({ ok: true, text: `Provider accepted; delivery is not yet confirmed.${reviewEmailNote(sent?.reviewEmail)}` });
       }
+      notifyUnreadChanged();
       const { cleared, persisted } = clearDraft(draftRevision);
       if (cleared && persisted) {
         setToNumber(customer?.phone || "");
@@ -2726,7 +2728,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             );
           })()}
         </>}
-        {!toNumber.trim() && <p className="mb-3 text-14 text-ink-secondary">Choose a recipient to start a message.</p>}
         <fieldset disabled={!toNumber.trim()} className="m-0 min-w-0 border-0 p-0">
         {(agentDraft || agentDraftLoading) && (
           <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm">
@@ -2839,6 +2840,88 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 )}
               </Button>
             )}
+            {/* Insert Link — opens the searchable link library sheet: the
+                per-customer minted links, per-office review links, the whole
+                website, app stores, and socials. */}
+            <Button
+              variant="secondary"
+              onClick={(event) => {
+                event.currentTarget.focus({ preventScroll: true });
+                openLinkSheet();
+              }}
+              disabled={
+                insertingResched ||
+                insertingReservice ||
+                !!insertingCustomerLink || sending
+              }
+              title="Quick Links — insert a link or send a prep guide"
+              aria-label="Quick Links"
+              className="sms-writing-tool ui-icon-action"
+              aria-haspopup="dialog"
+              aria-expanded={showLinkSheet}
+            >
+              {insertingResched || insertingReservice || insertingCustomerLink ? (
+                <Loader2 size={16} strokeWidth={2.2} className="animate-spin" aria-hidden />
+              ) : (
+                <Link2 size={16} strokeWidth={2.2} aria-hidden />
+              )}
+            </Button>{" "}
+            {/* Plus — attachment menu */}
+            <div className="relative">
+              {" "}
+              <Button
+                variant="secondary"
+                onClick={() => setShowAttachSheet((v) => !v)}
+                disabled={uploading}
+                aria-label="Add attachment"
+                title="Add image"
+                className="sms-writing-tool ui-icon-action"
+              >
+                {" "}
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.25"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  {" "}
+                  <line x1="12" y1="5" x2="12" y2="19" />{" "}
+                  <line x1="5" y1="12" x2="19" y2="12" />{" "}
+                </svg>{" "}
+              </Button>
+              {showAttachSheet && (
+                <div
+                  className="absolute bottom-full right-0 mb-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden"
+                  style={{ width: 180 }}
+                >
+                  {" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachSheet(false);
+                      cameraInputRef.current?.click();
+                    }}
+                    className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+                  >
+                    Take photo
+                  </button>{" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAttachSheet(false);
+                      fileInputRef.current?.click();
+                    }}
+                    className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                  >
+                    Photo library
+                  </button>{" "}
+                </div>
+              )}
+            </div>{" "}
           </div>
         </div>
         {/* Attachment tray */}
@@ -2933,62 +3016,6 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           />
         )}
         <div className="flex flex-wrap gap-2 items-center">
-          {/* Plus — attachment menu */}
-          <div className="relative">
-            {" "}
-            <Button
-              variant="secondary"
-              onClick={() => setShowAttachSheet((v) => !v)}
-              disabled={uploading}
-              aria-label="Add attachment"
-              title="Add image"
-              className="sms-writing-tool ui-icon-action"
-            >
-              {" "}
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.25"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                {" "}
-                <line x1="12" y1="5" x2="12" y2="19" />{" "}
-                <line x1="5" y1="12" x2="19" y2="12" />{" "}
-              </svg>{" "}
-            </Button>
-            {showAttachSheet && (
-              <div
-                className="absolute bottom-full left-0 mb-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden"
-                style={{ width: 180 }}
-              >
-                {" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAttachSheet(false);
-                    cameraInputRef.current?.click();
-                  }}
-                  className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 u-focus-ring"
-                >
-                  Take photo
-                </button>{" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAttachSheet(false);
-                    fileInputRef.current?.click();
-                  }}
-                  className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
-                >
-                  Photo library
-                </button>{" "}
-              </div>
-            )}
-          </div>{" "}
           <Button
             variant="primary"
             className="flex-1"
@@ -3030,49 +3057,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
           </Button>{" "}
-          {/* Insert Link — opens the searchable link library sheet: the
-              per-customer minted links, per-office review links, the whole
-              website, app stores, and socials. */}
-          <Button
-            variant="secondary"
-            onClick={(event) => {
-              event.currentTarget.focus({ preventScroll: true });
-              openLinkSheet();
-            }}
-            disabled={
-              insertingResched ||
-              insertingReservice ||
-              !!insertingCustomerLink || sending
-            }
-            title="Quick Links — insert a link or send a prep guide"
-            aria-haspopup="dialog"
-            aria-expanded={showLinkSheet}
-          >
-            {insertingResched || insertingReservice || insertingCustomerLink
-              ? "Adding…"
-              : "Quick Links"}
-          </Button>{" "}
         </div>
-        <Button
-          variant="secondary"
-          className="mt-3"
-          disabled={sending || uploading || listening || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
-          onClick={() => {
-            approvalDraftRequestRef.current += 1;
-            const { cleared, persisted } = clearDraft(draftRevision);
-            if (!cleared) return;
-            for (const attachment of attachments) {
-              if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-            }
-            const url = new URL(window.location.href);
-            url.searchParams.delete("draftId");
-            url.searchParams.delete("draft");
-            window.history.replaceState(window.history.state, "", url);
-            setSendResult({ ok: persisted, text: persisted ? "Draft cleared." : "Draft cleared here, but recovery storage could not be updated. It may return after a reload." });
-          }}
-        >
-          Clear draft
-        </Button>
         <InsertLinkSheet
           open={active && showLinkSheet}
           onClose={() => setShowLinkSheet(false)}

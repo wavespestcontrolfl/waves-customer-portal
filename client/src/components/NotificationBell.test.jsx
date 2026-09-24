@@ -64,6 +64,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  localStorage.removeItem('waves_admin_token');
 });
 
 describe('NotificationBell panel', () => {
@@ -200,6 +201,96 @@ describe('NotificationBell panel', () => {
     render(<NotificationBell type="admin" />);
     await act(async () => {});
     expect(badge.write).not.toHaveBeenCalled();
+  });
+
+  it('refreshes the admin count on resume, SMS changes, and visible service-worker pushes', async () => {
+    const serviceWorker = new EventTarget();
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: serviceWorker });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    let countRequests = 0;
+    global.fetch.mockImplementation(async url => {
+      if (String(url).includes('/unread-count')) {
+        countRequests += 1;
+        return jsonResponse({ count: countRequests });
+      }
+      return jsonResponse({ notifications: NOTIFICATIONS });
+    });
+
+    try {
+      render(<NotificationBell type="admin" />);
+      await waitFor(() => expect(countRequests).toBe(1));
+
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+      await waitFor(() => expect(countRequests).toBe(2));
+
+      act(() => window.dispatchEvent(new Event('waves:sms-unread-changed')));
+      await waitFor(() => expect(countRequests).toBe(3));
+
+      act(() => serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'waves:push-received' } })));
+      await waitFor(() => expect(countRequests).toBe(4));
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      act(() => serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'waves:push-received' } })));
+      await act(async () => {});
+      expect(countRequests).toBe(4);
+    } finally {
+      if (serviceWorkerDescriptor) Object.defineProperty(navigator, 'serviceWorker', serviceWorkerDescriptor);
+      else delete navigator.serviceWorker;
+      if (visibilityDescriptor) Object.defineProperty(document, 'visibilityState', visibilityDescriptor);
+      else delete document.visibilityState;
+    }
+  });
+
+  it('does not let an older admin poll replace newer push badge state', async () => {
+    const setAppBadge = vi.fn();
+    const clearAppBadge = vi.fn();
+    const badgeCache = {
+      match: vi.fn(async () => ({ json: async () => ({ seq: 200, count: 9 }) })),
+      put: vi.fn(),
+    };
+    const cachesDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'caches');
+    const setBadgeDescriptor = Object.getOwnPropertyDescriptor(navigator, 'setAppBadge');
+    const clearBadgeDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clearAppBadge');
+    const locksDescriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Object.defineProperty(globalThis, 'caches', { configurable: true, value: { open: vi.fn(async () => badgeCache) } });
+    Object.defineProperty(navigator, 'setAppBadge', { configurable: true, value: setAppBadge });
+    Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: clearAppBadge });
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { request: vi.fn(async (_name, apply) => apply()) },
+    });
+    localStorage.setItem('waves_admin_token', `header.${btoa(JSON.stringify({ role: 'admin' }))}.signature`);
+    let pollAt = 100;
+    global.fetch.mockImplementation(async url => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2, at: pollAt });
+      return jsonResponse({ notifications: NOTIFICATIONS });
+    });
+
+    try {
+      render(<NotificationBell type="admin" />);
+      await waitFor(() => expect(badgeCache.match).toHaveBeenCalledWith('/__badge-seq'));
+      await act(async () => {});
+      expect(badgeCache.put).not.toHaveBeenCalled();
+      expect(setAppBadge).not.toHaveBeenCalled();
+      expect(clearAppBadge).not.toHaveBeenCalled();
+
+      pollAt = 300;
+      act(() => window.dispatchEvent(new Event('waves:sms-unread-changed')));
+      await waitFor(() => expect(setAppBadge).toHaveBeenCalledWith(2));
+      expect(badgeCache.put).toHaveBeenCalledWith('/__badge-seq', expect.any(Response));
+      expect(await badgeCache.put.mock.calls[0][1].json()).toEqual({ seq: 300, count: 2 });
+    } finally {
+      if (cachesDescriptor) Object.defineProperty(globalThis, 'caches', cachesDescriptor);
+      else delete globalThis.caches;
+      if (setBadgeDescriptor) Object.defineProperty(navigator, 'setAppBadge', setBadgeDescriptor);
+      else delete navigator.setAppBadge;
+      if (clearBadgeDescriptor) Object.defineProperty(navigator, 'clearAppBadge', clearBadgeDescriptor);
+      else delete navigator.clearAppBadge;
+      if (locksDescriptor) Object.defineProperty(navigator, 'locks', locksDescriptor);
+      else delete navigator.locks;
+    }
   });
 
   it('ignores a response when credentials changed before the component unmounted', async () => {

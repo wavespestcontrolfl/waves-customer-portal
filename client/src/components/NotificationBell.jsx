@@ -6,8 +6,10 @@ import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../
 import { isNativeApp, nativePushConnectionState, requestNativePushPermission } from '../native/nativePush.js';
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { captureNativeBadgeUpdate } from '../native/nativeBadge';
+import { UNREAD_CHANGED_EVENT } from '../hooks/useUnreadConversations';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const PUSH_RECEIVED_MESSAGE = 'waves:push-received';
 
 // Local, unverified role hint from the staff JWT — gates nothing
 // security-sensitive (same pattern as push-subscribe.js): the server
@@ -43,6 +45,11 @@ async function syncAppBadge(count, at) {
     try {
       if (Number.isFinite(at) && typeof caches !== 'undefined') {
         const cache = await caches.open('waves-badge-state');
+        const prevRes = await cache.match('/__badge-seq');
+        let prev = { seq: 0, count: -1 };
+        if (prevRes) { try { prev = await prevRes.json(); } catch { /* corrupt → treat as empty */ } }
+        if (prev.seq > at) return;
+        if (prev.seq === at && prev.count >= count) return;
         await cache.put('/__badge-seq', new Response(JSON.stringify({ seq: at, count })));
       }
     } catch { /* ordering state is best-effort */ }
@@ -124,6 +131,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
         if (!countActiveRef.current || seq !== countSeqRef.current) return;
         if (type === 'customer' && api.token !== token
           && !sameRequestSession(tokenSessionIdentity(token), tokenSessionIdentity(api.token))) return;
+        if (!Number.isSafeInteger(d.count) || d.count < 0) return;
         setUnreadCount(d.count || 0);
         if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(d.count || 0, d.at);
         // Absent on older server versions: do nothing. An explicit false is
@@ -141,16 +149,24 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     fetchCount();
     const iv = setInterval(fetchCount, 30000);
     const onVisible = () => { if (document.visibilityState === 'visible') fetchCount(); };
+    const onPushReceived = (event) => {
+      if (event.data?.type === PUSH_RECEIVED_MESSAGE && document.visibilityState === 'visible') fetchCount();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    const serviceWorker = typeof navigator !== 'undefined' ? navigator.serviceWorker : null;
+    serviceWorker?.addEventListener?.('message', onPushReceived);
+    if (type === 'admin') window.addEventListener(UNREAD_CHANGED_EVENT, fetchCount);
     if (nativeCustomer) {
       window.addEventListener('waves:native-notification', fetchCount);
-      document.addEventListener('visibilitychange', onVisible);
     }
     return () => {
       countActiveRef.current = false;
       ++countSeqRef.current;
       clearInterval(iv);
+      if (type === 'admin') window.removeEventListener(UNREAD_CHANGED_EVENT, fetchCount);
       window.removeEventListener('waves:native-notification', fetchCount);
       document.removeEventListener('visibilitychange', onVisible);
+      serviceWorker?.removeEventListener?.('message', onPushReceived);
     };
   }, [type, customerId, nativeCustomer]);
 
