@@ -29,6 +29,7 @@ jest.mock('../services/call-commitments', () => ({ refreshFulfillment: jest.fn()
 
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { isEnabled } = require('../config/feature-gates');
 const { refreshFulfillment } = require('../services/call-commitments');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { reviseDispositionAfterAppliedMove, applyRescheduleFollowUps } = CallRecordingProcessor._test;
@@ -216,6 +217,18 @@ describe('reviseDispositionAfterAppliedMove', () => {
       });
       await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_other_call' });
       expect(store.disposition).toBe('existing_customer_routed');
+    });
+
+    test('callCommitments dark preserves the disposition even with no window and no visible commitment (Codex #4721 r3 P1)', async () => {
+      // recordCommitmentsStep bails outright when the gate is off, so an
+      // absent commitment row proves nothing about whether an independent
+      // obligation exists — there was never a chance to detect one.
+      isEnabled.mockImplementationOnce((name) => name !== 'callCommitments');
+      const { store } = mockStore({
+        callLog: { disposition: 'callback_task_created', v2_extraction_status: 'valid', ai_extraction_enriched: resolvedRescheduleExtraction },
+      });
+      await reviseDispositionAfterAppliedMove({ call: { id: CALL_ID }, callSid: 'CA_gate_dark' });
+      expect(store.disposition).toBe('callback_task_created');
     });
   });
 

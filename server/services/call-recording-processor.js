@@ -6753,15 +6753,31 @@ const STALE_AFTER_APPLIED_MOVE = new Set(['callback_task_created', 'cancellation
 // extraction, or an open call_commitments row of kind callback/call_back
 // (at most one 'waves:callback' row can exist — that key is not in
 // REPEATABLE_KINDS, so it is never split across two rows) — names
-// something ELSE, not this move. Only when NEITHER signal is present —
-// the disposition rests on the model's bare recommended_disposition alone,
-// nothing grounding it — is callback_task_created safe to read as a stale
-// intermediate judgment the later explicit commitment superseded. Fails
-// safe: any sign of a standing need leaves the disposition alone.
+// something ELSE, not this move.
+//
+// An absent row is not proof either, though (Codex #4721 r3 P1): with
+// callback_window_* unset, deriveCommitmentsFromExtraction's deterministic
+// seed has no field-path evidence to ground a callback item on and never
+// writes one — detecting a callback_window-less independent obligation (a
+// free-form "call me about my invoice") then depends ENTIRELY on the
+// call-commitments MODEL pass, which is optional best-effort (a timeout or
+// provider error is caught, logged, and left with no durable marker —
+// recordCallCommitments' summary never reaches call_log). Requiring
+// callCommitments to be LIVE at least means that pass had the chance to
+// run for every call reaching this function; a silent in-pass model
+// failure is accepted as a residual, already-logged risk shared by the
+// whole call-commitments feature (github #4721 PR body: scoped out, same
+// boundary the original task drew for the fulfillment side of this same
+// question) rather than grounds to block every revision on an
+// unconfirmable negative. With the gate dark there is no visibility at
+// all, so nothing is ever revised.
 async function hasIndependentCallbackObligation(callId, v2) {
   const schedulingCallbackWindow = v2?.scheduling?.callback_window_start || v2?.scheduling?.callback_window_end || null;
   if (schedulingCallbackWindow) {
     return { independent: true, reason: 'scheduling.callback_window_* still set alongside the committed booking' };
+  }
+  if (!isEnabled('callCommitments')) {
+    return { independent: true, reason: 'callCommitments is not live — no way to confirm the callback was resolved by this move' };
   }
   const openCallbackRow = await db('call_commitments')
     .where({ call_log_id: callId, status: 'open' })
