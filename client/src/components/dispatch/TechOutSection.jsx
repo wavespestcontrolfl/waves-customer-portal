@@ -205,7 +205,12 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       }
       setSubmitError(err.message || 'Failed to mark out');
     } finally {
-      if (!discarded) setSubmitting(false);
+      // A discarded response still resets the loading flag when THIS tech
+      // is still on screen: a remote absence refetch (TECH_ABSENCE_EVENT)
+      // can supersede an in-flight mutation without the selection moving,
+      // and the refetched status is what the section now shows (pre-push
+      // auditor P1 on #4678). Only a selection change / unmount leaves it.
+      if (!discarded || techIdRef.current === requestTechId) setSubmitting(false);
     }
   }
 
@@ -255,7 +260,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       if (discarded) return;
       setSubmitError(err.message || 'Failed to clear absence');
     } finally {
-      if (!discarded) setClearing(false);
+      if (!discarded || techIdRef.current === requestTechId) setClearing(false); // same rule as setSubmitting above
     }
   }
 

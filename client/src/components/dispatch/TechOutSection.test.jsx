@@ -336,3 +336,45 @@ describe('remote changes and a second clear (Codex r8 P2s on PR #4678)', () => {
     expect(await screen.findByText('Out today · Emergency')).toBeInTheDocument();
   });
 });
+
+describe('a remote refetch that supersedes an in-flight mutation (pre-push auditor P1 on PR #4678)', () => {
+  it('Confirm is not left stuck on "Redistributing…" and the refetched status wins', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Availability');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark out today' }));
+    await screen.findByRole('button', { name: 'Confirm' });
+
+    let releasePost;
+    fetch.mockReturnValueOnce(new Promise((resolve) => { releasePost = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByRole('button', { name: 'Redistributing…' })).toBeDisabled();
+
+    // Another tab's mark-out for this same tech lands while our POST is
+    // pending: the drawer refetches (status now shows the absence).
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ enabled: true, absence: { id: 'abs-r', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'sick', note: null, redistribution: { total: 0, parked: [] } } }),
+    });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_ABSENCE_EVENT, { detail: { tech_id: 'tech-1', date: '2026-09-23', out: true } }));
+    });
+    expect(await screen.findByText('Out today · Sick')).toBeInTheDocument();
+
+    // Our own POST now resolves (409 already_out): superseded, discarded,
+    // and nothing is stuck.
+    await act(async () => {
+      releasePost({ ok: false, status: 409, json: async () => ({ error: 'already_out' }) });
+    });
+    expect(screen.getByText('Out today · Sick')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Redistributing…' })).toBeNull();
+    expect(screen.queryByText('Already marked out')).toBeNull();
+    // The form is usable again after a remote clear (status → no absence):
+    // still in its confirm step, but Confirm is enabled, not stuck.
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_ABSENCE_EVENT, { detail: { tech_id: 'tech-1', date: '2026-09-23', out: false } }));
+    });
+    expect(await screen.findByRole('button', { name: 'Confirm' })).toBeEnabled();
+  });
+});
