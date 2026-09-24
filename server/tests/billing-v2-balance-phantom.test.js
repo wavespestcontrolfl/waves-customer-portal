@@ -162,7 +162,7 @@ describe('GET /balance — phantom failed-row exclusion', () => {
   // shown (or payable) as balance, and must not raise the failed banner.
   test('a never-attempted lock-contention deferral is neither balance nor a failed attempt', async () => {
     const deferral = {
-      amount: '55.00', stripe_payment_intent_id: null, retry_count: 0,
+      amount: '55.00', stripe_payment_intent_id: null, retry_count: 0, next_retry_at: '2026-09-24T14:00:00Z',
       metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: '2026-09', deferred_reason: 'lock_contention' }),
     };
     tableResults.failedRows = [deferral];
@@ -173,9 +173,22 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     expect(body.lastPaymentFailed).toBe(false);
   });
 
+  test('a deferral the sweep DISARMED without superseding (Auto Pay off / off the monthly lane) counts again — no collector is coming for it', async () => {
+    const disarmed = {
+      amount: '55.00', stripe_payment_intent_id: null, retry_count: 0, next_retry_at: null,
+      metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: '2026-09', deferred_reason: 'lock_contention' }),
+    };
+    tableResults.failedRows = [disarmed];
+    tableResults.recentAttempts = [{ status: 'failed', ...disarmed }];
+
+    const body = await getBalance();
+    expect(body.currentBalance).toBe(55);
+    expect(body.lastPaymentFailed).toBe(true);
+  });
+
   test('once the retry sweep has actually attempted the deferral (retry_count > 0) it counts like any failed rung', async () => {
     const attempted = {
-      amount: '55.00', stripe_payment_intent_id: null, retry_count: 1,
+      amount: '55.00', stripe_payment_intent_id: null, retry_count: 1, next_retry_at: '2026-09-26T14:00:00Z',
       metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: '2026-09', deferred_reason: 'lock_contention' }),
     };
     tableResults.failedRows = [attempted];

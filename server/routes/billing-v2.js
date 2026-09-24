@@ -1019,8 +1019,12 @@ router.get('/balance', async (req, res, next) => {
     // as a payable balance invites paying dues the winner already took.
     // The 10 AM sweep either supersedes it against the winner or actually
     // attempts it; a real decline bumps retry_count and it counts again.
+    // Only while ARMED (Codex #4682 r4 P2): once the sweep disarms it
+    // without superseding (Auto Pay off, customer off the monthly lane —
+    // next_retry_at cleared, retry_count still 0) no collector is coming
+    // for it any more, and it is visible debt like any other disarmed row.
     const isNeverAttemptedDeferral = (p) => {
-      if (p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0) return false;
+      if (p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0 || p.next_retry_at == null) return false;
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
         return !!(m && m.deferred_reason === 'lock_contention');
@@ -1031,7 +1035,7 @@ router.get('/balance', async (req, res, next) => {
     const failedRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .select('amount', 'metadata', 'stripe_payment_intent_id', 'retry_count');
+      .select('amount', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at');
     const failedInvoiceIds = [...new Set(failedRows.map(metadataInvoiceId).filter(Boolean))];
     const balanceCarryingInvoiceIds = new Set(
       failedInvoiceIds.length
@@ -1096,7 +1100,7 @@ router.get('/balance', async (req, res, next) => {
       .whereIn('status', ['paid', 'failed', 'refunded'])
       .whereNull('superseded_by_payment_id')
       .orderBy('payment_date', 'desc')
-      .select('status', 'metadata', 'stripe_payment_intent_id', 'retry_count');
+      .select('status', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at');
     let mostRecentAttempt = null;
     {
       const PAGE = 50;
