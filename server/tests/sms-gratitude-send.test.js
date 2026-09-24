@@ -20,6 +20,7 @@ const mockState = {
   aliasFirsts: 0,
   candidateRows: [],
   candidateOrderBys: [],
+  candidateExclusions: [],
 };
 
 jest.mock('../models/db', () => {
@@ -48,6 +49,15 @@ jest.mock('../models/db', () => {
       return q;
     });
     q.orWhere = jest.fn(() => q);
+    q.whereNotExists = jest.fn((callback) => {
+      const subquery = { raws: [] };
+      subquery.select = jest.fn(() => subquery);
+      subquery.from = jest.fn((from) => { subquery.fromTable = from; return subquery; });
+      subquery.whereRaw = jest.fn((sql, bindings) => { subquery.raws.push([sql, bindings]); return subquery; });
+      callback.call(subquery);
+      if (table === 'message_drafts as md') mockState.candidateExclusions.push(subquery);
+      return q;
+    });
     q.orWhereExists = jest.fn((callback) => {
       const subquery = {};
       for (const method of ['select', 'from', 'where', 'whereRaw']) {
@@ -188,6 +198,7 @@ function resetFixture() {
   mockState.decisionThreadScope = false;
   mockState.candidateRows = [];
   mockState.candidateOrderBys = [];
+  mockState.candidateExclusions = [];
   mockState.customers = [{ id: ID.customer, first_name: 'Dana', phone: '+19415550100' }];
   mockState.inbound = {
     id: ID.inbound, customer_id: ID.customer, direction: 'inbound',
@@ -434,6 +445,69 @@ test('candidate sweep drains the oldest inbound before more than 25 newer reject
     ['md.id', 'asc'],
   ]);
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+});
+
+function sweepCandidate(overrides = {}) {
+  return {
+    id: ID.draft,
+    sms_log_id: ID.inbound,
+    customer_id: ID.customer,
+    inbound_message: mockState.inbound.message_body,
+    draft_response: mockState.draft.draft_response,
+    intent: GRATITUDE_INTENT,
+    intent_confidence: 1,
+    model: 'gpt-test',
+    prompt_version: 'house_voice_v11',
+    intended_actions: metadata(),
+    scheduling_intent: false,
+    inbound_created_at: mockState.inbound.created_at,
+    created_at: mockState.draft.created_at,
+    ...overrides,
+  };
+}
+
+test('candidate sweep skips inbounds that already hold a send-once claim', async () => {
+  mockState.candidateRows = [sweepCandidate()];
+  await autoSend.processGratitudeAutoSendCandidates({ now: new Date() });
+  expect(mockState.candidateExclusions).toHaveLength(1);
+  const [exclusion] = mockState.candidateExclusions;
+  expect(exclusion.fromTable).toBe('agent_decisions as prior');
+  expect(exclusion.raws).toEqual([[
+    'prior.idempotency_key = ? || s.id::text',
+    ['sms_house_voice_auto_send:inbound:'],
+  ]]);
+});
+
+test('older candidates refused after the prefilter cannot starve a valid newer one', async () => {
+  const now = new Date();
+  const refused = Array.from({ length: 30 }, (_, index) => {
+    const inboundAt = new Date(now.getTime() - (9 * 60 * 1000) + index * 1000);
+    return sweepCandidate({
+      id: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      sms_log_id: `20000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      // Reaches the executor, then fails its durable-row comparison.
+      draft_response: 'Not the approved reply',
+      inbound_created_at: inboundAt,
+      created_at: new Date(inboundAt.getTime() + 1000),
+    });
+  });
+  mockState.candidateRows = [...refused, sweepCandidate()];
+
+  await expect(autoSend.processGratitudeAutoSendCandidates({ now }))
+    .resolves.toEqual({ scanned: 31, attempted: 31, sent: 1 });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+});
+
+test('a sweep-wide refusal stops the sweep after one attempt', async () => {
+  mockState.intentMode = 'suggest';
+  suggest.getIntentMode.mockResolvedValueOnce('suggest');
+  mockState.candidateRows = [
+    sweepCandidate({ id: '10000000-0000-4000-8000-000000000001', sms_log_id: '20000000-0000-4000-8000-000000000001' }),
+    sweepCandidate(),
+  ];
+  await expect(autoSend.processGratitudeAutoSendCandidates({ now: new Date() }))
+    .resolves.toEqual({ scanned: 2, attempted: 1, sent: 0 });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
 
 // Simulate provider preparation before the distinct final SMS predicate.

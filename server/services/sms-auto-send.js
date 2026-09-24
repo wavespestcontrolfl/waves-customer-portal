@@ -472,280 +472,338 @@ async function failClaim(decisionId, reason) {
  * a shadow/auto-send miss must never affect the inbound webhook path.
  */
 async function maybeAutoSend(params = {}) {
-  const {
-    draftId, customer, smsLogId, inboundMessage, reply, intent,
-    intendedActions = null, actionsVerifiedSafe = false,
-    confidence = null, model = null, promptVersion = null, schedulingIntent = false,
-    voiceProfileVersion = null,
-  } = params;
-  let customerId = customer?.id || null;
-  const gratitudeLane = intent === GRATITUDE_INTENT;
-
+  const gratitudeLane = params.intent === GRATITUDE_INTENT;
   try {
-    // (1) Gate.
-    if (gratitudeLane) {
-      if (!isEnabled('smsGratitudeReplies')) return { sent: false, reason: 'gate_off' };
-    } else if (!isEnabled('smsAutoSend')) {
-      return { sent: false, reason: 'gate_off' };
-    }
-
-    const suggest = require('./sms-suggest-mode');
-    // (2) Base eligibility (same hard rules as a suggestion).
-    if (!suggest.suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) {
-      return { sent: false, reason: 'ineligible_base' };
-    }
-
-    // Gratitude never trusts the drafter call's copies of source/customer/text.
-    // Reload the durable rows now, then repeat the same read under the claim
-    // lock immediately before provider entry.
-    let gratitudeContext = null;
-    if (gratitudeLane) {
-      gratitudeContext = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
-      if (!gratitudeContext.ok) return { sent: false, reason: gratitudeContext.reason };
-      if (customerId !== gratitudeContext.customer.id
-          || inboundMessage !== gratitudeContext.inbound.message_body
-          || reply !== gratitudeContext.expectedReply
-          || model !== gratitudeContext.draft.model
-          || promptVersion !== gratitudeContext.draft.prompt_version) {
-        return { sent: false, reason: 'caller_draft_mismatch' };
-      }
-      customerId = gratitudeContext.customer.id;
-    }
-    // (3) Intent must actually be flipped to auto_send.
-    const mode = await suggest.getIntentMode(intent);
-    if (mode !== AUTOSEND_MODE) return { sent: false, reason: 'mode_not_autosend' };
-
-    // (3.5) A draft whose safety contract records a follow-up action
-    //       (escalate / book / send a link) must reach a HUMAN — auto-sending
-    //       the text alone would promise something the executor never does.
-    //       Two layers: (a) actionsVerifiedSafe is the parser's RAW-output flag
-    //       (the only place unknown/dropped action types are visible — defaults
-    //       false, so a caller that omits it fails closed); (b) the executor
-    //       independently re-checks the sanitized list. Both must hold.
-    if (actionsVerifiedSafe !== true || !autoSendActionsSafe(intendedActions)) {
-      return { sent: false, reason: 'action_required' };
-    }
-
-    // (3.6) Defense in depth at the autonomy boundary: never send a reply that
-    //       carries a redaction placeholder ([name], [phone], …) copied from a
-    //       few-shot exemplar. Deterministic, independent of the LLM verifier.
-    if (suggest.hasRedactionPlaceholder(reply)) {
-      logger.warn(`[sms-auto-send] reply carries a redaction placeholder — refusing auto-send (intent=${intent})`);
-      return { sent: false, reason: 'redaction_placeholder' };
-    }
-
-    // (3.65) Voice-profile pin at the autonomy boundary (Codex r4): the
-    //       readiness evidence the eligibility check consults belongs to the
-    //       CURRENTLY effective profile, but THIS draft may have been shaped
-    //       by a different one — the drafting-path fetch fails safe to the
-    //       base prompt, and an approval can land mid-generation. Resolve
-    //       the effective profile ONCE (fail closed on error), require the
-    //       draft's stamp to match it, and hand the SAME pin to the
-    //       eligibility queries so gate and evidence can never disagree.
-    let effectiveVoiceProfileVersion;
-    try {
-      effectiveVoiceProfileVersion = (await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile())?.version ?? null;
-    } catch (err) {
-      logger.warn(`[sms-auto-send] voice-profile resolution failed (${err.message}) — refusing auto-send (intent=${intent})`);
-      return { sent: false, reason: 'voice_profile_unresolved' };
-    }
-    if ((voiceProfileVersion ?? null) !== effectiveVoiceProfileVersion) {
-      logger.warn(`[sms-auto-send] draft profile (${voiceProfileVersion ?? 'none'}) != effective profile (${effectiveVoiceProfileVersion ?? 'none'}) — refusing auto-send (intent=${intent})`);
-      return { sent: false, reason: 'voice_profile_mismatch' };
-    }
-
-    // (3.7) Amount-bearing drafts never AUTO-send. Owner ruling 2026-07-30
-    //       allows real amounts in texts, and the suggest lane now delivers
-    //       them (a human reviews before send) — but at the autonomy
-    //       boundary a wrong figure sent with nobody looking is the
-    //       worst-case failure, so this lane stays refused until an explicit
-    //       owner call relaxes it. Deterministic, independent of the LLM
-    //       verifier.
-    if (suggest.hasPriceQuote(reply)) {
-      logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
-      return { sent: false, reason: 'price_quote' };
-    }
-
-    // (4) Server-enforced graduation eligibility — re-checked live every send.
-    const graduation = require('./sms-graduation');
-    const elig = await graduation.evaluateAutoSendEligibility({ intent, voiceProfileVersion: effectiveVoiceProfileVersion });
-    if (!elig.eligible) {
-      logger.info(`[sms-auto-send] intent=${intent} not eligible; blockers: ${(elig.blockers || []).join(' | ')}`);
-      return { sent: false, reason: 'not_eligible' };
-    }
+    const ready = await autoSendReadiness(params, gratitudeLane);
+    if (ready.reason) return { sent: false, reason: ready.reason };
 
     // (5)+(6) Claim under the lock + guard-gauntlet. The ordinary lane parks
     // sibling cards; gratitude refuses them and leaves them untouched.
     const claim = gratitudeLane
-      ? await claimGratitudeSend({ draftId, smsLogId, confidence })
-      : await claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion });
+      ? await claimGratitudeSend({ draftId: params.draftId, smsLogId: params.smsLogId, confidence: params.confidence })
+      : await claimAutoSend({ ...params, customerId: ready.customerId });
     if (!claim) return { sent: false, reason: 'guarded_or_claimed' };
-    const parkedIds = claim.parkedIds || [];
-    const sendReply = gratitudeLane ? claim.reply : reply;
-    customerId = gratitudeLane ? claim.customerId : customerId;
-
-    // A blocked/failed/errored send means the customer was NOT answered — the
-    // parked sibling cards must come back. A confirmed send means the thread
-    // WAS answered autonomously — they resolve as ignored (drafts return to the
-    // judge), exactly like the manual send's post-send sweep.
-    const reopenParked = async (reason) => {
-      if (parkedIds.length) await suggest.reopenScheduledSuggestions({ decisionIds: parkedIds, reason });
-    };
-
-    // (7) Send via the policy-checked provider path (consent,
-    //     suppression, identity trust all enforced upstream).
-    const { sendCustomerMessage } = require('./messaging/send-customer-message');
-    // Arm before provider entry. A timeout followed by a DB outage still has
-    // durable uncertainty evidence; if this write misses, fail closed before
-    // any customer communication.
-    if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, uncertain: true })) {
-      await failClaim(claim.decisionId, 'could not arm provider-outcome reservation');
-      await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
-      return { sent: false, reason: 'reservation_failed' };
-    }
-    // Recheck after Twilio's final awaited guard, using its held connection
-    // when present. Earlier provider preparation cannot stale this read.
-    const checkGratitudeHandoff = gratitudeLane ? async ({ dbi = db } = {}) => {
-      const pendingWork = await pendingGratitudeWork(dbi, {
-        customerId: claim.customerId,
-        threadKey: claim.threadKey,
-        excludeDecisionId: claim.decisionId,
-      });
-      const advanced = await gratitudeThreadAdvanced(dbi, {
-        inboundId: claim.inboundId,
-        fromPhone: claim.inboundFromPhone,
-        toPhone: claim.inboundToPhone,
-        skipReservationId: claim.reservationId,
-      });
-      const timing = gratitudeTimingReason({
-        inboundCreatedAt: claim.inboundCreatedAt,
-        now: new Date(),
-        activatedAt: gratitudeActivation(),
-      });
-      const reason = pendingWork ? 'pending_work'
-        : advanced ? 'thread_advanced'
-        : timing || (!isEnabled('smsGratitudeReplies') ? 'gate_off' : null);
-      return reason ? { ok: false, code: reason, reason } : { ok: true };
-    } : undefined;
-    let result;
-    try {
-      if (checkGratitudeHandoff) {
-        const verdict = await checkGratitudeHandoff();
-        if (!verdict.ok) {
-          await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
-          await failClaim(claim.decisionId, verdict.reason);
-          return { sent: false, reason: verdict.reason };
-        }
-      }
-      const providerHandoffReservation = gratitudeLane ? null : require('./messaging/provider-handoff-reservation')
-        .borrowProviderHandoffReservation({
-          reservationId: claim.reservationId,
-          to: claim.toPhone,
-          fromNumber: claim.fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
-          body: sendReply,
-          messageType: AUTOSEND_MESSAGE_TYPE,
-        });
-      result = await sendCustomerMessage({
-        to: claim.toPhone,
-        body: sendReply,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'conversational',
-        customerId,
-        identityTrustLevel: 'phone_matches_customer',
-        entryPoint: 'sms_auto_send_executor',
-        ...(gratitudeLane ? {
-          providerPreSendCheck: checkGratitudeHandoff,
-          // Generic sends publish their holding row under this same lock.
-          // Keep it through the final checks and SDK call so publication
-          // cannot slip between a clear-thread verdict and the handoff.
-          withSmsHandoff: dispatch => db.transaction(async (trx) => {
-            await suggest.lockSuggestThread(trx, claim.threadLast10);
-            await dispatch(trx);
-            return { ok: true };
-          }),
-        } : {}),
-        // Send-window inbound-reply provenance: the auto-send executor only
-        // dispatches green-judged replies to a message the customer just
-        // texted into an active thread — the send class the window
-        // deliberately never defers.
-        conversationalContext: true,
-        providerHandoffReservation,
-        metadata: {
-          original_message_type: gratitudeLane ? 'ai_gratitude' : AUTOSEND_MESSAGE_TYPE,
-          ...(gratitudeLane ? { gratitude_policy_version: GRATITUDE_POLICY_VERSION } : {}),
-          agentDecisionId: claim.decisionId,
-          parkedDecisionIds: parkedIds.length ? parkedIds : undefined,
-          fromNumber: claim.fromNumber || undefined,
-        },
-      });
-    } catch (err) {
-      if (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) {
-        result = err.providerOutcome;
-      } else {
-        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
-        await failClaim(claim.decisionId, `send threw: ${err.message}`);
-        await reopenParked('Auto-send errored before delivery — suggestion reopened.');
-        logger.warn(`[sms-auto-send] send threw (decision ${claim.decisionId}): ${err.message}`);
-        return { sent: false, reason: 'send_error' };
-      }
-    }
-
-    // sent:true is not enough — an upstream suppression (gate off, template
-    // disabled, owner kill switch) reports sent with a sentinel id but nothing
-    // reached the customer. Only a real provider message finalizes the draft.
-    if (isRealProviderSend(result)) {
-      // The customer HAS been texted. Post-send bookkeeping must never flip
-      // this back to sent:false — that would let the drafter republish the
-      // already-delivered draft as a suggestion (a duplicate reply). If the
-      // bookkeeping update throws, the claim stays 'sending' with a sent
-      // sms_log row and reconcileAutoSendClaims settles it (resolve + flip).
-      try {
-        // The reservation itself becomes accepted evidence before any later
-        // bookkeeping. If Twilio's sms_log insert and these writes both fail,
-        // recovery still has one durable sent row linking used + parked ids.
-        if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, acceptedResult: result })) {
-          throw new Error('accepted reservation was not promoted');
-        }
-        if (!await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId })) {
-          throw new Error('auto-send claim was not resolved');
-        }
-        if (parkedIds.length) {
-          const ignored = await suggest.ignoreParkedSuggestions({ decisionIds: parkedIds, reviewedBy: 'auto' });
-          if (ignored !== parkedIds.length) throw new Error('parked suggestions were not fully resolved');
-        }
-        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
-      } catch (bookErr) {
-        logger.warn(`[sms-auto-send] post-send bookkeeping failed (decision ${claim.decisionId}); reconcile sweep will settle: ${bookErr.message}`);
-      }
-      logger.info(`[sms-auto-send] SENT customer=${customerId || 'unknown'} intent=${intent} decision=${claim.decisionId} sid=${result.providerMessageId || 'n/a'}`);
-      return { sent: true, decisionId: claim.decisionId, providerMessageId: result.providerMessageId || null };
-    }
-
-    if (isAmbiguousProviderOutcome(result)) {
-      logger.warn(`[sms-auto-send] provider outcome uncertain (decision ${claim.decisionId}) — claim retained for reconciliation`);
-      return { sent: false, reason: 'provider_uncertain', ambiguous: true, decisionId: claim.decisionId };
-    }
-
-    const notSentReason = result?.sent ? `suppressed:${result.providerMessageId || 'unknown'}` : (result?.code || 'not_sent');
-    await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
-    await failClaim(claim.decisionId, result?.reason || notSentReason);
-    await reopenParked('Auto-send did not go out — suggestion reopened.');
-    logger.info(`[sms-auto-send] NOT sent customer=${customerId || 'unknown'} intent=${intent} reason=${notSentReason}`);
-    return { sent: false, reason: notSentReason };
+    return await dispatchClaimedSend({
+      claim,
+      gratitudeLane,
+      draftId: params.draftId,
+      intent: params.intent,
+      reply: gratitudeLane ? claim.reply : params.reply,
+      customerId: gratitudeLane ? claim.customerId : ready.customerId,
+    });
   } catch (err) {
-    logger.error(`[sms-auto-send] unexpected failure (draft ${draftId}): ${err.message}`);
+    logger.error(`[sms-auto-send] unexpected failure (draft ${params.draftId}): ${err.message}`);
     return { sent: false, reason: 'error' };
   }
 }
 
 /**
- * Reuse the existing five-minute scheduler as delay storage: scan only recent
- * live-webhook gratitude shadow drafts, then hand each candidate to the same
- * fully revalidating executor. No queue state is created here.
+ * Steps (1)–(4) for one draft, cheapest first so the eligibility query never
+ * runs for a draft that is already refused. Returns { reason } on refusal,
+ * otherwise { customerId } — for gratitude, the reloaded durable customer.
  */
-async function processGratitudeAutoSendCandidates({ limit = 25, now = new Date() } = {}) {
-  const boundedLimit = Math.max(1, Math.min(Number(limit) || 25, 50));
+async function autoSendReadiness(params, gratitudeLane) {
+  const {
+    customer, smsLogId, reply, intent, intendedActions = null,
+    actionsVerifiedSafe = false, schedulingIntent = false,
+  } = params;
+  // (1) Gate.
+  if (!isEnabled(gratitudeLane ? 'smsGratitudeReplies' : 'smsAutoSend')) return { reason: 'gate_off' };
+
+  const suggest = require('./sms-suggest-mode');
+  const callerCustomerId = customer?.id || null;
+  // (2) Base eligibility (same hard rules as a suggestion).
+  if (!suggest.suggestionEligible({ reply, customerId: callerCustomerId, smsLogId, intent, schedulingIntent })) {
+    return { reason: 'ineligible_base' };
+  }
+  const caller = gratitudeLane
+    ? await reloadGratitudeCaller(params)
+    : { customerId: callerCustomerId };
+  if (caller.reason) return caller;
+
+  // (3) Intent must actually be flipped to auto_send.
+  if (await suggest.getIntentMode(intent) !== AUTOSEND_MODE) return { reason: 'mode_not_autosend' };
+
+  // (3.5) A draft whose safety contract records a follow-up action
+  //       (escalate / book / send a link) must reach a HUMAN — auto-sending
+  //       the text alone would promise something the executor never does.
+  //       Two layers: (a) actionsVerifiedSafe is the parser's RAW-output flag
+  //       (the only place unknown/dropped action types are visible — defaults
+  //       false, so a caller that omits it fails closed); (b) the executor
+  //       independently re-checks the sanitized list. Both must hold.
+  if (actionsVerifiedSafe !== true || !autoSendActionsSafe(intendedActions)) return { reason: 'action_required' };
+
+  // (3.6) Defense in depth at the autonomy boundary: never send a reply that
+  //       carries a redaction placeholder ([name], [phone], …) copied from a
+  //       few-shot exemplar. Deterministic, independent of the LLM verifier.
+  if (suggest.hasRedactionPlaceholder(reply)) {
+    logger.warn(`[sms-auto-send] reply carries a redaction placeholder — refusing auto-send (intent=${intent})`);
+    return { reason: 'redaction_placeholder' };
+  }
+
+  const profile = await pinDraftVoiceProfile(params);
+  if (profile.reason) return profile;
+
+  // (3.7) Amount-bearing drafts never AUTO-send. Owner ruling 2026-07-30
+  //       allows real amounts in texts, and the suggest lane now delivers
+  //       them (a human reviews before send) — but at the autonomy
+  //       boundary a wrong figure sent with nobody looking is the
+  //       worst-case failure, so this lane stays refused until an explicit
+  //       owner call relaxes it. Deterministic, independent of the LLM
+  //       verifier.
+  if (suggest.hasPriceQuote(reply)) {
+    logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
+    return { reason: 'price_quote' };
+  }
+
+  // (4) Server-enforced graduation eligibility — re-checked live every send.
+  const elig = await require('./sms-graduation').evaluateAutoSendEligibility({ intent, voiceProfileVersion: profile.version });
+  if (!elig.eligible) {
+    logger.info(`[sms-auto-send] intent=${intent} not eligible; blockers: ${(elig.blockers || []).join(' | ')}`);
+    return { reason: 'not_eligible' };
+  }
+  return { customerId: caller.customerId };
+}
+
+/**
+ * Gratitude never trusts the drafter call's copies of source/customer/text.
+ * Reload the durable rows now; the claim repeats the same read under the lock
+ * immediately before provider entry.
+ */
+async function reloadGratitudeCaller({
+  draftId, smsLogId, customer, inboundMessage, reply, model = null, promptVersion = null,
+}) {
+  const context = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+  if (!context.ok) return { reason: context.reason };
+  const matches = (customer?.id || null) === context.customer.id
+    && inboundMessage === context.inbound.message_body
+    && reply === context.expectedReply
+    && model === context.draft.model
+    && promptVersion === context.draft.prompt_version;
+  return matches ? { customerId: context.customer.id } : { reason: 'caller_draft_mismatch' };
+}
+
+/**
+ * (3.65) Voice-profile pin at the autonomy boundary (Codex r4): the readiness
+ * evidence the eligibility check consults belongs to the CURRENTLY effective
+ * profile, but THIS draft may have been shaped by a different one — the
+ * drafting-path fetch fails safe to the base prompt, and an approval can land
+ * mid-generation. Resolve the effective profile ONCE (fail closed on error),
+ * require the draft's stamp to match it, and hand the SAME pin to the
+ * eligibility queries so gate and evidence can never disagree.
+ */
+async function pinDraftVoiceProfile({ intent, voiceProfileVersion = null }) {
+  let effective;
+  try {
+    effective = (await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile())?.version ?? null;
+  } catch (err) {
+    logger.warn(`[sms-auto-send] voice-profile resolution failed (${err.message}) — refusing auto-send (intent=${intent})`);
+    return { reason: 'voice_profile_unresolved' };
+  }
+  if (voiceProfileVersion !== effective) {
+    logger.warn(`[sms-auto-send] draft profile (${voiceProfileVersion ?? 'none'}) != effective profile (${effective ?? 'none'}) — refusing auto-send (intent=${intent})`);
+    return { reason: 'voice_profile_mismatch' };
+  }
+  return { version: effective };
+}
+
+/**
+ * Gratitude's provider-boundary predicate. Run after Twilio's final awaited
+ * guard, using its held connection when present, so earlier provider
+ * preparation cannot stale this read.
+ */
+function gratitudeHandoffCheck(claim) {
+  return async ({ dbi = db } = {}) => {
+    const pendingWork = await pendingGratitudeWork(dbi, {
+      customerId: claim.customerId,
+      threadKey: claim.threadKey,
+      excludeDecisionId: claim.decisionId,
+    });
+    const advanced = await gratitudeThreadAdvanced(dbi, {
+      inboundId: claim.inboundId,
+      fromPhone: claim.inboundFromPhone,
+      toPhone: claim.inboundToPhone,
+      skipReservationId: claim.reservationId,
+    });
+    const timing = gratitudeTimingReason({
+      inboundCreatedAt: claim.inboundCreatedAt,
+      now: new Date(),
+      activatedAt: gratitudeActivation(),
+    });
+    const reason = pendingWork ? 'pending_work'
+      : advanced ? 'thread_advanced'
+      : timing || (!isEnabled('smsGratitudeReplies') ? 'gate_off' : null);
+    return reason ? { ok: false, code: reason, reason } : { ok: true };
+  };
+}
+
+/** The lane-specific sendCustomerMessage input for a claimed reply. */
+function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff }) {
+  const parkedIds = claim.parkedIds || [];
+  const laneFields = gratitudeLane ? {
+    providerPreSendCheck: checkHandoff,
+    // Generic sends publish their holding row under this same lock.
+    // Keep it through the final checks and SDK call so publication
+    // cannot slip between a clear-thread verdict and the handoff.
+    withSmsHandoff: dispatch => db.transaction(async (trx) => {
+      await require('./sms-suggest-mode').lockSuggestThread(trx, claim.threadLast10);
+      await dispatch(trx);
+      return { ok: true };
+    }),
+    providerHandoffReservation: null,
+  } : {
+    providerHandoffReservation: require('./messaging/provider-handoff-reservation')
+      .borrowProviderHandoffReservation({
+        reservationId: claim.reservationId,
+        to: claim.toPhone,
+        fromNumber: claim.fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+        body: reply,
+        messageType: AUTOSEND_MESSAGE_TYPE,
+      }),
+  };
+  return {
+    to: claim.toPhone,
+    body: reply,
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'conversational',
+    customerId,
+    identityTrustLevel: 'phone_matches_customer',
+    entryPoint: 'sms_auto_send_executor',
+    ...laneFields,
+    // Send-window inbound-reply provenance: the auto-send executor only
+    // dispatches green-judged replies to a message the customer just
+    // texted into an active thread — the send class the window
+    // deliberately never defers.
+    conversationalContext: true,
+    metadata: {
+      original_message_type: gratitudeLane ? 'ai_gratitude' : AUTOSEND_MESSAGE_TYPE,
+      ...(gratitudeLane ? { gratitude_policy_version: GRATITUDE_POLICY_VERSION } : {}),
+      agentDecisionId: claim.decisionId,
+      parkedDecisionIds: parkedIds.length ? parkedIds : undefined,
+      fromNumber: claim.fromNumber || undefined,
+    },
+  };
+}
+
+/**
+ * (7) Send a claimed reply via the policy-checked provider path (consent,
+ * suppression, identity trust all enforced upstream) and settle the claim.
+ * A blocked/failed/errored send means the customer was NOT answered — the
+ * parked sibling cards must come back. A confirmed send means the thread WAS
+ * answered autonomously — they resolve as ignored (drafts return to the
+ * judge), exactly like the manual send's post-send sweep.
+ */
+async function dispatchClaimedSend({ claim, gratitudeLane, draftId, intent, reply, customerId }) {
+  const suggest = require('./sms-suggest-mode');
+  const parkedIds = claim.parkedIds || [];
+  const reopenParked = async (reason) => {
+    if (parkedIds.length) await suggest.reopenScheduledSuggestions({ decisionIds: parkedIds, reason });
+  };
+  const notSent = async (reason, settleReason = reason) => {
+    await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+    await failClaim(claim.decisionId, settleReason);
+    return { sent: false, reason };
+  };
+
+  // Arm before provider entry. A timeout followed by a DB outage still has
+  // durable uncertainty evidence; if this write misses, fail closed before
+  // any customer communication.
+  if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, uncertain: true })) {
+    await failClaim(claim.decisionId, 'could not arm provider-outcome reservation');
+    await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
+    return { sent: false, reason: 'reservation_failed' };
+  }
+  const checkHandoff = gratitudeLane ? gratitudeHandoffCheck(claim) : undefined;
+  let result;
+  try {
+    const verdict = checkHandoff ? await checkHandoff() : { ok: true };
+    if (!verdict.ok) return await notSent(verdict.reason);
+    const { sendCustomerMessage } = require('./messaging/send-customer-message');
+    result = await sendCustomerMessage(autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff }));
+  } catch (err) {
+    if (!isRealProviderSend(err?.providerOutcome) && !isAmbiguousProviderOutcome(err?.providerOutcome)) {
+      const outcome = await notSent('send_error', `send threw: ${err.message}`);
+      await reopenParked('Auto-send errored before delivery — suggestion reopened.');
+      logger.warn(`[sms-auto-send] send threw (decision ${claim.decisionId}): ${err.message}`);
+      return outcome;
+    }
+    result = err.providerOutcome;
+  }
+  return settleAutoSendOutcome({ claim, result, draftId, intent, customerId, reopenParked });
+}
+
+/** Settle a claim from the provider's verdict on a reply that reached it. */
+async function settleAutoSendOutcome({ claim, result, draftId, intent, customerId, reopenParked }) {
+  // sent:true is not enough — an upstream suppression (gate off, template
+  // disabled, owner kill switch) reports sent with a sentinel id but nothing
+  // reached the customer. Only a real provider message finalizes the draft.
+  if (isRealProviderSend(result)) {
+    await recordAcceptedAutoSend({ claim, draftId, providerMessageId: result.providerMessageId, acceptedResult: result });
+    logger.info(`[sms-auto-send] SENT customer=${customerId || 'unknown'} intent=${intent} decision=${claim.decisionId} sid=${result.providerMessageId || 'n/a'}`);
+    return { sent: true, decisionId: claim.decisionId, providerMessageId: result.providerMessageId || null };
+  }
+
+  if (isAmbiguousProviderOutcome(result)) {
+    logger.warn(`[sms-auto-send] provider outcome uncertain (decision ${claim.decisionId}) — claim retained for reconciliation`);
+    return { sent: false, reason: 'provider_uncertain', ambiguous: true, decisionId: claim.decisionId };
+  }
+
+  const notSentReason = result?.sent ? `suppressed:${result.providerMessageId || 'unknown'}` : (result?.code || 'not_sent');
+  await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
+  await failClaim(claim.decisionId, result?.reason || notSentReason);
+  await reopenParked('Auto-send did not go out — suggestion reopened.');
+  logger.info(`[sms-auto-send] NOT sent customer=${customerId || 'unknown'} intent=${intent} reason=${notSentReason}`);
+  return { sent: false, reason: notSentReason };
+}
+
+/**
+ * The customer HAS been texted. Post-send bookkeeping must never flip this
+ * back to sent:false — that would let the drafter republish the
+ * already-delivered draft as a suggestion (a duplicate reply). If the
+ * bookkeeping update throws, the claim stays 'sending' with a sent sms_log row
+ * and reconcileAutoSendClaims settles it (resolve + flip).
+ */
+async function recordAcceptedAutoSend({ claim, draftId, providerMessageId, acceptedResult }) {
+  const suggest = require('./sms-suggest-mode');
+  const parkedIds = claim.parkedIds || [];
+  try {
+    // The reservation itself becomes accepted evidence before any later
+    // bookkeeping. If Twilio's sms_log insert and these writes both fail,
+    // recovery still has one durable sent row linking used + parked ids.
+    if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, acceptedResult })) {
+      throw new Error('accepted reservation was not promoted');
+    }
+    if (!await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId })) {
+      throw new Error('auto-send claim was not resolved');
+    }
+    if (parkedIds.length) {
+      const ignored = await suggest.ignoreParkedSuggestions({ decisionIds: parkedIds, reviewedBy: 'auto' });
+      if (ignored !== parkedIds.length) throw new Error('parked suggestions were not fully resolved');
+    }
+    await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+  } catch (bookErr) {
+    logger.warn(`[sms-auto-send] post-send bookkeeping failed (decision ${claim.decisionId}); reconcile sweep will settle: ${bookErr.message}`);
+  }
+}
+
+// Refusals that apply to every gratitude candidate alike, so the rest of the
+// sweep would only repeat them.
+const SWEEP_WIDE_REFUSALS = new Set(['gate_off', 'mode_not_autosend', 'not_eligible', 'voice_profile_unresolved']);
+
+/**
+ * Use a scheduler tick as delay storage: scan only recent live-webhook
+ * gratitude shadow drafts, then hand each candidate to the same fully
+ * revalidating executor. No queue state is created here.
+ *
+ * The bound cannot starve a candidate. Every claim is one-shot per inbound
+ * (send-once idempotency key), and inbounds that already hold one are excluded
+ * below, so no row can consume a claim twice. The remaining refusals are
+ * read-only checks, and the default bound covers the whole eight-minute
+ * window; a sweep that reaches it logs instead of silently truncating.
+ */
+async function processGratitudeAutoSendCandidates({ limit = 200, now = new Date() } = {}) {
+  const boundedLimit = Math.max(1, Math.min(Number(limit) || 200, 200));
   if (!isEnabled('smsGratitudeReplies')) return { scanned: 0, attempted: 0, sent: 0, reason: 'gate_off' };
   const activatedAt = gratitudeActivation();
   if (!activatedAt || activatedAt.getTime() > now.getTime()) {
@@ -772,6 +830,11 @@ async function processGratitudeAutoSendCandidates({ limit = 25, now = new Date()
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'actions_verified_safe' = 'true'")
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'verifier_enabled' = 'true'")
     .whereRaw("md.intended_actions::jsonb->'verify'->>'converged' = 'true'")
+    .whereNotExists(function alreadyClaimed() {
+      this.select(db.raw('1'))
+        .from('agent_decisions as prior')
+        .whereRaw('prior.idempotency_key = ? || s.id::text', [`${AUTOSEND_WORKFLOW}:inbound:`]);
+    })
     // The inbound clock owns both eligibility and the ten-minute deadline.
     // Drain the oldest eligible thread first so a steady stream of newer,
     // ultimately-rejected drafts cannot consume every bounded sweep until an
@@ -794,6 +857,9 @@ async function processGratitudeAutoSendCandidates({ limit = 25, now = new Date()
     seenInbounds.add(row.sms_log_id);
     candidates.push(row);
     if (candidates.length >= boundedLimit) break;
+  }
+  if (candidates.length >= boundedLimit) {
+    logger.warn(`[sms-gratitude] sweep reached its ${boundedLimit}-candidate bound; newer candidates wait for the next tick`);
   }
 
   let sent = 0;
@@ -820,6 +886,7 @@ async function processGratitudeAutoSendCandidates({ limit = 25, now = new Date()
       voiceProfileVersion: metadata.voice_profile_version ?? null,
     });
     if (result.sent) sent += 1;
+    if (SWEEP_WIDE_REFUSALS.has(result.reason)) break;
   }
   return { scanned: rows.length, attempted, sent };
 }

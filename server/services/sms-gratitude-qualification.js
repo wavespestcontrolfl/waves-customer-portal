@@ -58,6 +58,7 @@ const SOURCE_FILES = Object.freeze([
   'server/services/sms-sealed-eval.js',
   'server/services/sms-gratitude-qualification.js',
   'server/config/models.js',
+  'server/config/feature-gates.js',
 ]);
 const ROOT = path.join(__dirname, '..', '..');
 

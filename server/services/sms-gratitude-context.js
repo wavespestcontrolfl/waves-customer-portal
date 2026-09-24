@@ -41,6 +41,16 @@ function gratitudeActivation() {
   return require('../config/feature-gates').gateEnvTimestamp('SMS_GRATITUDE_ACTIVATED_AT');
 }
 
+// Can a gratitude claim exist? The activation stamp outlives the kill switch,
+// so a claim left provider-uncertain stays visible to manual send paths for
+// its 24-hour window after the gate is disabled. Clear the stamp only after
+// that window. Never stamped and gate off means no claim can exist, so those
+// paths stay an exact pass-through while the lane is dark.
+function gratitudeClaimsPossible() {
+  return require('../config/feature-gates').isEnabled('smsGratitudeReplies')
+    || gratitudeActivation() !== null;
+}
+
 function validateGratitudeDraftContract(row, { expectedReply, expectedPromptVersion } = {}) {
   const rowFailure = [
     [() => !row || row.status !== 'shadow' || row.intent !== GRATITUDE_INTENT, 'draft_not_shadow_gratitude'],
@@ -292,6 +302,7 @@ module.exports = {
   jsonObject,
   jsonArray,
   gratitudeActivation,
+  gratitudeClaimsPossible,
   validateGratitudeDraftContract,
   mediaCountFromMetadata,
   pendingGratitudeWork,

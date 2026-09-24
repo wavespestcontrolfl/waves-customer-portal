@@ -151,14 +151,47 @@ async function dispatchReserved(input, {
   }
 }
 
+// Gate-off fence: no new gratitude claim can start, so a lockless read is
+// enough to honor one that is still outstanding (a provider-uncertain attempt
+// retained after the kill switch was flipped).
+async function hasOutstandingAutoSendClaim(input) {
+  const threadLast10 = String(input.to || '').replace(/\D/g, '').slice(-10) || null;
+  const autoSend = require('../sms-auto-send');
+  return autoSend.hasActiveAutoSendClaim(require('../../models/db'), {
+    threadLast10,
+    customerId: input.customerId || null,
+  });
+}
+
 /**
  * Gratitude-lane prerequisite for the three operator send paths that do not
- * already own the composer/tech reply lifecycle. The gate-off branch is an
- * exact pass-through. When enabled, reserveHumanReply serializes against the
- * shared autonomous claim and persists recovery linkage before provider entry.
+ * already own the composer/tech reply lifecycle. Never activated and gate-off,
+ * this is an exact pass-through; gate-off after activation, it adds only the
+ * outstanding-claim fence. When enabled, reserveHumanReply serializes against
+ * the shared autonomous claim and persists recovery linkage before provider
+ * entry.
  */
 async function sendManualCustomerSms(input) {
-  if (!isEnabled('smsGratitudeReplies')) return sendCustomerMessage(input);
+  if (!isEnabled('smsGratitudeReplies')) {
+    if (!require('../sms-gratitude-context').gratitudeClaimsPossible()) return sendCustomerMessage(input);
+    let outstanding;
+    try {
+      outstanding = await hasOutstandingAutoSendClaim(input);
+    } catch (err) {
+      logger.warn(`[manual-sms] outstanding-claim check failed (${String(err?.code || err?.name || 'error')})`);
+      return blockedResult(
+        'MANUAL_REPLY_RESERVATION_FAILED',
+        'Could not reserve this conversation for delivery. Try again in a moment.',
+      );
+    }
+    if (outstanding) {
+      return blockedResult(
+        'AUTO_REPLY_IN_FLIGHT',
+        'An automatic reply to this customer is being sent right now. Try again in a moment.',
+      );
+    }
+    return sendCustomerMessage(input);
+  }
 
   const reviewedBy = input.metadata?.adminUserId || null;
   // Canonical send metadata historically also carries symbolic provenance

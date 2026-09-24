@@ -8,6 +8,7 @@ const mockSettleHumanReply = jest.fn();
 
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'smsGratitudeReplies' && mockGate.enabled),
+  gateEnvTimestamp: jest.fn(() => mockGate.activatedAt || null),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...args) => mockSendCustomerMessage(...args),
@@ -53,6 +54,7 @@ const reservation = () => ({
 
 beforeEach(() => {
   mockGate.enabled = false;
+  mockGate.activatedAt = null;
   jest.clearAllMocks();
   mockDeriveOutboundNumber.mockResolvedValue('+19413529161');
   mockReserveHumanReply.mockResolvedValue(reservation());
@@ -74,6 +76,41 @@ test('gate off is an exact canonical-send pass-through', async () => {
   expect(mockReserveHumanReply).not.toHaveBeenCalled();
   expect(mockSettleHumanReply).not.toHaveBeenCalled();
   expect(manualSmsDeliveryState(result)).toBeNull();
+});
+
+test.each([
+  ['blocks on', true, 'AUTO_REPLY_IN_FLIGHT'],
+  ['passes through without', false, null],
+])('gate off after activation %s an outstanding gratitude claim', async (_label, claimed, code) => {
+  mockGate.activatedAt = new Date('2026-09-24T12:00:00Z');
+  const autoSend = require('../services/sms-auto-send');
+  const claim = jest.spyOn(autoSend, 'hasActiveAutoSendClaim').mockResolvedValue(claimed);
+  try {
+    const result = await sendManualCustomerSms(input());
+    expect(claim).toHaveBeenCalledWith(expect.any(Function), { threadLast10: '9415550100', customerId: 'customer-1' });
+    if (code) {
+      expect(result).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', code });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    } else {
+      expect(mockSendCustomerMessage).toHaveBeenCalledWith(input());
+    }
+    expect(mockReserveHumanReply).not.toHaveBeenCalled();
+  } finally {
+    claim.mockRestore();
+  }
+});
+
+test('gate off after activation fails closed when the claim lookup errors', async () => {
+  mockGate.activatedAt = new Date('2026-09-24T12:00:00Z');
+  const autoSend = require('../services/sms-auto-send');
+  const claim = jest.spyOn(autoSend, 'hasActiveAutoSendClaim').mockRejectedValue(new Error('db down'));
+  try {
+    const result = await sendManualCustomerSms(input());
+    expect(result).toMatchObject({ sent: false, code: 'MANUAL_REPLY_RESERVATION_FAILED' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  } finally {
+    claim.mockRestore();
+  }
 });
 
 test('an existing gratitude auto-send claim blocks before canonical delivery', async () => {

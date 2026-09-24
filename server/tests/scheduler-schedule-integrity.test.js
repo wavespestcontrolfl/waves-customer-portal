@@ -55,25 +55,27 @@ test.each([
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(message));
 });
 
-test('gratitude gets its deadline-bound turn before scheduled-send recovery can stall', async () => {
-  const db = require('../models/db');
+test('gratitude runs on its own locked cron, not inside the scheduled-SMS sweep', async () => {
   const { processGratitudeAutoSendCandidates } = require('../services/sms-auto-send');
   initScheduledJobs();
-  const registration = cron.schedule.mock.calls.find(([expression, callback]) =>
-    expression === '*/5 * * * *' && callback.toString().includes('processGratitudeAutoSendCandidates'));
-  expect(registration[2]).toEqual({ timezone: 'America/New_York' });
+  const scheduledSms = cron.schedule.mock.calls.filter(([expression, callback]) =>
+    expression === '*/5 * * * *' && callback.toString().includes('recoverStaleScheduledSmsClaims'));
+  expect(scheduledSms).toHaveLength(1);
+  expect(scheduledSms[0][1].toString()).not.toContain('processGratitudeAutoSendCandidates');
 
-  let releaseRecovery;
-  let reachedRecovery;
-  const recoveryStarted = new Promise(resolve => { reachedRecovery = resolve; });
-  const recoveryWait = new Promise(resolve => { releaseRecovery = resolve; });
-  db.raw.mockImplementationOnce(() => { reachedRecovery(); return recoveryWait; });
-  const tick = registration[1]();
-  try {
-    await recoveryStarted;
-    expect(processGratitudeAutoSendCandidates).toHaveBeenCalledTimes(1);
-  } finally {
-    releaseRecovery({ rows: [], rowCount: 0 });
-    await tick;
-  }
+  const registration = cron.schedule.mock.calls.find(([, callback]) =>
+    callback.toString().includes('processGratitudeAutoSendCandidates'));
+  expect(registration[0]).toBe('1-59/5 * * * *');
+  expect(registration[2]).toEqual({ timezone: 'America/New_York' });
+  expect(registration[1].toString()).toContain("runExclusive('sms-gratitude-replies'");
+
+  isEnabled.mockImplementation(() => false);
+  await registration[1]();
+  expect(processGratitudeAutoSendCandidates).not.toHaveBeenCalled();
+
+  const { runExclusive } = require('../utils/cron-lock');
+  isEnabled.mockImplementation(name => name === 'smsGratitudeReplies');
+  await registration[1]();
+  expect(runExclusive).toHaveBeenCalledWith('sms-gratitude-replies', expect.any(Function));
+  expect(processGratitudeAutoSendCandidates).toHaveBeenCalledTimes(1);
 });

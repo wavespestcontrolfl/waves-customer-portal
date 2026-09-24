@@ -473,6 +473,7 @@ describe('sms gratitude qualification', () => {
     'server/routes/admin-communications.js',
     'server/routes/tech-line.js',
     'server/services/intelligence-bar/comms-tools.js',
+    'server/config/feature-gates.js',
   ])('changes to direct safety dependency %s invalidate a pass', async (relative) => {
     const store = memoryDb();
     const { qualification } = loadQualification({ dbi: store });

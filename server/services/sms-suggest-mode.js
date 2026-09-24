@@ -853,10 +853,10 @@ async function reserveHumanReply({
   return db.transaction(async (trx) => {
     await lockSuggestThread(trx, threadLast10);
     // Either autonomous lane can own the shared thread claim. Gratitude is
-    // intentionally independent of the general gate, so a manual reply must
-    // still observe its in-flight claim when only the narrow gate is enabled.
+    // intentionally independent of the general gate, and its claims outlive
+    // a later kill-switch flip while the activation stamp is set.
     const autoSendEnabled = isEnabled('smsAutoSend') || isEnabled('smsGratitudeReplies');
-    if (autoSendEnabled) {
+    if (autoSendEnabled || require('./sms-gratitude-context').gratitudeClaimsPossible()) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
         return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true };
       }

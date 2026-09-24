@@ -148,6 +148,7 @@ jest.mock('../services/short-url', () => ({
 const mockGates = { smsAutoSend: false, smsGratitudeReplies: false };
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (gate) => (Object.hasOwn(mockGates, gate) ? mockGates[gate] : true),
+  gateEnvTimestamp: () => mockGates.gratitudeActivatedAt || null,
   gates: {},
   logGateStatus: jest.fn(),
 }));
@@ -277,6 +278,7 @@ describe('admin communications SMS route', () => {
     db.mockReset();
     mockGates.smsAutoSend = false;
     mockGates.smsGratitudeReplies = false;
+    mockGates.gratitudeActivatedAt = null;
   });
 
   test('cleans rewrite model labels and quotes before returning SMS copy', () => {
@@ -1729,6 +1731,47 @@ describe('admin communications SMS route', () => {
       expect(res.status).toBe(409);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
+  });
+
+  test.each([
+    ['immediate', '/admin/communications/sms', {}],
+    ['scheduled', '/admin/communications/schedule-sms', { scheduledFor: '2099-01-01T10:00', customerId: 'cust-A' }],
+  ])('an outstanding gratitude claim still refuses a %s manual send after both gates are disabled', async (_label, path, extra) => {
+    // Activated earlier, then the kill switch was flipped off while an
+    // attempt was provider-uncertain: its retained claim must still fence.
+    mockGates.gratitudeActivatedAt = new Date('2026-09-24T12:00:00Z');
+    hasActiveAutoSendClaim.mockResolvedValueOnce(true);
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      if (table === 'customers') builder.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      return builder;
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand', messageType: 'manual', ...extra }),
+      });
+      expect(res.status).toBe(409);
+    });
+    expect(hasActiveAutoSendClaim).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a never-activated dark lane does not consult autonomous claims', async () => {
+    db.mockImplementation(() => makeUniversalBuilder());
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-dark' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand', messageType: 'manual' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(hasActiveAutoSendClaim).not.toHaveBeenCalled();
   });
 
   test.each([

@@ -3415,15 +3415,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN (offset one minute) — Delayed gratitude replies
+  // Independent of the scheduled-SMS sweep: queued operational sends never
+  // wait behind courtesy replies, and a stalled scheduled-SMS recovery never
+  // runs a gratitude reply past its ten-minute deadline. The five-minute
+  // cadence fits the eight-minute eligibility window. Gate-off returns before
+  // taking a lock connection.
+  // =========================================================================
+  cron.schedule('1-59/5 * * * *', async () => {
+    if (!isEnabled('smsGratitudeReplies')) return;
+    try {
+      await runExclusive('sms-gratitude-replies', async () => {
+        const result = await require('./sms-auto-send').processGratitudeAutoSendCandidates();
+        if (result?.attempted) logger.info(`[sms-gratitude] delayed send sweep: ${result.sent} sent of ${result.attempted} attempted`);
+      });
+    } catch (err) {
+      logger.warn(`[sms-gratitude] delayed send sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
-      // Gratitude expires ten minutes after inbound receipt. Give its bounded
-      // sweep priority over queued sends and their potentially slow recovery.
-      await require('./sms-auto-send').processGratitudeAutoSendCandidates().catch((gratitudeErr) => {
-        logger.warn(`[sms-gratitude] delayed send sweep failed: ${gratitudeErr.message}`);
-      });
       const now = new Date();
       let scheduled = [];
       try {
