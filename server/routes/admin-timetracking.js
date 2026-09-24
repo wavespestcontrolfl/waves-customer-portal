@@ -110,6 +110,33 @@ function isAdminCaller(req) {
   return !!(req.technician && req.technician.role === 'admin');
 }
 
+// Owner-only rows on the dashboard feed (ADMIN-BUG-R41): GET / stays
+// requireTechOrAdmin (it serves the who's-clocked-in roster both admin and
+// dispatch need), but todaySummaries/weekDailies and each activeShifts row
+// otherwise carry the exact revenue/overtime/utilization/approval-status/
+// approval-notes/clock-in-GPS columns the sibling /entries, /daily, /weekly
+// and /analytics routes already reserve for admins (requireAdmin). A
+// technician response is projected down to the live-roster shape those
+// routes were never meant to duplicate.
+function techSafeActiveShift(shift) {
+  return {
+    id: shift.id,
+    technician_id: shift.technician_id,
+    tech_name: shift.tech_name,
+    clock_in: shift.clock_in,
+    onBreak: shift.onBreak,
+    currentJob: shift.currentJob ? { service_type: shift.currentJob.service_type } : null,
+  };
+}
+function techSafeDailySummary(row) {
+  return {
+    technician_id: row.technician_id,
+    tech_name: row.tech_name,
+    work_date: row.work_date,
+    total_shift_minutes: row.total_shift_minutes,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // GET /  — Dashboard: who's clocked in, today's labor, weekly stats
 // ---------------------------------------------------------------------------
@@ -194,10 +221,19 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
       }
     }
 
+    const isAdminRequest = isAdminCaller(req);
     res.json({
-      activeShifts: liveStatus,
-      todaySummaries,
-      weekDailies,
+      // codex round-1 P2: the projected summaries drop job_count/
+      // total_job_minutes/revenue_generated/utilization_pct entirely for a
+      // technician, but TimeTrackingPage.jsx defaults each to 0 and renders
+      // it as a real metric (a technician would see "$0 revenue" /
+      // "0% utilization" for a coworker instead of "not shown"). This flag
+      // tells the client which shape it got so it can hide those tiles/
+      // columns instead of rendering an absent value as a real zero.
+      viewerRole: isAdminRequest ? 'admin' : 'technician',
+      activeShifts: isAdminRequest ? liveStatus : liveStatus.map(techSafeActiveShift),
+      todaySummaries: isAdminRequest ? todaySummaries : todaySummaries.map(techSafeDailySummary),
+      weekDailies: isAdminRequest ? weekDailies : weekDailies.map(techSafeDailySummary),
       allTechs,
       today,
       weekStart: weekStartStr,

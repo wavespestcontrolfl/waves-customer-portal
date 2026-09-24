@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { formatSmsTemplateVars } = require('../utils/sms-time-format');
 const { TEMPLATES: CLEAN_DEFAULT_SMS_TEMPLATES } = require('../models/migrations/20260514000002_tighten_sms_template_copy');
 const SmsTemplateVariants = require('../services/sms-template-variants');
@@ -198,7 +198,12 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // PUT /:id — update template body
-router.put('/:id', async (req, res, next) => {
+// Admin-only (ADMIN-BUG-R39): writes rewrite the wording/links every
+// customer's automated SMS uses (confirmations, reminders, receipts,
+// review requests) or silently switch one off — owner-only, matching the
+// 2026-08-25 role lockdown that made the Message Templates tab
+// adminOnly and the sibling admin-email-templates router.
+router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
     const { body, name, is_active, trigger_event_key } = req.body;
     const updates = { updated_at: new Date() };
@@ -221,7 +226,7 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // POST / — create new template
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { template_key, name, category, body, description, variables, is_internal } = req.body;
     if (!template_key || !name || !body) return res.status(400).json({ error: 'template_key, name, and body required' });
@@ -237,7 +242,7 @@ router.post('/', async (req, res, next) => {
 });
 
 // DELETE /:id — delete template
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
     const template = await db('sms_templates').where({ id: req.params.id }).first();
     if (!template) return res.status(404).json({ error: 'Template not found' });
@@ -274,7 +279,7 @@ router.get('/:templateKey/variants', async (req, res, next) => {
 });
 
 // POST /:templateKey/variants
-router.post('/:templateKey/variants', async (req, res, next) => {
+router.post('/:templateKey/variants', requireAdmin, async (req, res, next) => {
   try {
     const { variantKey, variant_key, name, body, weight, status, isControl, is_control, metadata } = req.body || {};
     const cleanVariantKey = String(variantKey || variant_key || '').trim();
@@ -310,7 +315,7 @@ router.post('/:templateKey/variants', async (req, res, next) => {
 });
 
 // PUT /:templateKey/variants/:variantKey
-router.put('/:templateKey/variants/:variantKey', async (req, res, next) => {
+router.put('/:templateKey/variants/:variantKey', requireAdmin, async (req, res, next) => {
   try {
     const updates = { updated_at: new Date() };
     if (req.body.body !== undefined) {
@@ -340,7 +345,7 @@ router.put('/:templateKey/variants/:variantKey', async (req, res, next) => {
 });
 
 // DELETE /:templateKey/variants/:variantKey
-router.delete('/:templateKey/variants/:variantKey', async (req, res, next) => {
+router.delete('/:templateKey/variants/:variantKey', requireAdmin, async (req, res, next) => {
   try {
     await db('sms_template_variants')
       .where({ template_key: req.params.templateKey, variant_key: req.params.variantKey })
