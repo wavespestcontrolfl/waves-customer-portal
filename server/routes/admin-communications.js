@@ -1706,12 +1706,13 @@ router.get('/log', async (req, res, next) => {
           AND prior.direction = 'outbound'
           AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
           AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
+          AND (CAST(? AS uuid) IS NULL OR prior_conversation.customer_id = conversations.customer_id)
           AND ${currentPeer} <> '' AND ${currentEndpoint} <> ''
           AND ${priorPeer} = ${currentPeer} AND ${priorEndpoint} = ${currentEndpoint}
           AND prior.created_at < messages.created_at
           AND prior.created_at > messages.created_at - interval '24 hours'
         ORDER BY prior.created_at DESC, prior.id DESC LIMIT 1
-      ) sms_prior_outbound ON true`)
+      ) sms_prior_outbound ON true`, [customerId || null])
       .where('messages.channel', 'sms')
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
