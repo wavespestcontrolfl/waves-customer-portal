@@ -48,6 +48,10 @@ function definiteRejectionMarkerFromAttemptError(error) {
 
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
+// Visit-specific station counts a "customer declined" closeout can never
+// truthfully carry (the roster-sized total_stations is not a visit claim).
+// Mirrors the CompletionPanel auto-count zeroing on customer_declined.
+const DECLINED_VISIT_STATION_COUNT_KEYS = ['stations_checked', 'stations_inaccessible', 'stations_with_activity', 'traps_checked'];
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
@@ -62,6 +66,9 @@ const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionCharge
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
+const { FIRST_VISIT_DEFAULT_RATING, confirmFirstVisitUnderLock, firstVisitDefaultRating } = require('../services/pest-pressure/first-visit');
+const { activityScaleNames } = require('../services/pest-pressure/label');
+const { pestPressureConfigAllowsTechnicianRating } = require('../services/pest-pressure/technician-rating-gate');
 const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
@@ -1779,17 +1786,6 @@ function completionAllowsTechnicianPestRating({ typedFindingsType = null, isInte
   return !typedFindingsType && !isInternalOnlyCompletion;
 }
 
-function pestPressureConfigAllowsTechnicianRating({ pestPressureConfig = null, serviceLine = null } = {}) {
-  const techEntryAllowed = !!(pestPressureConfig
-    && pestPressureConfig.allowTechnicianClientRatingEntry === true);
-  const enabledLines = Array.isArray(pestPressureConfig && pestPressureConfig.enabledServiceLines)
-    ? pestPressureConfig.enabledServiceLines
-    : [];
-  const serviceLineAllowed = enabledLines.length === 0
-    || (serviceLine && enabledLines.includes(serviceLine));
-  return techEntryAllowed && serviceLineAllowed;
-}
-
 function photoCaptionBannedCopyPayload(captionBannedViolations = new Set()) {
   const violations = [...captionBannedViolations];
   return {
@@ -2423,6 +2419,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       manualHeightIn = null,        // turf height-of-cut gauge reading (lawn) — OPTIONAL
       gaugePhoto = null,            // on-site lawn-length photo (data URL) — OPTIONAL
       clientPestRating = null,
+      // true when the tech deliberately cleared the picker — only then may
+      // a first visit complete without the default 5.
+      clientPestRatingCleared = false,
+      // true when the rating is the picker's untouched first-visit 5 — the
+      // server re-checks first-visit status instead of trusting it.
+      clientPestRatingPrefilled = false,
       structuredFindings = null,
       companionFindings = null,
       activityScore = null,
@@ -2572,6 +2574,83 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? typedPhotoSummary.trim().slice(0, 600)
       : '';
     const isIncompleteVisit = visitOutcome === 'incomplete';
+    // A visit the tech never performed at all (incomplete, customer
+    // declined) discards its station payload entirely — the post-commit
+    // sync below skips it, so the pre-commit station preflights (cap,
+    // trap-setup, consumption/capture consistency) must skip it too: a
+    // pin that will never be persisted must not 400 the closeout (codex
+    // round-2 P2). ONE definition, shared by the preflights and the sync.
+    const stationBlanketSkip = isIncompleteVisit || visitOutcome === 'customer_declined';
+    // A declined visit inspected NOTHING, and the whole station payload is
+    // discarded above/below — but the typed findings still freeze into the
+    // report snapshot, and termite-report-v2 falls back to the typed counts
+    // when a visit has no check rows. The current client zeroes these
+    // counts on customer_declined; a completion tab loaded before that
+    // deploy, or a count the tech hand-edited before switching the outcome,
+    // still posts the auto-filled roster size (codex round-3 P1). Zero the
+    // VISIT-specific counts server-side on every section that carries them
+    // (total_stations is the roster, not a visit claim) before validation
+    // so the frozen findings can never say stations were inspected.
+    if (visitOutcome === 'customer_declined') {
+      const zeroed = [];
+      for (const section of [structuredFindings, ...(Array.isArray(companionFindings) ? companionFindings : [])]) {
+        const values = section?.values;
+        if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+        for (const key of DECLINED_VISIT_STATION_COUNT_KEYS) {
+          if (!Object.prototype.hasOwnProperty.call(values, key)) continue;
+          if (String(values[key] ?? '').trim() !== '' && Number(values[key]) !== 0) zeroed.push(`${section?.type || 'primary'}.${key}=${values[key]}`);
+          values[key] = '0';
+        }
+      }
+      if (zeroed.length) logger.warn('[completion] declined visit station counts zeroed', { serviceId: completionInput.serviceId, zeroed });
+    }
+    // Which submitted station entries carry an EXPLICIT edit. The current
+    // client marks a tap `touched`; a completion tab loaded before that
+    // marker shipped never emits it, so an edit the zero-tap default can
+    // never produce is inferred as explicit too — a shape (a moved or new
+    // pin) or a non-default status. A bare `{id, status:'ok'}` stays
+    // ambiguous and is NOT explicit (fail closed; codex round-2 P1). Shared
+    // by the post-commit sync and the reconciliation below.
+    const explicitStationEntry = (entry) => !!entry && (
+      entry.retire === true
+      || entry.touched === true
+      || entry.shape != null
+      || (typeof entry.status === 'string' && entry.status !== 'ok')
+    );
+    // inspection_only persists ONLY the explicit entries, but the typed
+    // counts freeze into the report snapshot as submitted — and a tab loaded
+    // before the client narrowed its auto-counts still posts every visible
+    // pin as checked. termite-report-v2 falls back to those typed counts
+    // when the visit has no check rows (or rejects a partial summary as
+    // inconsistent), so the report claimed every mapped station was
+    // inspected (codex round-4 P1). Derive the visit-specific counts from
+    // the explicit entries the way the client's auto-fill does, and never
+    // let a typed count exceed them (a lower hand-typed count stands —
+    // never overstate). total_stations is the roster and stays.
+    if (visitOutcome === 'inspection_only' && Array.isArray(termiteStations) && termiteStations.length) {
+      const explicit = termiteStations.filter((entry) => explicitStationEntry(entry) && entry.retire !== true);
+      const inaccessible = explicit.filter((entry) => entry.status === 'inaccessible').length;
+      const derived = {
+        stations_checked: explicit.length - inaccessible,
+        stations_inaccessible: inaccessible,
+        stations_with_activity: explicit.filter((entry) => entry.status === 'activity').length,
+        traps_checked: explicit.length - inaccessible,
+      };
+      const clamped = [];
+      for (const section of [structuredFindings, ...(Array.isArray(companionFindings) ? companionFindings : [])]) {
+        const values = section?.values;
+        if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+        for (const key of DECLINED_VISIT_STATION_COUNT_KEYS) {
+          if (!Object.prototype.hasOwnProperty.call(values, key)) continue;
+          const typed = Number(values[key]);
+          const next = Number.isFinite(typed) && String(values[key] ?? '').trim() !== ''
+            ? Math.min(typed, derived[key]) : derived[key];
+          if (String(next) !== String(values[key])) clamped.push(`${section?.type || 'primary'}.${key}=${values[key]}->${next}`);
+          values[key] = String(next);
+        }
+      }
+      if (clamped.length) logger.warn('[completion] inspection_only station counts reconciled to explicit entries', { serviceId: completionInput.serviceId, clamped });
+    }
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
@@ -2883,7 +2962,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // office review with a billing hold (codex #4058 r5 P1). The pure
     // shape checks above still run: the saved form is the committed form.
     const stationProgram = TermiteStations.stationProgramForProfile(completionProfile);
-    if (!packetEffects && Array.isArray(termiteStations) && termiteStations.length && stationProgram && svc.customer_id
+    if (!packetEffects && !stationBlanketSkip && Array.isArray(termiteStations) && termiteStations.length && stationProgram && svc.customer_id
       && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations, stationProgram)) {
       return ({ status: 400, body: {
         error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
@@ -2902,7 +2981,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // version of this check). `trap_visit_type` only exists on the
     // rodent_trapping schema, so its presence in any submitted section
     // identifies the declaration.
-    if (stationProgram === 'trapping' && Array.isArray(termiteStations) && termiteStations.length) {
+    if (stationProgram === 'trapping' && !stationBlanketSkip && Array.isArray(termiteStations) && termiteStations.length) {
       const declaresTrapSetup = [
         structuredFindings?.values,
         ...(Array.isArray(companionFindings) ? companionFindings.map((entry) => entry?.values) : []),
@@ -2918,11 +2997,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // bait consumption must not ship beside an explicit "None" consumption
     // select — the customer report would contradict itself. Pre-commit like
     // the cap check (the sync is fail-soft and can't reject); incomplete
-    // visits skip the station sync entirely, so they skip this too. The
+    // and declined visits skip the station sync entirely, so they skip
+    // this too. The
     // rodent findings live on the primary when rodent_bait_station IS the
     // findings type, else on its companion section.
     if (Array.isArray(termiteStations) && termiteStations.length
-      && stationProgram === 'rodent' && !isIncompleteVisit) {
+      && stationProgram === 'rodent' && !stationBlanketSkip) {
       const rodentValues = completionProfile?.findingsType === 'rodent_bait_station'
         ? (structuredFindings?.values || null)
         : ((Array.isArray(companionFindings)
@@ -2940,7 +3020,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Trapping analog: a capture-marked trap pin beside an explicit
     // Captures count of 0 contradicts itself on the customer report.
     if (Array.isArray(termiteStations) && termiteStations.length
-      && stationProgram === 'trapping' && !isIncompleteVisit) {
+      && stationProgram === 'trapping' && !stationBlanketSkip) {
       const trappingValues = completionProfile?.findingsType === 'rodent_trapping'
         ? (structuredFindings?.values || null)
         : ((Array.isArray(companionFindings)
@@ -3387,6 +3467,35 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
+
+    // Owner ruling 2026-09-24: a customer's first visit on this line starts
+    // the technician rating at 5. The picker prefills it, but a submit that
+    // beats the picker's gate (or a failed gate fetch) sends no rating — so
+    // the server applies the same default unless the tech explicitly
+    // cleared it. Same gates as the rating write below.
+    let effectiveClientPestRating = clientPestRating;
+    try {
+      effectiveClientPestRating = await firstVisitDefaultRating({
+        knex: db,
+        clientPestRating,
+        clientPestRatingCleared,
+        clientPestRatingPrefilled,
+        visitOutcome,
+        completionAllowsRating: completionAllowsTechnicianPestRating({ typedFindingsType, isInternalOnlyCompletion }),
+        configAllowsRating: async () => pestPressureConfigAllowsTechnicianRating({
+          pestPressureConfig: await loadPestPressureConfig(db),
+          serviceLine: reportServiceLine,
+        }),
+        customerId: svc.customer_id,
+        serviceLine: reportServiceLine,
+      });
+    } catch (err) {
+      logger.warn(`[completion] first-visit rating default skipped: ${err?.message || err}`);
+    }
+    // The default (not a rating the tech chose) is re-confirmed under a lock
+    // inside the record transaction — see confirmFirstVisitUnderLock.
+    const firstVisitDefaultApplied = effectiveClientPestRating === FIRST_VISIT_DEFAULT_RATING
+      && (clientPestRating == null || clientPestRatingPrefilled === true);
 
     // Gauge-reading capture (flag-gated; UAT → rollout). On a LAWN visit the tech
     // may log an OPTIONAL maintained-height reading and/or an OPTIONAL on-site
@@ -4912,7 +5021,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // 2026-07-30).
             observations: reportObservations,
             recommendations: reportRecommendations,
-            pestActivityRating: Number.isInteger(clientPestRating) ? clientPestRating : null,
+            // Only a rating the tech chose grounds the recap. The first-visit
+            // default is scoring policy, not an observation — and it is only
+            // confirmed later, under the lock in the record transaction, so
+            // copy written now must not depend on it.
+            pestActivityRating: !firstVisitDefaultApplied && Number.isInteger(effectiveClientPestRating) ? effectiveClientPestRating : null,
+            pestActivityScale: !firstVisitDefaultApplied && Number.isInteger(effectiveClientPestRating)
+              ? activityScaleNames((await loadPestPressureConfig(db).catch(() => null))?.labels)
+              : null,
             visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {
@@ -6342,7 +6458,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // data (column gets set but never read). Inline-load the
           // config inside the txn so we read a consistent snapshot with
           // the score calc that runs a few lines below.
-          if (clientPestRating != null
+          if (firstVisitDefaultApplied
+            && !(await confirmFirstVisitUnderLock(trx, { customerId: svc.customer_id, serviceLine: reportServiceLine }))) {
+            // Another first visit on this line committed first — this one
+            // records no default (the tech never chose a rating).
+            effectiveClientPestRating = null;
+          }
+          if (effectiveClientPestRating != null
             && completionAllowsTechnicianPestRating({ typedFindingsType, isInternalOnlyCompletion })
             && serviceRecordCols.client_pest_rating
             && serviceRecordCols.client_pest_rating_source) {
@@ -6351,7 +6473,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               pestPressureConfig,
               serviceLine: reportServiceLine,
             })) {
-              recordInsert.client_pest_rating = clientPestRating;
+              recordInsert.client_pest_rating = effectiveClientPestRating;
               recordInsert.client_pest_rating_source = 'technician';
               if (serviceRecordCols.client_pest_rating_at) {
                 recordInsert.client_pest_rating_at = trx.fn.now();
@@ -6545,7 +6667,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // found, and a contradictory zero would print on the customer
           // report. Only an explicit 0 rating states it (codex P2 r1).
           && !(completionProfile?.followupPolicy === 'alert'
-            && (activityScore ?? clientPestRating) == null)
+            && (activityScore ?? effectiveClientPestRating) == null)
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
@@ -6555,7 +6677,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // activityScore only arrives on typed completions (which are
             // already excluded above) — without the client rating the guard
             // never fired on ordinary visits (codex P1 #3043).
-            activityScore: activityScore ?? clientPestRating,
+            activityScore: activityScore ?? effectiveClientPestRating,
           })
         ) {
           await trx('service_findings').insert({
@@ -7894,35 +8016,65 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // presentation data and must never abort a committed completion.
     // AUTHORIZATION: the server-resolved profile must carry the
     // termite_bait_station flow (primary or companion) — a stale/crafted
-    // non-termite body must not mutate the registry. Incomplete visits skip
-    // the sync entirely (same rule as companion findings): recording the
-    // zero-tap default "ok" checks for a visit that didn't happen would
-    // corrupt the station history future reports and trends read.
+    // non-termite body must not mutate the registry. A visit the tech
+    // never performed at all (incomplete, customer_declined) skips the
+    // sync entirely: recording the zero-tap default "ok" checks for a
+    // visit that didn't happen would corrupt the station history future
+    // reports and trends read (audit ADMIN-BUG-R31 — a declined closeout
+    // used to mint a full "all stations OK" check row per pin the tech
+    // never touched). inspection_only DID happen, though, so it is NOT
+    // blanket-skipped (codex round-4 P1 — that discarded a real
+    // inspection where the tech explicitly tapped, moved, or retired
+    // stations); it only drops the zero-tap defaults, keeping entries the
+    // client marked `touched` (an explicit status tap or a move) or
+    // `retire` (always an explicit action, and never writes a check row).
+    // A completion tab loaded BEFORE the `touched` marker shipped never
+    // emits it, so the marker alone would drop that client's real
+    // inspections (codex round-2 P1); an edit the zero-tap default can
+    // never produce is inferred as explicit too — a shape (a moved pin or
+    // a new one) or a non-default status (only a tap sets anything but
+    // 'ok'). A bare `{id, status:'ok'}` stays ambiguous and is dropped:
+    // the current client marks an explicit 'ok' tap `touched`, and for a
+    // legacy tab it is indistinguishable from the default the panel
+    // serializes for every untouched pin (fail closed).
+    // stationBlanketSkip is defined beside isIncompleteVisit — the
+    // pre-commit station preflights share it.
+    // explicitStationEntry is defined beside stationBlanketSkip: the
+    // inspection_only count reconciliation before the snapshot freezes
+    // uses the same predicate as this sync.
     if (Array.isArray(termiteStations) && termiteStations.length) {
-      if (isIncompleteVisit || !stationProgram) {
+      if (stationBlanketSkip || !stationProgram) {
         logger.warn('[completion] station payload skipped', {
           serviceId: svc.id,
           incomplete: isIncompleteVisit,
+          visitOutcome,
           findingsType: completionProfile?.findingsType || null,
         });
       } else {
-        try {
-          const stationSync = await TermiteStations.syncStationsForCompletion(db, {
-            customerId: svc.customer_id,
-            serviceRecordId: record.id,
-            entries: termiteStations,
-            program: stationProgram,
-          });
-          if (stationSync.skipped.length) {
-            // post-commit skips (cap race / foreign id) can't 400 a
-            // committed completion — surface them loudly for the operator
-            logger.warn('[completion] termite station entries skipped', { serviceId: svc.id, ...stationSync });
-          } else if (stationSync.created || stationSync.moved || stationSync.retired
-            || stationSync.checksApplied || stationSync.deduped) {
-            logger.info('[completion] termite stations synced', { serviceId: svc.id, ...stationSync });
+        const syncEntries = visitOutcome === 'inspection_only'
+          ? termiteStations.filter(explicitStationEntry)
+          : termiteStations;
+        if (!syncEntries.length) {
+          logger.warn('[completion] station payload skipped (inspection_only with no explicit taps)', { serviceId: svc.id });
+        } else {
+          try {
+            const stationSync = await TermiteStations.syncStationsForCompletion(db, {
+              customerId: svc.customer_id,
+              serviceRecordId: record.id,
+              entries: syncEntries,
+              program: stationProgram,
+            });
+            if (stationSync.skipped.length) {
+              // post-commit skips (cap race / foreign id) can't 400 a
+              // committed completion — surface them loudly for the operator
+              logger.warn('[completion] termite station entries skipped', { serviceId: svc.id, ...stationSync });
+            } else if (stationSync.created || stationSync.moved || stationSync.retired
+              || stationSync.checksApplied || stationSync.deduped) {
+              logger.info('[completion] termite stations synced', { serviceId: svc.id, ...stationSync });
+            }
+          } catch (stationErr) {
+            logger.warn(`[completion] termite station sync failed (non-blocking): ${stationErr.message}`);
           }
-        } catch (stationErr) {
-          logger.warn(`[completion] termite station sync failed (non-blocking): ${stationErr.message}`);
         }
       }
     }

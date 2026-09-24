@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { adminFetch } from "../../../utils/admin-fetch";
+import useVisiblePageRefresh from "../../../hooks/useVisiblePageRefresh";
 import { useHubParams } from "./hubParams";
 import WindowPresets, { windowLabel } from "./WindowPresets";
 import StatusStrip from "./StatusStrip";
@@ -14,7 +15,7 @@ import LaneCard from "./LaneCard";
 // the ledger phase (GATE_AGENT_CONTROL_READ); otherwise the hub keeps the
 // old Overview. Read-only: nothing here acts on a lane.
 
-export default function AgentControlCenterTab({ areas = [], setRefreshHandler }) {
+export default function AgentControlCenterTab({ areas = [] }) {
   const { area, window: windowKey, status, set: setHubParams } = useHubParams();
   const areaKnown = areas.some((a) => a.key === area);
   // The scope is the query the read is made with. A payload only renders
@@ -54,12 +55,7 @@ export default function AgentControlCenterTab({ areas = [], setRefreshHandler })
     load();
   }, [load]);
 
-  // The hub header's Refresh pill drives this tab (the same handle the old
-  // Overview and the Models tab expose).
-  useEffect(() => {
-    setRefreshHandler?.(load, loading);
-    return () => setRefreshHandler?.(null);
-  }, [setRefreshHandler, load, loading]);
+  useVisiblePageRefresh(load, { intervalMs: 30_000, enabled: !loading });
 
   // "Runs →" on a card: the Runs tab. It carries no lane / window params
   // yet — the Runs tab does not read them until C1 wires the run index, and
@@ -75,8 +71,11 @@ export default function AgentControlCenterTab({ areas = [], setRefreshHandler })
   const attentionLanes = useMemo(() => (data?.lanes || []).filter((l) => l.status === "attention"), [data]);
 
   const errorNotice = error && (
-    <div className="text-14 text-alert-fg" role="alert">
-      {error}
+    <div className="flex flex-wrap items-center justify-between gap-3 text-14 text-alert-fg" role="alert">
+      <span>{error}</span>
+      <button type="button" onClick={load} disabled={loading} className="h-11 md:h-8 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 font-medium text-zinc-900 u-focus-ring disabled:opacity-60">
+        {loading ? "Retrying…" : "Retry"}
+      </button>
     </div>
   );
   // The controls stay up while a scope loads (a second click must not wait

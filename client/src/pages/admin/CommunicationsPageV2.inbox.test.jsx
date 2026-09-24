@@ -2,7 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SmsTab } from "./CommunicationsPageV2";
 import { SMS_DRAFT_STORAGE_KEY } from "../../hooks/useSmsDraft";
@@ -24,7 +24,7 @@ const attachment = { url: "https://example.invalid/gate.png", key: "fixture/gate
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 const tick = async (ms = 350) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 const logRequests = () => fetch.mock.calls.filter(([url]) => String(url).includes("/communications/log?"));
-const setup = () => render(<SmsTab active />, { wrapper: MemoryRouter });
+const setup = (route = "/") => render(<SmsTab active />, { wrapper: ({ children }) => <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter> });
 const setupWithOwner = (id, props = {}) => render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id, role: "admin" } }} />}><Route path="*" element={<SmsTab active {...props} />} /></Route></Routes></MemoryRouter>);
 const savedApproval = {
   msgBody: "Edited approval reply", fromNumber: "+19415550199", selectedCustomerId: "customer-a",
@@ -184,6 +184,253 @@ it("keeps older history but restarts pagination so refreshed pages cannot be ski
   expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("page")).toBe("2");
 });
 
+it("loads and paginates the server needs-response filter, then restores the ordinary inbox", async () => {
+  let pendingAvailable = true;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    if (url.searchParams.get("needsResponse") === "true") {
+      return response({
+        messages: pendingAvailable ? [inbound(`pending-${page}`, `Pending question ${page}`, `+1941555010${page}`)] : [],
+        hasMore: pendingAvailable && page === 1,
+        page,
+      });
+    }
+    return response({ messages: [inbound("recent", "Recent ordinary message")], hasMore: false, page });
+  };
+  setup("/admin/communications?needsResponse=true"); await tick();
+  const filter = screen.getByRole("combobox", { name: "Filter conversations" });
+  expect(filter).toHaveValue("unanswered");
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
+  expect(screen.getByText("Pending question 1")).toBeInTheDocument();
+  expect(screen.queryByText("Recent ordinary message")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
+  const paged = new URL(String(logRequests().at(-1)[0]), "http://localhost");
+  expect(paged.searchParams.get("needsResponse")).toBe("true");
+  expect(paged.searchParams.get("page")).toBe("2");
+  expect(screen.getByText("Pending question 2")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("Pending question 1"));
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+  pendingAvailable = false;
+  await tick(30000);
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "all" } }); await tick();
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.has("needsResponse")).toBe(false);
+  expect(screen.getByText("Recent ordinary message")).toBeInTheDocument();
+});
+
+it("updates the mounted inbox when badge navigation changes the route", async () => {
+  render(<MemoryRouter initialEntries={["/admin/communications"]}>
+    <Link to="/admin/communications?needsResponse=true">Pending badge</Link>
+    <SmsTab active />
+  </MemoryRouter>);
+  await tick();
+  fireEvent.click(screen.getByRole("link", { name: "Pending badge" })); await tick();
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toHaveValue("unanswered");
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "all" } }); await tick();
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.has("needsResponse")).toBe(false);
+  fireEvent.click(screen.getByRole("link", { name: "Pending badge" })); await tick();
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toHaveValue("unanswered");
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
+});
+
+it("restores the ordinary dataset when Log View hides the unanswered selector", async () => {
+  loadLog = (url) => url.searchParams.get("needsResponse") === "true"
+    ? response({ messages: [inbound("pending", "Pending filtered question")], page: 1 })
+    : response({ messages: [inbound("ordinary", "Ordinary log message")], page: 1 });
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Log View" })); await tick();
+  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.has("needsResponse")).toBe(false);
+  expect(screen.getByText("Ordinary log message")).toBeInTheDocument();
+});
+
+it("refreshes loaded unanswered pages without discarding a still-pending page-two thread", async () => {
+  let pageTwoPending = true;
+  let pageTwoFailure = false;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    if (page === 2 && pageTwoFailure) return response({ error: "Unavailable" }, 503);
+    return response({
+      messages: page === 2 && !pageTwoPending
+        ? []
+        : [inbound(`pending-${page}`, `Pending page ${page}`, `+1941555010${page}`)],
+      hasMore: page === 1 && pageTwoPending,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
+  fireEvent.click(screen.getByText("Pending page 2"));
+  await tick(30000);
+  expect(logRequests().slice(-2).map(([url]) => new URL(String(url), "http://localhost").searchParams.get("page"))).toEqual(["1", "2"]);
+  expect(screen.getAllByText("Pending page 2").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+
+  pageTwoFailure = true;
+  await tick(30000);
+  expect(screen.getAllByText("Pending page 2").length).toBeGreaterThan(0);
+
+  pageTwoFailure = false;
+  pageTwoPending = false;
+  await tick(30000);
+  expect(screen.queryByText("Pending page 2")).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toBeInTheDocument();
+});
+
+it("closes an answered open thread after a complete loaded-page refresh even when older pages remain", async () => {
+  let answered = false;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    if (url.searchParams.get("needsResponse") !== "true") {
+      return response({ messages: [inbound("ordinary", "Ordinary message")], hasMore: false, page });
+    }
+    if (url.searchParams.has("phone")) {
+      return response({ messages: [], hasMore: false, page });
+    }
+    return response({
+      messages: answered
+        ? [{ ...inbound("other", "Another pending question", "+19415550101"), responseNeedsResponse: true }]
+        : [{ ...inbound("selected", "Selected pending question"), responseNeedsResponse: true }],
+      hasMore: true,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByText("Selected pending question"));
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+
+  answered = true;
+  await tick(30000);
+
+  expect(screen.queryByText("Selected pending question")).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Load older/ })).toBeInTheDocument();
+});
+
+it("keeps an open pending thread when a newer peer pushes it beyond the loaded prefix", async () => {
+  let shifted = false;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    const phone = url.searchParams.get("phone");
+    if (url.searchParams.get("needsResponse") !== "true") {
+      return response({ messages: [inbound("ordinary", "Ordinary message")], hasMore: false, page });
+    }
+    if (phone) {
+      return response({
+        messages: [{ ...inbound("selected", "Selected pending question refreshed"), responseNeedsResponse: true }],
+        hasMore: false,
+        page,
+      });
+    }
+    return response({
+      messages: shifted
+        ? [{ ...inbound("newer", "Newer pending peer", "+19415550101"), responseNeedsResponse: true }]
+        : [{ ...inbound("selected", "Selected pending question"), responseNeedsResponse: true }],
+      hasMore: true,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.change(screen.getByPlaceholderText("Search all SMS by name, phone, or message text…"), { target: { value: "selected" } }); await tick();
+  fireEvent.click(screen.getByText("Selected pending question"));
+
+  shifted = true;
+  await tick(30000);
+
+  expect(screen.getAllByText("Selected pending question refreshed").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+  const targeted = logRequests().map(([url]) => new URL(String(url), "http://localhost"))
+    .find((url) => url.searchParams.has("phone"));
+  expect(targeted.searchParams.get("phone")).toBe("+19415550100");
+  expect(targeted.searchParams.get("needsResponse")).toBe("true");
+  expect(targeted.searchParams.get("search")).toBe("selected");
+});
+
+it("keeps stale open-thread state and shows a recoverable error when peer confirmation fails", async () => {
+  let shifted = false;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    if (url.searchParams.get("needsResponse") !== "true") {
+      return response({ messages: [inbound("ordinary", "Ordinary message")], hasMore: false, page });
+    }
+    if (url.searchParams.has("phone")) return response({ error: "Unavailable" }, 503);
+    return response({
+      messages: shifted
+        ? [{ ...inbound("newer", "Newer pending peer", "+19415550101"), responseNeedsResponse: true }]
+        : [{ ...inbound("selected", "Selected pending question"), responseNeedsResponse: true }],
+      hasMore: true,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByText("Selected pending question"));
+
+  shifted = true;
+  await tick(30000);
+
+  expect(screen.getAllByText("Selected pending question").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("last successful load");
+});
+
+it("refreshes every loaded unanswered page after a successful send", async () => {
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    return response({
+      messages: [{
+        ...inbound(`pending-${page}`, `Pending page ${page}`, `+1941555010${page}`),
+        responseNeedsResponse: true,
+      }],
+      hasMore: page < 3,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
+  fireEvent.click(screen.getByText("Pending page 2"));
+  fireEvent.click(screen.getByRole("button", { name: "Text back" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "We can help" } });
+  const beforeSend = logRequests().length;
+
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+
+  const refreshedPages = logRequests().slice(beforeSend)
+    .map(([url]) => new URL(String(url), "http://localhost").searchParams.get("page"));
+  expect(refreshedPages).toEqual(["1", "2"]);
+});
+
+it("restarts an unanswered search at page one after paginating another query", async () => {
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    return response({
+      messages: [inbound(`pending-${page}`, `Pending page ${page}`, `+1941555010${page}`)],
+      hasMore: page === 1,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
+
+  fireEvent.change(screen.getByPlaceholderText("Search all SMS by name, phone, or message text…"), { target: { value: "gate" } });
+  await tick();
+
+  const searched = logRequests()
+    .map(([url]) => new URL(String(url), "http://localhost"))
+    .filter((url) => url.searchParams.get("search") === "gate");
+  expect(searched).toHaveLength(1);
+  expect(searched[0].searchParams.get("page")).toBe("1");
+});
+
 it("restores each conversation's own text and attachments when switching customers", async () => {
   messages.push(inbound("b", "Please check the lawn", "+19415550101"));
   const { container } = setup(); await tick();
@@ -257,6 +504,22 @@ it.each(["text", "media"])("keeps a saved %s draft's sender and reply target tog
   fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
   const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
   expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: line, replyToMessageId: "request-a" });
+});
+
+it("replies to a historical phone without attaching the customer's changed phone identity", async () => {
+  messages = [{
+    ...inbound("old-phone-question", "Question from the original phone"),
+    customerId: null, customerName: "Ada Changed", responseNeedsResponse: true,
+  }];
+  setup("/admin/communications?needsResponse=true"); await tick();
+  fireEvent.click(screen.getByText("Question from the original phone"));
+  fireEvent.click(screen.getByRole("button", { name: "Text back" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Confirmed." } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  const payload = JSON.parse(request[1].body);
+  expect(payload).toMatchObject({ to: "+19415550100", fromNumber: line, replyToMessageId: "old-phone-question" });
+  expect(payload).not.toHaveProperty("customerId");
 });
 
 it("replies to the outstanding request on its own line after newer recruiting activity", async () => {

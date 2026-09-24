@@ -95,6 +95,58 @@ test.each(['active_customer', 'won', 'at_risk', 'churned', 'past_customer', 'dor
   expect(await publishWebsiteQuote(args)).toBeNull();
 });
 
+test('a merge that repoints the draft between the owner peek and the lock retries under the surviving customer', async () => {
+  // Winner is an eligible new lead; the draft already belongs to it, but the
+  // first attempt's unlocked peek still saw the retired loser.
+  rows.estimates[0].customer_id = 'winner-fixture';
+  rows.customers = [{ id: 'winner-fixture', active: true, pipeline_stage: 'new_lead', waveguard_tier: null, monthly_rate: 0 }];
+  let peeks = 0;
+  // No rollback snapshot here: the moved-owner attempt throws before any
+  // write, and a structuredClone'd restore would hand the retry
+  // cross-realm objects that isDeepStrictEqual rejects.
+  db.transaction.mockImplementation(async work => {
+    const trx = (table) => {
+      const builder = query(table);
+      const first = builder.first;
+      builder.first = async (...cols) => {
+        if (table === 'estimates' && cols.length === 1 && cols[0] === 'customer_id') {
+          peeks += 1;
+          if (peeks === 1) return { customer_id: 'loser-fixture' };
+        }
+        return first(...cols);
+      };
+      return builder;
+    };
+    trx.raw = query.raw;
+    return work(trx);
+  });
+
+  const result = await publishWebsiteQuote(args);
+  expect(result?.token).toMatch(/^[a-f0-9]{32}$/);
+  expect(db.transaction).toHaveBeenCalledTimes(2);
+  expect(locks).toEqual([
+    'advisory:customer-comms:loser-fixture', 'estimates',
+    'advisory:customer-comms:winner-fixture', 'estimates', 'customers',
+  ]);
+});
+
+test('an owner that keeps moving fails closed after the retry cap', async () => {
+  db.transaction.mockImplementation(async work => {
+    const trx = (table) => {
+      const builder = query(table);
+      const first = builder.first;
+      builder.first = async (...cols) => (
+        table === 'estimates' && cols[0] === 'customer_id' && cols.length === 1
+          ? { customer_id: 'somewhere-else' } : first(...cols));
+      return builder;
+    };
+    trx.raw = query.raw;
+    return work(trx);
+  });
+  await expect(publishWebsiteQuote(args)).resolves.toBeNull();
+  expect(db.transaction).toHaveBeenCalledTimes(3);
+});
+
 test('rejects a member even when the CRM still labels them a lead', async () => {
   rows.customers[0].waveguard_tier = 'Silver';
   expect(await publishWebsiteQuote(args)).toBeNull();

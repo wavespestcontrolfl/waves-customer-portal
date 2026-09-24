@@ -46,6 +46,8 @@ const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = 
 const { detectServiceLine, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
+const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
+const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
 const { tipsForVisit } = require('../services/service-report/tip-library');
 
@@ -220,13 +222,20 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // dropped on completion. Computing the result per-service on the server
 // keeps the UI and the write path in agreement.
 //
+// `firstVisit` (owner ruling 2026-09-24): true when the customer has no
+// completed, customer-visible service record on this service line yet —
+// the picker then starts at 5 and the tech lowers it if they saw less.
+// Only computed when the picker is allowed, and only for the assigned
+// tech or an admin (it reads the customer's visit history) — anyone else
+// gets `false` and an empty picker, same as before this ruling.
+//
 // 404 on unknown service; admin-dispatch's existing requireTechOrAdmin
 // gate covers auth.
 router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'service_id', 'service_type');
+      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id');
     if (!svc) {
       return res.status(404).json({ error: 'Service not found' });
     }
@@ -235,13 +244,25 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
       resolveCompletionProfileForScheduledService(svc),
     ]);
     const serviceLine = detectServiceLine(svc.service_type);
-    res.json({
-      allowed: technicianPestRatingAllowedForService({
-        completionProfile,
-        pestPressureConfig: config,
-        serviceLine,
-      }),
+    const allowed = technicianPestRatingAllowedForService({
+      completionProfile,
+      pestPressureConfig: config,
+      serviceLine,
     });
+    const mayReadHistory = !completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    const firstVisit = allowed && mayReadHistory
+      ? !(await customerHasPriorVisitOnLine(db, { customerId: svc.customer_id, serviceLine }))
+      : false;
+    // The picker caption names what each tap means using the ACTIVE labels,
+    // so a label set edited in Settings never contradicts the report.
+    const scaleLabels = allowed
+      ? [0, 1, 2, 3, 4, 5].map((n) => resolvePestPressureLabel(n, config?.labels)?.name || null)
+      : null;
+    res.json({ allowed, firstVisit, scaleLabels });
   } catch (err) { next(err); }
 });
 
@@ -3584,8 +3605,8 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       contextLines,
     });
     const generated = await dispatchWithFallback(
-      MODELS.TEXT_POLICIES.visionAnalysis,
-      { laneId: 'photo_scoring', text: basePrompt, images, jsonMode: false, maxTokens: 700, temperature: 0.2 },
+      MODELS.TEXT_POLICIES.photoCaptions,
+      { laneId: 'photo_scoring', text: basePrompt, images, jsonMode: false, maxTokens: 2048, temperature: 0.2 },
       {
         validate: (candidate) => {
           const parsed = PhotoAnalysis.parsePhotoAnalysisResponse(candidate.text, { photoCount: photos.length });
@@ -6188,6 +6209,7 @@ module.exports.rescheduleReminderTime = rescheduleReminderTime;
 module.exports._test = {
   pastRescheduleDateError,
   technicianPestRatingAllowedForService,
+  customerHasPriorVisitOnLine,
   timeOnSiteEditPlan,
   reentryEditPlan,
   rearmRescheduleReminderWindows,

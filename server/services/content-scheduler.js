@@ -591,6 +591,7 @@ const ContentScheduler = {
           'BLOG_GUARDRAILS_FAILED',
           'BLOG_COMPARISON_GATE_FAILED',
           'BLOG_FACTCHECK_FAILED',
+          'BLOG_EDITORIAL_REVIEW_FAILED',
           // A semantic compliance P0 is edit-required exactly like the
           // fact-check above: the copy states an unconditional safety claim or
           // offers a service Waves does not provide, and re-running the same

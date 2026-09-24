@@ -64,6 +64,7 @@ const {
   stampFrozenCapsOnly,
   frozenCapsFromRow,
   resolveUpdateDetailsAddonFinancials,
+  pruneObsoleteFrozenAddonCaps,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -2234,12 +2235,136 @@ describe('resolveUpdateDetailsAddonFinancials — PUT /:id/update-details routes
       expect(result.canonicalRestackedAddonDollars[0].discountDollars).toBe(10);
       expect(result.canonicalRestackedAddonDollars[0].netPrice).toBe(90);
       // The re-frozen snapshot now carries the NEW id too, read fresh and
-      // correctly uncapped (never the OLD id's $5) — the OLD id's own
-      // entry persists (additive, never deleted — the same harmless-leftover
-      // convention every prior round's caps merge already follows), but
-      // nothing reads it once no addon carries that id any more.
+      // correctly uncapped (never the OLD id's $5). GitHub Codex round 16
+      // P1 (#4657, :10128): the OLD id's own entry is now PRUNED — it is
+      // no longer on any current line (no addon carries it, and there is
+      // no primary line_discount_id here either) — so a later fresh
+      // re-pick of that same preset can never resurrect this stale $5
+      // ceiling over its own live (possibly since-raised) catalog cap.
       expect(result.capsSnapshotToPersist.addons['new-addon-disc']).toBeNull();
-      expect(result.capsSnapshotToPersist.addons['old-addon-disc']).toBe(5);
+      expect(result.capsSnapshotToPersist.addons['old-addon-disc']).toBeUndefined();
     });
+  });
+
+  // GitHub Codex round 16 P1 (#4657, :10128): pruneObsoleteFrozenAddonCaps
+  // itself — the pure helper resolveUpdateDetailsAddonFinancials calls
+  // before handing a row's frozen caps to resolveStoredDiscountCaps.
+  // GitHub Codex round 26 P0 (#4657, :3074): loadStoredDiscountScope refuses
+  // to replay a CATEGORY-scoped appointment discount for any service-linked
+  // line whose service_category_snapshot is missing — and the canonical
+  // branch built its parent (and add-on rows) with service_id + key snapshot
+  // only, so an unmarked visit adopting canonical pricing while it kept or
+  // picked a category-scoped discount threw "service identity snapshot is
+  // missing" on preview and save alike. A marked row with a service-linked
+  // add-on hit the same throw through the add-on rows.
+  describe('category-scoped appointment discount — every canonical line carries its category snapshot (round 26 P0, #4657 :3074)', () => {
+    const PEST_10 = 'appt-pest-10pct';
+    const scoped = ({ existing, updates = {}, adoptCanonicalPricing = false, addons }) => resolveUpdateDetailsAddonFinancials({
+      db: makeDb([{ id: PEST_10, max_discount_dollars: null }]),
+      existing, updates, primaryGross: 100,
+      normalizedAddons: addons ?? [{
+        base: 50, price: 50, serviceId: 'svc-mosquito', serviceKey: 'mosquito_monthly', serviceCategory: 'mosquito', discount: null,
+      }],
+      effDiscountType: 'percentage', effDiscountAmount: 10, effMaxDiscountDollars: null,
+      effServiceKeyFilter: null, effServiceCategoryFilter: 'pest', appointmentDiscountId: PEST_10,
+      adoptCanonicalPricing,
+    });
+    const pestPrimary = {
+      service_id: 'svc-pest', service_key_snapshot: 'pest_quarterly', service_category_snapshot: 'pest',
+      line_discount_id: null, line_discount_type: null, line_discount_amount: null, line_discount_dollars: null,
+    };
+
+    test('an UNMARKED visit adopting canonical pricing while it keeps a pest-only 10% discount prices ($90 + $50 = $140) instead of throwing', async () => {
+      await withGateLive(async () => {
+        const result = await scoped({ existing: { ...pestPrimary, pricing_provenance: null }, adoptCanonicalPricing: true });
+        expect(result.canonicalPricingApplied).toBe(true);
+        expect(result.financials.appointmentDiscountDollars).toBe(10); // 10% of the $100 pest primary only
+        expect(result.financials.price).toBe(140); // the mosquito add-on is out of scope
+        expect(result.capsSnapshotToPersist).not.toBeNull(); // the row gets its first full regime stamp
+      });
+    });
+
+    test('a MARKED visit with a service-linked add-on under the same scoped discount restacks (the add-on rows carry their category too)', async () => {
+      await withGateLive(async () => {
+        const existing = {
+          ...pestPrimary,
+          pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: { id: null, cap: null }, addons: {} } },
+        };
+        const result = await scoped({ existing });
+        expect(result.canonicalPricingApplied).toBe(true);
+        expect(result.financials.price).toBe(140);
+      });
+    });
+
+    test('a primary-service switch this save scopes by the NEW category snapshot (updates win over the stored row)', async () => {
+      await withGateLive(async () => {
+        const result = await scoped({
+          existing: { ...pestPrimary, pricing_provenance: null },
+          updates: { service_id: 'svc-lawn', service_key_snapshot: 'lawn_program', service_category_snapshot: 'lawn' },
+          adoptCanonicalPricing: true,
+        });
+        expect(result.canonicalPricingApplied).toBe(true);
+        expect(result.financials.appointmentDiscountDollars ?? 0).toBe(0); // nothing on the visit is pest any more (the engine reports null)
+        expect(result.financials.price).toBe(150);
+      });
+    });
+
+    test('a category-scoped discount on a marked visit whose service-linked ADD-ON has no category snapshot still refuses (the guard itself is unchanged)', async () => {
+      await withGateLive(async () => {
+        const existing = {
+          ...pestPrimary,
+          pricing_provenance: { pricing_regime: 'discount_stack_v1', engine_version: 1, caps: { line: { id: null, cap: null }, addons: {} } },
+        };
+        await expect(scoped({
+          existing,
+          addons: [{ base: 50, price: 50, serviceId: 'svc-mystery', serviceKey: null, serviceCategory: null, discount: null }],
+        })).rejects.toThrow(/service identity snapshot is missing/);
+      });
+    });
+  });
+
+  describe('pruneObsoleteFrozenAddonCaps (round 16 P1, #4657 :10128)', () => {
+    test('drops a frozen add-on cap entry whose discount id is on no current line and is not the primary line discount', () => {
+      const frozen = { line: { id: null, cap: null }, addons: { 'removed-disc': 10, 'kept-disc': 7 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, ['kept-disc'], null);
+      expect(result.addons).toEqual({ 'kept-disc': 7 });
+      expect(result.addons['removed-disc']).toBeUndefined();
+      // `line` is untouched — this helper only ever prunes `addons`.
+      expect(result.line).toEqual({ id: null, cap: null });
+    });
+
+    test('keeps an id still used on a current add-on line', () => {
+      const frozen = { line: { id: null, cap: null }, addons: { 'still-used': 5 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, ['still-used'], null);
+      expect(result.addons).toEqual({ 'still-used': 5 });
+    });
+
+    test('keeps an id that matches the primary line\'s CURRENT line_discount_id even if no add-on carries it (the shared-id shape resolveStoredDiscountCaps documents as supported)', () => {
+      const frozen = { line: { id: 'shared-disc', cap: 12 }, addons: { 'shared-disc': 12 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, [], 'shared-disc');
+      expect(result.addons).toEqual({ 'shared-disc': 12 });
+    });
+
+    test('tolerates undefined/null frozen and an empty/missing addons map without throwing', () => {
+      expect(pruneObsoleteFrozenAddonCaps(undefined, ['x'], null)).toBeNull();
+      expect(pruneObsoleteFrozenAddonCaps(null, ['x'], null)).toBeNull();
+      const noAddons = { line: { id: null, cap: null } };
+      expect(pruneObsoleteFrozenAddonCaps(noAddons, ['x'], null)).toBe(noAddons);
+      const emptyAddons = { line: { id: null, cap: null }, addons: {} };
+      expect(pruneObsoleteFrozenAddonCaps(emptyAddons, ['x'], null)).toBe(emptyAddons);
+    });
+
+    test('returns the SAME object reference when nothing needs pruning (no unnecessary copy)', () => {
+      const frozen = { line: { id: null, cap: null }, addons: { 'kept-disc': 3 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, ['kept-disc'], null);
+      expect(result).toBe(frozen);
+    });
+
+    test('a null/undefined entry in liveAddonIds is ignored, never coerced into a spurious "null" key match', () => {
+      const frozen = { line: { id: null, cap: null }, addons: { 'real-disc': 9 } };
+      const result = pruneObsoleteFrozenAddonCaps(frozen, [null, undefined, 'real-disc'], null);
+      expect(result.addons).toEqual({ 'real-disc': 9 });
+    });
+
   });
 });

@@ -1,15 +1,19 @@
 /**
- * Trio-Vision Satellite Property Analyzer
+ * Ladder-Vision Satellite Property Analyzer
  *
- * Runs Claude (Anthropic), OpenAI, and Gemini (Google) vision in parallel
- * on Google Static Maps satellite images. Merges results with
- * confidence weighting — where both agree, confidence is high.
- * Where they disagree, flags for field verification.
+ * Owner ruling 2026-09-24: no more three-provider fan-out. Analyzes Google
+ * Static Maps satellite images with Gemini (Google) first, Claude (Anthropic)
+ * second, and OpenAI last resort — stopping at the first schema-valid result.
+ * mergeResults keeps its multi-provider agreement math (used when 2+ results
+ * are handed to it directly, e.g. by tests), but the live ladder only ever
+ * produces ONE result, so confidence always reads 'single_model' — a single
+ * source can no longer read "high", which used to require multi-provider
+ * agreement.
  */
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { geminiText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -19,11 +23,9 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
 // Live default is the registry's best Gemini vision model; override via
-// GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. analyzeWithGemini retries the
-// registry's GEMINI_VISION_FALLBACK only when it names a different model (one
-// Gemini model by default — owner ruling 2026-09-02).
+// GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. analyzeWithGemini makes ONE call
+// (no GEMINI_VISION_FALLBACK retry) — Claude then OpenAI follow in the ladder.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
 const VISION_PROMPT = `Analyze this satellite/aerial image of a residential property in Southwest Florida. Estimate the following measurements and features as accurately as possible from the image.
 
@@ -50,6 +52,66 @@ Return ONLY a JSON object with these fields:
 }
 
 Be specific with numbers. For SWFL properties, typical lot sizes range 5,000-15,000 sqft for single family, lawn areas are usually 40-65% of lot size.`;
+
+// ── Schema validation (mirrors lawn-assessment.js's isValidVisionScores) ────────
+// A syntactically valid but empty/malformed response (e.g. `{}`) is still a
+// truthy object — without this check it would read as a real single-source
+// result (all fields "missing" but the ladder stops anyway) instead of a miss
+// that falls through to the next rung. Validates the VISION_PROMPT contract.
+const SATELLITE_DENSITY_VALUES = new Set(['SPARSE', 'MODERATE', 'HEAVY']);
+const SATELLITE_COMPLEXITY_VALUES = new Set(['SIMPLE', 'MODERATE', 'COMPLEX']);
+const SATELLITE_PROPERTY_TYPES = new Set(['Single Family', 'Townhome', 'Condo', 'Duplex', 'Commercial']);
+const SATELLITE_ROOF_CONDITIONS = new Set(['good', 'fair', 'poor']);
+const SATELLITE_NUMERIC_FIELDS = ['lot_sqft', 'lawn_sqft', 'house_footprint_sqft', 'bed_area_sqft', 'driveway_sqft', 'palm_count', 'tree_count', 'perimeter_linear_ft'];
+const SATELLITE_BOOL_FIELDS = ['has_pool', 'has_pool_cage', 'has_large_driveway', 'near_water'];
+
+// Models sometimes quote numbers ("1200"), stringify booleans ("true"), or
+// vary enum casing ("moderate" vs "MODERATE", "single family" vs "Single
+// Family"). Coerce those in place first so the validator rejects only
+// genuinely missing or out-of-range fields, not formatting noise.
+function normalizeSatelliteAnalysis(parsed) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  for (const field of SATELLITE_NUMERIC_FIELDS) {
+    const v = parsed[field];
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) parsed[field] = Number(v);
+  }
+  for (const field of SATELLITE_BOOL_FIELDS) {
+    const v = parsed[field];
+    if (typeof v === 'string') {
+      const lower = v.trim().toLowerCase();
+      if (lower === 'true') parsed[field] = true;
+      else if (lower === 'false') parsed[field] = false;
+    }
+  }
+  for (const field of ['shrub_density', 'tree_density']) {
+    if (typeof parsed[field] === 'string') parsed[field] = parsed[field].trim().toUpperCase();
+  }
+  if (typeof parsed.landscape_complexity === 'string') parsed.landscape_complexity = parsed.landscape_complexity.trim().toUpperCase();
+  if (typeof parsed.roof_condition === 'string') parsed.roof_condition = parsed.roof_condition.trim().toLowerCase();
+  if (typeof parsed.property_type === 'string') {
+    const match = [...SATELLITE_PROPERTY_TYPES].find((t) => t.toLowerCase() === parsed.property_type.trim().toLowerCase());
+    if (match) parsed.property_type = match;
+  }
+  return parsed;
+}
+
+function isValidSatelliteAnalysis(parsed) {
+  if (!parsed || typeof parsed !== 'object') return false;
+  const nonNegNumber = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  for (const field of SATELLITE_NUMERIC_FIELDS) {
+    if (!nonNegNumber(parsed[field])) return false;
+  }
+  for (const field of SATELLITE_BOOL_FIELDS) {
+    if (typeof parsed[field] !== 'boolean') return false;
+  }
+  if (!SATELLITE_DENSITY_VALUES.has(parsed.shrub_density)) return false;
+  if (!SATELLITE_DENSITY_VALUES.has(parsed.tree_density)) return false;
+  if (!SATELLITE_COMPLEXITY_VALUES.has(parsed.landscape_complexity)) return false;
+  if (!SATELLITE_PROPERTY_TYPES.has(parsed.property_type)) return false;
+  if (!SATELLITE_ROOF_CONDITIONS.has(parsed.roof_condition)) return false;
+  if (typeof parsed.notes !== 'string') return false;
+  return true;
+}
 
 class SatelliteAnalyzer {
 
@@ -81,15 +143,26 @@ class SatelliteAnalyzer {
       return { error: 'Could not fetch satellite image', imageUrl, microCloseUrl };
     }
 
-    const [claudeResult, openaiResult, geminiResult] = await Promise.allSettled([
-      this.analyzeWithClaude(imageBase64s),
-      this.analyzeWithOpenAI(imageBase64s),
-      this.analyzeWithGemini(imageBase64s),
-    ]);
+    // Ladder (owner ruling 2026-09-24): Gemini first, then Claude, then OpenAI
+    // last resort — stop at the first schema-valid result. No more three-way
+    // parallel fan-out / agreement-based confidence.
+    const attempted = { claude: false, openai: false, gemini: false };
+    let gemini = null;
+    let claude = null;
+    let openai = null;
 
-    const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
-    const openai = openaiResult.status === 'fulfilled' ? openaiResult.value : null;
-    const gemini = geminiResult.status === 'fulfilled' ? geminiResult.value : null;
+    attempted.gemini = true;
+    gemini = await this.analyzeWithGemini(imageBase64s).catch(() => null);
+
+    if (!gemini) {
+      attempted.claude = true;
+      claude = await this.analyzeWithClaude(imageBase64s).catch(() => null);
+    }
+
+    if (!gemini && !claude) {
+      attempted.openai = true;
+      openai = await this.analyzeWithOpenAI(imageBase64s).catch(() => null);
+    }
 
     if (!claude && !openai && !gemini) {
       return { error: 'All vision models failed', imageUrl, microCloseUrl };
@@ -101,6 +174,10 @@ class SatelliteAnalyzer {
       gemini ? { provider: 'gemini', analysis: gemini } : null,
     ].filter(Boolean));
 
+    // A rung the ladder never reached gets no providerStatus entry at all:
+    // the estimate pages warn on `configured === false` OR `available === false`
+    // (buildAiProviderWarnings), and "not needed" is neither a missing key nor
+    // a real miss.
     return {
       ...merged,
       imageUrl,
@@ -108,9 +185,9 @@ class SatelliteAnalyzer {
       lat, lng,
       aiSources: merged.aiSources || merged._sources || merged.source?.split('+') || [],
       providerStatus: {
-        claude: { configured: !!process.env.ANTHROPIC_API_KEY, available: !!claude },
-        openai: { configured: !!process.env.OPENAI_API_KEY, available: !!openai },
-        gemini: { configured: !!GEMINI_KEY, available: !!gemini },
+        ...(attempted.claude ? { claude: { configured: !!process.env.ANTHROPIC_API_KEY, available: !!claude } } : {}),
+        ...(attempted.openai ? { openai: { configured: !!process.env.OPENAI_API_KEY, available: !!openai } } : {}),
+        ...(attempted.gemini ? { gemini: { configured: !!GEMINI_KEY, available: !!gemini } } : {}),
       },
       models: {
         claude: claude ? { available: true, raw: claude } : { available: false },
@@ -144,8 +221,16 @@ class SatelliteAnalyzer {
         }],
       });
 
-      const text = response.content[0].text;
-      return JSON.parse(text.replace(/```json|```/g, '').trim());
+      // FLAGSHIP can lead with a thinking block; the shared extractor skips it.
+      const text = anthropicText(response);
+      if (!text) { logger.warn('Satellite Claude vision returned empty content'); return null; }
+      const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+      normalizeSatelliteAnalysis(parsed);
+      if (!isValidSatelliteAnalysis(parsed)) {
+        logger.warn('Satellite Claude vision response failed schema validation');
+        return null;
+      }
+      return parsed;
     } catch (err) {
       logger.error(`Claude vision failed: ${err.message}`);
       return null;
@@ -191,7 +276,13 @@ class SatelliteAnalyzer {
       if (!text) return null;
       const cleaned = text.replace(/```json|```/g, '').trim();
       const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      return JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
+      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
+      normalizeSatelliteAnalysis(parsed);
+      if (!isValidSatelliteAnalysis(parsed)) {
+        logger.warn('Satellite OpenAI vision response failed schema validation');
+        return null;
+      }
+      return parsed;
     } catch (err) {
       logger.error(`OpenAI vision failed: ${err.message}`);
       return null;
@@ -226,27 +317,27 @@ class SatelliteAnalyzer {
     const text = geminiText(data);
     if (!text) return null;
 
-    return JSON.parse(text.replace(/```json|```/g, '').trim());
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    normalizeSatelliteAnalysis(parsed);
+    if (!isValidSatelliteAnalysis(parsed)) {
+      logger.warn(`Satellite Gemini vision response failed schema validation (${model})`);
+      return null;
+    }
+    return parsed;
   }
 
   async analyzeWithGemini(imageBase64s) {
     if (!GEMINI_KEY) return null;
 
-    // Live model first, then the prior model on any miss (skip the retry if an
-    // override has pinned both to the same id).
-    const models = GEMINI_VISION_FALLBACK_MODEL && GEMINI_VISION_FALLBACK_MODEL !== GEMINI_VISION_MODEL
-      ? [GEMINI_VISION_MODEL, GEMINI_VISION_FALLBACK_MODEL]
-      : [GEMINI_VISION_MODEL];
-
-    for (const model of models) {
-      try {
-        const parsed = await this.geminiAttempt(model, imageBase64s);
-        if (parsed) return parsed;
-      } catch (err) {
-        logger.error(`Gemini vision failed (${model}): ${err.message}`);
-      }
+    // One Gemini call: Claude and then OpenAI follow in the ladder, so the
+    // shared GEMINI_VISION_FALLBACK_MODEL retry is not part of this lane
+    // (keeps the switchboard's primary → fallback → retry chain exact).
+    try {
+      return await this.geminiAttempt(GEMINI_VISION_MODEL, imageBase64s);
+    } catch (err) {
+      logger.error(`Gemini vision failed (${GEMINI_VISION_MODEL}): ${err.message}`);
+      return null;
     }
-    return null;
   }
 
   /**
@@ -448,4 +539,7 @@ class SatelliteAnalyzer {
   }
 }
 
-module.exports = new SatelliteAnalyzer();
+module.exports = Object.assign(new SatelliteAnalyzer(), {
+  isValidSatelliteAnalysis,
+  normalizeSatelliteAnalysis,
+});

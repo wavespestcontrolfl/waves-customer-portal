@@ -1,3 +1,4 @@
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { Button, Field, Input, Select, Textarea, Card, ActionFeedback } from "../../components/ui";
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { etDateString, etDatetimeLocalToISO, formatETDate, formatETTime } from "../../lib/timezone";
@@ -66,17 +67,18 @@ export default function EquipmentCalibrationPanel() {
   const [reconciliationError, setReconciliationError] = useState("");
   const [detailError, setDetailError] = useState("");
   const [detailAttempt, setDetailAttempt] = useState(0);
-  const loadReconciliation = useCallback(async () => {
-    setReconciliationLoading(true);
+  const reconciliationSequence = useRef(0);
+  const loadReconciliation = useCallback(async ({ background = false } = {}) => {
+    const seq = ++reconciliationSequence.current;
+    if (!background) setReconciliationLoading(true);
     setReconciliationError("");
     try {
       const d = await adminFetch("/admin/equipment-systems/reconciliation");
-      setReconciliation(d);
+      if (seq === reconciliationSequence.current) setReconciliation(d);
     } catch (error) {
-      setReconciliation(null);
-      setReconciliationError(error.message);
+      if (seq === reconciliationSequence.current) setReconciliationError(error.message);
     } finally {
-      setReconciliationLoading(false);
+      if (!background) setReconciliationLoading(false);
     }
   }, []);
   const loadSystems = useCallback(async () => {
@@ -95,6 +97,9 @@ export default function EquipmentCalibrationPanel() {
     loadSystems();
     loadReconciliation();
   }, [loadSystems, loadReconciliation]);
+  useVisiblePageRefresh(() => loadReconciliation({ background: true }), {
+    intervalMs: 0, enabled: !busy && !reconciliationLoading,
+  });
   // When the tech picks a system, fetch its current active calibration
   // so they can see what they're about to supersede.
   //
@@ -543,7 +548,7 @@ export default function EquipmentCalibrationPanel() {
         })}
           </div>}
       </Card>{" "}
-      <ReconciliationPanel report={reconciliation} loading={reconciliationLoading} onRefresh={loadReconciliation} />
+      <ReconciliationPanel report={reconciliation} loading={reconciliationLoading} />
     </div>;
 }
 function assetName(asset) {
@@ -609,8 +614,7 @@ function SystemLinkSummary({
 }
 function ReconciliationPanel({
   report,
-  loading,
-  onRefresh
+  loading
 }) {
   const summary = report?.summary || {};
   const issues = report?.issues || [];
@@ -642,9 +646,6 @@ function ReconciliationPanel({
             Links calibrated systems, operational assets, and tax register rows.
           </div>
         </div>
-        <Button type="button" onClick={onRefresh} disabled={loading} variant="primary" loading={loading} className="min-w-11">
-          {"Refresh"}
-        </Button>
       </div>
 
       {!report && <div style={{

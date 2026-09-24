@@ -19,7 +19,7 @@ const COPY = Object.freeze({
 });
 
 function isLowOrVeryLow(labelKey) {
-  return labelKey === 'very_low' || labelKey === 'low';
+  return labelKey === 'none' || labelKey === 'very_low' || labelKey === 'low';
 }
 
 function resolveCustomerSummary({ trend, label, dataCompleteness }) {

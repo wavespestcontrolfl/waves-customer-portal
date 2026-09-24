@@ -1,0 +1,452 @@
+// House-number disagreement lane (live incident, 2026-09-16): a call validated
+// 1250 Example Street at premise level while the profile carried a
+// web-form 1260 that does not exist. The never-overwrite rule kept the
+// profile (correctly), the correction lane heard no correction language, and
+// the routing gate saw a validated address — so nothing surfaced it. These
+// pin the pure detector, the card's review lane, and the auto-resolve rule
+// that closes the card once the record carries the stated number.
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../config/twilio-numbers', () => ({
+  isInternalNumber: jest.fn(() => false),
+  isOwnedNumber: jest.fn(() => false),
+  findByNumber: jest.fn(() => null),
+  getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
+}));
+
+const { onFileHouseNumberConflict, sameHouseNumberStreet } = require('../services/call-triage-flags');
+const { buildTriageItem } = require('../services/call-routing-gates');
+const { classifyTriageItem, RULE_NOTES, visitAtStatedAddress } = require('../services/triage-auto-resolve');
+
+const av = (street, extra = {}) => ({
+  status: 'validated_accept',
+  normalized: { street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219', ...extra },
+});
+const ON_FILE = { address_line1: '1260 Example Street', address_line2: null, city: 'Parrish', zip: '34219' };
+
+describe('onFileHouseNumberConflict — fractional numbers', () => {
+  test('12 1/2 is one house token: it conflicts with 12 and stays on the same street as 13', () => {
+    const onFile12 = { ...ON_FILE, address_line1: '12 Example Street' };
+    expect(onFileHouseNumberConflict({ addressValidation: av('12 1/2 Example Street'), onFileAddress: onFile12 })).toMatchObject({ stated_house_number: '12 1/2', on_file_house_number: '12' });
+    const onFile13 = { ...ON_FILE, address_line1: '13 Example Street' };
+    expect(onFileHouseNumberConflict({ addressValidation: av('12 1/2 Example Street'), onFileAddress: onFile13 })).toMatchObject({ stated_house_number: '12 1/2', on_file_house_number: '13' });
+    expect(sameHouseNumberStreet('12 1/2 Example Street', '12 1/2 Example St')).toBe(true);
+  });
+});
+
+describe('onFileHouseNumberConflict', () => {
+  test('same street, different house number → the two streets and numbers', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street'), onFileAddress: ON_FILE })).toEqual({
+      stated_street: '1250 Example Street',
+      on_file_street: '1260 Example Street',
+      stated_house_number: '1250',
+      on_file_house_number: '1260',
+      stated_city: 'Parrish',
+      stated_zip: '34219',
+    });
+  });
+
+  test('a corrected verdict counts the same as an accepted one', () => {
+    const r = onFileHouseNumberConflict({ addressValidation: { ...av('1250 Example Street'), status: 'corrected' }, onFileAddress: ON_FILE });
+    expect(r?.stated_house_number).toBe('1250');
+  });
+
+  test('suffix spelling and case do not hide the same street', () => {
+    const r = onFileHouseNumberConflict({ addressValidation: av('1250 EXAMPLE ST'), onFileAddress: ON_FILE });
+    expect(r?.on_file_house_number).toBe('1260');
+  });
+
+  test('a unit on either side is not part of the comparison', () => {
+    const r = onFileHouseNumberConflict({
+      addressValidation: av('500 Main St Apt 4'),
+      onFileAddress: { address_line1: '510 Main St', address_line2: 'Apt 4', city: 'Parrish', zip: '34219' },
+    });
+    expect(r?.stated_house_number).toBe('500');
+  });
+
+  test('numbered streets keep their number: 42 St and 43 St are different streets', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 42 St'), onFileAddress: { ...ON_FILE, address_line1: '1260 43 St' } })).toBeNull();
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 42nd St'), onFileAddress: { ...ON_FILE, address_line1: '1260 42nd Street' } })?.stated_house_number).toBe('1250');
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 42 St'), onFileAddress: { ...ON_FILE, address_line1: '1260 42 St' } })?.on_file_house_number).toBe('1260');
+  });
+
+  test('a suffix ahead of a post-directional still equates the suffixless spelling', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Main St N'), onFileAddress: { ...ON_FILE, address_line1: '1260 Main N' } })?.stated_house_number).toBe('1250');
+    expect(sameHouseNumberStreet('1250 Main St N', '1250 Main N')).toBe(true);
+    expect(sameHouseNumberStreet('1250 Main St N', '1250 Main St S')).toBe(false);
+    expect(sameHouseNumberStreet('Apt 4, 1250 Main St', '1250 Main St')).toBe(true);
+    expect(sameHouseNumberStreet('Apt 4, 1260 Main St', 'Apt 4, 1250 Main St')).toBe(false);
+  });
+
+  test('a legacy unit-first on-file line is peeled before comparing', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Main St'), onFileAddress: { ...ON_FILE, address_line1: 'Apt 4, 1260 Main St' } })?.on_file_house_number).toBe('1260');
+  });
+
+  test('same house number → nothing to confirm', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1260 Example Street'), onFileAddress: ON_FILE })).toBeNull();
+  });
+
+  test('a different street is a second property, not a typo', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Sample Avenue'), onFileAddress: ON_FILE })).toBeNull();
+  });
+
+  test('a different ZIP or city is not a typo either', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street', { postal_code: '34221' }), onFileAddress: ON_FILE })).toBeNull();
+    // A different city vetoes only when no ZIP pair already agreed…
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street', { city: 'Bradenton', postal_code: '' }), onFileAddress: ON_FILE })).toBeNull();
+    // …postal-city names alias (Bradenton / Lakewood Ranch share a ZIP), so
+    // agreeing ZIPs keep the same-street conflict (codex r30 P1).
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street', { city: 'Bradenton' }), onFileAddress: ON_FILE }))
+      .toMatchObject({ stated_house_number: '1250', on_file_house_number: '1260', stated_city: 'Bradenton', stated_zip: '34219' });
+  });
+
+  test('a locality missing on one side does not veto the comparison', () => {
+    const r = onFileHouseNumberConflict({
+      addressValidation: av('1250 Example Street', { city: null, postal_code: null }),
+      onFileAddress: { address_line1: '1260 Example Street', city: null, zip: null },
+    });
+    expect(r?.stated_house_number).toBe('1250');
+  });
+
+  test('only a positively validated premise may contradict the record', () => {
+    for (const status of ['confirm_needed', 'missing_component', 'ambiguous', 'out_of_service_area', 'api_unavailable', 'not_attempted']) {
+      expect(onFileHouseNumberConflict({ addressValidation: { ...av('1250 Example Street'), status }, onFileAddress: ON_FILE })).toBeNull();
+    }
+    expect(onFileHouseNumberConflict({ addressValidation: null, onFileAddress: ON_FILE })).toBeNull();
+  });
+
+  test('a street with no house number on either side cannot disagree by number', () => {
+    expect(onFileHouseNumberConflict({ addressValidation: av('Example Street'), onFileAddress: ON_FILE })).toBeNull();
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street'), onFileAddress: { ...ON_FILE, address_line1: 'Example Street' } })).toBeNull();
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street'), onFileAddress: null })).toBeNull();
+    expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street'), onFileAddress: { address_line1: '' } })).toBeNull();
+  });
+});
+
+describe('on_file_house_number_conflict card', () => {
+  test('files in the address-review lane, advisory, with both streets in the payload', () => {
+    const conflict = onFileHouseNumberConflict({ addressValidation: av('1250 Example Street'), onFileAddress: ON_FILE });
+    const item = buildTriageItem({
+      callLogId: 42,
+      flag: 'on_file_house_number_conflict',
+      extraction: { meta: { call_summary: 'quote' }, scheduling: { status: 'none' } },
+      severity: 'advisory',
+      addressValidation: av('1250 Example Street'),
+      onFileAddress: ON_FILE,
+      extraPayload: conflict,
+    });
+    expect(item.category).toBe('address_review');
+    expect(item.severity).toBe('advisory');
+    const payload = JSON.parse(item.payload);
+    // The card carries the scheduling ask a held confirmed booking must
+    // answer before the sweep may close it, and joins the evidence set.
+    expect(payload.scheduling_window).toEqual(expect.objectContaining({ status: 'none' }));
+    expect(require('../services/triage-auto-resolve').EVIDENCE_CODES.has('on_file_house_number_conflict')).toBe(true);
+    expect(payload).toMatchObject({
+      stated_street: '1250 Example Street',
+      on_file_street: '1260 Example Street',
+      stated_house_number: '1250',
+      on_file_house_number: '1260',
+      on_file_address: { address_line1: '1260 Example Street', city: 'Parrish', zip: '34219' },
+    });
+  });
+});
+
+describe('triage auto-resolve: house_number_adopted', () => {
+  const NOW = new Date('2026-09-23T12:00:00Z');
+  const item = (over = {}) => ({
+    id: 1, status: 'open', severity: 'advisory', reason_code: 'on_file_house_number_conflict',
+    created_at: '2026-09-16T15:00:00Z', customer_deleted_at: null,
+    call_extraction: { scheduling: { status: 'none' } },
+    customer_address_line1: '1260 Example Street', customer_zip: '34219',
+    customer_city: 'Parrish',
+    payload: { stated_house_number: '1250', on_file_house_number: '1260', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
+    ...over,
+  });
+
+  test('resolves once the record carries the stated house number', () => {
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street' }), {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+    expect(RULE_NOTES.house_number_adopted).toMatch(/house number the caller stated/);
+  });
+
+  test('stands while the record still carries the other number, and is never aged out', () => {
+    expect(classifyTriageItem(item(), {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ created_at: '2026-01-01T00:00:00Z' }), {}, { now: NOW })).toBeNull();
+  });
+
+  test('a card filed against another customer is not settled by the relinked customer\'s record (codex r27 P1)', () => {
+    const relinked = item({
+      customer_address_line1: '1250 Example Street', call_customer_id: 'cust-new',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null, dispute_customer_id: 'cust-orig' },
+    });
+    expect(classifyTriageItem(relinked, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem({ ...relinked, call_customer_id: 'cust-orig' }, {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+    // The durable cleared marker does not bypass the identity check either (codex r28 P1).
+    const clearedRelinked = { ...relinked, customer_address_line1: '1260 Example Street',
+      payload: { ...relinked.payload, address_dispute_cleared_at: '2026-09-23T10:00:00Z' } };
+    expect(classifyTriageItem(clearedRelinked, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem({ ...clearedRelinked, call_customer_id: 'cust-orig' }, {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
+  test('a confirmed call held on this card stays open until a booking lands', () => {
+    const confirmed = item({
+      customer_address_line1: '1250 Example Street',
+      call_extraction: { scheduling: { status: 'confirmed' } },
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: 'confirmed' },
+    });
+    expect(classifyTriageItem(confirmed, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(confirmed, { evidence: new Map([[1, { booking_after_card: true }]]) }, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
+  test('a card recording a retained same-call visit is left to staff (codex r38 P1)', () => {
+    const withRetained = item({
+      customer_address_line1: '1250 Example Street',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null, retained_service_id: 'svc-9' },
+    });
+    expect(classifyTriageItem(withRetained, {}, { now: NOW })).toBeNull();
+  });
+
+  test('a card recording a promised follow-up is left to staff', () => {
+    const withPlan = item({
+      customer_address_line1: '1250 Example Street',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null, follow_up_plan: { scheduled_date: '2026-10-09', window_start: '10:00' } },
+    });
+    expect(classifyTriageItem(withPlan, {}, { now: NOW })).toBeNull();
+  });
+
+  test('a stated unit must be on the record before the ask is settled', () => {
+    const unitCard = item({
+      customer_address_line1: '1250 Example Street', customer_address_line2: 'Apt 3',
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', stated_unit: 'Apt 2', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
+    });
+    expect(classifyTriageItem(unitCard, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem({ ...unitCard, customer_address_line2: null }, {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem({ ...unitCard, customer_address_line2: 'Unit 2' }, {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
+  test('an unrelated street sharing the house number does not settle the ask', () => {
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Unrelated Avenue' }), {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_zip: '34221' }), {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_city: 'Bradenton', customer_zip: null }), {}, { now: NOW })).toBeNull();
+    // A stated ZIP the record no longer carries is not the same premise.
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_zip: null }), {}, { now: NOW })).toBeNull();
+  });
+
+  test('directional and suffix spellings resolve exactly as they were detected', () => {
+    expect(sameHouseNumberStreet('1250 North Main Street', '1250 N Main St')).toBe(true);
+    expect(sameHouseNumberStreet('Main St', '1250 Main St')).toBe(false);
+    expect(classifyTriageItem(item({
+      customer_address_line1: '1250 N Main St', customer_city: 'Parrish', customer_zip: '34219',
+      payload: { stated_house_number: '1250', stated_street: '1250 North Main Street', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
+    }), {}, { now: NOW })).toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
+  test('a saved spelling without a suffix still settles the ask (the detector equates them)', () => {
+    expect(sameHouseNumberStreet('1250 Main St', '1250 Main')).toBe(true);
+    expect(sameHouseNumberStreet('1250 Main St', '1250 Main Ave')).toBe(false);
+    expect(sameHouseNumberStreet('1250 N Main St', '1250 North Main Street')).toBe(true);
+    expect(sameHouseNumberStreet('Main St', '1250 Main St')).toBe(false);
+    expect(classifyTriageItem(item({
+      customer_address_line1: '1250 Main', customer_city: 'Parrish', customer_zip: '34219',
+      payload: { stated_house_number: '1250', stated_street: '1250 Main St', stated_city: 'Parrish', stated_zip: '34219', scheduling_status: null },
+    }), {}, { now: NOW })).toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
+  test('suffix spelling and a unit do not keep a settled ask open', () => {
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example St Apt 2' }), {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+    // A card whose call stated no locality is settled by the street alone.
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_zip: null, customer_city: null,
+      payload: { stated_house_number: '1250', stated_street: '1250 Example Street', scheduling_status: null } }), {}, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'house_number_adopted' });
+  });
+
+  test('a deleted customer or a card with no stated number is left alone', () => {
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', customer_deleted_at: '2026-09-20T00:00:00Z' }), {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', payload: {} }), {}, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ customer_address_line1: '1250 Example Street', payload: { stated_house_number: '1250' } }), {}, { now: NOW })).toBeNull();
+  });
+});
+
+describe('visitAtStatedAddress', () => {
+  const card = {
+    call_customer_id: 'c1',
+    payload: { stated_street: '1250 Example St', stated_city: 'Parrish', stated_zip: '34219', stated_house_number: '1250' },
+  };
+  const visit = (line1, city = 'Parrish', zip = '34219', line2 = null) => ({
+    customer_id: 'c1', service_address_line1: line1, service_address_line2: line2, service_address_city: city, service_address_zip: zip,
+  });
+
+  test('a booking at the stated premise counts; one at the old on-file number does not', () => {
+    expect(visitAtStatedAddress(card, visit('1250 Example Street'), new Map())).toBe(true);
+    // Equivalent spellings (directional, suffixless) via the detector's comparator.
+    expect(visitAtStatedAddress({ ...card, payload: { ...card.payload, stated_street: '1250 North Example St' } }, visit('1250 N Example Street'), new Map())).toBe(true);
+    expect(visitAtStatedAddress(card, visit('1250 Example'), new Map())).toBe(true);
+    expect(visitAtStatedAddress(card, visit('1260 Example St'), new Map())).toBe(false);
+    // A different city vetoes only when no ZIP pair agreed; aliased postal
+    // cities on the same ZIP are the same place (codex r33 P2).
+    expect(visitAtStatedAddress(card, visit('1250 Example St', 'Bradenton', null), new Map())).toBe(false);
+    expect(visitAtStatedAddress(card, visit('1250 Example St', 'Bradenton'), new Map())).toBe(true);
+    expect(visitAtStatedAddress(card, visit('1250 Example St', 'Parrish', '34221'), new Map())).toBe(false);
+  });
+
+  test('a stated unit must match; a card with no stated street proves nothing', () => {
+    const unitCard = { ...card, payload: { ...card.payload, stated_unit: 'Apt 2' } };
+    expect(visitAtStatedAddress(unitCard, visit('1250 Example St', 'Parrish', '34219', 'Apt 2'), new Map())).toBe(true);
+    expect(visitAtStatedAddress(unitCard, visit('1250 Example St', 'Parrish', '34219', 'Apt 3'), new Map())).toBe(false);
+    expect(visitAtStatedAddress({ ...card, payload: {} }, visit('1250 Example St'), new Map())).toBe(false);
+  });
+});
+
+describe('heldConflictTaskDecision (verdict route)', () => {
+  const { __private } = require('../routes/admin-triage');
+  const { heldConflictTaskDecision } = __private;
+  const held = {
+    scheduling_window: { status: 'confirmed', confirmed_start_at: '2026-09-25T14:00:00Z', requested_address: { street_line_1: '1250 Example St', city: 'Parrish', postal_code: '34219' } },
+    on_file_address: { address_line1: '1260 Example St', address_line2: null, city: 'Parrish', zip: '34219' },
+    stated_street: '1250 Example St',
+  };
+
+  test('Accept on a confirmed, unbooked call files the task, judged at the approved on-file address', () => {
+    const d = heldConflictTaskDecision({ verdict: 'accept', wrongFields: [], heldConflictPayload: held, bookingCovered: false });
+    expect(d.file).toBe(true);
+    expect(d.skippedReason).toBe('address_confirmed_on_file_after_house_number_dispute');
+    expect(d.approvedWindow.requested_address).toEqual({ street_line_1: '1260 Example St', street_line_2: null, city: 'Parrish', postal_code: '34219', raw_text: null });
+    const multi = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: { ...held, scheduling_window: { ...held.scheduling_window, requested_address: { ...held.scheduling_window.requested_address, additional_properties: [{ street_line_1: '9 Other Rd' }] } } } });
+    expect(multi.approvedWindow.requested_address.additional_properties).toEqual([{ street_line_1: '9 Other Rd' }]);
+    expect(multi.approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
+    const spoken = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: { ...held, scheduling_window: { ...held.scheduling_window, requested_address: { ...held.scheduling_window.requested_address, raw_text: '1250 Example Street in Parrish' } } } });
+    expect(spoken.approvedWindow.requested_address.raw_text).toBeNull();
+    expect(d.approvedPayload.stated_street).toBeUndefined();
+    expect(d.approvedPayload.heard_address.street_line_1).toBe('1260 Example St');
+  });
+
+  test('a relinked card refuses only Accept; Deny / Dismiss close it, and a reprocess re-binds its customer (pre-push audit P1 after r27)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    const guard = src.slice(src.indexOf('const relinked = '), src.indexOf('const liveCustomer = '));
+    expect(guard).toContain("if (!rejectsScheduling) {");
+    expect(guard).toContain("wrongFields.includes('spam_status'));");
+    expect(guard).toContain("code: 'CONFLICT_CUSTOMER_RELINKED'");
+    // A relinked Deny must not close the card while the retained visit is
+    // still live — a relink never cancels scheduled_services.
+    expect(guard).toContain("code: 'CONFLICT_RETAINED_VISIT_LIVE'");
+    expect(guard.indexOf("code: 'CONFLICT_RETAINED_VISIT_LIVE'")).toBeLessThan(guard.indexOf('no recovery task filed'));
+    expect(guard).toContain('no recovery task filed');
+    // The retained visit is looked up by the column scheduled_services actually carries (codex local audit).
+    expect(src).toContain("where({ id: retainedId, source_call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'])");
+    // Recovery tasks: version-bound on /verdict, never swept by a sibling verdict, obsolete retained fields nulled (codex r31 P1).
+    expect(src).toContain("if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {");
+    expect(src).toContain("...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),");
+    expect(src).toContain("retained_service_id: retained ? retained.id : null,");
+    // The settlement's follow-up card is filed only when visit 2 is neither owned by dispatch nor already handled (codex r31 P1).
+    expect(src).toContain("&& !(await followUpAlreadyOwnedOrHandled(trx, item.call_log_id))) {");
+    expect(src).toContain("orWhereIn('followup_source_service_id', callVisits)");
+    expect(src).toContain("whereIn('status', ['resolved', 'dismissed'])");
+    const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    // The disputed premise is held out of active property persistence on both authority paths (codex r32 P1).
+    expect(processor).toContain("if (!v2SoleAddressAuthority && !disputedPremise({ address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip })");
+    expect(processor).toContain("if (disputedPremise(entry)) continue;");
+    // …and rows an earlier pass persisted for the disputed premise are retired with the hold (codex r36 P1).
+    expect(processor).toContain(".where({ customer_id: customerId, source: 'call_pipeline', active: true })");
+    // A standing hold carried over without fresh AV evidence restores the disputed street (codex r33 P1).
+    expect(processor).toContain("disputedStatedStreet = standingPayload?.stated_street || null;");
+    expect(processor).toContain("disputedStatedUnit = standingPayload?.stated_unit || null;");
+    // A kept card's booking ask follows the positively resolved premise (codex r34 P1) — and the
+    // raw expression COMPILES under knex (a bare `?` existence operator would read as a binding).
+    expect(processor).toContain("CASE WHEN jsonb_exists(COALESCE(payload, '{}'::jsonb), 'scheduling_window') ");
+    const knex = require('knex')({ client: 'pg' });
+    const merged = JSON.stringify({ address_dispute_cleared_at: 'x' });
+    const resolvedAddress = JSON.stringify({ street_line_1: '1260 Example St' });
+    const compiled = knex('triage_items').where({ id: 1 }).update({
+      payload: knex.raw(
+        "CASE WHEN jsonb_exists(COALESCE(payload, '{}'::jsonb), 'scheduling_window') "
+        + "THEN jsonb_set(COALESCE(payload, '{}'::jsonb) || ?::jsonb, '{scheduling_window,requested_address}', COALESCE(payload #> '{scheduling_window,requested_address}', '{}'::jsonb) || ?::jsonb, true) "
+        + "ELSE COALESCE(payload, '{}'::jsonb) || ?::jsonb END",
+        [merged, resolvedAddress, merged],
+      ),
+    }).toSQL();
+    expect(compiled.bindings).toEqual([merged, resolvedAddress, merged, 1]);
+    knex.destroy();
+    // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).
+    expect(processor).toContain("...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),");
+  });
+
+  test('a denial of the call\'s scheduling evidence is exposed so the promised follow-up files nothing either (pre-push audit P1 after r25)', () => {
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: [], heldConflictPayload: held }).scheduleDenied).toBe(true);
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held }).scheduleDenied).toBe(true);
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['service'], heldConflictPayload: held }).scheduleDenied).toBe(true);
+    // A spam / wrong-number denial files no booking task either (codex r29 P1).
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['spam_status'], heldConflictPayload: held }).file).toBe(false);
+    // A denial naming only the address keeps the appointment evidence.
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).scheduleDenied).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held }).scheduleDenied).toBe(false);
+    // The settlement guards the follow-up branch on it.
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    expect(src).toContain("heldConflictPayload?.follow_up_plan && !decision.scheduleDenied");
+  });
+
+  test('a durably cleared dispute keeps its scheduling snapshot (codex r35 P1)', () => {
+    const clearedHeld = { ...held, address_dispute_cleared_at: '2026-09-23T10:00:00Z' };
+    const d = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: clearedHeld, liveOnFile: { address_line1: '1260 Example St', address_line2: null, city: 'Parrish', zip: '34219' } });
+    expect(d.approvedWindow.requested_address).toEqual(held.scheduling_window.requested_address);
+  });
+
+  test('the live customer address outranks the card snapshot once the office adopted the caller\'s number', () => {
+    const d = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1250 Example St', address_line2: null, city: 'Parrish', zip: '34219' } });
+    expect(d.approvedWindow.requested_address.street_line_1).toBe('1250 Example St');
+    expect(d.approvedPayload.on_file_address.address_line1).toBe('1250 Example St');
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '' } }).approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
+  });
+
+  test('a live address that is neither reviewed premise does not retarget the ask', () => {
+    const moved = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '9 Other Road', address_line2: null, city: 'Parrish', zip: '34219' } });
+    expect(moved.approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
+    expect(moved.approvedPayload.on_file_address.address_line1).toBe('1260 Example St');
+    // Same street line but a different unit or town is not a reviewed premise either.
+    const otherUnit = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: 'Apt 2', city: 'Parrish', zip: '34219' } });
+    expect(otherUnit.approvedWindow.requested_address.street_line_2).toBeNull();
+    const otherTown = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: 'Elsewhere', zip: '34220' } });
+    expect(otherTown.approvedWindow.requested_address.city).toBe('Parrish');
+    // A live row whose locality was CLEARED is not the reviewed premise either:
+    // the task keeps the snapshot's known city and ZIP (codex r25 P2).
+    const noZip = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: 'Parrish', zip: null } });
+    expect(noZip.approvedWindow.requested_address).toEqual({ street_line_1: '1260 Example St', street_line_2: null, city: 'Parrish', postal_code: '34219', raw_text: null });
+    const noCity = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: '', zip: '34219' } });
+    expect(noCity.approvedWindow.requested_address.city).toBe('Parrish');
+    expect(noCity.approvedPayload.on_file_address).toEqual(held.on_file_address);
+    const retyped = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: 'Parrish', zip: '34219' } });
+    expect(retyped.approvedWindow.requested_address.street_line_1).toBe('1260 Example Street');
+  });
+
+  test('an unconfirmed card still files the reassignment task for a held booking', () => {
+    const unconfirmed = { ...held, scheduling_window: { status: 'none' } };
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: unconfirmed }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: unconfirmed }).file).toBe(false);
+  });
+
+
+  test('a covering booking, or a card whose call never confirmed, files nothing', () => {
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: { ...held, scheduling_window: { status: 'none' } } }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: null }).file).toBe(false);
+  });
+
+  test('Deny keeps the appointment owed unless the scheduling extraction itself was denied', () => {
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).file).toBe(true);
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['address'], heldConflictPayload: held }).skippedReason).toBe('house_number_dispute_denied_appointment_unbooked');
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['service'], heldConflictPayload: held }).file).toBe(false);
+  });
+
+  test('a whole-call Deny (no field) or Dismiss rejects the appointment — no recovery task', () => {
+    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: [], heldConflictPayload: held }).file).toBe(false);
+    expect(heldConflictTaskDecision({ verdict: 'deny', heldConflictPayload: held }).file).toBe(false);
+    // Accept is unaffected by an empty field list.
+    expect(heldConflictTaskDecision({ verdict: 'accept', wrongFields: [], heldConflictPayload: held }).file).toBe(true);
+  });
+});

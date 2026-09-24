@@ -64,11 +64,13 @@ it("keeps fresh request data when an older overlapping load resolves later", asy
   await screen.findByText("Fresh agreement");
   expect(screen.queryByText("Loading document requests...")).not.toBeInTheDocument();
   fireEvent(window, new Event("online"));
-  await waitFor(() => expect(listCalls).toBe(4));
+  expect(listCalls).toBe(3);
 
   await act(async () => old.resolve(response({ requests: [request("stale", "Stale agreement")] })));
   expect(screen.getByText("Fresh agreement")).toBeInTheDocument();
   expect(screen.queryByText("Stale agreement")).not.toBeInTheDocument();
+  fireEvent(window, new Event("online"));
+  await waitFor(() => expect(listCalls).toBe(4));
   expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
 });
 

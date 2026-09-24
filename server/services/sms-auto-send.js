@@ -65,7 +65,10 @@ const FAILED_STATUS = 'auto_send_failed';
 // orphan — failClaim leaves the draft 'shadow', so it re-enters ordinary
 // drafting rather than staying invisibly stuck.
 // One source of truth with the readers' hide window (review-ask-reservation).
-const { REPLY_RESERVATION_HOLD_HOURS: UNCERTAIN_CLAIM_HOLD_HOURS } = require('./messaging/review-ask-reservation');
+const {
+  REPLY_RESERVATION_HOLD_HOURS: UNCERTAIN_CLAIM_HOLD_HOURS,
+  preserveSoleAcceptedReplyReceipts,
+} = require('./messaging/review-ask-reservation');
 // message_drafts.status once the send is confirmed (out of the judge pool).
 const DRAFT_SENT_STATUS = 'auto_sent';
 
@@ -501,7 +504,9 @@ async function maybeAutoSend(params = {}) {
         // The reservation itself becomes accepted evidence before any later
         // bookkeeping. If Twilio's sms_log insert and these writes both fail,
         // recovery still has one durable sent row linking used + parked ids.
-        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, acceptedResult: result });
+        if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, acceptedResult: result })) {
+          throw new Error('accepted reservation was not promoted');
+        }
         if (!await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId })) {
           throw new Error('auto-send claim was not resolved');
         }
@@ -594,13 +599,22 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
   try {
     reservationsCleared = await db('sms_log')
       .where({ direction: 'outbound' })
-      .whereIn('status', ['sending', 'sent', 'delivered'])
+      .whereIn('status', ['sending', 'sent', 'delivered', 'failed', 'undelivered', 'canceled'])
       .where(function replyReservation() {
         this.whereRaw("metadata->>'manual_send_reservation' = 'true'")
           .orWhereRaw("metadata->>'auto_send_reservation' = 'true'");
       })
       .whereRaw("COALESCE(metadata->>'review_ask_reservation', 'false') != 'true'")
       .where('created_at', '<', cutoff)
+      // Wrapper-managed no-card sends have no linked decision to keep their
+      // uncertain reservation alive. Preserve that narrow marker for the
+      // same bounded 24-hour window the retry interlock observes.
+      .whereRaw(`NOT (
+        status = 'sending'
+        AND COALESCE(metadata->>'manual_wrapper_reservation', 'false') = 'true'
+        AND COALESCE(metadata->>'provider_outcome_uncertain', 'false') = 'true'
+        AND created_at >= ?
+      )`, [uncertainCutoff])
       .where(function settledOrOrdinaryReservation() {
         this.whereRaw("metadata->>'provider_outcome_uncertain' IS DISTINCT FROM 'true'")
           .orWhereNotExists(function liveLinkedDecision() {
@@ -613,6 +627,7 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
               )`);
           });
       })
+      .modify(preserveSoleAcceptedReplyReceipts)
       .del();
   } catch (err) {
     logger.warn(`[sms-auto-send] reservation sweep failed: ${err.message}`);

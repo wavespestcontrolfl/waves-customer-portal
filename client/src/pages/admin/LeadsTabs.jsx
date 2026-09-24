@@ -35,6 +35,57 @@ import {
 } from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+const CONTACT_EVIDENCE_LABELS = new Map([
+  ["live_conversation", "Contacted after a live conversation"],
+  ["assessment_booked", "Contacted after an assessment was booked"],
+  ["assessment_completed", "Contacted after an assessment was completed"],
+]);
+
+function contactEvidenceDetails(activity) {
+  if (activity?.activity_type !== "status_change" || !activity.metadata)
+    return null;
+
+  let metadata;
+  try {
+    metadata =
+      typeof activity.metadata === "string"
+        ? JSON.parse(activity.metadata)
+        : activity.metadata;
+  } catch {
+    return null;
+  }
+
+  const label = CONTACT_EVIDENCE_LABELS.get(metadata?.evidenceType);
+  if (!label) return null;
+
+  const evidenceId = String(metadata?.evidenceId || "").trim();
+  const safeId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(evidenceId)
+    ? evidenceId
+    : "";
+  const reference =
+    safeId.length > 16
+      ? `${safeId.slice(0, 8)}…${safeId.slice(-4)}`
+      : safeId;
+
+  return { label, reference };
+}
+
+function ContactEvidenceExplanation({ activity }) {
+  const details = contactEvidenceDetails(activity);
+  if (!details) return null;
+
+  return (
+    <div className="mt-[2px] text-zinc-900">
+      {details.label}
+      {details.reference && (
+        <span className="text-ink-secondary">
+          {" "}· Evidence reference {details.reference}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // leads.address may hold either a street-only line or a fully composed
 // "street, City, FL zip" string depending on which intake path wrote the row —
 // only append the standalone city/zip columns when the stored address doesn't
@@ -412,6 +463,67 @@ function LeadBadge({ label, tone = "neutral", className }) {
     <Badge tone={tone} className={`whitespace-nowrap ${className || ""}`}>
       {label}
     </Badge>
+  );
+}
+const RECONCILIATION_EVIDENCE_LABELS = {
+  live_conversation: "Live conversation",
+  assessment_booked: "Assessment booked",
+  assessment_completed: "Assessment completed",
+};
+function LeadStatusReviewPanel({ reconciliation }) {
+  if (!reconciliation) return null;
+  const isReview = reconciliation.status === "review";
+  const isUnavailable = reconciliation.status === "unavailable";
+  const label = isReview
+    ? "Review needed"
+    : isUnavailable
+      ? "Unavailable"
+      : reconciliation.status === "not_evaluated"
+        ? "Not evaluated"
+        : "No conflict";
+  return (
+    <Card
+      className={`mb-[14px] p-[14px] ${isReview ? "border-alert-fg" : "border-zinc-200"}`}
+      aria-label="Status review"
+    >
+      <div className="flex flex-wrap items-center gap-[8px] mb-[8px]">
+        <h4 className="m-0 text-zinc-900 text-ui-body font-medium">
+          Status review
+        </h4>
+        <LeadBadge label={label} tone={isReview ? "alert" : "neutral"} />
+      </div>
+      <p className="m-0 text-ui-body text-zinc-900">
+        {reconciliation.summary}
+      </p>
+      {reconciliation.findings?.map((finding, index) => (
+        <div
+          key={`${finding.code}-${finding.evidence?.id || index}`}
+          className="mt-[10px] border-l-2 border-solid border-zinc-300 pl-[10px] text-ui-body text-zinc-900"
+        >
+          {finding.message}
+          {finding.evidence && (
+            <div className="mt-[3px] text-ink-secondary">
+              {RECONCILIATION_EVIDENCE_LABELS[finding.evidence.type] ||
+                finding.evidence.type}
+              {finding.evidence.id ? ` · ${finding.evidence.id}` : ""}
+              {finding.evidence.occurred_at
+                ? ` · ${new Date(finding.evidence.occurred_at).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`
+                : ""}
+            </div>
+          )}
+        </div>
+      ))}
+      <p className="m-[10px_0_0] text-ui-body text-ink-secondary">
+        Read-only preview for this lead and recent assessment evidence. No
+        status changes or customer messages were made.
+        {reconciliation.scope?.assessment_limit
+          ? ` Shows up to ${reconciliation.scope.assessment_limit} recent assessments.`
+          : ""}
+        {reconciliation.scope?.assessment_truncated
+          ? " Older assessments were not checked."
+          : ""}
+      </p>
+    </Card>
   );
 }
 function AgingBadge({ lead }) {
@@ -802,9 +914,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // Monotonic id of the newest loadLeads request — stale responses bail.
   const leadsRequestRef = useRef(0);
   const [leadActivities, setLeadActivities] = useState([]);
+  const [linkedHistory, setLinkedHistory] = useState(null);
+  const leadReviewEnabled = searchParams.get("leadReview") === "1";
   const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
   const [leadCalls, setLeadCalls] = useState([]);
+  const [leadStatusReview, setLeadStatusReview] = useState(null);
   const openedLinkedLeadRef = useRef(null);
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
@@ -1072,22 +1187,28 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       const requestedLeadId = String(leadId);
       if (!silent) {
         setLeadActivities([]);
+        setLinkedHistory(null);
         setLeadCalls([]);
+        setLeadStatusReview(null);
         setLeadActivitiesError(null);
         setLeadActivitiesLoading(true);
       }
       try {
-        const data = await adminFetch(`/admin/leads/${leadId}`);
+        const data = await adminFetch(`/admin/leads/${leadId}${leadReviewEnabled ? "?leadReview=1" : ""}`);
         if (String(expandedLeadRef.current || "") !== requestedLeadId) return;
         setLeadActivities(data.activities || []);
+        setLinkedHistory(data.linkedHistory || null);
         setLeadCalls(data.calls || []);
+        setLeadStatusReview(data.reconciliation || null);
         if (!silent) setLeadActivitiesError(null);
       } catch (e) {
         console.error("loadLeadActivities", e);
         if (String(expandedLeadRef.current || "") !== requestedLeadId) return;
         if (!silent) {
           setLeadActivities([]);
+          setLinkedHistory(null);
           setLeadCalls([]);
+          setLeadStatusReview(null);
           setLeadActivitiesError(e);
         }
       } finally {
@@ -1099,7 +1220,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         }
       }
     },
-    [],
+    [leadReviewEnabled],
   );
   useEffect(() => {
     if (tab !== "pipeline" || !expandedLead) return undefined;
@@ -1701,7 +1822,106 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                             >
                               {" "}
                               <div className="border-b border-solid border-zinc-200 bg-zinc-50 px-6 py-4">
-                                {" "}
+                                {leadReviewEnabled &&
+                                  linkedHistory &&
+                                  !leadActivitiesLoading && (
+                                    <section
+                                      aria-label="Linked lead history"
+                                      className="mb-4 text-ui-body text-ink-secondary"
+                                    >
+                                      <h4 className="m-0 mb-2 text-ui-body text-zinc-900">
+                                        Linked lead history
+                                      </h4>
+                                      <p className="my-2">
+                                        Review each record’s own calls,
+                                        estimates and activities. Links do not
+                                        merge records or move history.
+                                      </p>
+                                      {linkedHistory.unresolved && (
+                                        <p className="my-2">
+                                          The original record could not be
+                                          resolved. Review this link before
+                                          changing status.
+                                        </p>
+                                      )}
+                                      {[
+                                        ...(linkedHistory.canonical
+                                          ? [
+                                              {
+                                                ...linkedHistory.canonical,
+                                                relationship: "Primary record",
+                                              },
+                                            ]
+                                          : []),
+                                        ...(linkedHistory.original &&
+                                        linkedHistory.original.id !==
+                                          linkedHistory.canonical?.id
+                                          ? [
+                                              {
+                                                ...linkedHistory.original,
+                                                relationship: "Linked original",
+                                              },
+                                            ]
+                                          : []),
+                                        ...(linkedHistory.linked || []).map(
+                                          (record) => ({
+                                            ...record,
+                                            relationship: "Linked record",
+                                          }),
+                                        ),
+                                      ].map((record, index) => (
+                                        <div
+                                          key={`${record.id}-${index}`}
+                                          className="mb-2 flex flex-wrap items-center gap-2"
+                                        >
+                                          <span>
+                                            {record.relationship}:{" "}
+                                            {record.first_name}{" "}
+                                            {record.last_name} ·{" "}
+                                            {record.status
+                                              ? record.status.replace(/_/g, " ")
+                                              : "Unknown status"}
+                                            {record.service_interest
+                                              ? ` · ${record.service_interest}`
+                                              : ""}
+                                          </span>
+                                          <Button
+                                            variant="secondary"
+                                            onClick={() => {
+                                              // Ordinary row expansion is local state. Keep
+                                              // its exact record in history before leaving.
+                                              setSearchParams({
+                                                tab: "leads",
+                                                leadReview: "1",
+                                                lead: lead.id,
+                                              }, { replace: true });
+                                              setSearchParams({
+                                                tab: "leads",
+                                                leadReview: "1",
+                                                lead: record.id,
+                                              });
+                                            }}
+                                          >
+                                            Review record
+                                          </Button>
+                                        </div>
+                                      ))}
+                                      {!linkedHistory.original &&
+                                        !linkedHistory.canonical &&
+                                        !linkedHistory.linked?.length &&
+                                        !linkedHistory.unresolved && (
+                                          <p className="my-2">
+                                            No explicitly linked records.
+                                          </p>
+                                        )}
+                                      {linkedHistory.hasMore && (
+                                        <p className="my-2">
+                                          Showing the 50 most recent linked
+                                          records.
+                                        </p>
+                                      )}
+                                    </section>
+                                  )}{" "}
                                 <div className="flex gap-[16px] flex-wrap mb-[16px]">
                                   {" "}
                                   <div className="flex-[1_1_300px]">
@@ -1969,6 +2189,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           <span className="text-zinc-900">
                                             {a.description}
                                           </span>{" "}
+                                          {leadReviewEnabled && (
+                                            <ContactEvidenceExplanation
+                                              activity={a}
+                                            />
+                                          )}
                                           {(() => {
                                             if (
                                               a.activity_type !== "ai_triage" ||
@@ -2005,6 +2230,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     </div>{" "}
                                   </div>{" "}
                                 </div>
+                                {leadReviewEnabled && (
+                                  <LeadStatusReviewPanel
+                                    reconciliation={leadStatusReview}
+                                  />
+                                )}
                                 {/* AI Suggested Reply */}
                                 {(() => {
                                   const triageActivity = leadActivities.find(
@@ -3746,7 +3976,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   key={match.id}
                   onClick={() => {
                     setShowModal(null);
-                    navigate(`/admin/pipeline?lead=${match.id}`);
+                    const next = new URLSearchParams();
+                    if (leadReviewEnabled)
+                      next.set("leadReview", "1");
+                    next.set("lead", match.id);
+                    navigate(`/admin/pipeline?${next}`);
                   }}
                 >
                   {[match.first_name, match.last_name]
