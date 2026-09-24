@@ -47,6 +47,13 @@ describe('topUpOneSeries — dry run never reaches the committing wrapper', () =
     expect(db.transaction).toHaveBeenCalledWith(); // no callback — manual commit/rollback form
     expect(mockTopUpRecurringSeriesLocked).toHaveBeenCalledWith(mockTrx, 'parent-1', { horizonDays: 90 });
     expect(mockTrx.rollback).toHaveBeenCalledTimes(1);
+    // Rolled back with an EXPLICIT error, not a bare rollback() — knex's
+    // default doNotRejectOnRollback resolves (rather than rejects) the
+    // transaction's completion promise on a bare rollback, which would let
+    // an after-commit-gated side effect (annual-prepay-renewals.js's
+    // fileCoverageExceptionAfterCommit, reached from the extend step) fire
+    // for real on a dry run that wrote nothing.
+    expect(mockTrx.rollback.mock.calls[0][0]).toBeInstanceOf(Error);
     expect(mockTopUpRecurringSeries).not.toHaveBeenCalled();
     expect(result.spawnedVisits).toHaveLength(1);
   });

@@ -16,6 +16,10 @@
  * like the nightly cron's live pass. No confirmation SMS, no other customer
  * communication either way.
  *
+ * Each line prints the customer id (never a name — this codebase's logs,
+ * including ops scripts, carry ids only), service type, pattern, the
+ * current booked-through date, and the date(s) it added/would add.
+ *
  * Usage:
  *   node scripts/recurring-series-topup.js                     # dry run, every eligible ongoing series
  *   node scripts/recurring-series-topup.js --apply              # write
@@ -61,11 +65,6 @@ async function resolveParentIds() {
   return query.pluck('id');
 }
 
-function customerLabel(customer) {
-  if (!customer) return '(customer not found)';
-  return [customer.first_name, customer.last_name].filter(Boolean).join(' ') || customer.id;
-}
-
 async function main() {
   const { topUpOneSeries } = require('../server/services/recurring-series-topup');
   const parentIds = await resolveParentIds();
@@ -80,13 +79,9 @@ async function main() {
   const summary = { scanned: parentIds.length, toppedUp: 0, visitsInserted: 0, skipped: {}, errors: 0 };
 
   for (const parentId of parentIds) {
-    let customer = null;
     try {
       const result = await topUpOneSeries(parentId, { ...horizonOpt, dryRun: !APPLY });
       const insertedDates = (result?.spawnedVisits || []).map((v) => v.scheduledDate);
-      if (result?.customerId) {
-        customer = await db('customers').where({ id: result.customerId }).first('first_name', 'last_name');
-      }
       if (result?.skipped) {
         summary.skipped[result.skipped] = (summary.skipped[result.skipped] || 0) + 1;
         console.log(`[skip: ${result.skipped}] parent=${parentId}`);
@@ -96,8 +91,11 @@ async function main() {
         summary.toppedUp += 1;
         summary.visitsInserted += insertedDates.length;
       }
+      // Customer id, not name — this codebase's logs (incl. ops scripts;
+      // see ops/agents/README.md) never carry customer names/PII, only ids.
+      // Resolve the name from the id in the admin UI when acting on a line.
       console.log(
-        `${customerLabel(customer)} | ${result.serviceType || '(no service type)'} | ${result.recurringPattern || '(no pattern)'} `
+        `customer=${result.customerId || '(unknown)'} | ${result.serviceType || '(no service type)'} | ${result.recurringPattern || '(no pattern)'} `
         + `| booked through ${result.priorBookedThrough || '(no live visit)'} `
         + `| ${APPLY ? 'added' : 'would add'} ${insertedDates.length ? insertedDates.join(', ') : '(nothing — already at horizon)'}`,
       );

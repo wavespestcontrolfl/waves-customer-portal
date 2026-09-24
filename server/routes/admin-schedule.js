@@ -15020,12 +15020,21 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // paid" authority (annual-prepay-renewals.js) with no date-window filter, so
 // a term whose window has technically lapsed but hasn't been decided
 // (renewed/lapsed) yet still counts — never book past it speculatively.
-// Multiple valid terms (a renewal chain) take the LATEST term_end: an older
-// row's own end already reflects any renewal that in fact extended it.
-// Fails CLOSED (never returns a cap that turns out to be wrong): a lookup
-// error reports `failed: true` and the caller skips the series for this run
-// rather than guessing "no cap" and risking a visit that bills per-visit
-// against a still-active prepay term.
+// Excludes any row whose term_end already fell in the past (Codex pre-push
+// P1): coveredTermsAsOf(conn, null) also returns DECIDED historical
+// coverage with no date floor — a customer who switched off annual prepay
+// (status switch_plan) or rode out a declined renewal (cancelled +
+// renewal_decision=cancel) keeps that OLD, already-ended term_end in the
+// result forever. Without this filter that stale date would cap every
+// future top-up run permanently, even though the customer's TODAY-active
+// billing has nothing to do with that closed term. A term whose window is
+// still open (including a declined-renewal term riding out its already-paid
+// remainder) keeps capping normally. Multiple valid terms (a renewal chain)
+// take the LATEST term_end: an older row's own end already reflects any
+// renewal that in fact extended it. Fails CLOSED (never returns a cap that
+// turns out to be wrong): a lookup error reports `failed: true` and the
+// caller skips the series for this run rather than guessing "no cap" and
+// risking a visit that bills per-visit against a still-active prepay term.
 async function resolveTopUpTermCap(conn, parent, parentId, cols) {
   if (!cols.annual_prepay_term_id) return { cap: null, failed: false };
   try {
@@ -15037,7 +15046,8 @@ async function resolveTopUpTermCap(conn, parent, parentId, cols) {
     if (!allIds.length) return { cap: null, failed: false };
     const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
     const rows = await coveredTermsAsOf(conn, null).whereIn('t.id', allIds).select('t.term_end');
-    const ends = rows.map((r) => dateOnly(r.term_end)).filter(Boolean).sort();
+    const todayStr = etDateString();
+    const ends = rows.map((r) => dateOnly(r.term_end)).filter((d) => d && d >= todayStr).sort();
     return { cap: ends.length ? ends[ends.length - 1] : null, failed: false };
   } catch (e) {
     logger.warn(`[recurring-topup] term cap lookup failed for parent=${parentId}: ${e.message}`);

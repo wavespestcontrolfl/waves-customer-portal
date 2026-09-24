@@ -329,6 +329,28 @@ describe('topUpRecurringSeriesLocked — annual-prepay term_end cap', () => {
     for (const row of inserted) expect(row.scheduled_date < termEnd).toBe(true);
   });
 
+  test('ignores an already-ended DECIDED term (switch_plan/declined-renewal) — never permanently caps a customer no longer on that term', async () => {
+    // coveredTermsAsOf(conn, null) has no date-window filter, so a customer
+    // who switched off annual prepay months ago still surfaces that closed
+    // term. Its term_end is in the past, so it must never win the cap —
+    // otherwise a customer with no live term would never top up again.
+    const pastTermEnd = daysOut(-30);
+    coveredTermsAsOf.mockReturnValue({
+      whereIn: () => ({ select: async () => [{ term_end: pastTermEnd }] }),
+    });
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+      colsOverrides: { annual_prepay_term_id: {} },
+      linkedTermIds: ['term-old'],
+    });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.termCap).toBeNull();
+    // Falls back to the ordinary horizon (30 days), not the stale term_end.
+    expect(result.effectiveHorizon).toBe(daysOut(30));
+    expect(inserted.length).toBeGreaterThan(0);
+  });
+
   test('fails closed (skips the series) when the term-cap lookup errors — never guesses "no cap"', async () => {
     coveredTermsAsOf.mockImplementation(() => { throw new Error('boom'); });
     const { conn, inserted } = topupScenario({

@@ -64,10 +64,24 @@ async function topUpOneSeries(parentId, { horizonDays, dryRun }) {
     return topUpRecurringSeries(db, parentId, { horizonDays });
   }
   const trx = await db.transaction();
+  // Knex's default doNotRejectOnRollback RESOLVES trx.executionPromise on a
+  // bare rollback() with no error — but annual-prepay-renewals.js's
+  // fileCoverageExceptionAfterCommit (reached from applyExtensionPrepayCoverage
+  // inside the extend step) gates its admin notification on that SAME
+  // promise rejecting, to skip firing when its caller rolls back. Left
+  // alone, a dry run's rollback would read as "committed" to that gate and
+  // could ring a real notification bell for coverage math that never
+  // actually wrote anything (Codex pre-push P1). Passing an explicit error
+  // to rollback() forces the reject; the no-op catch here is only to keep
+  // that rejection from surfacing as an unhandled-rejection warning for
+  // whichever caller (if any) reads executionPromise on this trx.
+  if (trx.executionPromise && typeof trx.executionPromise.catch === 'function') {
+    trx.executionPromise.catch(() => {});
+  }
   try {
     return await topUpRecurringSeriesLocked(trx, parentId, { horizonDays });
   } finally {
-    await trx.rollback().catch(() => {});
+    await trx.rollback(new Error('recurring-series-topup: intentional dry-run rollback')).catch(() => {});
   }
 }
 
