@@ -56,6 +56,14 @@ function socketOrigin() {
 
 // Same-timestamp tie-break (one tech-out batch): lower bump_order first;
 // rows without one keep their relative order.
+// dispatch:alert for an unknown id prepends a new card; for a card already on
+// screen it is an update, merged over the existing card so hydrated join
+// fields (customer / tech names) survive.
+export function mergeAlertBroadcast(prev, payload) {
+  if (!prev.some((a) => a.id === payload.id)) return [payload, ...prev];
+  return prev.map((a) => (a.id === payload.id ? { ...a, ...payload } : a));
+}
+
 export function bumpOrderTieBreak(a, b) {
   const ao = Number(a?.payload?.bump_order);
   const bo = Number(b?.payload?.bump_order);
@@ -128,13 +136,12 @@ export function useDispatchAlerts() {
 
     function handleAlert(payload) {
       if (!payload || !payload.id) return;
-      // Prepend new alert to the top of the list. Dedupe by id in
-      // case a hydration response and a broadcast race for the same
-      // row.
-      setAlerts((prev) => {
-        if (prev.some((a) => a.id === payload.id)) return prev;
-        return [payload, ...prev];
-      });
+      // Prepend new alert to the top of the list. A broadcast for a card
+      // already on screen is an UPDATE (e.g. tech-out auto-assign stamping
+      // payload.auto_attempt): merge it over the existing card so hydrated
+      // join fields (customer/tech names) survive — which also dedupes a
+      // hydration response racing the create broadcast for the same row.
+      setAlerts((prev) => mergeAlertBroadcast(prev, payload));
     }
 
     function handleResolved(payload) {

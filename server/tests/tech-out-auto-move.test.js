@@ -11,7 +11,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn(), previewMoveConflicts: jest.fn() }));
-jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn() }));
+jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn(), emitAlert: jest.fn() }));
 jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn().mockResolvedValue(null) }));
 jest.mock('../services/technician-capabilities', () => ({
   assertCapabilitiesActive: jest.fn().mockResolvedValue(undefined),
@@ -35,7 +35,7 @@ jest.mock('../services/estimate-slot-availability', () => ({ invalidateAllEstima
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
-const { resolveAlert } = require('../services/dispatch-alerts');
+const { resolveAlert, emitAlert } = require('../services/dispatch-alerts');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../services/technician-eligibility');
 const { inactiveCapabilitiesForServices } = require('../services/technician-capabilities');
@@ -55,7 +55,11 @@ function query(result) {
   ['where', 'whereNot', 'whereNull', 'whereIn', 'whereNotIn', 'whereRaw', 'select', 'orderBy', 'orderByRaw', 'leftJoin', 'forShare']
     .forEach((m) => { self[m] = jest.fn(() => self); });
   self.first = jest.fn(async () => (Array.isArray(result) ? (result[0] ?? null) : result));
-  self.update = jest.fn().mockResolvedValue(1);
+  self.update = jest.fn(() => {
+    const updated = Promise.resolve(1);
+    updated.returning = jest.fn(async () => [{ id: ALERT_ID, payload: {} }]);
+    return updated;
+  });
   self.then = (resolve, reject) => Promise.resolve(
     Array.isArray(result) ? result : (result == null ? [] : [result]),
   ).then(resolve, reject);
@@ -138,6 +142,8 @@ describe('autoAssignParkedAlert', () => {
 
     expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'grouped_visit_manual' });
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    // The still-open card is re-broadcast so open boards show the reason.
+    expect(emitAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID }));
     // Annotated via a direct (non-transactional) payload merge.
     const rawCall = db.raw.mock.calls.find(([sql]) => /COALESCE\(payload/.test(sql));
     expect(JSON.parse(rawCall[1][0])).toMatchObject({ auto_attempt: { reason: 'grouped_visit_manual' } });

@@ -45,7 +45,7 @@ const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops')
 const { DEFAULT_EXCLUDE_STATUSES, windowsOverlap } = require('./scheduling/occupancy');
 const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
 const { resolveGeo, driveMin, HQ } = require('./auto-dispatch/geo');
-const { resolveAlert } = require('./dispatch-alerts');
+const { resolveAlert, emitAlert } = require('./dispatch-alerts');
 const { emitDispatchJobUpdate } = require('./dispatch-assignment');
 const { ALERT_TYPE } = require('./tech-out');
 
@@ -232,7 +232,16 @@ async function mergePayload(trx, alertId, patch) {
 
 async function annotateAttempt(alertId, reason) {
   try {
-    await mergePayload(db, alertId, { auto_attempt: { at: new Date().toISOString(), reason } });
+    const [row] = await db('dispatch_alerts')
+      .where({ id: alertId })
+      .whereNull('resolved_at')
+      .update({
+        payload: db.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ auto_attempt: { at: new Date().toISOString(), reason } })]),
+      })
+      .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+    // Re-broadcast the still-open card so every open board shows the reason
+    // now (useDispatchAlerts merges a known id), not after a reload.
+    if (row) emitAlert(row);
   } catch (err) {
     logger.warn(`[tech-out-auto-move] failed to annotate alert ${alertId} (${reason}): ${err.message}`);
   }
