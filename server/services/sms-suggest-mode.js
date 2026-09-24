@@ -276,6 +276,12 @@ async function getIntentMode(intent) {
 async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent }) {
   if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) return 'shadow';
   const mode = await getIntentMode(intent); // 'shadow' | 'suggest' | 'auto_send'; escalation forced shadow
+  // Gratitude never creates an unsolicited human-review card. It stays inert
+  // shadow storage unless both its intent rung and narrow send gate are live;
+  // the delayed sweep remains the only caller of its executor.
+  if (intent === require('./sms-gratitude').GRATITUDE_INTENT) {
+    return mode === AUTO_SEND_MODE && isEnabled('smsGratitudeReplies') ? AUTO_SEND_MODE : 'shadow';
+  }
   if (mode === AUTO_SEND_MODE) {
     if (isEnabled('smsAutoSend')) return AUTO_SEND_MODE;
     return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';
@@ -783,7 +789,10 @@ async function reserveHumanReply({ to, customerId = null, fromNumber, body, admi
   const { isEnabled } = require('../config/feature-gates');
   return db.transaction(async (trx) => {
     await lockSuggestThread(trx, threadLast10);
-    const autoSendEnabled = isEnabled('smsAutoSend');
+    // Either autonomous lane can own the shared thread claim. Gratitude is
+    // intentionally independent of the general gate, so a manual reply must
+    // still observe its in-flight claim when only the narrow gate is enabled.
+    const autoSendEnabled = isEnabled('smsAutoSend') || isEnabled('smsGratitudeReplies');
     if (autoSendEnabled) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
         return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true };

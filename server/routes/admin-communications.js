@@ -544,10 +544,10 @@ router.post('/sms', async (req, res, next) => {
     // after 30 minutes but retains an explicitly uncertain provider outcome.
     let autoSendInFlight = false;
     let staleAtClaim = false;
-    // The autonomous-claim lookup only matters while Phase E is enabled. The
-    // recovery reservation below is separate: it is also required gate-off
-    // whenever this send claims or parks a suggestion.
-    const autoSendInterlock = isEnabled('smsAutoSend');
+    // The autonomous-claim lookup matters while either autonomous lane is
+    // enabled. The recovery reservation below is separate: it is also required
+    // gate-off whenever this send claims or parks a suggestion.
+    const autoSendInterlock = isEnabled('smsAutoSend') || isEnabled('smsGratitudeReplies');
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
       if (parkPhoneLast10) {
@@ -3342,8 +3342,8 @@ router.post('/schedule-sms', async (req, res, next) => {
         // one dispatches. The 'scheduled' sms_log row inserted below is itself
         // the marker the auto-send's guard sees, so this check only needs to
         // cover the reverse race (auto claimed first). Gated → no-op while
-        // auto-send is dormant.
-        if (isEnabled('smsAutoSend')
+        // both autonomous lanes are dormant.
+        if ((isEnabled('smsAutoSend') || isEnabled('smsGratitudeReplies'))
           && await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: normalizePhoneLast10(to), customerId: trustedCustomerId })) {
           const conflict = new Error('An automated reply is going out to this conversation right now — refresh in a moment before scheduling.');
           conflict.statusCode = 409;

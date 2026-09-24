@@ -4293,6 +4293,12 @@ function initScheduledJobs() {
       await require('./sms-auto-send').reconcileAutoSendClaims().catch((recErr) => {
         logger.warn(`[sms-auto-send] fast reconcile failed: ${recErr.message}`);
       });
+      // Delayed gratitude replies reuse shadow drafts as inert storage. The
+      // sweep is independently gated, source/time bounded, and the executor
+      // reloads every row again under the shared SMS thread lock.
+      await require('./sms-auto-send').processGratitudeAutoSendCandidates().catch((gratitudeErr) => {
+        logger.warn(`[sms-gratitude] delayed send sweep failed: ${gratitudeErr.message}`);
+      });
     } catch (err) {
       logger.error(`Scheduled SMS processing failed: ${err.message}`);
     }

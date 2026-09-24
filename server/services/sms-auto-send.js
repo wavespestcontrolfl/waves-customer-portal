@@ -9,7 +9,8 @@
  * precondition itself rather than trusting the drafter that called it.
  *
  * Defense in depth, in order (the same order as autoSendPreflight):
- *   1. GATE_SMS_AUTO_SEND — the path is locked off entirely until opted in.
+ *   1. A lane-specific explicit gate — GATE_SMS_AUTO_SEND for ordinary
+ *      intents, GATE_SMS_GRATITUDE_REPLIES for gratitude-only replies.
  *   2. Base eligibility — reply present, customer + inbound link, NOT a
  *      scheduling-intent message, NOT an escalation intent (suggestionEligible).
  *   3. Intent mode is actually 'auto_send' (fail-closed lookup → 'shadow').
@@ -38,6 +39,19 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { ASK_SPACING_MS } = require('./review-ask-history');
+const {
+  GRATITUDE_INTENT,
+  GRATITUDE_POLICY_VERSION,
+  QUIET_WINDOW_MS,
+  MAX_REPLY_AGE_MS,
+  gratitudeTimingReason,
+} = require('./sms-gratitude');
+const {
+  jsonObject,
+  gratitudeActivation,
+  readGratitudeContext,
+  gratitudeThreadAdvanced,
+} = require('./sms-gratitude-context');
 
 const AUTOSEND_WORKFLOW = 'sms_house_voice_auto_send';
 const AUTOSEND_AGENT_NAME = 'House Voice Auto-Send';
@@ -271,6 +285,96 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
   });
 }
 
+/**
+ * Gratitude claim variant. It shares the ordinary thread/advisory lock and
+ * send-once decision key, but never parks or resolves another suggestion.
+ * Any open request/card is a reason to abstain because a courtesy closer must
+ * not conceal operational work.
+ */
+async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Date() }) {
+  const suggest = require('./sms-suggest-mode');
+  return db.transaction(async (trx) => {
+    const anchor = await trx('sms_log').where({ id: smsLogId, direction: 'inbound' })
+      .first('from_phone');
+    const threadLast10 = String(anchor?.from_phone || '').replace(/\D/g, '').slice(-10);
+    if (!threadLast10) return null;
+    await suggest.lockSuggestThread(trx, threadLast10);
+
+    // Gate, epoch, timing, immutable rows, live customer, exact endpoints,
+    // complete context and fixed reply are all re-read inside the lock.
+    if (!isEnabled('smsGratitudeReplies')) return null;
+    const checked = await readGratitudeContext({ draftId, smsLogId, now, activatedAt: gratitudeActivation(), dbh: trx, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+    if (!checked.ok) return null;
+    const { inbound, customer, draft, expectedReply } = checked;
+    const modeRow = await trx('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
+    if (modeRow?.mode !== AUTOSEND_MODE) return null;
+
+    if (await suggest.threadHasLiveAnswer(trx, {
+      threadLast10,
+      customerId: customer.id,
+      inboundCreatedAt: inbound.created_at,
+      inboundSmsLogId: inbound.id,
+    })) return null;
+    if (await hasActiveAutoSendClaim(trx, { threadLast10, customerId: customer.id })) return null;
+
+    const numericConfidence = Number.isFinite(Number(confidence)) ? Number(confidence) : null;
+    const [row] = await trx('agent_decisions')
+      .insert({
+        workflow: AUTOSEND_WORKFLOW,
+        agent_name: AUTOSEND_AGENT_NAME,
+        decision_version: AUTOSEND_DECISION_VERSION,
+        mode: AUTOSEND_MODE,
+        status: CLAIM_STATUS,
+        entity_type: 'message_draft',
+        entity_id: draft.id,
+        customer_id: customer.id,
+        source_channel: 'sms',
+        sms_log_id: inbound.id,
+        detected_intent: GRATITUDE_INTENT,
+        confidence: numericConfidence,
+        confidence_label: numericConfidence === null
+          ? null
+          : numericConfidence >= 0.85 ? 'high' : numericConfidence >= 0.6 ? 'medium' : 'low',
+        input_snapshot: JSON.stringify({ sms: { body: inbound.message_body }, draft_id: draft.id }),
+        suggested_message: expectedReply,
+        reasoning_summary: 'Delayed gratitude-only reply auto-sent after live thread revalidation.',
+        model: draft.model,
+        prompt_version: draft.prompt_version,
+        idempotency_key: `${AUTOSEND_WORKFLOW}:inbound:${inbound.id}`,
+      })
+      .onConflict('idempotency_key')
+      .ignore()
+      .returning('id');
+    if (!row?.id) return null;
+
+    const fromNumber = inbound.to_phone && !TWILIO_NUMBERS.isTechLine(inbound.to_phone)
+      ? inbound.to_phone : null;
+    const reservationId = await suggest.createReplyHoldingReservation(trx, {
+      to: inbound.from_phone,
+      customerId: customer.id,
+      fromNumber: fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+      body: expectedReply,
+      agentDecisionId: row.id,
+      parkedDecisionIds: [],
+      reservationKind: 'auto',
+    });
+    if (!reservationId) throw new Error('Gratitude auto-send holding reservation was not created');
+    return {
+      decisionId: row.id,
+      toPhone: inbound.from_phone,
+      fromNumber,
+      customerId: customer.id,
+      reply: expectedReply,
+      inboundCreatedAt: inbound.created_at,
+      inboundId: inbound.id,
+      inboundFromPhone: inbound.from_phone,
+      inboundToPhone: inbound.to_phone,
+      parkedIds: [],
+      reservationId,
+    };
+  });
+}
+
 /** Mark a confirmed send: resolve the claim and take the draft out of the judge pool. */
 async function resolveSent({ decisionId, draftId, providerMessageId }) {
   return db.transaction(async (trx) => {
@@ -355,16 +459,38 @@ async function maybeAutoSend(params = {}) {
     confidence = null, model = null, promptVersion = null, schedulingIntent = false,
     voiceProfileVersion = null,
   } = params;
-  const customerId = customer?.id || null;
+  let customerId = customer?.id || null;
+  const gratitudeLane = intent === GRATITUDE_INTENT;
 
   try {
     // (1) Gate.
-    if (!isEnabled('smsAutoSend')) return { sent: false, reason: 'gate_off' };
+    if (gratitudeLane) {
+      if (!isEnabled('smsGratitudeReplies')) return { sent: false, reason: 'gate_off' };
+    } else if (!isEnabled('smsAutoSend')) {
+      return { sent: false, reason: 'gate_off' };
+    }
 
     const suggest = require('./sms-suggest-mode');
     // (2) Base eligibility (same hard rules as a suggestion).
     if (!suggest.suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) {
       return { sent: false, reason: 'ineligible_base' };
+    }
+
+    // Gratitude never trusts the drafter call's copies of source/customer/text.
+    // Reload the durable rows now, then repeat the same read under the claim
+    // lock immediately before provider entry.
+    let gratitudeContext = null;
+    if (gratitudeLane) {
+      gratitudeContext = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+      if (!gratitudeContext.ok) return { sent: false, reason: gratitudeContext.reason };
+      if (customerId !== gratitudeContext.customer.id
+          || inboundMessage !== gratitudeContext.inbound.message_body
+          || reply !== gratitudeContext.expectedReply
+          || model !== gratitudeContext.draft.model
+          || promptVersion !== gratitudeContext.draft.prompt_version) {
+        return { sent: false, reason: 'caller_draft_mismatch' };
+      }
+      customerId = gratitudeContext.customer.id;
     }
     // (3) Intent must actually be flipped to auto_send.
     const mode = await suggest.getIntentMode(intent);
@@ -429,10 +555,15 @@ async function maybeAutoSend(params = {}) {
       return { sent: false, reason: 'not_eligible' };
     }
 
-    // (5)+(6) Claim under the lock + guard-gauntlet (also parks sibling cards).
-    const claim = await claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion });
+    // (5)+(6) Claim under the lock + guard-gauntlet. The ordinary lane parks
+    // sibling cards; gratitude refuses them and leaves them untouched.
+    const claim = gratitudeLane
+      ? await claimGratitudeSend({ draftId, smsLogId, confidence })
+      : await claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion });
     if (!claim) return { sent: false, reason: 'guarded_or_claimed' };
     const parkedIds = claim.parkedIds || [];
+    const sendReply = gratitudeLane ? claim.reply : reply;
+    customerId = gratitudeLane ? claim.customerId : customerId;
 
     // A blocked/failed/errored send means the customer was NOT answered — the
     // parked sibling cards must come back. A confirmed send means the thread
@@ -453,24 +584,52 @@ async function maybeAutoSend(params = {}) {
       await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
       return { sent: false, reason: 'reservation_failed' };
     }
+    // Reuse the canonical sender's awaited provider-boundary guard so its
+    // own contact/template/line lookups cannot make this observation stale.
+    const checkGratitudeHandoff = gratitudeLane ? async () => {
+      const advanced = await gratitudeThreadAdvanced(db, {
+        inboundId: claim.inboundId,
+        fromPhone: claim.inboundFromPhone,
+        toPhone: claim.inboundToPhone,
+        skipReservationId: claim.reservationId,
+      });
+      const timing = gratitudeTimingReason({
+        inboundCreatedAt: claim.inboundCreatedAt,
+        now: new Date(),
+        activatedAt: gratitudeActivation(),
+      });
+      const reason = advanced ? 'thread_advanced'
+        : timing || (!isEnabled('smsGratitudeReplies') ? 'gate_off' : null);
+      return reason ? { ok: false, code: reason, reason } : { ok: true };
+    } : undefined;
     let result;
     try {
+      if (checkGratitudeHandoff) {
+        const verdict = await checkGratitudeHandoff();
+        if (!verdict.ok) {
+          await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+          await failClaim(claim.decisionId, verdict.reason);
+          return { sent: false, reason: verdict.reason };
+        }
+      }
       result = await sendCustomerMessage({
         to: claim.toPhone,
-        body: reply,
+        body: sendReply,
         channel: 'sms',
         audience: 'customer',
         purpose: 'conversational',
         customerId,
         identityTrustLevel: 'phone_matches_customer',
         entryPoint: 'sms_auto_send_executor',
+        ...(gratitudeLane ? { preSendCheck: checkGratitudeHandoff } : {}),
         // Send-window inbound-reply provenance: the auto-send executor only
         // dispatches green-judged replies to a message the customer just
         // texted into an active thread — the send class the window
         // deliberately never defers.
         conversationalContext: true,
         metadata: {
-          original_message_type: AUTOSEND_MESSAGE_TYPE,
+          original_message_type: gratitudeLane ? 'ai_gratitude' : AUTOSEND_MESSAGE_TYPE,
+          ...(gratitudeLane ? { gratitude_policy_version: GRATITUDE_POLICY_VERSION } : {}),
           agentDecisionId: claim.decisionId,
           parkedDecisionIds: parkedIds.length ? parkedIds : undefined,
           fromNumber: claim.fromNumber || undefined,
@@ -532,6 +691,84 @@ async function maybeAutoSend(params = {}) {
     logger.error(`[sms-auto-send] unexpected failure (draft ${draftId}): ${err.message}`);
     return { sent: false, reason: 'error' };
   }
+}
+
+/**
+ * Reuse the existing five-minute scheduler as delay storage: scan only recent
+ * live-webhook gratitude shadow drafts, then hand each candidate to the same
+ * fully revalidating executor. No queue state is created here.
+ */
+async function processGratitudeAutoSendCandidates({ limit = 25, now = new Date() } = {}) {
+  const boundedLimit = Math.max(1, Math.min(Number(limit) || 25, 50));
+  if (!isEnabled('smsGratitudeReplies')) return { scanned: 0, attempted: 0, sent: 0, reason: 'gate_off' };
+  const activatedAt = gratitudeActivation();
+  if (!activatedAt || activatedAt.getTime() > now.getTime()) {
+    return { scanned: 0, attempted: 0, sent: 0, reason: 'activation_unset' };
+  }
+  const promptVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+  const newestAllowed = new Date(now.getTime() - QUIET_WINDOW_MS);
+  const oldestAllowed = new Date(now.getTime() - MAX_REPLY_AGE_MS);
+  const scanLimit = boundedLimit * 4;
+  const rows = await db('message_drafts as md')
+    .join('sms_log as s', 'md.sms_log_id', 's.id')
+    .where({
+      'md.status': 'shadow',
+      'md.intent': GRATITUDE_INTENT,
+      'md.prompt_version': promptVersion,
+      's.direction': 'inbound',
+    })
+    .whereNotNull('md.model')
+    .where('s.created_at', '>', activatedAt)
+    .where('s.created_at', '>=', oldestAllowed)
+    .where('s.created_at', '<=', newestAllowed)
+    .whereRaw("md.intended_actions::jsonb->'gratitude'->>'source' = 'live_webhook'")
+    .whereRaw("md.intended_actions::jsonb->'gratitude'->>'policy_version' = ?", [GRATITUDE_POLICY_VERSION])
+    .whereRaw("md.intended_actions::jsonb->'gratitude'->>'actions_verified_safe' = 'true'")
+    .whereRaw("md.intended_actions::jsonb->'gratitude'->>'verifier_enabled' = 'true'")
+    .whereRaw("md.intended_actions::jsonb->'verify'->>'converged' = 'true'")
+    .orderBy('md.created_at', 'desc')
+    .limit(scanLimit)
+    .select(
+      'md.id', 'md.sms_log_id', 'md.customer_id', 'md.inbound_message', 'md.draft_response',
+      'md.intent', 'md.intent_confidence', 'md.model', 'md.prompt_version',
+      'md.intended_actions', 'md.scheduling_intent'
+    );
+
+  const candidates = [];
+  const seenInbounds = new Set();
+  for (const row of rows) {
+    if (seenInbounds.has(row.sms_log_id)) continue;
+    seenInbounds.add(row.sms_log_id);
+    candidates.push(row);
+    if (candidates.length >= boundedLimit) break;
+  }
+
+  let sent = 0;
+  let attempted = 0;
+  for (const row of candidates) {
+    const metadata = jsonObject(row.intended_actions);
+    // Shape/provenance filtering above is only a cheap scan optimization. The
+    // executor reloads the name and checks the exact persisted reply.
+    if (!metadata || !Array.isArray(metadata.actions)) continue;
+    attempted += 1;
+    const result = await maybeAutoSend({
+      draftId: row.id,
+      customer: { id: row.customer_id },
+      smsLogId: row.sms_log_id,
+      inboundMessage: row.inbound_message,
+      reply: row.draft_response,
+      intent: row.intent,
+      intendedActions: metadata.actions,
+      actionsVerifiedSafe: true,
+      confidence: row.intent_confidence,
+      model: row.model,
+      promptVersion: row.prompt_version,
+      schedulingIntent: row.scheduling_intent === true,
+      voiceProfileVersion: metadata.voice_profile_version ?? null,
+    });
+    if (result.sent) sent += 1;
+  }
+  return { scanned: rows.length, attempted, sent };
 }
 
 /**
@@ -675,8 +912,10 @@ module.exports = {
   autoSendPreflight,
   hasActiveAutoSendClaim,
   claimAutoSend,
+  claimGratitudeSend,
   resolveSent,
   failClaim,
   maybeAutoSend,
+  processGratitudeAutoSendCandidates,
   reconcileAutoSendClaims,
 };
