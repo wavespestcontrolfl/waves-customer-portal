@@ -9975,7 +9975,18 @@ const CallRecordingProcessor = {
             addressValidation: effectiveAddressValidation,
             // The stated unit rides on the card so the reviewer sees the
             // whole door, not just the number (codex r1 P1).
-            extraPayload: { ...houseConflict, ...(statedUnit ? { stated_unit: String(statedUnit).trim() } : {}) },
+            extraPayload: {
+              ...houseConflict,
+              ...(statedUnit ? { stated_unit: String(statedUnit).trim() } : {}),
+              // An AV `corrected` premise is Google's correction, not the
+              // caller's words: the pre-validation street the caller gave is
+              // kept as the caller evidence and the validated line shown as
+              // the correction (codex r21 P2).
+              ...(effectiveAddressValidation?.status === 'corrected' && corroboratingStreet
+                && !sameHouseNumberStreet(corroboratingStreet, houseConflict.stated_street)
+                ? { spoken_street: String(corroboratingStreet).trim() }
+                : {}),
+            },
           })
           : null;
         // Both mutations under the per-call triage lock AND the

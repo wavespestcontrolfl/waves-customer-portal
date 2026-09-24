@@ -187,7 +187,14 @@ export function ConfirmEvidence({ payload }) {
     },
     // House-number disagreement: the validated call address beside the
     // record's street so the reviewer picks a number, not just "confirm".
-    p.stated_street && { label: "Caller stated", value: p.stated_unit ? `${p.stated_street}, ${p.stated_unit}` : p.stated_street },
+    // When Address Validation CORRECTED the number, the caller's own words
+    // are shown as the evidence and the validated line as the correction.
+    p.stated_street && {
+      label: p.spoken_street ? "Caller said" : "Caller stated",
+      value: p.spoken_street
+        ? `${p.spoken_street} — validated as ${p.stated_unit ? `${p.stated_street}, ${p.stated_unit}` : p.stated_street}`
+        : (p.stated_unit ? `${p.stated_street}, ${p.stated_unit}` : p.stated_street),
+    },
     // …and the whole on-file door too: Accept means the entire saved
     // address is right, so a differing saved unit must be visible.
     p.stated_street && (p.on_file_address?.address_line1 || p.on_file_street) && {

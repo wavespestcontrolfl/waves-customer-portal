@@ -117,6 +117,15 @@ describe('ConfirmEvidence — house-number conflict', () => {
     expect(screen.getByText('1250 Example Street, Apt 2')).toBeInTheDocument();
     expect(screen.getByText('1260 Example Street, Apt 3')).toBeInTheDocument();
   });
+  it('shows the caller\'s own words when Address Validation corrected the number', () => {
+    render(<ConfirmEvidence payload={{
+      flag: 'on_file_house_number_conflict',
+      stated_street: '1250 Example Street', spoken_street: '1240 Example Street',
+      on_file_address: { address_line1: '1260 Example Street' },
+    }} />);
+    expect(screen.getByText('Caller said:')).toBeInTheDocument();
+    expect(screen.getByText('1240 Example Street — validated as 1250 Example Street')).toBeInTheDocument();
+  });
 });
 
 describe('ConfirmEvidence — secondary contact', () => {
