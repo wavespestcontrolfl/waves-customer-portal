@@ -6617,10 +6617,15 @@ async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) 
 // only lands while the stored value is still what the caller read, so a
 // human retagging the call (PUT /calls/:id/disposition, a writer of its
 // own) or any other writer that ran in between wins and this write silently
-// no-ops instead of clobbering it.
-async function writeCallDisposition({ callId, disposition, reason, callSid, priorDisposition = undefined }) {
+// no-ops instead of clobbering it. `priorGeneration`, when passed, extends
+// that CAS to processing_generation too (Codex #4721 r1 P2): finalization
+// clears processing_token before these follow-ups run, so without this a
+// newer reprocess pass's own disposition could be raced by a stale pass
+// still finishing its own.
+async function writeCallDisposition({ callId, disposition, reason, callSid, priorDisposition = undefined, priorGeneration = undefined }) {
   const query = db('call_log').where({ id: callId });
   if (priorDisposition !== undefined) query.where({ disposition: priorDisposition });
+  if (priorGeneration != null) query.where({ processing_generation: priorGeneration });
   const written = await query.update({ disposition, updated_at: new Date() });
   if (written) logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
   return !!written;
@@ -6732,19 +6737,76 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
 // alone by the compare-and-swap in writeCallDisposition.
 const STALE_AFTER_APPLIED_MOVE = new Set(['callback_task_created', 'cancellation_processed']);
 
+// callback_task_created is the one disposition value a multi-intent call
+// can still deserve after the move landed: the model's recommendation is a
+// single field for the WHOLE call, so "move the visit AND have the owner
+// call about billing" recommends callback_task_created for a reason that
+// has nothing to do with the reschedule (Codex #4721 r1 P2). Two signals
+// say the callback obligation IS the reschedule ask itself, not a separate
+// one: the call_commitments 'waves:callback' row (at most one — kind
+// 'callback' is not in REPEATABLE_KINDS) is seeded ONLY from
+// scheduling.callback_window_* evidence or the bare recommended_disposition
+// flag (deriveCommitmentsFromExtraction), so a row grounded in ANY OTHER
+// field path came from the free-form model pass finding something the
+// deterministic seed didn't — an independent ask; and a live extraction
+// with no scheduling.callback_window_* at all means callback_task_created,
+// if still set, was never keyed to the scheduling ask in the first place.
+// A customer-side 'call_back' row is checked too, per the same evidence
+// rule — belt-and-suspenders for a promise this disposition doesn't
+// normally represent. Fails safe: any ambiguity leaves the disposition
+// standing rather than risk burying a real, separate obligation.
+async function hasIndependentCallbackObligation(callId, v2) {
+  const rows = await db('call_commitments')
+    .where({ call_log_id: callId, status: 'open' })
+    .whereIn('kind', ['callback', 'call_back'])
+    .select('id', 'evidence');
+  const evidenceOf = (row) => {
+    if (Array.isArray(row.evidence)) return row.evidence;
+    try { return JSON.parse(row.evidence || '[]'); } catch { return []; }
+  };
+  for (const row of rows) {
+    const evidence = evidenceOf(row);
+    const groundedInScheduling = evidence.length > 0
+      && evidence.every((e) => String(e?.field_path || '').startsWith('/scheduling/'));
+    if (!groundedInScheduling) {
+      return { independent: true, reason: `open commitment ${row.id} not grounded in the scheduling ask` };
+    }
+  }
+  const schedulingCallbackWindow = v2?.scheduling?.callback_window_start || v2?.scheduling?.callback_window_end || null;
+  if (!schedulingCallbackWindow) {
+    return { independent: true, reason: 'no scheduling.callback_window_* on the live extraction' };
+  }
+  return { independent: false, reason: null };
+}
+
 // Owner follow-up from #4708 r2 P2: when the apply step actually lands the
 // move, a callback (or a deterministic-path cancellation read) minted for
 // the SAME call before the move landed is no longer outstanding work — left
 // alone, unworked-comms-watcher.js keeps selecting it and can page someone
 // to call a customer who is already handled. Re-reads the live value and
 // swaps it under a CAS so nothing but that exact pre-move value is ever
-// touched.
-async function reviseDispositionAfterAppliedMove({ call, callSid }) {
-  const fresh = await db('call_log').where({ id: call.id }).first('disposition');
+// touched. `procGeneration`, when passed, fences BOTH the reread and the
+// write to this pass's processing_generation (Codex #4721 r1 P2): the token
+// that fenced this pass is already cleared by finalization, so without this
+// a stale, slow pass could revise a disposition a newer reprocess generation
+// already re-decided for itself.
+async function reviseDispositionAfterAppliedMove({ call, callSid, procGeneration = null }) {
+  const query = db('call_log').where({ id: call.id });
+  if (procGeneration != null) query.where({ processing_generation: procGeneration });
+  const fresh = await query.first('disposition', 'processing_generation', 'v2_extraction_status', 'ai_extraction_enriched');
   if (!fresh || !STALE_AFTER_APPLIED_MOVE.has(fresh.disposition)) return;
+  if (fresh.disposition === 'callback_task_created') {
+    const v2 = fresh.v2_extraction_status === 'valid' ? fresh.ai_extraction_enriched : null;
+    const { independent, reason } = await hasIndependentCallbackObligation(call.id, v2);
+    if (independent) {
+      logger.info(`[call-proc] Leaving callback_task_created standing for ${maskSid(callSid)} after applied move: ${reason}`);
+      return;
+    }
+  }
   await writeCallDisposition({
     callId: call.id,
     priorDisposition: fresh.disposition,
+    priorGeneration: procGeneration,
     disposition: 'existing_customer_routed',
     reason: 'reschedule_applied',
     callSid,
@@ -6755,25 +6817,43 @@ async function reviseDispositionAfterAppliedMove({ call, callSid }) {
 // above states the move and this states what follows from it (codex P2) —
 // all three share the same precondition and all three are non-blocking by
 // design.
-async function applyRescheduleFollowUps({ call, callSid, result }) {
-  if (result?.outcome !== 'applied') return;
-  // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
-  // the move just kept was written open and its proof did not exist yet.
-  // Re-run the fulfillment lookup now that the activity row exists, or the
-  // watchdog reports an overdue promise this pass already kept (GH codex
-  // #4204 r6 P2).
-  if (isEnabled('callCommitments')) {
-    await require('./call-commitments').refreshFulfillment(db, call.id)
-      .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+//
+// The disposition revision also runs on a RETRY that lands on
+// `skipped`/`already_applied` (Codex #4721 r1 P2): if the process died after
+// applyCallReschedule committed the move (and its call_reschedule_applied
+// activity row) but before this function ran, the move itself is durably
+// proved — the retry's own applyCallReschedule call reads that activity row
+// back and returns already_applied — so the guard below widens to it rather
+// than skipping the revision forever. Chosen over moving the write inside
+// call-reschedule-apply.js's own transaction (the smaller diff: the move
+// stays ignorant of call_log.disposition, and this already-idempotent
+// re-read/CAS handles being re-run safely). The other two follow-ups stay
+// scoped to a genuinely NEW apply — fulfillment refresh and the promised-
+// window note are about what the move JUST did, and already_applied means
+// it did nothing this pass.
+async function applyRescheduleFollowUps({ call, callSid, result, procGeneration = null }) {
+  const appliedNow = result?.outcome === 'applied';
+  const alreadyApplied = result?.outcome === 'skipped' && result?.reason === 'already_applied';
+  if (!appliedNow && !alreadyApplied) return;
+  if (appliedNow) {
+    // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
+    // the move just kept was written open and its proof did not exist yet.
+    // Re-run the fulfillment lookup now that the activity row exists, or the
+    // watchdog reports an overdue promise this pass already kept (GH codex
+    // #4204 r6 P2).
+    if (isEnabled('callCommitments')) {
+      await require('./call-commitments').refreshFulfillment(db, call.id)
+        .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+    }
+    // NOTE: the promised window this move communicated needs no capture step
+    // here. no-show-detector.js derives it from the activity_log row
+    // call-reschedule-apply.js writes in the SAME transaction as the move, so
+    // there is nothing to lose if a best-effort write fails after the call is
+    // finalized — and every move applied before that feature existed reads the
+    // same way (codex P1, PR #4403 rounds 8 and 10).
   }
-  // NOTE: the promised window this move communicated needs no capture step
-  // here. no-show-detector.js derives it from the activity_log row
-  // call-reschedule-apply.js writes in the SAME transaction as the move, so
-  // there is nothing to lose if a best-effort write fails after the call is
-  // finalized — and every move applied before that feature existed reads the
-  // same way (codex P1, PR #4403 rounds 8 and 10).
   if (isEnabled('callDispositionV1')) {
-    await reviseDispositionAfterAppliedMove({ call, callSid })
+    await reviseDispositionAfterAppliedMove({ call, callSid, procGeneration })
       .catch((err) => logger.warn(`[call-proc] post-reschedule disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
   }
 }
@@ -6792,7 +6872,7 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
     if (result.outcome !== 'skipped' || result.reason !== 'not_a_reschedule') {
       logger.info(`[call-proc] reschedule-apply for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
     }
-    await applyRescheduleFollowUps({ call, callSid, result });
+    await applyRescheduleFollowUps({ call, callSid, result, procGeneration });
     return result;
   } catch (err) {
     logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
@@ -17669,6 +17749,7 @@ CallRecordingProcessor._test = {
   applyCallRescheduleStep,
   applyRescheduleFollowUps,
   reviseDispositionAfterAppliedMove,
+  hasIndependentCallbackObligation,
   writeCallDisposition,
   recordedPartOfComposite,
   summarizeBatch,
