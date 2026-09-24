@@ -831,7 +831,20 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
     }
   }
   const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
-  return { customer: created };
+  // The new row's address is as ephemeral as any other phase-1 write
+  // (local audit P1): a failed booking returns it to the empty shape the
+  // insert uses when no address is known, so a retry with a corrected
+  // address is not overridden by this one.
+  const addressFields = ['address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude'];
+  return {
+    customer: created,
+    addressWrite: {
+      customerId: created.id,
+      before: { address_line1: '', address_line2: null, city: '', zip: '', latitude: null, longitude: null },
+      after: Object.fromEntries(addressFields.map((f) => [f, created[f] ?? null])),
+      writtenAt: new Date(),
+    },
+  };
 }
 
 // Puts back a customer address/coordinate write phase 1 made, when the

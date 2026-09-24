@@ -1000,6 +1000,22 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(27.51);
     });
 
+    test('local audit P1: an initially unlinked lead\'s NEW customer is returned to an empty address when the booking fails', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: null };
+      listResults.scheduled_services = [];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.55, lng: -82.55 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      insertResults.customers = [{ id: 'new-cust-1', address_line1: '123 Any St', address_line2: null, city: 'Bradenton', zip: '34209', latitude: 27.55, longitude: -82.55 }];
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time was just taken' }));
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Any St, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(409);
+      const undo = updateCalls.filter((c) => c.table === 'customers').pop();
+      expect(undo.payload).toMatchObject({ address_line1: '', city: '', zip: '', latitude: null, longitude: null });
+    });
+
     test('stored address present but unresolvable, unchanged under the lock: the validated supplied replacement wins and is written back, fixing up the bad stored address', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
       firstResults.customers = {
