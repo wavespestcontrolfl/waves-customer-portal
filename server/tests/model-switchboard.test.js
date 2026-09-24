@@ -161,6 +161,26 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('completion captions follow the shared GEMINI_VISION_MODEL pin like the other photo lanes', () => {
+    jest.resetModules();
+    const prev = process.env.GEMINI_VISION_MODEL;
+    process.env.GEMINI_VISION_MODEL = 'gemini-pinned-rollback';
+    try {
+      const fresh = require('../services/model-switchboard');
+      const { lanes } = fresh.getSwitchboard();
+      const captions = lanes.find((l) => l.id === 'photo_scoring');
+      const lawn = lanes.find((l) => l.id === 'lawn_assess');
+      expect(captions.primary.model).toBe('gemini-pinned-rollback');
+      expect(captions.primary.pinned).toBe(true);
+      expect(captions.primary.pinEnv).toBe('GEMINI_VISION_MODEL');
+      expect(captions.primary.selector).toBe(lawn.primary.selector);
+      // The running policy agrees with what the tab reports.
+      expect(require('../config/models').TEXT_POLICIES.photoCaptions.primary.model).toBe('gemini-pinned-rollback');
+    } finally {
+      if (prev === undefined) delete process.env.GEMINI_VISION_MODEL; else process.env.GEMINI_VISION_MODEL = prev;
+    }
+  });
+
   it('models the registry alias: OPENAI_SMS_DRAFT follows OPENAI_FAST until set', () => {
     const { selectors } = sb.getSwitchboard();
     const smsDraft = selectors.find((s) => s.key === 'OPENAI_SMS_DRAFT');
