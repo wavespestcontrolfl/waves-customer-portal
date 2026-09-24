@@ -101,11 +101,25 @@ test('rejects HTML challenge interstitials as source evidence', async () => {
     status: 200,
     finalUrl: 'https://example.gov/article',
     contentType: 'text/html',
-    html: '<html><title>Just a moment</title><body><div class="cf-chl">Checking your browser</div></body></html>',
+    html: '<html><title>Just a moment</title><body><div class="cf-chl">Checking your browser</div><script>"wavespestcontrol.com"</script></body></html>',
   });
 
   const result = await fetchSources(['https://example.gov/article']);
 
   expect(result.records).toEqual([]);
   expect(result.errors).toEqual(['Source returned a challenge page: https://example.gov/article']);
+});
+
+test('rejects plain-text challenge responses as source evidence', async () => {
+  mockFetchPage.mockResolvedValue({
+    status: 200,
+    finalUrl: 'https://example.gov/article.txt',
+    contentType: 'text/plain',
+    html: 'Access denied. Request blocked. Please enable JavaScript and cookies.',
+  });
+
+  const result = await fetchSources(['https://example.gov/article.txt']);
+
+  expect(result.records).toEqual([]);
+  expect(result.errors).toEqual(['Source returned a challenge page: https://example.gov/article.txt']);
 });

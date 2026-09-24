@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const { decodeHTML } = require('entities');
 const { fetchPage } = require('../seo/contact-finder');
-const { classifyPageBody } = require('../seo/link-prospect-verifier');
+const { classifyPageBody } = require('../seo/page-body-classifier');
 const { LIMITS } = require('./editorial-review-contracts');
 
 function htmlText(html) {
@@ -65,7 +65,7 @@ async function fetchSources(sourceUrls) {
       errors.push(`Source content type is not reviewable text: ${url}`);
       continue;
     }
-    if (mediaType !== 'text/plain' && classifyPageBody(page.html, mediaType) === 'challenge') {
+    if (classifyPageBody(page.html, mediaType, { strictChallenge: true }) === 'challenge') {
       errors.push(`Source returned a challenge page: ${url}`);
       continue;
     }
