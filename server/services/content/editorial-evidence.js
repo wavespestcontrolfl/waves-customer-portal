@@ -10,6 +10,9 @@ const DOMAIN_CONTEXT = { hostname: DOMAIN, tokens: {
 } };
 const enabled = () => gateEnvValue('GATE_EDITORIAL_EVIDENCE');
 const applicable = (path) => /^src\/content\/blog\/.+\.mdx?$/.test(String(path));
+// Kept local to avoid exporting publisher internals through its existing
+// load-time cycle. This mirrors publishRefresh's four-field blog allowlist.
+const REFRESH_REVIEW_META_FIELDS = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
 
 function sourceUrls(document, brief = {}) {
   // Public citation URLs only; the transport independently checks DNS/IP/redirects.
@@ -50,6 +53,7 @@ async function evaluate(document, brief = {}) {
 // independent review below still checks the exact bytes emitted by the publisher.
 async function prepareDraft(draft, brief = {}) {
   if (!enabled()) return draft;
+  let reviewFrontmatter = draft.frontmatter || {};
   if (brief.action_type === 'refresh_existing_page') {
     // Match publishRefresh's target precedence, then let its own resolver tell
     // us whether this is a blog. Refresh briefs deliberately use the generic
@@ -69,9 +73,29 @@ async function prepareDraft(draft, brief = {}) {
     }
     if (!resolved?.path) throw reviewError(null);
     if (!applicable(resolved.path)) return draft;
+
+    // The refresh sink is intentionally sparse: publishRefresh starts with
+    // the live frontmatter and accepts only non-empty edits to fields already
+    // present on that page. Review those effective bytes too, while returning
+    // the original sparse draft frontmatter for the publisher to freeze.
+    let liveFrontmatter;
+    try {
+      if (typeof resolved.file?.content !== 'string') throw new Error('resolved refresh file has no content');
+      liveFrontmatter = fm.parse(resolved.file.content).data || {};
+    } catch {
+      throw reviewError(null);
+    }
+    reviewFrontmatter = { ...liveFrontmatter };
+    for (const field of REFRESH_REVIEW_META_FIELDS) {
+      if (liveFrontmatter[field] !== undefined
+          && draft.frontmatter?.[field] !== undefined
+          && String(draft.frontmatter[field]).trim()) {
+        reviewFrontmatter[field] = String(draft.frontmatter[field]).trim();
+      }
+    }
   } else if (!['supporting-blog', 'customer-question'].includes(brief.page_type)
       && brief.action_type !== 'new_supporting_blog') return draft;
-  const original = fm.stringify(draft.frontmatter || {}, draft.body || '');
+  const original = fm.stringify(reviewFrontmatter, draft.body || '');
   let document = original;
   let result;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -83,7 +107,7 @@ async function prepareDraft(draft, brief = {}) {
     if (attempt === 0 && !result?.checks?.some((check) => check.status === 'error')) {
       const repaired = await require('./editorial-review').repair({ document,
         findings: result.checks.flatMap((check) => check.findings || []), sources: result.sources || [],
-        title: fm.parse(document).data.title || '', domain: DOMAIN_CONTEXT });
+        title: reviewFrontmatter.title || reviewFrontmatter.metaTitle || '', domain: DOMAIN_CONTEXT });
       document = typeof repaired === 'string' ? repaired : repaired?.document;
       if (!document || JSON.stringify(fm.parse(document).data) !== JSON.stringify(fm.parse(original).data)) throw reviewError(result);
     }

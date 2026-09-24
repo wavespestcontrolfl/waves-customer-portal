@@ -59,8 +59,11 @@ test('repairs before returning draft and requires another independent review', a
   failed.checks[0] = { name: 'answer_first', status: 'fail', findings: [{ passage: 'Inspect', action: 'Answer directly.' }] };
   reviewer.review.mockResolvedValueOnce(failed).mockResolvedValueOnce(passing());
   reviewer.repair.mockResolvedValue(fm.stringify({ title: 'How to inspect a door' }, 'Look for daylight around the closed door.'));
-  const result = await evidence.prepareDraft({ frontmatter: { title: 'How to inspect a door' }, body: 'Inspect' }, { page_type: 'supporting-blog' });
+  const frontmatter = { title: 'How to inspect a door' };
+  const result = await evidence.prepareDraft({ frontmatter, body: 'Inspect' }, { page_type: 'supporting-blog' });
   expect(result.body).toContain('Look for daylight');
+  expect(result.frontmatter).toBe(frontmatter);
+  expect(publisher.resolveExistingAstroFileForTarget).not.toHaveBeenCalled();
   expect(reviewer.review).toHaveBeenCalledTimes(2);
   expect(reviewer.repair).toHaveBeenCalledTimes(1);
 });
@@ -74,11 +77,12 @@ test.each([
   reviewer.review.mockResolvedValueOnce(failed).mockResolvedValueOnce(passing());
   reviewer.repair.mockResolvedValue(fm.stringify({ title: 'How to inspect a door' }, 'Look for daylight around the closed door.'));
   publisher.resolveExistingAstroFileForTarget.mockResolvedValue({ path, file: { content: document } });
+  const frontmatter = {};
   const draft = {
     type: 'draft',
     ...targetFields,
     page_url: 'https://www.wavespestcontrol.com/pest-control/wrong-fallback/',
-    frontmatter: { title: 'How to inspect a door' },
+    frontmatter,
     body: 'Inspect',
   };
   const result = await evidence.prepareDraft(draft, {
@@ -88,8 +92,52 @@ test.each([
   });
   expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith(expectedTarget);
   expect(result.body).toContain('Look for daylight');
+  expect(result.frontmatter).toBe(frontmatter);
+  expect(reviewer.review).toHaveBeenNthCalledWith(1, expect.objectContaining({ title: 'How to inspect a door' }));
+  expect(reviewer.repair).toHaveBeenCalledWith(expect.objectContaining({ title: 'How to inspect a door' }));
   expect(reviewer.review).toHaveBeenCalledTimes(2);
   expect(reviewer.repair).toHaveBeenCalledTimes(1);
+});
+test('reviews only publisher-permitted refresh metadata overrides against live immutable frontmatter', async () => {
+  const liveFrontmatter = {
+    title: 'Live title',
+    meta_description: 'Live snake description',
+    metaDescription: 'Live camel description',
+    category: 'Pest Control',
+    canonical: 'https://www.wavespestcontrol.com/blog/door/',
+    hero_image: { src: '/images/live.webp', alt: 'Live alt' },
+  };
+  publisher.resolveExistingAstroFileForTarget.mockResolvedValue({
+    path,
+    file: { content: fm.stringify(liveFrontmatter, 'Live body.') },
+  });
+  const frontmatter = {
+    title: '  Draft title  ',
+    metaTitle: 'Must not introduce an absent field',
+    meta_description: '   ',
+    metaDescription: '  Draft camel description  ',
+    category: 'Changed category',
+    canonical: 'https://attacker.example/wrong/',
+    hero_image: { src: '/images/wrong.webp', alt: 'Wrong alt' },
+  };
+  const draft = { type: 'draft', page_url: '/blog/door/', frontmatter, body: 'Updated body.' };
+
+  const result = await evidence.prepareDraft(draft, {
+    page_type: 'refresh',
+    action_type: 'refresh_existing_page',
+    target_url: '/blog/door/',
+  });
+
+  const reviewed = fm.parse(reviewer.review.mock.calls[0][0].document);
+  expect(reviewed.data).toEqual({
+    ...liveFrontmatter,
+    title: 'Draft title',
+    metaDescription: 'Draft camel description',
+  });
+  expect(reviewed.data.metaTitle).toBeUndefined();
+  expect(reviewer.review).toHaveBeenCalledWith(expect.objectContaining({ title: 'Draft title' }));
+  expect(result.frontmatter).toBe(frontmatter);
+  expect(result.body).toBe('Updated body.');
 });
 test('resolves but skips editorial review for a non-blog refresh target', async () => {
   publisher.resolveExistingAstroFileForTarget.mockResolvedValue({
@@ -114,6 +162,7 @@ test('resolves but skips editorial review for a non-blog refresh target', async 
 });
 test.each([
   ['returns no file', () => publisher.resolveExistingAstroFileForTarget.mockResolvedValue(null)],
+  ['returns a path without file content', () => publisher.resolveExistingAstroFileForTarget.mockResolvedValue({ path })],
   ['throws', () => publisher.resolveExistingAstroFileForTarget.mockRejectedValue(new Error('repository read failed'))],
 ])('fails closed when the refresh resolver %s', async (_label, arrangeResolver) => {
   arrangeResolver();
