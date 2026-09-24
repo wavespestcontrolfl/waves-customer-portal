@@ -226,6 +226,9 @@ export default function OwedTabV2() {
   const act = async (row, action) => {
     if (busyId) return;
     requestSeq.current += 1;
+    // The action just invalidated any foreground filter/Retry read that owned
+    // `loading`. Release only that state now; a newer read can set it again.
+    setState((s) => s.status === "loading" ? { ...s, status: "ready" } : s);
     setBusyId(row.id);
     try {
       await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });

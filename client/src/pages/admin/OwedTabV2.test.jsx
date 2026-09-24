@@ -131,6 +131,50 @@ describe("OwedTabV2", () => {
     expect(calls.filter((c) => c.url.includes("/commitments/open"))).toHaveLength(2);
   });
 
+  it("recovers polling when a failed action invalidates a pending filter read", async () => {
+    let resolvePendingRead;
+    let customerReads = 0;
+    const stale = { ...rows()[0], id: "stale", description: "Stale customer read" };
+    globalThis.fetch.mockImplementation(async (url, options = {}) => {
+      const path = String(url);
+      if (options.method === "PATCH") {
+        return {
+          ok: false,
+          status: 500,
+          statusText: "Server Error",
+          clone: () => ({ json: async () => ({ error: "Synthetic action failure" }) }),
+        };
+      }
+      if (path.includes("party=customer")) {
+        customerReads += 1;
+        if (customerReads === 1) {
+          return new Promise((resolve) => { resolvePendingRead = resolve; });
+        }
+        return { ok: true, status: 200, json: async () => ({ commitments: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ commitments: rows() }) };
+    });
+
+    render(<OwedTabV2 />);
+    await screen.findByText("Send the caller an estimate");
+    fireEvent.change(screen.getByLabelText("Whose promises"), { target: { value: "customer" } });
+    await waitFor(() => expect(resolvePendingRead).toBeTypeOf("function"));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Mark done" })[0]);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic action failure");
+
+    await act(async () => {
+      resolvePendingRead({ ok: true, status: 200, json: async () => ({ commitments: [stale] }) });
+      await Promise.resolve();
+    });
+    expect(screen.queryByText(stale.description)).toBeNull();
+
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(await screen.findByText(/Nothing owed/)).toBeInTheDocument();
+    expect(customerReads).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("Open call deep-links the Calls tab to that call", async () => {
     render(<OwedTabV2 />);
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Open call" })[0]).toBeInTheDocument());
