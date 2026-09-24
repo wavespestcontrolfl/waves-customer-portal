@@ -2,7 +2,8 @@
  * services/recurring-series-topup.js — the nightly sweep wrapper.
  *
  * Pins the contract the gate-off SHADOW pass and the ops script's dry-run
- * mode both depend on: a dry run calls topUpRecurringSeriesLocked inside a
+ * mode both depend on: a dry run calls topUpRecurringSeriesWithLocks (same
+ * maintenance lock + comms fence as a real run) inside a
  * transaction this module opens and ALWAYS rolls back, and never calls the
  * committing wrapper (topUpRecurringSeries) — so a dry/shadow run can never
  * write, regardless of what the locked function itself does. Also pins
@@ -27,10 +28,10 @@ jest.mock('../models/db', () => {
 });
 
 const mockTopUpRecurringSeries = jest.fn();
-const mockTopUpRecurringSeriesLocked = jest.fn();
+const mockTopUpRecurringSeriesWithLocks = jest.fn();
 jest.mock('../routes/admin-schedule', () => ({
   topUpRecurringSeries: (...args) => mockTopUpRecurringSeries(...args),
-  topUpRecurringSeriesLocked: (...args) => mockTopUpRecurringSeriesLocked(...args),
+  topUpRecurringSeriesWithLocks: (...args) => mockTopUpRecurringSeriesWithLocks(...args),
 }));
 
 const db = require('../models/db');
@@ -41,11 +42,11 @@ const {
 describe('topUpOneSeries — dry run never reaches the committing wrapper', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('dryRun opens its own transaction, calls the LOCKED function, and always rolls back', async () => {
-    mockTopUpRecurringSeriesLocked.mockResolvedValue({ spawnedVisits: [{ scheduledDate: '2027-01-01' }], skipped: null });
+  test('dryRun opens its own transaction, calls the lock-taking function, and always rolls back', async () => {
+    mockTopUpRecurringSeriesWithLocks.mockResolvedValue({ spawnedVisits: [{ scheduledDate: '2027-01-01' }], skipped: null });
     const result = await topUpOneSeries('parent-1', { horizonDays: 90, dryRun: true });
     expect(db.transaction).toHaveBeenCalledWith(); // no callback — manual commit/rollback form
-    expect(mockTopUpRecurringSeriesLocked).toHaveBeenCalledWith(mockTrx, 'parent-1', { horizonDays: 90 });
+    expect(mockTopUpRecurringSeriesWithLocks).toHaveBeenCalledWith(mockTrx, 'parent-1', { horizonDays: 90 });
     expect(mockTrx.rollback).toHaveBeenCalledTimes(1);
     // Rolled back with an EXPLICIT error, not a bare rollback() — knex's
     // default doNotRejectOnRollback resolves (rather than rejects) the
@@ -59,7 +60,7 @@ describe('topUpOneSeries — dry run never reaches the committing wrapper', () =
   });
 
   test('dryRun still rolls back even when the locked function throws', async () => {
-    mockTopUpRecurringSeriesLocked.mockRejectedValue(new Error('boom'));
+    mockTopUpRecurringSeriesWithLocks.mockRejectedValue(new Error('boom'));
     await expect(topUpOneSeries('parent-1', { horizonDays: 90, dryRun: true })).rejects.toThrow('boom');
     expect(mockTrx.rollback).toHaveBeenCalledTimes(1);
     expect(mockTopUpRecurringSeries).not.toHaveBeenCalled();
@@ -70,7 +71,7 @@ describe('topUpOneSeries — dry run never reaches the committing wrapper', () =
     await topUpOneSeries('parent-1', { horizonDays: 90, dryRun: false });
     expect(mockTopUpRecurringSeries).toHaveBeenCalledWith(db, 'parent-1', { horizonDays: 90 });
     expect(db.transaction).not.toHaveBeenCalled();
-    expect(mockTopUpRecurringSeriesLocked).not.toHaveBeenCalled();
+    expect(mockTopUpRecurringSeriesWithLocks).not.toHaveBeenCalled();
   });
 });
 
@@ -78,7 +79,7 @@ describe('runRecurringSeriesTopUpSweep', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('isolates a per-series failure — one bad series does not stop the run', async () => {
-    mockTopUpRecurringSeriesLocked
+    mockTopUpRecurringSeriesWithLocks
       .mockResolvedValueOnce({ spawnedVisits: [{ scheduledDate: '2027-01-01' }], skipped: null })
       .mockRejectedValueOnce(new Error('series exploded'))
       .mockResolvedValueOnce({ spawnedVisits: [], skipped: 'not_ongoing' });
@@ -94,24 +95,24 @@ describe('runRecurringSeriesTopUpSweep', () => {
     expect(summary.errors).toHaveLength(1);
     expect(summary.errors[0].parentId).toBe('p2');
     // The failing series must not have prevented p3 from running.
-    expect(mockTopUpRecurringSeriesLocked).toHaveBeenCalledTimes(3);
+    expect(mockTopUpRecurringSeriesWithLocks).toHaveBeenCalledTimes(3);
     // Never touched the committing wrapper in shadow mode.
     expect(mockTopUpRecurringSeries).not.toHaveBeenCalled();
   });
 
   test('with no parentIds given, scans eligibleSeriesParentIds', async () => {
     mockPluck.mockResolvedValueOnce(['auto-1', 'auto-2']);
-    mockTopUpRecurringSeriesLocked.mockResolvedValue({ spawnedVisits: [], skipped: 'not_ongoing' });
+    mockTopUpRecurringSeriesWithLocks.mockResolvedValue({ spawnedVisits: [], skipped: 'not_ongoing' });
     const summary = await runRecurringSeriesTopUpSweep({ dryRun: true });
     expect(summary.scanned).toBe(2);
-    expect(mockTopUpRecurringSeriesLocked).toHaveBeenCalledTimes(2);
+    expect(mockTopUpRecurringSeriesWithLocks).toHaveBeenCalledTimes(2);
   });
 
   test('apply mode (dryRun: false) routes every series through the committing wrapper', async () => {
     mockTopUpRecurringSeries.mockResolvedValue({ spawnedVisits: [{ scheduledDate: '2027-02-02' }], skipped: null });
     const summary = await runRecurringSeriesTopUpSweep({ dryRun: false, parentIds: ['p1'] });
     expect(mockTopUpRecurringSeries).toHaveBeenCalledTimes(1);
-    expect(mockTopUpRecurringSeriesLocked).not.toHaveBeenCalled();
+    expect(mockTopUpRecurringSeriesWithLocks).not.toHaveBeenCalled();
     expect(summary.toppedUp).toBe(1);
     expect(summary.visitsInserted).toBe(1);
   });

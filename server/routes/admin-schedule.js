@@ -15164,6 +15164,11 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
   if (!parent) return { spawnedVisits: [], skipped: 'not_found' };
+  // Only a series ROOT may be topped up. A child id (e.g. a mistaken
+  // `--parent` in the ops script) would otherwise pass every check below and
+  // spawn grandchildren pointing at the child — rows outside the root's
+  // cancellation/maintenance scope that no later sweep discovers (Codex r1).
+  if (parent.recurring_parent_id) return { spawnedVisits: [], skipped: 'not_series_root' };
   // Series-scope price/service overrides beat the parent's own columns —
   // same overlay the completion path applies before reading recurring_*.
   parent = overlayRecurringTemplateOverrides(parent, cols);
@@ -15237,30 +15242,38 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
 // script's --apply mode. For a dry run / the gate-off shadow pass, call
 // topUpRecurringSeriesLocked directly inside a transaction the caller rolls
 // back — see that function's header for why reminders can't ride along.
-async function topUpRecurringSeries(conn, parentId, opts = {}) {
-  const runLocked = async (trx) => {
-    await acquireRecurringSeriesMaintenanceLock(trx, parentId);
-    const parentRow = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
-    if (!parentRow) return topUpRecurringSeriesLocked(trx, parentId, opts);
-    await lockCustomerComms(trx, parentRow.customer_id);
-    // Rung-6 re-lock (mirrors runRecurringSeriesMaintenanceLocked's own
-    // comment): a merge undo can repoint the parent to a different customer
-    // while this call waited on the comms lock above. Re-read and lock the
-    // FRESH owner too, so the insert loop below is fenced against THAT
-    // customer's undo/offboarding, not a stale one. A row that moved AGAIN
-    // under the second lock defers this whole run to the next tick rather
-    // than inserting under a still-stale owner's fence.
-    const relocked = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
-    if (relocked && relocked.customer_id !== parentRow.customer_id) {
-      await lockCustomerComms(trx, relocked.customer_id);
-      const relockedAgain = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
-      if (!relockedAgain || relockedAgain.customer_id !== relocked.customer_id) {
-        logger.warn(`[recurring-topup] parent ${parentId} owner changed under the comms fence (merge-undo) — deferring top-up to the next tick`);
-        return { spawnedVisits: [], skipped: 'owner_changed_under_fence' };
-      }
+// Takes the same per-parent maintenance lock + customer-comms fence as the
+// completion path, then runs the top-up loop. Shared by the committing
+// wrapper below and the sweep's rollback-only dry run, so a shadow/preview
+// pass is serialized against concurrent completions, cancellations and
+// merge-undos exactly like a real run (Codex r1). Both locks are xact-scoped
+// advisory locks, so a dry run's rollback releases them.
+async function topUpRecurringSeriesWithLocks(trx, parentId, opts = {}) {
+  await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+  const parentRow = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
+  if (!parentRow) return topUpRecurringSeriesLocked(trx, parentId, opts);
+  await lockCustomerComms(trx, parentRow.customer_id);
+  // Rung-6 re-lock (mirrors runRecurringSeriesMaintenanceLocked's own
+  // comment): a merge undo can repoint the parent to a different customer
+  // while this call waited on the comms lock above. Re-read and lock the
+  // FRESH owner too, so the insert loop below is fenced against THAT
+  // customer's undo/offboarding, not a stale one. A row that moved AGAIN
+  // under the second lock defers this whole run to the next tick rather
+  // than inserting under a still-stale owner's fence.
+  const relocked = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
+  if (relocked && relocked.customer_id !== parentRow.customer_id) {
+    await lockCustomerComms(trx, relocked.customer_id);
+    const relockedAgain = await trx('scheduled_services').where({ id: parentId }).first('customer_id');
+    if (!relockedAgain || relockedAgain.customer_id !== relocked.customer_id) {
+      logger.warn(`[recurring-topup] parent ${parentId} owner changed under the comms fence (merge-undo) — deferring top-up to the next tick`);
+      return { spawnedVisits: [], skipped: 'owner_changed_under_fence' };
     }
-    return topUpRecurringSeriesLocked(trx, parentId, opts);
-  };
+  }
+  return topUpRecurringSeriesLocked(trx, parentId, opts);
+}
+
+async function topUpRecurringSeries(conn, parentId, opts = {}) {
+  const runLocked = (trx) => topUpRecurringSeriesWithLocks(trx, parentId, opts);
   const result = conn.isTransaction ? await runLocked(conn) : await conn.transaction(runLocked);
   for (const spawnedVisit of result.spawnedVisits) {
     // No confirmation SMS (sendConfirmation:false, matching every other
@@ -20955,6 +20968,7 @@ router._test = {
   coveringTermForDate,
   extendSeriesOnceLocked,
   topUpRecurringSeries,
+  topUpRecurringSeriesWithLocks,
   topUpRecurringSeriesLocked,
   resolveTopUpTermCap,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
@@ -20982,6 +20996,7 @@ module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
 // one-shot ops script), same avoid-a-route-load-cycle reason as above.
 module.exports.topUpRecurringSeries = topUpRecurringSeries;
 module.exports.topUpRecurringSeriesLocked = topUpRecurringSeriesLocked;
+module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
 // Shared "your appointment moved" notice (arrival-window copy, recipient
 // routing, terminal/slot recheck, guarded reminder close/re-arm) — consumed
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go

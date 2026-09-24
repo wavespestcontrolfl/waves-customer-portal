@@ -29,7 +29,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
-  topUpRecurringSeriesLocked, topUpRecurringSeries, TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
+  topUpRecurringSeriesLocked, topUpRecurringSeries, topUpRecurringSeriesWithLocks, TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
 } = adminScheduleRouter._test;
 const AppointmentReminders = require('../services/appointment-reminders');
 const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
@@ -192,6 +192,15 @@ describe('topUpRecurringSeriesLocked — eligibility', () => {
     const { conn, inserted } = topupScenario({ parentOverrides: { recurring_ongoing: false } });
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
     expect(result.skipped).toBe('not_ongoing');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('skips a child id — only a series root may be topped up', async () => {
+    // A mistaken --parent <child uuid> would otherwise spawn grandchildren
+    // pointing at the child, outside the root's cancel/maintenance scope.
+    const { conn, inserted } = topupScenario({ parentOverrides: { recurring_parent_id: 5 } });
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('not_series_root');
     expect(inserted).toHaveLength(0);
   });
 
@@ -496,6 +505,29 @@ describe('topUpRecurringSeriesLocked — annual-prepay term_end cap', () => {
     const coverageProbe = whereInCalls.find((c) => c.coverageDate);
     expect(coverageProbe).toBeDefined();
     expect(coverageProbe.ids).toContain('term-unlinked');
+  });
+});
+
+describe('topUpRecurringSeriesWithLocks — shared by apply and dry run', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('takes the per-parent maintenance lock and the customer-comms fence, and registers no reminders itself', async () => {
+    // The sweep's dry run calls this inside a rollback-only transaction, so
+    // a shadow/preview pass serializes against concurrent completions,
+    // cancellations and merge-undos exactly like a real run.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+    });
+    const rawCalls = [];
+    conn.raw = jest.fn((sql, bindings) => { rawCalls.push([sql, bindings]); return Promise.resolve(); });
+    const result = await topUpRecurringSeriesWithLocks(conn, 10, { horizonDays: 14 });
+    const flat = rawCalls.map(([sql, b]) => `${sql} ${JSON.stringify(b || [])}`);
+    expect(flat.some((x) => x.includes('pg_advisory_xact_lock') && x.includes('recurring-series-maintenance'))).toBe(true);
+    expect(flat.some((x) => x.includes('customer-comms:'))).toBe(true);
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(result.spawnedVisits).toHaveLength(inserted.length);
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   });
 });
 

@@ -51,15 +51,16 @@ async function eligibleSeriesParentIds(conn) {
 }
 
 // Run one series through the top-up loop.
-//   dryRun: true  → the real code path (topUpRecurringSeriesLocked) inside a
-//                    transaction this function opens and always rolls back.
+//   dryRun: true  → the real code path (topUpRecurringSeriesWithLocks: the
+//                    same maintenance lock + comms fence, then the loop) inside
+//                    a transaction this function opens and always rolls back.
 //                    No commit, no reminders — used by the gate-off shadow
 //                    pass and the ops script's default (no --apply) mode.
 //   dryRun: false → topUpRecurringSeries (the writing wrapper): commits and
 //                    registers a reminder for each spawned visit, exactly as
 //                    the completion-path wrapper does for its own extend.
 async function topUpOneSeries(parentId, { horizonDays, dryRun }) {
-  const { topUpRecurringSeries, topUpRecurringSeriesLocked } = require('../routes/admin-schedule');
+  const { topUpRecurringSeries, topUpRecurringSeriesWithLocks } = require('../routes/admin-schedule');
   if (!dryRun) {
     return topUpRecurringSeries(db, parentId, { horizonDays });
   }
@@ -79,7 +80,7 @@ async function topUpOneSeries(parentId, { horizonDays, dryRun }) {
     trx.executionPromise.catch(() => {});
   }
   try {
-    return await topUpRecurringSeriesLocked(trx, parentId, { horizonDays });
+    return await topUpRecurringSeriesWithLocks(trx, parentId, { horizonDays });
   } finally {
     await trx.rollback(new Error('recurring-series-topup: intentional dry-run rollback')).catch(() => {});
   }
