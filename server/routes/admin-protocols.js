@@ -778,14 +778,14 @@ router.get('/match', async (req, res, next) => {
 
     if (!result.program) return res.status(404).json({ error: 'Protocol program not found' });
 
-    res.json({
+    res.json(protocolCatalogForViewer(req, {
       serviceType,
       programKey: result.programKey,
       program: result.program,
       matchedVisit: result.matchedVisit,
       matched: result.matched,
       reason: result.reason,
-    });
+    }));
   } catch (err) { next(err); }
 });
 
@@ -804,6 +804,110 @@ function unmatchedPricedProtocolLines(items) {
 }
 
 // GET /api/admin/protocols/lawn-mix — generic tech-facing protocol preview.
+// Owner-only projection for lawn-mix (ADMIN-BUG-R44): neither this route nor
+// command-center below applied the file's own viewerSeesPricing rule, so a
+// technician received the vendor purchase price (bestPrice/costPerUnit) of
+// every protocol product plus the per-line and whole-job material-cost
+// (COGS) total — the same data the 2026-08-25 inventory role lockdown made
+// owner-only. Technicians keep the recipe (rates, mixing order, label
+// fields); pricing/materialCost fields are stripped.
+// codex round 1 P1: the structured cost fields were stripped, but item.raw
+// (and visit.primary/secondary, which item.raw lines are parsed FROM) still
+// carry the protocol's own priced-line convention verbatim — e.g. "K-Flow
+// 0-0-25 ($2.18)" — which ProtocolReferenceTabV2.jsx renders unconditionally.
+// Strip every dollar-figure token: the parenthesized "($x.xx)" / "($x+$y)" /
+// "($x est)" cost-tag convention (isPricedProtocolLine's own pattern), and
+// any bare "$N" left over (e.g. "OPTIONAL if requested — $15",
+// ">$60 YTD = reprice flag").
+function stripPriceTokensFromText(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/\s*\([^)]*\$[^)]*\)/g, '')
+    .replace(/[<>]?\$\s?\d[\d,.]*/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+(\n|$)/g, '$1')
+    .trim();
+}
+
+// Deep, whole-payload backstop for the same rule: any string anywhere in
+// the lawn-mix response (visit.primary/secondary, an unmatched-line
+// warning message, a mixingOrder instruction that falls back to item.raw
+// when the catalog product has no mixing_instructions, …) gets every
+// dollar-figure token stripped for a non-admin viewer. Field-level
+// stripping above (stripLawnMixItemPricing, materialCostSummary: null)
+// stays the primary mechanism; this closes every path that copies raw
+// protocol-line text into the response instead of a structured field.
+function deepStripPriceTokens(value) {
+  if (typeof value === 'string') return stripPriceTokensFromText(value);
+  if (Array.isArray(value)) return value.map(deepStripPriceTokens);
+  // codex-review P1: a Date (equipment.expiresAt, product.labelVerifiedAt)
+  // has no OWN enumerable properties, so recursing into it like a plain
+  // object produced {} — ProtocolTankSheet then rendered a quantity/expiry
+  // as missing. Only recurse into an actual plain object; every other
+  // object type (Date, RegExp, Buffer, …) passes through untouched.
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) out[key] = deepStripPriceTokens(val);
+    return out;
+  }
+  return value;
+}
+
+// codex round 4 P1 (PR #4673): the raw protocols.json catalog routes below
+// (/programs, /programs/:track/visit/:num, /match, /completion-actions) are
+// technician-reachable (router-level requireTechOrAdmin) and hand back the
+// track/program/visit objects verbatim — each visit carries the owner-only
+// per-visit cost figures (material_cost / conditional_cost / labor_cost, a
+// program's costing_assumptions and minimum_price_per_palm) AND the same
+// "($2.18)" priced-line convention in primary/secondary that lawn-mix
+// already strips. ProtocolReferenceTabV2's "View full calendar" table and
+// SchedulePage's protocol panels render them straight from these payloads.
+// Same rule as lawn-mix: the recipe stays, every cost figure goes, and the
+// response is tagged viewerRole so the client hides the cost columns
+// instead of rendering "—" placeholders. Only plain objects are recursed
+// (the Date-passthrough rule deepStripPriceTokens documents above).
+const OWNER_ONLY_PROTOCOL_COST_KEYS = new Set([
+  'material_cost', 'conditional_cost', 'labor_cost', 'costing_assumptions', 'minimum_price_per_palm',
+]);
+function stripOwnerOnlyProtocolCostFields(value) {
+  if (Array.isArray(value)) return value.map(stripOwnerOnlyProtocolCostFields);
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (OWNER_ONLY_PROTOCOL_COST_KEYS.has(key)) continue;
+      out[key] = stripOwnerOnlyProtocolCostFields(val);
+    }
+    return out;
+  }
+  return value;
+}
+function protocolCatalogForViewer(req, payload) {
+  if (viewerSeesPricing(req)) return { ...payload, viewerRole: 'admin' };
+  return { ...deepStripPriceTokens(stripOwnerOnlyProtocolCostFields(payload)), viewerRole: 'technician' };
+}
+
+function stripLawnMixItemPricing(item) {
+  const stripMix = (mix) => {
+    if (!mix) return mix;
+    const { materialCost: _materialCost, materialCostSource: _materialCostSource, materialCostDetail: _materialCostDetail, ...rest } = mix;
+    return rest;
+  };
+  let product = item.product;
+  if (product) {
+    const { bestPrice: _bestPrice, costPerUnit: _costPerUnit, costUnit: _costUnit, needsPricing: _needsPricing, ...rest } = product;
+    product = rest;
+  }
+  return {
+    ...item,
+    raw: stripPriceTokensFromText(item.raw),
+    product,
+    jobMix: stripMix(item.jobMix),
+    fullTankMix: stripMix(item.fullTankMix),
+    plannedMix: stripMix(item.plannedMix),
+    plannedFullTankMix: stripMix(item.plannedFullTankMix),
+  };
+}
+
 router.get('/lawn-mix', async (req, res, next) => {
   try {
     const protocols = require('../config/protocols.json');
@@ -958,9 +1062,16 @@ router.get('/lawn-mix', async (req, res, next) => {
       });
     }
 
-    res.json({
+    const seesPricing = viewerSeesPricing(req);
+    const payload = {
       track: { key: trackKey, name: track.name },
       month,
+      // codex round-3 P2: ProtocolReferenceTabV2.jsx rendered the now-absent
+      // materialCostSummary as "0/N lines priced" — a stripped-for-role
+      // response looking identical to a genuinely-unpriced one. This flag
+      // lets the client tell the difference and hide the Material Cost
+      // card/column instead of showing a fabricated zero.
+      viewerRole: seesPricing ? 'admin' : 'technician',
       visit: {
         visit: visit.visit,
         objective: visit.notes,
@@ -981,15 +1092,16 @@ router.get('/lawn-mix', async (req, res, next) => {
         expiresAt: calibration.expires_at || null,
       } : null,
       areaSqft,
-      materialCostSummary,
-      items,
-      selectedItems,
+      materialCostSummary: seesPricing ? materialCostSummary : null,
+      items: seesPricing ? items : items.map(stripLawnMixItemPricing),
+      selectedItems: seesPricing ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
       mixingOrder: buildMixOrder(selectedItems.map((item) => ({
         raw: item.raw,
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
       }))),
       warnings,
-    });
+    };
+    res.json(seesPricing ? payload : deepStripPriceTokens(payload));
   } catch (err) { next(err); }
 });
 
@@ -1058,7 +1170,7 @@ router.get('/completion-actions', async (req, res, next) => {
       visit,
     });
 
-    res.json({
+    res.json(protocolCatalogForViewer(req, {
       serviceType,
       programKey,
       track,
@@ -1070,7 +1182,7 @@ router.get('/completion-actions', async (req, res, next) => {
         objective: visit.notes,
       },
       actions,
-    });
+    }));
   } catch (err) { next(err); }
 });
 
@@ -1163,7 +1275,12 @@ router.post('/lawn/drafts/:id/publish', requireAdmin, async (req, res, next) => 
 
 // GET /api/admin/protocols/lawn/command-center — office operating view that
 // connects treatment plans, inventory, service reports, assessments, and wiki.
-router.get('/lawn/command-center', async (req, res, next) => {
+// Admin-only (ADMIN-BUG-R44): hands back vendor purchase price/vendor for
+// every mapped product, colleagues' staff emails in the audit trail, and
+// unpublished draft protocol versions — this Service Library screen is not
+// in TECH_ALLOWED_PATH_PREFIXES (no technician UI reaches it), so it is an
+// owner surface end to end rather than a per-field projection.
+router.get('/lawn/command-center', requireAdmin, async (req, res, next) => {
   try {
     const serviceDate = req.query.date ? dateOnlyToETNoon(req.query.date) : new Date();
     const protocolId = req.query.protocolId || null;
@@ -1681,14 +1798,14 @@ router.get('/programs', async (req, res, next) => {
     const { track, program } = req.query;
 
     if (program && PROGRAM_KEYS.includes(program) && protocols[program]) {
-      return res.json({ program: protocols[program] });
+      return res.json(protocolCatalogForViewer(req, { program: protocols[program] }));
     }
 
     // Backward compat: map old track letters to new keys
     const TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
     const resolvedTrack = TRACK_MAP[track] || track;
     if (resolvedTrack && protocols.lawn[resolvedTrack]) {
-      return res.json({ track: protocols.lawn[resolvedTrack] });
+      return res.json(protocolCatalogForViewer(req, { track: protocols.lawn[resolvedTrack] }));
     }
 
     // Return summary of all tracks
@@ -1696,7 +1813,7 @@ router.get('/programs', async (req, res, next) => {
       key, name: t.name, visits: t.visits.length, notes: t.notes.length,
     }));
 
-    res.json({
+    res.json(protocolCatalogForViewer(req, {
       operations: protocols.operations || {},
       lawn: { tracks: summary },
       programs: PROGRAM_KEYS.map((key) => programSummary(key, protocols[key])).filter(Boolean),
@@ -1708,7 +1825,7 @@ router.get('/programs', async (req, res, next) => {
       cockroach: programSummary('cockroach', protocols.cockroach),
       bed_bug: programSummary('bed_bug', protocols.bed_bug),
       termite: programSummary('termite', protocols.termite),
-    });
+    }));
   } catch (err) { next(err); }
 });
 
@@ -1720,7 +1837,7 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
 
     if (track === 'tree_shrub') {
       const visit = protocols.tree_shrub.visits.find(v => v.visit === parseInt(num));
-      return res.json({ visit, notes: protocols.tree_shrub.notes });
+      return res.json(protocolCatalogForViewer(req, { visit, notes: protocols.tree_shrub.notes }));
     }
 
     const VISIT_TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
@@ -1729,7 +1846,7 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
     if (!trackData) return res.status(404).json({ error: 'Track not found' });
 
     const visit = trackData.visits.find(v => v.visit === parseInt(num));
-    res.json({ visit, trackName: trackData.name, notes: trackData.notes });
+    res.json(protocolCatalogForViewer(req, { visit, trackName: trackData.name, notes: trackData.notes }));
   } catch (err) { next(err); }
 });
 

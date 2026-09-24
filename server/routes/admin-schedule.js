@@ -9571,6 +9571,33 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       discountId,
     } = req.body;
     let { discountType, discountAmount } = req.body;
+    // ADMIN-BUG-R52: reject negative money inputs outright. Without this, a
+    // negative discountAmount (custom appointment discount OR a per-add-on
+    // one) INFLATES the price instead of reducing it (applyDiscount only
+    // floors at zero), and a negative estimatedPrice fabricates a positive
+    // discount stamp the operator never chose when the replay reconciles a
+    // $0 gross against the negative net. Matches the n >= 0 rule this
+    // handler's own toMoney already enforces for add-on gross, and the
+    // [0, gross] clamp the booking/create path enforces via
+    // calculateDiscountDollars.
+    if (estimatedPrice !== undefined && estimatedPrice !== '' && Number(estimatedPrice) < 0) {
+      throw httpError(400, 'Price cannot be negative.');
+    }
+    if (primaryLinePrice !== undefined && primaryLinePrice !== '' && Number(primaryLinePrice) < 0) {
+      throw httpError(400, 'Price cannot be negative.');
+    }
+    if (discountAmount !== undefined && discountAmount !== null && discountAmount !== '' && Number(discountAmount) < 0) {
+      throw httpError(400, 'Discount amount cannot be negative.');
+    }
+    if (Array.isArray(addons)) {
+      for (const addon of addons) {
+        const addonDiscountAmount = addon?.discountAmount;
+        if (addonDiscountAmount !== undefined && addonDiscountAmount !== null && addonDiscountAmount !== ''
+          && Number(addonDiscountAmount) < 0) {
+          throw httpError(400, 'Add-on discount amount cannot be negative.');
+        }
+      }
+    }
     const updates = {};
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
@@ -10923,8 +10950,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
         }
       }
-      // Match customer editors and grouping: maintenance/comms, customer row,
-      // then stop locks. Tech-day fences remain ahead of all three.
+      // Match customer editors and grouping: maintenance/comms,
+      // combined-payment, customer row, then stop locks. Tech-day fences
+      // remain ahead of all four.
       const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
         || (assignmentPlan && assignmentPlan.scope !== 'this_only')
         || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
@@ -10941,14 +10969,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id, false);
       }
       if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
-      // Payer activation shares comms → combined → customer/appointment rows
-      // with customer editors and combined-payment setup. Take this before
-      // address locking too; the later release reacquires it re-entrantly.
-      // EVERY Bill-To edit, in BOTH directions (local audit): clearing a payer
-      // or setting self_pay_override reconciles withdrawn invoices, which
-      // takes the same combined lock later — and taking the customer row
-      // first and that advisory lock afterwards is the inversion a concurrent
-      // customer-payer assignment deadlocks against.
+      // Combined-payment lock BEFORE the customer row lock (#4716 pre-push
+      // P1). executeMerge (customer-dedupe.js) takes pay.combined.customer
+      // UNCONDITIONALLY before its `customers` FOR UPDATE (see the "Combined
+      // -session locks BEFORE any customer row locks" comment there), and
+      // the customer editors follow the same order for a payer change. This
+      // save used to take the customer row lock first and this advisory
+      // lock afterward, which is the inversion a concurrent merge or
+      // customer-payer assignment deadlocks against — EVERY Bill-To edit, in
+      // BOTH directions (local audit): clearing a payer or setting
+      // self_pay_override reconciles withdrawn invoices, which takes the
+      // same combined lock. Taking it here, before the row lock below, is
+      // the fix.
       if (detailsChanged && (Object.prototype.hasOwnProperty.call(updates, 'payer_id')
         || Object.prototype.hasOwnProperty.call(updates, 'self_pay_override'))) {
         const provCust = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
@@ -10956,6 +10988,27 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           await require('../services/pay-combined').lockCombinedCustomers(trx, [String(provCust.customer_id)]);
         }
       }
+      // Customer row lock (Codex #4716 r2 P1), now AFTER the combined-payment
+      // lock above, completing the order the comment documents
+      // (maintenance/comms, combined-payment, customer row, then stop locks)
+      // — this trx previously never actually took it here, only deep inside
+      // the make-recurring spawn block, well AFTER this route had already
+      // locked and written the edited scheduled_services row (the occupancy
+      // re-check's own row lock, then the details write further down) and
+      // after lockAppointmentAddress's own customer-row-then-stop-locks call
+      // (only on an address-changing save). executeMerge (customer-dedupe.js)
+      // locks the combined-payment advisory lock, THEN the customer row FOR
+      // UPDATE, and then sweeps scheduled_services (FK repoint + address
+      // stamp); this route was doing the reverse in two ways — the customer
+      // row before the combined-payment lock (fixed above), and
+      // locking/writing the appointment row before reaching either, deep in
+      // one conditional branch. Taking the combined-payment lock, then this
+      // row lock, before any scheduled_services row lock or write in this
+      // transaction, whether spawn/duplicate-guard runs or not, is the fix:
+      // whichever side (this save or a concurrent merge) gets to the
+      // combined lock and customer row first now runs to completion before
+      // the other can proceed.
+      if (commsPeek) await trx('customers').where({ id: commsPeek.customer_id }).forUpdate().first('id');
       if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
       if (addressPartnersQuery) {
         const lockedPartners = await addressPartnersQuery.clone();
@@ -12246,6 +12299,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
             throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
           }
+          // Customer row lock: taken up front in this transaction's
+          // comms-lock section (Codex #4716 r2 P1 — moved off its original
+          // r1 position here, which ran AFTER this route had already
+          // locked and written the SAME scheduled_services row, e.g. the
+          // occupancy re-check's own row lock and the details write below
+          // it — an ABBA against executeMerge, which locks the customer
+          // row first and THEN sweeps scheduled_services). See the
+          // comms-lock section for the reasoning; nothing further to do
+          // here.
           // Race-safe duplicate-series backstop (P0), mirroring the POST
           // creator's in-trx guard: the child-date preload above only dedupes
           // rows already attached to THIS parent — it never sees a DIFFERENT
@@ -15018,9 +15080,24 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // check_in/check_out/actual_duration and actual_start/actual_end/
 // service_time families for legacy reasons. Status changes write both
 // families so downstream reporting can read either shape.
+// Target statuses this bare status route actually commits (r1-sched-routes-2):
+// 'pending' and 'rescheduled' are not among them (un-confirming or manually
+// stamping a reschedule outside the reschedule engine's side effects is not
+// a supported transition here — self-serve/staff reschedule always goes
+// through SmartRebooker), and neither is any value outside the DB's
+// scheduled_services status enum. 'completed' / 'cancelled' / 'no_show' are
+// syntactically valid but redirected to their own routes by the explicit
+// guards just below; every other enum member routes through this handler
+// (the V2 dispatch board's row actions, including Skip, run through here).
+// The set lives in services/job-status.js so the sibling dispatch status
+// route enforces the identical closed set (pre-push fallback audit, PR #4673).
 router.put('/:id/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, requestReview } = req.body;
+    const { STATUS_ROUTE_ALLOWED_TARGETS } = require('../services/job-status');
+    if (!STATUS_ROUTE_ALLOWED_TARGETS.has(toStatus)) {
+      return res.status(400).json({ error: `Invalid status '${toStatus}'`, code: 'invalid_status' });
+    }
     // Technician tokens: own CURRENT visits (completed-in-window included,
     // NOT the live-only predicate) — a committed completion whose response
     // was lost must stay retryable so the route's same-status idempotency
@@ -16264,7 +16341,14 @@ router.get('/:id/estimate-source', async (req, res, next) => {
     res.json({
       linked: true,
       estimateId: est.id,
-      estimateToken: est.token,
+      // Owner-only: est.token is the permanent public bearer credential for
+      // the unauthenticated /api/estimates/:token router (view, PDF, resend,
+      // change-request) — admin-customers.js already strips 'estimates' from
+      // the tech 360 for exactly this reason. Never hand it to a technician
+      // token, which outlives the 7-day tech access window and any
+      // reassignment/termination (ADMIN-BUG-R40). No tech client reads this
+      // field.
+      ...(isTechnicianRequest(req) ? {} : { estimateToken: est.token }),
       // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.

@@ -24,6 +24,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: jest.fn(),
   cancelPaymentIntent: jest.fn(async () => ({ status: 'canceled' })),
+  // Saved-card claim fence (ADMIN-BUG-R20): no claimed/ambiguous attempt or
+  // unresolved orphan in these fixtures, so it clears by default. Tests that
+  // exercise the fence override this with a rejecting mock.
+  assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
 }));
 jest.mock('../services/pay-combined', () => ({
   clearPaymentIntentStamps: jest.fn(async () => undefined),

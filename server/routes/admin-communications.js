@@ -15,6 +15,7 @@ const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils
 const {
   draftIdSql,
   draftReplyToMessageIdSql,
+  inboundSmsReceiptProjectionSql,
   loadPriorOutboundBodies,
 } = require('../services/sms-response-policy');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
@@ -1670,6 +1671,9 @@ router.get('/log', async (req, res, next) => {
     const { customerId, direction, messageType, page, limit, search } = req.query;
     const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')");
     const responseReplyToMessageId = draftReplyToMessageIdSql('mdx.sms_log_id');
+    const receiptProjection = inboundSmsReceiptProjectionSql({
+      messageAlias: 'messages', legacyAlias: 'sms_response', receiptAlias: 'sms_optout_receipt',
+    });
 
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
@@ -1680,6 +1684,7 @@ router.get('/log', async (req, res, next) => {
         WHERE sl.twilio_sid = messages.twilio_sid AND sl.direction = messages.direction
         ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
       ) sms_response ON true`)
+      .joinRaw(receiptProjection.joinSql)
       .joinRaw(`LEFT JOIN LATERAL (
         SELECT mal.metadata
         FROM messaging_audit_log mal
@@ -1703,13 +1708,14 @@ router.get('/log', async (req, res, next) => {
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
       )
       .select(
-        'sms_response.message_type as response_message_type',
+        db.raw(`${receiptProjection.responseMessageTypeSql} as response_message_type`),
         'sms_response.status as response_status',
         'sms_response.metadata as response_metadata',
         'sms_response.created_at as response_created_at',
         'sms_audit.metadata as response_audit_metadata',
         'sms_answer.is_click_followup as response_is_click_followup',
         'sms_answer.reply_to_message_id as response_reply_to_message_id',
+        db.raw(`${receiptProjection.effectiveCreatedAtSql} as effective_created_at`),
       )
       .orderBy('messages.created_at', 'desc');
 
@@ -1803,7 +1809,7 @@ router.get('/log', async (req, res, next) => {
         responseReplyToMessageId: m.response_reply_to_message_id || null,
         responseCreatedAt: m.response_created_at || m.created_at,
         customerId: m.customer_id || fallbackCustomer?.id || null, customerName,
-        createdAt: m.created_at,
+        createdAt: m.effective_created_at || m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,
         courtesyOnly,
@@ -2964,8 +2970,14 @@ router.post('/link-library/sync', requireAdmin, async (req, res) => {
   }
 });
 
+// Admin-only (ADMIN-BUG-R38): a system-wide switch that turns automated
+// AI-composed customer SMS replies on or off company-wide is owner-only,
+// consistent with every other owner-only route in this file
+// (/reschedule-link, /customer-link, /link-library*, /collections-cases/:id/dial).
+// A technician login must get 403, not silently flip customer-facing
+// automation with no audit trail (system_config has no actor column).
 // GET /api/admin/communications/ai-auto-reply-status
-router.get('/ai-auto-reply-status', async (req, res) => {
+router.get('/ai-auto-reply-status', requireAdmin, async (req, res) => {
   try {
     const row = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
     res.json({ enabled: row?.value === 'true' });
@@ -2979,7 +2991,7 @@ router.get('/ai-auto-reply-status', async (req, res) => {
 });
 
 // POST /api/admin/communications/ai-auto-reply — toggle
-router.post('/ai-auto-reply', async (req, res) => {
+router.post('/ai-auto-reply', requireAdmin, async (req, res) => {
   try {
     const { enabled } = req.body;
     const value = enabled ? 'true' : 'false';

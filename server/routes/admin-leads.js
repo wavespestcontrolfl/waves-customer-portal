@@ -1039,7 +1039,10 @@ router.get('/:id', async (req, res, next) => {
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
-    res.json({ lead, activities, calls });
+    const linkedHistory = req.query.leadReview === '1'
+      ? await require('../services/lead-linked-history').readLinkedLeadHistory(db, lead)
+      : undefined;
+    res.json({ lead, activities, calls, ...(linkedHistory ? { linkedHistory } : {}) });
   } catch (err) { next(err); }
 });
 

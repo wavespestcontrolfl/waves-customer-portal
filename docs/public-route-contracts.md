@@ -252,6 +252,14 @@ per physical service program; capacity-enabled selections use version-2 catalog 
 bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
+
+`PUT /api/estimates/:token/accept` answers 409
+`{ error, reason: 'retired_lawn_cadence_selection' }` when a recurring lawn
+row still resolves to a retired lawn cadence — any tier hidden via
+`lawn_pricing_v2.tiers.<tier>.hidden` (6x/bi-monthly since 2026-09-24) or the
+removed 4x/quarterly — by explicit cadence, visit count, or the cadence's
+catalog key (`lawn_care_recurring` for 6x). The customer picks a current lawn
+option or the office requotes; the accept never silently reprices at 9x.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned

@@ -45,6 +45,34 @@ function cardTitle(c) {
   return `${brand} ${c.last_four}`;
 }
 
+function formatUsd(amount) {
+  return Number(amount || 0).toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+  });
+}
+
+// ADMIN-BUG-R47: the exact amount that will move — including the funding-
+// aware card surcharge and any post-credit reduction — priced by the same
+// /charge-card-quote endpoint CreateProjectModal already uses. The sheet
+// shows this line and binds its total into the charge as expectedTotal so
+// the server refuses if the invoice moved since it was priced. It stays
+// ONE tap (quote, show, charge — no confirm step between): whether to add
+// an explicit confirm is the open owner decision F0348 in
+// docs/design/DECISIONS.md, deliberately not taken here.
+function quoteAmountLabel(quote) {
+  if (!quote) return null;
+  const total = formatUsd(quote.total);
+  if (quote.coveredByCredit) {
+    return `Account credit covers the invoice — card charge ${total}`;
+  }
+  const surcharge = Number(quote.surcharge || 0);
+  if (surcharge > 0) {
+    return `${formatUsd(quote.base)} + ${formatUsd(surcharge)} card fee = ${total}`;
+  }
+  return `Total charge ${total}`;
+}
+
 export default function MobileCardOnFileSheet({
   desktopVisible = false,
   presentation = "legacy",
@@ -64,6 +92,25 @@ export default function MobileCardOnFileSheet({
   const [chargingId, setChargingId] = useState(null);
   const [error, setError] = useState(null);
   const [chargeBlocked, setChargeBlocked] = useState(false);
+  // Per-card quoted amount (base/surcharge/total from /charge-card-quote),
+  // shown next to the card and bound into the charge as expectedTotal.
+  const [quotes, setQuotes] = useState({});
+  // Set on unmount — handleCharge's continuation checks this after every
+  // await so a sheet closed/unmounted mid-quote (Back is disabled while
+  // charging, but this is the backstop for any other removal path) never
+  // fires the actual /charge-card POST from a closed sheet. Reset on
+  // (re)mount, not just declared false at init: React 18 StrictMode's dev
+  // double-invoke mounts, cleans up (setting this true), then mounts again
+  // for the SAME component instance — without resetting here, every
+  // charge on that second, genuinely-live mount would see a stale `true`
+  // and abort right after quoting.
+  const abortedRef = useRef(false);
+  useEffect(() => {
+    abortedRef.current = false;
+    return () => {
+      abortedRef.current = true;
+    };
+  }, []);
 
   const resolvedCustomerId =
     customerId || service?.customerId || service?.customer_id;
@@ -112,8 +159,14 @@ export default function MobileCardOnFileSheet({
     setChargingId(card.id);
     setError(null);
     try {
-      const r = await fetch(
-        `${API_BASE}/admin/invoices/${invoiceId}/charge-card`,
+      // ADMIN-BUG-R47: quote first — the exact base / card-fee / total that
+      // will move, including any post-credit reduction — then bind that
+      // total into the charge as expectedTotal so the server's changed-
+      // amount guard actually engages (stripe.js chargeInvoiceWithSavedCard)
+      // if the invoice moved since this quote was priced. Same contract
+      // CreateProjectModal already uses against these two endpoints.
+      const quoteResponse = await fetch(
+        `${API_BASE}/admin/invoices/${invoiceId}/charge-card-quote`,
         {
           method: "POST",
           headers: {
@@ -123,7 +176,62 @@ export default function MobileCardOnFileSheet({
           body: JSON.stringify({ paymentMethodId: card.id }),
         },
       );
+      const quoteData = await quoteResponse.json().catch(() => ({}));
+      if (!quoteResponse.ok) {
+        throw new Error(quoteData.error || "Could not price this charge");
+      }
+      // The sheet closed (Back, or some other unmount) while the quote was
+      // in flight — stop here. Nothing has moved money yet; do not fire
+      // the charge-card POST from a closed sheet, and there is no live
+      // component left to receive the quote into state.
+      if (abortedRef.current) return;
+      const quote = quoteData.quote || {};
+      // Fail closed (pre-push fallback audit P1): a 200 with no usable
+      // total would otherwise post the charge with expectedTotal undefined
+      // — JSON.stringify drops the field and the server's changed-amount
+      // guard never engages, so money would move on an unbound, unshown
+      // figure. Refuse before anything moves. Strict: the server quotes
+      // total as a number (stripe.js quoteInvoiceSavedCardCharge), and
+      // Number(null) / Number("") coerce to 0, which would slip a null
+      // expectedTotal past the server's `!= null` guard.
+      if (typeof quote.total !== "number" || !Number.isFinite(quote.total)) {
+        throw new Error("Could not price this charge — no total was quoted");
+      }
+      setQuotes((prev) => ({ ...prev, [card.id]: quote }));
+
+      const r = await fetch(
+        `${API_BASE}/admin/invoices/${invoiceId}/charge-card`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+          body: JSON.stringify({
+            paymentMethodId: card.id,
+            expectedTotal: quote.total,
+          }),
+        },
+      );
       const d = await r.json().catch(() => ({}));
+      // The charge already happened (or is in flight) by this point. If the
+      // sheet was removed while the POST was in flight, skip only THIS
+      // component's state — the parent must still learn the outcome
+      // (pre-push fallback audit P1): a collected charge it never hears
+      // about is a refresh it never does and an invitation to charge
+      // again; a terminal orphan/ambiguous/in-progress outcome is already
+      // raised server-side as an operator alert, so it is logged here
+      // rather than lost silently.
+      if (abortedRef.current) {
+        if (r.ok) {
+          onChargeSuccess?.(d);
+        } else if (d.orphan === true || d.ambiguous === true || d.in_progress === true) {
+          console.error(
+            `[MobileCardOnFileSheet] charge-card on invoice ${invoiceId} returned a terminal outcome after the sheet closed: ${d.error || "see server alert"} — do not charge again; the server alert carries the reconciliation`,
+          );
+        }
+        return;
+      }
       if (!r.ok) {
         const terminal =
           d.orphan === true || d.ambiguous === true || d.in_progress === true;
@@ -134,6 +242,7 @@ export default function MobileCardOnFileSheet({
       onChargeSuccess?.(d);
       onClose?.();
     } catch (e) {
+      if (abortedRef.current) return;
       setError(e.message || "Charge failed");
       if (e.terminal) {
         // The charge either succeeded upstream or may have succeeded. Keep every
@@ -178,9 +287,16 @@ export default function MobileCardOnFileSheet({
                   key={card.id}
                   className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline border-zinc-200 pb-3"
                 >
-                  <span className="font-medium break-words">
-                    {cardTitle(card)}
-                  </span>
+                  <div className="min-w-0">
+                    <span className="font-medium break-words block">
+                      {cardTitle(card)}
+                    </span>
+                    {quotes[card.id] && (
+                      <span className="block text-ui-caption text-ink-secondary">
+                        {quoteAmountLabel(quotes[card.id])}
+                      </span>
+                    )}
+                  </div>
                   <Button
                     variant="secondary"
                     onClick={() => handleCharge(card)}
@@ -228,8 +344,9 @@ export default function MobileCardOnFileSheet({
         <button
           type="button"
           onClick={onClose}
+          disabled={chargingId !== null && !chargeBlocked}
           aria-label="Back"
-          className="flex items-center justify-center h-11 w-11 rounded-full u-focus-ring text-zinc-900"
+          className="flex items-center justify-center h-11 w-11 rounded-full u-focus-ring text-zinc-900 disabled:opacity-40"
           style={{ background: "#F4F4F5" }}
         >
           <ArrowLeft size={20} strokeWidth={2} />
@@ -294,12 +411,31 @@ export default function MobileCardOnFileSheet({
                   >
                     {brandLabel(c)}
                   </span>
-                  <span
-                    className="font-medium text-zinc-900 truncate"
-                    style={{ fontSize: 18 }}
-                  >
-                    {cardTitle(c)}
-                  </span>
+                  <div className="min-w-0">
+                    <span
+                      className="font-medium text-zinc-900 truncate block"
+                      style={{ fontSize: 18 }}
+                    >
+                      {cardTitle(c)}
+                    </span>
+                    {quotes[c.id] && (
+                      // Codex round-2 P2: this used to `truncate` (single
+                      // line, ellipsized) — on a narrow screen the total at
+                      // the END of the string (base + fee = TOTAL) was the
+                      // part that got cut off, hiding the one number that
+                      // matters most. Let it wrap instead so the total is
+                      // always fully visible.
+                      <span
+                        className="text-ink-secondary block whitespace-normal break-words"
+                        // 14px: the repo's readable-text floor (Codex
+                        // round-3 P2) — this is the exact amount that
+                        // will move, read by field staff on a phone.
+                        style={{ fontSize: 14 }}
+                      >
+                        {quoteAmountLabel(quotes[c.id])}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <button
                   type="button"

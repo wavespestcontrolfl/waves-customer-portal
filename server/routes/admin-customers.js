@@ -4745,7 +4745,14 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
       return result;
     });
     logger.info(`[customers] Restored customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
-    res.json({ success: true });
+    // Restore never re-arms billing (see the disarm note above); say so to
+    // the caller so the office knows Auto Pay is still off (#4684 deferred
+    // r5 P2).
+    res.json({
+      success: true,
+      billing_rearmed: false,
+      message: 'Customer restored. Auto Pay and automatic charges stay off; re-enable Auto Pay from their profile if needed.',
+    });
   } catch (err) {
     if (err && err.restoreNotDeleted) return res.status(404).json({ error: err.message });
     next(err);

@@ -628,6 +628,30 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (upd.pipeline_stage) {
       push('customer', `Stage → ${upd.pipeline_stage} also stamps lifecycle fields (active, member_since, churned_at/churn_reason, pipeline_stage_changed_at) derived from the customer's stage at commit`);
     }
+    // Churn billing disarm (GitHub Codex #4684 r4, widened Codex #4715
+    // r1/r3): a stage move to 'churned' runs churnGuardOrRepair
+    // (customer-lifecycle-guard.js) at commit — REFUSE (bulk: skip and
+    // report) when findLiveFutureVisit still finds a future OR in-progress
+    // (en_route/on_site) visit OR an ongoing recurring-plan anchor with no
+    // seeded next occurrence, an active prepay term, or an unpaid
+    // annual-prepay invoice is still on file; otherwise wind billing down
+    // through cancellation-processor.js's disarmCustomerBillingFields +
+    // disarmPaymentRails. The generic stage line above never named this —
+    // the operator was confirming a smaller action than the one committed.
+    // Codex #4715 r3 P2: churnGuardOrRepair skips those live-visit/term/
+    // invoice checks entirely (churnGuardApplies) on a REPEAT save of a row
+    // ALREADY churned with customer-level billing ALREADY off — it only
+    // repairs the independent payment rails (payment_methods.autopay_enabled
+    // / payments.next_retry_at) unconditionally, never refusing. The card
+    // must not promise a re-check that does not happen on that row.
+    if (upd.pipeline_stage === 'churned') {
+      const n = toolName === 'bulk_update_customers' ? (params?.customer_ids || []).length : 1;
+      const prefix = n > 1 ? `For each of ${n} customers: ` : '';
+      const refusalClause = toolName === 'bulk_update_customers'
+        ? 'skipped at commit and reported back (not updated), never silently'
+        : 'REFUSED at commit';
+      push('billing', `${prefix}Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — ${refusalClause} if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file; an already-churned customer whose billing is already off is not re-checked — only saved-method Auto Pay and armed retries are repaired`);
+    }
   }
   // Billing-lane stamp (#3140): the executors stamp billing_mode
   // 'monthly_membership' on any affected row the update leaves with a

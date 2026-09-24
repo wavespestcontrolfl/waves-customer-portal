@@ -32,6 +32,7 @@ const lead = {
   updated_at: now,
   response_time_minutes: 4,
 };
+const linkedLead = { ...lead, id: "linked-fixture", first_name: "Robin", status: "duplicate" };
 const estimate = {
   id: "estimate-fixture",
   token: "fixture-customer-link",
@@ -91,7 +92,7 @@ function bodyFor(url, method) {
   if (p === "/api/admin/feature-flags") return { flags: {} };
   if (p.endsWith("/unread-count")) return { count: 0, conversations: 0 };
   if (p === "/api/admin/usage/track") return { ok: true };
-  if (p === "/api/admin/leads") return { leads: [lead], total: 1 };
+  if (p === "/api/admin/leads") return { leads: [url.searchParams.get("id") === linkedLead.id ? linkedLead : lead], total: 1 };
   if (p === "/api/admin/leads/sources") return { sources: [source] };
   if (p === "/api/admin/customers") return { customers: [customer], total: 1 };
   if (p === "/api/admin/dispatch/technicians") return { technicians: [] };
@@ -217,7 +218,20 @@ function bodyFor(url, method) {
         },
       ],
       calls: [],
+      ...(url.searchParams.get("leadReview") === "1"
+        ? {
+            linkedHistory: {
+              original: null,
+              canonical: null,
+              linked: [linkedLead],
+              unresolved: false,
+              hasMore: false,
+            },
+          }
+        : {}),
     };
+  if (p === "/api/admin/leads/linked-fixture")
+    return { lead: linkedLead, activities: [], calls: [], linkedHistory: { original: lead, canonical: lead, linked: [], unresolved: false, hasMore: false } };
   if (method !== "GET") return { ok: true };
   return null;
 }
@@ -356,6 +370,21 @@ async function main() {
       await activityExplanation.waitFor();
       await page.getByText(/Evidence reference call-evi.*1234/).waitFor();
       await waitForFonts(page);
+      const history = page.getByRole("region", { name: "Linked lead history" });
+      await history.getByText(/Linked record: Robin Example/).waitFor();
+      await history.getByRole("button", { name: "Review record" }).click();
+      await page.getByRole("button", { name: "Robin Example", exact: true }).waitFor();
+      assert.equal(new URL(page.url()).searchParams.get("lead"), "linked-fixture");
+      assert.equal(new URL(page.url()).searchParams.get("leadReview"), "1");
+      await page.goBack();
+      await history.getByText(/Linked record: Robin Example/).waitFor();
+      await page.goto(`${server.baseUrl}/admin/pipeline?tab=leads&leadReview=1`);
+      await page.getByRole("button", { name: "Avery Example", exact: true }).click();
+      await history.getByRole("button", { name: "Review record" }).click();
+      await page.getByRole("button", { name: "Robin Example", exact: true }).waitFor();
+      await page.goBack();
+      await history.getByText(/Linked record: Robin Example/).waitFor();
+      assert.equal(new URL(page.url()).searchParams.get("lead"), "lead-fixture");
       assert.equal(
         await page
           .locator(".ui-surface")
@@ -372,6 +401,10 @@ async function main() {
       const listShot = path.join(output, `lead-list-${width}.png`);
       await page.screenshot({ path: listShot, fullPage: true });
       report.screenshots.push(listShot);
+      await history.getByRole("button", { name: "Review record" }).scrollIntoViewIfNeeded();
+      const historyShot = path.join(output, `lead-history-${width}.png`);
+      await page.screenshot({ path: historyShot, fullPage: true });
+      report.screenshots.push(historyShot);
       await page
         .getByRole("combobox", { name: "Stage for Avery Example" })
         .selectOption("lost");
