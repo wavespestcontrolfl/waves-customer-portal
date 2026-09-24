@@ -72,7 +72,14 @@ function resolveField(row, col) {
 
 // whereRaw shim for the one raw shape these queries use:
 // lower(trim(<alias>.<col>)) = '<literal>'
-function rawPredicate(sql) {
+function rawPredicate(sql, bindings) {
+  // The shared scopeToAssessmentBookings shape: LOWER(TRIM(??)) = ? with
+  // ['<alias>.<col>', '<literal>'] bindings (Codex #4710 r17 P1).
+  if (Array.isArray(bindings) && /LOWER\(TRIM\(\?\?\)\)\s*=\s*\?/i.test(sql)) {
+    const col = String(bindings[0]).split('.').pop();
+    const literal = String(bindings[1]);
+    return (r) => String(r[col] == null ? '' : r[col]).trim().toLowerCase() === literal;
+  }
   const m = /lower\(trim\(\w+\.(\w+)\)\)\s*=\s*'([^']*)'/.exec(sql);
   if (!m) return () => false;
   return (r) => String(r[m[1]] == null ? '' : r[m[1]]).trim().toLowerCase() === m[2];
@@ -94,8 +101,8 @@ function groupPredicate(fn) {
     orWhereIn(col, arr) { groups.push([(r) => arr.includes(resolveField(r, col))]); return ctx; },
     whereNull(col) { cur().push((r) => resolveField(r, col) == null); return ctx; },
     whereNotNull(col) { cur().push((r) => resolveField(r, col) != null); return ctx; },
-    whereRaw(sql) { cur().push(rawPredicate(sql)); return ctx; },
-    orWhereRaw(sql) { groups.push([rawPredicate(sql)]); return ctx; },
+    whereRaw(sql, bindings) { cur().push(rawPredicate(sql, bindings)); return ctx; },
+    orWhereRaw(sql, bindings) { groups.push([rawPredicate(sql, bindings)]); return ctx; },
     // SQL `<>`: a NULL column never matches either way.
     whereNot(col, val) { cur().push((r) => resolveField(r, col) != null && resolveField(r, col) !== val); return ctx; },
     orWhereNot(col, val) { groups.push([(r) => resolveField(r, col) != null && resolveField(r, col) !== val]); return ctx; },
@@ -181,7 +188,8 @@ function makeFakeDb(seed = {}) {
     const api = {
       join() { return api; }, // the row source above already performed the one join shape this shim supports
       leftJoin() { return api; }, // likewise — the ss-rooted row source above did the outcome join
-      whereRaw(sql) { filtered = filtered.filter(rawPredicate(sql)); return api; },
+      whereRaw(sql, bindings) { filtered = filtered.filter(rawPredicate(sql, bindings)); return api; },
+      modify(fn, ...args) { fn(api, ...args); return api; },
       where(...args) { filtered = applyWhereArgs(filtered, args); return api; },
       whereNull(col) { filtered = filtered.filter((r) => resolveField(r, col) == null); return api; },
       whereNotNull(col) { filtered = filtered.filter((r) => resolveField(r, col) != null); return api; },
@@ -2049,7 +2057,7 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
   // joins/where clauses had already produced it — the fix under test lives
   // entirely in the per-row JS below the query, not in the SQL shape.
   function statsDb(visits) {
-    const builder = { leftJoin: () => builder, where: () => builder, select: () => Promise.resolve(visits) };
+    const builder = { leftJoin: () => builder, where: () => builder, modify: () => builder, select: () => Promise.resolve(visits) };
     return () => builder;
   }
 

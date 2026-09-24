@@ -37,7 +37,7 @@ const logger = require('./logger');
 const {
   etDateString, addETDays, addETDaysAtWallClock, parseETDateTime, etWallClockOccurrences,
 } = require('../utils/datetime-et');
-const { isAssessmentBooking } = require('./assessment-booking');
+const { isAssessmentBooking, scopeToAssessmentBookings } = require('./assessment-booking');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, CALL_FOLLOWUP_SOURCE_ACTION } = require('./call-booking-source-actions');
 
@@ -1435,11 +1435,8 @@ async function repairMissedNoShowOutcomes({ now, limit, result }) {
       .leftJoin('consultation_outcomes as co', 'co.scheduled_service_id', 'ss.id')
       .where('ss.status', 'no_show')
       .where('ss.scheduled_date', '>=', cutoff)
-      .where(function matchConsultation() {
-        this.whereRaw("lower(trim(ss.service_type)) = 'waves assessment'")
-          .orWhere('svc.service_key', 'lawn_inspection')
-          .orWhereRaw("lower(trim(svc.name)) = 'waves assessment'");
-      })
+      // The canonical assessment identity (Codex #4710 r17 P1), shared.
+      .modify((q) => scopeToAssessmentBookings(q, 'ss', 'svc'))
       .where(function missingOrOpen() {
         this.whereNull('co.id').orWhereIn('co.outcome', ['warm', 'cold'])
           // ...or lost for another reason (Codex #4710 r8 P2).
@@ -1690,11 +1687,7 @@ async function consultationStats({ from, to, trx } = {}) {
     // Postgres; the mocked stats test's hand-built fixture rows hid it
     // since nothing there validates real column existence.
     .leftJoin('lead_sources as lsrc', 'lsrc.id', 'l.lead_source_id')
-    .where(function matchConsultation() {
-      this.whereRaw("lower(trim(ss.service_type)) = 'waves assessment'")
-        .orWhere('svc.service_key', 'lawn_inspection')
-        .orWhereRaw("lower(trim(svc.name)) = 'waves assessment'");
-    })
+    .modify((q) => scopeToAssessmentBookings(q, 'ss', 'svc'))
     .where('ss.scheduled_date', '>=', fromDate)
     .where('ss.scheduled_date', '<=', toDate)
     .select(

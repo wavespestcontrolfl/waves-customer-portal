@@ -112,13 +112,10 @@ router.get('/stats', adminAuthenticate, requireAdmin, async (req, res, next) => 
     const { from, to } = req.query;
     // Shape, calendar validity and order checked here (Codex #4710 r3 P2) —
     // a bad value must be a 400, never a Postgres invalid-date 500.
-    const isCalendarDate = (v) => {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
-      // PostgreSQL has no year 0 (Codex #4710 r12 P2) — 0001 onward only.
-      if (v.startsWith('0000')) return false;
-      const d = new Date(`${v}T12:00:00Z`);
-      return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
-    };
+    // The shared strict validator (Codex #4710 r17 P1): round-trip and
+    // year-zero checks live in one place.
+    const { validCalendarDate } = require('../utils/datetime-et');
+    const isCalendarDate = (v) => Boolean(validCalendarDate(v));
     for (const [name, value] of [['from', from], ['to', to]]) {
       if (value !== undefined && value !== '' && (typeof value !== 'string' || !isCalendarDate(value))) {
         return res.status(400).json({ error: `${name} must be a real YYYY-MM-DD date` });
