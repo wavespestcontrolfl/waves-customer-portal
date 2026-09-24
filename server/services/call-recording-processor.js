@@ -9932,6 +9932,10 @@ const CallRecordingProcessor = {
     // a lost claim) still must not dispatch to the disputed number
     // (pre-push audit P1). Set on detection; the card lands or not.
     let houseNumberDisputed = false;
+    // The caller-stated street the hold is about (function scope, so the
+    // property persistence below can hold that premise out of active
+    // properties — codex r32 P1).
+    let disputedStatedStreet = null;
     // A claimed (in_progress) card that could not record this pass's newly
     // confirmed ask: the standing-card recovery below must NOT count it as
     // filed, or both fallback paths would suppress the task (codex r11 P1).
@@ -9990,7 +9994,7 @@ const CallRecordingProcessor = {
       // a lookup that throws must leave the dispute standing, not silently
       // release the booking (pre-push audit P1). Cleared only when an
       // independently saved property positively resolves it.
-      if (houseConflict) houseNumberDisputed = true;
+      if (houseConflict) { houseNumberDisputed = true; disputedStatedStreet = houseConflict.stated_street || null; }
       // The booking authority snapshot is built HERE, before the property
       // lookup below can throw: the shadow-mode fallback that a thrown
       // lookup triggers must see the confirmed legacy ask, not fall back to
@@ -10241,9 +10245,21 @@ const CallRecordingProcessor = {
               // or lands after a relink, must not read the old card as
               // filed and settle its stale evidence (pre-push audit P1
               // after r25).
+              // The on-file door's unit is read from address_line2 OR the
+              // unit embedded in address_line1 (street-first "1260 Main St
+              // Apt 2" and unit-first "Apt 2, 1260 Main St" alike), with the
+              // shared helpers — sameOnFile strips embedded units, so the
+              // identity must carry them (codex r32 P1).
+              const { splitStreetLineUnit: idSplit, splitUnitFirstLine: idUnitFirst, normalizeUnitLine: idNormUnit } = require('../utils/address-normalizer');
+              const onFileUnitOf = (addr) => {
+                const line1 = String(addr?.address_line1 || '');
+                const first = idUnitFirst(line1);
+                const embedded = (first && first.unit) || idSplit(line1).unit || '';
+                return String(idNormUnit(String(addr?.address_line2 || '')) || idNormUnit(String(embedded)) || '').toLowerCase().trim() || null;
+              };
               const identityKey = (p) => JSON.stringify({
                 unit: String(p?.stated_unit || '').toLowerCase().trim() || null,
-                onFileUnit: String(p?.on_file_address?.address_line2 || '').toLowerCase().trim() || null,
+                onFileUnit: onFileUnitOf(p?.on_file_address),
                 city: String(p?.on_file_address?.city || '').toLowerCase().trim() || null,
                 zip: (String(p?.on_file_address?.zip || '').match(/\d{5}/) || [''])[0] || null,
                 customer: p?.dispute_customer_id ? String(p.dispute_customer_id) : null,
@@ -10742,7 +10758,15 @@ const CallRecordingProcessor = {
         enqueueLookup(ensured);
         // V1 persistence writes yield under V2 sole authority (codex
         // #3418 r11) — see the authority decision above.
-        if (!v2SoleAddressAuthority
+        // The DISPUTED premise (the caller's number the county-roll card is
+        // asking the office to confirm) is held out of active property
+        // persistence until the conflict is settled — never a live
+        // secondary property other workflows would treat as real (codex
+        // r32 P1). The card carries the address; Accept adopts the on-file
+        // number, a correction records the right one.
+        const disputedPremise = (line1) => houseNumberDisputed === true
+          && !!disputedStatedStreet && sameHouseNumberStreet(String(line1 || ''), disputedStatedStreet);
+        if (!v2SoleAddressAuthority && !disputedPremise(extracted.address_line1)
           && (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress))) {
           const recorded = await customerProperties.recordCallProperty({
             customerId,
@@ -10886,6 +10910,8 @@ const CallRecordingProcessor = {
                 const entryCity = String(entry.city || '').trim();
                 const entryZip = String(entry.zip || '').trim();
                 if (!String(entry.address_line1 || '').trim()) continue;
+                // The disputed premise waits for the conflict card (codex r32 P1).
+                if (disputedPremise(entry.address_line1)) continue;
                 const firstAddressException = isFirstAddress && firstStreetPending;
                 firstStreetPending = false;
                 if (!firstAddressException && (!entryCity || !entryZip)) continue;

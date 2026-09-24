@@ -759,13 +759,17 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   const relinked = !!heldConflictPayload?.dispute_customer_id
     && String(heldConflictPayload.dispute_customer_id) !== String(callRowForAddress?.customer_id || '');
   if (relinked) {
-    // Only an ACCEPT is refused (it would file the recovery task under the
-    // new account with the original account's approved window). A Deny
-    // or Dismiss files nothing, so the operator can still close a card
-    // whose call was relinked or unlinked — the guard must not become a
-    // dead end (pre-push audit P1 after r27). A reprocess re-stamps
-    // dispute_customer_id when it keeps the card.
-    if (verdict === 'accept') {
+    // Refused unless the verdict REJECTS the scheduling obligation (a
+    // whole-call Deny / Dismiss, or a denial naming scheduling, service or
+    // spam): an Accept, or a denial scoped to address / name / consent /
+    // routing, keeps the confirmed appointment owed and would file (or
+    // silently drop) recovery work under the wrong account — the guard
+    // must neither become a dead end nor lose the appointment (codex r32
+    // P1). A reprocess re-stamps dispute_customer_id when it keeps the
+    // card.
+    const rejectsScheduling = verdict === 'deny'
+      && (wrongFields.length === 0 || wrongFields.includes('scheduling') || wrongFields.includes('service') || wrongFields.includes('spam_status'));
+    if (!rejectsScheduling) {
       throw Object.assign(new Error('This call was relinked to another customer since the card was filed — reprocess the call to refresh the card, then review it.'), { statusCode: 409, code: 'CONFLICT_CUSTOMER_RELINKED' });
     }
     logger.info(`[admin-triage] house-number card ${item.id} settled by ${verdict} after a relink — no recovery task filed`);
@@ -838,7 +842,12 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
           retained_scheduled_date: retained ? (retained.scheduled_date || null) : null,
           // The promised follow-up (visit 2) the hold kept from being booked
           // rides on the task with the primary ask (codex r20 P1).
-          ...(heldConflictPayload?.follow_up_plan ? { follow_up_plan: heldConflictPayload.follow_up_plan } : {}),
+          // …only while visit 2 is neither owned by dispatch nor already
+          // handled; an explicit null otherwise, so the merge onto a
+          // standing task cannot keep stale booking instructions (codex
+          // r33 P1).
+          follow_up_plan: (heldConflictPayload?.follow_up_plan && !(await followUpAlreadyOwnedOrHandled(trx, item.call_log_id)))
+            ? heldConflictPayload.follow_up_plan : null,
           scheduling_window: decision.approvedWindow,
           // The same live-else-snapshot choice the decision made (a
           // blank live line falls back to the snapshot).

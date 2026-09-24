@@ -318,7 +318,8 @@ describe('heldConflictTaskDecision (verdict route)', () => {
   test('a relinked card refuses only Accept; Deny / Dismiss close it, and a reprocess re-binds its customer (pre-push audit P1 after r27)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
     const guard = src.slice(src.indexOf('const relinked = '), src.indexOf('const liveCustomer = '));
-    expect(guard).toContain("if (verdict === 'accept') {");
+    expect(guard).toContain("if (!rejectsScheduling) {");
+    expect(guard).toContain("wrongFields.includes('spam_status'));");
     expect(guard).toContain("code: 'CONFLICT_CUSTOMER_RELINKED'");
     expect(guard).toContain('no recovery task filed');
     // The retained visit is looked up by the column scheduled_services actually carries (codex local audit).
@@ -332,6 +333,9 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(src).toContain("orWhereIn('followup_source_service_id', callVisits)");
     expect(src).toContain("whereIn('status', ['resolved', 'dismissed'])");
     const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    // The disputed premise is held out of active property persistence on both authority paths (codex r32 P1).
+    expect(processor).toContain("if (!v2SoleAddressAuthority && !disputedPremise(extracted.address_line1)");
+    expect(processor).toContain("if (disputedPremise(entry.address_line1)) continue;");
     // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).
     expect(processor).toContain("...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),");
   });
