@@ -672,10 +672,9 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'provider_down' });
   });
 
-  test('provider outage with safe copy → retries for a tailored reply, then posts the safe copy instead of parking (GitHub r1 P1)', async () => {
+  test('provider outage never posts a template, even for a 4-5★ review (2026-09-24: safe-copy last rung removed)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    const fallbackText = 'Hi Pat,\n\nThanks for the review. Glad to be your pest and lawn team.\n\nThe 🌊 Waves Pest Control Sarasota Team';
-    mockDraft.mockResolvedValue({ ok: false, reason: 'provider_unavailable', error: 'all_failed', mode: 'service_quality', version: 'reply-v1', rejections: [], fallbackText });
+    mockDraft.mockResolvedValue({ ok: false, reason: 'provider_unavailable', error: 'all_failed', mode: 'service_quality', version: 'reply-v1', rejections: [] });
     state.rows = [row()];
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'provider_unavailable', auto_reply_attempts: 1 });
@@ -683,10 +682,10 @@ describe('processDueAutoReplies — state machine', () => {
     state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
     state.rows[0].auto_reply_attempts = Runner.MAX_ATTEMPTS - 1;
     await Runner.processDueAutoReplies();
-    expect(mockPublish).toHaveBeenCalledTimes(1);
-    expect(mockPublish.mock.calls[0][0].text).toBe(fallbackText);
-    expect(mockPublish.mock.calls[0][0].auditMeta).toMatchObject({ safeCopy: true, reviewOnly: true });
-    expect(state.rows[0].auto_reply_status).not.toBe('parked');
+    // Every retry exhausted: parks as provider_down — a template reply is
+    // worse than a parked row (owner ruling 2026-09-24).
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'provider_down' });
   });
 
   test('Google failure → retry with backoff (draft kept), then park', async () => {

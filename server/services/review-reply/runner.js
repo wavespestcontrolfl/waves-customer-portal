@@ -683,14 +683,6 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     snapshot = groundingSnapshot(grounding);
   }
 
-  // Providers stayed down through every retry: a 4-5★ review posts the
-  // drafter's verified, provider-independent safe copy instead of parking as
-  // provider_down (owner directive 2026-09-03: no such review goes unanswered).
-  // Earlier failures keep the retry backoff so a blip still gets a tailored reply.
-  if (!draft.ok && draft.reason === 'provider_unavailable' && draft.fallbackText && (merged.auto_reply_attempts || 0) + 1 >= MAX_ATTEMPTS) {
-    draft = { ...draft, ok: true, text: draft.fallbackText, reviewOnly: true, safeCopy: true, fallbackText: undefined };
-  }
-
   if (!draft.ok) {
     // A person asked for an under-4★ draft (Post now) and it could not be
     // made — providers down, or no candidate passed the verifier. The cron
@@ -820,7 +812,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         auto_reply_claimed_until: null,
       },
       auditMeta: {
-        version: draft.version, mode: draft.mode, intent, reviewOnly: !!draft.reviewOnly, safeCopy: !!draft.safeCopy,
+        version: draft.version, mode: draft.mode, intent, reviewOnly: !!draft.reviewOnly,
         // A posted reply that needed retries keeps its rejection history on
         // the audit row (the review row's error field is cleared on success).
         ...(draft.rejectionDetails?.length ? { attempts: draft.attempts, rejections: draft.rejectionDetails } : {}),

@@ -114,14 +114,18 @@ describe('buildReplyGrounding', () => {
     const g = await G.buildReplyGrounding(review);
     expect(g.review.firstName).toBe('Dana');
     expect(g.review.mentionedTechNames).toEqual(['Marcus']);
-    expect(g.account).toEqual({ relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control', 'lawn care'], city: 'Venice' });
+    expect(g.account).toEqual({ relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control', 'lawn care'], servicesPerformed: ['Lawn_care', 'Pest_control'], city: 'Venice' });
     expect(g.provenance.relationship).toBe('account');
+    expect(g.provenance.servicesPerformed).toBe('account');
     expect(g.provenance.mentionedTechNames).toBe('review');
     // Verifier allowlists: reviewer + mentioned tech; every other tech forbidden.
     expect(g.allow.names).toEqual(['Dana', 'Marcus']);
     expect(g.allow.forbiddenNames).toEqual(['Bob']);
     expect(g.allow.cities).toEqual(expect.arrayContaining(['Sarasota', 'Venice', 'Florida']));
     expect(g.allow.digits).toEqual(['2']);
+    // Normalized, lowercased words of servicesPerformed — the verifier's
+    // service/experience-claim allowlist.
+    expect(g.allow.serviceWords).toEqual(expect.arrayContaining(['lawn', 'care', 'pest', 'control']));
     // Nothing private is present anywhere in the pack.
     const json = JSON.stringify(g);
     for (const k of ['transcript', 'sms', 'call_summary', 'feedback', 'notes', 'phone', 'address', 'invoice']) {
@@ -196,5 +200,52 @@ describe('buildReplyGrounding', () => {
     expect(g.review.hasText).toBe(false);
     expect(g.review.wordCount).toBe(0);
     expect(g.review.mentionedTechNames).toEqual([]);
+  });
+});
+
+describe('servicesPerformedFrom — public-safe service names (2026-09-24 fix)', () => {
+  test('strips generic suffixes and parenthetical qualifiers, drops product/brand names, dedupes case-insensitively, most-recent first, capped at 4', () => {
+    const visits = [
+      { service_type: 'Cockroach Treatment', scheduled_date: '2026-08-01' },
+      { service_type: 'Quarterly Pest Control Service', scheduled_date: '2026-07-01' },
+      { service_type: 'Monthly Pest Control', scheduled_date: '2026-06-01' },
+      { service_type: 'Rodent Trapping Service', scheduled_date: '2026-05-01' },
+      { service_type: 'WDO Inspection Service', scheduled_date: '2026-04-01' },
+      { service_type: 'Pre-Slab Termidor', scheduled_date: '2026-03-01' },
+      { service_type: 'General Pest Control (Quarterly)', scheduled_date: '2026-02-01' },
+      { service_type: 'cockroach treatment', scheduled_date: '2026-01-01' },
+    ];
+    // Cap at 4 stops before WDO Inspection / the product row / the parenthetical
+    // row are ever reached — they are not merely filtered, they are not needed.
+    expect(G.servicesPerformedFrom(visits)).toEqual(['Cockroach Treatment', 'Quarterly Pest Control', 'Monthly Pest Control', 'Rodent Trapping']);
+  });
+  test('a product/brand name alone, or with only short/blank entries, yields nothing', () => {
+    const visits = [
+      { service_type: 'Pre-Slab Termidor', scheduled_date: '2026-01-01' },
+      { service_type: 'Talstar Application', scheduled_date: '2026-01-02' },
+      { service_type: 'AC', scheduled_date: '2026-01-03' },
+      { service_type: '', scheduled_date: '2026-01-04' },
+      { service_type: null, scheduled_date: '2026-01-05' },
+    ];
+    expect(G.servicesPerformedFrom(visits)).toEqual([]);
+  });
+  test('normalizeServiceName: suffix strip, parenthetical strip, product drop', () => {
+    expect(G.normalizeServiceName('Quarterly Pest Control Service')).toBe('Quarterly Pest Control');
+    expect(G.normalizeServiceName('Rodent Trapping Service')).toBe('Rodent Trapping');
+    expect(G.normalizeServiceName('WDO Inspection Service')).toBe('WDO Inspection');
+    expect(G.normalizeServiceName('General Pest Control (Quarterly)')).toBe('General Pest Control');
+    expect(G.normalizeServiceName('Cockroach Treatment')).toBe('Cockroach Treatment');
+    expect(G.normalizeServiceName('Pre-Slab Termidor')).toBeNull();
+    expect(G.normalizeServiceName('')).toBeNull();
+  });
+});
+
+describe('accountFingerprint — servicesPerformed', () => {
+  test('changes when servicesPerformed changes, and is order-independent', () => {
+    const base = { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control'], servicesPerformed: ['Cockroach Treatment'], city: 'Venice' };
+    const changed = { ...base, servicesPerformed: ['Cockroach Treatment', 'Quarterly Pest Control'] };
+    expect(G.accountFingerprint(base)).not.toBe(G.accountFingerprint(changed));
+    const reordered = { ...changed, servicesPerformed: ['Quarterly Pest Control', 'Cockroach Treatment'] };
+    expect(G.accountFingerprint(changed)).toBe(G.accountFingerprint(reordered));
   });
 });

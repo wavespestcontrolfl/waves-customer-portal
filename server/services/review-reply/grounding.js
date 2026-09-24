@@ -13,10 +13,11 @@
  *     version, reviewId,
  *     review:  { firstName, rating, text, hasText, wordCount,
  *                mentionedTechNames, topics }            // source: review
- *     account: null | { relationship, tenure, serviceCategories, city }
- *                                                        // source: account
+ *     account: null | { relationship, tenure, serviceCategories,
+ *                       servicesPerformed, city }         // source: account
  *     provenance: { <fact>: 'review' | 'account' }
- *     allow: { names: [...], cities: [...], digits: [...] }  // verifier allowlist
+ *     allow: { names: [...], cities: [...], digits: [...],
+ *              serviceWords: [...] }                     // verifier allowlist
  *   }
  */
 
@@ -139,6 +140,64 @@ function serviceCategoriesFrom(serviceTypes) {
   return [...labels];
 }
 
+// Public-safe named services actually performed, derived from completed
+// scheduled_services.service_type — never a product/brand name, a count, or
+// a date (those stay out of the pack entirely; see servicesPerformedFrom).
+// Product/brand words a service_type must never surface under (an internal
+// label like "Pre-Slab Termidor" names a product, not a public service).
+const SERVICE_PRODUCT_WORD_RE = /termidor|talstar|talak|taurus|bifen|fipronil|advion|alpine|demand|essentria|waves assessment|appointment/i;
+
+// Shared word-normalization (mirrors drafter.js's normalizeWords — kept as a
+// small local copy rather than a cross-module import so grounding.js keeps
+// its own minimal surface).
+function normalizeWords(s) {
+  return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}'\s]/gu, ' ').split(/\s+/).filter(Boolean);
+}
+
+// First letter of each whitespace-delimited word capitalized, everything
+// else left exactly as given — a no-op for data that already arrives in
+// Title Case (the normal shape of service_type), but fixes a stray
+// all-lowercase entry without clobbering an embedded acronym (WDO).
+function titleCase(s) {
+  return s.split(' ').map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ');
+}
+
+// One completed service_type → a public-safe display name, or null when it
+// carries no safe public name (too short, or names a product/brand).
+function normalizeServiceName(serviceType) {
+  let s = String(serviceType || '').trim();
+  if (!s) return null;
+  // Strip a trailing generic suffix ("… Service", "… Visit", "… Appointment
+  // Service") before a trailing parenthesised qualifier ("(Quarterly)").
+  s = s.replace(/\s+(?:Appointment\s+Service|Visit|Service)$/i, '').trim();
+  s = s.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  s = s.replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  s = titleCase(s);
+  if (s.length < 4) return null;
+  if (SERVICE_PRODUCT_WORD_RE.test(s)) return null;
+  return s;
+}
+
+// Most-recent-first, deduped case-insensitively, capped at 4 — a short,
+// public-safe list of WHAT we have done, never when or how many times.
+function servicesPerformedFrom(visits) {
+  const dateKey = (v) => String(v.scheduled_date == null ? '' : (v.scheduled_date instanceof Date ? v.scheduled_date.toISOString() : v.scheduled_date)).slice(0, 10);
+  const sorted = [...visits].sort((a, b) => dateKey(b).localeCompare(dateKey(a)));
+  const seen = new Set();
+  const out = [];
+  for (const v of sorted) {
+    const name = normalizeServiceName(v.service_type);
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
 // Tenure in ET CALENDAR days: member_since is a Postgres DATE (never a UTC
 // instant) and created_at is an instant that must be read on the ET wall
 // clock — etCalendarDayOf handles both shapes.
@@ -211,6 +270,7 @@ async function loadAccountFacts(customerId, conn = db) {
     relationship,
     tenure: tenureBucket(tenureSince),
     serviceCategories: serviceCategoriesFrom(visits.map((v) => v.service_type)),
+    servicesPerformed: servicesPerformedFrom(visits),
     city: servedCity(customer.city),
   };
 }
@@ -220,7 +280,7 @@ async function loadAccountFacts(customerId, conn = db) {
 // was in flight (same customer_id) invalidates the draft.
 function accountFingerprint(account) {
   const a = account || null;
-  const key = a ? `${a.relationship || ''}|${a.tenure || ''}|${[...(a.serviceCategories || [])].sort().join(',')}|${a.city || ''}` : 'none';
+  const key = a ? `${a.relationship || ''}|${a.tenure || ''}|${[...(a.serviceCategories || [])].sort().join(',')}|${[...(a.servicesPerformed || [])].sort().join(',')}|${a.city || ''}` : 'none';
   return require('crypto').createHash('sha1').update(key).digest('hex');
 }
 
@@ -253,7 +313,7 @@ async function buildReplyGrounding(review, { conn = db, techFirstNames = null } 
     firstName: 'review', rating: 'review', text: 'review', mentionedTechNames: 'review', topics: 'review',
   };
   if (account) {
-    for (const k of ['relationship', 'tenure', 'serviceCategories', 'city']) provenance[k] = 'account';
+    for (const k of ['relationship', 'tenure', 'serviceCategories', 'servicesPerformed', 'city']) provenance[k] = 'account';
   }
 
   const locationWords = [loc.name, loc.area || '', 'Southwest Florida', 'Florida', 'SWFL']
@@ -288,6 +348,10 @@ async function buildReplyGrounding(review, { conn = db, techFirstNames = null } 
       cities: [...new Set([...locationWords, ...(account?.city ? [account.city] : [])])],
       // Digit strings the reply may contain: only what the reviewer typed.
       digits: (text.match(/\d+/g) || []),
+      // Lowercased, normalized words of the account's servicesPerformed
+      // names — sourced vocabulary for the verifier's service/experience
+      // claim checks (e.g. "cockroach" from "Cockroach Treatment").
+      serviceWords: [...new Set((account?.servicesPerformed || []).flatMap((s) => normalizeWords(s)))],
     },
   };
 }
@@ -306,6 +370,8 @@ module.exports = {
   detectTopics,
   mentionedTechNames,
   serviceCategoriesFrom,
+  servicesPerformedFrom,
+  normalizeServiceName,
   tenureBucket,
   servedCity,
 };
