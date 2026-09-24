@@ -832,21 +832,25 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   const decision = heldConflictTaskDecision({
     verdict, wrongFields, heldConflictPayload, liveOnFile, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
   });
-  if (decision.file) {
+  // A same-call booking the dispute RETAINED (stamped to the caller's
+  // number, kept unassigned) is still live: the task is address-
+  // correction work on that visit, never a second appointment beside
+  // it (codex r29 P1). Judged on the live row so a visit the office
+  // already cancelled or moved falls back to the booking task.
+  const retainedId = heldConflictPayload?.retained_service_id || null;
+  const retained = retainedId
+    // A 'rescheduled' row is the customer-reschedule placeholder (off the
+    // calendar until staff rebook it) — not a live retained visit, so the
+    // task must ask for a booking, not address-correction-only (codex r34
+    // P1).
+    ? await trx('scheduled_services').where({ id: retainedId, source_call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled']).first('id', 'scheduled_date')
+    : null;
+  // …and that correction work files even when ANOTHER booking already
+  // covers the ask (codex r34 P1): closing the warning must not leave the
+  // old visit scheduled at the rejected number.
+  const retainedNeedsCorrection = !!retained && decision.confirmed && !decision.scheduleDenied;
+  if (decision.file || retainedNeedsCorrection) {
     const { buildTriageItem } = require('../services/call-routing-gates');
-    // A same-call booking the dispute RETAINED (stamped to the caller's
-    // number, kept unassigned) is still live: the task is address-
-    // correction work on that visit, never a second appointment beside
-    // it (codex r29 P1). Judged on the live row so a visit the office
-    // already cancelled or moved falls back to the booking task.
-    const retainedId = heldConflictPayload?.retained_service_id || null;
-    const retained = retainedId
-      // A 'rescheduled' row is the customer-reschedule placeholder (off the
-      // calendar until staff rebook it) — not a live retained visit, so the
-      // task must ask for a booking, not address-correction-only (codex r34
-      // P1).
-      ? await trx('scheduled_services').where({ id: retainedId, source_call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled']).first('id', 'scheduled_date')
-      : null;
     const taskSummary = retained
       ? `Address confirmed on file after a house-number dispute — the retained appointment (visit ${retained.id}) still carries the disputed number; correct its address, do not book a second one`
       : decision.summary;

@@ -102,17 +102,26 @@ function evidenceFromCard(card, unitOnly) {
   };
 }
 
+// A house-number conflict card a later pass positively CLEARED (the record's
+// own number validated) stands only for its unbooked scheduling ask — it is
+// no longer an address warning (codex #4666 r34 P2).
+export function isClearedConflictCard(card) {
+  if (!card || card.reason_code !== 'on_file_house_number_conflict') return false;
+  let payload = card.payload;
+  if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+  return !!(payload && payload.address_dispute_cleared_at);
+}
+const isAddressAsk = (i) => !!i && ADDRESS_ASK_REASONS.has(i.reason_code) && !isClearedConflictCard(i);
+
 /** The validation-ask cards out of a /admin/triage response's items. */
 export function filterAddressAsks(items) {
-  return (Array.isArray(items) ? items : []).filter(
-    (i) => i && ADDRESS_ASK_REASONS.has(i.reason_code),
-  );
+  return (Array.isArray(items) ? items : []).filter(isAddressAsk);
 }
 
 /** Every card that means "confirm this street before a tech drives to it". */
 export function filterAddressConfirmations(items) {
   return (Array.isArray(items) ? items : []).filter(
-    (i) => i && (ADDRESS_ASK_REASONS.has(i.reason_code) || ADDRESS_READBACK_REASONS.has(i.reason_code)),
+    (i) => i && (isAddressAsk(i) || ADDRESS_READBACK_REASONS.has(i.reason_code)),
   );
 }
 
@@ -136,7 +145,7 @@ export function addressAskNotice(asks) {
     state.hasUnitAsk ||= card.reason_code === 'missing_unit_number';
     state.hasLiveRecovery ||= card.reason_code === 'address_recovered'
       && !card.payload?.recovery_superseded_at;
-    state.hasCurrentAsk ||= ADDRESS_ASK_REASONS.has(card.reason_code);
+    state.hasCurrentAsk ||= isAddressAsk(card);
     callState.set(callKey, state);
   });
 

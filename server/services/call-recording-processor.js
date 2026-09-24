@@ -10084,7 +10084,23 @@ const CallRecordingProcessor = {
           .where({ customer_id: customerId, active: true })
           .whereNot({ source: 'call_pipeline' })
           .select('address_line1', 'address_line2', 'city', 'zip');
-        knownIndependentProperty = !!statedKey && props.some((prop) => propertyKey(prop) === statedKey);
+        // The detector's own street equivalence (directionals, suffixes),
+        // plus the unit and a ZIP-wins locality — never a raw key equality
+        // that reads "1250 N Main St" and "1250 North Main Street" as two
+        // premises (codex r34 P2).
+        const { normalizeUnitLine: propUnit } = require('../utils/address-normalizer');
+        const statedUnitKey = String(propUnit(String(statedUnit || '')) || '').toLowerCase();
+        const statedZip5 = (String(avNormalized.postal_code || '').match(/\d{5}/) || [''])[0];
+        const statedCityKey = String(avNormalized.city || '').toLowerCase().replace(/[^a-z]/g, '');
+        knownIndependentProperty = !!statedKey && props.some((prop) => {
+          if (!sameHouseNumberStreet(String(prop.address_line1 || ''), String(avNormalized.street_line_1 || ''))) return false;
+          const propUnitKey = String(propUnit(String(prop.address_line2 || '')) || unitOfLine(prop.address_line1) || '').toLowerCase();
+          if (propUnitKey !== statedUnitKey) return false;
+          const propZip5 = (String(prop.zip || '').match(/\d{5}/) || [''])[0];
+          if (statedZip5 && propZip5) return statedZip5 === propZip5;
+          const propCityKey = String(prop.city || '').toLowerCase().replace(/[^a-z]/g, '');
+          return !statedCityKey || !propCityKey || statedCityKey === propCityKey;
+        });
         if (knownIndependentProperty) {
           houseConflict = null;
           houseNumberDisputed = false;
