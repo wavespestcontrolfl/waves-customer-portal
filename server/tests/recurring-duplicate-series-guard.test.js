@@ -606,11 +606,16 @@ describe('acquireSeriesCreateLocks — sorted-union pre-pass (P1: multi-unit con
 describe('the series creators consume the guard (source guards)', () => {
   test('booking.js self-book: locked guard + seeding share one transaction; skip-with-note, booked visit kept, self-row excluded', () => {
     expect(bookingSrc).toContain('checkActiveSeriesLocked(trx, {');
-    expect(bookingSrc).toContain('excludeParentId: serviceRow.id');
+    // Codex #4716 r3: the guard and the seed now read the RE-VERIFIED
+    // parent row (effectiveParent — serviceRow merged with a fresh,
+    // owner-checked FOR UPDATE read), not the stale in-memory serviceRow —
+    // a merge can repoint the parent's customer_id between the booking's
+    // own transaction and this post-commit one.
+    expect(bookingSrc).toContain('excludeParentId: effectiveParent.id');
     expect(bookingSrc).toContain("action: 'recurring_series_skipped'");
     // Seeding rides the SAME transaction as the locked re-check — that is
     // what closes the check-then-insert race.
-    expect(bookingSrc).toContain('seedFollowUpsForParent(trx, serviceRow, {');
+    expect(bookingSrc).toContain('seedFollowUpsForParent(trx, effectiveParent, {');
     // Fail-open: guard errors must not change seeding.
     expect(bookingSrc).toContain('duplicate-series guard failed (seeding proceeds)');
   });
