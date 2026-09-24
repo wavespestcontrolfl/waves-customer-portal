@@ -6,6 +6,7 @@ describe('call recording appointment guardrails', () => {
     extractedNameMatchesCustomer,
     maskPhone,
     resolveCallContactPhone,
+    isLiveLeadConversation,
     resolveDefaultCallBookingTechnician,
     resolveSchedulableCallService,
     shouldCreateCallLeadForCustomer,
@@ -54,6 +55,39 @@ describe('call recording appointment guardrails', () => {
     expect(maskPhone('+19415551212')).toBe('***1212');
     expect(maskPhone('(941) 555-1212')).toBe('***1212');
     expect(maskPhone('')).toBe('unknown');
+  });
+
+  test('contacted requires a processed live conversation, never a voicemail or attempt', () => {
+    const evidence = { call: { status: 'completed' }, extracted: { is_voicemail: false },
+      leadId: 'lead-1', finalStatus: 'processed', transcription: 'Customer and staff discuss a quote.' };
+    expect(isLiveLeadConversation(evidence)).toBe(true);
+    for (const patch of [
+      { call: { status: 'no-answer' } }, { call: { status: 'completed', call_outcome: 'voicemail' } },
+      { extracted: { is_voicemail: true } }, { extracted: {} },
+      { extracted: { is_voicemail: false, is_spam: true } }, { leadId: null },
+      { extracted: { is_voicemail: false, is_spam: false,
+        call_summary: require('../utils/extraction-compat').EXTRACTION_INVALID_JSON_SUMMARY } },
+      { finalStatus: 'extraction_failed' }, { nonLeadCall: true },
+      { voicemailLeadPath: true }, { transcription: '' },
+    ]) expect(isLiveLeadConversation({ ...evidence, ...patch })).toBe(false);
+  });
+
+  test('uses the actual prospect destination for form callback bridges', () => {
+    const call = {
+      direction: 'outbound', source: 'lead-webhook-auto-bridge',
+      from_phone: '+19412975749', to_phone: '+19415993489',
+      metadata: { type: 'lead_auto_bridge', leadPhone: '+19145550123' },
+    };
+    expect(resolveCallContactPhone(call)).toBe('+19145550123');
+    expect(resolveCallContactPhone({ ...call, metadata: JSON.stringify(call.metadata) }))
+      .toBe('+19145550123');
+    // A spoken callback is not allowed to replace this known dialed identity.
+    expect(resolveCallContactPhone(call, '+19145550999')).toBe('+19145550123');
+    for (const metadata of ['{', null, { type: 'lead_auto_bridge', leadPhone: '+19412975749' }]) {
+      expect(resolveCallContactPhone({ ...call, metadata })).toBeNull();
+    }
+    expect(resolveCallContactPhone({ ...call, source: 'admin-click', to_phone: '+19145550456' }))
+      .toBe('+19145550456');
   });
 
   test('detects transcript name mismatch against a linked customer', () => {
