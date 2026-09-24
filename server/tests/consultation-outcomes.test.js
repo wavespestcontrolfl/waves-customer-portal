@@ -2058,6 +2058,18 @@ describe('consultationStats — P1-1 median_days_to_close preserves the schedule
     expect(stats.by_technician[0]).toMatchObject({ showed: 1, won: 1 });
   });
 
+  // Codex #4710 r15 pre-push P1: system outcomes on a moved visit count.
+  test('a moved consultation later won, or later no-showed, still counts — only technician observations go stale', async () => {
+    const visits = [
+      { status: 'completed', scheduled_date: '2026-09-20', window_start: '09:00', technician_id: 't1', technician_name: 'Adam', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-22T16:00:00Z'), recorded_at: new Date('2026-09-10T16:00:00Z') },
+      { status: 'no_show', scheduled_date: '2026-09-20', window_start: '09:00', technician_id: 't1', technician_name: 'Adam', outcome: 'lost', lost_reason: 'no_show', recorded_at: new Date('2026-09-10T16:00:00Z') },
+    ];
+    const stats = await consultationStats({ trx: statsDb(visits) });
+    expect(stats.won).toBe(1);
+    expect(stats.lost).toBe(1);
+    expect(stats.lost_by_reason).toEqual({ no_show: 1 });
+  });
+
   test('Codex #4710 r3 P2: an even cohort reports the arithmetic midpoint (2 and 3 days → 2.5), not a rounded value', async () => {
     const visits = [
       { status: 'completed', scheduled_date: '2026-09-10', technician_id: 't1', technician_name: 'Adam', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T16:00:00Z') },

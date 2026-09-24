@@ -1608,6 +1608,10 @@ const OUTCOME_BREAKDOWNS = {
 // itself doesn't touch consultation_outcomes, so this stays purely a stats
 // read concern.
 function isStaleOutcome(v) {
+  // Only a TECHNICIAN observation goes stale (Codex #4710 r15 pre-push
+  // P1): a win or a no-show loss is system-stamped against the current
+  // schedule and always counts.
+  if (v.outcome === 'won' || (v.outcome === 'lost' && v.lost_reason === 'no_show')) return false;
   if (!v.recorded_at) return false;
   const opensMs = visitWindowOpensMs(v);
   if (opensMs == null) return false;
