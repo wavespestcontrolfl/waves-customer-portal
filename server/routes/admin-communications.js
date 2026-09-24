@@ -12,7 +12,11 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
-const { draftIdSql, loadPriorOutboundBodies } = require('../services/sms-response-policy');
+const {
+  draftIdSql,
+  draftReplyToMessageIdSql,
+  loadPriorOutboundBodies,
+} = require('../services/sms-response-policy');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -1665,12 +1669,13 @@ router.get('/log', async (req, res, next) => {
   try {
     const { customerId, direction, messageType, page, limit, search } = req.query;
     const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', messages.metadata->>'draft_id')");
+    const responseReplyToMessageId = draftReplyToMessageIdSql('mdx.sms_log_id');
 
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
       .joinRaw(`LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.status, sl.metadata
+        SELECT sl.message_type, sl.status, sl.metadata, sl.created_at
         FROM sms_log sl
         WHERE sl.twilio_sid = messages.twilio_sid AND sl.direction = messages.direction
         ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
@@ -1682,8 +1687,8 @@ router.get('/log', async (req, res, next) => {
         ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
       ) sms_audit ON true`)
       .joinRaw(`LEFT JOIN LATERAL (
-        SELECT true AS has_draft_provenance,
-               mdx.intent = 'click_followup' AS is_click_followup
+        SELECT mdx.intent = 'click_followup' AS is_click_followup,
+               ${responseReplyToMessageId} AS reply_to_message_id
         FROM message_drafts mdx
         WHERE mdx.id = ${responseDraftId}
         LIMIT 1
@@ -1701,9 +1706,10 @@ router.get('/log', async (req, res, next) => {
         'sms_response.message_type as response_message_type',
         'sms_response.status as response_status',
         'sms_response.metadata as response_metadata',
+        'sms_response.created_at as response_created_at',
         'sms_audit.metadata as response_audit_metadata',
         'sms_answer.is_click_followup as response_is_click_followup',
-        'sms_answer.has_draft_provenance as response_has_draft_provenance',
+        'sms_answer.reply_to_message_id as response_reply_to_message_id',
       )
       .orderBy('messages.created_at', 'desc');
 
@@ -1786,7 +1792,7 @@ router.get('/log', async (req, res, next) => {
       const responseIsAnswer = require('../services/sms-response-policy').outboundIsAnswer({
         direction: m.direction, messageType: responseMessageType, status: responseStatus,
         isClickFollowup: m.response_is_click_followup === true,
-        hasDraftProvenance: m.response_has_draft_provenance === true,
+        replyToMessageId: m.response_reply_to_message_id,
       });
       return {
         id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
@@ -1794,6 +1800,8 @@ router.get('/log', async (req, res, next) => {
         responseMessageType,
         responseStatus,
         responseIsAnswer,
+        responseReplyToMessageId: m.response_reply_to_message_id || null,
+        responseCreatedAt: m.response_created_at || m.created_at,
         customerId: m.customer_id || fallbackCustomer?.id || null, customerName,
         createdAt: m.created_at,
         isRead: !!m.is_read,

@@ -35,9 +35,8 @@
 //          reproduced; scoping applies WITHIN the customer's own rows.
 //          Per thread: excluded machine/opt-flow types never count as the
 //          latest message, a later STOP retires it, a standalone courtesy
-//          closer as the last message retires it, and a human-APPROVED
-//          PROACTIVE nudge (an unanchored message_drafts row finalized
-//          alongside the outbound) is not an answer.
+//          closer as the last message retires it, and an approved/revised
+//          reply counts only when its draft anchors this exact inbound.
 //
 // Fail-soft throughout: runCompletionCommsGuard catches everything and the
 // /complete call site wraps it again — a guard failure must never fail the
@@ -45,6 +44,11 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const {
+  HUMAN_REPLY_TYPES,
+  DRAFT_REPLY_TYPES,
+  draftIdSql,
+} = require('./sms-response-policy');
 
 // Leg A window: flags older than this are stale — the daily watcher has
 // already re-surfaced or expired them.
@@ -66,15 +70,13 @@ const EXCLUDED_INBOUND_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_reque
 // this module needs BOTH sets — one per leg:
 //
 //  - Leg B / general threads: unworked-comms-watcher's HUMAN_REPLY_TYPES.
-//    The AI assistant and follow-up lanes ARE conversational answers, so
-//    omitting them reports an answered customer as waiting.
+//    The conversational AI types are answers; proactive follow_up sends are
+//    excluded by the shared policy.
 //  - Leg A / reschedule flags: reschedule-intent-watcher's (narrower) set.
 //    The AI assistant STANDS DOWN on reschedule intent, so a later AI
 //    message is not an answer to a reschedule request — counting it would
 //    hide an open flag.
-const THREAD_REPLY_TYPES = [
-  'manual', 'ai_approved', 'ai_revised', 'ai_assistant', 'ai_assistant_reply', 'follow_up',
-];
+const THREAD_REPLY_TYPES = [...HUMAN_REPLY_TYPES];
 const FLAG_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 // Leg A only, and NARROWLY scoped (see flagResolved): the watcher accepts a
 // delivered reschedule confirmation as proof only for a null-entity,
@@ -93,7 +95,7 @@ const OUTBOUND_SCAN_TYPES = [...THREAD_REPLY_TYPES, ...RESCHEDULE_CONFIRMATION_T
 // a reply sent seconds before completion whose receipt hasn't landed yet,
 // which is the right direction for a detection-only surface.
 const CONFIRMED_OUTBOUND_STATUS = 'delivered';
-// Proactive-draft matching window, mirroring the digest's ±2 minutes.
+// Leg A retains the reschedule watcher's legacy proactive-send exclusion.
 const DRAFT_MATCH_WINDOW_MS = 2 * 60 * 1000;
 // One customer's SMS rows inside the window are a small set; the caps are
 // runaway guards, not business rules. Rows are scanned newest-first, so a
@@ -196,6 +198,7 @@ async function findOpenCommsExceptions({ customerId, serviceId, knex = db }) {
     .select('id', 'created_at', 'message_type', 'message_body', 'from_phone', 'to_phone', 'metadata');
 
   // One scan covering both legs' type sets; each leg narrows below.
+  const responseDraftId = draftIdSql("COALESCE(outbound_audit.metadata->>'draft_id', sms_log.metadata->>'draft_id')");
   const outboundRows = await knex('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
     .whereIn('message_type', OUTBOUND_SCAN_TYPES)
@@ -203,17 +206,36 @@ async function findOpenCommsExceptions({ customerId, serviceId, knex = db }) {
     .where('created_at', '>=', outboundFloor)
     .orderBy('created_at', 'desc')
     .limit(SMS_SCAN_CAP)
-    .select('id', 'created_at', 'from_phone', 'to_phone', 'message_type');
+    .joinRaw(`LEFT JOIN LATERAL (
+      SELECT mal.metadata
+      FROM messaging_audit_log mal
+      WHERE mal.provider_message_id = sms_log.twilio_sid AND mal.channel = 'sms'
+      ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
+    ) outbound_audit ON true`)
+    .joinRaw(`LEFT JOIN LATERAL (
+      SELECT mdx.sms_log_id AS reply_to_sms_log_id, mdx.intent AS draft_intent
+      FROM message_drafts mdx
+      WHERE mdx.id = ${responseDraftId}
+      LIMIT 1
+    ) response_draft ON true`)
+    .select(
+      'sms_log.id', 'sms_log.created_at', 'sms_log.from_phone', 'sms_log.to_phone',
+      'sms_log.message_type', 'response_draft.reply_to_sms_log_id', 'response_draft.draft_intent',
+    );
 
   const threadReplies = outboundRows.filter((r) => THREAD_REPLY_TYPES.includes(r.message_type));
   const flagReplies = outboundRows.filter((r) => FLAG_REPLY_TYPES.includes(r.message_type));
   const rescheduleConfirmations = outboundRows.filter((r) => RESCHEDULE_CONFIRMATION_TYPES.includes(r.message_type));
 
-  // A human-APPROVED proactive nudge (click_followup and friends) is outbound
-  // marketing, not an answer — the EOD digest excludes it the same way
-  // (unworked-comms-watcher lane 3, codex r24). Identified structurally: an
-  // unanchored draft (sms_log_id IS NULL — not composed against a specific
-  // inbound) finalized within a couple of minutes of the outbound.
+  // Approved/revised rows need exact draft provenance. The lateral joins use
+  // the shared reader's latest-audit-then-legacy precedence and UUID guard.
+  const replyMatchesInbound = (outbound, inboundId) => (
+    !DRAFT_REPLY_TYPES.includes(outbound.message_type)
+    || (outbound.draft_intent !== 'click_followup'
+      && inboundId != null
+      && String(outbound.reply_to_sms_log_id) === String(inboundId))
+  );
+
   let proactiveTimes = [];
   if (outboundRows.length) {
     const drafts = await knex('message_drafts')
@@ -222,9 +244,11 @@ async function findOpenCommsExceptions({ customerId, serviceId, knex = db }) {
       .whereNotNull('sent_at')
       .where('sent_at', '>=', new Date(ts(outboundFloor) - DRAFT_MATCH_WINDOW_MS))
       .select('sent_at');
-    proactiveTimes = drafts.map((d) => ts(d.sent_at));
+    proactiveTimes = drafts.map((draft) => ts(draft.sent_at));
   }
-  const isProactive = (row) => proactiveTimes.some((dt) => Math.abs(dt - ts(row.created_at)) <= DRAFT_MATCH_WINDOW_MS);
+  const isProactive = (row) => proactiveTimes.some(
+    (sentAt) => Math.abs(sentAt - ts(row.created_at)) <= DRAFT_MATCH_WINDOW_MS,
+  );
 
   // A later STOP retires every thread from that handset: an opted-out
   // customer must never be surfaced as waiting for a reply nobody may send
@@ -268,7 +292,7 @@ async function findOpenCommsExceptions({ customerId, serviceId, knex = db }) {
     const answered = threadReplies.some((out) => tail10(out.to_phone) === peer
       && tail10(out.from_phone) === endpoint
       && ts(out.created_at) > ts(row.created_at)
-      && !isProactive(out));
+      && replyMatchesInbound(out, row.id));
     if (!answered) { unansweredInbound = row; break; }
   }
 

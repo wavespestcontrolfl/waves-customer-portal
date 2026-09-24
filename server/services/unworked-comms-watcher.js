@@ -54,8 +54,19 @@ const MAX_REQUEST_ROWS = 25;
 // ai_assistant = the conversational AI's own successful answer — a real
 // reply for thread-clearing purposes (codex r20). The reschedule watcher
 // keeps its stricter list (the AI stands down on reschedule intent).
-const { HUMAN_REPLY_TYPES: HUMAN_REPLY_TYPE_VALUES } = require('./sms-response-policy');
+const {
+  HUMAN_REPLY_TYPES: HUMAN_REPLY_TYPE_VALUES,
+  DRAFT_REPLY_TYPES: DRAFT_REPLY_TYPE_VALUES,
+  draftIdSql,
+} = require('./sms-response-policy');
 const HUMAN_REPLY_TYPES = `(${HUMAN_REPLY_TYPE_VALUES.map((type) => `'${type}'`).join(', ')})`;
+const DRAFT_REPLY_TYPES = `(${DRAFT_REPLY_TYPE_VALUES.map((type) => `'${type}'`).join(', ')})`;
+const OUTBOUND_DRAFT_ID_SQL = draftIdSql(`COALESCE((
+  SELECT mal.metadata->>'draft_id'
+  FROM messaging_audit_log mal
+  WHERE mal.provider_message_id = os.twilio_sid AND mal.channel = 'sms'
+  ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
+), os.metadata->>'draft_id')`);
 
 // Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
 // marker), bounded to 7 days — windows tile exactly run-to-run, including
@@ -498,9 +509,9 @@ async function loadUnansweredThreads(cutoff = new Date(), { includeExpired = fal
       -- Endpoint-scoped (codex r45): conversations are unique per
       -- (peer, our number) — a later text to the AI number must not
       -- swallow an unanswered HQ thread from the same phone.
-      SELECT DISTINCT ON (peer, endpoint) peer, endpoint, message_body, metadata, created_at
+      SELECT DISTINCT ON (peer, endpoint) id, peer, endpoint, message_body, metadata, created_at
       FROM (
-        SELECT message_body, metadata, created_at, from_phone,
+        SELECT id, message_body, metadata, created_at, from_phone,
                ${phoneKey('from_phone')} AS peer,
                ${phoneKey('to_phone')} AS endpoint
         FROM sms_log
@@ -570,16 +581,18 @@ async function loadUnansweredThreads(cutoff = new Date(), { includeExpired = fal
       SELECT 1 FROM sms_log os
       WHERE os.direction = 'outbound'
         AND os.message_type IN ${HUMAN_REPLY_TYPES}
-        -- A human-APPROVED click-followup nudge is proactive marketing,
-        -- not a reply to this item (codex r24): its draft intent is
-        -- 'click_followup' and finalize stamps sent_at at send time.
-        AND NOT EXISTS (
+        -- Approved/revised sends answer ONLY the exact legacy inbound their
+        -- draft names. The send wrapper stamps draft_id in the audit row;
+        -- older paths may carry it on sms_log.metadata. The shared reader
+        -- precedence is latest audit, then legacy metadata; missing or
+        -- malformed evidence fails closed. Manual and conversational-AI
+        -- replies retain their ordinary thread/time behavior.
+        AND (os.message_type NOT IN ${DRAFT_REPLY_TYPES} OR EXISTS (
           SELECT 1 FROM message_drafts mdx
-          WHERE mdx.sms_log_id IS NULL
-            AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND ${phoneKey("COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone')")} = ${phoneKey('os.to_phone')}))
-            AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
-                                AND os.created_at + interval '2 minutes'
-        )
+          WHERE mdx.id = ${OUTBOUND_DRAFT_ID_SQL}
+            AND mdx.sms_log_id = l.id
+            AND COALESCE(mdx.intent, '') <> 'click_followup'
+        ))
         AND os.status IN ('queued', 'sent', 'delivered')
         AND os.created_at > l.created_at
         AND ${phoneKey("os.to_phone")}  = l.peer
