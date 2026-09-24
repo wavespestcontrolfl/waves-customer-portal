@@ -1,8 +1,17 @@
 /**
- * Admin API for photo assessments (lawn assessment + pest identification).
+ * Admin API for photo assessments (lawn assessment, pest identification,
+ * tree & shrub assessment).
  *
- * One surface over both funnel tables — lawn_diagnostics (mode='prospect')
- * and pest_identifications — backing /admin/lawn-assessments:
+ * One surface over the three assessment tables — lawn_diagnostics
+ * (mode='prospect'), pest_identifications, and tree_shrub_identifications —
+ * backing /admin/lawn-assessments. Tree & shrub has no public funnel and no
+ * tokenized customer report page yet: its rows are admin-created only,
+ * generate-link / send-report refuse it (TYPES.tree_shrub.reportPath = null),
+ * it is not in /funnel, and its table has no report/claim/funnel columns
+ * (report_token, report_expires_at, claim_token, claimed_at,
+ * report_first_viewed_at, pricing_snapshot, last_sent_at — dropped by
+ * 20260924010100). The shared list/detail shaping reads those columns
+ * generically, so on a tree_shrub row they are simply absent (null/false).
  *
  *   GET  /                      unified list (type/status filters, newest first)
  *   GET  /funnel                per-type funnel counts (analyzed → claimed → viewed → booked)
@@ -47,6 +56,15 @@ const {
   buildPublicPestReport,
   PEST_LIBRARY,
 } = require('../services/pest-identification');
+const {
+  analyzePhoto,
+  isCompleteVisionResult,
+  mergePhotoComposites,
+  toCategoryScores,
+  calculateOverall,
+  buildTreeShrubTechFindings,
+} = require('../services/tree-shrub-assessment');
+const { buildTreeShrubVisualCategories } = require('../services/service-report/tree-shrub-visual-categories');
 const { sendAssessmentReportEmail } = require('../services/assessment-report-email');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
 const { overallStatusLabel } = require('../utils/public-report-egress');
@@ -63,6 +81,13 @@ const MAX_PHOTOS = 5;
 const MAX_PHOTO_CHARS = 6_000_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIBRARY_BY_SLUG = new Map(PEST_LIBRARY.map((e) => [e.slug, e]));
+// Category key → customer-safe label ("Pest Activity Signals", never
+// "infestation"), taken from the same five-category builder the tree & shrub
+// visit report uses so the admin list and the report never name a signal
+// differently.
+const TREE_SHRUB_SIGNAL_LABELS = Object.fromEntries(
+  buildTreeShrubVisualCategories({}).map((category) => [category.key, category.label]),
+);
 
 // Inbound MMS photos pulled into an assessment: resized to this max
 // dimension and re-encoded as JPEG so every downstream consumer (vision
@@ -176,6 +201,10 @@ const TYPES = {
     photoKeyPrefix: 'lawnfunnel',
     reportPath: (token) => `/lawn-report/${token}`,
     label: 'Lawn Assessment',
+    listFields: (row) => ({ headline: overallStatusLabel(row.overall_score) }),
+    techView: (row, contract) => ({ contract }),
+    customerPreview: (row) => buildPublicLawnReport(row),
+    analyze: (photos, prospectNote) => runLawnAnalysis(photos, prospectNote),
   },
   pest: {
     table: 'pest_identifications',
@@ -184,11 +213,46 @@ const TYPES = {
     photoKeyPrefix: 'pestid',
     reportPath: (token) => `/pest-report/${token}`,
     label: 'Pest Identification',
+    listFields: (row) => pestListFields(row),
+    techView: (row, contract) => pestTechView(row, contract),
+    customerPreview: (row) => buildPublicPestReport(row),
+    analyze: (photos, prospectNote) => runPestAnalysis(photos, prospectNote),
+  },
+  tree_shrub: {
+    table: 'tree_shrub_identifications',
+    photoTable: 'tree_shrub_identification_photos',
+    photoFk: 'identification_id',
+    photoKeyPrefix: 'treeshrub',
+    // No tokenized customer report page exists for tree & shrub yet — a null
+    // reportPath makes generate-link / send-report refuse (releaseRefusal)
+    // BEFORE any report/claim column would be read or written (the table has
+    // none), and keeps report_url null, so no dead link is ever shown.
+    reportPath: null,
+    label: 'Tree & Shrub Assessment',
+    listFields: (row) => treeShrubListFields(row),
+    techView: (row, contract) => treeShrubTechView(contract),
+    customerPreview: () => null,
+    analyze: (photos, prospectNote) => runTreeShrubAnalysis(photos, prospectNote),
   },
 };
 
+// Every assessment type, in list/funnel order. A literal list rather than
+// the keys of TYPES: TYPES is the governed insert-table config
+// (tests/lead-writer-registry.test.js) and may not be handed whole to an
+// uninspectable callee. The allowlist also keeps a prototype key
+// (?type=toString, /constructor/:id) from resolving to a config.
+const TYPE_KEYS = ['lawn', 'pest', 'tree_shrub'];
+// Types with a public lead-magnet funnel (teaser → claim → report). Only
+// these have the claim/view/report columns funnelCounts counts; tree_shrub
+// has neither the funnel nor the columns.
+const FUNNEL_TYPE_KEYS = ['lawn', 'pest'];
+
+function configFor(type) {
+  return TYPE_KEYS.includes(String(type || '')) ? TYPES[type] : null;
+}
+
 function typeConfig(req, res) {
-  const config = TYPES[String(req.params.type || '')];
+  const config = configFor(req.params.type);
   if (!config) {
     res.status(404).json({ error: 'Unknown assessment type' });
     return null;
@@ -246,16 +310,30 @@ function listRowShape(type, row) {
       phone: contact.phone || null,
     },
   };
-  if (type === 'lawn') {
-    return { ...shared, headline: overallStatusLabel(row.overall_score) };
-  }
+  const typeFields = configFor(type).listFields(row);
+  return { ...shared, ...typeFields };
+}
+
+function pestListFields(row) {
   const item = row.species_slug ? LIBRARY_BY_SLUG.get(row.species_slug) : null;
   return {
-    ...shared,
     headline: item ? item.label : (row.category || 'Unidentified'),
     category: row.category || null,
     urgency: row.urgency || null,
     service_line: row.service_line || null,
+  };
+}
+
+// Overall 0-100 health score + the worst flagged signal, e.g.
+// "62/100 · Pest Activity Signals" or "91/100 · No flagged signals".
+function treeShrubListFields(row) {
+  const overall = row.overall_score == null ? null : Number(row.overall_score);
+  const worstLabel = TREE_SHRUB_SIGNAL_LABELS[row.worst_signal] || null;
+  return {
+    headline: `${overall == null ? 'Unscored' : `${overall}/100`} · ${worstLabel || 'No flagged signals'}`,
+    overall_score: overall,
+    worst_signal: worstLabel ? row.worst_signal : null,
+    worst_signal_label: worstLabel,
   };
 }
 
@@ -271,7 +349,7 @@ async function fetchListRows(type, { status, limit, offset }) {
     // correctly — the merged top (offset+limit) is always contained in the
     // union of each table's top (offset+limit).
     .limit(offset + limit);
-  // Prospect-only for BOTH types (codex GH r1 P2) — a customer's own Photo ID
+  // Prospect-only for ALL types (codex GH r1 P2) — a customer's own Photo ID
   // submission (mode 'customer') must never surface in this lead-magnet
   // queue, same as an internal tech diagnostic already didn't.
   qb = scopeProspects(qb);
@@ -280,15 +358,15 @@ async function fetchListRows(type, { status, limit, offset }) {
   return rows.map((row) => listRowShape(type, row));
 }
 
-// GET /api/admin/photo-assessments?type=lawn|pest|all&status=analyzed|sent|archived|all
+// GET /api/admin/photo-assessments?type=lawn|pest|tree_shrub|all&status=analyzed|sent|archived|all
 router.get('/', async (req, res, next) => {
   try {
-    const type = ['lawn', 'pest'].includes(req.query.type) ? req.query.type : 'all';
+    const type = configFor(req.query.type) ? req.query.type : 'all';
     const status = cleanString(req.query.status, 20) || 'all';
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
 
-    const typesToFetch = type === 'all' ? ['lawn', 'pest'] : [type];
+    const typesToFetch = type === 'all' ? TYPE_KEYS : [type];
     const lists = await Promise.all(typesToFetch.map((t) => fetchListRows(t, { status, limit, offset })));
     const merged = lists.flat().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     res.json({
@@ -350,15 +428,14 @@ async function funnelCounts(type, sinceDate) {
 }
 
 // GET /api/admin/photo-assessments/funnel?days=30 (days=0 → all time)
+// One key per funnel type (lawn, pest) — tree_shrub has no public funnel.
 router.get('/funnel', async (req, res, next) => {
   try {
     const days = Math.min(Math.max(Number(req.query.days ?? 30), 0), 365);
     const sinceDate = days > 0 ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : null;
-    const [lawn, pest] = await Promise.all([
-      funnelCounts('lawn', sinceDate),
-      funnelCounts('pest', sinceDate),
-    ]);
-    res.json({ days, lawn, pest });
+    const types = FUNNEL_TYPE_KEYS;
+    const counts = await Promise.all(types.map((type) => funnelCounts(type, sinceDate)));
+    res.json({ days, ...Object.fromEntries(types.map((type, i) => [type, counts[i]])) });
   } catch (err) {
     next(err);
   }
@@ -417,6 +494,28 @@ function pestTechView(row, contract) {
   };
 }
 
+// Admin view of a tree & shrub assessment: the five 0-100 health scores and
+// statuses, the flagged findings, the headline + per-photo observations, and
+// the admin next step. The contract is written only by runTreeShrubAnalysis
+// and holds nothing but admin-safe fields, so the view is the contract over
+// empty defaults (older/partial rows still render). Admin eyes only — there
+// is no customer report page for this type yet.
+const TREE_SHRUB_VIEW_DEFAULTS = {
+  scores: {},
+  categories: [],
+  worst_signal: null,
+  findings: [],
+  observations: '',
+  photo_observations: [],
+  ai_summary: null,
+  suggested_customer_action: null,
+  scored_count: null,
+  photo_count: null,
+};
+function treeShrubTechView(contract) {
+  return { ...TREE_SHRUB_VIEW_DEFAULTS, ...contract };
+}
+
 // GET /api/admin/photo-assessments/:type/:id
 router.get('/:type/:id', async (req, res, next) => {
   try {
@@ -449,8 +548,13 @@ router.get('/:type/:id', async (req, res, next) => {
         // Copy-link is only offered for links a customer can actually open.
         // Mirror the public readers' exact contract (status='sent' + non-null
         // FUTURE expiry) — archived rows and missing-expiry tokens 404 there,
-        // so handing staff those URLs would ship dead links.
-        report_url: row.status === 'sent' && row.report_token && row.report_expires_at
+        // so handing staff those URLs would ship dead links. A type with no
+        // report page (tree_shrub) never has one.
+        report_available: config.reportPath !== null,
+        // The SAME gate generate-link / send-report enforce, so the sheet
+        // offers Get link / Send report only when the server would accept.
+        can_release: releaseRefusal(config, row, 'release a report') === null,
+        report_url: config.reportPath && row.status === 'sent' && row.report_token && row.report_expires_at
           && new Date(row.report_expires_at).getTime() > Date.now()
           ? portalUrl(config.reportPath(row.report_token))
           : null,
@@ -461,9 +565,10 @@ router.get('/:type/:id', async (req, res, next) => {
       customer: customer || null,
       // Internal treatment-oriented view (confirmation steps, tech notes,
       // raw observations) — admin/tech eyes only.
-      tech_view: type === 'lawn' ? { contract } : pestTechView(row, contract),
-      // Exactly what the customer sees at the tokenized report URL.
-      customer_preview: type === 'lawn' ? buildPublicLawnReport(row) : buildPublicPestReport(row),
+      tech_view: config.techView(row, contract),
+      // Exactly what the customer sees at the tokenized report URL (null
+      // for a type with no customer report page).
+      customer_preview: config.customerPreview(row),
     });
   } catch (err) {
     next(err);
@@ -530,6 +635,19 @@ function isReleasable(row) {
 }
 const UNCLAIMED_ERROR = 'This prospect has not unlocked the report yet — sending now would skip lead capture and permanently block their claim. Link or create the lead via their unlock instead.';
 
+// The one release gate generate-link and send-report share: a type with no
+// customer report page, a non-releasable status, or an unclaimed public
+// funnel row all refuse (409) before anything is minted or sent. Returns
+// the refusal message, or null when the row may be released.
+function releaseRefusal(config, row, action) {
+  if (!config.reportPath) {
+    return `There is no customer report for ${config.label.toLowerCase()} yet — review it here and follow up directly.`;
+  }
+  if (!['analyzed', 'sent'].includes(row.status)) return `Cannot ${action} for a ${row.status} assessment`;
+  if (!isReleasable(row)) return UNCLAIMED_ERROR;
+  return null;
+}
+
 // Atomic mint: COALESCE keeps the FIRST token under concurrent mints /
 // double-submits (both requests read back the same persisted token, so
 // neither caller carries a link the other invalidated). Every mint refreshes
@@ -561,10 +679,8 @@ router.post('/:type/:id/generate-link', async (req, res, next) => {
     if (!config) return undefined;
     const row = await loadRow(config, req.params.id);
     if (!row) return res.status(404).json({ error: 'Assessment not found' });
-    if (!['analyzed', 'sent'].includes(row.status)) {
-      return res.status(409).json({ error: `Cannot generate a report link for a ${row.status} assessment` });
-    }
-    if (!isReleasable(row)) return res.status(409).json({ error: UNCLAIMED_ERROR });
+    const refusal = releaseRefusal(config, row, 'generate a report link');
+    if (refusal) return res.status(409).json({ error: refusal });
     const { reportToken, expiresAt } = await mintReportToken(config, row.id);
     return res.json({ success: true, reportUrl: portalUrl(config.reportPath(reportToken)), expiresAt });
   } catch (err) {
@@ -583,10 +699,8 @@ router.post('/:type/:id/send-report', async (req, res, next) => {
     if (!config) return undefined;
     const row = await loadRow(config, req.params.id);
     if (!row) return res.status(404).json({ error: 'Assessment not found' });
-    if (!['analyzed', 'sent'].includes(row.status)) {
-      return res.status(409).json({ error: `Cannot send a report for a ${row.status} assessment` });
-    }
-    if (!isReleasable(row)) return res.status(409).json({ error: UNCLAIMED_ERROR });
+    const refusal = releaseRefusal(config, row, 'send a report');
+    if (refusal) return res.status(409).json({ error: refusal });
 
     const contact = parseJson(row.contact_snapshot, {});
     // Recipient resolution: explicit override → snapshot → linked lead →
@@ -766,6 +880,118 @@ async function runPestAnalysis(photos, prospectNote) {
   };
 }
 
+// Tree & shrub runs the SAME dual-vision engine the tech visit closeout uses
+// — its per-photo analyzePhoto (Claude + Gemini), mergePhotoComposites
+// (worst signal across photos), and deterministic 0-100 health scoring — so
+// there is no second analysis implementation. It composes those pieces here
+// rather than calling previewTreeShrubAssessment because this lane needs what
+// the preview discards: each photo's own reading. The prospect note is
+// stored for the admin view only and never passed to the model (same rule as
+// lawn/pest).
+
+// Admin next step keyed by the worst flagged signal. This lane is standalone
+// (a prospect, or a customer with no visit booked), so unlike the closeout
+// helper's "we'll recheck on the next visit" it never promises a visit. Admin
+// view only — tree & shrub has no customer report egress.
+const TREE_SHRUB_NEXT_STEPS = {
+  none: 'No treatment signals in these photos — offer a seasonal check.',
+  foliage_fullness: 'Recommend an on-site look to confirm what is thinning the canopy and quote a plan.',
+  leaf_color_vigor: 'Recommend an on-site look to confirm the discoloration pattern and quote treatment.',
+  pest_activity: 'Recommend an on-site look to confirm the pest-pressure signals and quote treatment.',
+  disease_leaf_spot: 'Recommend an on-site look to confirm the leaf-spot signals and quote treatment.',
+  water_heat_mechanical_stress: 'Recommend an on-site look at watering and pruning before quoting treatment.',
+};
+
+// The five categories as the admin lane stores them: key/label/score/status
+// only. The report builder's customerExplanation copy is written for a
+// completed visit ("documented today", "confirm next visit"), which a
+// standalone assessment must not carry.
+function treeShrubCategories(scores) {
+  return buildTreeShrubVisualCategories({ scores })
+    .map(({ key, label, score, status }) => ({ key, label, score, status }));
+}
+
+// Lowest-scoring flagged (watch / needs_attention) category, or null when
+// nothing is flagged.
+function worstTreeShrubSignal(categories) {
+  return categories
+    .filter((category) => category.status === 'watch' || category.status === 'needs_attention')
+    .reduce((worst, category) => (!worst || category.score < worst.score ? category : worst), null);
+}
+
+// One photo through the engine. A result that did not read every schema
+// field (isCompleteVisionResult — an omitted or invalid field would
+// otherwise default to a clean "none"/95) counts as unscored: null.
+async function scoreTreeShrubPhoto({ photo, index }) {
+  const result = await analyzePhoto(photo.data, photo.mimeType).catch(() => null);
+  if (!isCompleteVisionResult(result)) return null;
+  const categories = treeShrubCategories(toCategoryScores(result.composite));
+  return {
+    index,
+    composite: result.composite,
+    observations: String(result.composite.observations || '').trim(),
+    worst: worstTreeShrubSignal(categories),
+    categories,
+  };
+}
+
+// The scored photo whose own reading drives the merged worst signal (the
+// lowest score on that category), so the headline observation describes the
+// trouble spot rather than whichever photo happened to come first. No
+// flagged signal → the first photo.
+function headlineTreeShrubPhoto(scored, worstKey) {
+  const scoreOn = (entry) => entry.categories.find((category) => category.key === worstKey)?.score ?? Infinity;
+  return scored.reduce((best, entry) => (scoreOn(entry) < scoreOn(best) ? entry : best), scored[0]);
+}
+
+// Every photo that carries data must score completely, or nothing is
+// persisted: a dropped photo would silently leave the operator's pick
+// (possibly the trouble spot) out of the worst-signal merge.
+async function runTreeShrubAnalysis(photos, prospectNote) {
+  const analyzable = photos.map((photo, index) => ({ photo, index })).filter(({ photo }) => photo.data);
+  const scored = await Promise.all(analyzable.map(scoreTreeShrubPhoto));
+  if (!scored.every(Boolean)) return { error: 'Could not analyze every photo — try again in a few minutes.' };
+
+  const merged = mergePhotoComposites(scored.map((entry) => entry.composite));
+  const scores = toCategoryScores(merged);
+  scores.overallScore = calculateOverall(scores);
+  const categories = treeShrubCategories(scores);
+  const worst = worstTreeShrubSignal(categories);
+  const worstKey = worst ? worst.key : null;
+  const headline = headlineTreeShrubPhoto(scored, worstKey);
+  const { aiSummary, findings } = buildTreeShrubTechFindings({ scores });
+  const contract = {
+    scores,
+    categories,
+    worst_signal: worst,
+    // Headline paragraph: the photo driving the worst signal. Every photo's
+    // own paragraph is kept, in upload order, beside its own worst signal.
+    observations: headline.observations,
+    photo_observations: scored.map((entry) => ({
+      index: entry.index,
+      observations: entry.observations,
+      worst_signal: entry.worst && entry.worst.key,
+    })),
+    findings,
+    ai_summary: aiSummary,
+    suggested_customer_action: TREE_SHRUB_NEXT_STEPS[worstKey ?? 'none'],
+    scored_count: scored.length,
+    photo_count: analyzable.length,
+  };
+  return {
+    insert: {
+      ai_analysis: JSON.stringify({
+        prospect_note: prospectNote,
+        provenance: { source: 'admin', engine: 'tree-shrub-assessment' },
+      }),
+      report_contract: JSON.stringify(contract),
+      overall_score: scores.overallScore,
+      worst_signal: worstKey,
+      ai_summary: cleanString(headline.observations, 2000),
+    },
+  };
+}
+
 // Resolves the request's photo inputs (photos + message_photos) into the
 // normalizePhotos-shaped list the analysis ladder runs on, or an
 // { error, status }. Owns every count/size/shape check for BOTH sources so
@@ -911,9 +1137,7 @@ router.post('/:type', async (req, res, next) => {
 
     const { contactSnapshot, addressSnapshot, prospectNote } = buildSnapshots(body, customerContact);
 
-    const analysis = req.params.type === 'lawn'
-      ? await runLawnAnalysis(photos, prospectNote)
-      : await runPestAnalysis(photos, prospectNote);
+    const analysis = await config.analyze(photos, prospectNote);
     if (analysis.error) return res.status(503).json({ error: analysis.error });
 
     const [row] = await db(config.table).insert({
@@ -947,6 +1171,14 @@ module.exports._test = {
   listRowShape,
   normalizePhotos,
   TYPES,
+  TYPE_KEYS,
+  FUNNEL_TYPE_KEYS,
+  configFor,
+  releaseRefusal,
+  runTreeShrubAnalysis,
+  worstTreeShrubSignal,
+  headlineTreeShrubPhoto,
+  TREE_SHRUB_NEXT_STEPS,
   resolveRequestPhotos,
   resolveAssociations,
   lookupAssociation,

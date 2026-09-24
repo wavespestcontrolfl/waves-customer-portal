@@ -755,6 +755,11 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
     keyword: fc.keyword || data.primary_keyword || '',
     tag: fc.tag || data.tag || data.category || '',
   });
+  // Signed editorial evidence promises a completed fact check, so every
+  // remediation path requires one while that gate is on — not only callers
+  // that pass requireFactCheck.
+  const requireFactCheck = opts.requireFactCheck || require('./editorial-evidence').enabled();
+  if (requireFactCheck && factResult?.checked !== true) return { ok: false, reason: 'factcheck did not complete', transient: true };
   if (factResult && !factResult.pass) {
     const p0 = (factResult.findings || []).filter((f) => f.severity === 'P0');
     if (p0.length) return { ok: false, reason: `factcheck ${p0.map((f) => f.message).slice(0, 2).join('; ')}` };
@@ -1109,6 +1114,18 @@ function retryableFrontmatterPark(state) {
   return /^fix changed frontmatter beyond the whitelist: (?:frontmatter key "(?:schema_types|spoke_links)" changed|meta_description changed but no finding in this round targets it)/.test(String(state.park_reason || ''))
     || state.park_reason === 'fix changes the body-derived schema types (frontmatter schema is frozen)'
     || state.park_reason === 'frontmatter repair rejected after bounded retry: schema_types may only follow the publisher-derived FAQPage change';
+}
+
+// Editorial review/signing depends on remote providers and configured keys.
+// Retry only recognizable availability failures; a policy rejection or a
+// malformed/no-evidence result remains a same-head human hold.
+function transientEditorialEvidenceError(error) {
+  if (error?.code === 'BLOG_EDITORIAL_REVIEW_FAILED') return false;
+  if (error?.code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE') return true;
+  const status = Number(error?.status || error?.statusCode);
+  if (status === 408 || status === 429 || status >= 500) return true;
+  return /(?:unavailable|temporar|timed?\s*out|timeout|rate.?limit|overload|signing key|signature verification|ECONN|ETIMEDOUT|ENOTFOUND|fetch failed|network)/i
+    .test(String(error?.message || ''));
 }
 
 /**
@@ -1626,7 +1643,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const gh = deps.gh || ghDefault;
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
-    operatorFaqException = false, guardContext = null,
+    operatorFaqException = false, guardContext = null, editorialBrief = null,
     // Owner directive 2026-08-26: TRUE only when the caller verified
     // operator-intercept provenance AND both named-competitor gates
     // (namedCompetitorAutopublish + namedCompetitorComparison) — lets a fix
@@ -1918,6 +1935,15 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   let originalMetaDescription;
   try { originalMetaDescription = ((fm.parse(file.content) || {}).data || {}).meta_description; } catch (_) { originalMetaDescription = undefined; }
   const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext, originalMetaDescription }, deps);
+  if (gate?.transient === true) {
+    // An incomplete fact check is a provider outage, not a verdict: spend a
+    // round and retry on the same bounded budget as editorial evidence.
+    const attempt = (state.rounds || 0) + 1;
+    await saveState(db, prNumber, { branch, status: 'active', rounds: attempt });
+    const reason = `fix content gates temporarily unavailable: ${gate.reason}`;
+    if (atRoundLimit(attempt)) return park(db, prNumber, `${reason} (exhausted ${MAX_ROUNDS} remediation rounds)`, onPark, headSha, PARK_PRE_PUSH);
+    return { skipped: true, transient: true, reason: `${reason} (will retry)` };
+  }
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha, PARK_PRE_PUSH);
   // A passing fix that carries named-competitor content still needs a human:
   // the merge stamps enforcing that sign-off (astro_requires_human_merge /
@@ -1951,6 +1977,39 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     }
   }
 
+  // The repaired bytes have passed every publisher/lane gate. Attach evidence
+  // now, using only a caller-supplied persisted brief; PR content is never a
+  // trusted source of operator allowances. A review/signing outage parks
+  // before the pre-push check, sync hold, or any branch mutation.
+  let editorialFiles;
+  try {
+    const editorial = deps.editorialEvidence || require('./editorial-evidence');
+    editorialFiles = await editorial.filesForDocument({
+      document: fixed,
+      path: targetPath,
+      brief: editorialBrief || {},
+    });
+    if (!Array.isArray(editorialFiles)) throw new Error('editorial evidence generator returned no file list');
+  } catch (e) {
+    if (transientEditorialEvidenceError(e)) {
+      // The LLM fix and every content gate already ran, so this attempt spent
+      // a round even though no branch write occurred. Keep the row active
+      // while budget remains; otherwise every poll could repeat paid model
+      // work forever. The final failure parks before any write as before.
+      const attempt = (state.rounds || 0) + 1;
+      await saveState(db, prNumber, { branch, status: 'active', rounds: attempt });
+      const reason = `editorial evidence generation temporarily unavailable: ${e.message}`;
+      if (atRoundLimit(attempt)) {
+        return park(db, prNumber, `${reason} (exhausted ${MAX_ROUNDS} remediation rounds)`, onPark, headSha, PARK_PRE_PUSH);
+      }
+      return { skipped: true, transient: true, reason: `${reason} (will retry)` };
+    }
+    return park(db, prNumber, `editorial evidence generation failed: ${e.message}`, onPark, headSha, PARK_PRE_PUSH);
+  }
+  if (editorialFiles.length && typeof gh.commitFiles !== 'function') {
+    return park(db, prNumber, 'editorial evidence generation failed: atomic multi-file commit unavailable', onPark, headSha, PARK_PRE_PUSH);
+  }
+
   // Last-instant pre-push guard, mirroring the merge path's: the LLM call and
   // gate re-runs above take real time, and the lane's claim (queue row /
   // publishing claim / tracked PR) can move while they run. A failed or
@@ -1967,7 +2026,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // Mark 'remediating' BEFORE the push so a later save/comment failure can't
   // strand the fix — the recovery branch keys off status='remediating'.
   // A false return means markPrTerminal won (the PR merged/closed while
-  // this round was in flight) — stop BEFORE gh.putFile so we never push
+  // this round was in flight) — stop BEFORE the branch write so we never push
   // fixes to a branch whose PR already left the open state.
   // The sync hold is taken BEFORE the push, not after it. gh.putFile returning
   // and the bookkeeping write are two steps: a process death (or a deploy) in
@@ -1995,16 +2054,30 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
   let commit;
+  let atomicCommitParent = null;
   try {
-    commit = await gh.putFile({
-      path: targetPath,
-      content: fixed,
-      message: `fix(blog): address Codex review findings (round ${round})`,
-      branch,
-      sha: file.sha,
-    });
+    const message = `fix(blog): address Codex review findings (round ${round})`;
+    if (editorialFiles.length) {
+      commit = await gh.commitFiles({
+        branch,
+        expectedHeadSha: headSha,
+        files: [{ path: targetPath, content: fixed }, ...editorialFiles],
+        message,
+      });
+      // commitFiles creates the commit directly from expectedHeadSha and its
+      // ref update is non-forced, so that immutable CAS head is its parent.
+      atomicCommitParent = headSha;
+    } else {
+      commit = await gh.putFile({
+        path: targetPath,
+        content: fixed,
+        message,
+        branch,
+        sha: file.sha,
+      });
+    }
   } catch (e) {
-    // A putFile throw is AMBIGUOUS — GitHub may have committed the write and
+    // A branch-write throw is AMBIGUOUS — GitHub may have committed the write and
     // failed the response — and a ref read taken immediately afterwards can
     // still serve the OLD head (the same read-after-write staleness the
     // post-push checks already defend against). So one unchanged-ref read is
@@ -2023,15 +2096,12 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
 
-  // Parent CAS (PR r18 P1): putFile only CAS-checks the target FILE's blob,
-  // so a foreign push touching another file in the tip-read→putFile window
-  // still becomes this commit's parent. The Contents API returns the created
-  // commit's parents — on the pinned lanes the fix commit's parent MUST be
-  // the pinned parent, or the re-pin would bless every foreign change.
-  // Missing parent info fails closed. The commit already exists on the
-  // branch, so this parks post-push for a human instead of skipping.
+  // Parent CAS (PR r18 P1): the putFile path checks the returned parent; the
+  // atomic path binds its non-forced commit to expectedHeadSha. On pinned
+  // lanes that parent MUST be the pinned parent, or the re-pin would bless
+  // every foreign change. Missing parent proof fails closed.
   if (expectedParentSha) {
-    const newParent = String(commit?.commit?.parents?.[0]?.sha || '').toLowerCase();
+    const newParent = String(atomicCommitParent || commit?.commit?.parents?.[0]?.sha || '').toLowerCase();
     if (newParent !== String(expectedParentSha).toLowerCase()) {
       return park(db, prNumber, `fix commit ${shortSha(newHead)} landed on a foreign parent (${newParent ? shortSha(newParent) : 'unknown'} != pinned ${shortSha(expectedParentSha)}) — human reconciliation required`, onPark, newHead || headSha, PARK_POST_PUSH);
     }
@@ -2380,25 +2450,87 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled(run?.action_type)) return { skipped: true, reason: 'disabled' };
   const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
   const db = deps.db || dbDefault;
+  const gh = deps.gh || ghDefault;
   // Foreign-parent guard (PR #3508 r15 P1): remediation fixes ONE file and
   // re-pins the resulting commit as trusted — so it may only build on a
   // head that is ALREADY publisher-pinned or human-approved. Remediating on
   // top of a foreign push would bless every unrelated change that push
   // carried (JS, config, assets, other content). Missing/unparseable
   // payload or a mismatched head skips remediation (fail closed: the PR
-  // waits for a human; the universal merge pin withholds it anyway).
+  // waits for a human; the universal merge pin withholds it anyway). The
+  // sole descendant exception is a cryptographically verified evidence-only
+  // commit; it becomes the expected parent without changing the DB pin.
   let expectedParentSha = null;
   if (run && run.id && (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page')) {
     let parentOk = false;
     try {
-      const fresh = await db('autonomous_runs').where({ id: run.id }).first();
-      let dp = fresh ? fresh.draft_payload : undefined;
-      if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+      const stableContextValue = (value) => {
+        if (Array.isArray(value)) return value.map(stableContextValue);
+        if (value && typeof value === 'object') return Object.fromEntries(
+          Object.keys(value).sort().map((key) => [key, stableContextValue(value[key])]),
+        );
+        return value;
+      };
+      const readParentContext = async () => {
+        const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+        if (!fresh) return null;
+        let dp = fresh.draft_payload;
+        if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+        let comparison = fresh.comparison_table_result;
+        if (typeof comparison === 'string') { try { comparison = JSON.parse(comparison); } catch (_) { comparison = undefined; } }
+        const approvedAt = fresh.trust_build_approved_at || null;
+        return {
+          pinned: String(dp?.autopublish_head_sha || '').toLowerCase(),
+          approvedSha: String(dp?.trust_build_approved_head_sha || '').toLowerCase(),
+          approvedAt,
+          approvedAtKey: approvedAt instanceof Date ? approvedAt.toISOString() : String(approvedAt || ''),
+          briefId: fresh.brief_id || null,
+          comparisonKey: JSON.stringify(stableContextValue(comparison)),
+          draftKey: JSON.stringify(stableContextValue(dp)),
+        };
+      };
+      const sameParentContext = (a, b) => Boolean(a && b
+        && a.pinned === b.pinned && a.approvedSha === b.approvedSha
+        && a.approvedAtKey === b.approvedAtKey
+        && String(a.briefId || '') === String(b.briefId || '')
+        && a.comparisonKey === b.comparisonKey && a.draftKey === b.draftKey);
+
+      const context = await readParentContext();
       const headSha = String(pr?.head?.sha || '').toLowerCase();
-      const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
-      const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
-      if (headSha && pinned && pinned === headSha) { parentOk = true; expectedParentSha = pinned; }
-      else if (headSha && fresh?.trust_build_approved_at && approvedSha && approvedSha === headSha) { parentOk = true; expectedParentSha = approvedSha; }
+      if (headSha && context?.pinned && context.pinned === headSha) {
+        parentOk = true; expectedParentSha = context.pinned;
+      } else if (headSha && context?.approvedAt && context.approvedSha && context.approvedSha === headSha) {
+        parentOk = true; expectedParentSha = context.approvedSha;
+      } else if (headSha && (context?.pinned || (context?.approvedAt && context?.approvedSha))) {
+        const editorial = deps.editorialEvidence || require('./editorial-evidence');
+        const anchors = [
+          ...(context.approvedAt && context.approvedSha
+            ? [{ sha: context.approvedSha, kind: 'approved' }] : []),
+          ...(context.pinned && (!context.approvedAt || context.pinned !== context.approvedSha)
+            ? [{ sha: context.pinned, kind: 'publisher' }] : []),
+        ];
+        let verifiedKind = null;
+        for (const anchor of anchors) {
+          if (await editorial.verifyEvidenceOnlyAdvance({
+            pinnedSha: anchor.sha, headSha,
+          }, { gh })) {
+            verifiedKind = anchor.kind;
+            break;
+          }
+        }
+        if (verifiedKind) {
+          const rechecked = await readParentContext();
+          // Poller supplies its fresh queue/claim check. Evidence recovery is
+          // never allowed to start a round after that authorization moved.
+          const contextUnchanged = sameParentContext(context, rechecked);
+          const queueStillParked = contextUnchanged && typeof deps.prePushCheck === 'function'
+            && await deps.prePushCheck() === true;
+          if (queueStillParked) {
+            parentOk = true;
+            expectedParentSha = headSha;
+          }
+        }
+      }
     } catch (_) { return { skipped: true, transient: true, reason: 'publisher pin lookup unavailable' }; }
     if (!parentOk) {
       return { skipped: true, reason: 'pr head is not a publisher-pinned or human-approved commit — remediation withheld (foreign parent needs a human decision)' };
@@ -2425,6 +2557,9 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // refresh-grandfathered content the run-context gate allows — the preflight
   // must judge the fix with the SAME allowances or valid fixes park.
   let guardContext = null;
+  // Only the persisted, reviewed brief loaded through the autonomous runner
+  // may inform editorial source/facts context for the repaired bytes.
+  let trustedEditorialBrief = null;
   try {
     const fullRun = run && run.id ? await db('autonomous_runs').where({ id: run.id }).first() : null;
     const opp = (fullRun && fullRun.action_type === 'new_supporting_blog' && fullRun.opportunity_id)
@@ -2434,6 +2569,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
       const runner = deps.autonomousRunner || require('./autonomous-runner');
       const brief = await runner._loadReviewedBrief(fullRun);
       if (brief) {
+        trustedEditorialBrief = brief;
         const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
         operatorFaqException = !!guardOptions && guardOptions.operatorFaqException === true;
         let dp = fullRun.draft_payload;
@@ -2467,6 +2603,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // by the re-pin.
     expectedParentSha,
     guardContext,
+    editorialBrief: trustedEditorialBrief,
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
     // path comes from the findings themselves (the autonomous run has no slug

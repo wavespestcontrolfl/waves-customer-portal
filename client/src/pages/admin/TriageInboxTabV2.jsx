@@ -63,11 +63,13 @@ const REASON_LABELS = {
   confirmed_without_start_time: "Confirmed, no start time",
   low_confidence: "Low confidence",
   address_recovered: "Address recovered — read back",
+  on_file_house_number_conflict: "House number differs from record — confirm",
   email_unverified: "Email spelled — read back",
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
+  attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
 };
 
 // Human-readable occupancy names for property-role proposal rows.
@@ -183,6 +185,52 @@ export function ConfirmEvidence({ payload }) {
       label: "Customer replied",
       value: `${p.customer_reply_unit} (by text${p.customer_reply_at ? ` ${new Date(p.customer_reply_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET` : ""}) — confirm and enter it on the record`,
     },
+    // House-number disagreement: the validated call address beside the
+    // record's street so the reviewer picks a number, not just "confirm".
+    // When Address Validation CORRECTED the number, the caller's own words
+    // are shown as the evidence and the validated line as the correction.
+    p.stated_street && {
+      label: p.spoken_street ? "Caller said" : "Caller stated",
+      value: p.spoken_street
+        ? `${p.spoken_street} — validated as ${p.stated_unit ? `${p.stated_street}, ${p.stated_unit}` : p.stated_street}`
+        : (p.stated_unit ? `${p.stated_street}, ${p.stated_unit}` : p.stated_street),
+    },
+    // …and the whole on-file door too: Accept means the entire saved
+    // address is right, so a differing saved unit must be visible.
+    // A recovery task books at its PRESERVED requested premise when that
+    // differs from the primary on file (a cleared dispute whose stated
+    // address is a saved secondary property) — codex r36 P1.
+    p.skipped_reason && p.scheduling_window?.requested_address?.street_line_1 && {
+      label: "Book at",
+      value: [p.scheduling_window.requested_address.street_line_1, p.scheduling_window.requested_address.street_line_2, p.scheduling_window.requested_address.city, p.scheduling_window.requested_address.postal_code].filter((v) => String(v || "").trim()).join(", "),
+    },
+    // …and on the RECOVERY task Accept files (stated_street deliberately
+    // removed, on_file_address kept as the address to book / apply).
+    (p.stated_street || p.skipped_reason) && (p.on_file_address?.address_line1 || p.on_file_street) && {
+      label: "On file",
+      value: [p.on_file_address?.address_line1 || p.on_file_street, p.on_file_address?.address_line2].filter((v) => String(v || "").trim()).join(", "),
+    },
+    // Accept here means "the address on file is right" — adopting the
+    // caller's number is a record edit, after which the card closes itself.
+    p.stated_street && { label: "To resolve", value: (p.scheduling_window?.status === "confirmed" || p.scheduling_status === "confirmed")
+      ? "Accept = the address on file is correct (a booking task is then filed for the confirmed appointment). Accept judges the WHOLE call — every other open card on it resolves too, so review those first. If the caller's number is right, edit the customer's address to it and book the appointment; the card closes once both are done."
+      : "Accept = the address on file is correct. Accept judges the WHOLE call — every other open card on it resolves too, so review those first. If the caller's number is right, edit the customer's address to it; the card closes once the record matches." },
+    // A promised follow-up (visit 2) the dispute hold kept from being
+    // booked with the primary — book both, not just the recovered primary.
+    p.follow_up_plan && (p.follow_up_plan.scheduled_date || p.follow_up_plan.window_start) && {
+      label: "Promised follow-up",
+      value: `Visit 2 was promised${p.follow_up_plan.scheduled_date ? ` for ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""} — book it with the primary appointment.`,
+    },
+    // A same-call visit the dispute retained on the caller's number: the
+    // work is to correct THAT appointment's address, not to book another.
+    // …after a DENIED call the visit is to be cancelled or reviewed, never
+    // corrected and kept (the server's own summary says so).
+    p.retained_service_id && {
+      label: "Retained visit",
+      value: p.skipped_reason === "retained_visit_review_after_denial"
+        ? `Visit ${p.retained_service_id}${p.retained_scheduled_date ? ` on ${String(p.retained_scheduled_date).slice(0, 10)}` : ""} is still scheduled on the caller-stated number after the call was denied — cancel it or review it; do not correct its address.`
+        : `Visit ${p.retained_service_id}${p.retained_scheduled_date ? ` on ${String(p.retained_scheduled_date).slice(0, 10)}` : ""} was kept on the caller-stated number — correct its address; do not book a second appointment.`,
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },
@@ -228,12 +276,12 @@ export function ConfirmEvidence({ payload }) {
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before dispatch</div>
       {rows.map((r) => (
-        <div key={`${r.label}-${r.value}`} className="text-12 text-ink-secondary">
+        <div key={`${r.label}-${r.value}`} className="text-14 text-ink-secondary">
           <span className="text-ink-tertiary">{r.label}:</span> {r.value}
         </div>
       ))}
       {p.confirmation_question && (
-        <div className="text-12 text-zinc-900 mt-1">Ask: “{p.confirmation_question}”</div>
+        <div className="text-14 text-zinc-900 mt-1">Ask: “{p.confirmation_question}”</div>
       )}
     </div>
   );
@@ -364,7 +412,10 @@ export default function TriageInboxTabV2() {
       : `/admin/triage/auto-routed/${item.call_log_id}/verdict`;
     adminFetch(url, {
       method: "POST",
-      body: JSON.stringify({ verdict, wrong_fields: wrongFields || [], note: note || null }),
+      // expected_updated_at: version binding (enforced server-side for
+      // house-number conflict cards) — a card refreshed since it was
+      // rendered answers 409 instead of settling unseen evidence.
+      body: JSON.stringify({ verdict, wrong_fields: wrongFields || [], note: note || null, expected_updated_at: item.updated_at || null }),
     })
       .then(() => {
         setActioning(null);
@@ -384,6 +435,26 @@ export default function TriageInboxTabV2() {
       })
       .catch((err) => {
         setActioning(null);
+        // The card's evidence was refreshed since it rendered (a force
+        // reprocess on a house-number conflict): reload so the operator
+        // answers the CURRENT evidence, instead of resubmitting the same
+        // stale version forever (codex #4666 r25 P2).
+        if (err?.status === 409 && err?.code === 'STALE_CARD_VERSION') {
+          setDenyFor(null);
+          setDenyFields([]);
+          load(mode, status, autoOnly);
+          setError("This card's evidence changed since it loaded — review the refreshed card before answering.");
+          return;
+        }
+        // Any other 409 (a relinked call, a reschedule proposal on the
+        // card) carries the server's own instruction — a reload would not
+        // change it, so show the message rather than loop on it.
+        if (err?.status === 409 && err?.message) {
+          setDenyFor(null);
+          setDenyFields([]);
+          setError(err.message);
+          return;
+        }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
@@ -630,6 +701,15 @@ export default function TriageInboxTabV2() {
                 // commitment needs the single-card Resolve/Dismiss transition,
                 // same as bounce and property-role cards above).
                 const isPromiseCard = isTriage && item.reason_code === "reschedule_link_promise";
+                // An owed follow-up visit (the primary booked; visit 2 is
+                // booked by hand) — settled by its own Resolve once booked,
+                // never by a call verdict (the server 400s /verdict on it).
+                const isFollowUpCard = isTriage && item.reason_code === "attached_booking_followup_unbooked";
+                // Accepting a house-number conflict stores a calibration
+                // `deny · address` on route_feedback; neither the settled
+                // conflict nor the recovery task it files is judged by it.
+                const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
+                const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
@@ -664,7 +744,7 @@ export default function TriageInboxTabV2() {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isRescheduleProposal && (
+                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -725,6 +805,16 @@ export default function TriageInboxTabV2() {
                             >
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
+                            </Button>
+                          ) : isFollowUpCard ? (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={actioning === busyKey}
+                              onClick={() => resolveItem(item)}
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                              {actioning === busyKey ? "Saving…" : "Follow-up booked"}
                             </Button>
                           ) : (
                             <>

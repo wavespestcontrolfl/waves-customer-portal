@@ -3,7 +3,6 @@
  * Tabs rendered as one centered pill:
  *   - "Overview"           — AgentOpsPage (fleet health cards + task queue),
  *                            or the Control center once features.ledger is enabled
- *   - "Dispatch"           — Auto-Dispatch run history and visit decisions
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
  *   - "Pending Drafts"     — PendingDraftsTab (owner-approval queue for
  *                            parked message_drafts; approve/revise sends)
@@ -33,9 +32,9 @@
  * Tier 1 V2 styling for the shell; the embedded pages keep their own
  * Tier 2 styles.
  */
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw, Layers } from "lucide-react";
+import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, Layers } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
@@ -70,7 +69,6 @@ const TAB_LIST = [
   // working) — GATE_AGENT_ACTIVITY; the tab renders a "not enabled" note
   // while the gate is off (the endpoint answers { available: false }).
   { key: TABS.ACTIVITY, label: "Runs", Icon: Activity },
-  { key: TABS.DISPATCH, label: "Dispatch", Icon: Bot, adminOnly: true },
   { key: TABS.DECISIONS, label: "Decisions", Icon: ListChecks },
   { key: TABS.DRAFTS, label: "Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow", Icon: MessageSquareDashed },
@@ -108,8 +106,8 @@ function readsArea(tab, controlCenter) {
 
 // Overview is the Control center once the ledger phase exists, else the
 // fleet-health page it has always been.
-function OverviewTab({ controlCenter, areas, setRefreshHandler }) {
-  return controlCenter ? <AgentControlCenterTab areas={areas} setRefreshHandler={setRefreshHandler} /> : <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />;
+function OverviewTab({ controlCenter, areas }) {
+  return controlCenter ? <AgentControlCenterTab areas={areas} /> : <AgentOpsPage embedded />;
 }
 
 export default function AgentsHubPage() {
@@ -126,13 +124,14 @@ export default function AgentsHubPage() {
     return () => { disposed = true; };
   }, []);
   const queueAvailable = hub.features.queue === true;
-  // Keep the gated Control center and admin-only Dispatch oversight together.
+  // Auto-Dispatch is autonomous. Its diagnostic deep links remain admin-only,
+  // but it is no longer a section in the everyday navigation.
   const controlCenter = hub.features.ledger === true;
-  const tabList = (queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST)
-    .filter(({ adminOnly }) => !adminOnly || getAdminUser()?.role === "admin");
+  const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
   const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
-  const tab = validTabs.includes(paramTab) ? paramTab : TABS.OVERVIEW;
+  const diagnosticDispatch = paramTab === TABS.DISPATCH && getAdminUser()?.role === "admin";
+  const tab = diagnosticDispatch || validTabs.includes(paramTab) ? paramTab : TABS.OVERVIEW;
   const setTab = useCallback(
     (next) => {
       // Re-clicking the active section renders nothing new — skip the URL
@@ -156,22 +155,6 @@ export default function AgentsHubPage() {
   // (Codex #2961 r15).
   useRenderedTabBeacon("/admin/agents", tab, [searchParams]);
 
-  // AgentOpsPage owns its data fetch; expose a handle here so the lifted
-  // Refresh pill in this header can trigger it without lifting the state
-  // (same pattern as AdminDispatchPage's setOpenCreateHandler). The page
-  // re-registers on each loading transition so the pill can show busy
-  // state, and clears the handler on unmount.
-  const refreshRef = useRef(null);
-  const [refreshState, setRefreshState] = useState({
-    ready: false,
-    busy: false,
-  });
-  const setRefreshHandler = useCallback((handler, busy = false) => {
-    refreshRef.current = handler || null;
-    setRefreshState({ ready: typeof handler === "function", busy });
-  }, []);
-  const handleRefresh = () => refreshRef.current?.();
-
   const showAreas = readsArea(tab, controlCenter) && hub.areas.length > 0;
   const areaSections = showAreas ? [{ key: ALL_AREAS, label: "All" }, ...hub.areas.map((a) => ({ key: a.key, label: areaLabel(a) }))] : [];
   const activeArea = hub.areas.some((a) => a.key === area) ? area : ALL_AREAS;
@@ -185,26 +168,16 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-9" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"}
+        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-8" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-7"}
         secondarySections={areaSections}
         secondaryActiveKey={activeArea}
         onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}
         secondaryAriaLabel="Product area"
         secondaryNavGridClassName="grid-cols-2 md:grid-cols-4 lg:grid-cols-7"
-        action={
-          tab === TABS.OVERVIEW || tab === TABS.MODELS
-            ? {
-                label: refreshState.busy ? "Refreshing" : "Refresh",
-                icon: RefreshCw,
-                onClick: handleRefresh,
-                disabled: !refreshState.ready || refreshState.busy,
-              }
-            : null
-        }
       />
       <div aria-label="Agents content" className="flex-1 min-h-0 flex flex-col">
         {tab === TABS.OVERVIEW ? (
-          <OverviewTab controlCenter={controlCenter} areas={hub.areas} setRefreshHandler={setRefreshHandler} />
+          <OverviewTab controlCenter={controlCenter} areas={hub.areas} />
         ) : tab === TABS.ACTIVITY ? (
           <AgentActivityTab />
         ) : tab === TABS.DISPATCH ? (
@@ -216,7 +189,7 @@ export default function AgentsHubPage() {
         ) : tab === TABS.SHADOW ? (
           <AgentShadowDraftsPage embedded />
         ) : tab === TABS.MODELS ? (
-          <AgentModelsTab setRefreshHandler={setRefreshHandler} />
+          <AgentModelsTab />
         ) : tab === TABS.QUEUE ? (
           <AgentQueueTab embedded />
         ) : (

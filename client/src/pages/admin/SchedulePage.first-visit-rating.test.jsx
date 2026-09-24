@@ -188,16 +188,33 @@ describe('first-visit pest activity rating', () => {
     expect(body).not.toHaveProperty('clientPestRatingPrefilled');
   });
 
-  it('a restored prefill keeps its marker even when the gate now says not-first-visit', async () => {
+  it('a stale untouched prefill restored after the gate says not-first-visit is cleared', async () => {
     localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Prefill only', clientPestRating: 5, clientPestRatingTouched: false }));
     const onSubmit = await mount();
     await answer({ allowed: true, firstVisit: false });
     fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(pressed()).toEqual([]);
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
     });
     const body = onSubmit.mock.calls[0][1];
-    expect(body.clientPestRating).toBe(5);
-    expect(body.clientPestRatingPrefilled).toBe(true);
+    expect(body).not.toHaveProperty('clientPestRating');
+    expect(body).not.toHaveProperty('clientPestRatingCleared');
+  });
+
+  it('a stale untouched prefill restored before the gate answers is cleared when it says not-first-visit', async () => {
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Prefill only', clientPestRating: 5, clientPestRatingTouched: false }));
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await answer({ allowed: true, firstVisit: false });
+    expect(pressed()).toEqual([]);
+  });
+
+  it('a chosen rating restored from a draft survives a not-first-visit gate', async () => {
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Chose 4', clientPestRating: 4, clientPestRatingTouched: true }));
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await answer({ allowed: true, firstVisit: false });
+    expect(new Set(pressed())).toEqual(new Set(['Rate pest activity 4 out of 5']));
   });
 });

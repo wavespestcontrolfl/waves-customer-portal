@@ -204,7 +204,7 @@ const DYNAMIC_TABLE_INSERTS = [
     file: 'routes/admin-photo-assessments.js',
     anchor: 'const [row] = await db(config.table).insert({',
     expr: 'config.table',
-    reason: "FUNNEL_CONFIGS tables only — 'lawn_diagnostics' / 'pest_identifications' (routes/admin-photo-assessments.js), never leads",
+    reason: "FUNNEL_CONFIGS tables only — 'lawn_diagnostics' / 'pest_identifications' / 'tree_shrub_identifications' (routes/admin-photo-assessments.js), never leads",
     // Scoped to the named config OBJECT (balanced-brace extraction), where
     // spreads, shorthand, and noncanonical keys are rejected and every
     // listed prop must be a literal.
@@ -221,7 +221,7 @@ const DYNAMIC_TABLE_INSERTS = [
     file: 'utils/funnel-photos.js',
     anchor: 'await db(table).insert({',
     expr: 'table',
-    reason: 'caller-supplied funnel PHOTO table (lawn/pest assessment photo tables), never leads',
+    reason: 'caller-supplied funnel PHOTO table (lawn/pest/tree & shrub assessment photo tables), never leads',
     // allowIndirect is accepted ONLY from indirectFile — the one file whose
     // config object the config-literals contract validates.
     callerContract: {

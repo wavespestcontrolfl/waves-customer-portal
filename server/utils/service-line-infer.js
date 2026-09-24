@@ -14,7 +14,10 @@ const PALM_NOT_PALMETTO_RE = /palm(?!etto)/;
 function inferServiceLine(interest) {
   const t = (interest || '').toLowerCase();
   if (t.includes('lawn') || t.includes('grass') || t.includes('turf')) return 'lawn';
-  if (t.includes('mosquito')) return 'mosquito';
+  // 'misting' alone (no "mosquito") still routes here — the misting system
+  // pages (catalog: 20260924000020 mosquito_misting_system) don't always
+  // say "mosquito" in their lead copy.
+  if (t.includes('mosquito') || t.includes('misting')) return 'mosquito';
   if (t.includes('termite')) return 'termite';
   if (t.includes('rodent') || t.includes('rat') || t.includes('mouse')) return 'rodent';
   if (t.includes('tree') || t.includes('shrub') || PALM_NOT_PALMETTO_RE.test(t)) return 'tree_shrub';
@@ -60,6 +63,13 @@ function inferSpecificService(interest) {
   if (t.includes('termite trench')) return 'termite_trenching';
   if (t.includes('termite bait')) return 'termite_bait_station';
   if (t.includes('bora')) return 'bora_care';
+  // Mosquito MISTING SYSTEM (install + on-site design visit) is a distinct,
+  // high-ticket lead identity from the recurring barrier program
+  // (mosquito_monthly / mosquito_one_time / mosquito_seasonal) — must be
+  // checked before the bare 'mosquito' catch-all below, or every misting
+  // lead misbuckets as the recurring program (catalog: 20260924000020
+  // mosquito_misting_system).
+  if (t.includes('misting')) return 'mosquito_misting';
   if (t.includes('mosquito')) return 'mosquito_program';
   if (t.includes('flea') || t.includes('tick')) return 'flea_tick';
   if (t.includes('cockroach') || t.includes('roach')) return 'cockroach';
@@ -80,7 +90,7 @@ function inferSpecificService(interest) {
 function inferServiceBucket(interest) {
   const specific = inferSpecificService(interest);
   const recurring = ['mosquito_program', 'termite_bait_station', 'rodent_bait_station', 'quarterly_pest'];
-  const highTicket = ['rodent_exclusion', 'bed_bug', 'termite_trenching', 'bora_care', 'palm_injection'];
+  const highTicket = ['rodent_exclusion', 'bed_bug', 'termite_trenching', 'bora_care', 'palm_injection', 'mosquito_misting'];
   const lawnSeasonal = ['lawn_plugging', 'top_dressing', 'dethatching', 'tree_shrub_spray'];
   if (recurring.includes(specific)) return 'recurring';
   if (highTicket.includes(specific)) return 'high_ticket_specialty';

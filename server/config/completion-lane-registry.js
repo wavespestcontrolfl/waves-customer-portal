@@ -78,8 +78,16 @@ const CUTOVER_IN_FLIGHT_KEYS = {
 // mode 'internal_only', no pointer): the only posture the runtime honors
 // for non-typed suppression, keeping the service_records audit row while
 // suppressing the report token and completion comms.
+//
+// mosquito_misting_system (2026-09-24, migration 20260924000020): a
+// lead-only catalog row with no engine pricer — misting is quoted after an
+// on-site design visit, an advisory walkthrough rather than a completed
+// treatment (same shape as the Waves Assessment, just with no alternate
+// typed deliverable of its own yet). Same enforced posture: completion_mode
+// 'internal_only', no project_type — never a generic auto-send report.
 const ASSESSMENT_EXPERIENCE_KEYS = [
   'lawn_inspection',
+  'mosquito_misting_system',
 ];
 
 // Owner 2026-07-12: scheduled as services, but billing riders — invoice line

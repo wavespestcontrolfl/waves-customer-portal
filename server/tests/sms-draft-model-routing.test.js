@@ -108,7 +108,12 @@ describe('generateDraftOnce', () => {
   });
 
   test('routed success: draft comes from the routed model', async () => {
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: DRAFT_JSON, model: MODELS.OPENAI_SMS_DRAFT });
+    dispatchWithFallback.mockResolvedValue({
+      ok: true,
+      text: DRAFT_JSON,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      servedModel: 'provider-resolved-draft-model',
+    });
 
     const result = await generateDraftOnce(client, 'system', 'user content', MODELS.ROUTES.smsDraftDefault);
 
@@ -125,6 +130,7 @@ describe('generateDraftOnce', () => {
       expect.objectContaining({ validate: expect.any(Function) }),
     );
     expect(result.model).toBe(MODELS.OPENAI_SMS_DRAFT);
+    expect(result.servedModel).toBe('provider-resolved-draft-model');
     expect(result.parsed.reply).toBe('Hello! Happy to help with that.');
     expect(client.messages.create).not.toHaveBeenCalled();
   });

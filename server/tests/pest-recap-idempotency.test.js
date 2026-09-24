@@ -18,6 +18,9 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/pest-pressure/orchestrate', () => ({
   runAndSwallowErrors: jest.fn().mockResolvedValue(null),
 }));
+jest.mock('../services/pest-pressure/store', () => ({
+  loadActiveConfig: jest.fn().mockResolvedValue({ allowTechnicianClientRatingEntry: true, enabledServiceLines: ['pest', 'mosquito'] }),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mockResolvedValue() }));
 jest.mock('../services/track-transitions', () => ({
@@ -333,6 +336,32 @@ describe('pest recap idempotency (Codex P1)', () => {
     const { runAndSwallowErrors } = require('../services/pest-pressure/orchestrate');
     expect(runAndSwallowErrors).toHaveBeenCalledTimes(2);
     expect(runAndSwallowErrors).toHaveBeenLastCalledWith(store.records[0].id, knex);
+  });
+
+  test('with technician rating entry switched off, a recap rating is ignored and nothing rescores (follow-up to #4741)', async () => {
+    const { loadActiveConfig } = require('../services/pest-pressure/store');
+    loadActiveConfig.mockResolvedValueOnce({ allowTechnicianClientRatingEntry: false, enabledServiceLines: ['pest'] });
+    const store = {
+      serviceStatus: 'scheduled',
+      records: [],
+      extraRecordCols: { client_pest_rating: {}, client_pest_rating_source: {}, client_pest_rating_at: {} },
+    };
+    const knex = makeKnex(store);
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Treated kitchen + garage.',
+      products: [{ product_name: 'Termidor' }],
+      customerRecap: 'Service complete.',
+      sendSms: false,
+      clientPestRating: 4,
+      knex,
+    });
+    expect(result.ok).toBe(true);
+    expect(store.recordInserts[0]).not.toHaveProperty('client_pest_rating');
+    expect(store.recordInserts[0]).not.toHaveProperty('client_pest_rating_source');
+    expect(require('../services/pest-pressure/orchestrate').runAndSwallowErrors).not.toHaveBeenCalled();
   });
 
   test('a recap-created record freezes the report identity snapshot from in-trx reads (codex P2 #3742)', async () => {

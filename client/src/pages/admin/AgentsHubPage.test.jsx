@@ -148,9 +148,10 @@ describe("AgentsHubPage usage reporting", () => {
 
 
 describe("Dispatch oversight", () => {
-  it("opens the canonical Dispatch tab and retains the requested run", () => {
+  it("omits autonomous dispatch from navigation but preserves diagnostic run links", () => {
     renderHub("/admin/agents?tab=dispatch&run=run-123");
     expect(screen.getByText("Auto-Dispatch workspace")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dispatch" })).not.toBeInTheDocument();
     expect(screen.getByTestId("search")).toHaveTextContent("run=run-123");
   });
   it("hides Dispatch oversight from technician accounts", () => {
