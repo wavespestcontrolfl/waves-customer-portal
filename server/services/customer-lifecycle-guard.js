@@ -57,6 +57,12 @@ const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 // on a stale status once the tracker itself says the work is done or gone.
 const { LIVE_TRACK_STATES } = require('./cancellation-eligibility');
 const TERMINAL_TRACK_STATES = ['complete', 'cancelled'];
+// Terminal OPERATIONAL statuses outrank a stale live tracker: a cancel,
+// skip or no-show writes `status` and syncs track_state best-effort, so a
+// failed sync can leave en_route/on_property on a finished row. The
+// tracking route and the cancellation processor give these statuses
+// precedence the same way (GitHub Codex #4684 r9 P2).
+const TERMINAL_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 // A live visit/series obligation: either an upcoming-or-in-progress
 // scheduled_services row, OR a series ANCHOR still marked recurring_ongoing
 // with no upcoming child seeded yet (a completed last occurrence whose next
@@ -89,7 +95,13 @@ function whereVisitRowLive(qb, today, { trackState = true } = {}) {
     });
     if (trackState) this.whereRaw(`(track_state IS NULL OR track_state NOT IN (${terminalTrackStatesSql}))`, TERMINAL_TRACK_STATES);
   });
-  if (trackState) qb.orWhereRaw(`track_state IN (${liveTrackStatesSql})`, LIVE_TRACK_STATES);
+  if (trackState) {
+    const terminalStatusesSql = TERMINAL_STATUSES.map(() => '?').join(', ');
+    qb.orWhereRaw(
+      `(track_state IN (${liveTrackStatesSql}) AND (status IS NULL OR status NOT IN (${terminalStatusesSql})))`,
+      [...LIVE_TRACK_STATES, ...TERMINAL_STATUSES],
+    );
+  }
 }
 
 async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
