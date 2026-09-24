@@ -242,6 +242,28 @@ async function saveCustomerEstimate(input, actionContext) {
     throw failure('A fresh administrator confirmation is required.', 'approval_required');
   }
   return db.transaction(async trx => {
+    // The county-roll ADDRESS-VERDICT contact-pair lock(s) FIRST — before the
+    // customer, group and estimate locks (#4667): the persistence save takes
+    // it after this transaction's row locks, while the public lookup and
+    // /calculate take it before touching those rows, so acquiring it here
+    // ahead of every row lock keeps one order. Pair identities are read
+    // unlocked (identity, not evidence); reentrant for the save's own take.
+    {
+      const { contactPairLockKey } = require('../lead-address-unverified');
+      const pairKeys = new Set();
+      const add = (email, phone) => { if (email && phone) pairKeys.add(contactPairLockKey(email, phone)); };
+      if (input.estimate_id) {
+        const peek = await trx('estimates').where({ id: input.estimate_id }).first('customer_email', 'customer_phone');
+        add(peek?.customer_email, peek?.customer_phone);
+      }
+      if (input.customer_id) {
+        const cust = await trx('customers').where({ id: input.customer_id }).first('email', 'phone');
+        add(cust?.email, cust?.phone);
+      }
+      for (const key of [...pairKeys].sort()) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
+      }
+    }
     // Lock order: customer (and its properties) FIRST, then the estimate.
     // updateCustomer locks the customers row and its fanout then touches the
     // open estimates rows, so taking the estimate lock before the customer

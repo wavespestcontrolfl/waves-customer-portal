@@ -601,7 +601,13 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
                 // profile timestamp is the evidence time, the same fallback
                 // the locked reconciliation uses (pre-push audit P1 after r45).
                 const evidenceAt = auditEvidenceAt(result) || result?.meta?.timestamp || null;
-                if (verdict.status === 'clean' && evidenceAt) verdict.at = evidenceAt;
+                // …and never OLDER than a clean verdict the reconciliation
+                // accepted under the lock (a staff confirmation newer than
+                // this delayed live audit): the newest accepted clean
+                // timestamp is persisted (pre-push audit P1 after r48).
+                const newestCleanAt = [evidenceAt, reconciledCleanAt].filter(Boolean)
+                  .sort((a, b) => (Date.parse(b) || 0) - (Date.parse(a) || 0))[0] || null;
+                if (verdict.status === 'clean' && newestCleanAt) verdict.at = newestCleanAt;
                 // An UNANSWERED lookup (a county outage) that reattached to a
                 // lead the reconciliation found clean for this premise must
                 // not overwrite that clean verdict with 'unanswered' — an
