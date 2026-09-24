@@ -11,7 +11,12 @@
 // the critical audit row commits with the archival.
 const { samePremiseDisplay } = require('./lead-address-unverified');
 
-const WITHDRAWABLE_PUBLICATION_STATES = ['sent', 'viewed', 'scheduled', 'sending', 'send_failed'];
+// …and 'expired': a previously published quote that expired before the
+// flagged lookup is still revivable through the public seven-day extension
+// (isEstimateExtensionRequestEligible admits published expired rows), so
+// it is quarantined too — the archive and price-lock guards still apply
+// (codex #4667 r36 P1).
+const WITHDRAWABLE_PUBLICATION_STATES = ['sent', 'viewed', 'scheduled', 'sending', 'send_failed', 'expired'];
 
 async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactPhone, fullAddress, flag = null }) {
   if (!leadId || !contactEmail || !contactPhone || !String(fullAddress || '').trim()) return [];
