@@ -2850,15 +2850,26 @@ const AppointmentReminders = {
         // a fresh row would carry no hold and enter the send scan while
         // the address is unresolved (codex #4666 r18 P1). The settlement
         // task re-arms it.
+        // …and the same for the RECOVERY task the settlement hands them to
+        // (existing_scheduled_service_ids): the hold lasts until staff
+        // close that task (local audit P1 after codex r19).
         .whereNotExists(function () {
           this.select(1)
             .from('triage_items as ti')
-            .where('ti.reason_code', 'on_file_house_number_conflict')
             .whereIn('ti.status', ['open', 'in_progress'])
-            .whereRaw("jsonb_typeof(ti.payload->'held_unassigned_booking_ids') = 'array'")
-            // jsonb_exists, never the bare `?` operator: knex reads `?` as a
-            // binding placeholder (codex r19 P1).
-            .whereRaw("jsonb_exists(ti.payload->'held_unassigned_booking_ids', ss.id::text)");
+            .where(function () {
+              this.where(function () {
+                this.where('ti.reason_code', 'on_file_house_number_conflict')
+                  .whereRaw("jsonb_typeof(ti.payload->'held_unassigned_booking_ids') = 'array'")
+                  // jsonb_exists, never the bare `?` operator: knex reads
+                  // `?` as a binding placeholder (codex r19 P1).
+                  .whereRaw("jsonb_exists(ti.payload->'held_unassigned_booking_ids', ss.id::text)");
+              }).orWhere(function () {
+                this.where('ti.reason_code', 'auto_booking_skipped_after_approval')
+                  .whereRaw("jsonb_typeof(ti.payload->'existing_scheduled_service_ids') = 'array'")
+                  .whereRaw("jsonb_exists(ti.payload->'existing_scheduled_service_ids', ss.id::text)");
+              });
+            });
         })
         .orderBy('ss.scheduled_date', 'asc')
         .limit(SELF_HEAL_REGISTRATION_LIMIT)
