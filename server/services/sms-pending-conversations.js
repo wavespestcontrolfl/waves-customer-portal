@@ -35,11 +35,18 @@ async function loadPendingSmsConversations({
   const blockedPeer = phoneIdentitySql('b.number');
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
-  const stopPeer = phoneIdentitySql("COALESCE(NULLIF(stop_receipt.phone, ''), NULLIF(stop_legacy.from_phone, ''), NULLIF(stop_conversation.contact_phone, ''), stop_customer.phone, '')");
+  // An uncertain historical STOP must never migrate to a customer's changed
+  // primary phone. Legacy/receipt events still suppress their original peer.
+  const stopPeer = phoneIdentitySql("COALESCE(NULLIF(stop_receipt.phone, ''), NULLIF(stop_legacy.from_phone, ''), NULLIF(stop_message.metadata->>'sms_contact_phone', ''), NULLIF(stop_conversation.contact_phone, ''), '')");
   const legacyStopPeer = phoneIdentitySql('stop_log.from_phone');
   const receiptStopPeer = phoneIdentitySql('receipt_stop.phone');
   const draftId = draftIdSql("COALESCE(audit.metadata->>'draft_id', s.metadata_draft_id)");
   const draftReplyToMessageId = draftReplyToMessageIdSql('response_draft.sms_log_id');
+  // The original communications backfill copied no source id for null-SID
+  // rows. Match its exact copied event fields, accepting only one legacy
+  // candidate; matching NULL SIDs alone would join unrelated messages.
+  const legacyEndpoint = phoneIdentitySql("CASE WHEN sl.direction = 'inbound' THEN sl.to_phone ELSE sl.from_phone END");
+  const legacyPeer = phoneIdentitySql("CASE WHEN sl.direction = 'inbound' THEN sl.from_phone ELSE sl.to_phone END");
   const { rows = [] } = await db.raw(`
     WITH canonical_sms AS MATERIALIZED (
       SELECT 'canonical'::text AS source, m.id, m.direction, m.body AS message_body,
@@ -47,8 +54,8 @@ async function loadPendingSmsConversations({
              m.delivery_status AS canonical_delivery_status,
              m.metadata AS canonical_metadata, COALESCE(m.media, '[]'::jsonb) AS media,
              c.customer_id,
-             COALESCE(NULLIF(c.contact_phone, ''), cu.phone, '') AS contact_phone,
-             COALESCE(c.our_endpoint_id, '') AS our_endpoint_id
+             COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, ''), cu.phone, '') AS contact_phone,
+             COALESCE(NULLIF(m.metadata->>'sms_our_endpoint_id', ''), c.our_endpoint_id, '') AS our_endpoint_id
       FROM messages m
       JOIN conversations c ON c.id = m.conversation_id
       LEFT JOIN customers cu ON cu.id = c.customer_id
@@ -57,6 +64,32 @@ async function loadPendingSmsConversations({
         AND NOT (COALESCE(c.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(c.contact_phone, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(cu.phone, '') = ANY(CAST(:excludePhones AS text[])))
+    ), canonical_legacy_links AS MATERIALIZED (
+      SELECT s.id AS message_id, legacy.*
+      FROM messages s
+      JOIN conversations original_thread ON original_thread.id = s.conversation_id
+      LEFT JOIN LATERAL (
+        SELECT candidates.* FROM (
+          SELECT sl.*, 1::bigint AS match_count
+          FROM sms_log sl
+          WHERE s.twilio_sid IS NOT NULL AND sl.twilio_sid = s.twilio_sid
+            AND sl.direction = s.direction
+          UNION ALL
+          SELECT sl.*, count(*) OVER () AS match_count
+          FROM sms_log sl
+          WHERE s.twilio_sid IS NULL AND sl.twilio_sid IS NULL
+              AND sl.direction = s.direction
+              AND sl.created_at = s.created_at
+              AND NULLIF(sl.message_body, '') IS NOT DISTINCT FROM s.body
+              AND sl.customer_id IS NOT DISTINCT FROM original_thread.customer_id
+              AND ${legacyEndpoint} = ${phoneIdentitySql("COALESCE(NULLIF(s.metadata->>'sms_our_endpoint_id', ''), original_thread.our_endpoint_id)")}
+              AND (original_thread.customer_id IS NOT NULL
+                OR ${legacyPeer} = ${phoneIdentitySql('original_thread.contact_phone')})
+        ) candidates
+        WHERE s.twilio_sid IS NOT NULL OR candidates.match_count = 1
+        ORDER BY candidates.created_at DESC, candidates.id DESC LIMIT 1
+      ) legacy ON true
+      WHERE s.channel = 'sms'
     ), legacy_only_sms AS MATERIALIZED (
       SELECT 'legacy'::text AS source, sl.id, sl.direction, sl.message_body,
              sl.created_at, sl.twilio_sid, sl.message_type AS canonical_message_type,
@@ -71,6 +104,10 @@ async function loadPendingSmsConversations({
           SELECT 1 FROM messages twin
           WHERE twin.channel = 'sms' AND twin.twilio_sid = sl.twilio_sid
             AND twin.direction = sl.direction
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM canonical_legacy_links twin
+          WHERE sl.twilio_sid IS NULL AND twin.id = sl.id
         )
         AND NOT (COALESCE(sl.to_phone, '') = ANY(CAST(:excludePhones AS text[]))
           OR COALESCE(sl.from_phone, '') = ANY(CAST(:excludePhones AS text[]))
@@ -92,14 +129,8 @@ async function loadPendingSmsConversations({
              CASE WHEN s.source = 'legacy' THEN s.created_at
                ELSE COALESCE(legacy.created_at, s.created_at) END AS response_created_at
       FROM base_sms s
-      LEFT JOIN LATERAL (
-        SELECT sl.id, sl.message_type, sl.status, sl.metadata, sl.created_at,
-               sl.from_phone, sl.to_phone
-        FROM sms_log sl
-        WHERE s.source = 'canonical' AND sl.twilio_sid = s.twilio_sid
-          AND sl.direction = s.direction
-        ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
-      ) legacy ON true
+      LEFT JOIN canonical_legacy_links legacy
+        ON s.source = 'canonical' AND legacy.message_id = s.id
       LEFT JOIN inbound_sms_optout_receipts optout_receipt
         ON s.direction = 'inbound' AND optout_receipt.message_sid = s.twilio_sid
     ), inbound_events AS MATERIALIZED (
@@ -116,7 +147,7 @@ async function loadPendingSmsConversations({
         AND s.message_type <> ALL(CAST(:ignoredInboundTypes AS text[]))
         AND s.message_type NOT LIKE 'job\\_%'
         AND NOT EXISTS (SELECT 1 FROM blocked_numbers b WHERE ${blockedPeer} = s.peer)
-      ORDER BY s.peer, s.endpoint, s.created_at DESC, s.id DESC
+      ORDER BY s.peer, s.endpoint, s.created_at DESC, (s.source = 'canonical') DESC, s.id DESC
     ), enriched_inbound AS MATERIALIZED (
       SELECT li.*, li.metadata || COALESCE(audit.metadata, '{}'::jsonb) AS enriched_metadata
       FROM latest_inbound li
@@ -130,6 +161,7 @@ async function loadPendingSmsConversations({
       SELECT s.*, li.id AS inbound_id, li.created_at AS inbound_created_at,
              response_draft.intent AS draft_intent,
              CASE WHEN li.source = 'legacy' THEN response_draft.sms_log_id
+               WHEN li.twilio_sid IS NULL AND response_draft.sms_log_id = li.legacy_id THEN li.id
                ELSE ${draftReplyToMessageId} END AS draft_reply_to_event_id
       FROM enriched_inbound li
       JOIN projected_events s ON s.peer = li.peer AND s.endpoint = li.endpoint
@@ -167,12 +199,7 @@ async function loadPendingSmsConversations({
       FROM messages stop_message
       JOIN conversations stop_conversation ON stop_conversation.id = stop_message.conversation_id
       LEFT JOIN customers stop_customer ON stop_customer.id = stop_conversation.customer_id
-      LEFT JOIN LATERAL (
-        SELECT sl.message_type, sl.from_phone
-        FROM sms_log sl
-        WHERE sl.twilio_sid = stop_message.twilio_sid AND sl.direction = stop_message.direction
-        ORDER BY sl.created_at DESC, sl.id DESC LIMIT 1
-      ) stop_legacy ON true
+      LEFT JOIN canonical_legacy_links stop_legacy ON stop_legacy.message_id = stop_message.id
       LEFT JOIN inbound_sms_optout_receipts stop_receipt
         ON stop_receipt.message_sid = stop_message.twilio_sid
       WHERE stop_message.channel = 'sms' AND stop_message.direction = 'inbound'
