@@ -106,6 +106,19 @@ router.get('/', async (req, res) => {
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .whereIn('triage_items.status', status)
       .modify((q) => { if (customerId) q.where('customers.id', customerId); })
+      // A customer-scoped read joins through the call's CURRENT customer:
+      // after a relink, a conflict card filed against another account must
+      // not surface on the new customer's estimate / booking notices (nor
+      // vanish from the old one's until a reprocess re-binds it) — the
+      // settlement already refuses it (codex r33 P2).
+      .modify((q) => {
+        if (customerId) {
+          q.whereRaw(
+            "NOT (triage_items.reason_code = 'on_file_house_number_conflict' AND COALESCE(triage_items.payload->>'dispute_customer_id', '') <> '' AND triage_items.payload->>'dispute_customer_id' <> ?)",
+            [String(customerId)],
+          );
+        }
+      })
       .modify((q) => {
         if (req.query.address_confirmation === 'true') {
           q.whereIn('triage_items.reason_code', ADDRESS_CONFIRMATION_REASONS);
@@ -1048,6 +1061,10 @@ router.post('/:id/verdict', async (req, res) => {
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
         ])
         .modify((q) => { if (conflictLeftForOwnVerdict) q.whereNot({ id: heldConflict.id }); })
+        // A verdict ON a recovery task settles that row alone: a reprocess
+        // can add fresh address / identity / email cards while the task is
+        // open, and they must be reviewed on their own (codex r33 P1).
+        .modify((q) => { if (item.reason_code === 'auto_booking_skipped_after_approval') q.where({ id: item.id }); })
         .whereRaw("payload->'reschedule_proposal' IS NULL")
         .whereIn('status', OPEN_STATES)
         .update({

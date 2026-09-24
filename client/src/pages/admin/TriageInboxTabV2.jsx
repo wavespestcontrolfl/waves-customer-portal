@@ -197,7 +197,9 @@ export function ConfirmEvidence({ payload }) {
     },
     // …and the whole on-file door too: Accept means the entire saved
     // address is right, so a differing saved unit must be visible.
-    p.stated_street && (p.on_file_address?.address_line1 || p.on_file_street) && {
+    // …and on the RECOVERY task Accept files (stated_street deliberately
+    // removed, on_file_address kept as the address to book / apply).
+    (p.stated_street || p.skipped_reason) && (p.on_file_address?.address_line1 || p.on_file_street) && {
       label: "On file",
       value: [p.on_file_address?.address_line1 || p.on_file_street, p.on_file_address?.address_line2].filter((v) => String(v || "").trim()).join(", "),
     },
@@ -692,6 +694,11 @@ export default function TriageInboxTabV2() {
                 // booked by hand) — settled by its own Resolve once booked,
                 // never by a call verdict (the server 400s /verdict on it).
                 const isFollowUpCard = isTriage && item.reason_code === "attached_booking_followup_unbooked";
+                // Accepting a house-number conflict stores a calibration
+                // `deny · address` on route_feedback; neither the settled
+                // conflict nor the recovery task it files is judged by it.
+                const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
+                const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
@@ -726,7 +733,7 @@ export default function TriageInboxTabV2() {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isRescheduleProposal && (
+                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>

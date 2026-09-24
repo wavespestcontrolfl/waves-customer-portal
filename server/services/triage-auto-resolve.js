@@ -964,6 +964,12 @@ function recordCarriesStatedStreet(item) {
   // The stated locality must hold on the record too (same helper the
   // address-moot rules use): a ZIP or city the caller gave that the record
   // now lacks or contradicts is not the same premise (pre-push audit P1).
+  // Postal-city aliases (Lakewood Ranch / Bradenton share a ZIP): agreeing
+  // ZIPs settle the locality on their own, the same ZIP-wins rule the
+  // detector applies at filing (codex r33 P2).
+  const recordZip = zip5(item.customer_zip);
+  const statedZip = zip5(payload?.stated_zip);
+  if (recordZip && statedZip) return recordZip === statedZip;
   return localityAgrees(
     { city: item.customer_city, zip: item.customer_zip },
     { city: payload?.stated_city, zip: payload?.stated_zip },
