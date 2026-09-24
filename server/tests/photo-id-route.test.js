@@ -92,7 +92,7 @@ const mockDb = jest.fn((table) => makeQuery(table));
 const mockGateState = { customerPhotoId: true };
 const mockIdentifyPest = jest.fn();
 const mockLawnAnalyzePhoto = jest.fn();
-const mockPreviewTreeShrub = jest.fn();
+const mockTreeAnalyzePhoto = jest.fn();
 const mockReserviceAccess = jest.fn(async () => null);
 // Unscoped by default (gate off / single-home) — matches every existing test
 // (property_id stamped null, no read filtering). codex GH r1 P1 tests below
@@ -159,7 +159,12 @@ jest.mock('../services/lawn-assessment', () => ({
 }));
 jest.mock('../services/tree-shrub-assessment', () => {
   const actual = jest.requireActual('../services/tree-shrub-assessment');
-  return { ...actual, previewTreeShrubAssessment: (...args) => mockPreviewTreeShrub(...args) };
+  // Mock the per-photo vision call only (analyzePhoto) — mergePhotoComposites
+  // / toCategoryScores / calculateOverall / buildTreeShrubTechFindings /
+  // buildCustomerTreeShrubReport all run for REAL (pure, deterministic), so
+  // these tests exercise the actual evidence-merge logic (codex GH r5 P1),
+  // the same as lawn's mockLawnAnalyzePhoto pattern.
+  return { ...actual, analyzePhoto: (...args) => mockTreeAnalyzePhoto(...args) };
 });
 
 const express = require('express');
@@ -230,15 +235,14 @@ beforeEach(() => {
       turf_density: 80, weed_coverage: 10, color_health: 8, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Lawn looks healthy.',
     },
   });
-  mockPreviewTreeShrub.mockResolvedValue({
-    scores: {
-      foliageFullness: 80, leafColorVigor: 75, pestActivity: 90, diseaseLeafSpot: 95, waterHeatStress: 85, overallScore: 85,
+  // Raw composite (analyzePhoto's own shape) — mergePhotoComposites /
+  // toCategoryScores / calculateOverall run for real: foliageFullness=80,
+  // leafColorVigor=75, pestActivity=diseaseLeafSpot=waterHeatStress=95
+  // ('none' severity), overall = avg(80,75,95,95,95) = 88.
+  mockTreeAnalyzePhoto.mockResolvedValue({
+    composite: {
+      foliage_fullness: 80, leaf_color_vigor: 75, pest_signals: 'none', disease_signals: 'none', water_heat_stress: 'none', pruning_mechanical: 'none', observations: 'Plants look healthy.',
     },
-    observations: 'Plants look healthy.',
-    aiSummary: 'No urgent visible plant issues found.',
-    findings: [],
-    scoredCount: 1,
-    photoCount: 1,
   });
 });
 
@@ -356,7 +360,7 @@ describe('POST /api/photo-id/:type happy paths', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.type).toBe('tree_shrub');
-      expect(body.result.scores.overall).toBe(85);
+      expect(body.result.scores.overall).toBe(88);
       expect(Array.isArray(body.result.signals)).toBe(true);
       expect(body.result.plant_groups).toEqual([]);
       expect(TABLES.tree_shrub_assessments).toHaveLength(1);
@@ -579,16 +583,9 @@ describe('next_step branches', () => {
   });
 
   test('tree_shrub: no usable scores -> unclear', async () => {
-    mockPreviewTreeShrub.mockResolvedValue({
-      scores: {
-        foliageFullness: null, leafColorVigor: null, pestActivity: null, diseaseLeafSpot: null, waterHeatStress: null, overallScore: null,
-      },
-      observations: '',
-      aiSummary: null,
-      findings: [],
-      scoredCount: 1,
-      photoCount: 1,
-    });
+    // A composite that carries SOME evidence (pest_signals present, so it's
+    // not a total-failure 503) but no foliage/color data at all.
+    mockTreeAnalyzePhoto.mockResolvedValue({ composite: { pest_signals: 'none', observations: '' } });
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
       const body = await res.json();
@@ -597,21 +594,18 @@ describe('next_step branches', () => {
     });
   });
 
-  test('tree_shrub: one photo failing to score forces unclear AND suppresses the successful subset\'s scores', async () => {
+  test('tree_shrub: one photo returning null forces unclear AND suppresses the successful subset\'s scores', async () => {
     // codex r3 P1 — scoredCount < photoCount must not read as a complete
     // next_step. codex GH r1 P1 — it must not leave the successful subset's
     // healthy-looking scores standing in the result either.
     mockReserviceAccess.mockResolvedValue({ token: 'tok-y', lanes: ['lawn'] }); // would otherwise win as 'reservice'
-    mockPreviewTreeShrub.mockResolvedValue({
-      scores: {
-        foliageFullness: 80, leafColorVigor: 75, pestActivity: 90, diseaseLeafSpot: 95, waterHeatStress: 85, overallScore: 85,
-      },
-      observations: 'Plants look healthy.',
-      aiSummary: 'No urgent visible plant issues found.',
-      findings: [],
-      scoredCount: 1,
-      photoCount: 2,
-    });
+    mockTreeAnalyzePhoto
+      .mockResolvedValueOnce({
+        composite: {
+          foliage_fullness: 80, leaf_color_vigor: 75, pest_signals: 'none', disease_signals: 'none', water_heat_stress: 'none', pruning_mechanical: 'none', observations: 'Plants look healthy.',
+        },
+      })
+      .mockResolvedValueOnce(null); // this photo's analyze call failed entirely
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
       const body = await res.json();
@@ -621,20 +615,37 @@ describe('next_step branches', () => {
     });
   });
 
+  test('tree_shrub: one healthy composite + one truly EMPTY composite is unclear, never a confident single-photo read (codex GH r5 P1)', async () => {
+    // An empty {} composite is truthy — previewTreeShrubAssessment's own
+    // scoredCount would have counted it as scored. This route's own
+    // evidence-based merge must not let it stand in as if the whole batch
+    // succeeded.
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-z', lanes: ['lawn'] }); // would otherwise win as 'reservice'
+    mockTreeAnalyzePhoto
+      .mockResolvedValueOnce({
+        composite: {
+          foliage_fullness: 80, leaf_color_vigor: 75, pest_signals: 'none', disease_signals: 'none', water_heat_stress: 'none', pruning_mechanical: 'none', observations: 'Plants look healthy.',
+        },
+      })
+      .mockResolvedValueOnce({ composite: {} }); // truthy, but carries nothing
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/tree_shrub', photoBody({ photos: [PHOTO_DATA_URL, PHOTO_DATA_URL] }));
+      const body = await res.json();
+      expect(body.next_step.kind).toBe('unclear');
+      expect(body.result.scores.overall).toBeNull();
+      expect(body.result.summary).not.toContain('Plants look healthy');
+    });
+  });
+
   test('tree_shrub: a valid-JSON response missing severity data ("synthesized" healthy scores) reads unclear, not healthy', async () => {
     // codex GH r1 P1 — toCategoryScores defaults a MISSING severity field to
     // 'none' (95), so an all-photos-"succeeded" batch with no real evidence
     // still produces a non-null, healthy-looking overallScore. Only
     // foliageFullness/leafColorVigor stay genuinely null with no evidence.
-    mockPreviewTreeShrub.mockResolvedValue({
-      scores: {
-        foliageFullness: null, leafColorVigor: null, pestActivity: 95, diseaseLeafSpot: 95, waterHeatStress: 95, overallScore: 95,
+    mockTreeAnalyzePhoto.mockResolvedValue({
+      composite: {
+        pest_signals: 'none', disease_signals: 'none', water_heat_stress: 'none', pruning_mechanical: 'none', observations: '',
       },
-      observations: '',
-      aiSummary: 'No urgent visible plant issues found.',
-      findings: [],
-      scoredCount: 1,
-      photoCount: 1,
     });
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
@@ -645,7 +656,16 @@ describe('next_step branches', () => {
   });
 
   test('tree_shrub: total vision failure -> 503, no row stored', async () => {
-    mockPreviewTreeShrub.mockResolvedValue(null);
+    mockTreeAnalyzePhoto.mockResolvedValue(null);
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
+      expect(res.status).toBe(503);
+      expect(TABLES.tree_shrub_assessments).toHaveLength(0);
+    });
+  });
+
+  test('tree_shrub: a completely EMPTY composite carries no evidence at all -> 503, not a confident/unclear 200', async () => {
+    mockTreeAnalyzePhoto.mockResolvedValue({ composite: {} });
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/tree_shrub', photoBody());
       expect(res.status).toBe(503);

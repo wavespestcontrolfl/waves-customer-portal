@@ -45,7 +45,11 @@ const {
 const lawnAssessment = require('../services/lawn-assessment');
 const { loadCustomerGrassContext, grassTypeLabel } = require('../services/lawn-grass-context');
 const {
-  previewTreeShrubAssessment,
+  analyzePhoto: analyzeTreeShrubPhoto,
+  mergePhotoComposites: mergeTreeShrubComposites,
+  toCategoryScores,
+  calculateOverall,
+  buildTreeShrubTechFindings,
   buildCustomerTreeShrubReport,
   formatAssessmentScores,
 } = require('../services/tree-shrub-assessment');
@@ -549,12 +553,46 @@ function treeResultForResponse(treeResult, unreliable) {
 
 // ── Tree & shrub ─────────────────────────────────────────────────────────
 
+// codex GH r5 P1: previewTreeShrubAssessment's OWN scoredCount counts any
+// non-null composite — an empty {} composite is truthy, so a mixed batch
+// (one real photo + one that returned nothing) merged a confident result
+// off the single working photo alone with scoredCount == photoCount
+// (nothing flagged as partial). Same evidence-first fix as lawn's
+// lawnCompositeHasEvidence: a composite counts only when it carries at
+// least one field mergePhotoComposites actually reads.
+function treeShrubCompositeHasEvidence(composite) {
+  if (!composite) return false;
+  const fields = ['foliage_fullness', 'leaf_color_vigor', 'pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical'];
+  return fields.some((key) => composite[key] != null && composite[key] !== '');
+}
+
+// Reimplements previewTreeShrubAssessment's own orchestration (analyze each
+// photo, merge, score) using the SAME exported building blocks
+// (analyzePhoto / mergePhotoComposites / toCategoryScores / calculateOverall
+// / buildTreeShrubTechFindings) rather than calling that helper directly —
+// it has no hook to filter a composite for evidence before merging, and
+// evidence-filtering is exactly the fix this needs.
+async function previewTreeShrubWithEvidence(photoInputs) {
+  const analyses = await Promise.all(photoInputs.map((photo) => analyzeTreeShrubPhoto(photo.data, photo.mimeType)
+    .catch((err) => { logger.warn(`[photo-id] tree-shrub analyzePhoto failed: ${err.message}`); return null; })));
+  const composites = analyses.filter(Boolean).map((a) => a.composite).filter(treeShrubCompositeHasEvidence);
+  if (!composites.length) return null;
+  const mergedRaw = mergeTreeShrubComposites(composites);
+  const scores = toCategoryScores(mergedRaw);
+  scores.overallScore = calculateOverall(scores);
+  return {
+    scores,
+    observations: mergedRaw.observations || '',
+    scoredCount: composites.length,
+    photoCount: photoInputs.length,
+    ...buildTreeShrubTechFindings({ scores, observations: mergedRaw.observations }),
+  };
+}
+
 async function handleTreeShrub(req, res, { note, location, propertyId, isSecondary }) {
   const photoInputs = req._photoInputs;
-  const preview = await previewTreeShrubAssessment({
-    photos: photoInputs,
-    loadImage: async (photo) => ({ base64: photo.data, mimeType: photo.mimeType }),
-  }).catch((err) => { logger.warn(`[photo-id] tree-shrub preview failed: ${err.message}`); return null; });
+  const preview = await previewTreeShrubWithEvidence(photoInputs)
+    .catch((err) => { logger.warn(`[photo-id] tree-shrub preview failed: ${err.message}`); return null; });
 
   if (!preview) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
