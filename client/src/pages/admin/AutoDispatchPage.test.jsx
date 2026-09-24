@@ -44,6 +44,7 @@ it("opens a requested run and links the named appointment to its CURRENT date", 
 it("refreshes selected decisions as well as the list when the page regains focus", async () => {
   mount();
   await screen.findByText("Original decision");
+  await screen.findByRole("button", { name: /running.*Apply/ });
   detail = { run: { ...run, status: "completed" }, logs: [{ ...decision, reason_description: "Final decision" }] };
   fireEvent(window, new Event("focus"));
   expect(await screen.findByText("Final decision")).toBeInTheDocument();
