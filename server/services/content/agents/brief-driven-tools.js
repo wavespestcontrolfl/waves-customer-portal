@@ -63,7 +63,17 @@ const sessionEditorial = new Map();
 function registerSessionEditorial(sessionId, brief) {
   if (sessionId && require('../editorial-evidence').enabled()
       && ['supporting-blog', 'customer-question', 'refresh'].includes(brief?.page_type)) {
-    sessionEditorial.set(sessionId, { title: brief.working_title || brief.target_keyword || '', attempts: 0, plan: null });
+    const refresh = brief.page_type === 'refresh' || brief.action_type === 'refresh_existing_page';
+    sessionEditorial.set(sessionId, {
+      // A refresh title comes from get_existing_page below. Decay briefs can
+      // legitimately have no query/keyword, and an agent-supplied replacement
+      // title is not authoritative for the live page being expanded.
+      title: refresh ? '' : brief.working_title || brief.target_keyword || '',
+      requiresExistingTitle: refresh,
+      targetUrl: refresh ? brief.target_url || brief.page_url || null : null,
+      attempts: 0,
+      plan: null,
+    });
   }
 }
 
@@ -376,6 +386,19 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       if (!context) return { pass: true, skipped: 'editorial_gate_not_applicable' };
       context.plan = null;
       if (++context.attempts > 3) return { pass: false, error: 'Answer-plan attempt budget exhausted; stop this draft.' };
+      if (context.requiresExistingTitle && !String(context.title || '').trim()) {
+        // Resolve the brief's bound target ourselves. The refresh agent may
+        // call get_existing_page for comparison/research pages too; accepting
+        // the most recent agent-selected page would review against an
+        // unrelated title promise.
+        const existing = context.targetUrl
+          ? await executeBriefTool('get_existing_page', { page_url: context.targetUrl }, { sessionId })
+          : null;
+        context.title = String(existing?.frontmatter?.title || existing?.frontmatter?.metaTitle || '').trim();
+        if (!context.title) {
+          return { pass: false, error: 'Existing page title unavailable; resolve the refresh brief target before validating the answer plan.' };
+        }
+      }
       try {
         const result = await require('../editorial-review').reviewPlan({ title: context.title, sections: input?.sections });
         if (result?.pass === true) context.plan = input.sections;

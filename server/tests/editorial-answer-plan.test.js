@@ -1,9 +1,15 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/content/editorial-review', () => ({ reviewPlan: jest.fn() }));
+jest.mock('../services/content-astro/github-client', () => ({ getFile: jest.fn() }));
 const tools = require('../services/content/agents/brief-driven-tools');
 const { reviewPlan } = require('../services/content/editorial-review');
+const gh = require('../services/content-astro/github-client');
 const originalGate = process.env.GATE_EDITORIAL_EVIDENCE;
-beforeEach(() => { process.env.GATE_EDITORIAL_EVIDENCE = 'true'; jest.clearAllMocks(); });
+beforeEach(() => {
+  process.env.GATE_EDITORIAL_EVIDENCE = 'true';
+  jest.clearAllMocks();
+  gh.getFile.mockReset();
+});
 afterEach(() => { tools.clearDraft('editorial-test'); });
 afterAll(() => {
   if (originalGate === undefined) delete process.env.GATE_EDITORIAL_EVIDENCE;
@@ -16,7 +22,7 @@ test('cannot emit depth before independently approved answer plan', async () => 
   expect(tools.getDraft('editorial-test')).toBeNull();
 });
 test('answer plan fails closed with a bounded retry budget', async () => {
-  tools.registerSessionEditorial('editorial-test', { page_type: 'supporting-blog' });
+  tools.registerSessionEditorial('editorial-test', { page_type: 'supporting-blog', working_title: 'Door inspection' });
   reviewPlan.mockRejectedValue(new Error('provider outage'));
   for (let i = 0; i < 4; i++) {
     const result = await tools.executeBriefTool('validate_answer_plan', { sections: [{ heading: 'Inspect', question: 'How?', answer: 'Look for gaps.' }] }, { sessionId: 'editorial-test' });
@@ -25,11 +31,59 @@ test('answer plan fails closed with a bounded retry budget', async () => {
   expect(reviewPlan).toHaveBeenCalledTimes(3);
 });
 test('a later failed plan revokes the prior approval', async () => {
-  tools.registerSessionEditorial('editorial-test', { page_type: 'supporting-blog' });
+  tools.registerSessionEditorial('editorial-test', { page_type: 'supporting-blog', working_title: 'Door inspection' });
   reviewPlan.mockResolvedValueOnce({ pass: true }).mockResolvedValueOnce({ pass: false });
   const context = { sessionId: 'editorial-test' };
   const input = { sections: [{ heading: 'Inspect', question: 'How?', answer: 'Look for gaps.' }] };
   expect((await tools.executeBriefTool('validate_answer_plan', input, context)).pass).toBe(true);
   expect((await tools.executeBriefTool('validate_answer_plan', input, context)).pass).toBe(false);
+  expect(reviewPlan).toHaveBeenNthCalledWith(1, { title: 'Door inspection', sections: input.sections });
   expect((await tools.executeBriefTool('emit_draft', { frontmatter: { title: 'Inspect' }, body: 'Depth' }, context)).draft_rejected).toBe(true);
+});
+test('a keywordless decay refresh validates against the authoritative existing page title', async () => {
+  tools.registerSessionEditorial('editorial-test', {
+    page_type: 'refresh',
+    action_type: 'refresh_existing_page',
+    working_title: null,
+    target_keyword: null,
+    target_url: '/blog/door/',
+  });
+  gh.getFile.mockImplementation(async (filePath) => {
+    if (filePath === 'src/content/blog/other.md') return { content: '---\ntitle: Unrelated Research Page\n---\n\nOther body.' };
+    if (filePath === 'src/content/blog/door.md') return { content: '---\ntitle: Door Inspection Guide\n---\n\nExisting body.' };
+    return null;
+  });
+  reviewPlan.mockResolvedValue({ pass: true });
+
+  const researchPage = await tools.executeBriefTool('get_existing_page', { page_url: '/blog/other/' }, { sessionId: 'editorial-test' });
+  const result = await tools.executeBriefTool('validate_answer_plan', {
+    sections: [{ heading: 'Inspect', question: 'How?', answer: 'Look for gaps.' }],
+  }, { sessionId: 'editorial-test' });
+
+  expect(researchPage.frontmatter.title).toBe('Unrelated Research Page');
+  expect(result.pass).toBe(true);
+  expect(reviewPlan).toHaveBeenCalledWith({
+    title: 'Door Inspection Guide',
+    sections: [{ heading: 'Inspect', question: 'How?', answer: 'Look for gaps.' }],
+  });
+});
+test.each([
+  ['the existing page has no title', { content: '---\nupdated: 2026-09-24\n---\n\nExisting body.' }],
+  ['the existing page cannot be resolved', null],
+])('a refresh plan fails closed when %s', async (_label, existingFile) => {
+  tools.registerSessionEditorial('editorial-test', {
+    page_type: 'refresh',
+    action_type: 'refresh_existing_page',
+    working_title: null,
+    target_keyword: null,
+    target_url: '/blog/door/',
+  });
+  gh.getFile.mockImplementation(async (filePath) => filePath === 'src/content/blog/door.md' ? existingFile : null);
+
+  const result = await tools.executeBriefTool('validate_answer_plan', {
+    sections: [{ heading: 'Inspect', question: 'How?', answer: 'Look for gaps.' }],
+  }, { sessionId: 'editorial-test' });
+
+  expect(result).toEqual(expect.objectContaining({ pass: false, error: expect.stringContaining('Existing page title unavailable') }));
+  expect(reviewPlan).not.toHaveBeenCalled();
 });
