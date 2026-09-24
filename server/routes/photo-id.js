@@ -503,15 +503,16 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   });
 
   const noUsableScores = merged.turf_density == null && merged.weed_coverage == null && merged.color_health == null;
+  const lawnUnreliable = noUsableScores || partial;
   const access = await reserviceStreamlineAccess(req.customer.id);
-  const kind = (noUsableScores || partial) ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
+  const kind = lawnUnreliable ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
   const nextStep = buildNextStep(kind, {
     url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
     prefill: prefillFor('lawn', { location, note }),
   });
 
   return res.status(200).json({
-    id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResultForResponse(lawnResult, partial), next_step: nextStep,
+    id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResultForResponse(lawnResult, lawnUnreliable), next_step: nextStep,
   });
 }
 
@@ -675,11 +676,20 @@ function pestNextStepKindFromRow(row, access, isSecondary) {
   return pestNextStepKind(publicReport, idLabel, pestReserviceLane(contract), access, partial, isSecondary);
 }
 
-function lawnNextStepKindFromRow(row, access, isSecondary) {
+// codex GH r3 P1: an empty composite (analyzePhoto succeeded but returned no
+// usable fields) counts as a SUCCESSFUL photo, so `partial` alone never
+// catches it — noUsableScores must ALSO force the neutral result, not just
+// the unclear next_step, on both POST and every later GET read.
+function lawnRowIsUnreliable(row) {
   const contract = parseJsonSafe(row.report_contract);
   const scores = contract?.result?.scores || {};
   const noScores = scores.turf_density == null && scores.weed_coverage == null && scores.color_health == null;
-  return (noScores || contract.partial) ? 'unclear' : laneOutcomeKind('lawn', access, isSecondary);
+  return noScores || !!contract.partial;
+}
+
+function lawnNextStepKindFromRow(row, access, isSecondary) {
+  if (lawnRowIsUnreliable(row)) return 'unclear';
+  return laneOutcomeKind('lawn', access, isSecondary);
 }
 
 // True for a partial photo batch OR a "synthesized" (little-to-no real
@@ -769,14 +779,14 @@ router.get('/:type/:id', async (req, res, next) => {
     if (type === 'lawn') {
       const contract = parseJsonSafe(row.report_contract);
       const lawnResult = contract.result || lawnPublicResult({});
-      const lawnPartial = !!contract.partial;
+      const lawnUnreliable = lawnRowIsUnreliable(row);
       const kind = lawnNextStepKindFromRow(row, access, scope.isSecondary);
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
         prefill: prefillFor('lawn', { location: row.location, note: row.note }),
       });
       return res.status(200).json({
-        id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResultForResponse(lawnResult, lawnPartial), next_step: nextStep,
+        id: row.id, type: 'lawn', created_at: row.created_at, result: lawnResultForResponse(lawnResult, lawnUnreliable), next_step: nextStep,
       });
     }
 

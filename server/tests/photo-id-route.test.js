@@ -498,12 +498,29 @@ describe('next_step branches', () => {
     });
   });
 
-  test('lawn: no usable scores -> unclear', async () => {
+  test('lawn: no usable scores -> unclear, and the result is the neutral placeholder (codex GH r3 P1)', async () => {
+    // An empty composite is a SUCCESSFUL photo (partial stays false), so
+    // only noUsableScores catches this — the result must be suppressed the
+    // same way a partial batch's is, not just the next_step.
     mockLawnAnalyzePhoto.mockResolvedValue({ composite: {} });
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-would-win', lanes: ['lawn'] });
     await withServer(async (base) => {
       const res = await post(base, '/api/photo-id/lawn', photoBody());
       const body = await res.json();
       expect(body.result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
+      expect(body.result.signals).toEqual([]);
+      expect(body.result.observations).not.toContain('No urgent lawn issues');
+      expect(body.next_step.kind).toBe('unclear');
+    });
+  });
+
+  test('GET /:type/:id also suppresses a stored no-usable-scores lawn result', async () => {
+    mockLawnAnalyzePhoto.mockResolvedValue({ composite: {} });
+    await withServer(async (base) => {
+      const created = await post(base, '/api/photo-id/lawn', photoBody()).then((r) => r.json());
+      const res = await fetch(`${base}/api/photo-id/lawn/${created.id}`);
+      const body = await res.json();
+      expect(body.result.observations).not.toContain('No urgent lawn issues');
       expect(body.next_step.kind).toBe('unclear');
     });
   });
