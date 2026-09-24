@@ -95,8 +95,10 @@ function sectionFor(body, at) {
 // new post text, or null when there is not exactly one such reference.
 function replaceBodyAlt(text, imagePath, alt) {
   const { fmText, body } = splitPost(text);
-  const defs = new Map();
-  for (const m of body.matchAll(/^[ \t]{0,3}\[([^\]]+)\]:[ \t]*(\S+)/gm)) defs.set(contentGuardrails.normalizeReferenceLabel(m[1]), m[2].replace(/^<|>$/g, ''));
+  // The guardrails' definition map (continuation destinations included) —
+  // the same one bodyImageRefs resolves against, so every plannable
+  // reference is also rewritable.
+  const defs = contentGuardrails.markdownReferenceDefinitions(body);
   const spans = [];
   for (const span of contentGuardrails.eachMarkdownLink(body)) {
     if (!span.isImage) continue;
@@ -131,8 +133,15 @@ function planItem(t, publisher) {
   const target = path.join(ASTRO, 'public/images/blog', dir, `${file}${ext}`);
   if (!fs.existsSync(target)) return { t, skip: `image not in worktree: ${target}` };
   const item = { t, kind, postFile: path.relative(ASTRO, postFile), imagePath, target, index: 0, captions: [], ...postFields(fm, dir), siblings: siblingAssets(dir, `${file}${ext}`) };
-  if (kind === 'hero') return item;
-  const refs = publisher._internals.bodyImageRefs(body).map((r, i) => ({ ...r, ordinal: i, src: String(r.src || '').split(/[?#]/)[0] }));
+  if (kind === 'hero') {
+    // Only the post's ACTIVE hero is regenerated: a stale hero.webp beside a
+    // curated/migrated hero_image.src would otherwise get the live alt + date.
+    const liveSrc = typeof fm.hero_image?.src === 'string' ? fm.hero_image.src.split(/[?#]/)[0] : null;
+    return liveSrc === imagePath ? item : { t, skip: `not the post's active hero (hero_image.src = ${liveSrc || 'none'})` };
+  }
+  // Legacy .md posts render raw HTML blocks as HTML (image-like Markdown
+  // inside them is not an image); MDX does not — the publisher's own flag.
+  const refs = publisher._internals.bodyImageRefs(body, { mdx: !postFile.endsWith('.md') }).map((r, i) => ({ ...r, ordinal: i, src: String(r.src || '').split(/[?#]/)[0] }));
   const hits = refs.filter((r) => r.src === imagePath);
   if (hits.length !== 1) return { t, skip: hits.length ? `image referenced ${hits.length}× in post body (need exactly one)` : 'image reference not found in post body' };
   const ref = hits[0]; const sec = sectionFor(body, ref.line);

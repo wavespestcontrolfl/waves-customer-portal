@@ -44,7 +44,20 @@ async function classifyUniform({ buffer, mimeType }) {
   let parsed = null;
   try { parsed = JSON.parse(String(res.text).replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch (_) { parsed = null; }
   if (!parsed || typeof parsed !== 'object') return { ok: false, reason: 'unparseable', raw: String(res.text).slice(0, 200) };
+  const shape = classifierShapeProblem(parsed);
+  if (shape) return { ok: false, reason: `incomplete classifier answer: ${shape}`, raw: String(res.text).slice(0, 200) };
   return { ok: true, parsed };
+}
+// The fields outOfUniform() decides on must be present and well-typed — a
+// valid-JSON answer missing `uniform_ok` must never read as compliant.
+const ROLES = new Set(['technician', 'homeowner', 'other', 'none']);
+const HEADS = new Set(['capped', 'bare', 'hidden']);
+function classifierShapeProblem(p) {
+  if (typeof p.person !== 'boolean') return 'person is not a boolean';
+  if (!ROLES.has(p.role)) return `role "${p.role}" not in ${[...ROLES].join('|')}`;
+  if (typeof p.uniform_ok !== 'boolean') return 'uniform_ok is not a boolean';
+  if (p.person && p.role === 'technician' && !HEADS.has(String(p.head || '').toLowerCase())) return `head "${p.head}" not in ${[...HEADS].join('|')}`;
+  return null;
 }
 // A technician who is out of uniform — the only case the sweep regenerates. A
 // visible bare head counts (the uniform line requires a cap) even when the
@@ -89,5 +102,5 @@ async function main() {
   console.log(`\n${rows.length} images audited · ${fix.length} need regeneration · ${rows.filter((r) => r.error).length} errors · report: ${OUT}`);
 }
 
-module.exports = { classifyUniform, outOfUniform, PROMPT, MIME };
+module.exports = { classifyUniform, outOfUniform, classifierShapeProblem, PROMPT, MIME };
 if (require.main === module) main();
