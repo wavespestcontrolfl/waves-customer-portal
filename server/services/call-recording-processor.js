@@ -10217,7 +10217,21 @@ const CallRecordingProcessor = {
                 });
               };
               const sameService = serviceKey(claimedPayload) === serviceKey(parsedCard);
-              if (!sameStreet || !sameOnFile || !sameService) return 'claimed_unrecorded';
+              // …and the COMPLETE dispute identity: the stated unit, the
+              // on-file door's unit and locality, and the customer the card
+              // was filed against. A reprocess that moves Apt 2 to Apt 3,
+              // or lands after a relink, must not read the old card as
+              // filed and settle its stale evidence (pre-push audit P1
+              // after r25).
+              const identityKey = (p) => JSON.stringify({
+                unit: String(p?.stated_unit || '').toLowerCase().trim() || null,
+                onFileUnit: String(p?.on_file_address?.address_line2 || '').toLowerCase().trim() || null,
+                city: String(p?.on_file_address?.city || '').toLowerCase().trim() || null,
+                zip: (String(p?.on_file_address?.zip || '').match(/\d{5}/) || [''])[0] || null,
+                customer: p?.dispute_customer_id ? String(p.dispute_customer_id) : null,
+              });
+              const sameIdentity = identityKey(claimedPayload) === identityKey(parsedCard);
+              if (!sameStreet || !sameOnFile || !sameService || !sameIdentity) return 'claimed_unrecorded';
               if (!newlyConfirmed) return 'filed';
               const claimedConfirmed = claimedPayload?.scheduling_window?.status === 'confirmed' || claimedPayload?.scheduling_status === 'confirmed';
               const sameStart = String(claimedPayload?.scheduling_window?.confirmed_start_at || '') === String(parsedCard.scheduling_window?.confirmed_start_at || '');
