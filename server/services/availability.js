@@ -11,8 +11,11 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
-const { findConflictingVisits, acquireOccupancyLock, listOccupiedWindows } = require('./scheduling/occupancy');
+const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/occupancy');
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
+const { ensureCatalogLoaded, expectedMinutesSync, expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
+const { loadPackingAnchors, packedBounds } = require('./scheduling/packing-geometry');
+const { lunchBlockEnabled } = require('./scheduling/customer-windows');
 const { selfBookDayCapEnabled } = require('../config/feature-gates');
 const { violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 
@@ -114,7 +117,7 @@ class AvailabilityEngine {
     // 2. Get config
     const config = await db('booking_config').first() || {
       advance_days_min: 1, advance_days_max: 14,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       lunch_start: '12:00', lunch_end: '13:00',
       slot_duration_minutes: 60, buffer_minutes: 15,
       max_self_books_per_day: 3,
@@ -125,7 +128,7 @@ class AvailabilityEngine {
     const lunchStart = this.timeToMin(config.lunch_start || '12:00');
     const lunchEnd = this.timeToMin(config.lunch_end || '13:00');
     const dayStart = this.timeToMin(config.day_start || '08:00');
-    const dayEnd = this.timeToMin(config.day_end || '17:00');
+    const dayEnd = this.timeToMin(config.day_end || '18:00');
 
     const days = [];
     const today = new Date();
@@ -138,42 +141,77 @@ class AvailabilityEngine {
       etDateString(addETDays(today, config.advance_days_max)),
     );
 
+    // Global packing anchors (Codex r5 P1): every committed stop across the
+    // date range, regardless of zone or technician — loaded UNCONDITIONALLY
+    // via scheduling/packing-geometry.js's loadPackingAnchors (allocation
+    // expansion + expected-minutes credit are catalog/schema facts, not a
+    // feature flag). Previously this whole read lived INSIDE the
+    // GATE_SLOT_TRAVEL_GAP branch below, so with the gate unset an
+    // out-of-zone visit was invisible to this engine's packing decision
+    // (hasRealStops) too, not just to drive-time filtering. Soft-degrade
+    // like every other mirror here: a failed read serves the zone-only set.
+    let anchorsByDate = new Map();
+    try {
+      const anchors = await loadPackingAnchors({
+        dateFrom: etDateString(addETDays(today, config.advance_days_min)),
+        dateTo: etDateString(addETDays(today, config.advance_days_max)),
+      });
+      for (const anchor of anchors) {
+        if (!anchorsByDate.has(anchor.date)) anchorsByDate.set(anchor.date, []);
+        anchorsByDate.get(anchor.date).push(anchor);
+      }
+    } catch (anchorErr) {
+      logger.warn(`[availability] packing anchors unavailable — serving zone-only slots: ${anchorErr.message}`);
+      anchorsByDate = new Map();
+    }
+
     // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): confirmBooking's commit probe
     // runs the tech-blind, coordinate-aware findConflictingVisits `travel`
     // predicate over EVERY stop that day, while this builder's occupied set
     // is zone-scoped and buffer-only — an out-of-zone stop adjacent to a
     // quoted slot would make the commit reject the exact option just
-    // offered (offer/commit dead end). Gate on: one range read of every
-    // occupying row with guarded coords + the same pin the commit measures
-    // with (customers.latitude/longitude via opts.customerId, else the
-    // estimate's customer; neither → buffer-only, never a skipped check;
-    // lead-response quotes have no customer row and no booking tool). Gate off:
-    // no extra statements. Soft-degrade like /book's mirror: a failed read
-    // serves unfiltered and the commit gate keeps correctness.
+    // offered (offer/commit dead end). Gate on: the same pin the commit
+    // measures with (customers.latitude/longitude via opts.customerId, else
+    // the estimate's customer; neither → buffer-only, never a skipped
+    // check; lead-response quotes have no customer row and no booking
+    // tool) plus the candidate's own expected-minutes credit. Gate off: no
+    // extra statements (this is now ONLY the drive-time-filtering/candidate-
+    // credit half of the old mirror — the anchor set above is unconditional).
     let travelMirror = null;
     if (travelGapEnabled()) {
       try {
-        const rows = await listOccupiedWindows({
-          dateFrom: etDateString(addETDays(today, config.advance_days_min)),
-          dateTo: etDateString(addETDays(today, config.advance_days_max)),
-          withCoords: true,
-        });
-        const byDate = new Map();
-        for (const row of rows) {
-          if (!byDate.has(row.date)) byDate.set(row.date, []);
-          byDate.get(row.date).push(row);
-        }
         let pin = { lat: null, lng: null };
         let pinCustomerId = opts.customerId || null;
-        if (!pinCustomerId && estimateId) {
-          const est = await db('estimates').where('id', estimateId).first('customer_id');
-          pinCustomerId = est?.customer_id || null;
+        // The candidate's own service identity, for its expected-minutes
+        // padding credit (owner ruling 2026-09-23) — this legacy engine
+        // previously passed the mirror/commit probes only timing and
+        // coordinates for the candidate, so paddingMinutesOf(candidate)
+        // always read zero and a short job in a wide window lost its
+        // legitimate credit (Codex r3 P1). Same estimate-derived identity
+        // confirmBooking resolves at commit; no estimate/no match falls
+        // back to the window length (zero padding, legacy gap).
+        //
+        // estimates has NO `services`/`service_type` columns (never did —
+        // see the admin_layer/estimates_source migrations; the real
+        // free-text summary column is `service_interest`) — selecting them
+        // by name threw a real "column does not exist" in Postgres, caught
+        // by this function's own try/catch, which nulled travelMirror
+        // ENTIRELY for every estimate-linked call (Codex r4 P1: this also
+        // silently undid the r3 P1 global-stop merge and the original r1
+        // mirror for that whole class of caller). Read the real column.
+        let candidateServiceType = 'General Pest Control';
+        if (estimateId) {
+          const est = await db('estimates').where('id', estimateId).first('customer_id', 'service_interest');
+          if (!pinCustomerId) pinCustomerId = est?.customer_id || null;
+          candidateServiceType = est?.service_interest || candidateServiceType;
         }
         if (pinCustomerId) {
           const cust = await db('customers').where('id', pinCustomerId).first('latitude', 'longitude');
           pin = { lat: cust?.latitude ?? null, lng: cust?.longitude ?? null };
         }
-        travelMirror = { byDate, pin };
+        await ensureCatalogLoaded(db);
+        const candidateExpectedMinutes = expectedMinutesSync({ serviceType: candidateServiceType, windowMinutes: slotDuration });
+        travelMirror = { pin, expectedMinutes: candidateExpectedMinutes };
       } catch (mirrorErr) {
         logger.warn(`[availability] travel-gap mirror unavailable — serving unfiltered slots: ${mirrorErr.message}`);
         travelMirror = null;
@@ -242,6 +280,7 @@ class AvailabilityEngine {
 
       // Build occupied slots from scheduled_services
       const occupied = scheduledInZone.map(s => ({
+        id: s.id,
         start: this.timeToMin(s.window_start),
         end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
       }));
@@ -271,11 +310,78 @@ class AvailabilityEngine {
         occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
       });
 
-      // Add lunch block
-      occupied.push({ start: lunchStart, end: lunchEnd });
+      // Global anchors anchor the packing too (Codex r3 P1, r5 P1): this
+      // engine is TECH-BLIND like travel-gap.js — every stop on a date is on
+      // the SAME route regardless of which zone its customer's city falls
+      // in — but `occupied` above is built ONLY from `scheduledInZone`
+      // (city-matched). A day whose only committed visit belongs to another
+      // zone had `occupied` empty here even though the global anchor set
+      // carried it, so `hasRealStops` read the day as empty and every hour
+      // was offered instead of packing against that real stop. Merge the
+      // anchors for this date into the same packing geometry — UNCONDITIONAL
+      // (anchorsByDate is loaded above independently of GATE_SLOT_TRAVEL_GAP).
+      // A row already in `occupied` (in-zone) is REPLACED, never skipped
+      // (Codex r6 P1): `occupied`'s own entry is scheduledInZone's raw
+      // window_start/window_end, but the anchor for that same id carries
+      // loadPackingAnchors' allocation-expanded span — a version-2 combined
+      // allocation's three 09:00-10:00 members sharing a real 09:00-12:00
+      // occupancy used to leave `occupied` at the raw 09:00-10:00 (the
+      // anchor merge saw the id already known and skipped it entirely),
+      // packing an 11:00 candidate the commit gate then rejected as
+      // overlapping the real 09:00-12:00 span.
+      //
+      // Each merged/replaced entry also carries the anchor's own
+      // expectedEndMin (Codex r6 P2) — findGaps' packed-after-a-stop bound
+      // needs the STOP's own catalog credit, not just its raw span, or a
+      // co-located candidate is measured from the full window regardless of
+      // how little of it the stop is actually expected to use.
+      const dayAnchors = anchorsByDate.get(dateStr) || [];
+      {
+        const byId = new Map();
+        for (const o of occupied) if (o.id != null) byId.set(String(o.id), o);
+        for (const anchor of dayAnchors) {
+          if (!Number.isFinite(anchor.rawStartMin) || !Number.isFinite(anchor.rawEndMin)) continue;
+          const existing = anchor.id != null ? byId.get(String(anchor.id)) : null;
+          if (existing) {
+            existing.start = anchor.rawStartMin;
+            existing.end = anchor.rawEndMin;
+            existing.expectedEndMin = anchor.expectedEndMin;
+            continue;
+          }
+          const added = { id: anchor.id, start: anchor.rawStartMin, end: anchor.rawEndMin, expectedEndMin: anchor.expectedEndMin };
+          occupied.push(added);
+          if (anchor.id != null) byId.set(String(anchor.id), added);
+        }
+      }
+
+      // Packed-ends (owner bug report 2026-09-23): a day with at least one
+      // REAL committed stop (not counting the lunch block added next)
+      // restricts each gap to its packed end(s) against that stop, instead
+      // of offering every hourly window in between — see findGaps. An
+      // empty day (lunch only, or no lunch block at all under the gate)
+      // keeps today's earliest-per-gap behavior.
+      const hasRealStops = occupied.length > 0;
+
+      // Add lunch block — ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner
+      // ruling 2026-09-23, unset by default; #4663). Off, noon is a normal
+      // offerable/bookable hour like any other on this legacy zone engine.
+      // Flagged `lunch: true` (Codex r1 P2) so findGaps' packed-ends mode
+      // never treats it as a route stop to pack against.
+      if (lunchBlockEnabled()) occupied.push({ start: lunchStart, end: lunchEnd, lunch: true });
 
       // Sort occupied by start time
       occupied.sort((a, b) => a.start - b.start);
+
+      // Travel-gap stops, reshaped from the packing anchors to the
+      // {startMin, endMin, lat, lng, expectedMinutes, hold} entity shape
+      // travelGapConflicts/violatesTravelGap read — gate-agnostic by
+      // construction (travelGapEnabled() is checked inside violatesTravelGap
+      // itself), so this list is built once per day regardless of the gate.
+      const travelGapStops = dayAnchors.map((anchor) => ({
+        id: anchor.id, startMin: anchor.rawStartMin, endMin: anchor.rawEndMin,
+        lat: anchor.lat, lng: anchor.lng,
+        expectedMinutes: anchor.expectedEndMin - anchor.rawStartMin, hold: anchor.hold,
+      }));
 
       // Find gaps. Self-serve notice window (owner ruling 2026-09-23) +
       // travel-gap mirror (see above): drop what confirmBooking would now
@@ -285,15 +391,42 @@ class AvailabilityEngine {
       // check_availability tool; the internal pickFirstServiceDate caller
       // (estimate-converter.js) only reads the day, not a specific time, so
       // the per-slot filter is harmless there too.
+      // Morning/afternoon coverage while the lunch block is OFF: the block
+      // used to split every day into two gaps, so an empty day offered
+      // [09:00, 14:00]; without it the day is ONE gap and findGaps' first-
+      // accepted-start-per-gap rule would offer 09:00 alone. Pass the
+      // configured afternoon boundary so each gap spanning it also offers
+      // its first accepted afternoon start (13:00 on an empty day — noon
+      // stays offerable where a gap opens onto it). Null while the block is
+      // on: the block itself already splits the day, legacy output exactly.
+      const afternoonStartMin = lunchBlockEnabled() ? null : lunchEnd;
       const accept = (g) => {
         if (violatesSelfServeNotice({ date: dateStr, startTime: this.minToTime24(g.start) }, today)) return false;
         if (travelMirror && violatesTravelGap(
-          { startMin: g.start, endMin: g.end, ...travelMirror.pin },
-          travelMirror.byDate.get(dateStr) || [],
+          {
+            startMin: g.start, endMin: g.end, ...travelMirror.pin,
+            // The candidate's own expected-minutes credit (see above) — the
+            // commit probe's findConflictingVisits `travel` option resolves
+            // the same padding, so a candidate the mirror rejects here is
+            // one the commit would also reject (offer/commit parity).
+            expectedMinutes: travelMirror.expectedMinutes,
+          },
+          travelGapStops,
         )) return false;
         return true;
       };
-      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept);
+      // The gap bound this engine computes for "packed before an upcoming
+      // stop" shares scheduling/packing-geometry.js's packedBounds formula
+      // (Codex r5 P2) instead of a flat buffer subtraction that always
+      // measured from the full window regardless of credit — with no
+      // travelMirror (gate off) this degrades to the exact legacy
+      // block.start - buffer shape. afternoonStartMin (owner ruling
+      // 2026-09-23, #4663) is an independent axis: it only widens the
+      // no-real-stops (packEnds false) walk, so an empty day's choices
+      // don't collapse to a single morning slot once the lunch block stops
+      // splitting the day in two.
+      const credit = travelMirror ? { expectedMinutes: travelMirror.expectedMinutes } : null;
+      const slots = this.findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept, { packEnds: hasRealStops, credit, afternoonStartMin });
 
       if (slots.length > 0) {
         days.push({
@@ -320,34 +453,159 @@ class AvailabilityEngine {
   // gap then advances an hour at a time so a long zone-local hole still
   // yields its first ACCEPTED hour (an out-of-zone stop can reject 9:00 while
   // 12:00 in the same hole is fine — r5 P2).
-  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null) {
+  //
+  // opts.packEnds (owner bug report 2026-09-23, true only when the day
+  // already has a real committed stop — see the caller): restrict each gap
+  // to its packed end(s) instead of walking every hour in it — the leading
+  // gap (day-open to the first block) offers ONLY its latest accepted hour,
+  // the trailing gap (last block to day-end) offers ONLY its earliest, and
+  // a middle gap (between two blocks) tries both, independently (an accept
+  // rejection on one end never suppresses the other). False (or no real
+  // stop that day) keeps the legacy first-accepted-hour-per-gap walk (below,
+  // via `offer`).
+  // Only a REAL stop is a packing anchor: a block flagged `lunch: true` is
+  // a fixed break, not a stop, so a gap bounded by it on one side gets no
+  // offer on that side (a day whose only stop is 16:00 offers the hour
+  // before that stop and the hour after it — never "packed before lunch").
+  // opts.credit ({ expectedMinutes } — the CANDIDATE's own, resolved by the
+  // caller from the same estimate identity the accept() callback already
+  // credits) feeds the "packed before an upcoming block" bound through
+  // scheduling/packing-geometry.js's packedBounds instead of a flat buffer
+  // subtraction that always measured from the full window (Codex r5 P2:
+  // an offer/commit mismatch, since the accept() callback beside it already
+  // credited this). Omitted (null): every bound degrades to the exact
+  // legacy `block.start - buffer` shape — packedBounds' own no-credit
+  // fallback is arithmetically identical, so every existing caller of this
+  // method (including every direct unit test) is byte-for-byte unaffected.
+  // opts.afternoonStartMin (GATE_BOOKING_LUNCH_BLOCK unset, owner ruling
+  // 2026-09-23, #4663): applies only on the packEnds-false (no real stops)
+  // walk — a gap that spans this boundary ALSO offers its first accepted
+  // start at/after it, so removing the lunch block (which used to split
+  // every day into a morning and an afternoon gap) doesn't collapse an
+  // empty day's choices from [09:00, 14:00] to [09:00]. Null = legacy
+  // first-start-per-gap only. Independent of packEnds/credit: a real-stop
+  // day is governed entirely by the packed-ends geometry above, never by
+  // this afternoon top-up.
+  findGaps(occupied, dayStart, dayEnd, slotDuration, buffer, accept = null, { packEnds = false, credit = null, afternoonStartMin = null } = {}) {
     const slots = [];
+    // Round minutes-since-midnight UP/DOWN to the next/previous clean hour.
+    // Customer-facing slot starts like 1:15 / 2:45 felt like "we're
+    // squeezing you into a travel gap" — the operator wants every quoted
+    // time to land on the hour (1:00, 2:00). The buffer still applies but
+    // the slot only starts at the next :00 after buffer.
+    const roundUpToHour = (min) => Math.ceil(min / 60) * 60;
+    const roundDownToHour = (min) => Math.floor(min / 60) * 60;
+
+    // The no-real-stops walk (packEnds false): first accepted hour in the
+    // gap, plus an afternoon top-up when afternoonStartMin is set (see the
+    // opts doc above).
+    const firstAccepted = (from, gapEnd) => {
+      for (let start = from; gapEnd - start >= slotDuration; start += 60) {
+        const slot = { start, end: start + slotDuration };
+        if (!accept || accept(slot)) return slot;
+        if (!accept) return null;
+      }
+      return null;
+    };
     const offer = (gapStart, gapEnd) => {
+      const first = firstAccepted(gapStart, gapEnd);
+      if (!first) return;
+      slots.push(first);
+      if (Number.isFinite(afternoonStartMin) && first.start < afternoonStartMin) {
+        const pm = firstAccepted(roundUpToHour(afternoonStartMin), gapEnd);
+        if (pm && pm.start !== first.start) slots.push(pm);
+      }
+    };
+
+    const offerEarliest = (gapStart, gapEnd) => {
       for (let start = gapStart; gapEnd - start >= slotDuration; start += 60) {
         const slot = { start, end: start + slotDuration };
         if (!accept || accept(slot)) { slots.push(slot); return; }
         if (!accept) return;
       }
     };
+    const offerLatest = (gapStart, gapEnd) => {
+      for (let start = roundDownToHour(gapEnd - slotDuration); start >= gapStart; start -= 60) {
+        const slot = { start, end: start + slotDuration };
+        if (!accept || accept(slot)) { slots.push(slot); return; }
+        if (!accept) return;
+      }
+    };
+
+    const gaps = [];
     let cursor = dayStart;
-
-    // Round minutes-since-midnight UP to the next clean hour. Customer-
-    // facing slot starts like 1:15 / 2:45 felt like "we're squeezing you
-    // into a travel gap" — the operator wants every quoted time to land
-    // on the hour (1:00, 2:00). The buffer still applies but the slot
-    // only starts at the next :00 after buffer.
-    const roundUpToHour = (min) => Math.ceil(min / 60) * 60;
-
+    let realBefore = false;
+    // The real block (never the lunch block) currently anchoring realBefore,
+    // if any — its own expectedEndMin feeds the packed-after-a-stop bound
+    // below (Codex r6 P2). Tracked in lockstep with realBefore itself: set
+    // whenever realBefore becomes true from a real block, cleared whenever
+    // a lunch block resets realBefore to false, untouched when a contained
+    // lunch block leaves realBefore alone.
+    let prevAnchorBlock = null;
+    // The earliest a slotDuration-long candidate may start after the most
+    // recent real anchor, credited with THAT STOP's own expected minutes
+    // (packedBounds' no-credit fallback — no anchor, or one with no known
+    // expectedEndMin — degrades to the exact legacy cursor + buffer shape;
+    // only ever consumed downstream when the gap's own realBefore is true).
+    const packedAfterStart = () => {
+      if (!prevAnchorBlock) return roundUpToHour(cursor + buffer);
+      const { earliestStart } = packedBounds({
+        prev: {
+          rawStartMin: prevAnchorBlock.start,
+          rawEndMin: prevAnchorBlock.end,
+          expectedEndMin: Number.isFinite(prevAnchorBlock.expectedEndMin)
+            ? prevAnchorBlock.expectedEndMin : prevAnchorBlock.end,
+        },
+        next: null,
+        durationMinutes: slotDuration,
+        buffer,
+      });
+      return roundUpToHour(earliestStart);
+    };
     for (const block of occupied) {
-      const gapStart = roundUpToHour(cursor + buffer);
-      const gapEnd = block.start - buffer;
-
-      offer(gapStart, gapEnd);
+      // The latest a slotDuration-long candidate can start before this
+      // block, credited with the candidate's own expected minutes when
+      // known — see packedBounds (packing-geometry.js). `+ slotDuration`
+      // converts its "latest START" back to the "latest END" boundary this
+      // gap object's downstream consumers (offerLatest) already expect.
+      const { latestStart } = packedBounds({
+        prev: null, next: { rawStartMin: block.start },
+        durationMinutes: slotDuration, expectedMinutes: credit?.expectedMinutes,
+        buffer,
+      });
+      gaps.push({
+        start: packedAfterStart(), end: latestStart + slotDuration,
+        realBefore, realAfter: !block.lunch,
+      });
+      // The anchor flag for the NEXT gap follows the block that actually
+      // ADVANCES the cursor — a lunch block contained inside a real stop
+      // (11:00-14:00 around 12:00-13:00) must not erase that stop's anchor;
+      // a real block tying the cursor keeps/sets it (Codex r2 P2).
+      if (block.end > cursor) { realBefore = !block.lunch; prevAnchorBlock = block.lunch ? null : block; }
+      else if (!block.lunch && block.end === cursor) { realBefore = true; prevAnchorBlock = block; }
       cursor = Math.max(cursor, block.end);
     }
-
     // Gap after the last occupied block — same clean-hour rule.
-    offer(roundUpToHour(cursor + buffer), dayEnd);
+    gaps.push({ start: packedAfterStart(), end: dayEnd, realBefore, realAfter: false });
+
+    gaps.forEach((gap) => {
+      if (!packEnds) { offer(gap.start, gap.end); return; }
+      // A middle gap's earliest and latest picks can land on the same hour
+      // (a gap too narrow to hold two distinct accepted starts) — dedupe
+      // within this one gap so it never reports the identical slot twice.
+      const gapStarts = [];
+      const tryOffer = (offerFn) => {
+        const before = slots.length;
+        offerFn(gap.start, gap.end);
+        if (slots.length > before) {
+          const added = slots[slots.length - 1];
+          if (gapStarts.includes(added.start)) slots.pop();
+          else gapStarts.push(added.start);
+        }
+      };
+      if (gap.realBefore) tryOffer(offerEarliest); // packed after the stop before this gap
+      if (gap.realAfter) tryOffer(offerLatest); // packed before the stop after this gap
+    });
 
     return slots.slice(0, 4); // max 4 slots per day
   }
@@ -413,12 +671,29 @@ class AvailabilityEngine {
     if (violatesSelfServeNotice({ date: dateStr, startTime })) {
       throw bookingError('That time is too soon to book online — please pick another slot', 'SLOT_TAKEN');
     }
+    // Lunch block (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23) —
+    // commit-side mirror of getAvailableSlots' occupied-lunch push, using the
+    // same configured interval: an option the assistant quoted before the
+    // gate flipped on must not commit onto the block. No-op while unset.
+    if (lunchBlockEnabled()) {
+      const lunchStart = this.timeToMin(config?.lunch_start || '12:00');
+      const lunchEnd = this.timeToMin(config?.lunch_end || '13:00');
+      if (startMin < lunchEnd && endMin > lunchStart) {
+        throw bookingError('That time falls in the lunch block — please pick another slot', 'SLOT_TAKEN');
+      }
+    }
 
     // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served
     // by the same public /booking/status/:code as the /book confirm path, so a
     // guessable four-char code here would undercut the ≈50-bit codes there.
     const confCode = generateConfirmationCode();
-    const serviceType = estimate?.services?.[0] || estimate?.service_type || 'General Pest Control';
+    // estimates has no `services`/`service_type` columns (see the identical
+    // note on getAvailableSlots' candidateServiceType above) — `estimate` is
+    // read via a bare `.first()` here so this never THREW, but the fields
+    // never existed either, so this always silently fell through to the
+    // literal default regardless of what the estimate actually named
+    // (Codex r4 P1: offer/commit identity parity requires the real column).
+    const serviceType = estimate?.service_interest || 'General Pest Control';
     const zoneCities = zone?.cities || [];
 
     // Two customers browsing the same zone see the same slots and can both
@@ -625,6 +900,14 @@ class AvailabilityEngine {
       // was taken at the TOP of the transaction (rung 1 of the global
       // order) — the rebooker takes neither the zone nor the day-cap lock,
       // so that date lock is the only rung shared with it.
+      // The candidate's own expected-minutes credit (owner ruling
+      // 2026-09-23) — the SAME identity/window getAvailableSlots' offer-side
+      // mirror resolved (Codex r3 P1); passing only {lat,lng} here fell back
+      // to zero candidate padding, so a short job's legitimate credit
+      // dropped between offer and commit. Gate off: no catalog read.
+      const candidateExpectedMinutes = travelGapEnabled()
+        ? await expectedServiceMinutes(trx, { serviceType, windowMinutes: slotDuration })
+        : null;
       const occupancyClash = await findConflictingVisits({
         db: trx,
         includeInterviews: true,
@@ -635,7 +918,9 @@ class AvailabilityEngine {
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the customer's pin from the
         // fenced re-read; the zone engine's offers are city-only, so this
         // is the only drive check.
-        travel: bookingPin,
+        travel: Number.isFinite(candidateExpectedMinutes)
+          ? { ...bookingPin, expectedMinutes: candidateExpectedMinutes }
+          : bookingPin,
       });
       if (occupancyClash.length) {
         throw bookingError('That time slot was just taken — please pick another', 'SLOT_TAKEN');

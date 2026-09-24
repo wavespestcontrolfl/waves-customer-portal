@@ -73,6 +73,7 @@
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
+ *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
@@ -2126,6 +2127,16 @@ const gates = {
   // Consumers read gateEnvValue at CALL time (services/scheduling/travel-gap.js)
   // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
   slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
+
+  // Booking lunch block (owner ruling 2026-09-23) — restores the
+  // 12:00-13:00 reserved window on every customer-facing offer + commit
+  // surface (routes/booking.js, routes/reschedule-public.js and
+  // routes/reservice-public.js via its shared builder, services/availability.js's
+  // legacy zone engine). Off (default): noon is a normal offerable and
+  // reservable hour everywhere. This entry is for logGateStatus only —
+  // every consumer reads gateEnvValue at CALL time through the single
+  // lunchBlockEnabled() helper in services/scheduling/customer-windows.js.
+  bookingLunchBlock: gateEnvValue('GATE_BOOKING_LUNCH_BLOCK'),
 
   // Self-booking day cap (owner ruling 2026-09-23) — retired in favor of the
   // self-serve notice window; see selfBookDayCapEnabled() below, the one

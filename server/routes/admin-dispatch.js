@@ -20,6 +20,7 @@ const db = require('../models/db');
 const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -712,6 +713,12 @@ router.get('/:date?', async (req, res, next) => {
 
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })
+      // A technician token is scoped to their OWN current assignments, same
+      // as the admin-schedule day feed (scopeToAssignedTech) — this route
+      // has no client caller by date any more, but stays reachable directly
+      // and must never hand one tech another tech's customers, access codes,
+      // rates or invoice totals for any day (ADMIN-BUG-R04).
+      .modify((q) => technicianCurrentVisitFilter(req, q))
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(
@@ -4269,13 +4276,26 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         if (!cardOnly && overlapDates.length) parts.push(result.arrivalWindowDates?.length
           ? `${overlapDates.length} occurrence(s) need route review to keep every promised arrival window (${overlapDates.join(', ')}) — check those days' routes`
           : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
+        // Deep link: AdminDispatchPage mounts the Schedule tab only with
+        // ?tab=schedule (Board is the default); DispatchPageV2 then reads
+        // ?date= (opens that day) and ?appointment= (opens that visit's
+        // detail sheet). Nothing reads a service id. Land on the earliest
+        // affected day, focused on the first untimed conflict when there is one.
+        // An untimed conflict outranks earlier preserved/overlap days: it is
+        // the visit that still needs a time, so it gets the focus (codex r2).
+        const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d));
+        const focusConflict = [...dueConflicts].filter((c) => isDate(c.date)).sort((a, b) => a.date.localeCompare(b.date))[0] || null;
+        const otherDates = cardOnly ? [] : [...overlapDates, ...preserved.map((c) => c.date)].filter(isDate).sort();
+        const link = focusConflict
+          ? `/admin/dispatch?tab=schedule&date=${focusConflict.date}&appointment=${encodeURIComponent(focusConflict.id)}`
+          : otherDates.length ? `/admin/dispatch?tab=schedule&date=${otherDates[0]}` : '/admin/dispatch?tab=schedule';
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           preserved.length ? 'Recurring move needs a future visit review'
             : dueConflicts.length ? 'Series move left visits without a time window'
               : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { bell: true, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
+          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
         );
         if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');

@@ -68,7 +68,14 @@ function createCapacityDbFixture(prefix = 'scheduling_capacity') {
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema },
       searchPath: [schema], pool: { min: 0, max: 5 } });
     for (const table of ['customers', 'estimates', 'services', 'scheduled_services', 'technicians',
-      'technician_capabilities', 'tech_schedule_blocks', 'schedule_blackout_dates', 'system_settings', 'audit_log']) {
+      'technician_capabilities', 'tech_schedule_blocks', 'schedule_blackout_dates', 'system_settings', 'audit_log',
+      // reserveSlot/commitReservation read booking_config for the lunch
+      // interval / day-end override (Codex r1 P2s on #4663) and fail
+      // closed (push-audit P1) if that read has never succeeded — an
+      // empty copied table resolves the read successfully with no row,
+      // falling back to the fixed defaults (matching this fixture's
+      // pre-existing behavior).
+      'booking_config']) {
       await mockPg.raw('CREATE TABLE ?? (LIKE public.?? INCLUDING ALL)', [table, table]);
     }
     await mockPg.raw('ALTER TABLE scheduled_services ALTER COLUMN id SET DEFAULT gen_random_uuid()');

@@ -4,6 +4,23 @@
  *
  *   requiredGap(a, b) = driveMin(a, b) + SLOT_TRAVEL_BUFFER_MINUTES (default 15)
  *
+ * Owner ruling 2026-09-23: the gap is measured from the EARLIER side's
+ * EXPECTED end — window_start + its catalog expected-service minutes
+ * (expected-service-minutes.js), clamped to its own window length — not
+ * from the raw window end, and the buffer the drive must still clear is
+ * reduced by that side's own padding (window minus expected):
+ *
+ *   requiredGap(early, late) = driveMin(early, late)
+ *     + max(0, SLOT_TRAVEL_BUFFER_MINUTES - (early.windowMinutes - early.expectedMinutes))
+ *
+ * "early" is whichever of the two windows (real, unadjusted) ends first —
+ * a candidate packed BEFORE a stop uses the CANDIDATE's own padding; a
+ * candidate packed AFTER a stop uses the STOP's. Neither side's expected
+ * minutes ever move a REAL overlap (raw window vs raw window) — only the
+ * free-time-between-two-non-overlapping-windows measurement. A pair with no
+ * expectedMinutes/windowMinutes data (legacy callers, or no catalog match)
+ * gets zero padding — the exact legacy drive+buffer gap.
+ *
  * Drive minutes come from route-optimizer's shared model via
  * auto-dispatch/geo.js driveMin (the same estimator find-time scores detours
  * with) — never a local copy. The fixed buffer is parking / setup / wrap-up
@@ -83,24 +100,80 @@ function coordsOf(point) {
   return { lat, lng };
 }
 
-/** Minutes that must separate two stops: modeled drive (0 when a side has no pin) + buffer. */
+// windowMinutes of an entity: explicit windowMinutes wins, else endMin-startMin,
+// else null (no window known — padding then falls back to zero below).
+function windowMinutesOf(entity) {
+  if (Number.isFinite(entity?.windowMinutes)) return entity.windowMinutes;
+  if (Number.isFinite(entity?.startMin) && Number.isFinite(entity?.endMin)) return entity.endMin - entity.startMin;
+  return null;
+}
+
+// Minutes of slack inside an entity's own window that its expected service
+// time doesn't use — this is what "absorbs" the travel buffer (owner ruling
+// 2026-09-23). No window/expected data -> 0 (no credit, legacy gap).
+function paddingMinutesOf(entity) {
+  const windowMinutes = windowMinutesOf(entity);
+  if (!Number.isFinite(windowMinutes)) return 0;
+  const expected = Number.isFinite(entity?.expectedMinutes)
+    ? Math.min(entity.expectedMinutes, windowMinutes)
+    : windowMinutes;
+  return Math.max(0, windowMinutes - expected);
+}
+
+// The entity whose window starts first — its own padding is what reduces
+// the required buffer for this pair (see the header). Ties (or missing
+// startMin on either side) keep `a` as the reference, matching every
+// existing legacy call site that passes plain {lat,lng} with no timing.
+function earlierOf(a, b) {
+  if (Number.isFinite(a?.startMin) && Number.isFinite(b?.startMin) && b.startMin < a.startMin) return b;
+  return a;
+}
+
+/** Minutes that must separate two stops: modeled drive (0 when a side has no
+ * pin) + the buffer, reduced by the earlier side's own padding (see header). */
 function requiredGapMinutes(a, b) {
-  return driveMin(coordsOf(a), coordsOf(b)) + travelBufferMinutes();
+  const padding = paddingMinutesOf(earlierOf(a, b));
+  return driveMin(coordsOf(a), coordsOf(b)) + Math.max(0, travelBufferMinutes() - padding);
+}
+
+// A stop's effective end for the free-time measurement: window_start + its
+// (clamped) expected minutes. Real-overlap detection never uses this —
+// only the non-overlapping free-time gap.
+function effectiveEndMinutes(entity) {
+  const windowMinutes = windowMinutesOf(entity);
+  const expected = Number.isFinite(entity?.expectedMinutes) && Number.isFinite(windowMinutes)
+    ? Math.min(entity.expectedMinutes, windowMinutes)
+    : (windowMinutes ?? 0);
+  return entity.startMin + expected;
 }
 
 /**
- * candidate / stop: { startMin, endMin, lat?, lng? } (minutes from midnight).
- * Returns null when the pair is fine, else { gapMin, requiredMin } — gapMin is
- * the free time between the two windows (negative on overlap).
- * Gate-agnostic: callers decide via travelGapEnabled()/violatesTravelGap.
+ * candidate / stop: { startMin, endMin, lat?, lng?, windowMinutes?,
+ * expectedMinutes? } (minutes from midnight). Returns null when the pair is
+ * fine, else { gapMin, requiredMin } — gapMin is the free time between the
+ * two windows (negative on overlap). Gate-agnostic: callers decide via
+ * travelGapEnabled()/violatesTravelGap.
  */
 function travelGapViolation(candidate, stop) {
   if (!candidate || !stop) return null;
   if (![candidate.startMin, candidate.endMin, stop.startMin, stop.endMin].every(Number.isFinite)) return null;
-  const gapMin = stop.startMin >= candidate.endMin
-    ? stop.startMin - candidate.endMin      // stop after the candidate
-    : candidate.startMin - stop.endMin;     // stop before (negative = overlap)
   const requiredMin = requiredGapMinutes(candidate, stop);
+  // Real overlap (raw windows, never adjusted by expected minutes) — the
+  // exact legacy ternary, unconditionally a violation.
+  const realOverlap = candidate.startMin < stop.endMin && stop.startMin < candidate.endMin;
+  if (realOverlap) {
+    const gapMin = stop.startMin >= candidate.endMin
+      ? stop.startMin - candidate.endMin
+      : candidate.startMin - stop.endMin;
+    return { gapMin, requiredMin };
+  }
+  // No overlap: measure from the EARLIER side's effective (expected-minutes)
+  // end to the LATER side's real start — its window_start is a promise to
+  // whoever holds it and is never adjusted.
+  const candidateEarly = candidate.endMin <= stop.startMin;
+  const early = candidateEarly ? candidate : stop;
+  const late = candidateEarly ? stop : candidate;
+  const gapMin = late.startMin - effectiveEndMinutes(early);
   return gapMin < requiredMin ? { gapMin, requiredMin } : null;
 }
 
@@ -177,11 +250,22 @@ function violatesTravelGap(candidate, stops) {
 /**
  * One divergence-guarded read of a scheduled_services row's own pin for
  * commit gates that only hold the raw row (rebooker): the stamped
- * scheduled_services.lat/lng, else the non-divergent customer coords.
- * Returns { lat, lng } with nulls when unknown — never throws (fail-open).
- * Gate off → undefined WITHOUT a query, so a legacy move issues exactly the
- * statements it issued before (findConflictingVisits treats an undefined
- * `travel` as "overlap only").
+ * scheduled_services.lat/lng, else the non-divergent customer coords —
+ * PLUS (Codex r6 P1 on #4664) that same row's own expected-minutes credit,
+ * resolved from its catalog identity (service_key_snapshot/service_type)
+ * exactly like every other reader of a scheduled row (expected-service-
+ * minutes.js's byKey/byName lookup), windowed to its own current duration.
+ * Every rebooker probe that threads this function's return as `travel` into
+ * findConflictingVisits used to measure a co-located candidate from its
+ * FULL window end (zero padding) — a packed offer availability.js/find-
+ * time.js had already credited and promised then came back SLOT_TAKEN at
+ * commit. findConflictingVisitsWithTravel re-clamps this to the actual
+ * candidate (destination) window itself, so a stale/rougher value here can
+ * never manufacture negative padding.
+ * Returns { lat, lng, expectedMinutes } with nulls/window-length fallbacks
+ * when unknown — never throws (fail-open). Gate off → undefined WITHOUT a
+ * query, so a legacy move issues exactly the statements it issued before
+ * (findConflictingVisits treats an undefined `travel` as "overlap only").
  */
 async function resolveStopCoords(db, scheduledServiceId) {
   if (!travelGapEnabled()) return undefined;
@@ -192,9 +276,21 @@ async function resolveStopCoords(db, scheduledServiceId) {
     const row = await db('scheduled_services')
       .where('scheduled_services.id', scheduledServiceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select(...guardedCoordSelects(db))
+      .select(
+        ...guardedCoordSelects(db),
+        'scheduled_services.estimated_duration_minutes',
+        'scheduled_services.service_key_snapshot',
+        'scheduled_services.service_type',
+      )
       .first();
-    return coordsOf(row) || none;
+    const coords = coordsOf(row) || none;
+    if (!row) return coords;
+    const { expectedServiceMinutes } = require('./expected-service-minutes');
+    const windowMinutes = Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60;
+    const expectedMinutes = await expectedServiceMinutes(db, {
+      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes,
+    });
+    return { ...coords, expectedMinutes };
   } catch {
     return none;
   }
@@ -211,4 +307,9 @@ module.exports = {
   isHoldStop,
   violatesTravelGap,
   resolveStopCoords,
+  // Exported for find-time.js's earliest/latest gap geometry, so its
+  // packed-ends math shares this exact padding/effective-end formula
+  // instead of a local copy (owner ruling 2026-09-23).
+  paddingMinutesOf,
+  effectiveEndMinutes,
 };

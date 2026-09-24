@@ -47,9 +47,24 @@ test('explicit departure and return limits remain authoritative for capacity mea
   expect(evaluateArrivalPlacement(input, { ...options(600, 30), dayEndMin: 649 }).feasible).toBe(false);
 });
 
-test.each([[420, 30], [1020, 30], [960, 121]])('new arrival/work windows stay within 08–18: %j', (start, duration) => {
+test.each([[420, 30], [960, 121]])('new arrival/work windows stay within 08–18: %j', (start, duration) => {
   expect(() => assertAdminAppointmentWindow({ windowStart: clock(start), durationMinutes: duration })).toThrow();
   expect(evaluateArrivalPlacement(context(), options(start, duration)).feasible).toBe(false);
+});
+
+// Codex r1 P1 on #4663: a 17:00 start used to be rejected here too — the
+// admission check required 2 hours of headroom (start + SHIFT.arrivalMinutes
+// <= SHIFT.endMinutes) on top of the job's own actual end, so even a
+// 30-minute job at 1020 (17:00), ending comfortably at 1050 (17:30), failed.
+// The customer picker's shared grid (scheduling/customer-windows.js) offers
+// 17:00 on every surface, so capacity mode must admit it too — otherwise an
+// offered 17:00 estimate/booking slot could not be reserved in capacity mode.
+test('a 17:00 start that ends well before the 18:00 close is admitted (Codex r1 P1 on #4663)', () => {
+  expect(() => assertAdminAppointmentWindow({ windowStart: clock(1020), durationMinutes: 30 })).not.toThrow();
+  expect(evaluateArrivalPlacement(context(), options(1020, 30)).feasible).toBe(true);
+  // A duration that would run past the 18:00 close is still rejected.
+  expect(() => assertAdminAppointmentWindow({ windowStart: clock(1020), durationMinutes: 61 })).toThrow();
+  expect(evaluateArrivalPlacement(context(), options(1020, 61)).feasible).toBe(false);
 });
 
 test('finds an insertion without changing the existing relative stop order', () => {

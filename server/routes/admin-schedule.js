@@ -10300,8 +10300,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const basePrice = Number(estimatedPrice);
         const existingPrice = await db('scheduled_services')
           .where({ id: req.params.id })
-          .first('estimated_price', 'discount_type', 'discount_amount',
+          .first('estimated_price', 'primary_line_price', 'discount_type', 'discount_amount',
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
+            ...(cols.service_id ? ['service_id'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []))
           .catch(() => null);
@@ -10314,9 +10315,64 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const legacyPrimaryCategory = updates.service_category_snapshot !== undefined
           ? (updates.service_category_snapshot || null)
           : (existingPrice?.service_category_snapshot || null);
-        const existingEstimatedPrice = Number(existingPrice?.estimated_price);
-        const priceChanged = !Number.isFinite(existingEstimatedPrice)
-          || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
+        // Existing add-on rows, loaded up front: the no-op comparison below
+        // needs them to re-derive the stored row's own GROSS the same way
+        // `deriveLegacyPrimarySubmission` derives it (shared with the
+        // client's Price-field seed), and the rest of this branch already
+        // needed them for `addonBaseTotal`/`legacyLines`.
+        const addonRows = cols.primary_line_price
+          ? await db('scheduled_service_addons')
+              .where({ scheduled_service_id: req.params.id })
+              .catch(() => [])
+          : [];
+        // ADMIN-BUG-R01 (P0) fix: this branch is shared by TWO callers with
+        // DIFFERENT price-field conventions for the SAME `estimatedPrice`
+        // key. The desktop Edit-appointment modal (SchedulePage.jsx) seeds
+        // its Price field from the row's GROSS `primaryLinePrice` (:1708-
+        // 1719) — never the stored NET `estimated_price` — while
+        // MobileServiceEditModal seeds and posts the stored NET
+        // `estimatedPrice` verbatim. Diffing the posted value against only
+        // the net (the old behavior) treated every discounted, add-on-less
+        // DESKTOP save as a price change and silently stripped the
+        // discount.
+        //
+        // Codex rounds 1-2 (P0): a purely value-based guess at which
+        // convention a given save used — "does it match the derived gross,
+        // or the stored net" — cannot be made safe. When the row has
+        // add-ons, the "gross" this branch can derive is only the PRIMARY
+        // line's own (deriveLegacyPrimarySubmission ignores add-ons
+        // whenever `primaryLinePrice` is set), not the row's total, so a
+        // genuine mobile total that happens to equal it would be discarded;
+        // and even for a genuinely add-on-less row, a genuine mobile price
+        // change that happens to equal the stored GROSS (or a genuine
+        // desktop change that happens to equal the stored NET) collides the
+        // same way. Guessing from the number can never rule this out.
+        //
+        // Fixed by removing the guess: the desktop modal now sends its own
+        // `primaryLinePrice` on EVERY save (previously only when add-ons
+        // were present), declaring outright that its `estimatedPrice` is
+        // that row's GROSS. Its presence is the caller's explicit
+        // convention, not a value to pattern-match — MobileServiceEditModal
+        // never sends this field, so its `estimatedPrice` is read as the
+        // NET exactly as this branch always treated it before this fix.
+        const desktopGrossConvention = primaryLinePrice !== undefined && primaryLinePrice !== ''
+          && !isNaN(Number(primaryLinePrice));
+        let priceChanged;
+        if (desktopGrossConvention) {
+          const existingGrossPrice = deriveLegacyPrimarySubmission({
+            primaryLinePrice: existingPrice?.primary_line_price,
+            estimatedPrice: existingPrice?.estimated_price,
+            addons: addonRows.map((addon) => ({
+              basePrice: addon.base_price != null ? addon.base_price : addon.estimated_price,
+            })),
+          });
+          priceChanged = !Number.isFinite(existingGrossPrice)
+            || Math.abs(existingGrossPrice - basePrice) >= 0.005;
+        } else {
+          const existingNetPrice = Number(existingPrice?.estimated_price);
+          priceChanged = !Number.isFinite(existingNetPrice)
+            || Math.abs(existingNetPrice - basePrice) >= 0.005;
+        }
         const discountTypeChanged = discountType !== undefined
           && (discountType || null) !== (existingPrice?.discount_type || null);
         const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
@@ -10325,24 +10381,42 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           : null;
         const discountAmountChanged = discountAmount !== undefined
           && Math.abs((nextDiscountAmount || 0) - (existingDiscountAmount || 0)) >= 0.005;
+        // Codex round 1 (P1) on the ADMIN-BUG-R01 fix: a same-priced SERVICE
+        // SWAP can move the row out of (or into) the stored appointment
+        // discount's scope even when neither the price nor any discount
+        // field was posted — the desktop modal omits discount inputs on
+        // every save (it never seeds them), so a service change alone would
+        // otherwise take the no-op path below and keep a discount stamped
+        // for a service that no longer qualifies (or drop one a NEW service
+        // should carry). Mirrors the identical `primaryServiceChanged` check
+        // the multi-line (addons) branch above already applies — `updates.*`
+        // only carries these keys when THIS save actually resolved a service
+        // pick, so presence still isn't change; each is checked against the
+        // stored row's own value.
+        const primaryServiceChanged = (updates.service_id !== undefined
+          && String(updates.service_id ?? '') !== String(existingPrice?.service_id ?? ''))
+          || (updates.service_key_snapshot !== undefined
+            && String(updates.service_key_snapshot ?? '') !== String(existingPrice?.service_key_snapshot ?? ''))
+          || (updates.service_category_snapshot !== undefined
+            && String(updates.service_category_snapshot ?? '') !== String(existingPrice?.service_category_snapshot ?? ''));
         // appointmentDiscountChanged folds in the preset identity (a
         // same-valued preset switch): the replacement preset must still run
         // eligibility and the scope-aware recomputation before its id/name/
         // filters persist (Codex #3531 r6 P1).
-        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
+        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged
+          || appointmentDiscountChanged || primaryServiceChanged;
         if (!shouldRebaseStoredDiscounts) {
-          if (cols.estimated_price) updates.estimated_price = basePrice;
+          // Genuinely unchanged: leave the stored economics — the NET
+          // `estimated_price` AND the discount stamp — exactly as they are.
+          // Writing the posted GROSS into `estimated_price` here (as this
+          // branch once did unconditionally) would overwrite a discounted
+          // row's net price with its gross on every no-op save.
           throw new Error('noop-price-save');
         }
         let finalPrice = basePrice;
         if (discountType && discountAmount != null && discountAmount !== '') {
           finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
         }
-        const addonRows = cols.primary_line_price
-          ? await db('scheduled_service_addons')
-              .where({ scheduled_service_id: req.params.id })
-              .catch(() => [])
-          : [];
         const addonBaseTotal = addonRows.reduce((sum, addon) => {
           const value = Number(addon.base_price != null ? addon.base_price : addon.estimated_price);
           return Number.isFinite(value) && value > 0 ? sum + value : sum;

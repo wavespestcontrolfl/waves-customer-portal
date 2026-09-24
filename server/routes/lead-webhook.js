@@ -604,7 +604,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // back manually from the admin portal or directly.
         try {
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
-          const fromNumber = TWILIO_NUMBERS.mainLine.number;
+          // Internal alert leg to Adam: dedicated caller ID (see config), NOT the
+          // main line. The customer-facing bridge leg below keeps the main line.
+          const fromNumber = TWILIO_NUMBERS.internalAlertCallerId();
           attemptedLeadCallFrom = fromNumber;
           const autoBridge = isEnabled('leadAutoBridge');
 
