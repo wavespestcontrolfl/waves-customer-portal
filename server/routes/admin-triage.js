@@ -418,6 +418,7 @@ router.put('/:id/resolve', async (req, res) => {
     await transition(req, res, 'resolved');
   } catch (err) {
     logger.error(`[admin-triage] resolve failed: ${err.message}`);
+    if (err?.statusCode === 409 && !res.headersSent) return res.status(409).json({ error: err.message, code: err.code || null });
     if (!res.headersSent) res.status(500).json({ error: 'Failed to resolve item' });
   }
 });
@@ -428,6 +429,7 @@ router.put('/:id/dismiss', async (req, res) => {
     await transition(req, res, 'dismissed');
   } catch (err) {
     logger.error(`[admin-triage] dismiss failed: ${err.message}`);
+    if (err?.statusCode === 409 && !res.headersSent) return res.status(409).json({ error: err.message, code: err.code || null });
     if (!res.headersSent) res.status(500).json({ error: 'Failed to dismiss item' });
   }
 });
@@ -703,6 +705,15 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   // carry the approved snapshot; the coverage check reads
   // scheduling_window.requested_address.
   const callRowForAddress = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
+  // The card is settled only for the customer it was FILED against: after
+  // a relink the recovery task would be joined under the new account with
+  // the original account's approved window (codex r24 P1). A reprocess
+  // refreshes the card for the new customer; until then the verdict is
+  // refused.
+  if (heldConflictPayload?.dispute_customer_id && callRowForAddress?.customer_id
+    && String(heldConflictPayload.dispute_customer_id) !== String(callRowForAddress.customer_id)) {
+    throw Object.assign(new Error('This call was relinked to another customer since the card was filed — reprocess the call to refresh the card, then review it.'), { statusCode: 409, code: 'CONFLICT_CUSTOMER_RELINKED' });
+  }
   const liveCustomer = callRowForAddress?.customer_id
     ? await trx('customers').where({ id: callRowForAddress.customer_id }).whereNull('deleted_at').first('address_line1', 'address_line2', 'city', 'zip')
     : null;
@@ -1080,6 +1091,7 @@ router.post('/:id/verdict', async (req, res) => {
     return res.json({ ok: true, id, status: 'resolved', verdict, resolved_count: resolved });
   } catch (err) {
     if (err.proposalConflict) return res.status(409).json({ error: err.message });
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message, code: err.code || null });
     logger.error(`[admin-triage] verdict failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to record verdict' });
   }

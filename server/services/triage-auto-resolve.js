@@ -1901,7 +1901,7 @@ function lineRecordIdentity(line) {
 }
 
 // Bookings and completed visits for the not_confirmed / address arms.
-async function loadVisitEvidence(conn, items, flag) {
+async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {}) {
   // not_confirmed cards, address cards, and every card whose call CONFIRMED
   // an appointment (the confirmed-unbooked guard is answered only by a
   // booking matching the card's snapshotted ask).
@@ -1950,8 +1950,13 @@ async function loadVisitEvidence(conn, items, flag) {
 
   for (const item of visitItems) {
     const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
+    // At VERDICT time (ignoreGate) the association path is admitted for a
+    // multi-property account too: the booking's own stamped address has
+    // to match the approved premise there, so the single-property guard
+    // (a nightly-sweep safety margin) would only file a duplicate task
+    // for an appointment that exists (codex #4666 r24 P1).
     if (needsBooking(item)
-      && bookingCoversRequest(item, mine, { singleProperty: singleProperty(item.call_customer_id), places })) {
+      && bookingCoversRequest(item, mine, { singleProperty: ignoreGate || singleProperty(item.call_customer_id), places })) {
       flag(item.id, 'booking_after_card');
     }
     if (ADDRESS_MOOT_CODES.has(item.reason_code) && singleProperty(item.call_customer_id)) {
@@ -1993,7 +1998,7 @@ async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
   await loadEmailEvidence(conn, candidates, flag);
   await loadUnambiguousEmailEvidence(conn, candidates, flag);
   await loadContactEvidence(conn, candidates, flag);
-  await loadVisitEvidence(conn, candidates, flag);
+  await loadVisitEvidence(conn, candidates, flag, { ignoreGate });
   return evidence;
 }
 

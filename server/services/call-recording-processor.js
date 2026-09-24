@@ -9903,6 +9903,16 @@ const CallRecordingProcessor = {
                 city: extracted?.city || null,
                 postal_code: extracted?.zip || null,
               },
+              // The other requested properties ride on the snapshot too, so
+              // a booking at the primary alone cannot satisfy a multi-
+              // property ask once the sibling card is bulk-resolved (codex
+              // r24 P1).
+              additional_properties: (Array.isArray(callAdditionalProps) ? callAdditionalProps : []).map((extra) => ({
+                street_line_1: extra?.address_line1 || extra?.street_line_1 || null,
+                street_line_2: extra?.address_line2 || extra?.street_line_2 || null,
+                city: extra?.city || null,
+                postal_code: extra?.zip || extra?.postal_code || null,
+              })),
             },
             scheduling: {
               status: extracted?.appointment_confirmed ? 'confirmed' : (extracted?.preferred_date_time ? 'requested' : 'none'),
@@ -9981,6 +9991,10 @@ const CallRecordingProcessor = {
             // whole door, not just the number (codex r1 P1).
             extraPayload: {
               ...houseConflict,
+              // The customer the card was FILED against: a later relink
+              // must not hand its settlement to another account (codex
+              // r24 P1).
+              dispute_customer_id: customerId ? String(customerId) : null,
               ...(statedUnit ? { stated_unit: String(statedUnit).trim() } : {}),
               // An AV `corrected` premise is Google's correction, not the
               // caller's words: the pre-validation street the caller gave is
