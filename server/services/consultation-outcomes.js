@@ -1023,12 +1023,18 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
   result.reopened = 0;
   let rows;
   try {
-    rows = await db('consultation_outcomes')
-      .where('outcome', 'won')
-      .whereNotNull('won_evidence_booking_id')
-      .orderBy('won_at', 'desc')
+    // Dead-or-missing evidence is filtered BEFORE the LIMIT (local audit
+    // P1): a LIMIT over every evidence-backed win would re-read the same
+    // newest live wins each tick and never reach an older dead one.
+    rows = await db('consultation_outcomes as co')
+      .where('co.outcome', 'won')
+      .whereNotNull('co.won_evidence_booking_id')
+      .whereNotIn('co.won_evidence_booking_id', function liveBookings() {
+        this.select('id').from('scheduled_services').whereNotIn('status', DEAD_CONSULTATION_STATUSES);
+      })
+      .orderBy('co.won_at', 'asc')
       .limit(limit)
-      .select('id', 'won_evidence_booking_id', 'pre_win_outcome');
+      .select('co.id', 'co.customer_id', 'co.scheduled_service_id', 'co.won_evidence_booking_id', 'co.pre_win_outcome');
   } catch (err) {
     logger.error(`[consultation-outcomes] dead-evidence query failed: ${err.message}`);
     result.errors += 1;
@@ -1036,11 +1042,31 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
   }
   for (const row of rows) {
     try {
-      const booking = await db('scheduled_services').where({ id: row.won_evidence_booking_id }).first('id', 'status');
-      if (booking && !DEAD_CONSULTATION_STATUSES.includes(booking.status)) continue;
-      const reopened = await db('consultation_outcomes')
-        .where({ id: row.id, outcome: 'won', won_evidence_booking_id: row.won_evidence_booking_id })
-        .update({
+       
+      const changed = await db.transaction(async (locked) => {
+        if (row.customer_id) await lockCustomerRow(locked, row.customer_id);
+        // Surviving evidence first (local audit P1): the win pass below only
+        // selects consultations inside the sweep's selection window, so an
+        // old consultation must be re-judged HERE, against its own 90-day
+        // window, before its win is cleared.
+        const visit = await locked('scheduled_services').where({ id: row.scheduled_service_id }).first('scheduled_date');
+        const evidence = visit && row.customer_id
+          ? await findSaleEvidenceForConsultation(locked, {
+            customerId: row.customer_id,
+            scheduledDateStr: toDateOnlyString(visit.scheduled_date),
+            now,
+          })
+          : null;
+        const guard = { id: row.id, outcome: 'won', won_evidence_booking_id: row.won_evidence_booking_id };
+        if (evidence) {
+          return locked('consultation_outcomes').where(guard).update({
+            won_at: evidence.won_at,
+            won_via: evidence.won_via,
+            won_evidence_booking_id: evidence.booking_id || null,
+            updated_at: now,
+          });
+        }
+        return locked('consultation_outcomes').where(guard).update({
           outcome: ['warm', 'cold'].includes(row.pre_win_outcome) ? row.pre_win_outcome : 'warm',
           won_at: null,
           won_via: null,
@@ -1048,7 +1074,8 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
           pre_win_outcome: null,
           updated_at: now,
         });
-      if (reopened) result.reopened += 1;
+      });
+      if (changed) result.reopened += 1;
     } catch (err) {
       result.errors += 1;
       logger.warn(`[consultation-outcomes] reopen failed for outcome ${row.id}: ${err.message}`);

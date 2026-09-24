@@ -181,7 +181,11 @@ function makeFakeDb(seed = {}) {
       whereNull(col) { filtered = filtered.filter((r) => resolveField(r, col) == null); return api; },
       whereNotNull(col) { filtered = filtered.filter((r) => resolveField(r, col) != null); return api; },
       whereNot(col, val) { filtered = filtered.filter((r) => resolveField(r, col) !== val); return api; },
-      whereNotIn(col, arr) { filtered = filtered.filter((r) => !arr.includes(resolveField(r, col))); return api; },
+      whereNotIn(col, valueOrFn) {
+        const values = typeof valueOrFn === 'function' ? runSubquery(valueOrFn) : valueOrFn;
+        filtered = filtered.filter((r) => !values.includes(resolveField(r, col)));
+        return api;
+      },
       whereIn(col, valueOrFn) {
         const values = typeof valueOrFn === 'function' ? runSubquery(valueOrFn) : valueOrFn;
         filtered = filtered.filter((r) => values.includes(resolveField(r, col)));
@@ -1587,6 +1591,40 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
     expect(result.reopened).toBe(1);
     expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'cold', won_at: null, won_via: null, won_evidence_booking_id: null });
+  });
+
+  test('local audit P1: an OLD consultation whose win booking died is re-pointed to surviving in-window evidence, not reopened', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-old', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-03-01', customer_id: 'cust-1' },
+        { id: 'sale-dead', status: 'cancelled', service_type: 'Quarterly Pest Control', scheduled_date: '2026-03-20', customer_id: 'cust-1', created_at: new Date('2026-03-05T15:00:00Z') },
+        { id: 'sale-live', status: 'completed', service_type: 'Lawn Care', scheduled_date: '2026-03-25', customer_id: 'cust-1', created_at: new Date('2026-03-10T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-old', scheduled_service_id: 'visit-old', customer_id: 'cust-1', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-03-05T15:00:00Z'), won_evidence_booking_id: 'sale-dead', pre_win_outcome: 'warm' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-live' });
+  });
+
+  test('local audit P1: live wins never crowd out a dead one — the dead filter runs before the LIMIT', async () => {
+    const live = Array.from({ length: 5 }, (_, i) => ({ id: `sale-live-${i}`, status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: `cust-${i}` }));
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-x' },
+        { id: 'sale-dead', status: 'skipped', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-x' },
+        ...live,
+      ],
+      consultation_outcomes: [
+        ...live.map((b, i) => ({ id: `co-live-${i}`, scheduled_service_id: 'visit-1', customer_id: `cust-${i}`, outcome: 'won', won_at: new Date(`2026-09-1${i}T15:00:00Z`), won_evidence_booking_id: b.id })),
+        { id: 'co-dead', scheduled_service_id: 'visit-1', customer_id: 'cust-x', outcome: 'won', won_at: new Date('2026-09-19T15:00:00Z'), won_evidence_booking_id: 'sale-dead', pre_win_outcome: 'warm' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW, limit: 2 });
+    expect(result.reopened).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-dead').outcome).toBe('warm');
   });
 
   test('a live evidence booking, or a win with no recorded evidence, is left won', async () => {
