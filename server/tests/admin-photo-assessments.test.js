@@ -1,5 +1,5 @@
 // Controls for the db mock — set per test.
-let mockRows = { lawn_diagnostics: [], pest_identifications: [] };
+let mockRows = { lawn_diagnostics: [], pest_identifications: [], tree_shrub_identifications: [] };
 let mockPhotoRows = [];
 let mockLeadRow = null;
 let mockCustomerRow = null;
@@ -44,7 +44,7 @@ function builder(table) {
       return chain;
     },
     then: (resolve, reject) => Promise.resolve(
-      table === 'lawn_diagnostic_photos' || table === 'pest_identification_photos'
+      table === 'lawn_diagnostic_photos' || table === 'pest_identification_photos' || table === 'tree_shrub_identification_photos'
         ? mockPhotoRows
         : (mockRows[table] || []),
     ).then(resolve, reject),
@@ -79,6 +79,13 @@ jest.mock('../services/lawn-diagnostic-analyze', () => {
   };
 });
 jest.mock('../services/lawn-assessment', () => ({ getSeason: () => 'peak' }));
+// The tree & shrub engine's multi-photo preview (dual vision + merge) —
+// mocked at the module boundary; the five-category builder stays real so
+// the stored categories/labels are the production copy.
+const mockTreeShrubPreview = jest.fn();
+jest.mock('../services/tree-shrub-assessment', () => ({
+  previewTreeShrubAssessment: (...args) => mockTreeShrubPreview(...args),
+}));
 const mockIdentifyPest = jest.fn();
 jest.mock('../services/pest-identification', () => {
   const actual = jest.requireActual('../services/pest-identification');
@@ -172,7 +179,7 @@ function pestRow(overrides = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockRows = { lawn_diagnostics: [], pest_identifications: [] };
+  mockRows = { lawn_diagnostics: [], pest_identifications: [], tree_shrub_identifications: [] };
   mockPhotoRows = [];
   mockLeadRow = null;
   mockCustomerRow = null;
@@ -980,5 +987,327 @@ describe('resolveRequestPhotos / resolveAssociations / lookupAssociation (unit)'
         customerId: CUSTOMER_ID,
         customerContact: { first_name: null, last_name: null, email: null, phone: null },
       });
+  });
+});
+
+describe('tree & shrub — third assessment type', () => {
+  const { storeFunnelPhotos } = require('../utils/funnel-photos');
+  const {
+    TYPES, TYPE_KEYS, configFor, listRowShape, releaseRefusal, worstTreeShrubSignal,
+  } = adminRouter._test;
+  const MESSAGE_ID = 'dddddddd-eeee-4fff-8000-111111111111';
+  const CONVERSATION_ID = 'eeeeeeee-ffff-4000-8111-222222222222';
+  const CUSTOMER_ID = 'ffffffff-0000-4111-8222-333333333333';
+  const INBOUND_KEY = 'sms-media/inbound/abc123';
+
+  // What previewTreeShrubAssessment returns for a hedge with light pest
+  // signals and a stronger leaf-spot read.
+  function previewResult(overrides = {}) {
+    return {
+      scores: {
+        foliageFullness: 82,
+        leafColorVigor: 74,
+        pestActivity: 75,
+        diseaseLeafSpot: 50,
+        waterHeatStress: 95,
+        overallScore: 75,
+      },
+      observations: 'Leaf spotting on the lower hedge is consistent with fungal leaf spot.',
+      scoredCount: 1,
+      photoCount: 1,
+      aiSummary: 'AI flagged 1 item to review.',
+      suggestedCustomerAction: 'Monitor the flagged areas; we’ll recheck on the next visit.',
+      findings: [{ key: 'disease_leaf_spot', label: 'Leaf-spot / disease signals', status: 'attention', detail: 'Possible leaf-spot or disease-like signals.', score: 50, defaultAction: 'monitor' }],
+      ...overrides,
+    };
+  }
+
+  function treeShrubRow(overrides = {}) {
+    return {
+      id: ROW_ID,
+      mode: 'prospect',
+      status: 'analyzed',
+      source: 'admin',
+      overall_score: 75,
+      worst_signal: 'disease_leaf_spot',
+      report_contract: {
+        scores: previewResult().scores,
+        categories: [{ key: 'disease_leaf_spot', label: 'Disease / Leaf Spot Signals', score: 50, status: 'needs_attention', customerExplanation: 'Leaf-spot signals we want to monitor and confirm next visit.' }],
+        worst_signal: { key: 'disease_leaf_spot', label: 'Disease / Leaf Spot Signals', score: 50, status: 'needs_attention' },
+        observations: 'Leaf spotting on the lower hedge is consistent with fungal leaf spot.',
+        findings: previewResult().findings,
+        ai_summary: 'AI flagged 1 item to review.',
+        suggested_customer_action: 'Monitor the flagged areas.',
+        scored_count: 1,
+        photo_count: 1,
+      },
+      ai_analysis: JSON.stringify({ prospect_note: 'hedge by the pool', provenance: { source: 'admin' } }),
+      contact_snapshot: JSON.stringify({ first_name: 'Robin', email: 'robin@example.com' }),
+      created_at: '2026-09-24T14:00:00.000Z',
+      claimed_at: null,
+      lead_id: null,
+      customer_id: null,
+      report_token: null,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    mockTreeShrubPreview.mockResolvedValue(previewResult());
+  });
+
+  test('TYPES config: own tables, treeshrub photo prefix, no report page', () => {
+    expect(TYPE_KEYS).toEqual(['lawn', 'pest', 'tree_shrub']);
+    expect(TYPES.tree_shrub).toMatchObject({
+      table: 'tree_shrub_identifications',
+      photoTable: 'tree_shrub_identification_photos',
+      photoFk: 'identification_id',
+      photoKeyPrefix: 'treeshrub',
+      reportPath: null,
+      label: 'Tree & Shrub Assessment',
+    });
+    // Never the visit-keyed engine table.
+    expect(TYPES.tree_shrub.table).not.toBe('tree_shrub_assessments');
+  });
+
+  test('configFor only resolves real types — prototype keys never become a config', () => {
+    expect(configFor('tree_shrub')).toBe(TYPES.tree_shrub);
+    expect(configFor('toString')).toBeNull();
+    expect(configFor('constructor')).toBeNull();
+    expect(configFor(undefined)).toBeNull();
+  });
+
+  test('listRowShape: overall score + worst signal headline', () => {
+    const shaped = listRowShape('tree_shrub', treeShrubRow());
+    expect(shaped.type).toBe('tree_shrub');
+    expect(shaped.headline).toBe('75/100 · Disease / Leaf Spot Signals');
+    expect(shaped.overall_score).toBe(75);
+    expect(shaped.worst_signal).toBe('disease_leaf_spot');
+    expect(shaped.worst_signal_label).toBe('Disease / Leaf Spot Signals');
+  });
+
+  test('listRowShape: nothing flagged / unscored rows read cleanly', () => {
+    expect(listRowShape('tree_shrub', treeShrubRow({ overall_score: 91, worst_signal: null })).headline)
+      .toBe('91/100 · No flagged signals');
+    const unscored = listRowShape('tree_shrub', treeShrubRow({ overall_score: null, worst_signal: 'bogus_key' }));
+    expect(unscored.headline).toBe('Unscored · No flagged signals');
+    expect(unscored.worst_signal).toBeNull();
+  });
+
+  test('worstTreeShrubSignal picks the lowest flagged category, null when none is flagged', () => {
+    const cats = [
+      { key: 'foliage_fullness', score: 90, status: 'strong' },
+      { key: 'pest_activity', score: 60, status: 'watch' },
+      { key: 'disease_leaf_spot', score: 40, status: 'needs_attention' },
+    ];
+    expect(worstTreeShrubSignal(cats).key).toBe('disease_leaf_spot');
+    expect(worstTreeShrubSignal([{ key: 'foliage_fullness', score: 90, status: 'strong' }])).toBeNull();
+  });
+
+  test('GET /?type=tree_shrub lists only tree & shrub rows', async () => {
+    mockRows.lawn_diagnostics = [lawnRow()];
+    mockRows.pest_identifications = [pestRow()];
+    mockRows.tree_shrub_identifications = [treeShrubRow()];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments?type=tree_shrub`);
+      expect(res.status).toBe(200);
+      const { assessments } = await res.json();
+      expect(assessments).toHaveLength(1);
+      expect(assessments[0].type).toBe('tree_shrub');
+      expect(assessments[0].headline).toBe('75/100 · Disease / Leaf Spot Signals');
+    });
+  });
+
+  test('GET / (all) merges all three types; a prototype-key type filter falls back to all', async () => {
+    mockRows.lawn_diagnostics = [lawnRow()];
+    mockRows.pest_identifications = [pestRow({ id: 'cccccccc-dddd-4eee-8fff-000000000000' })];
+    mockRows.tree_shrub_identifications = [treeShrubRow({ id: 'dddddddd-eeee-4fff-8000-000000000000' })];
+    await withServer(async (base) => {
+      for (const query of ['', '?type=toString']) {
+        const res = await fetch(`${base}/api/admin/photo-assessments${query}`);
+        expect(res.status).toBe(200);
+        const { assessments } = await res.json();
+        expect(assessments.map((a) => a.type)).toEqual(['tree_shrub', 'pest', 'lawn']);
+      }
+    });
+  });
+
+  test('GET /funnel reports a tree_shrub key alongside lawn and pest', async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/funnel?days=30`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Object.keys(body).sort()).toEqual(['days', 'lawn', 'pest', 'tree_shrub']);
+      expect(body.tree_shrub).toHaveProperty('admin_created');
+    });
+  });
+
+  test('GET /tree_shrub/:id: admin detail with scores + observations, no customer preview, no report link', async () => {
+    // Even a row that somehow carries a released token never surfaces a URL:
+    // there is no public page for it to open.
+    mockRows.tree_shrub_identifications = [treeShrubRow({
+      status: 'sent',
+      report_token: 'a'.repeat(32),
+      report_expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    })];
+    mockPhotoRows = [{ id: 'p1', photo_index: 0, mime_type: 'image/jpeg', s3_key: 'key1' }];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub/${ROW_ID}`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.assessment.report_available).toBe(false);
+      expect(body.assessment.can_release).toBe(false);
+      expect(body.assessment.report_url).toBeNull();
+      expect(body.assessment.prospect_note).toBe('hedge by the pool');
+      expect(body.customer_preview).toBeNull();
+      expect(body.tech_view.scores.overallScore).toBe(75);
+      expect(body.tech_view.worst_signal.key).toBe('disease_leaf_spot');
+      expect(body.tech_view.observations).toContain('consistent with');
+      expect(body.tech_view.findings).toHaveLength(1);
+      expect(body.photos[0].url).toBe('https://signed.example/url');
+    });
+  });
+
+  test('detail can_release mirrors the mint gate: an unclaimed public-funnel row is not releasable', async () => {
+    mockRows.lawn_diagnostics = [lawnRow({ claimed_at: null })];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/lawn/${ROW_ID}`);
+      const body = await res.json();
+      expect(body.assessment.report_available).toBe(true);
+      expect(body.assessment.can_release).toBe(false);
+    });
+  });
+
+  test('lawn/pest detail payloads report report_available: true', async () => {
+    mockRows.pest_identifications = [pestRow()];
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest/${ROW_ID}`);
+      const body = await res.json();
+      expect(body.assessment.report_available).toBe(true);
+      // Claimed public-funnel pest row → releasable, matching the mint gate.
+      expect(body.assessment.can_release).toBe(true);
+    });
+  });
+
+  test('generate-link and send-report refuse tree_shrub (409) — nothing minted or emailed', async () => {
+    mockRows.tree_shrub_identifications = [treeShrubRow()];
+    await withServer(async (base) => {
+      for (const action of ['generate-link', 'send-report']) {
+        const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub/${ROW_ID}/${action}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'robin@example.com' }),
+        });
+        expect(res.status).toBe(409);
+        const body = await res.json();
+        expect(body.error).toMatch(/no customer report for tree & shrub assessment yet/i);
+      }
+      expect(updates.tree_shrub_identifications).toBeUndefined();
+      expect(mockSendEmail).not.toHaveBeenCalled();
+    });
+  });
+
+  test('releaseRefusal keeps the lawn/pest status + unclaimed messages', () => {
+    expect(releaseRefusal(TYPES.pest, { status: 'archived', source: 'admin' }, 'send a report'))
+      .toBe('Cannot send a report for a archived assessment');
+    expect(releaseRefusal(TYPES.lawn, { status: 'analyzed', source: 'public_funnel', claimed_at: null }, 'send a report'))
+      .toMatch(/has not unlocked the report yet/);
+    expect(releaseRefusal(TYPES.lawn, { status: 'analyzed', source: 'admin' }, 'send a report')).toBeNull();
+  });
+
+  test('POST /tree_shrub/:id/link links a customer', async () => {
+    mockRows.tree_shrub_identifications = [treeShrubRow()];
+    mockCustomerRow = { id: CUSTOMER_ID };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub/${ROW_ID}/link`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }),
+      });
+      expect(res.status).toBe(200);
+      expect(updates.tree_shrub_identifications[0].customer_id).toBe(CUSTOMER_ID);
+    });
+  });
+
+  test('POST /tree_shrub with uploaded photos runs the engine and stores scores + signals — the note never reaches the model', async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          photos: [{ data: 'aGVsbG8=', mimeType: 'image/jpeg' }],
+          contact: { first_name: 'Robin', phone: '941-555-0100' },
+          note: 'hedge by the pool is thinning',
+        }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.type).toBe('tree_shrub');
+
+      // Engine got the normalized photos + an inline loader, nothing else.
+      expect(mockTreeShrubPreview).toHaveBeenCalledTimes(1);
+      const engineArgs = mockTreeShrubPreview.mock.calls[0][0];
+      expect(Object.keys(engineArgs).sort()).toEqual(['loadImage', 'photos']);
+      expect(JSON.stringify(engineArgs.photos)).not.toContain('hedge by the pool');
+      await expect(engineArgs.loadImage(engineArgs.photos[0])).resolves.toEqual({ base64: 'aGVsbG8=', mimeType: 'image/jpeg' });
+      await expect(engineArgs.loadImage({ data: null })).resolves.toBeNull();
+
+      const stored = inserts.tree_shrub_identifications[0];
+      expect(stored).toMatchObject({ mode: 'prospect', status: 'analyzed', source: 'admin', overall_score: 75, worst_signal: 'disease_leaf_spot' });
+      const contract = JSON.parse(stored.report_contract);
+      expect(contract.scores).toMatchObject({ foliageFullness: 82, diseaseLeafSpot: 50, overallScore: 75 });
+      expect(contract.categories.map((c) => c.key)).toEqual([
+        'foliage_fullness', 'leaf_color_vigor', 'pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress',
+      ]);
+      expect(contract.worst_signal).toMatchObject({ key: 'disease_leaf_spot', label: 'Disease / Leaf Spot Signals' });
+      // Customer-safe category copy: signals language, never a confirmed diagnosis.
+      const copy = contract.categories.map((c) => c.customerExplanation).join(' ');
+      expect(copy).not.toMatch(/infestation|diseased/i);
+      expect(JSON.parse(stored.ai_analysis).prospect_note).toBe('hedge by the pool is thinning');
+      expect(stored.ai_summary).toContain('consistent with');
+      expect(inserts.leads).toBeUndefined();
+      expect(mockSendEmail).not.toHaveBeenCalled();
+
+      expect(storeFunnelPhotos).toHaveBeenCalledWith(expect.objectContaining({
+        table: 'tree_shrub_identification_photos',
+        fkColumn: 'identification_id',
+        keyPrefix: 'treeshrub',
+      }));
+    });
+  });
+
+  test('POST /tree_shrub with message_photos feeds the resized inbound MMS photo to the engine and links the thread customer', async () => {
+    mockMessagesById[MESSAGE_ID] = {
+      id: MESSAGE_ID,
+      conversation_id: CONVERSATION_ID,
+      direction: 'inbound',
+      channel: 'sms',
+      media: JSON.stringify([{ key: INBOUND_KEY, contentType: 'image/jpeg', size: 12345 }]),
+    };
+    mockConversationsById[CONVERSATION_ID] = { id: CONVERSATION_ID, customer_id: CUSTOMER_ID };
+    mockCustomerRow = { id: CUSTOMER_ID, first_name: 'Robin', last_name: 'Lee', email: 'robin@example.com', phone: '9415550100' };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }] }),
+      });
+      expect(res.status).toBe(201);
+      expect(mockGetPhotoBuffer).toHaveBeenCalledTimes(1);
+      const { photos, loadImage } = mockTreeShrubPreview.mock.calls[0][0];
+      expect(photos).toHaveLength(1);
+      await expect(loadImage(photos[0])).resolves.toEqual({ base64: mockResizedJpeg.toString('base64'), mimeType: 'image/jpeg' });
+      const stored = inserts.tree_shrub_identifications[0];
+      expect(stored.customer_id).toBe(CUSTOMER_ID);
+      expect(JSON.parse(stored.contact_snapshot).first_name).toBe('Robin');
+    });
+  });
+
+  test('engine outage (no photo scored) degrades to 503, no row, no photo storage', async () => {
+    mockTreeShrubPreview.mockResolvedValue(null);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photos: [{ data: 'aGVsbG8=' }] }),
+      });
+      expect(res.status).toBe(503);
+      expect(inserts.tree_shrub_identifications).toBeUndefined();
+      expect(storeFunnelPhotos).not.toHaveBeenCalled();
+    });
   });
 });

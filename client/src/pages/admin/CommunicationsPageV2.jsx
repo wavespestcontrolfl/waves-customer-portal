@@ -943,6 +943,7 @@ function AnalyzePhotosDialog({ open, onClose, photos, fixedCustomerId, fixedCust
           <Select value={type} onChange={(e) => setType(e.target.value)} disabled={busy}>
             <option value="lawn">Lawn assessment</option>
             <option value="pest">Pest identification</option>
+            <option value="tree_shrub">Tree &amp; shrub assessment</option>
           </Select>
         </div>
         {fixedCustomerId ? (
@@ -1028,7 +1029,7 @@ function AnalyzePhotosAction({ active, isAdmin, activeThread, customerMessages, 
       <Button
         variant="secondary"
         onClick={() => setOpen(true)}
-        title="Run a lawn or pest assessment on photos from this thread"
+        title="Run a lawn, pest, or tree & shrub assessment on photos from this thread"
         aria-label="Analyze photos"
         className="sms-writing-tool ui-icon-action"
         aria-haspopup="dialog"

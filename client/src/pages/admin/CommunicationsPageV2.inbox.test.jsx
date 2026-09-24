@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SmsTab } from "./CommunicationsPageV2";
@@ -639,4 +639,29 @@ it("a failed Analyze photos submit keeps the dialog open with the server's error
   expect(screen.getByText("At least one photo is required")).toBeInTheDocument();
   expect(screen.getByText("Analyze photos from this thread")).toBeInTheDocument();
   expect(mockNavigate).not.toHaveBeenCalled();
+});
+
+it("Analyze photos offers Tree & shrub and posts a tree_shrub assessment, then deep-links to it", async () => {
+  const photoPhone = "+19415550800";
+  messages = [{
+    id: "photo-hedge", from: photoPhone, to: line, direction: "inbound", body: "Hedge photo",
+    isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-hedge",
+    media: [{ key: "sms-media/inbound/hedge", url: "https://signed.example/hedge", contentType: "image/jpeg" }],
+  }];
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/photo-assessments/")
+    ? response({ success: true, id: "assessment-ts1", type: "tree_shrub" }, 201)
+    : originalFetch(url, options));
+  setupWithOwner("analyze-photos-tree-shrub"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  const dialog = screen.getByRole("dialog", { name: "Analyze photos from this thread" });
+  const typeSelect = within(dialog).getByDisplayValue("Lawn assessment");
+  expect(within(typeSelect).getByRole("option", { name: "Tree & shrub assessment" })).toHaveValue("tree_shrub");
+  fireEvent.change(typeSelect, { target: { value: "tree_shrub" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Run analysis" })); await tick();
+  const [postUrl, postInit] = fetch.mock.calls.find(([url]) => String(url).includes("/photo-assessments/"));
+  expect(String(postUrl)).toMatch(/\/admin\/photo-assessments\/tree_shrub$/);
+  expect(JSON.parse(postInit.body).message_photos).toEqual([{ message_id: "photo-hedge", key: "sms-media/inbound/hedge" }]);
+  expect(mockNavigate).toHaveBeenCalledWith("/admin/lawn-assessments?open=tree_shrub:assessment-ts1");
 });
