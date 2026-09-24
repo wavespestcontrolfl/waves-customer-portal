@@ -169,9 +169,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   }
 
   // Save-time eligibility (422 TECH_NOT_ASSIGNABLE): a stale board that still
-  // offers a tech who has since gone prospective/inactive/office-only cannot
-  // complete the assignment.
-  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn }) : null;
+  // offers a tech who has since gone prospective/inactive/office-only, or one
+  // marked out for this job's date (technician_absences), cannot complete
+  // the assignment.
+  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn, date: dateOnly(job.scheduled_date) }) : null;
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -184,10 +185,6 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   const fromTechId = job.technician_id || null;
   let updatedRow;
   const applyAssignment = async (assignmentTrx) => {
-    // Re-checked FOR SHARE on the writing trx: a Team-tab offboarding or
-    // field-eligibility removal (FOR UPDATE) cannot slip between the
-    // pre-transaction read above and this commit.
-    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx });
     // Tech-day membership fence (scheduling/tech-day-lock.js): reassignment
     // moves the stop between two tech-days on the same date — the nightly
     // reorder's membership read is only safe against writers holding the
@@ -196,10 +193,18 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     // how the driver parses DATE columns. route_order: null drops the OLD
     // tech's sequence number — consumers append NULLs last; carrying the
     // stale number would interleave it into the new tech's run.
+    //
+    // Read BEFORE the re-checked eligibility assert below so that assert can
+    // thread this same date into its technician_absences check (a tech
+    // marked out for the job's actual day cannot receive it here either).
     const { lockTechDays } = require('./scheduling/tech-day-lock');
     const dayRow = await assignmentTrx('scheduled_services')
       .where({ id: jobId })
       .first(assignmentTrx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+    // Re-checked FOR SHARE on the writing trx: a Team-tab offboarding or
+    // field-eligibility removal (FOR UPDATE) cannot slip between the
+    // pre-transaction read above and this commit.
+    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx, date: dayRow?.day });
     if (dayRow?.day) {
       await lockTechDays(assignmentTrx, [
         { techId: fromTechId, date: dayRow.day },

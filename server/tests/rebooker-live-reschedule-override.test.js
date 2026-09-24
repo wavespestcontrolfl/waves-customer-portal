@@ -137,6 +137,7 @@ function wireRescheduleMocks(service) {
     if (table === 'reschedule_log') return logInsert;
     if (table === 'series_moves') return chain();
     if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
+    if (table === 'technician_absences') return chain();
     throw new Error(`Unexpected trx table ${table}`);
   });
   trx.raw = rawFactory('trx.raw');
@@ -595,6 +596,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
       if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
+      if (table === 'technician_absences') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -990,6 +992,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
       if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
+      if (table === 'technician_absences') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -1063,6 +1066,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
       if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue(techRow) });
+      if (table === 'technician_absences') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');

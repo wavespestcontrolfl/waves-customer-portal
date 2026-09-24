@@ -12,6 +12,11 @@
  * Race-safety: same fetchSeq pattern as TechDrawer's own fetchTech — a
  * per-request sequence token so a stale fetch (tech switched, or the same
  * tech reselected before the first fetch resolved) can't clobber state.
+ * The POST (mark out) and DELETE (tech is back) mutations capture the
+ * seq + techId before firing and re-check both before applying their
+ * response — a late-resolving redistribution for tech A can't paint
+ * over tech B's drawer if the dispatcher switched selection mid-flight
+ * (Codex P1 on PR #4678).
  *
  * Tier 1 V2 styling: Card / Badge / Button / Select / Textarea primitives,
  * zinc ramp, fontWeight 400/500, 14px text minimum.
@@ -47,7 +52,7 @@ function postErrorMessage(errCode) {
   return null;
 }
 
-export default function TechOutSection({ techId, techName }) {
+export default function TechOutSection({ techId, techName, onChanged }) {
   // 'loading' | 'off' | 'ready'
   const [phase, setPhase] = useState('loading');
   const [absence, setAbsence] = useState(null);
@@ -60,6 +65,14 @@ export default function TechOutSection({ techId, techName }) {
   const [clearing, setClearing] = useState(false);
 
   const fetchSeqRef = useRef(0);
+  // Mirrors the techId prop on every render so an already-in-flight async
+  // handler (whose own `techId` closure is frozen at the value from the
+  // render it started in) can still tell the selection moved on. Needed
+  // alongside fetchSeqRef: the seq only advances once the selection-change
+  // effect actually runs, which is soon but not synchronous with the prop
+  // change itself.
+  const techIdRef = useRef(techId);
+  techIdRef.current = techId;
 
   const fetchStatus = useCallback(async (id) => {
     const seq = ++fetchSeqRef.current;
@@ -110,15 +123,29 @@ export default function TechOutSection({ techId, techName }) {
 
   async function handleConfirmMarkOut() {
     if (submitting) return;
+    // Capture the guard pair before the request goes out — see the
+    // header comment. A response that comes back after the dispatcher
+    // has switched to a different tech (or this same tech re-fetched)
+    // must be discarded, never applied to whatever's on screen now.
+    // Checked once, right after the request settles: nothing below this
+    // component re-bumps fetchSeqRef, so a single check is sufficient
+    // (unlike handleTechIsBack, which calls fetchStatus internally).
+    const seq = fetchSeqRef.current;
+    const requestTechId = techId;
     setSubmitting(true);
     setSubmitError(null);
+    let discarded = false;
     try {
-      const res = await fetch(`${API_BASE}/admin/tech-out/${techId}`, {
+      const res = await fetch(`${API_BASE}/admin/tech-out/${requestTechId}`, {
         method: 'POST',
         headers: adminAuthHeaders(),
         body: JSON.stringify({ reason, note: note || undefined }),
       });
       const data = await res.json().catch(() => ({}));
+      if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
+        discarded = true;
+        return;
+      }
       if (res.status === 409 || res.status === 400) {
         setSubmitError(postErrorMessage(data.error) || data.error || 'Failed to mark out');
         return;
@@ -126,36 +153,57 @@ export default function TechOutSection({ techId, techName }) {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       // The POST response shape is { absence, summary } (siblings), unlike
       // the GET status shape which nests summary as absence.redistribution
-      // — normalize so the "out" view below has one shape to read.
+      // — normalize so the "out" view below has one shape to read. Success
+      // covers both a fresh mark-out (201) and the resume case (200,
+      // { ..., resumed: true }) — both are `res.ok` and carry the same
+      // { absence, summary } shape.
       setAbsence({ ...data.absence, redistribution: data.absence?.redistribution || data.summary });
       setConfirming(false);
       setNote('');
+      onChanged?.();
     } catch (err) {
+      if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
+        discarded = true;
+        return;
+      }
       setSubmitError(err.message || 'Failed to mark out');
     } finally {
-      setSubmitting(false);
+      if (!discarded) setSubmitting(false);
     }
   }
 
   async function handleTechIsBack() {
     if (clearing) return;
+    const seq = fetchSeqRef.current;
+    const requestTechId = techId;
     setClearing(true);
     setSubmitError(null);
+    // `discarded` (not a live re-check of fetchSeqRef) drives the finally
+    // block: fetchStatus() below bumps fetchSeqRef itself on success, so
+    // re-comparing against the captured `seq` afterwards would misfire on
+    // the ordinary, non-stale path and leave `clearing` stuck true.
+    let discarded = false;
     try {
       const date = etDateString();
-      const res = await fetch(`${API_BASE}/admin/tech-out/${techId}?date=${date}`, {
+      const res = await fetch(`${API_BASE}/admin/tech-out/${requestTechId}?date=${date}`, {
         method: 'DELETE',
         headers: adminAuthHeaders(),
       });
+      if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
+        discarded = true;
+        return;
+      }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      await fetchStatus(techId);
+      await fetchStatus(requestTechId);
+      onChanged?.();
     } catch (err) {
+      if (discarded) return;
       setSubmitError(err.message || 'Failed to clear absence');
     } finally {
-      setClearing(false);
+      if (!discarded) setClearing(false);
     }
   }
 

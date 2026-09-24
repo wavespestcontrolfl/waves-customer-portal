@@ -112,7 +112,7 @@ function RouteStop({ stop }) {
   );
 }
 
-export default function TechDrawer({ techId, onClose }) {
+export default function TechDrawer({ techId, onClose, onAbsenceChanged }) {
   const [tech, setTech] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -237,7 +237,7 @@ export default function TechDrawer({ techId, onClose }) {
               </Card>
             </div>
 
-            <TechOutSection techId={techId} techName={tech.name} />
+            <TechOutSection techId={techId} techName={tech.name} onChanged={onAbsenceChanged} />
 
             <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary mb-2">
               Today's route

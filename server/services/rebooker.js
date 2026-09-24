@@ -10,9 +10,9 @@ const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eli
 // and this commit is a "pick another slot" outcome for the customer, not an
 // internal 422 naming staff: translate it to the route's SLOT_TAKEN recovery
 // (reschedule-public refreshes availability on that code).
-async function assertAssignableSlotTechnician(technicianId, trx) {
+async function assertAssignableSlotTechnician(technicianId, trx, date) {
   try {
-    await assertAssignableTechnician(technicianId, { conn: trx });
+    await assertAssignableTechnician(technicianId, { conn: trx, date });
   } catch (err) {
     if (err.code !== NOT_ASSIGNABLE) throw err;
     throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
@@ -1627,7 +1627,7 @@ class SmartRebooker {
       // the same trx that writes it — a slot offered before the tech went
       // prospective/inactive/office-only cannot land here.
       if (Object.prototype.hasOwnProperty.call(updates, 'technician_id')) {
-        await assertAssignableSlotTechnician(updates.technician_id, trx);
+        await assertAssignableSlotTechnician(updates.technician_id, trx, newDateStr);
       }
       // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
       // re-reads the receiving tech's capabilities here; the unit mover runs the
@@ -2841,7 +2841,7 @@ class SmartRebooker {
             : occupancyProbeEnd(updateData.window_start, null, sib.estimated_duration_minutes)
         ));
         if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
-          await assertAssignableSlotTechnician(options.technicianId || null, trx);
+          await assertAssignableSlotTechnician(options.technicianId || null, trx, String(date).split('T')[0]);
           updateData.technician_id = options.technicianId || null;
           // Tech change also invalidates the sequence (same rule as the
           // single-reschedule path above).

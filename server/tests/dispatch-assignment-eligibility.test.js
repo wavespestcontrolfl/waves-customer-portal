@@ -18,13 +18,20 @@ const JOB = { id: 'job-1', status: 'scheduled', technician_id: 't-old', schedule
 function primeReads({ tech }) {
   const jobChain = { where: jest.fn(() => jobChain), first: jest.fn(async () => JOB) };
   const techChain = { where: jest.fn(() => techChain), first: jest.fn(async () => tech) };
+  // technician_absences: only reached when the tech is otherwise eligible
+  // (assertAssignableTechnician's date-scoped absence check) — the job's
+  // date is not marked out in these fixtures.
+  const absenceChain = {
+    where: jest.fn(() => absenceChain), whereNull: jest.fn(() => absenceChain), first: jest.fn(async () => undefined),
+  };
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return jobChain;
     if (table === 'technicians') return techChain;
+    if (table === 'technician_absences') return absenceChain;
     throw new Error(`unexpected table ${table}`);
   });
   db.transaction = jest.fn(async () => { throw new Error('transaction must not start for a refused technician'); });
-  return { jobChain, techChain };
+  return { jobChain, techChain, absenceChain };
 }
 
 describe('assignDispatchJob save-time eligibility', () => {

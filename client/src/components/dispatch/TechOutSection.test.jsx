@@ -118,3 +118,91 @@ describe('out today', () => {
     expect(deleteCall[1].method).toBe('DELETE');
   });
 });
+
+// Codex P1 on PR #4678: the seq guard used to cover only the status GET —
+// a mark-out POST or a "Tech is back" DELETE for tech A that resolved
+// after the dispatcher had already selected tech B could still paint A's
+// redistribution result into B's drawer.
+describe('cross-tech mutation race (Codex P1)', () => {
+  it('discards a stale POST response after switching to a different tech before it resolves', async () => {
+    const onChanged = vi.fn();
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+
+    const { rerender } = render(
+      <TechOutSection techId="tech-1" techName="Tech One" onChanged={onChanged} />
+    );
+    await screen.findByText('Availability');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark out today' }));
+    await screen.findByRole('button', { name: 'Confirm' });
+
+    let releasePost;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await screen.findByRole('button', { name: 'Redistributing…' });
+
+    // Dispatcher switches to tech-2 before A's POST resolves.
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    rerender(<TechOutSection techId="tech-2" techName="Tech Two" onChanged={onChanged} />);
+    await screen.findByText('Availability');
+    expect(screen.getByRole('button', { name: 'Mark out today' })).toBeInTheDocument();
+
+    // Now A's POST resolves with a redistribution summary.
+    await act(async () => {
+      releasePost({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          absence: { id: 'abs-1', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'sick', note: null },
+          summary: { total: 1, moved: [{ job_id: 'j1', to_technician_id: 'tech-9', to_technician_name: 'Tech Nine' }], parked: [], failed: [] },
+        }),
+      });
+    });
+
+    // B's view is unaffected: no "Out today" banner, still the plain
+    // Availability form, and onChanged fired only for whatever B's own
+    // lifecycle triggers (never for the discarded tech-1 POST).
+    expect(screen.queryByText(/Out today/)).toBeNull();
+    expect(screen.getByText('Availability')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark out today' })).toBeInTheDocument();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('discards a stale DELETE response after switching to a different tech before it resolves', async () => {
+    const onChanged = vi.fn();
+    const absence = {
+      id: 'abs-1', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'sick', note: null,
+      redistribution: { total: 1, moved: [], parked: [], failed: [] },
+    };
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence }) });
+
+    const { rerender } = render(
+      <TechOutSection techId="tech-1" techName="Tech One" onChanged={onChanged} />
+    );
+    await screen.findByText('Out today · Sick');
+
+    let releaseDelete;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { releaseDelete = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Tech is back' }));
+    await screen.findByRole('button', { name: 'Clearing…' });
+
+    // Dispatcher switches to tech-2 (not out) before A's DELETE resolves.
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    rerender(<TechOutSection techId="tech-2" techName="Tech Two" onChanged={onChanged} />);
+    await screen.findByText('Availability');
+
+    // Now A's DELETE resolves successfully.
+    await act(async () => {
+      releaseDelete({ ok: true, json: async () => ({ absence: { ...absence, cleared_at: new Date().toISOString() } }) });
+    });
+
+    // B's view is unaffected, and the stale DELETE must not have triggered
+    // a fetchStatus(tech-1) call or onChanged() on B's behalf.
+    expect(screen.getByText('Availability')).toBeInTheDocument();
+    expect(screen.queryByText(/Out today/)).toBeNull();
+    expect(onChanged).not.toHaveBeenCalled();
+    // Only 3 fetches total: tech-1 GET, tech-2 GET, tech-1 DELETE. No
+    // extra fetchStatus(tech-1) call snuck in after the discard.
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+});

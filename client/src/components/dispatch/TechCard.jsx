@@ -67,6 +67,27 @@ function gpsAgeTone(updatedAt, now) {
   return now - ms > 5 * 60 * 1000 ? 'text-alert-fg' : 'text-ink-tertiary';
 }
 
+// Pulled out of TechCardImpl to keep that function's cyclomatic
+// complexity under the lint ceiling. A tech marked out today shows
+// nothing job-related — they aren't actually working the board, so
+// their last reported status/address/ETA (which can be stale from
+// before they went out) would mislead a dispatcher at a glance: idle
+// dot + "Out" status text + "—" address, same idea as the existing
+// idle-dot rule for dotColor/statusTextColor. ETA is backend-computed
+// via haversine when status is en_route/driving + tech has a
+// current_job + both have lat/lng — null in every other case, and
+// never shown for an out tech even if a stale en_route/driving status
+// and eta_minutes are still sitting on the row.
+function deriveTechDisplay(tech, jobs) {
+  const currentJob = !tech.out_today && tech.current_job_id ? jobs.get(tech.current_job_id) : null;
+  const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
+  const dotColor = tech.out_today ? STATUS_DOT.idle : (STATUS_DOT[tech.status] || STATUS_DOT.idle);
+  const statusTextColor = tech.out_today ? STATUS_TEXT.idle : (STATUS_TEXT[tech.status] || STATUS_TEXT.idle);
+  const statusText = tech.out_today ? 'Out' : (tech.status || 'idle');
+  const showEta = !tech.out_today && tech.eta_minutes != null && (tech.status === 'en_route' || tech.status === 'driving');
+  return { currentJob, addressLine, dotColor, statusTextColor, statusText, showEta };
+}
+
 function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -75,18 +96,9 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
     return () => window.clearInterval(id);
   }, []);
 
-  const currentJob = tech.current_job_id ? jobs.get(tech.current_job_id) : null;
-  const addressLine = currentJob ? truncate(streetOnly(currentJob.address), 28) : '—';
-  // A tech marked out today shows the idle dot regardless of their last
-  // reported status — they aren't actually working the board.
-  const dotColor = tech.out_today ? STATUS_DOT.idle : (STATUS_DOT[tech.status] || STATUS_DOT.idle);
-  const statusTextColor = STATUS_TEXT[tech.status] || STATUS_TEXT.idle;
+  const { currentJob, addressLine, dotColor, statusTextColor, statusText, showEta } = deriveTechDisplay(tech, jobs);
   const gpsLabel = gpsAgeLabel(tech.location_updated_at, now);
   const gpsTone = gpsAgeTone(tech.location_updated_at, now);
-  // ETA: backend computes via haversine when status is en_route or
-  // driving + tech has a current_job + both have lat/lng. Null in
-  // every other case — render nothing rather than a fake number.
-  const showEta = tech.eta_minutes != null && (tech.status === 'en_route' || tech.status === 'driving');
 
   const initials = (tech.name || '?')
     .split(/\s+/)
@@ -155,7 +167,7 @@ function TechCardImpl({ tech, jobs, selected, onSelect, isDropTarget }) {
                   statusTextColor
                 )}
               >
-                {tech.status || 'idle'}
+                {statusText}
               </span>
               {showEta ? (
                 <span className="text-11 uppercase tracking-label font-medium text-zinc-500">

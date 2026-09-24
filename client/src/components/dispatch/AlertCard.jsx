@@ -20,6 +20,12 @@
  * While the PATCH is in flight the button is disabled + shows
  * "Resolving…". On failure the button re-enables for retry. If no
  * `onResolve` prop is passed, the button is omitted (read-only mode).
+ *
+ * Job action: when an `onOpenJob(jobId)` prop is passed AND the alert
+ * carries a `job_id`, a secondary "Open job" button appears in the
+ * footer next to Resolve, calling onOpenJob(alert.job_id). Implemented
+ * once in the shared footer (not per-type body) so every alert type
+ * with a job_id gets it for free, not just tech_out_overflow.
  */
 import React, { useState } from 'react';
 import { Card, Button, cn } from '../ui';
@@ -337,11 +343,12 @@ const PRETTY_HEADER_LABEL = {
   tech_out_overflow: 'Needs a decision',
 };
 
-export default function AlertCard({ alert, onResolve }) {
+export default function AlertCard({ alert, onResolve, onOpenJob }) {
   const tracking = alert.payload?.source === 'no_show_detector';
   const Body = tracking ? TrackingBody : (TYPE_RENDERERS[alert.type] || GenericBody);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState(null);
+  const showOpenJob = !!(alert.job_id && onOpenJob);
 
   async function handleResolve() {
     if (!onResolve || resolving) return;
@@ -384,19 +391,30 @@ export default function AlertCard({ alert, onResolve }) {
         </span>
       </div>
       <Body alert={alert} />
-      {onResolve && (
+      {(onResolve || showOpenJob) && (
         <div className="mt-2 flex items-center justify-end gap-2">
           {resolveError && (
             <span className="text-11 text-alert-fg">{resolveError}</span>
           )}
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={handleResolve}
-            disabled={resolving}
-          >
-            {resolving ? 'Resolving…' : 'Resolve'}
-          </Button>
+          {showOpenJob && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => onOpenJob(alert.job_id)}
+            >
+              Open job
+            </Button>
+          )}
+          {onResolve && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={handleResolve}
+              disabled={resolving}
+            >
+              {resolving ? 'Resolving…' : 'Resolve'}
+            </Button>
+          )}
         </div>
       )}
     </Card>

@@ -25,6 +25,20 @@ function connReturning(row, { transaction = false } = {}) {
   return { conn, chain };
 }
 
+// A conn that routes 'technicians' to the given row and 'technician_absences'
+// to an uncleared-absence lookup, for the date-scoped branch.
+function connWithAbsence(techRow, absenceRow, { transaction = false } = {}) {
+  const techChain = {
+    where: jest.fn(() => techChain), forShare: jest.fn(() => techChain), first: jest.fn(async () => techRow),
+  };
+  const absenceChain = {
+    where: jest.fn(() => absenceChain), whereNull: jest.fn(() => absenceChain), first: jest.fn(async () => absenceRow),
+  };
+  const conn = jest.fn((table) => (table === 'technicians' ? techChain : absenceChain));
+  if (transaction) conn.isTransaction = true;
+  return { conn, techChain, absenceChain };
+}
+
 describe('technician eligibility', () => {
   test('statuses are exactly prospective / active / inactive', () => {
     expect(EMPLOYMENT_STATUSES).toEqual(['prospective', 'active', 'inactive']);
@@ -118,6 +132,44 @@ describe('technician eligibility', () => {
       db.mockReturnValue(chain);
       await expect(assertAssignableTechnician('t1')).resolves.toMatchObject({ id: 't1' });
       expect(db).toHaveBeenCalledWith('technicians');
+    });
+
+    describe('date-scoped technician_absences check (tech-out redistribution, codex #4678 r1 finding B)', () => {
+      const ROW = { id: 't1', name: 'Tech One', employment_status: 'active', field_dispatchable: true };
+
+      test('no date ⇒ byte-identical: technician_absences is never queried', async () => {
+        const { conn, absenceChain } = connWithAbsence(ROW, { id: 'abs-1' });
+        await expect(assertAssignableTechnician('t1', { conn })).resolves.toBe(ROW);
+        expect(absenceChain.where).not.toHaveBeenCalled();
+      });
+
+      test('a date with no uncleared absence row is unaffected', async () => {
+        const { conn } = connWithAbsence(ROW, undefined);
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-01' })).resolves.toBe(ROW);
+      });
+
+      test('an uncleared absence on that date throws 422 TECH_NOT_ASSIGNABLE, "marked out on <date>"', async () => {
+        const { conn, absenceChain } = connWithAbsence(ROW, { id: 'abs-1' });
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-01' })).rejects.toMatchObject({
+          status: 422,
+          statusCode: 422,
+          isOperational: true,
+          code: NOT_ASSIGNABLE,
+          technicianId: 't1',
+          message: expect.stringMatching(/Tech One is marked out on 2026-10-01 and cannot be assigned work/),
+        });
+        expect(absenceChain.where).toHaveBeenCalledWith({ technician_id: 't1', absence_date: '2026-10-01' });
+      });
+
+      test('a technician already ineligible for another reason short-circuits before the absence read', async () => {
+        const inactiveRow = { id: 't1', name: 'Tech One', employment_status: 'inactive', field_dispatchable: true };
+        const { conn, absenceChain } = connWithAbsence(inactiveRow, { id: 'abs-1' });
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-01' })).rejects.toMatchObject({
+          code: NOT_ASSIGNABLE,
+          message: expect.stringMatching(/no longer active/),
+        });
+        expect(absenceChain.where).not.toHaveBeenCalled();
+      });
     });
   });
 });

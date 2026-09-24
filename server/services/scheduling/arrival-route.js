@@ -62,7 +62,7 @@ function hasCoords(stop) {
 
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
-  changes = {}, now = new Date(), travel, preserveCapacity = false,
+  changes = {}, now = new Date(), travel, preserveCapacity = false, treatTargetAsPending = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -125,7 +125,13 @@ async function loadArrivalRouteContext({
     .where({ visit_id: target.visit_id }).whereNot('id', serviceId)
     .whereNotIn('id', capacity ? [] : excludeServiceIds)
     .whereNotIn('status', TERMINAL_ROW_STATUSES).first('id'));
-  const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
+  // treatTargetAsPending (tech-out redistribution's fit pre-check): the
+  // target is being moved OFF its current holder regardless of that stop's
+  // own live status — an en_route stop of an absent tech is exactly the
+  // case this exists to cover — so its current activeTarget membership must
+  // not gate placement eligibility for a DIFFERENT candidate technician.
+  const activeTarget = !treatTargetAsPending
+    && dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   return { target, rows: rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
     && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)),

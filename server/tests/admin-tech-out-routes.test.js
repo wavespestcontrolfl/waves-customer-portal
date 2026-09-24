@@ -71,6 +71,24 @@ describe('admin-tech-out routes', () => {
     expect(techOut.getTechOut).toHaveBeenCalledWith(expect.objectContaining({ technicianId: TECH_ID, date: expect.any(String) }));
   });
 
+  test('GET rejects an impossible calendar date with 400, no service call', async () => {
+    techOut.techOutEnabled.mockReturnValue(true);
+
+    const res = await run('get', '/:technicianId', { query: { date: '2027-02-31' } });
+
+    expect(res.statusCode).toBe(400);
+    expect(techOut.getTechOut).not.toHaveBeenCalled();
+  });
+
+  test('DELETE rejects an impossible calendar date with 400, no service call', async () => {
+    techOut.techOutEnabled.mockReturnValue(true);
+
+    const res = await run('delete', '/:technicianId', { query: { date: '2027-02-31' } });
+
+    expect(res.statusCode).toBe(400);
+    expect(techOut.clearTechOut).not.toHaveBeenCalled();
+  });
+
   test('POST 201s with the absence + redistribution summary, actorId from req.technicianId', async () => {
     techOut.techOutEnabled.mockReturnValue(true);
     const absence = { id: 'abs-1', technician_id: TECH_ID, reason: 'sick' };
@@ -84,6 +102,18 @@ describe('admin-tech-out routes', () => {
     expect(techOut.markTechOut).toHaveBeenCalledWith(expect.objectContaining({
       technicianId: TECH_ID, reason: 'sick', note: 'flu', actorId: 'actor-1',
     }));
+  });
+
+  test('POST 200s (not 201) when markTechOut resumed an incomplete prior redistribution', async () => {
+    techOut.techOutEnabled.mockReturnValue(true);
+    const absence = { id: 'abs-1', technician_id: TECH_ID, reason: 'sick' };
+    const summary = { total: 2, moved: [], parked: [], failed: [], status: 'complete' };
+    techOut.markTechOut.mockResolvedValue({ absence, summary, resumed: true });
+
+    const res = await run('post', '/:technicianId', { body: { reason: 'sick' } });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ absence, summary });
   });
 
   test('POST maps a VALIDATION error (bad reason) to 400', async () => {

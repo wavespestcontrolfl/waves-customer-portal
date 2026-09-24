@@ -11,7 +11,7 @@
 const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const {
   techOutEnabled, getTechOut, markTechOut, clearTechOut,
 } = require('../services/tech-out');
@@ -29,6 +29,7 @@ router.get('/:technicianId', async (req, res, next) => {
   if (!techOutEnabled()) return res.status(404).json({ enabled: false });
   try {
     const date = req.query.date || etDateString();
+    if (!validCalendarDate(date)) return res.status(400).json({ error: 'date must be a valid calendar date (YYYY-MM-DD)' });
     const absence = await getTechOut({ technicianId: req.params.technicianId, date });
     res.json({ enabled: true, absence });
   } catch (err) { next(err); }
@@ -38,14 +39,15 @@ router.post('/:technicianId', async (req, res, next) => {
   if (!techOutEnabled()) return res.status(404).json({ enabled: false });
   try {
     const { date, reason, note } = req.body || {};
-    const { absence, summary } = await markTechOut({
+    const { absence, summary, resumed } = await markTechOut({
       technicianId: req.params.technicianId,
       date: date || etDateString(),
       reason,
       note,
       actorId: req.technicianId,
     });
-    res.status(201).json({ absence, summary });
+    // 200 for a resume of an existing (incomplete) absence, 201 for a fresh mark.
+    res.status(resumed ? 200 : 201).json({ absence, summary });
   } catch (err) {
     if (err.code === 'ALREADY_OUT') return res.status(409).json({ error: 'already_out' });
     if (err.code === 'PAST_DATE') return res.status(409).json({ error: 'past_date' });
@@ -58,6 +60,7 @@ router.delete('/:technicianId', async (req, res, next) => {
   if (!techOutEnabled()) return res.status(404).json({ enabled: false });
   try {
     const date = req.query.date || etDateString();
+    if (!validCalendarDate(date)) return res.status(400).json({ error: 'date must be a valid calendar date (YYYY-MM-DD)' });
     const { absence, resolvedAlerts } = await clearTechOut({
       technicianId: req.params.technicianId,
       date,

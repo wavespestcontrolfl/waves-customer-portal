@@ -52,13 +52,27 @@ function reasonFor(tech) {
  * status writer takes (admin-timetracking.js), so an offboarding or a
  * field-eligibility removal cannot commit between this check and the
  * assignment's commit. On a plain connection it is a point-in-time check.
+ *
+ * `date` (YYYY-MM-DD, optional): when given, also rejects a technician
+ * marked out for that calendar date (an uncleared technician_absences row —
+ * GATE_TECH_OUT_REDISTRIBUTE) so an assignment cannot land on an absent
+ * tech's day, from tech-out's own redistribution or any other writer that
+ * threads the destination date through. Omitting it keeps every caller
+ * byte-identical to before this check existed.
  */
-async function assertAssignableTechnician(technicianId, { conn = db } = {}) {
+async function assertAssignableTechnician(technicianId, { conn = db, date } = {}) {
   if (technicianId === null || technicianId === undefined || technicianId === '') return null;
   let query = conn('technicians').where({ id: technicianId });
   if (conn.isTransaction) query = query.forShare();
   const tech = await query.first('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active');
-  const reason = reasonFor(tech);
+  let reason = reasonFor(tech);
+  if (!reason && date) {
+    const absence = await conn('technician_absences')
+      .where({ technician_id: technicianId, absence_date: date })
+      .whereNull('cleared_at')
+      .first('id');
+    if (absence) reason = `is marked out on ${date}`;
+  }
   if (reason) {
     const err = new Error(`Technician ${tech ? tech.name : technicianId} ${reason} and cannot be assigned work`);
     // Both shapes: `status` for route handlers that read it, and the

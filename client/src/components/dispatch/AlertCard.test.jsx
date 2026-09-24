@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import AlertCard from './AlertCard';
 afterEach(cleanup);
 describe('communication-based dispatch warnings', () => {
@@ -134,6 +134,47 @@ describe('tech_out_overflow alert', () => {
     expect(screen.getByText('Jordan Reyes')).toBeTruthy();
     expect(screen.getByText(/is out \(emergency\)/)).toBeTruthy();
     expect(screen.getByText(/Demo Customer/)).toBeTruthy();
+  });
+});
+
+describe('Open job action', () => {
+  it('shows "Open job" and calls onOpenJob(job_id) when the alert has a job_id and the prop is passed', () => {
+    const onOpenJob = vi.fn();
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_out_overflow', severity: 'warn', created_at: new Date().toISOString(),
+      job_id: 'visit-1', tech_name: 'Tech One',
+      payload: { reason: 'sick', absent_tech_name: 'Tech One' },
+    }} onOpenJob={onOpenJob} />);
+    const btn = screen.getByRole('button', { name: 'Open job' });
+    fireEvent.click(btn);
+    expect(onOpenJob).toHaveBeenCalledWith('visit-1');
+  });
+
+  it('shows Open job for any alert type that carries a job_id, not just tech_out_overflow', () => {
+    const onOpenJob = vi.fn();
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_late', severity: 'warn', created_at: new Date().toISOString(),
+      job_id: 'visit-2', tech_name: 'Tech One',
+      payload: { delay_minutes: 10 },
+    }} onOpenJob={onOpenJob} />);
+    expect(screen.getByRole('button', { name: 'Open job' })).toBeTruthy();
+  });
+
+  it('omits the Open job button when the alert has no job_id', () => {
+    const onOpenJob = vi.fn();
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_out_overflow', severity: 'warn', created_at: new Date().toISOString(),
+      tech_name: 'Tech One', payload: { reason: 'sick', absent_tech_name: 'Tech One' },
+    }} onOpenJob={onOpenJob} />);
+    expect(screen.queryByRole('button', { name: 'Open job' })).toBeNull();
+  });
+
+  it('omits the Open job button when no onOpenJob prop is passed, even with a job_id', () => {
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_out_overflow', severity: 'warn', created_at: new Date().toISOString(),
+      job_id: 'visit-1', tech_name: 'Tech One', payload: { reason: 'sick', absent_tech_name: 'Tech One' },
+    }} />);
+    expect(screen.queryByRole('button', { name: 'Open job' })).toBeNull();
   });
 });
 

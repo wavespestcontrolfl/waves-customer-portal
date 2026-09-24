@@ -38,8 +38,17 @@
  * Server-side socketAuth (PR #279 + #284) verifies the token, runs
  * the staff freshness check, and joins the `dispatch:admins` room
  * automatically — we don't call socket.join() from the client.
+ *
+ * refreshTechs(): a stable callback (exposed to consumers) that re-runs
+ * GET /board and merges the fresh tech rows into techsMap by id — used
+ * after a tech-out mark-out/clear mutation so out_today and the roster's
+ * derived status reflect the server immediately, without waiting on a
+ * broadcast. It deliberately leaves jobs[] untouched: the tech-out
+ * redistribution reassigns stops through the same assignDispatchJob path
+ * drag-to-reassign uses, which already emits dispatch:job_update per job
+ * — refetching jobs here would just duplicate that broadcast.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -142,6 +151,28 @@ export function useDispatchBoard() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // ---- on-demand tech refresh (see header comment) ----
+  const refreshTechs = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/admin/dispatch/board`, {
+        headers: adminAuthHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTechsMap((prev) => {
+        const next = new Map(prev);
+        for (const t of data.techs || []) next.set(t.id, t);
+        return next;
+      });
+    } catch {
+      // Best-effort: this follows a mutation that already succeeded
+      // (mark out / tech is back). `error` is reserved for the initial
+      // board load failing outright, so a failed refresh here just
+      // leaves the roster as it was — the next broadcast or manual
+      // reopen catches it up.
+    }
   }, []);
 
   // ---- socket subscription ----
@@ -295,5 +326,6 @@ export function useDispatchBoard() {
     setSelectedJobId,
     loading,
     error,
+    refreshTechs,
   };
 }
