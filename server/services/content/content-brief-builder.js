@@ -258,7 +258,7 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
     // r26/r34), so the note is simply OMITTED without facts; the per-item
     // figure rule already says 'where one exists / NEVER invent'.
     ...(factsAvailable
-      ? ['"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, naming the actual sources and linking their supporting pages only when the outbound-link policy permits them; never invent testing, field experience, or a selection methodology)']
+      ? ['"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, name sources only when their identities are supplied or independently verified, and link supporting pages only when the outbound-link policy permits them. If source metadata is absent, describe only the documented basis in the brief without attributing it to an invented source; omit the note if no publishable basis is available. Never invent testing, field experience, or a selection methodology)']
       : []),
   ];
   const voice = {
@@ -267,7 +267,7 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
       'The item count in the title MUST equal the number of numbered H2 sections — recount before finishing.',
       "Each item's first sentence is self-contained and declarative so it can be quoted standalone by an answer engine.",
       'No filler between an item heading and its answer — the payoff sentence comes first, color commentary after.',
-      'Use a concrete figure from the brief\'s facts pack or a permitted primary source only where it helps the reader (a measurement, timeframe, temperature, count). There is no statistics quota. Preserve units, source date and geographic/species scope. NEVER invent a figure, and never a dollar amount (use the brief\'s approved service CTA for cost questions).',
+      'Use a concrete figure from the brief\'s facts pack or a permitted primary source only where it helps the reader (a measurement, timeframe, temperature, count). There is no statistics quota. Preserve supplied units and scope; include source date and geographic/species scope only when supplied or independently verified. Never invent missing metadata; omit a number if essential interpretive context is unavailable. NEVER invent a figure, and never a dollar amount (use the brief\'s approved service CTA for cost questions).',
       'This is an informational list, never a ranked vendor roundup — do not rank or compare companies.',
     ],
   };

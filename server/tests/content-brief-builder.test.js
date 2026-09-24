@@ -145,6 +145,9 @@ describe('applyListicleTreatment', () => {
     expect(note).toMatch(/outbound-link policy permits/i);
     expect(note).toMatch(/never invent testing, field experience/i);
     expect(note).not.toMatch(/no external links/i);
+    expect(note).toMatch(/name sources only when their identities are supplied or independently verified/i);
+    expect(note).toMatch(/omit the note if no publishable basis is available/i);
+    expect(r.voiceConstraints.listicle_notes.join(' ')).toMatch(/Never invent missing metadata/);
   });
 
   test('stacks on top of the AEO overlay without losing its additions', () => {
