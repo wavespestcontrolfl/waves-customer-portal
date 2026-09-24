@@ -527,13 +527,19 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         // token; released with the anchor. A sibling under another send's
         // fresh claim keeps that one.
         if (visibleSiblingIds.length) {
-          await trx('estimates')
+          const stamped = await trx('estimates')
             .whereIn('id', visibleSiblingIds)
             .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
             .update({
               estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, deliveryClaimToken]),
               updated_at: trx.fn.now(),
             });
+          // EVERY visible sibling must carry this token (codex r44 P1): a
+          // sibling under another send's live claim is skipped by the
+          // predicate, and once that owner releases it a lookup could
+          // quarantine it before the provider call — so the notification
+          // is withheld rather than sent for an incomplete link.
+          if (Number(stamped) !== visibleSiblingIds.length) return false;
         }
         return true;
       });

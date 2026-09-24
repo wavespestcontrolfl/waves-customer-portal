@@ -271,7 +271,55 @@ function contactPairLockKey(email, phone) {
   return `address-verdict:${String(email || '').toLowerCase().trim()}:${ten}`;
 }
 
+// ONE contact-pair verdict read + ONE precedence decision, shared by the
+// public lookup, /calculate and their callers (codex #4667 r44 P2): the
+// rows under the typed email + phone that carry either verdict key, the
+// newest flag covering the premise, and the newest clean verdict covering
+// it (the caller's OWN lead is judged on the premise alone — a staff
+// confirmation of a street-only intake carries no locality; other leads
+// need the complete locality).
+async function loadContactVerdicts(conn, { email, phone, premise, ownLeadId = null }) {
+  const rows = await conn('leads')
+    .whereNull('deleted_at')
+    .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(phone).replace(/\D/g, '').slice(-10)])
+    .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
+    .select('id', 'extracted_data');
+  const parse = (row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data);
+  const flags = rows
+    .map((row) => recoverAddressUnverified(parse(row)))
+    .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, premise))
+    .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0));
+  const newestFlag = flags[0] || null;
+  const newestCleanAt = rows
+    .map((row) => ({ own: ownLeadId != null && String(row.id) === String(ownLeadId), snap: parse(row) }))
+    .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, premise, { requireLocality: !own }))
+    .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
+    .reduce((max, at) => Math.max(max, at), 0);
+  return { rows, newestFlag, newestFlagAt: newestFlag ? (Date.parse(newestFlag.flagged_at || '') || 0) : 0, newestCleanAt };
+}
+// The two-way precedence decision over those verdicts plus this run's own
+// evidence: { newerFlag } when a covering flag is newer than every clean
+// verdict (stored or this run's), { newerClean } when a stored clean verdict
+// is newer than every flag, and { newerFlag } again when the run's own /
+// carried block is older than a stored flag (so writes carry the newest
+// evidence); else {}.
+function reconcileVerdictPrecedence({ verdicts, blocked = null, extraFlags = [], cleanAt = 0 }) {
+  const flags = [verdicts?.newestFlag, ...extraFlags].filter(Boolean)
+    .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0));
+  const newestFlag = flags[0] || null;
+  const newestFlagAt = newestFlag ? (Date.parse(newestFlag.flagged_at || '') || 0) : 0;
+  const newestClean = verdicts?.newestCleanAt || 0;
+  const effectiveCleanAt = Math.max(cleanAt || 0, newestClean);
+  if (!blocked && newestFlag && newestFlagAt > effectiveCleanAt) return { newerFlag: newestFlag };
+  if (blocked && newestClean > newestFlagAt) return { newerClean: new Date(newestClean).toISOString() };
+  if (blocked && newestFlag && newestFlag !== blocked && newestFlagAt > (Date.parse(blocked.flagged_at || '') || 0)) return { newerFlag: newestFlag };
+  return {};
+}
+
 module.exports = {
   cachedAuditSuperseded,
   auditEvidenceAt, deriveAddressUnverified, snapshotCoversAddress, recoverAddressUnverified, countyRollAnswered, nextAddressUnverified, flagCoversAddress, samePremiseDisplay, parseDisplayAddress, buildAddressVerdict, cleanVerdictCovers, contactPairLockKey };
 module.exports.streetKeyNoUnit = streetKeyNoUnit;
+module.exports.loadContactVerdicts = loadContactVerdicts;
+module.exports.reconcileVerdictPrecedence = reconcileVerdictPrecedence;

@@ -134,3 +134,29 @@ describe('codex r43', () => {
     expect(src).not.toContain("samePremiseDisplay(custDisplay, lockedPrior?.address, { requireLocality: true })");
   });
 });
+
+describe('codex r44', () => {
+  test('the extension withholds notification unless every visible sibling took the claim', () => {
+    const ext = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+    expect(ext).toContain('if (Number(stamped) !== visibleSiblingIds.length) return false;');
+  });
+  test('never-published expired siblings are outside both link-visible selectors', () => {
+    const adm = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    expect(adm.split("COALESCE(disposition, '') <> 'expired_unsent'").length - 1).toBeGreaterThanOrEqual(2);
+  });
+  test('one shared contact-pair verdict read and precedence decision', () => {
+    const svc = require('../services/lead-address-unverified');
+    expect(typeof svc.loadContactVerdicts).toBe('function');
+    const flag = { address_line1: '1260 Example St', flagged_at: '2026-09-02T00:00:00Z' };
+    const verdicts = { newestFlag: flag, newestFlagAt: Date.parse(flag.flagged_at), newestCleanAt: Date.parse('2026-09-03T00:00:00Z') };
+    expect(svc.reconcileVerdictPrecedence({ verdicts, blocked: null, cleanAt: 0 })).toEqual({});
+    expect(svc.reconcileVerdictPrecedence({ verdicts: { ...verdicts, newestCleanAt: 0 }, blocked: null, cleanAt: Date.parse('2026-09-01T00:00:00Z') })).toEqual({ newerFlag: flag });
+    expect(svc.reconcileVerdictPrecedence({ verdicts, blocked: flag })).toEqual({ newerClean: '2026-09-03T00:00:00.000Z' });
+    const older = { address_line1: '1260 Example St', flagged_at: '2026-08-01T00:00:00Z' };
+    expect(svc.reconcileVerdictPrecedence({ verdicts: { ...verdicts, newestCleanAt: 0 }, blocked: older, extraFlags: [older] })).toEqual({ newerFlag: flag });
+    const pq = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
+    expect(pq).toContain('const verdicts = await loadContactVerdicts(trx, { email: contactEmail, phone: contactPhone, premise: normalizedAddress');
+    expect(ppl).toContain('const verdicts = await loadContactVerdicts(conn, { email, phone: normPhone, premise: normalizedAddress, ownLeadId: lead.id });');
+  });
+});

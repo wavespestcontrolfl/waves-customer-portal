@@ -489,7 +489,13 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
       // still renders them) under the county-roll address block, so the
       // scheduling preflight refuses what the cron's final verdict would
       // abort (codex #4667 r38 P1).
-      .orWhere((held) => held.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")));
+      // …an EXPIRED sibling only when it was ever published (sent_at or
+      // viewed_at, never expired_unsent) — the renderer's own rule; a
+      // never-delivered legacy row is not part of the link being
+      // protected (codex #4667 r44 P2).
+      .orWhere((held) => held.whereIn('status', ['sending', 'sent', 'viewed', 'expired'])
+        .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+        .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")));
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
@@ -2573,6 +2579,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // them as summaries while the anchor's navigation window is open
       // (codex r35 P1).
       .whereIn('status', ['sent', 'viewed', 'expired'])
+      // …published ones only (the renderer's rule — codex r44 P2).
+      .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")
       .whereNull('archived_at')
       .select('id');
     for (const row of published) linkVisibleGroupIds.push(row.id);

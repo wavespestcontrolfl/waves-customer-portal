@@ -1364,40 +1364,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // verdict newer than it reads as { newerClean } too.
     const reconcileUnderLock = async (trx, { carriedFlag = null } = {}) => {
       if (!contactEmail || !contactPhone) return {};
-      const blocked = addressUnverified || carriedFlag || null;
-      const cleanAt = Math.max(
-        Date.parse(cleanEvidenceAt || '') || 0,
-        rollAnsweredThisRun ? (Date.parse(trustedProfileCachedAt || '') || 0) : 0,
-      );
-      const rows = await trx('leads')
-        .whereNull('deleted_at')
-        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])
-        .whereRaw("(extracted_data->'address_unverified' IS NOT NULL OR extracted_data->'address_verdict' IS NOT NULL)")
-        .select('id', 'extracted_data');
-      const parseRow = (row) => (typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data);
-      const flags = rows
-        .map((row) => recoverAddressUnverified(parseRow(row)))
-        .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress));
-      if (addressUnverified) flags.push(addressUnverified);
-      if (carriedFlag) flags.push(carriedFlag);
-      const newestFlag = flags.sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0] || null;
-      const newestFlagAt = newestFlag ? (Date.parse(newestFlag.flagged_at || '') || 0) : 0;
-      const newestClean = rows
-        .map((row) => ({ own: String(row.id) === String(lead?.id || ''), snap: parseRow(row) }))
-        .filter(({ own, snap }) => snap && cleanVerdictCovers(snap, normalizedAddress, { requireLocality: !own }))
-        .map(({ snap }) => Date.parse(snap.address_verdict?.at || '') || 0)
-        .reduce((max, at) => Math.max(max, at), 0);
-      const effectiveCleanAt = Math.max(cleanAt, newestClean);
-      if (!blocked && newestFlag && newestFlagAt > effectiveCleanAt) return { newerFlag: newestFlag };
-      if (blocked && newestClean > newestFlagAt) return { newerClean: new Date(newestClean).toISOString() };
-      // An already-blocked run whose own / carried flag is OLDER than a
-      // flag another request committed reports that newer flag too, so the
-      // draft, lead and withdrawal writes carry the newest evidence and
-      // never overwrite a concurrently updated lead with the older one
-      // (codex r34 P1).
-      if (blocked && newestFlag && newestFlag !== blocked && newestFlagAt > (Date.parse(blocked.flagged_at || '') || 0)) return { newerFlag: newestFlag };
-      return {};
+      const { loadContactVerdicts, reconcileVerdictPrecedence } = require('../services/lead-address-unverified');
+      // ONE shared read + decision with the lookup stage (codex r44 P2).
+      const verdicts = await loadContactVerdicts(trx, { email: contactEmail, phone: contactPhone, premise: normalizedAddress, ownLeadId: lead?.id || null });
+      return reconcileVerdictPrecedence({
+        verdicts,
+        blocked: addressUnverified || carriedFlag || null,
+        extraFlags: [addressUnverified, carriedFlag].filter(Boolean),
+        cleanAt: Math.max(
+          Date.parse(cleanEvidenceAt || '') || 0,
+          rollAnsweredThisRun ? (Date.parse(trustedProfileCachedAt || '') || 0) : 0,
+        ),
+      });
     };
     if (addressUnverified) {
       // Stamp the judged address on a freshly derived flag (a recovered
