@@ -114,6 +114,87 @@ test.each([
   expect(reviewPlan).not.toHaveBeenCalled();
 });
 
+test('emit_draft accepts a body whose H2 headings exactly match the approved plan, in order', async () => {
+  await tools.registerSessionEditorial(sessionId, { page_type: 'supporting-blog', working_title: 'Door inspection' });
+  reviewPlan.mockResolvedValue({ pass: true });
+  await tools.executeBriefTool('validate_answer_plan', { sections }, { sessionId });
+  const result = await tools.executeBriefTool('emit_draft', {
+    frontmatter: { title: 'Door inspection' },
+    body: '## Inspect\n\nLook for gaps around the frame.',
+  }, { sessionId });
+  expect(result.ok).toBe(true);
+  expect(tools.getDraft(sessionId).body).toContain('## Inspect');
+});
+
+test('emit_draft rejects a body missing an approved plan section as a heading', async () => {
+  await tools.registerSessionEditorial(sessionId, { page_type: 'supporting-blog', working_title: 'Door inspection' });
+  reviewPlan.mockResolvedValue({ pass: true });
+  await tools.executeBriefTool('validate_answer_plan', { sections }, { sessionId });
+  const result = await tools.executeBriefTool('emit_draft', {
+    frontmatter: { title: 'Door inspection' },
+    body: '## Something Else\n\nUnrelated depth.',
+  }, { sessionId });
+  expect(result.draft_rejected).toBe(true);
+  expect(result.directives.join(' ')).toContain('Inspect');
+  expect(tools.getDraft(sessionId)).toBeNull();
+});
+
+test('emit_draft rejects a body with an H2 the approved plan does not cover, on a new page', async () => {
+  await tools.registerSessionEditorial(sessionId, { page_type: 'supporting-blog', working_title: 'Door inspection' });
+  reviewPlan.mockResolvedValue({ pass: true });
+  await tools.executeBriefTool('validate_answer_plan', { sections }, { sessionId });
+  const result = await tools.executeBriefTool('emit_draft', {
+    frontmatter: { title: 'Door inspection' },
+    body: '## Inspect\n\nLook for gaps.\n\n## Bonus Tips\n\nUnapproved extra section.',
+  }, { sessionId });
+  expect(result.draft_rejected).toBe(true);
+  expect(result.directives.join(' ')).toContain('Bonus Tips');
+});
+
+test('emit_draft allows a Frequently Asked Questions section alongside the approved plan', async () => {
+  await tools.registerSessionEditorial(sessionId, { page_type: 'supporting-blog', working_title: 'Door inspection' });
+  reviewPlan.mockResolvedValue({ pass: true });
+  await tools.executeBriefTool('validate_answer_plan', { sections }, { sessionId });
+  const result = await tools.executeBriefTool('emit_draft', {
+    frontmatter: { title: 'Door inspection' },
+    body: '## Inspect\n\nLook for gaps.\n\n## Frequently Asked Questions\n\n### Is this normal?\n\nYes.',
+  }, { sessionId });
+  expect(result.ok).toBe(true);
+});
+
+test('emit_draft on a refresh session only requires the plan section to appear somewhere; extras stay allowed', async () => {
+  gh.getFile.mockImplementation(async (filePath) => filePath === 'src/content/blog/door.md'
+    ? { content: '---\ntitle: Door Inspection Guide\n---\n\nExisting body.' }
+    : null);
+  await tools.registerSessionEditorial(sessionId, {
+    page_type: 'refresh', action_type: 'refresh_existing_page', working_title: null, target_keyword: null, target_url: '/blog/door/',
+  });
+  reviewPlan.mockResolvedValue({ pass: true });
+  await tools.executeBriefTool('validate_answer_plan', { sections }, { sessionId });
+  const result = await tools.executeBriefTool('emit_draft', {
+    frontmatter: { title: 'Door Inspection Guide' },
+    body: '## Existing Section\n\nUnrelated pre-existing content.\n\n### Inspect\n\nLook for gaps.',
+  }, { sessionId });
+  expect(result.ok).toBe(true);
+});
+
+test('emit_draft on a refresh session still rejects when the approved plan section is missing entirely', async () => {
+  gh.getFile.mockImplementation(async (filePath) => filePath === 'src/content/blog/door.md'
+    ? { content: '---\ntitle: Door Inspection Guide\n---\n\nExisting body.' }
+    : null);
+  await tools.registerSessionEditorial(sessionId, {
+    page_type: 'refresh', action_type: 'refresh_existing_page', working_title: null, target_keyword: null, target_url: '/blog/door/',
+  });
+  reviewPlan.mockResolvedValue({ pass: true });
+  await tools.executeBriefTool('validate_answer_plan', { sections }, { sessionId });
+  const result = await tools.executeBriefTool('emit_draft', {
+    frontmatter: { title: 'Door Inspection Guide' },
+    body: '## Existing Section\n\nUnrelated pre-existing content, unchanged.',
+  }, { sessionId });
+  expect(result.draft_rejected).toBe(true);
+  expect(result.directives.join(' ')).toContain('Inspect');
+});
+
 test('gate-off registration does not fetch the refresh target', async () => {
   process.env.GATE_EDITORIAL_EVIDENCE = 'false';
   await tools.registerSessionEditorial(sessionId, {
@@ -125,4 +206,22 @@ test('gate-off registration does not fetch the refresh target', async () => {
   expect(gh.getFile).not.toHaveBeenCalled();
   await expect(tools.executeBriefTool('validate_answer_plan', { sections }, { sessionId }))
     .resolves.toEqual({ pass: true, skipped: 'editorial_gate_not_applicable' });
+});
+
+test('a refresh whose target lookup failed at registration re-resolves the title at plan validation', async () => {
+  let available = false;
+  gh.getFile.mockImplementation(async (filePath) => {
+    if (!available) throw new Error('GitHub 502');
+    return filePath === 'src/content/blog/door.md' ? { content: '---\ntitle: Door Inspection Guide\n---\n\nExisting body.' } : null;
+  });
+  await tools.registerSessionEditorial(sessionId, {
+    page_type: 'refresh', action_type: 'refresh_existing_page', target_url: '/blog/door/',
+  });
+  available = true;
+  reviewPlan.mockResolvedValue({ pass: true });
+
+  const result = await tools.executeBriefTool('validate_answer_plan', { sections }, { sessionId });
+
+  expect(result.pass).toBe(true);
+  expect(reviewPlan).toHaveBeenCalledWith({ title: 'Door Inspection Guide', sections });
 });

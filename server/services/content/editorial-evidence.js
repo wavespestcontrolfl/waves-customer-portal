@@ -1,6 +1,7 @@
 /** Autonomous editorial checks. Only this trusted service signs review results. */
 const { gateEnvValue } = require('../../config/feature-gates');
 const fm = require('../content-astro/frontmatter');
+const { SPOKE_SITE_KEYS, HUB_SITE_KEYS, spokeSiteOrigin } = require('../content-astro/spoke-sites');
 
 const DOMAIN = 'wavespestcontrol.com';
 const DOMAIN_CONTEXT = { hostname: DOMAIN, tokens: {
@@ -14,16 +15,65 @@ const applicable = (path) => /^src\/content\/blog\/.+\.mdx?$/.test(String(path))
 // load-time cycle. This mirrors publishRefresh's four-field blog allowlist.
 const REFRESH_REVIEW_META_FIELDS = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
 
+// Resolve the review/signing domain from an article's OWN frontmatter
+// `domains` (astro-publisher's stampBlogDomains — see resolveSpokeTarget /
+// blogOriginForSpoke in spoke-routing.js) rather than assuming the hub: when
+// SPOKE_BLOG_NETWORK_ENABLED routes a post to a single spoke, its domains is
+// `[spokeKey]` and review/evidence must bind to that spoke's own hostname +
+// siteUrl, never the hub's. Hub-only or absent `domains` (every publisher
+// path except a live spoke route) resolves to the hub. Anything ambiguous —
+// more than one non-hub domain, or a domain outside the fleet — returns
+// null so every caller fails closed instead of reviewing/signing a document
+// under the wrong site.
+function resolveDomainContext(domains) {
+  const list = Array.isArray(domains) ? domains.filter((d) => typeof d === 'string' && d.trim()) : [];
+  if (list.length === 0 || list.every((d) => HUB_SITE_KEYS.includes(d))) return DOMAIN_CONTEXT;
+  if (list.length === 1 && SPOKE_SITE_KEYS.includes(list[0])) {
+    const hostname = list[0];
+    return { hostname, tokens: { ...DOMAIN_CONTEXT.tokens, siteUrl: spokeSiteOrigin(hostname) || `https://www.${hostname}` } };
+  }
+  return null;
+}
+
+// Same resolution, read from the article's own bytes — every verification
+// point trusts the domain the document itself declares (at the exact ref
+// being checked) rather than an assumption carried in from elsewhere.
+function domainContextFromDocument(document) {
+  let domains;
+  try { domains = fm.parse(document).data?.domains; } catch { return null; }
+  return resolveDomainContext(domains);
+}
+
+// Trim a trailing ')' only while it is UNMATCHED by an earlier '(' in the
+// same URL (markdown/parenthetical wrapping, e.g. "(see https://a.org/x)"
+// or the closing paren of a markdown link), so a balanced pair that is part
+// of the URL itself (e.g. ".../report_(2026)") is preserved.
+function trimTrailingUrlNoise(url) {
+  let out = url;
+  for (;;) {
+    if (/[.,;]$/.test(out)) { out = out.slice(0, -1); continue; }
+    if (out.endsWith(')')) {
+      const opens = (out.match(/\(/g) || []).length;
+      const closes = (out.match(/\)/g) || []).length;
+      if (closes > opens) { out = out.slice(0, -1); continue; }
+    }
+    break;
+  }
+  return out;
+}
+
 function sourceUrls(document, brief = {}) {
   // Public citation URLs only; the transport independently checks DNS/IP/redirects.
+  // Parentheses are allowed inside the match (URLs can legitimately contain
+  // them); trimTrailingUrlNoise strips only what's unmatched.
   const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}`;
-  return [...new Set((text.match(/https:\/\/[^\s<>"'\]})]+/g) || [])
-    .map((url) => url.replace(/[.,;]+$/, ''))
+  return [...new Set((text.match(/https:\/\/[^\s<>"'\]}]+/g) || [])
+    .map(trimTrailingUrlNoise)
     .filter((url) => {
       try {
         const parsed = new URL(url);
         const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
-        return !require('../content-astro/spoke-sites').SPOKE_SITE_KEYS.includes(host)
+        return !SPOKE_SITE_KEYS.includes(host)
           && !/\.(?:webp|png|jpe?g|gif|svg)(?:$|\?)/i.test(parsed.pathname);
       } catch { return false; }
     }))];
@@ -45,8 +95,13 @@ function reviewError(result) {
 
 async function evaluate(document, brief = {}) {
   const parsed = fm.parse(document);
+  const domain = resolveDomainContext(parsed.data.domains);
+  if (!domain) {
+    throw reviewError({ checks: [{ name: 'source_support', status: 'error',
+      findings: [{ action: 'Editorial evidence domain could not be resolved from this document\'s frontmatter domains; retry once it is unambiguous.' }] }] });
+  }
   return require('./editorial-review').review({ document, title: parsed.data.title || parsed.data.metaTitle || '',
-    domain: DOMAIN_CONTEXT, sourceUrls: sourceUrls(document, brief), factsPack: brief.facts_pack || null });
+    domain, sourceUrls: sourceUrls(document, brief), factsPack: brief.facts_pack || null });
 }
 
 // Repairs happen BEFORE existing schema, claims, privacy and SEO gates. A final
@@ -108,7 +163,11 @@ async function prepareDraft(draft, brief = {}) {
       const repaired = await require('./editorial-review').repair({ document,
         findings: result.checks.flatMap((check) => check.findings || []), sources: result.sources || [],
         factsPack: brief.facts_pack || null,
-        title: reviewFrontmatter.title || reviewFrontmatter.metaTitle || '', domain: DOMAIN_CONTEXT });
+        // The prior evaluate() call above already resolved this same
+        // document's domain successfully (it throws otherwise), so this is
+        // never null here — recomputed rather than threaded through so
+        // repair always reviews under the domain the current bytes declare.
+        title: reviewFrontmatter.title || reviewFrontmatter.metaTitle || '', domain: domainContextFromDocument(document) });
       document = typeof repaired === 'string' ? repaired : repaired?.document;
       if (!document || JSON.stringify(fm.parse(document).data) !== JSON.stringify(fm.parse(original).data)) throw reviewError(result);
     }
@@ -124,11 +183,22 @@ async function filesForDocument({ document, path, brief = {} }) {
   }
   const result = await evaluate(document, brief);
   if (result?.pass !== true) throw reviewError(result);
-  const manifest = contract.createManifest({ document, path, domain: DOMAIN, checks: result.checks,
-    sources: result.sources, reviewedAt: result.reviewedAt, model: result.model,
-    privateKey: process.env.EDITORIAL_REVIEW_PRIVATE_KEY });
-  const verified = contract.verifyManifest({ document, path, domain: DOMAIN, manifest,
-    publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
+  // evaluate() above already resolved this document's domain successfully,
+  // so this is never null here.
+  const domain = domainContextFromDocument(document).hostname;
+  let manifest, verified;
+  try {
+    manifest = contract.createManifest({ document, path, domain, checks: result.checks,
+      sources: result.sources, reviewedAt: result.reviewedAt, model: result.model,
+      privateKey: process.env.EDITORIAL_REVIEW_PRIVATE_KEY });
+    verified = contract.verifyManifest({ document, path, domain, manifest,
+      publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
+  } catch {
+    // Malformed key material (corrupt env var, wrong key type) is a config
+    // outage, not a content failure — classify it the same 'unavailable'
+    // way as the missing-key check above rather than crashing the publish.
+    throw reviewError({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'Editorial signing keys could not be used to sign or verify; retry after configuration recovers.' }] }] });
+  }
   if (!verified.pass) throw reviewError({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'Editorial signature verification failed.' }] }] });
   return [{ path: contract.evidencePath(path), content: JSON.stringify(manifest, null, 2) + '\n' }];
 }
@@ -156,6 +226,10 @@ async function assertPrEvidence(pr) {
   const mergeBaseSha = String(compared?.mergeBaseSha || '');
   if (!mergeBaseSha) throw reviewError(null);
   const contract = require('../../../packages/editorial-evidence/index.cjs');
+  // Head-side filenames of every applicable, non-removed article verified
+  // below — callers (e.g. the PR poller) use this to know exactly which
+  // articles this evidence proof covers.
+  const articlePaths = [];
   for (const file of files) {
     if (file.status === 'removed' || !applicable(file.filename)) continue;
     const basePaths = [file.filename];
@@ -174,11 +248,16 @@ async function assertPrEvidence(pr) {
     const evidence = await gh.getFile(contract.evidencePath(file.filename), headSha);
     let manifest;
     try { manifest = JSON.parse(evidence?.content); } catch { throw reviewError(null); }
-    const result = contract.verifyManifest({ document: document?.content, path: file.filename,
-      domain: DOMAIN, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
-    if (!document || !result.pass) throw reviewError(null);
+    // Domain from the article's own bytes at head — never assumed — so a
+    // spoke-targeted article is verified against its own spoke, not the hub.
+    const domain = document ? domainContextFromDocument(document.content)?.hostname : null;
+    if (!document || !domain) throw reviewError(null);
+    const result = contract.verifyManifest({ document: document.content, path: file.filename,
+      domain, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
+    if (!result.pass) throw reviewError(null);
+    articlePaths.push(file.filename);
   }
-  return { baseSha, baseRef };
+  return { baseSha, baseRef, articlePaths };
 }
 
 // A signing-only follow-up commit may advance an autonomous PR after the
@@ -214,8 +293,11 @@ async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
     if (!applicable(articlePath) || contract.evidencePath(articlePath) !== evidencePath) return false;
     const article = await gh.getFile(articlePath, head);
     if (typeof article?.content !== 'string') return false;
+    // Domain from the article's own bytes at head, same as assertPrEvidence.
+    const domain = domainContextFromDocument(article.content)?.hostname;
+    if (!domain) return false;
     const verified = contract.verifyManifest({ document: article.content, path: articlePath,
-      domain: DOMAIN, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
+      domain, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
     if (!verified.pass) return false;
   }
   return true;

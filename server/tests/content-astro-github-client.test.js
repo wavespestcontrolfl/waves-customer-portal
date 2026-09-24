@@ -76,34 +76,173 @@ describe('content-astro github-client pagination', () => {
     );
   });
 
-  test('mergePr verifies the current PR base immediately before the pinned merge request', async () => {
-    global.fetch = jest.fn()
-      .mockResolvedValueOnce(jsonResponse({ state: 'open', base: { ref: 'main', sha: 'base-sha' } }))
-      .mockResolvedValueOnce(jsonResponse({ merged: true, sha: 'merge-sha' }));
+  test('mergePr (no expectBaseSha) still PUTs /merge — the atomic ref-update path is opt-in only', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce(jsonResponse({ merged: true, sha: 'merge-sha' }));
 
-    await expect(gh.mergePr(42, {
-      sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main',
-    })).resolves.toMatchObject({ merged: true });
+    await expect(gh.mergePr(42, { sha: 'head-sha' })).resolves.toMatchObject({ merged: true, sha: 'merge-sha' });
 
-    expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect(global.fetch.mock.calls[0][0]).toContain('/pulls/42');
-    expect(global.fetch.mock.calls[1][0]).toContain('/pulls/42/merge');
-    expect(JSON.parse(global.fetch.mock.calls[1][1].body)).toMatchObject({ sha: 'head-sha' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][0]).toContain('/pulls/42/merge');
+    expect(global.fetch.mock.calls[0][1].method).toBe('PUT');
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body)).toMatchObject({ sha: 'head-sha' });
   });
 
-  test.each([
-    ['moved', { state: 'open', base: { ref: 'main', sha: 'different-base' } }],
-    ['retargeted', { state: 'open', base: { ref: 'release', sha: 'base-sha' } }],
-    ['unavailable', null],
-  ])('mergePr fails closed when the expected base is %s', async (_label, current) => {
-    global.fetch = jest.fn().mockResolvedValueOnce(current === null
-      ? { ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => '' }
-      : jsonResponse(current));
+  test('mergePr(expectBaseSha) without verifyPaths keeps the squash endpoint behind a base re-read', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(jsonResponse({ state: 'open', base: { ref: 'main', sha: 'base-sha' }, head: { sha: 'head-sha' } }))
+      .mockResolvedValueOnce(jsonResponse({ merged: true, sha: 'merge-sha' }));
 
-    await expect(gh.mergePr(42, {
-      sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main',
-    })).rejects.toMatchObject({ code: 'BLOG_BASE_MOVED' });
+    await expect(gh.mergePr(42, { sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main' }))
+      .resolves.toMatchObject({ merged: true, sha: 'merge-sha' });
+    expect(global.fetch.mock.calls[1][0]).toContain('/pulls/42/merge');
+    expect(JSON.parse(global.fetch.mock.calls[1][1].body)).toMatchObject({ merge_method: 'squash', sha: 'head-sha' });
+
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(jsonResponse({ state: 'open', base: { ref: 'main', sha: 'moved-sha' }, head: { sha: 'head-sha' } }));
+    await expect(gh.mergePr(42, { sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main' }))
+      .rejects.toMatchObject({ code: 'BLOG_BASE_MOVED' });
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  describe('mergePr(expectBaseSha) — atomic base-bound merge via the git data API', () => {
+    const openPr = (overrides = {}) => jsonResponse({
+      state: 'open',
+      base: { ref: 'main', sha: 'base-sha' },
+      head: { sha: 'head-sha' },
+      mergeable: true,
+      merge_commit_sha: 'test-merge-sha',
+      ...overrides,
+    });
+    const testMergeCommit = (overrides = {}) => jsonResponse({
+      sha: 'test-merge-sha',
+      tree: { sha: 'tree-sha' },
+      parents: [{ sha: 'base-sha' }, { sha: 'head-sha' }],
+      ...overrides,
+    });
+    const newCommit = () => jsonResponse({ sha: 'new-merge-commit-sha' });
+    const refPatchOk = () => jsonResponse({ object: { sha: 'new-merge-commit-sha' } });
+
+    test('happy path: re-reads the PR, validates the test-merge parents, creates a real merge commit from its tree, and fast-forwards the base ref', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(openPr())
+        .mockResolvedValueOnce(testMergeCommit())
+        .mockResolvedValueOnce(newCommit())
+        .mockResolvedValueOnce(refPatchOk());
+
+      const res = await gh.mergePr(42, {
+        sha: 'head-sha', title: 'Blog: Title', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
+      });
+
+      expect(res).toEqual({ sha: 'new-merge-commit-sha', merged: true });
+      expect(global.fetch).toHaveBeenCalledTimes(4);
+      expect(global.fetch.mock.calls[0][0]).toContain('/pulls/42');
+      expect(global.fetch.mock.calls[1][0]).toContain('/git/commits/test-merge-sha');
+      expect(global.fetch.mock.calls[2][0]).toContain('/git/commits');
+      const commitBody = JSON.parse(global.fetch.mock.calls[2][1].body);
+      expect(commitBody).toMatchObject({ tree: 'tree-sha', parents: ['base-sha', 'head-sha'], message: 'Blog: Title' });
+      expect(global.fetch.mock.calls[3][0]).toContain('/git/refs/heads/main');
+      expect(global.fetch.mock.calls[3][1].method).toBe('PATCH');
+      const refBody = JSON.parse(global.fetch.mock.calls[3][1].body);
+      expect(refBody).toEqual({ sha: 'new-merge-commit-sha', force: false });
+      // never touches the merge endpoint on this path
+      expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/pulls/42/merge'))).toBe(false);
+    });
+
+    test.each([
+      ['base moved', { base: { ref: 'main', sha: 'different-base' } }],
+      ['retargeted', { base: { ref: 'release', sha: 'base-sha' } }],
+      ['head moved', { head: { sha: 'other-head-sha' } }],
+      ['closed', { state: 'closed' }],
+      ['mergeable still computing', { mergeable: null }],
+      ['conflicting', { mergeable: false, merge_commit_sha: null }],
+    ])('fails closed (BLOG_BASE_MOVED) at the PR re-read when %s', async (_label, overrides) => {
+      global.fetch = jest.fn().mockResolvedValueOnce(openPr(overrides));
+
+      await expect(gh.mergePr(42, {
+        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
+      })).rejects.toMatchObject({ code: 'BLOG_BASE_MOVED' });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('PR unavailable at the re-read fails closed', async () => {
+      global.fetch = jest.fn().mockResolvedValueOnce({ ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => '' });
+
+      await expect(gh.mergePr(42, {
+        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
+      })).rejects.toMatchObject({ code: 'BLOG_BASE_MOVED' });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('stale test-merge commit (parents do not match [base, head]) fails closed', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(openPr())
+        .mockResolvedValueOnce(testMergeCommit({ parents: [{ sha: 'base-sha' }, { sha: 'some-older-head' }] }));
+
+      await expect(gh.mergePr(42, {
+        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
+      })).rejects.toMatchObject({ code: 'BLOG_BASE_MOVED' });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    test('verifyPaths blob mismatch at the test-merge tree fails closed', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(openPr())
+        .mockResolvedValueOnce(testMergeCommit())
+        // getFile(path, merge_commit_sha) — blob differs from head
+        .mockResolvedValueOnce(jsonResponse({ sha: 'blob-at-merge', path: 'src/content/blog/x.mdx', content: '' }))
+        // getFile(path, headSha)
+        .mockResolvedValueOnce(jsonResponse({ sha: 'blob-at-head', path: 'src/content/blog/x.mdx', content: '' }));
+
+      await expect(gh.mergePr(42, {
+        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main',
+        verifyPaths: ['src/content/blog/x.mdx'],
+      })).rejects.toMatchObject({ code: 'BLOG_BASE_MOVED' });
+      expect(global.fetch).toHaveBeenCalledTimes(4);
+    });
+
+    test('verifyPaths: identical blobs (or both absent) at merge vs head pass through to the merge commit', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(openPr())
+        .mockResolvedValueOnce(testMergeCommit())
+        .mockResolvedValueOnce(jsonResponse({ sha: 'same-blob', path: 'src/content/blog/x.mdx', content: '' }))
+        .mockResolvedValueOnce(jsonResponse({ sha: 'same-blob', path: 'src/content/blog/x.mdx', content: '' }))
+        .mockResolvedValueOnce(newCommit())
+        .mockResolvedValueOnce(refPatchOk());
+
+      await expect(gh.mergePr(42, {
+        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main',
+        verifyPaths: ['src/content/blog/x.mdx'],
+      })).resolves.toEqual({ sha: 'new-merge-commit-sha', merged: true });
+    });
+
+    test('422 on the ref PATCH (base moved during merge) is converted to BLOG_BASE_MOVED', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(openPr())
+        .mockResolvedValueOnce(testMergeCommit())
+        .mockResolvedValueOnce(newCommit())
+        .mockResolvedValueOnce({ ok: false, status: 422, headers: { get: () => 'application/json' }, text: async () => 'Update is not a fast forward' })
+        // the 422 handler re-reads the ref to rule out a landed retry
+        .mockResolvedValueOnce(jsonResponse({ object: { sha: 'someone-elses-commit' } }));
+
+      await expect(gh.mergePr(42, {
+        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
+      })).rejects.toMatchObject({ code: 'BLOG_BASE_MOVED' });
+      expect(global.fetch).toHaveBeenCalledTimes(5);
+    });
+
+    test('422 on the ref PATCH, but the ref already carries our new commit (an earlier attempt landed): reports success rather than failing', async () => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(openPr())
+        .mockResolvedValueOnce(testMergeCommit())
+        .mockResolvedValueOnce(newCommit())
+        .mockResolvedValueOnce({ ok: false, status: 422, headers: { get: () => 'application/json' }, text: async () => 'Update is not a fast forward' })
+        .mockResolvedValueOnce(jsonResponse({ object: { sha: 'new-merge-commit-sha' } }));
+
+      await expect(gh.mergePr(42, {
+        sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main', verifyPaths: [],
+      })).resolves.toEqual({ sha: 'new-merge-commit-sha', merged: true });
+      expect(global.fetch).toHaveBeenCalledTimes(5);
+    });
   });
 });
 

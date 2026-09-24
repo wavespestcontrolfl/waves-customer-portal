@@ -1621,6 +1621,64 @@ describe('Astro publisher hero image republish', () => {
     }));
   });
 
+  test('recomputes FAQPage schema after an editorial repair adds a visible FAQ section', async () => {
+    const editorialEvidence = require('../services/content/editorial-evidence');
+    const repairedBody = [
+      '## What you are seeing',
+      '',
+      'Ant trails around Bradenton patios usually start with moisture, food access, and tiny exterior gaps.',
+      '',
+      '## Frequently Asked Questions',
+      '',
+      '### Why do ants keep using the same trail?',
+      '',
+      'Ants lay a pheromone trail other workers follow, so the same crack or gap keeps getting reused.',
+    ].join('\n');
+    // Simulate a prepareDraft repair that ADDS a visible FAQ section the
+    // original draft didn't have — buildFrontmatter's schema_types was
+    // already computed off the PRE-repair body.
+    const prepareDraftSpy = jest.spyOn(editorialEvidence, 'prepareDraft')
+      .mockImplementation(async (draft) => ({ ...draft, body: repairedBody }));
+
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      // No visible FAQ pre-repair — buildFrontmatter's schema_types is Article-only.
+      content: '## What you are seeing\n\nAnt trails around Bradenton patios usually start with moisture, food access, and tiny exterior gaps.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    try {
+      await AstroPublisher.publishAstro('post-1');
+    } finally {
+      prepareDraftSpy.mockRestore();
+    }
+
+    const files = gh.commitFiles.mock.calls[0][0].files;
+    const markdownFile = files.find((f) => f.path === 'src/content/blog/ant-trails-bradenton.md');
+    const written = require('../services/content-astro/frontmatter').parse(markdownFile.content);
+    expect(written.data.schema_types).toEqual(['Article', 'FAQPage']);
+    expect(written.content).toContain('Frequently Asked Questions');
+  });
+
   test('blocks a legacy post that ships a hardcoded price (P0 guardrail) before opening a PR', async () => {
     const post = {
       id: 'post-1',

@@ -1325,6 +1325,13 @@ async function publishAstro(postId) {
     const prepared = await editorialEvidence.prepareDraft({ frontmatter: data, body: post.content || '' }, { page_type: 'supporting-blog' });
     const body = String(prepared.body || '').trim();
     if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);
+    // A repair can add or remove the body's visible FAQ section — recompute
+    // schema_types against the REPAIRED body so FAQPage tracks what actually
+    // renders (schema describing an FAQ the page doesn't show is a P0 publish
+    // block). schemaTypesForContent re-derives FAQPage from content itself,
+    // so strip it from the base before re-adding it conditionally; any other
+    // explicit type buildFrontmatter set is preserved.
+    data.schema_types = schemaTypesForContent(body, data.schema_types.filter((type) => type !== 'FAQPage'));
     post.content = body;
 
     // 2b. Content-policy guardrails (hardcoded price, brand-token leak on
@@ -3934,6 +3941,18 @@ function canPublishRefresh(draft, brief = {}) {
 
 // ── Merge (approval → prod) ────────────────────────────────────────
 
+// mergePr's atomic path (expectBaseSha) proves the merge produces the exact
+// signed bytes by re-checking each article path AND its evidence sidecar at
+// GitHub's test-merge commit. Undefined articlePaths (gate off, or an
+// editorialBaseProof-less body-image pin) → undefined verifyPaths, same as
+// omitting the option.
+function articleVerifyPaths(editorialBaseProof) {
+  const articlePaths = editorialBaseProof?.articlePaths;
+  if (!Array.isArray(articlePaths) || !articlePaths.length) return undefined;
+  const contract = require('../../../packages/editorial-evidence/index.cjs');
+  return articlePaths.flatMap((p) => [p, contract.evidencePath(p)]);
+}
+
 // `expectBaseSha`: the default-branch tip a caller's body-image check
 // validated unchanged assets against (pages-poll) — re-read inside the
 // topic-merge lock immediately before the merge call, since the gates
@@ -4002,6 +4021,10 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
       // older body-image base pin when one was supplied.
       expectBaseSha: editorialBaseProof?.baseSha || expectBaseSha || undefined,
       expectBaseRef: editorialBaseProof?.baseRef || gh.env().defaultBranch,
+      // Proves the merge produces the exact signed bytes: article + its
+      // evidence sidecar must resolve to the same blob at GitHub's test
+      // merge as at head (mergePr's atomic path, expectBaseSha only).
+      verifyPaths: articleVerifyPaths(editorialBaseProof),
     });
     // Publish PRs: the ownership recheck and the merge run under one
     // advisory lock so two PRs claiming the same entity cannot both pass

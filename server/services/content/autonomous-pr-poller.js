@@ -1634,12 +1634,22 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'editorial_evidence_invalid', error: err.message };
   }
 
+  // mergePr's atomic path (expectBaseSha) proves the merge produces the
+  // exact signed bytes by re-checking each article path AND its evidence
+  // sidecar at GitHub's test-merge commit. No articlePaths (gate off) →
+  // undefined verifyPaths, same as omitting the option.
+  const articlePaths = editorialBaseProof?.articlePaths;
+  const verifyPaths = Array.isArray(articlePaths) && articlePaths.length
+    ? articlePaths.flatMap((p) => [p, require('../../../packages/editorial-evidence/index.cjs').evidencePath(p)])
+    : undefined;
+
   const doMerge = () => gh.mergePr(pr.number, {
     method: 'squash',
     title: String(pr.title || '').slice(0, 72),
     sha: pr.head?.sha,
     expectBaseSha: editorialBaseProof?.baseSha,
     expectBaseRef: editorialBaseProof?.baseRef,
+    verifyPaths,
   });
   let mergeRes;
   try {

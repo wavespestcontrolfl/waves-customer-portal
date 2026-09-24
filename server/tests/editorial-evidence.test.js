@@ -72,7 +72,7 @@ describe('merge-output evidence proof', () => {
     });
 
     await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
-      .resolves.toEqual({ baseSha, baseRef: 'main' });
+      .resolves.toEqual({ baseSha, baseRef: 'main', articlePaths: [path] });
     expect(gh.compareFiles).toHaveBeenCalledWith(headSha, baseSha);
   });
 
@@ -85,7 +85,7 @@ describe('merge-output evidence proof', () => {
     });
 
     await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
-      .resolves.toEqual({ baseSha, baseRef: 'main' });
+      .resolves.toEqual({ baseSha, baseRef: 'main', articlePaths: [path] });
   });
 
   test('rejects a clean non-overlapping base edit to the reviewed article', async () => {
@@ -217,6 +217,37 @@ test('missing signing key cannot silently publish or spend model calls', async (
   delete process.env.EDITORIAL_REVIEW_PRIVATE_KEY;
   await expect(evidence.filesForDocument({ document, path })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
   expect(reviewer.review).not.toHaveBeenCalled();
+});
+test('malformed private key material is classified as an editorial outage, not a crash', async () => {
+  process.env.EDITORIAL_REVIEW_PRIVATE_KEY = 'not-valid-pem-or-der';
+  await expect(evidence.filesForDocument({ document, path })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+});
+describe('review domain follows the article\'s own frontmatter domains', () => {
+  test('signs and verifies under the single spoke domain the article targets', async () => {
+    const spokeDocument = fm.stringify({ title: 'Bradenton door guide', domains: ['bradentonfllawncare.com'] }, 'Inspect the door seal for gaps.');
+    const [file] = await evidence.filesForDocument({ document: spokeDocument, path });
+    const manifest = JSON.parse(file.content);
+    expect(manifest.domain).toBe('bradentonfllawncare.com');
+    expect(contract.verifyManifest({ document: spokeDocument, path, domain: 'bradentonfllawncare.com',
+      manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY }).pass).toBe(true);
+    expect(reviewer.review).toHaveBeenCalledWith(expect.objectContaining({ domain: expect.objectContaining({
+      hostname: 'bradentonfllawncare.com', tokens: expect.objectContaining({ siteUrl: 'https://www.bradentonfllawncare.com' }) }) }));
+  });
+  test('falls back to the hub for hub-only or absent domains', async () => {
+    const hubDocument = fm.stringify({ title: 'Hub door guide', domains: ['wavespestcontrol.com'] }, 'Inspect the door seal for gaps.');
+    const [file] = await evidence.filesForDocument({ document: hubDocument, path });
+    expect(JSON.parse(file.content).domain).toBe('wavespestcontrol.com');
+  });
+  test('fails closed on more than one domain, spending no model call', async () => {
+    const ambiguous = fm.stringify({ title: 'Ambiguous', domains: ['bradentonfllawncare.com', 'sarasotafllawncare.com'] }, 'Body.');
+    await expect(evidence.filesForDocument({ document: ambiguous, path })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+    expect(reviewer.review).not.toHaveBeenCalled();
+  });
+  test('fails closed on a domain outside the fleet, spending no model call', async () => {
+    const unknown = fm.stringify({ title: 'Unknown', domains: ['example.com'] }, 'Body.');
+    await expect(evidence.filesForDocument({ document: unknown, path })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+    expect(reviewer.review).not.toHaveBeenCalled();
+  });
 });
 test('writer pass flag cannot override incomplete mandatory results', async () => {
   reviewer.review.mockResolvedValue({ ...passing(), checks: [] });
@@ -362,4 +393,10 @@ test('an exhausted repair fails with directives instead of requiring approval', 
 test('source extraction ignores image assets and fleet links, deduplicates evidence', () => {
   expect(evidence.sourceUrls('[IFAS](https://edis.ifas.ufl.edu/fact) ![x](https://example.org/x.webp) https://wavespestcontrol.com/about',
     { required_sources: ['https://edis.ifas.ufl.edu/fact'] })).toEqual(['https://edis.ifas.ufl.edu/fact']);
+});
+test('source extraction preserves a balanced parenthesis inside a URL and trims only an unmatched wrapping one', () => {
+  expect(evidence.sourceUrls('Per the report at https://example.org/report_(2026) prevalence rose.'))
+    .toEqual(['https://example.org/report_(2026)']);
+  expect(evidence.sourceUrls('(see https://a.org/x)')).toEqual(['https://a.org/x']);
+  expect(evidence.sourceUrls('[x](https://a.org/b_(c))')).toEqual(['https://a.org/b_(c)']);
 });
