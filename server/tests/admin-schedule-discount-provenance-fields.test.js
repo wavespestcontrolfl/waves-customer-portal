@@ -374,6 +374,26 @@ postgres('scheduled_services PUT /:id/update-details — add-on discount catalog
     expect(statusCode).toBe(200);
     const saved = await realTrx('scheduled_services').where({ id: visitId }).first();
     expect(Number(saved.estimated_price)).toBe(120);
+
+    // GitHub Codex round 1 on #4769 (:13144): the route's OWN writes to
+    // this row (assignScheduleJobs / applyAppointmentAddress) run before
+    // the late financial CAS block, so a version compared there would read
+    // the route's own update as drift. A priced edit that also assigns a
+    // technician, with NO concurrent writer, must commit.
+    const technicianId = randomUUID();
+    await realTrx('technicians').insert({ id: technicianId, name: 'Fixture Assignee', employment_status: 'active', field_dispatchable: true, active: true });
+    // Reassignment is admin-only on this route — an admin staff token.
+    const handler = findHandler('put', '/:id/update-details');
+    const adminReq = { params: { id: visitId }, query: {}, body: { primaryLinePrice: 130, addons: [], technicianId }, headers: {}, techRole: 'admin' };
+    let assigned = { statusCode: 200, payload: null };
+    const adminRes = { status(code) { assigned.statusCode = code; return this; }, json(p) { assigned.payload = p; return this; } };
+    let assignErr = null;
+    await handler(adminReq, adminRes, (err) => { assignErr = err; });
+    if (assignErr) assigned = { statusCode: assignErr.statusCode || assignErr.status, payload: { code: assignErr.code, reason: assignErr.reason, message: assignErr.message } };
+    expect(assigned).toEqual(expect.objectContaining({ statusCode: 200 }));
+    const afterAssign = await realTrx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(afterAssign.estimated_price)).toBe(130);
+    expect(afterAssign.technician_id).toBe(technicianId);
   });
 
   test('a NEW 20%-off-capped-at-$5 add-on discount on an unmarked visit saves capped at $5, never the raw uncapped $20', async () => {

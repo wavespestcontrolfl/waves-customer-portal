@@ -12651,6 +12651,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         });
       }
 
+      // Row-version CAS (follow-up to #4657; GitHub Codex round 1 on #4769,
+      // :13144): ANY concurrent write to the visit row or one of its add-on
+      // rows since the plan read them — a column the field comparators do
+      // not list included — is drift. Compared HERE, at the row's first
+      // locked read and BEFORE any route-owned write: applyAppointmentAddress
+      // and assignScheduleJobs (just below) update this same row, and the
+      // late financial CAS block would have read the route's own update as
+      // drift and refused every priced edit that also moved the visit. The
+      // customer row lock above precedes this row lock (ordering contract);
+      // the later FOR UPDATE reads of the same row are re-entrant.
+      if (financialCasSnapshot?.versions) {
+        const lockedVersionRow = await trx('scheduled_services')
+          .where({ id: req.params.id }).forUpdate().first('id', ...rowVersionSelect(trx));
+        const lockedAddonVersionRows = await trx('scheduled_service_addons')
+          .where({ scheduled_service_id: req.params.id }).select('id', ...rowVersionSelect(trx));
+        if (rowVersionsDrifted(financialCasSnapshot, { parent: lockedVersionRow, addons: lockedAddonVersionRows })) {
+          throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+            statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
+          });
+        }
+      }
+
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
       if (assignmentShouldRun) {
@@ -13110,12 +13132,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             ? Array.from(new Set(['id', ...Object.keys(financialCasSnapshot.parent)]))
             : ['id', 'estimated_price'];
           const freshParentRow = await trx('scheduled_services')
-            .where({ id: req.params.id }).forUpdate().first(...parentRecheckFields, ...rowVersionSelect(trx));
+            .where({ id: req.params.id }).forUpdate().first(...parentRecheckFields);
           const addonRecheckFields = financialCasSnapshot
             ? ['id', 'base_price', 'estimated_price', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars']
             : ['id'];
           const freshAddonIdRows = await trx('scheduled_service_addons')
-            .where({ scheduled_service_id: req.params.id }).select(...addonRecheckFields, ...rowVersionSelect(trx));
+            .where({ scheduled_service_id: req.params.id }).select(...addonRecheckFields);
           if (addonsReplaced && Array.isArray(expectedAddonRowIds)
             && addonRowIdsDrifted(expectedAddonRowIds, freshAddonIdRows.map((r) => r.id))) {
             throw Object.assign(new Error('This visit changed while you were editing — reload and save again.'), {
@@ -13135,15 +13157,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (financialStateDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {
             throw Object.assign(new Error('This appointment’s pricing changed while saving — reload and save again.'), {
               statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'FINANCIAL_STATE_DRIFT',
-            });
-          }
-          // Row-version CAS (follow-up to #4657): ANY concurrent write to
-          // the visit row or one of its add-on rows since this plan read
-          // them — a column the field comparators above do not list
-          // included — is drift. See rowVersionsDrifted.
-          if (rowVersionsDrifted(financialCasSnapshot, { parent: freshParentRow, addons: freshAddonIdRows })) {
-            throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
-              statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
             });
           }
           // GitHub Codex round 26 P1 (#4657, :11902): the witness, again,
