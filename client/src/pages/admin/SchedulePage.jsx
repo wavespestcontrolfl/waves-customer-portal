@@ -12852,6 +12852,9 @@ export function CompletionPanel({
   // the late first-visit prefill must never overwrite either. A dedicated
   // ref — the draft snapshot ref is replaced on every autosave.
   const clientPestRatingSetByTechRef = useRef(false);
+  // The gate's first-visit answer once known (null until then) — lets a
+  // draft restored AFTER the gate skip a stale untouched prefill.
+  const firstVisitGateRef = useRef(null);
   // Active label names for 0..5 from the gate, so the caption never
   // contradicts labels edited in Settings; falls back to the default scale.
   const [pestRatingScaleLabels, setPestRatingScaleLabels] = useState(null);
@@ -12878,11 +12881,17 @@ export function CompletionPanel({
         const allowed = !!(body && body.allowed === true);
         setTechRatingAllowed(allowed);
         if (allowed && Array.isArray(body.scaleLabels)) setPestRatingScaleLabels(body.scaleLabels);
+        firstVisitGateRef.current = allowed ? body.firstVisit === true : false;
         if (allowed && body.firstVisit === true) {
           setClientPestRatingDefault(5);
           // Never over a value the tech already tapped or a restored draft
           // (including a draft where the tech cleared the default).
           if (!clientPestRatingSetByTechRef.current) setClientPestRating(5);
+        } else if (!clientPestRatingSetByTechRef.current) {
+          // Not a first visit (any more): an untouched prefill restored
+          // from a draft is stale — the server would drop it anyway, so
+          // don't show a selected 5 that won't be recorded.
+          setClientPestRating(null);
         }
       })
       .catch(() => {
@@ -14778,7 +14787,7 @@ export function CompletionPanel({
     if (draftTouched) {
       clientPestRatingSetByTechRef.current = true;
       setClientPestRating(draftRating);
-    } else if (draftRating != null) {
+    } else if (draftRating != null && firstVisitGateRef.current !== false) {
       setClientPestRating(draftRating);
     }
     setReviewTiming(normalizeReviewTiming(savedDraft.reviewTiming));

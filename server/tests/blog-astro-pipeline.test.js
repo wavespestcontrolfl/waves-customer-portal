@@ -1621,6 +1621,64 @@ describe('Astro publisher hero image republish', () => {
     }));
   });
 
+  test('recomputes FAQPage schema after an editorial repair adds a visible FAQ section', async () => {
+    const editorialEvidence = require('../services/content/editorial-evidence');
+    const repairedBody = [
+      '## What you are seeing',
+      '',
+      'Ant trails around Bradenton patios usually start with moisture, food access, and tiny exterior gaps.',
+      '',
+      '## Frequently Asked Questions',
+      '',
+      '### Why do ants keep using the same trail?',
+      '',
+      'Ants lay a pheromone trail other workers follow, so the same crack or gap keeps getting reused.',
+    ].join('\n');
+    // Simulate a prepareDraft repair that ADDS a visible FAQ section the
+    // original draft didn't have — buildFrontmatter's schema_types was
+    // already computed off the PRE-repair body.
+    const prepareDraftSpy = jest.spyOn(editorialEvidence, 'prepareDraft')
+      .mockImplementation(async (draft) => ({ ...draft, body: repairedBody }));
+
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      // No visible FAQ pre-repair — buildFrontmatter's schema_types is Article-only.
+      content: '## What you are seeing\n\nAnt trails around Bradenton patios usually start with moisture, food access, and tiny exterior gaps.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    try {
+      await AstroPublisher.publishAstro('post-1');
+    } finally {
+      prepareDraftSpy.mockRestore();
+    }
+
+    const files = gh.commitFiles.mock.calls[0][0].files;
+    const markdownFile = files.find((f) => f.path === 'src/content/blog/ant-trails-bradenton.md');
+    const written = require('../services/content-astro/frontmatter').parse(markdownFile.content);
+    expect(written.data.schema_types).toEqual(['Article', 'FAQPage']);
+    expect(written.content).toContain('Frequently Asked Questions');
+  });
+
   test('blocks a legacy post that ships a hardcoded price (P0 guardrail) before opening a PR', async () => {
     const post = {
       id: 'post-1',
@@ -2512,6 +2570,16 @@ describe('parseImageDataUrl (bounded data-URL header parse)', () => {
   test('rejects non-data and non-base64-image URLs', () => {
     expect(parseImageDataUrl('https://example.com/x.png')).toBeNull();
     expect(parseImageDataUrl('data:text/html;base64,PGI+')).toBeNull();
+  });
+
+  test('the waves-logo marker survives a stamp → parse round trip and is absent on a plain URL (Codex r1 P2 on #4761)', () => {
+    const { stampLogoReference } = AstroPublisher._internals;
+    const stamped = stampLogoReference('data:image/png;base64,AAAA');
+    expect(stamped).toBe('data:image/png;waves-logo=1;base64,AAAA');
+    expect(parseImageDataUrl(stamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true });
+    expect(parseImageDataUrl('data:image/png;base64,AAAA')).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false });
+    expect(parseImageDataUrl('data:image/png;evil=1;base64,AAAA').logoReference).toBe(false);
+    expect(stampLogoReference('https://example.com/x.png')).toBe('https://example.com/x.png');
     expect(parseImageDataUrl('data:image/png,rawdata')).toBeNull();
     expect(parseImageDataUrl('')).toBeNull();
   });
@@ -3198,6 +3266,38 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
     // GitHub 409s the merge if the head moved after the gates ran — the pin
     // is what makes the Codex/hub-only checks race-proof.
     expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: HEAD_SHA }));
+  });
+
+  test('threads the editorial base proof into the final merge request', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
+    const queries = [read];
+    db.mockImplementation(() => queries.shift() || chain());
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'open', merged: false,
+      head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA },
+    });
+    mockHubOnlyBranchFile();
+    gh.listIssueComments.mockResolvedValue([{
+      user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z',
+    }]);
+    gh.listPrReviews.mockResolvedValue([{
+      user: { login: 'chatgpt-codex-connector' }, body: "Codex Review: Didn't find any major issues.",
+      state: 'COMMENTED', commit_id: HEAD_SHA, submitted_at: '2026-07-02T12:05:00Z',
+    }]);
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha' });
+    const editorial = require('../services/content/editorial-evidence');
+    const proof = { baseSha: 'reviewed-base-sha', baseRef: 'main' };
+    const evidenceSpy = jest.spyOn(editorial, 'assertPrEvidence').mockResolvedValueOnce(proof);
+
+    try {
+      await AstroPublisher.mergeAstro('post-pin-1');
+    } finally {
+      evidenceSpy.mockRestore();
+    }
+
+    expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({
+      sha: HEAD_SHA, expectBaseSha: proof.baseSha, expectBaseRef: proof.baseRef,
+    }));
   });
 
   test('expectHeadSha mismatch (green build of an older commit) refuses to merge', async () => {

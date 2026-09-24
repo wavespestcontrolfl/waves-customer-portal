@@ -35,6 +35,57 @@ import {
 } from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+const CONTACT_EVIDENCE_LABELS = new Map([
+  ["live_conversation", "Contacted after a live conversation"],
+  ["assessment_booked", "Contacted after an assessment was booked"],
+  ["assessment_completed", "Contacted after an assessment was completed"],
+]);
+
+function contactEvidenceDetails(activity) {
+  if (activity?.activity_type !== "status_change" || !activity.metadata)
+    return null;
+
+  let metadata;
+  try {
+    metadata =
+      typeof activity.metadata === "string"
+        ? JSON.parse(activity.metadata)
+        : activity.metadata;
+  } catch {
+    return null;
+  }
+
+  const label = CONTACT_EVIDENCE_LABELS.get(metadata?.evidenceType);
+  if (!label) return null;
+
+  const evidenceId = String(metadata?.evidenceId || "").trim();
+  const safeId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(evidenceId)
+    ? evidenceId
+    : "";
+  const reference =
+    safeId.length > 16
+      ? `${safeId.slice(0, 8)}…${safeId.slice(-4)}`
+      : safeId;
+
+  return { label, reference };
+}
+
+function ContactEvidenceExplanation({ activity }) {
+  const details = contactEvidenceDetails(activity);
+  if (!details) return null;
+
+  return (
+    <div className="mt-[2px] text-zinc-900">
+      {details.label}
+      {details.reference && (
+        <span className="text-ink-secondary">
+          {" "}· Evidence reference {details.reference}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // leads.address may hold either a street-only line or a fully composed
 // "street, City, FL zip" string depending on which intake path wrote the row —
 // only append the standalone city/zip columns when the stored address doesn't
@@ -414,7 +465,7 @@ function LeadBadge({ label, tone = "neutral", className }) {
     </Badge>
   );
 }
-const CONTACT_EVIDENCE_LABELS = {
+const RECONCILIATION_EVIDENCE_LABELS = {
   live_conversation: "Live conversation",
   assessment_booked: "Assessment booked",
   assessment_completed: "Assessment completed",
@@ -452,7 +503,7 @@ function LeadStatusReviewPanel({ reconciliation }) {
           {finding.message}
           {finding.evidence && (
             <div className="mt-[3px] text-ink-secondary">
-              {CONTACT_EVIDENCE_LABELS[finding.evidence.type] ||
+              {RECONCILIATION_EVIDENCE_LABELS[finding.evidence.type] ||
                 finding.evidence.type}
               {finding.evidence.id ? ` · ${finding.evidence.id}` : ""}
               {finding.evidence.occurred_at
@@ -822,7 +873,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const compactQueue = useIsMobile(1280);
   const [tab, setTab] = useState("pipeline");
   const openMessages = useCustomerSms();
-  const messageLead = (lead, initialDraft = "") =>
+  // appendDraft: unlike initialDraft (only seeds an EMPTY draft — an
+  // existing per-lead draft silently wins and the text never lands), this
+  // is joined onto whatever draft already exists, matching how the
+  // Communications composer's own Insert Link actions add a clause to the
+  // current body instead of losing it. "Send consultation link" uses this
+  // (pre-push Codex P2); a plain click-to-message keeps seeding as before.
+  const messageLead = (lead, initialDraft = "", { append = false } = {}) =>
     openMessages?.(
       {
         id: lead.customer_id,
@@ -832,7 +889,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       },
       {
         leadId: lead.id,
-        initialDraft,
+        ...(append ? { appendDraft: initialDraft } : { initialDraft }),
         onSent: () => {
           loadLeads();
           loadLeadActivities(lead.id, {
@@ -967,6 +1024,55 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const hasLoadedLeadsRef = useRef(false);
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
+  // Consultation link (lead-inspection-link-scope.md §4), dark behind
+  // GATE_LEAD_INSPECTION_LINK — { [leadId]: { loading, available, reason,
+  // minting } }, fetched once per expanded lead so the button can show its
+  // disabled reason as a tooltip rather than only failing on click. This is
+  // an AVAILABILITY probe only (pre-push Codex P2): the GET route never
+  // mints a short code, so it carries no url/line — those only exist once
+  // sendConsultationLink below actually mints one, on the Send click.
+  const [consultationLinks, setConsultationLinks] = useState({});
+  // The consultation gate, read once from the lead list response (Codex
+  // #4709 r6 P1) — null until the first list load, then true/false. Rows
+  // never probe availability while it is off.
+  const [consultationGate, setConsultationGate] = useState(null);
+  const loadConsultationLink = useCallback(async (leadId) => {
+    setConsultationLinks((m) => ({ ...m, [leadId]: { loading: true } }));
+    try {
+      const data = await adminFetch(`/admin/leads/${leadId}/consultation-link`);
+      setConsultationLinks((m) => ({ ...m, [leadId]: { loading: false, ...data } }));
+    } catch (e) {
+      setConsultationLinks((m) => ({
+        ...m,
+        [leadId]: { loading: false, available: false, reason: e.message || "Could not load the consultation link" },
+      }));
+    }
+  }, []);
+  // The actual mint (POST — a real DB insert handing out a live 14-day
+  // bearer token) fires only here, on the Send click, never on row expand
+  // (pre-push Codex P2). A failure (a race since the availability probe —
+  // the gate flipped off, the lead closed) updates the SAME per-lead entry
+  // so the button's tooltip picks up the fresh reason.
+  const sendConsultationLink = useCallback(async (lead) => {
+    setConsultationLinks((m) => ({ ...m, [lead.id]: { ...m[lead.id], minting: true } }));
+    try {
+      const data = await adminFetch(`/admin/leads/${lead.id}/consultation-link`, { method: "POST" });
+      setConsultationLinks((m) => ({ ...m, [lead.id]: { ...m[lead.id], minting: false } }));
+      if (!data.url) {
+        setConsultationLinks((m) => ({
+          ...m,
+          [lead.id]: { ...m[lead.id], available: false, reason: data.reason || "Consultation link unavailable" },
+        }));
+        return;
+      }
+      messageLead(lead, data.line || "", { append: true });
+    } catch (e) {
+      setConsultationLinks((m) => ({
+        ...m,
+        [lead.id]: { ...m[lead.id], minting: false, available: false, reason: e.message || "Could not build the consultation link" },
+      }));
+    }
+  }, [messageLead]);
   useEffect(() => {
     if (!newLeadRequest) return;
     setFormData({});
@@ -1008,6 +1114,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         if (requestId !== leadsRequestRef.current) return; // superseded
         setLeads(data.leads || []);
         setLeadsTotal(data.total || 0);
+        setConsultationGate(data.consultationLinksEnabled === true);
+        // A list reload follows every lead edit on this page — drop cached
+        // availability so the expanded row re-probes against the edited lead
+        // (Codex #4709 r7 P2). An in-flight mint keeps its entry.
+        setConsultationLinks((m) => Object.fromEntries(Object.entries(m).filter(([, v]) => v?.minting)));
         hasLoadedLeadsRef.current = true;
         setPipelineLoadState("success");
       } catch (e) {
@@ -1213,6 +1324,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     }
     setActiveLead(linkedLeadId);
     loadLeadActivities(linkedLeadId);
+    // The consultation probe for this deep-linked row runs from the
+    // gate-aware effect below once the list response says the gate is on.
   }, [
     linkedLeadId,
     legacyLinkedLeadId,
@@ -1220,6 +1333,14 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     loadLeadActivities,
     setPipelineView,
   ]);
+
+  // Probe the expanded lead once the page-level gate is known to be on —
+  // covers the ?lead= deep link (which expands before the list loads) and
+  // any row expanded before the first list response.
+  useEffect(() => {
+    if (consultationGate !== true || !expandedLead || consultationLinks[expandedLead]) return;
+    loadConsultationLink(expandedLead);
+  }, [consultationGate, expandedLead, consultationLinks, loadConsultationLink]);
 
   // Drill-down from the dashboard Marketing Attribution panel:
   // /admin/leads?source_name=<name>&from=<YYYY-MM-DD>&to=<YYYY-MM-DD>&period_label=<label>
@@ -1243,6 +1364,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     }
     setActiveLead(lead.id);
     loadLeadActivities(lead.id);
+    if (consultationGate === true && !consultationLinks[lead.id]) loadConsultationLink(lead.id);
   };
   const openLostModal = useCallback((leadId) => {
     setFormData({ leadId });
@@ -2138,6 +2260,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           <span className="text-zinc-900">
                                             {a.description}
                                           </span>{" "}
+                                          {leadReviewEnabled && (
+                                            <ContactEvidenceExplanation
+                                              activity={a}
+                                            />
+                                          )}
                                           {(() => {
                                             if (
                                               a.activity_type !== "ai_triage" ||
@@ -2256,6 +2383,30 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                   >
                                     Message
                                   </Button>{" "}
+                                  {/* Omitted unless the probe says the gate is live (Codex #4709 r3 P1). */}
+                                  {consultationLinks[lead.id]?.enabled === true && (
+                                  <Button
+                                    variant={"secondary"}
+                                    disabled={
+                                      consultationLinks[lead.id]?.loading ||
+                                      consultationLinks[lead.id]?.minting ||
+                                      !consultationLinks[lead.id]?.available
+                                    }
+                                    title={
+                                      consultationLinks[lead.id]?.loading
+                                        ? "Loading…"
+                                        : consultationLinks[lead.id]?.minting
+                                          ? "Building the link…"
+                                          : consultationLinks[lead.id]?.available
+                                            ? undefined
+                                            : consultationLinks[lead.id]?.reason ||
+                                              "Consultation link unavailable"
+                                    }
+                                    onClick={() => sendConsultationLink(lead)}
+                                  >
+                                    Send consultation link
+                                  </Button>
+                                  )}{" "}
                                   <Button
                                     variant={"primary"}
                                     onClick={() => {
@@ -3920,7 +4071,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   key={match.id}
                   onClick={() => {
                     setShowModal(null);
-                    navigate(`/admin/pipeline?lead=${match.id}`);
+                    const next = new URLSearchParams();
+                    if (leadReviewEnabled)
+                      next.set("leadReview", "1");
+                    next.set("lead", match.id);
+                    navigate(`/admin/pipeline?${next}`);
                   }}
                 >
                   {[match.first_name, match.last_name]

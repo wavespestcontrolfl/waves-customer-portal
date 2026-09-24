@@ -290,6 +290,42 @@ describe('payment lifecycle email sender', () => {
     }));
   });
 
+  test('retry and failure notices name a removed bank method from the payment snapshot (GH codex r6 P2)', async () => {
+    // payment_method_id was nulled by the method's removal; the delete
+    // trigger left the tender on the payment itself.
+    const removed = payment({
+      payment_method_id: null,
+      payment_method_type: 'ach',
+      bank_name: 'FIFTH THIRD BANK',
+      card_last_four: '2017',
+      metadata: JSON.stringify({ invoice_id: 'inv-1' }),
+    });
+    setDbQueues({
+      payments: [chain({ first: removed })],
+      invoices: [chain({ first: invoice() })],
+      ...lifecycleQueues(),
+    });
+    await PaymentLifecycleEmail.sendPaymentRetryNotice({ customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23' });
+    expect(EmailTemplates.sendTemplate).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateKey: 'payment.retry_notice',
+      payload: expect.objectContaining({
+        payment_method_type: 'ach',
+        payment_method_label: 'FIFTH THIRD BANK ending in 2017',
+      }),
+    }));
+
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: removed })],
+      ...lifecycleQueues(),
+    });
+    await PaymentLifecycleEmail.sendPaymentFailed({ customerId: 'cust-1', paymentIntentId: 'pi_test', attemptId: 'ch_attempt2', invoiceId: 'inv-1' });
+    expect(EmailTemplates.sendTemplate).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateKey: 'payment.failed',
+      payload: expect.objectContaining({ payment_method_label: 'FIFTH THIRD BANK ending in 2017' }),
+    }));
+  });
+
   test('sends payment failure notice keyed on payment intent + attempt', async () => {
     setDbQueues({
       invoices: [chain({ first: invoice() })],

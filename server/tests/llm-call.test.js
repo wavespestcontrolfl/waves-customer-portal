@@ -450,6 +450,29 @@ describe('dispatchWithFallback', () => {
     if (savedAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = savedAnthropic;
   });
 
+  test('preserves the requested model and exposes the winning provider model separately', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: 'resp-served-model',
+        model: 'openai-provider-resolved',
+        status: 'completed',
+        output_text: 'provider copy',
+      }),
+    });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-requested-alias' },
+    }, { text: 'write', jsonMode: false });
+
+    expect(result).toMatchObject({
+      ok: true,
+      provider: PROVIDER.OPENAI,
+      model: 'openai-requested-alias',
+      servedModel: 'openai-provider-resolved',
+      text: 'provider copy',
+    });
+  });
+
   test('repair preserves primary JSON for validation without calling the fallback', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true, json: async () => ({ output_text: '{"text":"Keep comma,}","items":[1,],}' }),

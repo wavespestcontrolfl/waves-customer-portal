@@ -1,9 +1,10 @@
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 /**
  * Photo Assessments — admin surface for the lawn-assessment + pest-identifier
- * lead magnets (/admin/lawn-assessments).
+ * lead magnets (/admin/lawn-assessments), plus admin-run tree & shrub
+ * assessments (no public funnel, no customer report page yet).
  *
- * One list over both assessment types with per-stage funnel tiles
+ * One list over all three assessment types with per-stage funnel tiles
  * (analyzed → unlocked → viewed → booked), a detail sheet (customer report
  * preview + tech treatment view + photos), manual send-report, lead/customer
  * linking, and admin-created assessments (phone prospects / existing
@@ -43,7 +44,10 @@ import {
 import { adminFetch } from "../../lib/adminFetch";
 import PhotoAssessmentDetailSheet from "./PhotoAssessmentDetailSheet";
 
-const TYPE_LABELS = { lawn: "Lawn", pest: "Pest ID" };
+const TYPE_LABELS = { lawn: "Lawn", pest: "Pest ID", tree_shrub: "Tree & Shrub" };
+// Deep-linkable types (?open=<type>:<id>) — a Set, so a prototype key like
+// "toString" never counts as a type.
+const ASSESSMENT_TYPES = new Set(Object.keys(TYPE_LABELS));
 
 const dateTimeET = (v) =>
   v
@@ -62,16 +66,27 @@ const dateTimeET = (v) =>
 // catches Get-link rows (status flips to sent at mint, but last_sent_at /
 // claimed_at stay null because nothing was emailed or claimed) — the report
 // URL is live, so they must not read as an unreleased teaser.
+// Below the timestamp rungs the stage comes from data, not more branches:
+// a status with its own stage first, then the type's resting stage — a
+// type with no public funnel or report page (tree & shrub) rests at
+// "Analyzed", never "Teaser only" — then the funnel teaser.
+const STATUS_STAGES = {
+  sent: { key: "link_released", label: "Link released" },
+  archived: { key: "archived", label: "Archived" },
+};
+const NO_FUNNEL_STAGES = {
+  tree_shrub: { key: "analyzed", label: "Analyzed" },
+};
+const TEASER_STAGE = { key: "teaser", label: "Teaser only" };
+
 export function stageOf(row) {
   if (row.report_first_viewed_at) return { key: "viewed", label: "Viewed" };
   if (row.last_sent_at) return { key: "sent", label: "Report sent" };
   if (row.claimed_at) return { key: "unlocked", label: "Unlocked" };
-  if (row.status === "sent") return { key: "link_released", label: "Link released" };
-  if (row.status === "archived") return { key: "archived", label: "Archived" };
-  return { key: "teaser", label: "Teaser only" };
+  return STATUS_STAGES[row.status] ?? NO_FUNNEL_STAGES[row.type] ?? TEASER_STAGE;
 }
 
-const SOURCE_LABELS = { public_funnel: "Public funnel", admin: "Admin", tech: "Tech" };
+const SOURCE_LABELS = { public_funnel: "Public funnel", admin: "Admin", tech: "Tech", auto_triage: "Photo triage" };
 
 // Downscale to ≤1600px JPEG before upload — same payload contract as the
 // public funnel client (keeps admin uploads under the server's size cap).
@@ -98,6 +113,8 @@ async function fileToResizedBase64(file) {
   return { data: jpeg.split(",")[1], mimeType: "image/jpeg" };
 }
 
+// Lead-magnet funnels only — tree & shrub has no public funnel, so it has
+// no tile (the server still reports its admin_created count).
 function FunnelTiles({ funnel }) {
   if (!funnel) return null;
   const tiles = ["lawn", "pest"].map((type) => ({ type, ...funnel[type] }));
@@ -186,6 +203,7 @@ function NewAssessmentDialog({ open, onClose, onCreated }) {
           <Select value={type} onChange={(e) => setType(e.target.value)}>
             <option value="lawn">Lawn assessment</option>
             <option value="pest">Pest identification</option>
+            <option value="tree_shrub">Tree &amp; shrub assessment</option>
           </Select>
         </div>
         <div>
@@ -245,7 +263,7 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
     const openParam = searchParams.get("open");
     if (!openParam) return;
     const [openType, openId] = openParam.split(":");
-    if ((openType === "lawn" || openType === "pest") && openId) {
+    if (ASSESSMENT_TYPES.has(openType) && openId) {
       setSelected({ type: openType, id: openId });
     }
     const next = new URLSearchParams(searchParams);
@@ -307,7 +325,7 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
             <h1 className="text-[22px] leading-7 text-zinc-900">Photo assessments</h1>
           )}
           <p className="text-[14px] text-zinc-500 mt-0.5">
-            Lawn-assessment and pest-identifier lead magnets — teaser → unlock → report → booking.
+            Lawn-assessment and pest-identifier lead magnets — teaser → unlock → report → booking. Tree &amp; shrub assessments are admin-run.
           </p>
           {gates ? (
             <div className="flex gap-2 mt-2">
@@ -329,6 +347,7 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
             <Tab value="all">All</Tab>
             <Tab value="lawn">Lawn</Tab>
             <Tab value="pest">Pest</Tab>
+            <Tab value="tree_shrub">Tree &amp; Shrub</Tab>
           </TabList>
         </Tabs>
         <div className="w-40">

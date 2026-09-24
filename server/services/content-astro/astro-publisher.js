@@ -33,6 +33,7 @@ const { decodeHTMLStrict } = require('entities');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
+const editorialEvidence = require('../content/editorial-evidence');
 const complianceGate = require('../content/compliance-gate');
 const { describeHeroForAlt } = require('../content/hero-alt-vision');
 const { normalizeContentUrl } = require('../content/content-registry');
@@ -769,15 +770,29 @@ function imageExtFromSource(url) {
 // "Maximum call stack size exceeded" hero failure. Split at the first comma
 // and regex ONLY the bounded header; Buffer.from(base64) tolerates embedded
 // whitespace, so wrapped payloads now decode instead of erroring.
+// An admin-generated hero is stored as a bare data: URL (no row for its
+// provenance), so the one fact the publish-time re-screen needs — was the
+// Waves logo reference attached? — rides as an RFC 2397 media-type parameter
+// (`data:image/png;waves-logo=1;base64,…`; browsers render it unchanged).
+// stampLogoReference adds it; parseImageDataUrl reads it back as
+// logoReference (Codex r1 P2 on #4761).
+const LOGO_REFERENCE_PARAM = 'waves-logo=1';
+function stampLogoReference(dataUrl) {
+  const s = String(dataUrl || '');
+  const m = s.match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
+  if (!m) return s;
+  return `data:${m[1]};${LOGO_REFERENCE_PARAM};base64,${s.slice(m[0].length)}`;
+}
 function parseImageDataUrl(url) {
   const s = String(url || '');
   if (!s.toLowerCase().startsWith('data:')) return null;
   const comma = s.indexOf(',');
   if (comma === -1) return null;
   const header = s.slice(0, comma); // bounded — never the multi-MB payload
-  const m = header.match(/^data:(image\/[a-z0-9.+-]+);base64$/i);
+  const m = header.match(/^data:(image\/[a-z0-9.+-]+)((?:;[a-z0-9-]+=[a-z0-9-]+)*);base64$/i);
   if (!m) return null;
-  return { mime: m[1].toLowerCase(), base64: s.slice(comma + 1) };
+  const params = (m[2] || '').split(';').filter(Boolean).map((p) => p.toLowerCase());
+  return { mime: m[1].toLowerCase(), base64: s.slice(comma + 1), logoReference: params.includes(LOGO_REFERENCE_PARAM) };
 }
 
 async function fetchImageBuffer(url) {
@@ -852,7 +867,9 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     let gen;
     let img;
     try {
-      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt });
+      // Opt in to the Waves logo reference: this path screens the result with
+      // the uniform-logo allowance below (owner directive 2026-09-24).
+      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt, uniformLogo: true });
       img = await fetchImageBuffer(gen.dataUrl);
       if (!img?.buffer) throw new Error(`${mode} image generation produced no usable image`);
     } catch (err) {
@@ -872,10 +889,14 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     }
     const allowedText = plan.style === 'infographic' ? captions : [];
     // The screen runs inside the same slot deadline as the generation.
-    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, timeoutMs: deadlineAt - Date.now() });
+    // The uniform logo is allowed on the cap/chest only when the generator
+    // actually attached the reference (owner directive 2026-09-24); a
+    // logo-free generation is screened as before.
+    const allowUniformLogo = gen.logoReference === true;
+    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, allowUniformLogo, timeoutMs: deadlineAt - Date.now() });
     // deadlineAt rides along so the caller's alt-text vision pass runs
     // inside the same slot budget (Codex r9 P2).
-    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, deadlineAt };
+    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, logoReference: allowUniformLogo, deadlineAt };
     if (screen.ok) return candidate;
     candidates.push(candidate);
     if (attempt === 0) {
@@ -1057,6 +1078,10 @@ async function reconcileTopicBlockedPostPrs() {
 // gate itself fails open, so this only throws on a real factual block.
 async function assertFactCheckClear({ title, body, city, keyword, tag }, label) {
   const factCheck = await factCheckGate.evaluate({ title, body, city, keyword, tag });
+  if (editorialEvidence.enabled() && factCheck.checked !== true) {
+    throw editorialEvidence.reviewError({ checks: [{ name: 'source_support', status: 'error',
+      findings: [{ action: 'The mandatory factual review did not complete. Retry automatically; never treat an outage or disabled reviewer as approval.' }] }] });
+  }
   if (!factCheck.pass) {
     // Only P0 (objective, unambiguous) findings block; P1/P2 are advisory.
     const blocking = factCheck.findings.filter((f) => f.severity === 'P0');
@@ -1268,7 +1293,11 @@ async function publishAstro(postId) {
         if (heroImage?.buffer && dataUrl) {
           const { screenGeneratedImage } = require('../content/hero-alt-vision');
           heroImage.model = 'admin pre-generated';
-          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png' });
+          // The stored URL says whether the logo reference was attached, so
+          // a correctly branded cap/chest is not re-reported as a forbidden
+          // logo (Codex r1 P2 on #4761).
+          heroImage.logoReference = dataUrl.logoReference === true;
+          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png', allowUniformLogo: heroImage.logoReference });
         }
       } catch (mediaErr) {
         const e = new Error(`featured image could not be fetched for Astro publish: ${mediaErr.message}`);
@@ -1293,7 +1322,7 @@ async function publishAstro(postId) {
     // source extension.
     if (heroImage?.buffer) {
       // Preserve alt across the recompress — only the generated path sets it.
-      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null, model: heroImage.model || null, plan: heroImage.plan || null, screen: heroImage.screen || null };
+      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null, model: heroImage.model || null, plan: heroImage.plan || null, screen: heroImage.screen || null, logoReference: heroImage.logoReference === true };
     }
     const heroImageExt = heroImage?.buffer ? 'webp' : imageExtFromSource(post.featured_image_url);
 
@@ -1317,7 +1346,17 @@ async function publishAstro(postId) {
       hero_image_alt: vetGeneratedAlt(heroImage?.alt, post.hero_image_alt),
     });
     assertValidBlogFrontmatter(data);
-    const body = (post.content || '').trim();
+    const prepared = await editorialEvidence.prepareDraft({ frontmatter: data, body: post.content || '' }, { page_type: 'supporting-blog' });
+    const body = String(prepared.body || '').trim();
+    if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);
+    // A repair can add or remove the body's visible FAQ section — recompute
+    // schema_types against the REPAIRED body so FAQPage tracks what actually
+    // renders (schema describing an FAQ the page doesn't show is a P0 publish
+    // block). schemaTypesForContent re-derives FAQPage from content itself,
+    // so strip it from the base before re-adding it conditionally; any other
+    // explicit type buildFrontmatter set is preserved.
+    data.schema_types = schemaTypesForContent(body, data.schema_types.filter((type) => type !== 'FAQPage'));
+    post.content = body;
 
     // 2b. Content-policy guardrails (hardcoded price, brand-token leak on
     // multi-domain blogs, FAQ on a policy-blocked service, keyword stuffing).
@@ -1455,6 +1494,7 @@ async function publishAstro(postId) {
     }
     const finalBody = bodyImages.body;
     const markdown = fm.stringify(data, finalBody + '\n');
+    const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
 
     await gh.createBranch(branch);
     branchCreated = true;
@@ -1490,6 +1530,7 @@ async function publishAstro(postId) {
           : []),
         ...bodyImages.files,
         { path: filePath, content: markdown },
+        ...editorialFiles,
       ],
       deletes: bodyImages.deletes || [],
     });
@@ -1511,6 +1552,7 @@ async function publishAstro(postId) {
 
     const previewUrl = cloudflarePreviewUrl(branch);
     await db('blog_posts').where({ id: postId }).update({
+      content: body,
       astro_status: 'pr_open',
       astro_branch_name: branch,
       astro_pr_number: pr.number,
@@ -3018,7 +3060,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     const alt = vetGeneratedAlt(described, gen.alt || `Illustration for ${slot.heading}`, Array.isArray(frontmatter.domains) ? frontmatter.domains : null);
     logger.info(`[astro-publisher] generated body image ${n} for ${slug} via ${gen.model} (${gen.plan?.style || 'unplanned'}, "${slot.heading}")`);
     files.push({ path: repoPath, buffer });
-    images.push({ src, alt, reused: false, model: gen.model || null, plan: gen.plan || null, screen: gen.screen || null });
+    images.push({ src, alt, reused: false, model: gen.model || null, plan: gen.plan || null, screen: gen.screen || null, logoReference: gen.logoReference === true });
     newAlts.push(alt);
     placements.push({ insertAt: slot.insertAt, src, alt });
   }
@@ -3301,6 +3343,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   assertValidBlogFrontmatter(frontmatter);
 
   const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   await gh.createBranch(branch);
   // Reused body pictures are pinned to the blob they were judged on; a
@@ -3339,6 +3382,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
       ...(hero.buffer ? [{ path: hero.repoPath, buffer: hero.buffer }] : []),
       ...bodyImages.files,
       { path: filePath, content: markdown },
+      ...editorialFiles,
     ],
     deletes: [...(isLegacyMd ? [existingFile.path] : []), ...(bodyImages.deletes || [])],
   });
@@ -3508,8 +3552,19 @@ async function publishMetadataRewrite(draft, brief = {}) {
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/meta-${branchSlug}-${shortId()}`;
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
   await gh.createBranch(branch);
-  const fileCommit = await gh.putFile({
+  if (editorialFiles.length) {
+    const current = await gh.getFile(filePath, branch);
+    if (current?.sha !== existing.sha) {
+      await dropUnreferencedBranch(branch, 'metadata target changed');
+      throw new Error('metadata target changed before evidence commit');
+    }
+  }
+  const fileCommit = editorialFiles.length ? await gh.commitFiles({
+    branch, message: `fix(seo): update metadata for ${publicPathFromAstroFile(filePath)}`,
+    files: [{ path: filePath, content: markdown }, ...editorialFiles],
+  }) : await gh.putFile({
     path: filePath,
     content: markdown,
     message: `fix(seo): update title and meta for ${publicPathFromAstroFile(filePath)}`,
@@ -3762,6 +3817,7 @@ async function publishRefresh(draft, brief = {}) {
   }
   const finalBody = refreshImages.body;
   const markdown = fm.stringify(nextFrontmatter, `${finalBody}\n`);
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
@@ -3777,7 +3833,7 @@ async function publishRefresh(draft, brief = {}) {
   // the SHA it was diffed against, and each generated asset path (allocated
   // as ABSENT from main — resolveBodyImages never overwrites a committed
   // picture) must still be absent, or a concurrent write would be lost.
-  if (refreshImages.files.length || (refreshImages.deletes || []).length || (refreshImages.images || []).some((i) => i.reused) || (refreshImages.pinned || []).length) {
+  if (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length || (refreshImages.images || []).some((i) => i.reused) || (refreshImages.pinned || []).length) {
     const conflicts = [];
     const onBranch = await gh.getFile(filePath, branch);
     if (!onBranch || onBranch.sha !== existing.sha) conflicts.push(`${filePath} (expected ${existing.sha}, found ${onBranch?.sha || 'missing'})`);
@@ -3791,11 +3847,11 @@ async function publishRefresh(draft, brief = {}) {
   }
   // New image bytes ride the SAME commit as the post (atomic, like the
   // autonomous lane); with nothing to add the single-file put stays.
-  const fileCommit = (refreshImages.files.length || (refreshImages.deletes || []).length)
+  const fileCommit = (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length)
     ? await gh.commitFiles({
       branch,
       message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
-      files: [...refreshImages.files, { path: filePath, content: markdown }],
+      files: [...refreshImages.files, { path: filePath, content: markdown }, ...editorialFiles],
       deletes: refreshImages.deletes || [],
     })
     : await gh.putFile({
@@ -3909,6 +3965,18 @@ function canPublishRefresh(draft, brief = {}) {
 
 // ── Merge (approval → prod) ────────────────────────────────────────
 
+// mergePr's atomic path (expectBaseSha) proves the merge produces the exact
+// signed bytes by re-checking each article path AND its evidence sidecar at
+// GitHub's test-merge commit. Undefined articlePaths (gate off, or an
+// editorialBaseProof-less body-image pin) → undefined verifyPaths, same as
+// omitting the option.
+function articleVerifyPaths(editorialBaseProof) {
+  const articlePaths = editorialBaseProof?.articlePaths;
+  if (!Array.isArray(articlePaths) || !articlePaths.length) return undefined;
+  const contract = require('../../../packages/editorial-evidence/index.cjs');
+  return articlePaths.flatMap((p) => [p, contract.evidencePath(p)]);
+}
+
 // `expectBaseSha`: the default-branch tip a caller's body-image check
 // validated unchanged assets against (pages-poll) — re-read inside the
 // topic-merge lock immediately before the merge call, since the gates
@@ -3946,7 +4014,11 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
         && String(expectHeadSha).trim().toLowerCase() !== String(pr.head.sha).trim().toLowerCase()) {
       throw new Error(`PR #${pr.number} head ${String(pr.head.sha).slice(0, 7)} no longer matches the verified build commit ${String(expectHeadSha).slice(0, 7)}; re-verify before merge`);
     }
-    if (!isUnpublish) await assertOpenPublishPrIsHubOnly(post, pr);
+    let editorialBaseProof = null;
+    if (!isUnpublish) {
+      editorialBaseProof = await editorialEvidence.assertPrEvidence(pr);
+      await assertOpenPublishPrIsHubOnly(post, pr);
+    }
     // A remediation push whose blog_posts.content mirror never completed must not
     // merge on ANY path — including a clean review, which never consults the P2
     // bar where this used to be checked. Merging would ship the fix with the
@@ -3968,6 +4040,15 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
       // (mergePr supports this; the autonomous poller already pins, this
       // manual/scheduler path did not).
       sha: pr.head?.sha,
+      // When editorial evidence is enabled, bind its same-article base proof
+      // to the final network read inside mergePr. Gate-off callers retain the
+      // older body-image base pin when one was supplied.
+      expectBaseSha: editorialBaseProof?.baseSha || expectBaseSha || undefined,
+      expectBaseRef: editorialBaseProof?.baseRef || gh.env().defaultBranch,
+      // Proves the merge produces the exact signed bytes: article + its
+      // evidence sidecar must resolve to the same blob at GitHub's test
+      // merge as at head (mergePr's atomic path, expectBaseSha only).
+      verifyPaths: articleVerifyPaths(editorialBaseProof),
     });
     // Publish PRs: the ownership recheck and the merge run under one
     // advisory lock so two PRs claiming the same entity cannot both pass
@@ -3978,7 +4059,7 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
         await assertTopicTargetingStillClear(post, pr);
         if (expectBaseSha) {
           const tip = await gh.getBranchSha(gh.env().defaultBranch);
-          if (tip && tip !== expectBaseSha) {
+          if (!tip || tip !== expectBaseSha) {
             const moved = new Error(`PR #${pr.number}: default branch moved during gating (${String(expectBaseSha).slice(0, 9)} → ${String(tip).slice(0, 9)}); re-verify body images before merge`);
             moved.code = 'BLOG_BASE_MOVED';
             throw moved;
@@ -4436,7 +4517,7 @@ function describeImageProvenance(label, img) {
   const screen = img.screen
     ? (img.screen.checked ? (img.screen.ok ? 'screen clean' : `**screen flagged after retry: ${img.screen.reasons.join('; ')}**`) : 'screen unavailable (fail-open)')
     : 'not screened';
-  return `- ${label}: ${img.model || 'unknown model'} (${plan}) — ${screen}`;
+  return `- ${label}: ${img.model || 'unknown model'}${img.logoReference ? ' + uniform logo reference' : ''} (${plan}) — ${screen}`;
 }
 
 function buildDraftPrBody({ frontmatter, slug, branch, content, brief, images = null }) {
@@ -5137,6 +5218,7 @@ module.exports = {
     supersededBodyImages,
     fetchImageBuffer,
     parseImageDataUrl,
+    stampLogoReference,
     defaultHeroForCategory,
     describeHeroFailure,
     inferServiceAreas,

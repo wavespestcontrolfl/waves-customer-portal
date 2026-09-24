@@ -14,7 +14,7 @@ const PINS = {
     anthropic: { model: 'synthetic-anthropic' },
     openai: { model: 'synthetic-openai' },
   },
-  verifier: { enabled: true },
+  verifier: { enabled: true, model: 'synthetic-verifier' },
   voiceProfileVersion: 'synthetic-profile-v1',
 };
 
@@ -33,6 +33,8 @@ function passingResult(fixture, leg) {
       passes: 1,
       converged: true,
       model: PINS.routes[leg].model,
+      servedModel: PINS.routes[leg].model,
+      verifierModels: fixture.expectedEligible ? [PINS.verifier.model] : [],
       voiceProfileVersion: PINS.voiceProfileVersion,
     },
   };
@@ -99,6 +101,10 @@ describe('pure gratitude qualification grading', () => {
     ['non-none action', result => { result.output.parsed.intendedActions = [{ type: 'escalate' }]; }],
     ['unconverged output', result => { result.output.converged = false; }],
     ['wrong model', result => { result.output.model = 'other-model'; }],
+    ['missing served-model telemetry', result => { result.output.servedModel = null; }],
+    ['different served model', result => { result.output.servedModel = 'provider-resolved-alias'; }],
+    ['missing verifier telemetry', result => { result.output.verifierModels = []; }],
+    ['fallback verifier model', result => { result.output.verifierModels = ['synthetic-fallback']; }],
     ['wrong profile', result => { result.output.voiceProfileVersion = 'other-profile'; }],
   ])('a positive leg fails on %s', (_label, mutate) => {
     const { exam } = loadGratitudeExam();
@@ -116,6 +122,8 @@ describe('pure gratitude qualification grading', () => {
     ['unconverged output', (result) => { result.output.converged = false; }],
     ['zero generation passes', (result) => { result.output.passes = 0; }],
     ['wrong model', (result) => { result.output.model = 'other-model'; }],
+    ['missing served-model telemetry', (result) => { result.output.servedModel = null; }],
+    ['different served model', (result) => { result.output.servedModel = 'provider-resolved-alias'; }],
     ['wrong profile', (result) => { result.output.voiceProfileVersion = 'other-profile'; }],
     ['claimed missing information', (result) => { result.output.parsed.missingInfo = 'needs review'; }],
   ])('a negative leg fails on %s', (_label, mutate) => {

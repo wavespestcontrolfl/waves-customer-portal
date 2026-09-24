@@ -2990,11 +2990,13 @@ const StripeService = {
       .leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id')
       .select(
         'payments.*',
-        'payment_methods.card_brand',
-        'payment_methods.last_four',
+        // A removed method nulls payment_method_id (ON DELETE SET NULL) —
+        // fall back to the brand/last-four snapshot taken at charge time.
+        db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'),
+        db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four'),
         'payment_methods.processor as pm_processor',
-        'payment_methods.method_type',
-        'payment_methods.bank_name'
+        db.raw('COALESCE(payment_methods.method_type, payments.payment_method_type) as method_type'),
+        db.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')
       )
       .orderBy('payments.payment_date', 'desc')
       .limit(limit);
