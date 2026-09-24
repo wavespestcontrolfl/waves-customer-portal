@@ -189,6 +189,20 @@ describe('autoAssignParkedAlert', () => {
     expect(db.raw).not.toHaveBeenCalled();
   });
 
+  test('a card parked as a group whose visit has since dissolved: judged on the stop\'s CURRENT membership and moved', async () => {
+    SmartRebooker.reschedule.mockResolvedValue({ success: true });
+    const queue = [
+      query(baseAlert({ payload: { date: DATE, visit_member_ids: [JOB_ID, 'job-2'] } })),
+      query(baseStop({ visit_id: null })),
+      query([CANDIDATE]), query([]), query([]),
+    ];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toMatchObject({ moved: true, job_id: JOB_ID });
+  });
+
   test('a stop already grouped since it was parked (visit_id set now): same manual-decision reason', async () => {
     const queue = [query(baseAlert()), query(baseStop({ visit_id: 'visit-9' }))];
     db.mockImplementation(() => queue.shift() || query({}));
@@ -647,7 +661,7 @@ describe('autoAssignTechDay', () => {
   });
 
   test('an unexpected per-alert failure is annotated with a safe reason and reported as failed, not as a clean zero', async () => {
-    const alertsList = query([{ id: 'alert-a' }]);
+    const alertsList = query([{ id: 'alert-a' }]); // no job_id: unconditional note
     const boom = query({});
     boom.first = jest.fn(async () => { throw new Error('connection reset'); });
     const annotate = query({});
@@ -660,6 +674,20 @@ describe('autoAssignTechDay', () => {
     expect(res.moved).toEqual([]);
     const rawCall = db.raw.mock.calls.find(([sql]) => /COALESCE\(payload/.test(sql));
     expect(JSON.parse(rawCall[1][0]).auto_attempt.reason).toBe('auto_move_error');
+  });
+
+  test('an unexpected failure on a card whose stop left the absent day closes it instead of reporting a failure', async () => {
+    const alertsList = query([{ id: 'alert-a', job_id: 'job-a' }]);
+    const stopsRead = query([{ id: 'job-a', is_recurring: false, status: 'confirmed', window_start: '09:00' }]);
+    const boom = query({});
+    boom.first = jest.fn(async () => { throw new Error('connection reset'); });
+    const queue = [alertsList, stopsRead, boom, staleUpdate()];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    const res = await autoAssignTechDay({ technicianId: ABSENT_TECH, date: DATE });
+
+    expect(res.failed).toEqual([]);
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-a', auto: true }));
   });
 
   test('orders cards most-protected first by re-scoring their stops, not by batch-local bump_order', async () => {

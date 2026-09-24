@@ -463,10 +463,11 @@ async function loadMovableStop(alertId) {
     await resolveStaleAlert(alertId);
     return { done: { moved: false, alert_id: alertId, skipped: 'already_resolved' } };
   }
-  // Grouped units are a human decision (PR B scope) — never auto-moved.
-  if (memberIds && memberIds.length > 1) {
-    return { done: await refuseOrClose(alertId, 'grouped_visit_manual', jobId, absentTechId, date) };
-  }
+  // Grouped units are a human decision (PR B scope) — judged on the stop's
+  // CURRENT membership (stop.visit_id, refused in stopMoveRefusal), never the
+  // card's parking-time visit_member_ids: a group that dissolved since leaves
+  // an ordinary stop that may move; its former siblings still on the absent
+  // tech are re-parked by the sweep once this card resolves (covers nothing).
 
   // Any other refusal (scope exclusion) is worth telling a dispatcher about.
   if (staleCheck) return { done: await refuseOrClose(alertId, staleCheck.reason, jobId, absentTechId, date) };
@@ -688,7 +689,10 @@ async function mostProtectedFirst(alerts) {
   const known = alerts.filter((a) => a.job_id && byJob.has(String(a.job_id)));
   const unknown = alerts.filter((a) => !(a.job_id && byJob.has(String(a.job_id))));
   const bumpFirst = rankBumpOrder(known.map((a) => ({ ...byJob.get(String(a.job_id)), alert_id: a.id })));
-  return [...bumpFirst.reverse().map((r) => ({ id: r.alert_id })), ...unknown.map((a) => ({ id: a.id }))];
+  return [
+    ...bumpFirst.reverse().map((r) => ({ id: r.alert_id, job_id: r.id })),
+    ...unknown.map((a) => ({ id: a.id, job_id: a.job_id || null })),
+  ];
 }
 
 async function autoAssignTechDay({ technicianId, date, actorId } = {}) {
@@ -709,7 +713,7 @@ async function autoAssignTechDay({ technicianId, date, actorId } = {}) {
   // One schedule-quality refresh for the whole run, after every move.
   const qualityDates = new Set();
   try {
-    for (const { id } of alerts) {
+    for (const { id, job_id: jobId } of alerts) {
       let result;
       try {
         result = await autoAssignParkedAlert({ alertId: id, actorId, qualityDates });
@@ -718,8 +722,15 @@ async function autoAssignTechDay({ technicianId, date, actorId } = {}) {
         // card says so (safe reason, never the raw error) and the response
         // reports it, so the drawer can say the run was not a clean zero.
         logger.error(`[tech-out-auto-move] alert ${id} threw during batch auto-assign: ${err.message}`);
-        await annotateAttempt(id, 'auto_move_error');
-        failed.push({ alert_id: id, reason: 'auto_move_error' });
+        // Same stale-aware exit as every other refusal: a card whose stop
+        // left the absent day meanwhile is closed, not stamped as failed.
+        let closedAsStale = false;
+        if (jobId) {
+          closedAsStale = !!(await refuseOrClose(id, 'auto_move_error', jobId, technicianId, date)).skipped;
+        } else {
+          await annotateAttempt(id, 'auto_move_error');
+        }
+        if (!closedAsStale) failed.push({ alert_id: id, reason: 'auto_move_error' });
         continue;
       }
       if (result.moved) moved.push(result);
