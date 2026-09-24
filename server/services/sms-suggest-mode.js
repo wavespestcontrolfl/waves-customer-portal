@@ -1164,17 +1164,6 @@ async function recoverSuggestionHoldingStates({ orphanMinutes = 30, uncertainRec
       correction_note: 'Scheduled send never fired — suggestion reopened by the recovery sweep.',
       updated_at: new Date(),
     });
-  try {
-    await db('sms_log')
-      .where({ direction: 'outbound' })
-      .whereIn('status', ['sending', 'sent', 'delivered', 'failed', 'undelivered', 'canceled'])
-      .whereRaw("metadata->>'provider_handoff_reservation' = 'true'")
-      .where('created_at', '<', uncertainCutoff)
-      .modify(preserveSoleAcceptedReplyReceipts)
-      .del();
-  } catch (err) {
-    logger.warn(`[sms-suggest] provider-handoff reservation cleanup failed: ${err.message}`);
-  }
   if (reopened > 0) logger.info(`[sms-suggest] reopened ${reopened} orphaned scheduled suggestions`);
   return reopened;
 }

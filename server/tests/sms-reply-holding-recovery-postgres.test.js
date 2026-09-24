@@ -396,8 +396,28 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     const agedAt = new Date(Date.now() - hours * 60 * 60 * 1000);
     await trx('sms_log').where({ id: prepared.handle.reservationId }).update({ created_at: agedAt, updated_at: agedAt });
     await suggest.recoverSuggestionHoldingStates();
-    await autoSend.reconcileAutoSendClaims();
+    expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeDefined();
+    await expect(autoSend.reconcileAutoSendClaims()).resolves.toMatchObject({ reservationsCleared: retained ? 0 : 1 });
     expect(Boolean(await trx('sms_log').where({ id: prepared.handle.reservationId }).first())).toBe(retained);
+  });
+
+  test('provider expiration keeps a live linked decision and accounts for cleanup only after release', async () => {
+    const held = await decision();
+    await trx('agent_decisions').where({ id: held.id }).update({ updated_at: new Date() });
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body: 'Pending owner', messageType: 'manual',
+    });
+    const agedAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    await trx('sms_log').where({ id: prepared.handle.reservationId }).update({
+      created_at: agedAt, updated_at: agedAt,
+      metadata: { provider_handoff_reservation: true, provider_outcome_uncertain: true, agent_decision_id: held.id },
+    });
+    await suggest.recoverSuggestionHoldingStates();
+    await expect(autoSend.reconcileAutoSendClaims()).resolves.toMatchObject({ reservationsCleared: 0 });
+    expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeDefined();
+    await trx('agent_decisions').where({ id: held.id }).update({ status: 'pending_review' });
+    await expect(autoSend.reconcileAutoSendClaims()).resolves.toMatchObject({ reservationsCleared: 1 });
+    expect(await trx('sms_log').where({ id: prepared.handle.reservationId }).first()).toBeUndefined();
   });
 
   test.each([
