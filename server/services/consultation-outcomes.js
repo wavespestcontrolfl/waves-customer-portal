@@ -75,6 +75,47 @@ function makeError(message, statusCode, code) {
   return err;
 }
 
+// Round 12 fix (codex P1, post-push): quotedAmount is written straight into
+// consultation_outcomes.quoted_amount, a decimal(10,2) column (migration
+// 20260923000010_consultation_outcomes.js — 8 digits before the point, 2
+// after: [0, 99999999.99]). The pre-fix guard
+// (`quotedAmount != null && !Number.isFinite(Number(quotedAmount))`)
+// accepted anything Number() coerces to a finite value — '' (Number('')
+// === 0) and whitespace-only strings, booleans (Number(true) === 1),
+// negative numbers, and values far past the column's range (1e9) — and
+// then wrote the RAW value straight through, so a value outside the
+// column's precision threw a raw, unmapped Postgres 22P02/numeric-overflow
+// 500 on a technician's save instead of a clean 400.
+//
+// Returns null for an absent or blank amount (same as omitted — a
+// technician clearing the field or leaving it untouched must not become a
+// validation error), or the amount rounded to the nearest cent. Throws 400
+// VALIDATION for anything else: a boolean, an object/array, a non-numeric
+// string, a negative amount, or a value outside decimal(10,2)'s range.
+function normalizeQuotedAmount(rawValue) {
+  if (rawValue === null || rawValue === undefined) return null;
+  let candidate = rawValue;
+  if (typeof candidate === 'string') {
+    candidate = candidate.trim();
+    if (candidate === '') return null; // blank input — treated as omitted
+  } else if (typeof candidate !== 'number') {
+    // Booleans, arrays, objects — never a number or a numeric string.
+    throw makeError('quotedAmount must be a number', 400, 'VALIDATION');
+  }
+  const num = Number(candidate);
+  if (!Number.isFinite(num)) {
+    throw makeError('quotedAmount must be a number', 400, 'VALIDATION');
+  }
+  // Compared in whole CENTS (integer math), not the raw float, so a value
+  // sitting exactly at the boundary can't land on the wrong side of the
+  // check from float rounding.
+  const cents = Math.round(num * 100);
+  if (cents < 0 || cents > 9999999999) {
+    throw makeError('quotedAmount must be between 0 and 99,999,999.99', 400, 'VALIDATION');
+  }
+  return cents / 100;
+}
+
 // P1-A (round 5 — the round-4 advisory lock was itself a real deadlock,
 // caught by the pre-push auditor): recordOutcome's write+evidence-check
 // must serialize against markWonForCustomer's reconciling UPDATE, or both
@@ -621,9 +662,7 @@ async function recordOutcome(params = {}, { trx } = {}) {
   if (interests != null && !Array.isArray(interests)) {
     throw makeError('interests must be an array', 400, 'VALIDATION');
   }
-  if (quotedAmount != null && !Number.isFinite(Number(quotedAmount))) {
-    throw makeError('quotedAmount must be a number', 400, 'VALIDATION');
-  }
+  const normalizedQuotedAmount = normalizeQuotedAmount(quotedAmount);
   if (!isValidFollowUpAt(followUpAt)) {
     throw makeError(
       'followUpAt must be a valid date/time — a naive local time like "2026-09-25T09:00" is read as ET, or pass an ISO string with an explicit offset/Z',
@@ -648,7 +687,7 @@ async function recordOutcome(params = {}, { trx } = {}) {
     outcome,
     lost_reason: outcome === 'lost' ? lostReason : null,
     interests: JSON.stringify(Array.isArray(interests) ? interests : []),
-    quoted_amount: quotedAmount != null ? quotedAmount : null,
+    quoted_amount: normalizedQuotedAmount,
     quoted_cadence: quotedCadence || null,
     quote_notes: quoteNotes || null,
     follow_up_at: defaultFollowUpAt(outcome, followUpAt),

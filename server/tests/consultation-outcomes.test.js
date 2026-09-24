@@ -362,6 +362,51 @@ describe('recordOutcome — validation', () => {
     await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', quotedCadence: 'decade' }, { trx: baseDb() }))
       .rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
   });
+
+  // Round 12 fix (codex P1, post-push): the pre-fix guard
+  // (`Number.isFinite(Number(quotedAmount))`) accepted '' (Number('')===0),
+  // whitespace, booleans (Number(true)===1), negatives, and values past
+  // decimal(10,2)'s range (1e9) — and wrote the RAW value through, so an
+  // out-of-range save threw a raw, unmapped Postgres 22P02/numeric-overflow
+  // 500 instead of a clean 400. Table-driven over exactly the values the
+  // audit named.
+  it.each([
+    ['', 'valid', null],
+    ['  ', 'valid', null],
+    [true, 'invalid', undefined],
+    [-1, 'invalid', undefined],
+    ['abc', 'invalid', undefined],
+    [1e9, 'invalid', undefined],
+    ['149.50', 'valid', 149.5],
+    [149.5, 'valid', 149.5],
+    [null, 'valid', null],
+  ])('quotedAmount %p is %s', async (quotedAmount, expectation, expectedStored) => {
+    const promise = recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', quotedAmount }, { trx: baseDb() });
+    if (expectation === 'invalid') {
+      // Never a raw DB error — the guard rejects with a clean 400 before
+      // any write is even attempted (these values never reach the row
+      // object, let alone a query).
+      await expect(promise).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+    } else {
+      const saved = await promise;
+      expect(saved.quoted_amount).toBe(expectedStored);
+    }
+  });
+
+  test('the boundary value decimal(10,2) can actually hold (99,999,999.99) is accepted, not rejected as "beyond range"', async () => {
+    const saved = await recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', quotedAmount: 99999999.99 },
+      { trx: baseDb() },
+    );
+    expect(saved.quoted_amount).toBe(99999999.99);
+  });
+
+  test('a value one cent over the boundary (100,000,000.00) is rejected, not written raw', async () => {
+    await expect(recordOutcome(
+      { scheduledServiceId: 'visit-1', outcome: 'warm', quotedAmount: 100000000 },
+      { trx: baseDb() },
+    )).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+  });
 });
 
 describe('recordOutcome — success + upsert', () => {
