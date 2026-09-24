@@ -1367,6 +1367,15 @@ async function submitRecap({
     }
   }
 
+  // A recap rating is the report score now (owner ruling 2026-09-24):
+  // rescore after the commit so the gauge and PDF never keep the old value.
+  // Best-effort, same as the completion flow — a scoring failure must not
+  // fail a committed recap.
+  if (clientPestRating != null) {
+    const { runAndSwallowErrors: rescorePestPressure } = require('./pest-pressure/orchestrate');
+    await rescorePestPressure(recordId, knex);
+  }
+
   logger.info(
     `[pest-recap] recap committed service=${serviceId} record=${recordId} `
     + `actor=${actorType} created=${createdRecord} `
