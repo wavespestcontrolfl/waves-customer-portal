@@ -289,7 +289,7 @@ export default function PendingDraftsTab({ embedded = false }) {
   // Without paging, older drafts past the first page silently starve.
   const loadOlder = useCallback(async () => {
     if (!nextCursor) return;
-    const seq = loadSeq.current;
+    const seq = ++loadSeq.current;
     setLoadingMore(true);
     try {
       const data = await adminFetch(`/admin/drafts?status=pending&before=${encodeURIComponent(nextCursor)}`);

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const adminFetch = vi.fn();
@@ -183,6 +183,27 @@ describe("PendingDraftsTab", () => {
     await waitFor(() => expect(screen.getByText("Old Draft")).toBeInTheDocument());
     expect(screen.getAllByText("Sam Owner")).toHaveLength(1); // dedup by id
     expect(screen.queryByText("Load older drafts")).not.toBeInTheDocument(); // cursor exhausted
+  });
+
+  it("keeps an older page when an earlier background refresh resolves last", async () => {
+    const firstPage = { drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "d2" };
+    adminFetch.mockResolvedValueOnce(firstPage);
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+
+    let finishRefresh;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { finishRefresh = resolve; }));
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(2));
+
+    const oldDraft = { ...DRAFTS.drafts[0], id: "d3", customerName: "Old Draft" };
+    adminFetch.mockResolvedValueOnce({ drafts: [oldDraft], pendingCount: 3, nextCursor: null });
+    fireEvent.click(screen.getByText("Load older drafts"));
+    expect(await screen.findByText("Old Draft")).toBeInTheDocument();
+
+    await act(async () => { finishRefresh(firstPage); });
+    expect(screen.getByText("Old Draft")).toBeInTheDocument();
+    expect(screen.queryByText("Load older drafts")).not.toBeInTheDocument();
   });
 
   it("keeps loaded older drafts when a background refresh runs", async () => {

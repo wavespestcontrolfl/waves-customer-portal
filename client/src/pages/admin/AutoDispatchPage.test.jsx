@@ -139,6 +139,45 @@ it("does not let a stale poll overwrite a visit protection update", async () => 
   expect(screen.getByRole("checkbox", { name: "Lock this visit from automation" })).toBeChecked();
 });
 
+it("refreshes the currently selected run when a protection update from the prior run resolves", async () => {
+  const patch = deferred();
+  const secondRun = { ...run, id: "run-2", status: "completed" };
+  const secondDetail = {
+    run: secondRun,
+    logs: [{ ...decision, id: "decision-2", reason_description: "Second run decision" }],
+  };
+  let firstRunReads = 0;
+  let secondRunReads = 0;
+  adminFetch.mockImplementation((path, options) => {
+    if (options?.method === "PATCH") return patch.promise;
+    if (path.includes("runs?")) return Promise.resolve({ runs: [run, secondRun], automation });
+    if (path.endsWith("/run-2")) {
+      secondRunReads += 1;
+      return Promise.resolve(structuredClone(secondDetail));
+    }
+    firstRunReads += 1;
+    return Promise.resolve(structuredClone(detail));
+  });
+
+  mount();
+  await screen.findByText("Original decision");
+  fireEvent.click(screen.getByText("Decision details and visit controls"));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Lock this visit from automation" }));
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
+    "/admin/auto-dispatch/services/visit-1/lock",
+    { method: "PATCH", body: '{"locked":true}' },
+  ));
+
+  fireEvent.click(screen.getByRole("button", { name: "Other run" }));
+  expect(await screen.findByText("Second run decision")).toBeInTheDocument();
+
+  await act(async () => patch.resolve({ ok: true }));
+  await waitFor(() => expect(secondRunReads).toBeGreaterThanOrEqual(2));
+  expect(screen.getByText("Second run decision")).toBeInTheDocument();
+  expect(screen.queryByText("Original decision")).not.toBeInTheDocument();
+  expect(firstRunReads).toBe(1);
+});
+
 it("does not infer current operation from an old apply run when status cannot load", async () => {
   automation = null;
   mount();

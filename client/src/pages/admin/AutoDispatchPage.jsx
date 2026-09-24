@@ -139,6 +139,8 @@ function RunDetails({ selected, state, onRefresh, onSavingChange }) {
 export default function AutoDispatchPage({ embedded = false }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const selected = searchParams.get("run");
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [list, setList] = useState({ runs: [], automation: null, loading: true, error: null });
   const [detail, setDetail] = useState({ data: null, loading: false, error: null });
   const [running, setRunning] = useState(false);
@@ -183,18 +185,23 @@ export default function AutoDispatchPage({ embedded = false }) {
     setDetail((previous) => ({ data: clear ? null : previous.data, loading: true, error: null }));
     try {
       const data = await adminFetch(`/admin/auto-dispatch/runs/${encodeURIComponent(runId)}`);
-      if (mounted.current && request === detailRequest.current) setDetail({ data, loading: false, error: null });
+      if (mounted.current && request === detailRequest.current && selectedRef.current === runId) {
+        setDetail({ data, loading: false, error: null });
+      }
     } catch (err) {
-      if (mounted.current && request === detailRequest.current) {
+      if (mounted.current && request === detailRequest.current && selectedRef.current === runId) {
         setDetail((previous) => ({ ...previous, loading: false, error: err.message || "Failed to load decisions" }));
       }
     }
   }, []);
 
-  const refresh = useCallback(() => Promise.all([
-    loadRuns(),
-    selected ? loadDetail(selected) : Promise.resolve(),
-  ]), [loadDetail, loadRuns, selected]);
+  const refresh = useCallback(() => {
+    const runId = selectedRef.current;
+    return Promise.all([
+      loadRuns(),
+      runId ? loadDetail(runId) : Promise.resolve(),
+    ]);
+  }, [loadDetail, loadRuns]);
 
   const handleSavingChange = useCallback((saving) => {
     if (saving) {

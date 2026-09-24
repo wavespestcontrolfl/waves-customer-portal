@@ -56,3 +56,23 @@ it('keeps in-progress review text when a pending background read resolves', asyn
     expect(screen.getAllByText('Fixture customer').length).toBeGreaterThan(0);
   expect(screen.queryByText('Replacement')).not.toBeInTheDocument();
 });
+
+it('initializes reply fields when switching away from an edited decision whose context uses no IDs', async () => {
+  adminFetch.mockImplementation(async (url) => {
+    if (url.endsWith('/context')) return { context: {} };
+    return {
+      decisions: [
+        { id: 'decision-a', status: 'pending', customerName: 'Customer A', recommendedActions: [], suggestedMessage: 'Suggested A' },
+        { id: 'decision-b', status: 'pending', customerName: 'Customer B', recommendedActions: [], suggestedMessage: 'Suggested B' },
+      ],
+    };
+  });
+  render(<MemoryRouter><AgentDecisionsPage /></MemoryRouter>);
+
+  const reply = await screen.findByLabelText('Final / rewrite reply');
+  await waitFor(() => expect(reply).toHaveValue('Suggested A'));
+  fireEvent.change(reply, { target: { value: 'Edited A' } });
+
+  fireEvent.click(screen.getByText('Customer B'));
+  await waitFor(() => expect(reply).toHaveValue('Suggested B'));
+});

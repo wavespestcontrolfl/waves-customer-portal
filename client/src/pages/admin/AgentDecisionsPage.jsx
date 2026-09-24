@@ -107,7 +107,8 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const [replyScenarioLabel, setReplyScenarioLabel] = useState("");
   const requestRef = useRef(0);
   const editEpochRef = useRef(0);
-  const detailAppliedEpochRef = useRef(0);
+  const detailEditRef = useRef({ decisionId: null, epoch: 0 });
+  const detailAppliedRef = useRef({ decisionId: null, editEpoch: 0 });
   const draftBaselineRef = useRef({
     correctionNote: "",
     correctedActions: "",
@@ -164,12 +165,14 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       return;
     }
     let cancelled = false;
-    const editEpoch = editEpochRef.current;
+    const decisionId = selected.id;
+    const currentEdit = detailEditRef.current;
+    const editEpoch = currentEdit.decisionId === decisionId ? currentEdit.epoch : 0;
     setDetailLoading(true);
-    adminFetch(`/admin/agent-decisions/${selected.id}/context`)
+    adminFetch(`/admin/agent-decisions/${decisionId}/context`)
       .then((next) => {
         if (!cancelled) {
-          detailAppliedEpochRef.current = editEpoch;
+          detailAppliedRef.current = { decisionId, editEpoch };
           setDetail(next);
         }
       })
@@ -183,7 +186,10 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   }, [selected?.id]);
 
   useEffect(() => {
-    if (detailAppliedEpochRef.current !== editEpochRef.current) return;
+    const applied = detailAppliedRef.current;
+    const currentEdit = detailEditRef.current;
+    const currentEditEpoch = currentEdit.decisionId === selected?.id ? currentEdit.epoch : 0;
+    if (applied.decisionId !== selected?.id || applied.editEpoch !== currentEditEpoch) return;
     const training = detail?.replyTraining;
     const humanReply = detail?.context?.actualHumanReply?.body || "";
     const nextActualReply = training?.actualHumanReply || humanReply || "";
@@ -201,7 +207,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
       replyReviewNote: nextReviewNote,
       replyScenarioLabel: nextScenarioLabel,
     };
-  }, [detail?.replyTraining?.id, detail?.context?.actualHumanReply?.id, selected?.id, selected?.suggestedMessage]);
+  }, [detail, selected?.id, selected?.suggestedMessage]);
 
   const hasDraftChanges = correctionNote !== draftBaselineRef.current.correctionNote
     || correctedActions !== draftBaselineRef.current.correctedActions
@@ -211,6 +217,11 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
     || replyScenarioLabel !== draftBaselineRef.current.replyScenarioLabel;
   const updateDraft = (setter, value) => {
     editEpochRef.current += 1;
+    const current = detailEditRef.current;
+    detailEditRef.current = {
+      decisionId: selected?.id || null,
+      epoch: current.decisionId === selected?.id ? current.epoch + 1 : 1,
+    };
     setter(value);
   };
 
