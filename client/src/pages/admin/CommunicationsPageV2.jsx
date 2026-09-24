@@ -1568,6 +1568,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     });
   };
 
+  const discardAgentDraft = () => {
+    setMsgBody("");
+    setSelectedAgentDraft(null);
+    setSendResult({ ok: true, text: "Agent draft discarded." });
+  };
+
   // Upload one-or-more image files → S3 → mediaUrls. Called from the hidden
   // <input type="file">triggered by the + button.
   const handleUpload = async (fileList) => {
@@ -3085,6 +3091,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             onClick={leaveApprovalDraft}
           >
             Leave approval draft
+          </Button>
+        )}
+        {!loadedMessageDraft?.id && selectedAgentDraft?.decisionId && (
+          <Button
+            variant="secondary"
+            className="mt-3"
+            disabled={sending}
+            onClick={discardAgentDraft}
+          >
+            Discard agent draft
           </Button>
         )}
         <InsertLinkSheet

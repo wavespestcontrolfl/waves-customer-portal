@@ -443,6 +443,25 @@ it("drops an unverifiable recovered agent selection while retaining the editable
 });
 
 
+it("discards an Agent Review selection before sending a fresh message", async () => {
+  const owner = "discard-agent-draft-owner";
+  const selectedAgentDraft = { decisionId: "decision-a", suggestedMessage: "Agent suggestion" };
+  saveDraft(owner, { msgBody: selectedAgentDraft.suggestedMessage, fromNumber: line, selectedAgentDraft });
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: selectedAgentDraft }) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Discard agent draft" }));
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue("");
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Fresh reply" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: "Fresh reply" });
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("agentDecisionId");
+});
+
+
 it("leaves a recovered approval and clears its metadata before composing a fresh message", async () => {
   const owner = "discard-approval-owner";
   saveDraft(owner, { ...savedApproval, attachments: [attachment], replyContext: { messageId: "old-reply", phone: "9415550100", customerId: "customer-a" }, sendTiming: "tomorrow", insertedCustomerLinks: { contract: { url: "https://example.invalid/contract", contractId: "old-contract" } } });
