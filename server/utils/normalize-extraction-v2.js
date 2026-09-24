@@ -134,6 +134,49 @@ function normalizeSecondaryContacts(list) {
   return out;
 }
 
+// price / prices[] (schema 1.13.0, codex #4722 r1 P1s): the model can
+// return a price object that disagrees with itself or with its siblings —
+// caller_response 'accepted' alongside accepted: false, or a top-level
+// price that doesn't match the accepted entry in prices[]. Both are
+// corrected here, before persistence, so no reader has to reconcile them.
+
+// accepted is DERIVED from caller_response (schema description + prompt
+// rule) — when caller_response is present (even null), it wins; when the
+// key is genuinely ABSENT (a pre-1.13.0 shape, or a field the model simply
+// omitted), the model's own accepted value is preserved unchanged.
+function normalizePriceEntry(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  if (!('caller_response' in entry)) return entry;
+  let accepted;
+  if (entry.caller_response === 'accepted') accepted = true;
+  else if (entry.caller_response === 'declined' || entry.caller_response === 'no_response') accepted = false;
+  else accepted = null; // 'not_at_issue' or null
+  return { ...entry, accepted };
+}
+
+// Primary-price compatibility contract: `price` is always the single
+// PRIMARY entry — the accepted one in `prices[]` if any (first such), else
+// `prices[0]` — so a reader of `price` alone never sees a stale/disagreeing
+// value. A `price` with no `prices` array (the common single-price case) is
+// left alone beyond its own accepted derivation above.
+function normalizeServiceRequestPricing(serviceRequest) {
+  if (!serviceRequest || typeof serviceRequest !== 'object') return serviceRequest;
+  if (serviceRequest.price === undefined && !Array.isArray(serviceRequest.prices)) return serviceRequest;
+
+  const result = { ...serviceRequest };
+  if (result.price !== undefined) {
+    result.price = normalizePriceEntry(result.price);
+  }
+  if (Array.isArray(result.prices)) {
+    result.prices = result.prices.map(normalizePriceEntry);
+    if (result.prices.length > 0) {
+      const accepted = result.prices.find((p) => p && p.caller_response === 'accepted');
+      result.price = accepted || result.prices[0];
+    }
+  }
+  return result;
+}
+
 function normalizeExtractionV2(extraction) {
   if (!extraction || typeof extraction !== 'object') return extraction;
 
@@ -151,6 +194,9 @@ function normalizeExtractionV2(extraction) {
     ...(extraction.secondary_contacts !== undefined
       ? { secondary_contacts: normalizeSecondaryContacts(extraction.secondary_contacts) }
       : {}),
+    ...(extraction.service_request !== undefined
+      ? { service_request: normalizeServiceRequestPricing(extraction.service_request) }
+      : {}),
   };
 }
 
@@ -164,4 +210,6 @@ module.exports = {
   normalizeZip,
   normalizeState,
   cleanValidEmail,
+  normalizePriceEntry,
+  normalizeServiceRequestPricing,
 };

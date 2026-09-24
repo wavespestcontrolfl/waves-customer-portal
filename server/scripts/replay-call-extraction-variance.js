@@ -79,6 +79,11 @@ const FIELD_GROUPS = {
     // starts dropping every price but the primary one into `price` (instead
     // of also listing them in `prices`) should show up here.
     'price_count',
+    // prices[] content signature (codex #4722 r1 P1) — price_count alone
+    // collapses two extractions that both return 2 prices but disagree on
+    // the SECONDARY entry's contents (e.g. its unit). A plain deterministic
+    // string; normalizeField needs no special case.
+    'prices_signature',
   ],
   low: [
     'lead_quality',

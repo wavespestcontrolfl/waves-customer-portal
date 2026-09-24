@@ -74,6 +74,26 @@ describe('buildCallIntelligence', () => {
     expect(view.prices.price).toBeNull();
   });
 
+  // service_request.prices[] (schema 1.13.0, codex #4722 r1 P2): forwarded
+  // as prices.list, additive alongside the unchanged primary prices.price.
+  test('prices.list passes through every distinct price; empty array when the extraction has none', () => {
+    const empty = buildCallIntelligence({ call: CALL, commitments: [] });
+    expect(empty.prices.list).toEqual([]);
+
+    const primary = { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true };
+    const secondary = { amount_usd: 40, unit: 'per_month', caller_response: 'not_at_issue', accepted: null, tier_mentioned: 'gold' };
+    const call = {
+      ...CALL,
+      ai_extraction_enriched: JSON.stringify({
+        ...V2,
+        service_request: { ...V2.service_request, price: primary, prices: [primary, secondary] },
+      }),
+    };
+    const view = buildCallIntelligence({ call, commitments: [] });
+    expect(view.prices.price).toEqual(primary);
+    expect(view.prices.list).toEqual([primary, secondary]);
+  });
+
   test('an operator customer link is reported as human-set with who/when and the previous value', () => {
     const call = { ...CALL, metadata: JSON.stringify({ customer_link_override: { customer_id: 'cust-2', previous_customer_id: 'cust-1', by: 'tech-1', at: '2026-09-01T15:00:00Z' } }), customer_id: 'cust-2' };
     const view = buildCallIntelligence({ call, commitments: [] });

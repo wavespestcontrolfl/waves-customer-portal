@@ -13,6 +13,25 @@ function isV2Extraction(extraction) {
   return !!(extraction && extraction.meta && extraction.meta.schema_version);
 }
 
+// prices_signature (schema 1.13.0, codex #4722 r1 P1): price_count alone
+// collapses two extractors that both return 2 prices but disagree on the
+// SECONDARY entry's contents — the count matches while the actual prices
+// differ. This builds a deterministic per-entry signature so replay
+// variance can see that disagreement. Order-sensitive by design (the
+// prompt asks for most-consequential-first, so a reorder is itself a
+// meaningful change).
+function priceEntrySignature(entry) {
+  const e = entry || {};
+  return ['amount_usd', 'amount_max_usd', 'unit', 'caller_response', 'prepay_term', 'tier_mentioned']
+    .map((key) => (e[key] === null || e[key] === undefined ? '' : String(e[key])))
+    .join('|');
+}
+
+function pricesSignature(prices) {
+  if (!Array.isArray(prices)) return null;
+  return prices.map(priceEntrySignature).join(';');
+}
+
 function flatView(extraction) {
   if (!extraction) return {};
   if (!isV2Extraction(extraction)) return extraction;
@@ -73,6 +92,10 @@ function flatView(extraction) {
     // working. Only the COUNT is flattened here — each array entry is not
     // flattened individually, per the #4707 follow-up scope.
     price_count: Array.isArray(svc.prices) ? svc.prices.length : null,
+    // Content signature (codex #4722 r1 P1) — price_count alone can't tell
+    // two 2-price extractions with a differing secondary entry apart.
+    // Watched by replay variance (FIELD_GROUPS medium).
+    prices_signature: pricesSignature(svc.prices),
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
     service_address_occupancy: property.service_address_occupancy || null,
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'

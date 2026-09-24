@@ -657,6 +657,7 @@ describe('call extraction replay variance reporting', () => {
         'price_stated_by',
         'price_has_evidence',
         'price_count',
+        'prices_signature',
       ]) {
         expect(allFields.has(field)).toBe(true);
       }
@@ -751,6 +752,26 @@ describe('call extraction replay variance reporting', () => {
         true
       );
       expect(variances.find((v) => v.field === 'price_count')).toBeDefined();
+    });
+
+    // prices_signature (codex #4722 r1 P1): price_count alone collapses two
+    // extractions that both return 2 prices but disagree on the SECONDARY
+    // entry — this variance must surface even though price_count is
+    // identical on both sides.
+    test('compareFlatFields reports a variance when only the secondary price entry differs, even though price_count is unchanged', () => {
+      const oldFlat = {
+        price_count: 2,
+        prices_signature: '65||one_time|accepted||;40||per_month|not_at_issue||',
+      };
+      const currentFlat = {
+        price_count: 2,
+        prices_signature: '65||one_time|accepted||;40||per_quarter|not_at_issue||',
+      };
+      const variances = compareFlatFields(oldFlat, currentFlat, true);
+      expect(variances.find((v) => v.field === 'price_count')).toBeUndefined();
+      const signatureVariance = variances.find((v) => v.field === 'prices_signature');
+      expect(signatureVariance).toBeDefined();
+      expect(signatureVariance.severity).toBe('medium');
     });
   });
 });

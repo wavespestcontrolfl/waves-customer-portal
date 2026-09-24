@@ -1237,6 +1237,37 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(withPrices).not.toHaveProperty('prices');
   });
 
+  // prices_signature (codex #4722 r1 P1): price_count alone can't tell two
+  // 2-price extractions with a differing secondary entry apart.
+  test('flatView exposes prices_signature as a deterministic per-entry string, null when prices absent', () => {
+    const absent = flatView({ meta: { schema_version: '1.13.0' }, service_request: { price: {} } });
+    expect(absent.prices_signature).toBeNull();
+
+    const withPrices = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        price: { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+        prices: [
+          { amount_usd: 65, amount_max_usd: null, unit: 'one_time', caller_response: 'accepted', prepay_term: null, tier_mentioned: null },
+          { amount_usd: 40, amount_max_usd: null, unit: 'per_month', caller_response: 'not_at_issue', prepay_term: null, tier_mentioned: 'gold' },
+        ],
+      },
+    });
+    expect(withPrices.prices_signature).toBe('65||one_time|accepted||;40||per_month|not_at_issue||gold');
+
+    // Order-sensitive, and differs when only the secondary entry's unit changes.
+    const secondaryChanged = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 65, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_quarter', caller_response: 'not_at_issue', tier_mentioned: 'gold' },
+        ],
+      },
+    });
+    expect(secondaryChanged.prices_signature).not.toBe(withPrices.prices_signature);
+  });
+
   test('normalizeCallExtraction sanitizes the new V1 fields', () => {
     const out = normalizeCallExtraction({
       quoted_price: '350',

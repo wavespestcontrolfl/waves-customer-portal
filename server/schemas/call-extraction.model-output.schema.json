@@ -937,7 +937,7 @@
                 "boolean",
                 "null"
               ],
-              "description": "DERIVED from caller_response — kept only for backward compatibility with readers written before caller_response existed; set both consistently. true when caller_response is 'accepted'. false when caller_response is 'declined' or 'no_response'. null when caller_response is 'not_at_issue' or null/absent."
+              "description": "DERIVED from caller_response — kept only for backward compatibility with readers written before caller_response existed; set both consistently. true when caller_response is 'accepted'. false when caller_response is 'declined' or 'no_response'. null when caller_response is 'not_at_issue' or null/absent. This schema does not itself enforce the derivation — normalizeExtractionV2 (server/utils/normalize-extraction-v2.js) recomputes `accepted` from `caller_response` before persistence whenever caller_response is present, so a model that returns a disagreeing pair is corrected rather than trusted as-is."
             },
             "caller_response": {
               "type": [
@@ -1003,7 +1003,7 @@
         "prices": {
           "type": "array",
           "maxItems": 6,
-          "description": "EVERY DISTINCT price stated on the call (one-time, monthly, a competitor's price, etc.), most consequential first — additive alongside `price`, which stays the single PRIMARY entry (the accepted one if any, else the first stated) so every existing reader of `price` keeps working unchanged. A call with only one price mentioned may leave this empty or omit it; `price` alone still carries it. Each entry has the same shape as `price`.",
+          "description": "EVERY DISTINCT price stated on the call (one-time, monthly, a competitor's price, etc.), most consequential first — additive alongside `price`, which stays the single PRIMARY entry (the accepted one if any, else the first stated) so every existing reader of `price` keeps working unchanged. A call with only one price mentioned may leave this empty or omit it; `price` alone still carries it. Each entry has the same shape as `price`. This schema does not itself enforce that `price` matches the accepted (or first) entry here — normalizeExtractionV2 (server/utils/normalize-extraction-v2.js) canonicalizes `price` from a nonempty `prices` before persistence, so a model that returns a disagreeing pair is corrected rather than trusted as-is.",
           "items": {
             "type": "object",
             "additionalProperties": false,

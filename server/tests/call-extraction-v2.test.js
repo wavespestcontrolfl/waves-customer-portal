@@ -664,6 +664,112 @@ describe('normalize extraction v2', () => {
     expect(result.caller.email).toBeNull();
     expect(result.caller.last_name).toBeNull();
   });
+
+  // #4722 codex r1 P1s: server-side derivation + the primary/prices
+  // compatibility contract — the model can disagree with itself
+  // (caller_response 'accepted' alongside accepted: false, or a price that
+  // doesn't match the accepted prices[] entry) and both must be corrected
+  // before persistence, not left for readers to reconcile.
+  describe('service_request.price / prices normalization', () => {
+    test('derives accepted from caller_response on price, overriding a disagreeing model value', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 65, caller_response: 'accepted', accepted: false };
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price.accepted).toBe(true);
+    });
+
+    test('derives accepted for every caller_response value', () => {
+      const cases = [
+        ['accepted', true],
+        ['declined', false],
+        ['no_response', false],
+        ['not_at_issue', null],
+        [null, null],
+      ];
+      for (const [caller_response, expected] of cases) {
+        const extraction = validModelOutput();
+        extraction.service_request.price = { amount_usd: 65, caller_response, accepted: 'stale' };
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price.accepted).toBe(expected);
+      }
+    });
+
+    test('when caller_response is absent (key not present), the old accepted value is preserved unchanged', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 65, accepted: false };
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price.accepted).toBe(false);
+      expect(result.service_request.price).not.toHaveProperty('caller_response');
+    });
+
+    test('derives accepted on every prices[] entry independently', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true };
+      extraction.service_request.prices = [
+        { amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: false },
+        { amount_usd: 40, unit: 'per_month', caller_response: 'declined', accepted: true },
+      ];
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.prices[0].accepted).toBe(true);
+      expect(result.service_request.prices[1].accepted).toBe(false);
+    });
+
+    test('a nonempty prices[] with price missing fills price from the accepted entry (first such), else prices[0]', () => {
+      const withAccepted = validModelOutput();
+      delete withAccepted.service_request.price;
+      withAccepted.service_request.prices = [
+        { amount_usd: 40, unit: 'per_month', caller_response: 'declined' },
+        { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+      ];
+      const resultA = normalizeExtractionV2(withAccepted);
+      expect(resultA.service_request.price).toMatchObject({ amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true });
+
+      const noneAccepted = validModelOutput();
+      delete noneAccepted.service_request.price;
+      noneAccepted.service_request.prices = [
+        { amount_usd: 40, unit: 'per_month', caller_response: 'declined' },
+        { amount_usd: 300, unit: 'one_time', caller_response: 'no_response' },
+      ];
+      const resultB = normalizeExtractionV2(noneAccepted);
+      expect(resultB.service_request.price).toMatchObject({ amount_usd: 40, unit: 'per_month', caller_response: 'declined', accepted: false });
+    });
+
+    test('a price that disagrees with the accepted prices[] entry is replaced by that entry', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 40, unit: 'per_month', caller_response: 'declined', accepted: false };
+      extraction.service_request.prices = [
+        { amount_usd: 40, unit: 'per_month', caller_response: 'declined' },
+        { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+      ];
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price).toMatchObject({ amount_usd: 300, unit: 'one_time', caller_response: 'accepted', accepted: true });
+    });
+
+    test('a single price with no prices array is left alone (only accepted derivation applies)', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: false };
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true });
+      expect(result.service_request.prices).toBeUndefined();
+    });
+
+    test('an empty prices[] array leaves price alone', () => {
+      const extraction = validModelOutput();
+      extraction.service_request.price = { amount_usd: 65, caller_response: 'accepted', accepted: false };
+      extraction.service_request.prices = [];
+      const result = normalizeExtractionV2(extraction);
+      expect(result.service_request.price).toMatchObject({ amount_usd: 65, caller_response: 'accepted', accepted: true });
+      expect(result.service_request.prices).toEqual([]);
+    });
+
+    test('a service_request with neither price nor prices is untouched', () => {
+      const extraction = validModelOutput();
+      delete extraction.service_request.price;
+      const before = JSON.stringify(extraction.service_request);
+      const result = normalizeExtractionV2(extraction);
+      expect(JSON.stringify(result.service_request)).toBe(before);
+    });
+  });
 });
 
 // ═══════════════════════════════════════════════════
