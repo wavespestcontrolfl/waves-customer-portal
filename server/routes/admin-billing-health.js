@@ -260,6 +260,16 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
         } catch (err) {
           return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };
         }
+      }).catch((err) => {
+        // The cross-process layer (utils/customer-billing-lock.js) found a
+        // genuine other-process claim on this SAME customer — a Railway
+        // deploy overlap racing the 8 AM cron or 10 AM retry sweep. Refuse
+        // as retryable rather than let it fall through to the generic
+        // error handler as a 500.
+        if (err.code === 'BILLING_CLAIM_HELD_ELSEWHERE') {
+          return { response: { status: 409, body: { error: `${err.message} — try again in a moment`, in_progress: true } } };
+        }
+        throw err;
       });
 
       if (lockOutcome.response) return res.status(lockOutcome.response.status).json(lockOutcome.response.body);

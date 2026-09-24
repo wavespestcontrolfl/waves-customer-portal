@@ -318,7 +318,20 @@ const BillingCron = {
           const service = await require('./stripe');
           const paymentResult = await service.chargeMonthly(customer.id);
           return { paymentResult };
+        }).catch((err) => {
+          // Cross-process claim held elsewhere (a deploy overlap racing
+          // charge-now or the retry sweep for this SAME customer) — skip
+          // this tick, stay eligible for the next one. No write, no
+          // supersede: nothing conclusive happened here.
+          if (err.code === 'BILLING_CLAIM_HELD_ELSEWHERE') return { claimHeldElsewhere: true };
+          throw err;
         });
+
+        if (lockOutcome.claimHeldElsewhere) {
+          logger.warn(`[billing-cron] Monthly charge for customer ${customer.id} deferred — collection lock held elsewhere; will retry next tick`);
+          skipped++;
+          continue;
+        }
 
         if (lockOutcome.alreadyCollected) {
           await logAutopay(customer.id, 'skipped_already_paid', { paymentId: lockOutcome.alreadyCollected.id });
@@ -832,6 +845,11 @@ const BillingCron = {
       // classification above and here — resolved exactly like the
       // ALREADY_COLLECTED branch, never re-entering the failure ladder.
       let raceAlreadyCollectedId = null;
+      // Set when the cross-process claim (utils/customer-billing-lock.js)
+      // is held elsewhere for this customer — a deploy overlap racing
+      // charge-now or the monthly cron. No charge was attempted, so this
+      // row must stay exactly as it was: no retry_count bump, no disarm.
+      let deferredClaimHeldElsewhere = false;
 
       try {
         const service = await require('./stripe');
@@ -900,8 +918,13 @@ const BillingCron = {
               billed_month: obligationMonth || undefined,
             }, retryIdempotencyKey);
             return { charged };
+          }).catch((lockErr) => {
+            if (lockErr.code === 'BILLING_CLAIM_HELD_ELSEWHERE') return { claimHeldElsewhere: true };
+            throw lockErr;
           });
-          if (lockOutcome.alreadyCollected) {
+          if (lockOutcome.claimHeldElsewhere) {
+            deferredClaimHeldElsewhere = true;
+          } else if (lockOutcome.alreadyCollected) {
             raceAlreadyCollectedId = lockOutcome.alreadyCollected;
           } else {
             newPayment = lockOutcome.charged;
@@ -1355,6 +1378,15 @@ const BillingCron = {
             });
           }
         }
+        continue;
+      }
+
+      // ADMIN-BUG-R11: the cross-process collection claim is held elsewhere
+      // for this customer (a deploy overlap racing charge-now or the
+      // monthly cron) — no charge was attempted, so leave this row exactly
+      // as armed; the next sweep tick retries it normally.
+      if (deferredClaimHeldElsewhere) {
+        logger.warn(`[billing-cron] Retry for payment ${payment.id} deferred — collection lock held elsewhere for customer ${payment.customer_id}; left armed for next tick`);
         continue;
       }
 
