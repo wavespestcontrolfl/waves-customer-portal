@@ -21,7 +21,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour } = require('../services/scheduling/find-time-hints');
@@ -31,15 +31,20 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
 const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
 const { bookingPropertyStamp } = require('../services/customer-properties');
+const { isTechnicianRequest, technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 
 const MAX_FIND_TIME_DAYS = 90;
 
-// Admin-only: every caller in the repo (CreateAppointmentModal, useBestTimes)
-// is an admin surface, and the ranked-slot payload names every assignable
-// technician's customers/appointment times plus resolves any customer or
-// visit id to a street address with no ownership predicate — a technician
-// token must never reach it (ADMIN-BUG-R07).
-router.use(adminAuthenticate, requireAdmin);
+// requireTechOrAdmin at the router level: the ADMIN-only "Find-a-Time"
+// button (CreateAppointmentModal — no `hint`) and every other non-hint use
+// stay locked to admin inside the handler below. Technician tokens are
+// admitted ONLY for the `hint:true` advisory pickers their own edit/
+// reschedule surfaces already call (useBestTimes, from EditServiceModal /
+// RescheduleConfirmModal on /admin/dispatch and /admin/schedule, both
+// technician-allowed client routes) — and only for a visit/customer they
+// currently service, with technicianId forced to themselves so the ranked
+// search never walks another technician's route (ADMIN-BUG-R07).
+router.use(adminAuthenticate, requireTechOrAdmin);
 
 function httpError(status, message) {
   const err = new Error(message);
@@ -194,10 +199,41 @@ router.post('/', async (req, res) => {
     const {
       customerId, address, lat, lng,
       durationMinutes, serviceType, dateFrom, dateTo,
-      technicianId, topN,
+      topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
     } = req.body || {};
+    let { technicianId } = req.body || {};
+
+    const isTech = isTechnicianRequest(req);
+    // Technician authz is decided BEFORE the feature-gate short-circuit
+    // below, so a technician gets a real 403/404 regardless of whether
+    // GATE_BEST_TIME_HINTS happens to be on — access control never rides on
+    // a dark-ship flag. Non-hint mode is the full-org ranged search (the
+    // admin "Find-a-Time" button, and any caller that omits `hint`) — never
+    // technician-reachable. In hint mode, a technician's own edit/reschedule
+    // pickers (useBestTimes) reach here with a serviceId or customerId;
+    // require it to be one they currently service, then pin the search to
+    // their OWN route: a technician must never see another technician's
+    // customers, appointment times or stop ids, nor resolve an arbitrary
+    // customer/visit id to a street address (ADMIN-BUG-R07).
+    if (isTech) {
+      if (!hint) throw httpError(403, 'Admin access required');
+      let owned = false;
+      if (serviceId) {
+        const visit = await technicianCurrentVisitFilter(
+          req,
+          db('scheduled_services').where({ id: serviceId }),
+        ).first('id');
+        owned = !!visit;
+      } else if (customerId) {
+        owned = await technicianServicesCustomer(req, customerId);
+      }
+      if (!owned) {
+        throw httpError(serviceId || customerId ? 404 : 403, serviceId || customerId ? 'Visit not found' : 'Admin access required');
+      }
+      technicianId = req.technicianId;
+    }
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
     // at call time so a flip needs no redeploy (same kill-switch contract

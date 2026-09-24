@@ -9,10 +9,11 @@
  * Runs only against a private clone (e.g.
  * DATABASE_URL=postgres://.../waves_audit_fixauthz_1), real router, real
  * adminAuthenticate with a signed staff access token. Skipped (not failed)
- * unless DATABASE_URL names a waves_audit_* clone — this suite inserts
- * live technicians/customers/visits and must never touch a shared database
- * such as CI's own waves_test. All inserted fixtures, including the
- * control-test admin, are deleted in afterAll.
+ * unless the URL's own database name (the path component, not merely a
+ * substring anywhere in the connection string) starts with waves_audit_ —
+ * this suite inserts live technicians/customers/visits and must never touch
+ * a shared database such as CI's own waves_test. All inserted fixtures,
+ * including the control-test admin, are deleted in afterAll.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'audit-repro-jwt-secret';
 
@@ -21,7 +22,20 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-const SKIP = !/waves_audit_/.test(process.env.DATABASE_URL || '');
+// Validate the URL's own database name (the path component), not merely a
+// substring anywhere in the connection string — a query param or username
+// containing "waves_audit_" must not satisfy this guard (matches the
+// sibling admin-ical-history-tech-authz.pg.test.js guard).
+function isPrivateAuditClone(databaseUrl) {
+  if (!databaseUrl) return false;
+  try {
+    return /^waves_audit_/.test(new URL(databaseUrl).pathname.replace(/^\//, ''));
+  } catch {
+    return false;
+  }
+}
+
+const SKIP = !isPrivateAuditClone(process.env.DATABASE_URL);
 const describeOrSkip = SKIP ? describe.skip : describe;
 
 // Relative to real "now" (never a fixed calendar date) so the fixture never
