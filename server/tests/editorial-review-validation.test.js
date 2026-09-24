@@ -22,6 +22,16 @@ describe('editorial review coverage validation', () => {
     expect(validatePlanJson(response, sections)).toBe('plan_coverage');
   });
 
+  test('requires a finding for every failed plan section', () => {
+    const sections = [{ sectionIndex: 0, answer: 'First answer.' }, { sectionIndex: 1, answer: 'Second answer.' }];
+    const response = {
+      pass: false,
+      findings: [{ sectionIndex: 0, passage: 'First answer.', detail: 'Too vague.', action: 'Be specific.' }],
+      sectionCoverage: [{ sectionIndex: 0, status: 'fail' }, { sectionIndex: 1, status: 'fail' }],
+    };
+    expect(validatePlanJson(response, sections)).toBe('plan_finding_missing');
+  });
+
   test('allows numeric instructions to be classified as non-external', () => {
     const passage = 'Check 2 containers near your door.';
     expect(validateClaim(passage, { verdict: 'non_external', claimKind: 'non_external', sourceSuitability: 'not_applicable', sourceIndex: -1, sourceQuote: '' })).toBeNull();

@@ -139,6 +139,8 @@ function validatePlanJson(json, sections) {
     if (!section || item.passage !== section.answer || !String(item.detail || '').trim() || !String(item.action || '').trim()) return 'plan_finding';
     if (!json.sectionCoverage.some((entry) => entry.sectionIndex === item.sectionIndex && entry.status === 'fail')) return 'plan_finding_coverage';
   }
+  const findingIndexes = new Set(json.findings.map((item) => item.sectionIndex));
+  if (json.sectionCoverage.some((item) => item.status === 'fail' && !findingIndexes.has(item.sectionIndex))) return 'plan_finding_missing';
   return null;
 }
 
