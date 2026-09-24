@@ -2310,7 +2310,10 @@ async function createSelfBooking(payload = {}) {
         phone: phoneDigits,
         email: new_customer.email || null,
       });
-      if (account?.accountId && !account.existingCustomer && account.matchType == null) createdAccountId = account.accountId;
+      // Only an account this request PROVABLY minted (the helper's explicit
+      // flag) is ever rolled back — never an existing profile-less account
+      // that merely looks unmatched (pre-push audit P1).
+      if (account?.accountId && account.created === true) createdAccountId = account.accountId;
       const [created] = await db('customers').insert(applyContactNormalization({
         account_id: account.accountId,
         is_primary_profile: !account.existingCustomer,
