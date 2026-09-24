@@ -476,6 +476,12 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress))
           .map((flag) => Date.parse(flag.flagged_at || '') || 0)
           .reduce((max, at) => Math.max(max, at), 0);
+        const newestFlagObj = snapshots
+          .map((snap) => recoverAddressUnverified(snap))
+          .filter((flag) => flag && flag.address_line1 && flagCoversAddress(flag, normalizedAddress))
+          .sort((a, b) => (Date.parse(b.flagged_at || '') || 0) - (Date.parse(a.flagged_at || '') || 0))[0] || null;
+        resolveStaffCleanAt.lastNewestFlag = newestFlagObj;
+        resolveStaffCleanAt.lastNewestFlagAt = newestFlag;
         return newestClean && newestClean > newestFlag ? new Date(newestClean).toISOString() : null;
       } catch (cleanErr) {
         logger.warn(`[public-property-lookup] contact-pair clean verdict re-read failed: ${cleanErr.code || cleanErr.name || 'error'}`);
@@ -544,12 +550,24 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // committed since the pre-lock read outranks this run's audit when
         // it is newer than the audit's own evidence time (a live audit is
         // stamped now and always stands).
-        if (addressUnverified && result?.enriched) {
+        // …BOTH ways, whatever the pre-lock value (codex r21 P1): a flag
+        // another request committed since (a recordless county audit is
+        // never cached, so nothing else could recover it) outranks this
+        // run's clean answer when it is newer than this run's evidence.
+        {
           const lockedCleanAt = await resolveStaffCleanAt(trx);
-          if (lockedCleanAt && cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt: auditEvidenceAt(result), cleanEvidenceAt: lockedCleanAt })) {
+          const evidenceAt = Date.parse(auditEvidenceAt(result) || '') || Date.parse(result?.meta?.timestamp || '') || 0;
+          const newerFlag = resolveStaffCleanAt.lastNewestFlag;
+          const newerFlagAt = resolveStaffCleanAt.lastNewestFlagAt || 0;
+          if (addressUnverified && result?.enriched && lockedCleanAt
+            && cachedAuditSuperseded({ leadCleanVerdict: true, profileFound: true, cachedAt: auditEvidenceAt(result), cleanEvidenceAt: lockedCleanAt })) {
             addressUnverified = null;
             staffCleanAt = lockedCleanAt;
             cachedAuditStale = true;
+          } else if (!addressUnverified && newerFlag && newerFlagAt > evidenceAt && !(lockedCleanAt && (Date.parse(lockedCleanAt) || 0) > newerFlagAt)) {
+            addressUnverified = newerFlag;
+            staffCleanAt = null;
+            cachedAuditStale = false;
           }
         }
         // A FLAGGED verdict quarantines the visitor's earlier publications

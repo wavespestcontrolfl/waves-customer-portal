@@ -3287,7 +3287,10 @@ async function reviseAdminEstimate({
         // but a customer at Apt 4 linked to an Apt 5 estimate must not be
         // moved by that estimate's correction (codex r18 P1).
         const sameDoor = !!before && doorUnit(before.address_line1, before.address_line2) === doorUnit(priorParsed.line1, priorParsed.unit);
-        if (before && custDisplay && sameDoor && samePremiseDisplay(custDisplay, lockedPrior?.address)) {
+        // …and the COMPLETE locality on both sides (codex r21 P1): a
+        // street-only estimate must not move a same-number customer in
+        // another town.
+        if (before && custDisplay && sameDoor && samePremiseDisplay(custDisplay, lockedPrior?.address, { requireLocality: true })) {
           // The repository's established address-change path, not a bare
           // column write (codex r17 P1): coordinates cleared atomically
           // with the address (the async re-geocode refills them), the

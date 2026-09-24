@@ -1899,6 +1899,8 @@ export default function EstimateToolViewV2({
         }
         if (!d.editable) {
           setEditMode(null);
+          setAddressUnverified(null);
+          setConfirmAddress(false);
           setEditLoadError(
             d.blockReason || "This estimate can no longer be edited.",
           );
@@ -1936,7 +1938,7 @@ export default function EstimateToolViewV2({
         setExistingCustomerMatch(d.customer || null);
       } catch (e) {
         if (!cancelled) {
-          if (!refreshing) setEditMode(null);
+          if (!refreshing) { setEditMode(null); setAddressUnverified(null); setConfirmAddress(false); }
           setEditLoadError(e.message);
         }
       }
@@ -1950,6 +1952,9 @@ export default function EstimateToolViewV2({
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
     onStartNew?.();
     setEditMode(null);
+    // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
+    setAddressUnverified(null);
+    setConfirmAddress(false);
     draftIdRef.current = null;
     setEditLoadError(null);
     setForm(buildDefaultEstimateForm());
@@ -2838,6 +2843,9 @@ export default function EstimateToolViewV2({
     lookupSeqRef.current += 1;
     onStartNew?.();
     setEditMode(null);
+    // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
+    setAddressUnverified(null);
+    setConfirmAddress(false);
     draftIdRef.current = null;
     setEditLoadError(null);
     const multiHome = discountPresets.find((x) => x.discount_key === "multi_home");
@@ -4058,6 +4066,9 @@ export default function EstimateToolViewV2({
     // Save changes would still PUT the new quote over the estimate that was
     // being edited.
     setEditMode(null);
+    // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
+    setAddressUnverified(null);
+    setConfirmAddress(false);
     draftIdRef.current = null;
     setEditLoadError(null);
     setEstimate(null);

@@ -2471,6 +2471,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           });
         });
       } catch (lockErr) {
+        // FAIL CLOSED for a FLAGGED run (codex r21 P1): with the lead's
+        // verdict unpersisted an older clean verdict would stand, and a
+        // later outage would treat it as the roll's answer and clear the
+        // draft's block — the recordless negative audit is never cached, so
+        // the warning would be unrecoverable. The visitor retries.
+        if (addressUnverified) {
+          logger.error(`[public-quote] locked verdict publication failed on a flagged run — refusing: ${lockErr.code || lockErr.name || 'error'}`);
+          return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
+        }
         logger.warn(`[public-quote] locked verdict publication failed: ${lockErr.code || lockErr.name || 'error'}`);
       }
     }
