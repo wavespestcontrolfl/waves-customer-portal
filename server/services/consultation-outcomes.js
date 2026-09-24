@@ -53,6 +53,18 @@ const OUTCOME_VALUES = ['warm', 'cold', 'lost'];
 const LOST_REASON_VALUES = ['price', 'competitor', 'diy', 'not_ready', 'no_show', 'other'];
 const CADENCE_VALUES = ['month', 'quarter', 'visit', 'year'];
 const WON_WINDOW_DAYS = 90;
+// P1 :924 (round 12): the sweep's OWN row-SELECTION cutoff only — never
+// the EVIDENCE bound findSaleEvidenceForConsultation applies (that stays
+// exactly WON_WINDOW_DAYS from the visit's scheduled_date; see its own
+// comment). "Which rows does this hourly tick look at" and "does this
+// evidence timestamp fall inside the 90-day window" are two separate
+// questions — reconcileOpenConsultationOutcomes' own comment explains why
+// conflating them dropped a row the moment its window closed. `ss.
+// scheduled_date` is a DATE column (no time-of-day), so "within the last
+// N hours" is applied at day granularity — ceil(48/24) = 2 extra days on
+// the sweep's own selection cutoff.
+const SWEEP_GRACE_HOURS = 48;
+const SWEEP_GRACE_DAYS = Math.ceil(SWEEP_GRACE_HOURS / 24);
 
 function makeError(message, statusCode, code) {
   const err = new Error(message);
@@ -905,18 +917,34 @@ async function markWonForCustomer(customerId, {
  * not anything about it changed — moves to the back of the line, so the
  * NEXT tick reaches whatever this one's `limit` cutoff left behind.
  *
+ * GRACE PERIOD (round 12, P1 :924): the SELECTION cutoff (which rows this
+ * tick even looks at) is WON_WINDOW_DAYS + SWEEP_GRACE_DAYS ago, not bare
+ * WON_WINDOW_DAYS — a plain cutoff drops a row the INSTANT its window
+ * closes, so a sale recorded late on the visit's own last in-window day
+ * (e.g. 23:40 ET on day 90) can miss that day's last hourly tick and then
+ * never be examined again: the NEXT tick's `now` has already rolled past
+ * midnight, and (now - 90 days) has advanced beyond the visit's
+ * scheduled_date. The EVIDENCE bound findSaleEvidenceForConsultation
+ * applies is untouched (still exactly WON_WINDOW_DAYS from scheduled_date)
+ * — evidence dated AFTER the visit's own window still never counts; the
+ * grace period only keeps the ROW in the sweep's candidate set for a few
+ * more hourly chances to find evidence that was already inside it.
+ *
  * Returns { scanned, won, errors } — never throws.
  */
 async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200 } = {}) {
   const result = { scanned: 0, won: 0, errors: 0 };
   let rows;
   try {
-    const cutoff = etDateString(addETDays(now, -WON_WINDOW_DAYS));
+    const cutoff = etDateString(addETDays(now, -(WON_WINDOW_DAYS + SWEEP_GRACE_DAYS)));
     const nowDateStr = etDateString(now);
     // Same [90-days-ago, today] visit-date window markWonForCustomer's own
     // atomic UPDATE bounds itself to (P1-2) — a consultation scheduled in
     // the future, or one long past its attribution window, is never
-    // reconciled by either path.
+    // reconciled by either path. This sweep's own SELECTION cutoff is
+    // wider (the grace period above); the actual WIN still requires
+    // evidence dated inside the strict 90-day window — that bound lives in
+    // findSaleEvidenceForConsultation, not here.
     rows = await db('consultation_outcomes as co')
       .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
       .whereIn('co.outcome', ['warm', 'cold'])
@@ -1045,6 +1073,14 @@ async function consultationStats({ from, to, trx } = {}) {
     .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
     .leftJoin('consultation_outcomes as co', 'co.scheduled_service_id', 'ss.id')
     .leftJoin('leads as l', 'l.id', 'co.lead_id')
+    // round 12 fix (codex P1 :1064): leads has no `lead_source` column —
+    // the source is a FK, leads.lead_source_id -> lead_sources.id, with the
+    // human-readable name on lead_sources.name. Selecting the bare
+    // `l.lead_source` column that never existed 500'd this endpoint in
+    // production (undefined-column) every time it ran against real
+    // Postgres; the mocked stats test's hand-built fixture rows hid it
+    // since nothing there validates real column existence.
+    .leftJoin('lead_sources as lsrc', 'lsrc.id', 'l.lead_source_id')
     .where(function matchConsultation() {
       this.whereRaw("lower(trim(ss.service_type)) = 'waves assessment'")
         .orWhere('svc.service_key', 'lawn_inspection')
@@ -1061,7 +1097,7 @@ async function consultationStats({ from, to, trx } = {}) {
       'co.lost_reason',
       'co.won_via',
       'co.won_at',
-      'l.lead_source',
+      'lsrc.name as lead_source',
     );
 
   const stats = {

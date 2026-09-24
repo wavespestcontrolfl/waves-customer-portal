@@ -1047,6 +1047,60 @@ describe('reconcileOpenConsultationOutcomes — the completeness guarantee (roun
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-old').outcome).toBe('warm');
   });
 
+  test('P1 :924 grace period — a sale at 23:40 ET on the visit\'s last in-window day (day 90) is still won by the sweep tick just after midnight (day 91) even though the bare 90-day cutoff would have already dropped the row from selection', async () => {
+    // day0 = 2026-06-01 (the visit); day90 = 2026-08-30 (the last day
+    // inside the window); day91 = 2026-08-31. Without the grace period,
+    // a sweep tick running with `now` on day91 computes cutoff = now - 90
+    // = day91-90 = a date AFTER day0, so day0's row falls out of the
+    // SELECTION entirely — even though the evidence below is genuinely
+    // dated on day90, inside the window.
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', scheduled_date: '2026-06-01', customer_id: 'cust-1', service_type: 'Waves Assessment' },
+        {
+          id: 'visit-real', scheduled_date: '2026-08-30', customer_id: 'cust-1', service_type: 'Quarterly Pest Control',
+          status: 'confirmed', created_at: new Date('2026-08-31T03:40:00Z'), // 2026-08-30 23:40 ET (EDT, UTC-4)
+        },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'warm' },
+      ],
+    });
+
+    // The sweep's hourly tick just after midnight on day91 — the FIRST
+    // tick after the sale, since the sale landed after the last tick on
+    // day90 itself (this is exactly the missed-tick scenario the grace
+    // period exists for).
+    const result = await reconcileOpenConsultationOutcomes({ now: new Date('2026-08-31T04:27:00Z') }); // 00:27 ET day91
+
+    expect(result).toEqual({ scanned: 1, won: 1, errors: 0 });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').outcome).toBe('won');
+  });
+
+  test('P1 :924 — a "sale" dated AFTER the window closes (day 91) is still never a win, even though the grace period keeps the row selectable', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', scheduled_date: '2026-06-01', customer_id: 'cust-1', service_type: 'Waves Assessment' },
+        {
+          id: 'visit-late', scheduled_date: '2026-08-31', customer_id: 'cust-1', service_type: 'Quarterly Pest Control',
+          status: 'confirmed', created_at: new Date('2026-08-31T15:00:00Z'), // day 91 — one day past the window's last day
+        },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'warm' },
+      ],
+    });
+
+    const result = await reconcileOpenConsultationOutcomes({ now: new Date('2026-08-31T20:27:00Z') }); // 16:27 ET day91
+
+    // The grace period keeps the row IN the sweep's candidate set (it's
+    // examined — scanned: 1), but findSaleEvidenceForConsultation's own
+    // strict 90-day evidence bound (untouched by this fix) still excludes
+    // a booking created after the window closed — no evidence, no win.
+    expect(result).toEqual({ scanned: 1, won: 0, errors: 0 });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').outcome).toBe('warm');
+  });
+
   test('skips an already-won row (idempotent — not selected at all, since the query only reads warm/cold)', async () => {
     const fakeDb = install({
       scheduled_services: [
