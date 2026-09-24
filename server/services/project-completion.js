@@ -19,16 +19,27 @@ const {
 const { createAlertOnce } = require('./dispatch-alerts');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspection-fee');
 const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSuppliesOwedMarker } = require('./supplies-consumption');
+const { INVOICE_DELIVERED_STATUSES } = require('./closeout-status');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
+
 // Only a DELIVERED or SETTLED invoice satisfies the project closeout billing
 // guard (ADMIN-BUG-R49). A lone 'draft' — e.g. one minted by a cancelled
 // "Send with invoice" preview on a non-WDO project — was never sent to the
 // customer, carries no balance (open-balance.js only counts sent/viewed/
 // overdue) and is delivered by nothing in the close flow, so it must not
-// let the visit close as though it were billed.
-const COMPLETION_DELIVERED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing'];
+// let the visit close as though it were billed. "Delivered" reuses
+// closeout-status.js's canonical INVOICE_DELIVERED_STATUSES vocabulary
+// (imported above) instead of a second, driftable copy — that set already
+// includes 'partially_paid' (a customer who received and paid part of the
+// invoice was clearly shown it) — and, like that module, a stamped
+// sent_at/sms_sent_at OUTRANKS the status check: a 'processing' invoice
+// (ACH mid-flight) was necessarily sent first, and its status no longer
+// says 'sent' once the customer starts paying it.
+function invoiceCountsAsDelivered(invoice) {
+  return !!(invoice.sent_at || invoice.sms_sent_at || INVOICE_DELIVERED_STATUSES.has(String(invoice.status)));
+}
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -260,7 +271,7 @@ async function resolveProjectCompletionBilling({
     // statement instead (invoice.js stamps payer_statement_id at create
     // time, before any send). That is a resolved billing state, not an
     // unsent draft nobody chose to send.
-    if (COMPLETION_DELIVERED_INVOICE_STATUSES.includes(invoice.status) || invoice.payer_statement_id) {
+    if (invoiceCountsAsDelivered(invoice) || invoice.payer_statement_id) {
       return {
         required: true,
         resolved: true,

@@ -63,6 +63,26 @@ describe('r1-projects-docs-4: Close billing guard vs an unsent draft', () => {
     expect(result.resolved).toBe(true);
     expect(result.reason).toBe('invoice_exists');
   });
+
+  // Codex round-1 P1: the delivered/settled allowlist must reuse
+  // closeout-status.js's canonical INVOICE_DELIVERED_STATUSES vocabulary,
+  // which includes 'partially_paid' — a customer who received AND paid
+  // part of the invoice was clearly shown it and must not be refused a
+  // project closeout.
+  test('a partially_paid invoice counts as billing resolved', async () => {
+    const { resolveProjectCompletionBilling } = require('../services/project-completion');
+    const result = await resolveProjectCompletionBilling({
+      scheduledService: { id: 'ss-1', customer_id: 'cust-1', estimated_price: '175.00' },
+      customer: {},
+      project: { id: 'proj-1', project_type: 'termite_treatment' },
+      knex: knexWithInvoice({
+        id: 'inv-partial-1', status: 'partially_paid', invoice_number: 'WPC-2026-9997', total: '175.00',
+      }),
+    });
+    expect(result.required).toBe(true);
+    expect(result.resolved).toBe(true);
+    expect(result.reason).toBe('invoice_exists');
+  });
 });
 
 describe('r1-projects-docs-4: non-WDO dry_run must not mint a real invoice', () => {
