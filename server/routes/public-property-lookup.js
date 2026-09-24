@@ -639,7 +639,12 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       // one unit, so the fallback lands before or after it, never between;
       // and a clean verdict newer than this flag (a staff confirmation) is
       // not overwritten.
-      if (addressUnverified && lead?.id) {
+      // …NEVER when the rollback WAS a live delivery claim (codex r51 P1):
+      // the sender's estimate-only claim check would pass while this flag
+      // lands on the lead, and /booking/confirm would then refuse the link
+      // it just delivered. The 503 sends the visitor back through the
+      // lookup once the claim lapses (its TTL is minutes).
+      if (addressUnverified && lead?.id && verdictErr?.code !== 'DELIVERY_CLAIM_LIVE') {
         await db.transaction(async (ftrx) => {
           await ftrx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(email, normPhone)]);
           const { loadContactVerdicts } = require('../services/lead-address-unverified');

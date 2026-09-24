@@ -72,7 +72,7 @@ describe('codex r42: the proposal editor lifts the hold it is the only path to c
   test('the extension claim stamps link-visible siblings with the same token and releases them with the anchor', () => {
     const src = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
     const claim = src.slice(src.indexOf('const deliveryClaimToken = '), src.indexOf('let smsResult = '));
-    expect(claim).toContain(".whereIn('status', ['sent', 'viewed', 'expired'])");
+    expect(claim).toContain(".whereIn('status', ['sending', 'sent', 'viewed', 'expired'])");
     expect(claim).toContain('.whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)\n            .update({');
     expect(src).toContain('adminEstimates.clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken)');
   });
@@ -365,5 +365,19 @@ describe('pre-push audit after r50', () => {
     const block = src.slice(start, src.indexOf('}', start + 300));
     expect(block).toContain('bookingUrl = null;');
     expect(block).toContain('websiteEstimateUrl = null;');
+  });
+});
+
+describe('codex r51', () => {
+  test('the lookup fallback defers when the rollback was a live delivery claim', () => {
+    const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
+    expect(ppl).toContain("if (addressUnverified && lead?.id && verdictErr?.code !== 'DELIVERY_CLAIM_LIVE') {");
+  });
+  test('every link-visible sibling selector includes the renderer\'s sending state', () => {
+    const fs = require('fs');
+    for (const mod of ['../routes/public-quote', '../services/estimate-extension', '../routes/admin-estimates']) {
+      const src = fs.readFileSync(require.resolve(mod), 'utf8');
+      expect(src).toContain(".whereIn('status', ['sending', 'sent', 'viewed', 'expired'])");
+    }
   });
 });

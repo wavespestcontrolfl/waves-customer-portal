@@ -3769,7 +3769,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               .where({ estimate_group_id: groupRow.estimate_group_id })
               .whereNot({ id: draftEstimateId })
               .whereNull('archived_at')
-              .whereIn('status', ['sent', 'viewed', 'expired'])
+              // …'sending' too: the public renderer's link-visible scope
+              // includes it (codex r51 P1); a sibling under another sender's
+              // live claim refuses this claim, which withholds the sends.
+              .whereIn('status', ['sending', 'sent', 'viewed', 'expired'])
               .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")
               .orderBy('id')
               .forUpdate()

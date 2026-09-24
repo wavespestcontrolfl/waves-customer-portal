@@ -2578,7 +2578,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // …expired published siblings too: the public group renderer keeps
       // them as summaries while the anchor's navigation window is open
       // (codex r35 P1).
-      .whereIn('status', ['sent', 'viewed', 'expired'])
+      // …'sending' too — the renderer's link-visible scope includes it (codex r51 P1).
+      .whereIn('status', ['sending', 'sent', 'viewed', 'expired'])
       // …published ones only (the renderer's rule — codex r44 P2).
       .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")
       .whereNull('archived_at')

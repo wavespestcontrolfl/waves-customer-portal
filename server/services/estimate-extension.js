@@ -506,7 +506,8 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
             .where({ estimate_group_id: estimate.estimate_group_id })
             .whereNot({ id: estimate.id })
             .whereNull('archived_at')
-            .whereIn('status', ['sent', 'viewed', 'expired'])
+            // …'sending' too — the renderer's link-visible scope includes it (codex r51 P1).
+            .whereIn('status', ['sending', 'sent', 'viewed', 'expired'])
             // …published ones only — the renderer's rule, as the admin send
             // selector applies it (pre-push audit P1 after r45): a
             // never-delivered expired_unsent sibling is not on the link.
