@@ -59,12 +59,13 @@ async function main() {
         const groupStyle = getComputedStyle(el.querySelector('.ui-command-heading'));
         const buttons = [...el.querySelectorAll('.ui-command-action')];
         const primary = buttons[0].getBoundingClientRect();
-        return { title: el.dataset.case, headingTop: heading.top, headingBottom: heading.bottom, headingRight: heading.right, groupRight: group.right - parseFloat(groupStyle.paddingRight),
+        return { title: el.dataset.case, headingWidth: heading.width, headingHeight: heading.height, headingTop: heading.top, headingBottom: heading.bottom, headingRight: heading.right, groupRight: group.right - parseFloat(groupStyle.paddingRight),
           primaryLeft: primary.left, primaryRight: primary.right, primaryTop: primary.top, primaryBottom: primary.bottom,
           secondaryTop: buttons[1]?.getBoundingClientRect().top,
           styles: buttons.map(button => { const style = getComputedStyle(button); return { height: button.getBoundingClientRect().height, font: style.fontSize, transform: style.textTransform, radius: style.borderRadius }; }) };
       }));
       for (const row of metrics) {
+        assert.ok(row.headingWidth > 24 && row.headingHeight > 0, `${width}: ${row.title} title stays visible and is not sized as an icon`);
         assert.ok(Math.abs(row.groupRight - row.primaryRight) < 2, `${width}: ${row.title} primary must align right`);
         assert.ok(row.styles.every(style => style.height >= 44 && style.font === '14px' && style.transform === 'uppercase' && style.radius === '4px'), JSON.stringify(row));
         if (width < 1024) {
