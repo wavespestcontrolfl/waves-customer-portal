@@ -154,14 +154,32 @@ function estimateDatabase(table) {
     mutations.push({ table, patch });
     const targets = matches();
     if (!targets.length) return 0;
-    const target = targets[0];
-    for (const [key, value] of Object.entries(patch)) {
-      if (key === 'estimate_data' && value?.sql) {
-        if (value.bindings?.[0]) target.estimate_data = { ...dataOf(target), ...JSON.parse(value.bindings[0]) };
-      } else if (key === 'status' && value?.sql) target.status = target.viewed_at ? 'viewed' : 'sent';
-      else target[key] = value;
+    // Every matched row takes the patch and the affected count comes back,
+    // as knex reports it (the grouped delivery claim stamps every
+    // link-visible sibling in one UPDATE and checks the count — #4667).
+    // Only the grouped delivery-claim stamp / release fans out to every
+    // matched row (the fake's filters are looser than SQL elsewhere, so
+    // other writes keep first-match semantics).
+    const claimSql = patch.estimate_data?.sql?.includes("'{estimatorEngine}'") && patch.estimate_data.sql.includes('delivering_at');
+    for (const target of (claimSql ? targets : [targets[0]])) {
+      for (const [key, value] of Object.entries(patch)) {
+        if (key === 'estimate_data' && value?.sql) {
+          if (value.sql.includes("'{estimatorEngine}'") && value.sql.includes("- 'delivering_at'")) {
+            const data = dataOf(target);
+            const eng = { ...(data.estimatorEngine || {}) };
+            delete eng.delivering_at; delete eng.delivering_token;
+            target.estimate_data = { ...data, estimatorEngine: eng };
+          } else if (value.sql.includes("'{estimatorEngine}'") && value.sql.includes("'delivering_at'")) {
+            const data = dataOf(target);
+            target.estimate_data = { ...data, estimatorEngine: { ...(data.estimatorEngine || {}), delivering_at: value.bindings?.[0], delivering_token: value.bindings?.[1] } };
+          } else if (value.bindings?.[0]) {
+            target.estimate_data = { ...dataOf(target), ...JSON.parse(value.bindings[0]) };
+          }
+        } else if (key === 'status' && value?.sql) target.status = target.viewed_at ? 'viewed' : 'sent';
+        else target[key] = value;
+      }
     }
-    return 1;
+    return claimSql ? targets.length : 1;
   });
   return builder;
 }
@@ -1171,7 +1189,9 @@ describe('annual provider delivery receipts', () => {
           const priorData = structuredClone(dataOf(sibling));
           const result = await update(patch);
           // Model the terminal sibling scope + receipt SQL merge as well.
-          if (result && patch.estimate_data?.sql?.startsWith("jsonb_set(COALESCE(estimate_data, '{}'::jsonb),") && patch.estimate_data.bindings?.[1]) {
+          if (result && patch.estimate_data?.sql?.startsWith("jsonb_set(COALESCE(estimate_data, '{}'::jsonb),") && patch.estimate_data.bindings?.[1]
+            // …not the delivery-claim stamp (#4667: its bindings are a timestamp and a token, not JSON).
+            && !patch.estimate_data.sql.includes("'{estimatorEngine}'")) {
             sibling.estimate_data = { ...priorData,
               sendSnapshot: { ...priorData.sendSnapshot, ...JSON.parse(patch.estimate_data.bindings[0]) },
               ...JSON.parse(patch.estimate_data.bindings[1]) };

@@ -10581,19 +10581,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           err.status = 409;
           throw err;
         }
-        if (freshLinkData && require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: freshLinkData })) {
-          // The token route's GENERIC 404 (codex #4667 r35 P0): the same
-          // token answers 404 from the view / data surfaces once blocked,
-          // so a 409 here would tell a bearer the token maps to a real
-          // estimate.
-          const err = new Error('Estimate not found');
-          err.status = 404;
-          err.code = 'OFF_CUSTOMER_SURFACE';
-          throw err;
-        }
+        // A linkage-invalidated row keeps its long-standing 409 contract
+        // (the accept-atomicity audit pins it: no payload, no amounts) —
+        // judged before the generic off-surface refusal below.
         if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
+          throw err;
+        }
+        if (freshLinkData && require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: freshLinkData })) {
+          // The token route's GENERIC 404 (codex #4667 r35 P0): the same
+          // token answers 404 from the view / data surfaces once blocked
+          // by the county-roll address hold, so a 409 here would tell a
+          // bearer the token maps to a real estimate.
+          const err = new Error('Estimate not found');
+          err.status = 404;
+          err.code = 'OFF_CUSTOMER_SURFACE';
           throw err;
         }
         // The call row is locked FOR UPDATE and HELD through the
@@ -18609,8 +18612,12 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
 // (codex #4667 r37 P0). Every other zero-row cause keeps its 409.
 async function zeroRowMutationStatus(estimateId) {
   try {
+    // An archived row keeps the pre-existing 409 ("no longer active") the
+    // accept-atomicity audit pins; only an unknown row or one under the
+    // shared off-surface markers (the county-roll hold among them) answers
+    // the generic 404.
     const fresh = await db('estimates').where({ id: estimateId }).first('estimate_data', 'archived_at');
-    if (!fresh || fresh.archived_at || estimateOffCustomerSurface(fresh)) return 404;
+    if (!fresh || estimateOffCustomerSurface(fresh)) return 404;
   } catch { /* fall through to the 409 */ }
   return 409;
 }

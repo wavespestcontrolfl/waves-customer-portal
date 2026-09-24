@@ -163,7 +163,8 @@ describe('booking SMS template wiring', () => {
   test('one-time quote SMS uses the regular booking invite path', () => {
     const retiredTemplateKey = ['estimate', 'onetime', 'followup'].join('_');
     expect(routeSource).not.toContain(retiredTemplateKey);
-    expect(routeSource).toContain('if (normalizedPhone && !quoteRequired && bookingUrl)');
+    // …with the per-leg deliverability recheck this PR added (#4667 r32).
+    expect(routeSource).toContain('if (normalizedPhone && !quoteRequired && bookingUrl && smsLinkDeliverable)');
     expect(routeSource).toContain('bookingServiceFor(serviceInterest)');
     expect(routeSource).toContain("'quote-wizard-onetime'");
     expect(routeSource).toContain("bookingParams.set('service_label', bookingServiceLabel)");
