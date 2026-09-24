@@ -873,9 +873,18 @@ function worstTreeShrubSignal(categories) {
     .reduce((worst, category) => (!worst || category.score < worst.score ? category : worst), null);
 }
 
+// The engine silently drops a photo both vision providers failed on
+// (scoredCount < photoCount) and merges the rest — fine for a tech preview
+// that falls back to re-scoring, wrong here: the worst-signal merge would
+// quietly miss the photo the operator picked (possibly the trouble spot).
+// Every photo that carries data must score, or nothing is persisted.
 async function runTreeShrubAnalysis(photos, prospectNote) {
-  const preview = await previewTreeShrubAssessment({ photos, loadImage: loadInlinePhoto });
+  const analyzable = photos.filter((photo) => photo.data);
+  const preview = await previewTreeShrubAssessment({ photos: analyzable, loadImage: loadInlinePhoto });
   if (!preview) return { error: 'Photo analysis is unavailable right now — try again in a few minutes.' };
+  if (preview.scoredCount !== analyzable.length) {
+    return { error: 'Could not analyze every photo — try again in a few minutes.' };
+  }
   const categories = buildTreeShrubVisualCategories({ scores: preview.scores });
   const worst = worstTreeShrubSignal(categories);
   const contract = {

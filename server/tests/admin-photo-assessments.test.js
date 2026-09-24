@@ -1299,6 +1299,37 @@ describe('tree & shrub — third assessment type', () => {
     });
   });
 
+  test('a photo the engine could not score fails the whole request (503) — no partial row, no photo storage', async () => {
+    // Both providers failed on one of the two photos: the engine drops it
+    // and merges the rest, which must not be persisted as a full analysis.
+    mockTreeShrubPreview.mockResolvedValue(previewResult({ scoredCount: 1, photoCount: 2 }));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photos: [{ data: 'aGVsbG8=' }, { data: 'd29ybGQ=' }] }),
+      });
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toMatch(/Could not analyze every photo/);
+      expect(mockTreeShrubPreview.mock.calls[0][0].photos).toHaveLength(2);
+      expect(inserts.tree_shrub_identifications).toBeUndefined();
+      expect(storeFunnelPhotos).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a data-less photo entry is not sent to the engine and does not count against completeness', async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photos: [{ data: 'aGVsbG8=' }, { mimeType: 'image/jpeg' }] }),
+      });
+      expect(res.status).toBe(201);
+      expect(mockTreeShrubPreview.mock.calls[0][0].photos).toHaveLength(1);
+      expect(inserts.tree_shrub_identifications).toHaveLength(1);
+    });
+  });
+
   test('engine outage (no photo scored) degrades to 503, no row, no photo storage', async () => {
     mockTreeShrubPreview.mockResolvedValue(null);
     await withServer(async (base) => {

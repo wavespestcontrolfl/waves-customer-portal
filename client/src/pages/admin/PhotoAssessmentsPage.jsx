@@ -65,13 +65,24 @@ const dateTimeET = (v) =>
 // catches Get-link rows (status flips to sent at mint, but last_sent_at /
 // claimed_at stay null because nothing was emailed or claimed) — the report
 // URL is live, so they must not read as an unreleased teaser.
+// Below the timestamp rungs the stage comes from data, not more branches:
+// a status with its own stage first, then the type's resting stage — a
+// type with no public funnel or report page (tree & shrub) rests at
+// "Analyzed", never "Teaser only" — then the funnel teaser.
+const STATUS_STAGES = {
+  sent: { key: "link_released", label: "Link released" },
+  archived: { key: "archived", label: "Archived" },
+};
+const NO_FUNNEL_STAGES = {
+  tree_shrub: { key: "analyzed", label: "Analyzed" },
+};
+const TEASER_STAGE = { key: "teaser", label: "Teaser only" };
+
 export function stageOf(row) {
   if (row.report_first_viewed_at) return { key: "viewed", label: "Viewed" };
   if (row.last_sent_at) return { key: "sent", label: "Report sent" };
   if (row.claimed_at) return { key: "unlocked", label: "Unlocked" };
-  if (row.status === "sent") return { key: "link_released", label: "Link released" };
-  if (row.status === "archived") return { key: "archived", label: "Archived" };
-  return { key: "teaser", label: "Teaser only" };
+  return STATUS_STAGES[row.status] ?? NO_FUNNEL_STAGES[row.type] ?? TEASER_STAGE;
 }
 
 const SOURCE_LABELS = { public_funnel: "Public funnel", admin: "Admin", tech: "Tech" };

@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import PhotoAssessmentsPage from "./PhotoAssessmentsPage";
+import PhotoAssessmentsPage, { stageOf } from "./PhotoAssessmentsPage";
 import PhotoAssessmentDetailSheet from "./PhotoAssessmentDetailSheet";
 
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
@@ -90,6 +90,9 @@ it("tree & shrub detail: scores + observations, and no Get link / Send report", 
   render(<PhotoAssessmentDetailSheet open type="tree_shrub" id={TS_ID} onClose={() => {}} onChanged={() => {}} />);
   expect(await screen.findByText(/No customer report for tree & shrub yet/)).toBeInTheDocument();
   expect(screen.getByText("Tree & Shrub Assessment — Robin Lee")).toBeInTheDocument();
+  // No funnel/teaser for this type: the stage reads Analyzed, not "Teaser only".
+  expect(screen.getByText("Analyzed")).toBeInTheDocument();
+  expect(screen.queryByText("Teaser only")).not.toBeInTheDocument();
   expect(screen.getByText("75/100")).toBeInTheDocument();
   expect(screen.getAllByText("Disease / Leaf Spot Signals").length).toBeGreaterThan(0);
   expect(screen.getByText("50/100 · Needs attention")).toBeInTheDocument();
@@ -135,4 +138,28 @@ it("hides Get link + Send report when the server says the row cannot be released
   expect(await screen.findByText("Overall status")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Send report" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Get link" })).not.toBeInTheDocument();
+});
+
+it("stageOf: tree & shrub rests at Analyzed; funnel types keep Teaser only; status + timestamp rungs still win", () => {
+  expect(stageOf({ type: "tree_shrub", status: "analyzed", source: "admin" })).toEqual({ key: "analyzed", label: "Analyzed" });
+  expect(stageOf({ type: "tree_shrub", status: "archived", source: "admin" }).label).toBe("Archived");
+  expect(stageOf({ type: "lawn", status: "analyzed", source: "public_funnel" }).label).toBe("Teaser only");
+  expect(stageOf({ type: "pest", status: "analyzed", source: "admin" }).label).toBe("Teaser only");
+  expect(stageOf({ type: "pest", status: "sent" }).label).toBe("Link released");
+  expect(stageOf({ type: "lawn", status: "sent", claimed_at: "2026-09-24T00:00:00Z" }).label).toBe("Unlocked");
+  expect(stageOf({ type: "lawn", status: "sent", last_sent_at: "x", report_first_viewed_at: "y" }).label).toBe("Viewed");
+});
+
+it("the list shows a tree & shrub row as Analyzed, not Teaser only", async () => {
+  routeFetch({
+    "/admin/photo-assessments?": {
+      assessments: [{ id: TS_ID, type: "tree_shrub", status: "analyzed", source: "admin", headline: "75/100 · Disease / Leaf Spot Signals", contact: { first_name: "Robin" }, created_at: "2026-09-24T14:00:00.000Z" }],
+      gates: { lawn: false, pest: false },
+    },
+  });
+  render(<MemoryRouter><PhotoAssessmentsPage /></MemoryRouter>);
+  const row = (await screen.findByText("75/100 · Disease / Leaf Spot Signals")).closest("tr");
+  expect(within(row).getByText("Tree & Shrub")).toBeInTheDocument();
+  expect(within(row).getByText("Analyzed")).toBeInTheDocument();
+  expect(within(row).queryByText("Teaser only")).not.toBeInTheDocument();
 });
