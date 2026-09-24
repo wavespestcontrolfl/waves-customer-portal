@@ -1327,7 +1327,7 @@ function parseCommitBody(body) {
 
 // Phase 2 — createSelfBooking with the assessment's internal callbackVisit
 // (see the handler's phase-2 note for the lane-dedupe contract).
-async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog }) {
+async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation }) {
   const { createSelfBooking } = booking._internals;
   return createSelfBooking({
     slot_date: date,
@@ -1354,6 +1354,10 @@ async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalo
       // The identity the offer side measured the travel gap with, so the
       // commit-time check agrees (Codex #4737 r1 P2).
       expectedIdentity: ASSESSMENT_EXPECTED_IDENTITY,
+      // The location this slot was validated for — createSelfBooking
+      // refuses (409) under its customer fence if the customer's stored pin
+      // has moved since (Codex #4737 r5 P1).
+      expectedLocation: bookingLocation,
       alertLabel: '🔁 Free consultation self-booked:',
     },
   });
@@ -1528,7 +1532,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // A duplicate throws ALREADY_BOOKED, caught below and mapped to the
     // same `{ state: 'already_booked', visit, rescheduleUrl }` shape GET
     // returns, resolved against whichever visit survived.
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog });
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation });
 
     if (!result.ok) {
       return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog });

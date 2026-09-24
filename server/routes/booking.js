@@ -1675,7 +1675,7 @@ async function createSelfBooking(payload = {}) {
 
     // callbackVisit is INTERNAL-ONLY (reservice-public.js, inspection-public.js):
     // a server-resolved { serviceKey, serviceId, serviceType, durationMinutes,
-    // isCallback?, dedupeLane?, expectedIdentity?, alertLabel? } describing a free internal-
+    // isCallback?, dedupeLane?, expectedIdentity?, expectedLocation?, alertLabel? } describing a free internal-
     // caller booking. It swaps the funnel catalog resolution for the caller's
     // catalog row and skips the funnel-only follow-ons (signed-offer gate,
     // card-capture step, ad attribution, customer promotion, quarterly
@@ -2715,6 +2715,21 @@ async function createSelfBooking(payload = {}) {
             isOperational: true,
             code: 'CUSTOMER_CHANGED_RETRY',
           });
+        }
+        // callbackVisit.expectedLocation (consultation page only, Codex #4737
+        // r5 P1): the location the caller validated the slot for must still be
+        // the customer's, checked under this fence — another commit can have
+        // replaced the address after the caller's own lock released.
+        if (callbackVisit?.expectedLocation) {
+          const pin = await trx('customers').where({ id: custId }).first('latitude', 'longitude');
+          const same = (a, b) => a != null && Math.abs(parseFloat(a) - Number(b)) < 1e-6;
+          if (!pin || !same(pin.latitude, callbackVisit.expectedLocation.lat) || !same(pin.longitude, callbackVisit.expectedLocation.lng)) {
+            throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'LOCATION_CHANGED_RETRY',
+            });
+          }
         }
         // Estimate linkage revalidates under the fence too (r35): a
         // journaled estimate a merge-undo just returned no longer belongs

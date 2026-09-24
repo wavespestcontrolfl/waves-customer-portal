@@ -412,6 +412,31 @@ describe('GET /:token state shapes', () => {
 // Codex #4737 P0: leads.customer_id can come from unverified submitted
 // contact info (public-quote.js), so an unproven link must expose nothing of
 // that customer and must never book onto them.
+describe('Codex #4737 r5 P1: the booking is bound to the validated location', () => {
+  test('createSelfBooking receives the location the slot was validated for (callbackVisit.expectedLocation)', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.expectedLocation).toEqual({ lat: 27.4, lng: -82.5 });
+  });
+
+  test('booking.js checks expectedLocation under the customer-comms fence, before any insert', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
+    const fence = src.indexOf('await lockCustomerComms(trx, custId);');
+    const check = src.indexOf('if (callbackVisit?.expectedLocation) {', fence);
+    const insert = src.indexOf("await trx('self_booked_appointments').insert({", fence);
+    expect(check).toBeGreaterThan(fence);
+    expect(check).toBeLessThan(insert);
+  });
+});
+
 describe('Codex #4737 r5 P2: a retired assessment catalog row is not bookable', () => {
   test.each([{ is_active: false }, { is_archived: true }, { booking_enabled: false }])('%o → commit answers 503 temporarily unavailable', async (flags) => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
