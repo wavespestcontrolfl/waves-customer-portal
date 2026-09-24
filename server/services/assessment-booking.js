@@ -19,6 +19,7 @@
 
 const db = require('../models/db');
 
+const ASSESSMENT_DISPLAY_NAME = 'Waves Assessment';
 const ASSESSMENT_NAME_RE = /^waves assessment$/i;
 const ASSESSMENT_SERVICE_KEY = 'lawn_inspection';
 
@@ -43,6 +44,7 @@ async function isAssessmentBooking(booking, database = db) {
 }
 
 module.exports = {
+  ASSESSMENT_DISPLAY_NAME,
   ASSESSMENT_NAME_RE,
   ASSESSMENT_SERVICE_KEY,
   isAssessmentServiceType,

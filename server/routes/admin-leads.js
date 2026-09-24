@@ -13,6 +13,7 @@ const { assertAdminAppointmentWindow, slotOverlapWarning } = require('../service
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer, markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
+const { getLeadStatusReconciliation } = require('../services/lead-status-reconciliation');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const logger = require('../services/logger');
 
@@ -1039,7 +1040,29 @@ router.get('/:id', async (req, res, next) => {
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
-    res.json({ lead, activities, calls });
+    const response = { lead, activities, calls };
+    if (req.query.leadReview === '1') {
+      try {
+        response.reconciliation = await getLeadStatusReconciliation({
+          database: db,
+          lead,
+          activities,
+          associatedCallCount: calls.length,
+        });
+      } catch {
+        logger.warn('[leads] status reconciliation preview unavailable', { leadId: lead.id });
+        response.reconciliation = {
+          mode: 'read_only',
+          status: 'unavailable',
+          current_status: lead.status,
+          summary: 'Status reconciliation could not be loaded. No lead data was changed.',
+          findings: [],
+          scope: { kind: 'single_record', writes: false, global_sweep: false },
+        };
+      }
+    }
+
+    res.json(response);
   } catch (err) { next(err); }
 });
 
