@@ -54,7 +54,15 @@ const SUFFIX_ALIASES = {
   groves: 'grvs', lake: 'lk', lakes: 'lks', estate: 'est', estates: 'ests', manor: 'mnr', manors: 'mnrs',
   village: 'vlg', villages: 'vlgs', vista: 'vis', vis: 'vis',
 };
-const streetKeyNoUnit = (v) => lineKey(String(v || '').replace(UNIT_TAIL, ''))
+// EVERY trailing unit pair comes off ("1260 Example St Bldg 2 Apt 4" →
+// "1260 example st"), as the server's splitStreetLineUnit strips the
+// whole compound unit (codex #4667 r35 P2).
+const stripUnitTail = (text) => {
+  let out = String(text || '');
+  for (let i = 0; i < 4 && UNIT_TAIL.test(out); i += 1) out = out.replace(UNIT_TAIL, '');
+  return out;
+};
+const streetKeyNoUnit = (v) => lineKey(stripUnitTail(v))
   .split(' ')
   .map((token) => SUFFIX_ALIASES[token] || token)
   .join(' ');

@@ -10568,8 +10568,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // rely on the millisecond-truncated updated_at CAS (codex #4667
         // r18 P1).
         if (freshLinkData && require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: freshLinkData })) {
-          const err = new Error('Estimate is no longer active');
-          err.status = 409;
+          // The token route's GENERIC 404 (codex #4667 r35 P0): the same
+          // token answers 404 from the view / data surfaces once blocked,
+          // so a 409 here would tell a bearer the token maps to a real
+          // estimate.
+          const err = new Error('Estimate not found');
+          err.status = 404;
+          err.code = 'OFF_CUSTOMER_SURFACE';
           throw err;
         }
         const eng = freshLinkData?.estimatorEngine;

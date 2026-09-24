@@ -76,4 +76,9 @@ describe('leadAddressUnverified', () => {
     expect(leadAddressUnverified({ ...base, address: 'Apt 4, 1260 Example St, Sarasota, FL 34219' })).toBeTruthy();
     expect(leadAddressUnverified({ ...base, address: '1260 Example St, Apt 4, Bradenton, FL 34219' })).toBeNull();
   });
+
+  it('strips a compound trailing unit before matching (codex #4667 r35 P2)', () => {
+    const flag = { source: 'county_roll', reason: 'r', address_line1: '1260 Example St', city: 'Sarasota', zip: '34219', flagged_at: '2026-09-24T00:00:00Z' };
+    expect(leadAddressUnverified({ extracted_data: { address_unverified: flag }, address: '1260 Example St Bldg 2 Apt 4, Sarasota, FL 34219' })).toBeTruthy();
+  });
 });

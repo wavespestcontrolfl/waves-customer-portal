@@ -2544,7 +2544,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     const published = await db('estimates')
       .where({ estimate_group_id: estimate.estimate_group_id })
       .whereNotIn('id', deliveryEstimateIds)
-      .whereIn('status', ['sent', 'viewed'])
+      // …expired published siblings too: the public group renderer keeps
+      // them as summaries while the anchor's navigation window is open
+      // (codex r35 P1).
+      .whereIn('status', ['sent', 'viewed', 'expired'])
       .whereNull('archived_at')
       .select('id');
     for (const row of published) linkVisibleGroupIds.push(row.id);
@@ -4350,7 +4353,11 @@ router.put('/:id/proposal', async (req, res, next) => {
     // save. The whole-blob proposal write must carry the LOCKED row's values
     // even when this edit does not need to extend its own link again.
     const lockedData = parseEstimateData(locked.estimate_data) || {};
-    for (const key of ['groupLinkViewableThrough', 'groupPublishedByEstimateId']) {
+    // …and the county-roll address block (codex #4667 r35 P1): a flagged
+    // lookup that stamped the row after this save's pre-read must survive
+    // the whole-blob write, or the county-rejected proposal becomes
+    // sendable again.
+    for (const key of ['groupLinkViewableThrough', 'groupPublishedByEstimateId', 'addressUnverified', 'addressUnverifiedFlag', 'addressUnverifiedClearedBy', 'addressUnverifiedSupersededAt']) {
       if (Object.hasOwn(lockedData, key)) nextData[key] = lockedData[key];
       else delete nextData[key];
     }
