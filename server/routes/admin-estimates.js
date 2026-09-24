@@ -2533,6 +2533,22 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // claimed for publish — so a sibling withheld since its claim aborts the
   // send rather than publishing the group around it.
   const deliveryEstimateIds = [estimate.id, ...claimedGroupSiblings.map((s) => s.id)];
+  // …and every OTHER link-visible member of the group (sent / viewed
+  // siblings the shared link already renders): a county hold landing on one
+  // of them between the sibling preflight and the provider call would make
+  // that property silently disappear from the delivered group link, so the
+  // final pre-handoff verdict covers the whole visible set (codex #4667 r34
+  // P1). Claimed rows keep driving the send metadata.
+  const linkVisibleGroupIds = [...deliveryEstimateIds];
+  if (estimate.estimate_group_id) {
+    const published = await db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNotIn('id', deliveryEstimateIds)
+      .whereIn('status', ['sent', 'viewed'])
+      .whereNull('archived_at')
+      .select('id');
+    for (const row of published) linkVisibleGroupIds.push(row.id);
+  }
 
   // FINAL pre-delivery verdict re-read (codex P0, PR #3304): a linkage
   // invalidation can archive the row after this send claimed it — the
@@ -2734,7 +2750,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // EVERY claimed member of a grouped send, not only the anchor: a
           // county warning landing on a sibling before the provider call
           // aborts the shared handoff (codex #4667 r20 P1).
-          for (const deliveryId of deliveryEstimateIds) {
+          for (const deliveryId of linkVisibleGroupIds) {
             if (await estimateInvalidatedJustBeforeHandoff(deliveryId, now)) {
               throw new Error('invalidated_before_delivery');
             }
@@ -2840,7 +2856,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // EVERY claimed member of a grouped send, not only the anchor: a
           // county warning landing on a sibling before the provider call
           // aborts the shared handoff (codex #4667 r20 P1).
-          for (const deliveryId of deliveryEstimateIds) {
+          for (const deliveryId of linkVisibleGroupIds) {
             if (await estimateInvalidatedJustBeforeHandoff(deliveryId, now)) {
               throw new Error('invalidated_before_delivery');
             }
