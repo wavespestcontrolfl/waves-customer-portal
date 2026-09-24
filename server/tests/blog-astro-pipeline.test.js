@@ -2570,6 +2570,16 @@ describe('parseImageDataUrl (bounded data-URL header parse)', () => {
   test('rejects non-data and non-base64-image URLs', () => {
     expect(parseImageDataUrl('https://example.com/x.png')).toBeNull();
     expect(parseImageDataUrl('data:text/html;base64,PGI+')).toBeNull();
+  });
+
+  test('the waves-logo marker survives a stamp → parse round trip and is absent on a plain URL (Codex r1 P2 on #4761)', () => {
+    const { stampLogoReference } = AstroPublisher._internals;
+    const stamped = stampLogoReference('data:image/png;base64,AAAA');
+    expect(stamped).toBe('data:image/png;waves-logo=1;base64,AAAA');
+    expect(parseImageDataUrl(stamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true });
+    expect(parseImageDataUrl('data:image/png;base64,AAAA')).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false });
+    expect(parseImageDataUrl('data:image/png;evil=1;base64,AAAA').logoReference).toBe(false);
+    expect(stampLogoReference('https://example.com/x.png')).toBe('https://example.com/x.png');
     expect(parseImageDataUrl('data:image/png,rawdata')).toBeNull();
     expect(parseImageDataUrl('')).toBeNull();
   });
