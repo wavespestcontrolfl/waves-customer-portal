@@ -1250,6 +1250,30 @@ describe('POST /:token commit', () => {
       expect(await loadTrustedCustomer(dbConn, { ...LEAD_ROW }, null)).toEqual(profile);
     });
 
+    // Codex #4737 r7 pre-push P1: a reused secondary profile with its OWN
+    // phone (selected through the account's phone match) is found again on
+    // reload by a verified lead — and never by an unverified one.
+    test('book-then-reload: a verified lead keeps a reused profile whose phone differs, via its account', async () => {
+      const { loadTrustedCustomer } = inspectionPublicRouter._test;
+      const lead = { id: LEAD_ID, phone: '9415550101', first_contact_channel: 'web', customer_id: 'cust-2' };
+      const secondary = { id: 'cust-2', account_id: 'acct-9', phone: '9415559999' };
+      const dbConn = (table) => ({
+        where() { return this; }, whereNull() { return this; }, orderBy() { return this; },
+        select: async () => (table === 'customers' ? [{ phone: '9415559999' }, { phone: '+1 (941) 555-0101' }] : []),
+        first: async () => (table === 'lead_activities' ? null : secondary),
+      });
+      const smsToken = { channel: require('../utils/lead-consultation-token').smsChannelFor('9415550101') };
+      expect(await loadTrustedCustomer(dbConn, lead, smsToken)).toEqual(secondary);
+      expect(await loadTrustedCustomer(dbConn, lead, null)).toBeNull();
+      const strangerAccount = (table) => ({
+        ...dbConn(table),
+        select: async () => [{ phone: '9415559999' }],
+        where() { return this; }, whereNull() { return this; }, orderBy() { return this; },
+        first: async () => (table === 'lead_activities' ? null : secondary),
+      });
+      expect(await loadTrustedCustomer(strangerAccount, lead, smsToken)).toBeNull();
+    });
+
     test('provenance that requires verification is not trusted on an unverified token', async () => {
       const { loadTrustedCustomer } = inspectionPublicRouter._test;
       const lead = { id: LEAD_ID, phone: '9415550101', first_contact_channel: 'web', customer_id: null };

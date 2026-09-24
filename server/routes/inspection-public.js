@@ -347,11 +347,24 @@ async function latestProvenance(dbConn, leadId) {
   return typeof row?.metadata === 'string' ? JSON.parse(row.metadata) : (row?.metadata || null);
 }
 
-// The lead's contact is verified AND the customer is on the lead's phone.
+// The lead's contact is verified AND the customer is on the lead's phone —
+// the profile's own, or (Codex #4737 r7 pre-push P1) any live profile of its
+// account: the same account-level phone match that selected the property
+// (ensureCustomerAccount + matchExistingAccountProfile), so a reused
+// secondary profile with its own phone is found again on reload.
 async function verifiedForCustomer(lead, customer, token, dbConn) {
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-  if (!last10(customer.phone) || last10(customer.phone) !== last10(lead.phone)) return false;
-  return leadContactVerified(lead, token, dbConn);
+  const leadPhone = last10(lead.phone);
+  if (!leadPhone) return false;
+  let onLeadPhone = last10(customer.phone) === leadPhone;
+  if (!onLeadPhone && customer.account_id) {
+    const profiles = await dbConn('customers')
+      .where({ account_id: customer.account_id })
+      .whereNull('deleted_at')
+      .select('phone');
+    onLeadPhone = profiles.some((row) => last10(row.phone) === leadPhone);
+  }
+  return onLeadPhone && leadContactVerified(lead, token, dbConn);
 }
 
 async function loadCustomer(dbConn, customerId) {
