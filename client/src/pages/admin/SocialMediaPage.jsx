@@ -474,6 +474,7 @@ export default function SocialMediaPage() {
       <FailureAlertBanner
         alert={alert}
         onDismiss={async () => {
+          loadGen.current += 1;
           await adminFetch("/admin/social-media/alerts", {
                 method: "DELETE",
               }).catch(() => {});
@@ -1170,6 +1171,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
   );
   const runNow = async (mode) => {
     loadGen.current += 1;
+    setLoading(false);
     setRunning(mode);
     try {
       const result = await adminFetch("/admin/social-media/autonomous/run", {
@@ -1194,6 +1196,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
   };
   const approveRun = async (run) => {
     loadGen.current += 1;
+    setLoading(false);
     setActing(`approve-${run.id}`);
     try {
       const result = await adminFetch(`/admin/social-media/autonomous/runs/${run.id}/approve`, {
@@ -1214,6 +1217,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
   };
   const rejectRun = async (run) => {
     loadGen.current += 1;
+    setLoading(false);
     setActing(`reject-${run.id}`);
     try {
       await adminFetch(`/admin/social-media/autonomous/runs/${run.id}/reject`, {

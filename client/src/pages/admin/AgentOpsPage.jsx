@@ -370,6 +370,7 @@ export default function AgentOpsPage({ embedded = false } = {}) {
     }
     const key = `${item.id}:${action.key}`;
     loadSeqRef.current += 1;
+    setLoading(false);
     setPendingAction(key);
     setError("");
     setNotice("");

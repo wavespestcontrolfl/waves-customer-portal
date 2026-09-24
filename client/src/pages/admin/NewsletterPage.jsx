@@ -1700,6 +1700,7 @@ export default function NewsletterPage() {
         adminFetch("/admin/newsletter/subscribers?limit=1"),
       ]).then(([sends, subscribers]) => {
         if (request !== summaryRequest.current) return;
+        setSendsLoading(false);
         setSendsData(
           sends.status === "fulfilled"
             ? sends.value || { sends: [], counts: {} }

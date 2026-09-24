@@ -76,3 +76,38 @@ it("does not let a stale background read overwrite a task action reload", async 
   expect(screen.getByText("After action")).toBeInTheDocument();
   expect(screen.queryByText("Stale background")).toBeNull();
 });
+
+it("recovers after a failed task action supersedes an in-flight Retry", async () => {
+  let resolveRetry;
+  let overviewReads = 0;
+  adminFetch.mockImplementation((path, options) => {
+    if (options?.method === "POST") return Promise.reject(new Error("Action failed"));
+    if (path === "/admin/agents/overview") {
+      overviewReads += 1;
+      if (overviewReads === 1) return Promise.resolve(payload("Current task"));
+      if (overviewReads === 2) return Promise.reject(new Error("Refresh failed"));
+      if (overviewReads === 3) return new Promise((resolve) => { resolveRetry = resolve; });
+      return Promise.resolve(payload("Recovered task"));
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+
+  render(<MemoryRouter><AgentOpsPage embedded /></MemoryRouter>);
+  await screen.findByText("Current task");
+
+  await act(async () => refresh.callback());
+  fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(overviewReads).toBe(3));
+
+  fireEvent.click(screen.getByRole("button", { name: "Complete" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Action failed");
+  const retry = screen.getByRole("button", { name: "Retry" });
+  expect(retry).toBeEnabled();
+
+  await act(async () => resolveRetry(payload("Superseded retry")));
+  expect(screen.queryByText("Superseded retry")).not.toBeInTheDocument();
+
+  fireEvent.click(retry);
+  expect(await screen.findByText("Recovered task")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
