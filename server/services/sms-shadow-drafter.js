@@ -745,7 +745,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * adversarial verifier; if the draft asserts facts the context doesn't
  * support, feeds the violations back for a rewrite toward deferral, up to
  * MAX_REVISIONS times. Returns the final draft + loop telemetry
- * { parsed, passes, converged, model }. converged=true means the verifier
+ * { parsed, passes, converged, model, verifierModels }. converged=true means the verifier
  * signed off (or the reply was empty — nothing to assert). model is whichever
  * model produced the FINAL draft (routed default / save-the-sale, or the
  * opposite-provider fallback) — persist it, don't assume a provider. Verify failures
@@ -802,14 +802,19 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // profile-free.
   const voiceProfileVersion = profileApplied ? (voiceProfile?.version ?? null) : null;
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
-  if (!first) return { parsed: null, passes: 1, converged: false, model: null, voiceProfileVersion };
+  if (!first) return {
+    parsed: null, passes: 1, converged: false, model: null, voiceProfileVersion, verifierModels: [],
+  };
   let { parsed, model } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
-  if (!VERIFY_ENABLED) return { parsed, passes: 1, converged: true, model, voiceProfileVersion };
+  if (!VERIFY_ENABLED) return {
+    parsed, passes: 1, converged: true, model, voiceProfileVersion, verifierModels: [],
+  };
 
   const verifier = require('./sms-draft-verifier');
   let passes = 1;
   let converged = false;
+  const verifierModels = [];
 
   for (let attempt = 0; attempt <= MAX_REVISIONS; attempt += 1) {
     // An empty reply ("no reply warranted") asserts nothing — nothing to check.
@@ -824,6 +829,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
         system: verifier.buildVerifierSystemPrompt(),
         messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply) }],
       });
+      // createDeepMessage can transparently cross providers. Preserve the
+      // model that actually served each verdict so sealed qualification can
+      // prove that its pinned verifier route ran instead of its fallback.
+      verifierModels.push(typeof vResp?.model === 'string' ? vResp.model : null);
       verdict = verifier.parseVerifierResponse(vResp.content?.[0]?.text || '');
     } catch (err) {
       logger.warn(`[sms-shadow] verify pass failed (${err.message}); keeping current draft`);
@@ -860,7 +869,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     passes += 1;
   }
 
-  return { parsed, passes, converged, model, voiceProfileVersion };
+  return { parsed, passes, converged, model, voiceProfileVersion, verifierModels };
 }
 
 /**
