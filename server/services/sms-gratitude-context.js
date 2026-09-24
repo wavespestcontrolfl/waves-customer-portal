@@ -149,7 +149,9 @@ async function gratitudeThreadAdvanced(dbh, { inboundId, fromPhone, toPhone, ski
   return Boolean(await query.first('id'));
 }
 
-async function readGratitudeContext({ draftId, smsLogId, now = new Date(), activatedAt = gratitudeActivation(), dbh } = {}) {
+async function readGratitudeContext({
+  draftId, smsLogId, expectedPromptVersion, now = new Date(), activatedAt = gratitudeActivation(), dbh,
+} = {}) {
   if (!dbh) return { ok: false, reason: 'context_database_unavailable' };
   if (!activatedAt) return { ok: false, reason: 'activation_unset' };
   const draft = await dbh('message_drafts').where({ id: draftId }).first(
@@ -173,7 +175,6 @@ async function readGratitudeContext({ draftId, smsLogId, now = new Date(), activ
   if (customers.length !== 1 || customers[0].id !== draft.customer_id) return { ok: false, reason: 'customer_untrusted' };
   const customer = customers[0];
   const expectedReply = buildGratitudeReply(customer.first_name);
-  const expectedPromptVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
   const contractReason = validateGratitudeDraftContract(draft, { expectedReply, expectedPromptVersion });
   if (contractReason) return { ok: false, reason: contractReason };
   if (mediaCountFromMetadata(inbound.metadata) !== 0) return { ok: false, reason: 'media_or_unknown' };
@@ -202,9 +203,10 @@ async function readGratitudeContext({ draftId, smsLogId, now = new Date(), activ
     createdAt: row.created_at,
     mediaCount: mediaCountFromMetadata(row.metadata),
   }));
+  const pendingWork = await pendingGratitudeWork(dbh, { customerId: customer.id, threadLast10 });
   const policy = evaluateGratitudeContext({
     inbound: { id: inbound.id, direction: inbound.direction, body: inbound.message_body, createdAt: inbound.created_at, mediaCount: 0 },
-    history, firstName: customer.first_name, contextComplete: true, pendingWork: false,
+    history, firstName: customer.first_name, contextComplete: true, pendingWork,
   });
   if (!policy.eligible || policy.reply !== expectedReply) return { ok: false, reason: policy.reason || 'policy_rejected' };
   return { ok: true, draft, inbound, customer, expectedReply, threadLast10 };

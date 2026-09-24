@@ -3,6 +3,7 @@ const {
   validateGratitudeDraftContract,
   pendingGratitudeWork,
   gratitudeThreadAdvanced,
+  readGratitudeContext,
 } = require('../services/sms-gratitude-context');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION } = require('../services/sms-gratitude');
 
@@ -38,6 +39,58 @@ function compilingDb() {
   };
   dbh.raw = knex.raw.bind(knex);
   return { dbh, queries };
+}
+
+function readContextDb({ pendingRequest = false } = {}) {
+  const inboundCreatedAt = '2026-09-24T12:00:00.000Z';
+  const draft = contractRow({
+    created_at: '2026-09-24T12:00:01.000Z',
+    inbound_message: 'Thank you!',
+  });
+  const inbound = {
+    id: 'sms-1', customer_id: 'customer-1', direction: 'inbound',
+    from_phone: '+1 (941) 555-0100', to_phone: '+19413529161',
+    message_body: 'Thank you!', metadata: { media: [] }, created_at: inboundCreatedAt,
+  };
+  const rows = [
+    inbound,
+    {
+      id: 'sms-outbound', direction: 'outbound',
+      message_body: 'Your service report: https://portal.example/report',
+      message_type: 'service_report', status: 'delivered', metadata: { media: [] },
+      created_at: '2026-09-24T11:59:00.000Z',
+    },
+  ];
+  const firstResults = {
+    message_drafts: [draft],
+    sms_log: [inbound, null],
+    service_requests: [pendingRequest ? { id: 'request-1' } : null],
+    'call_commitments as cc': [null],
+    'call_commitments as cc_sms': [null],
+    'triage_items as ti': [null],
+    'operator_inbox_items as oi': [null],
+    'agent_decisions as ad': [null],
+  };
+  const selectedTables = [];
+  const dbh = jest.fn((table) => {
+    const query = {};
+    for (const method of [
+      'where', 'whereNot', 'whereNotIn', 'whereIn', 'whereNull', 'whereRaw',
+      'orWhere', 'orWhereRaw', 'join', 'leftJoin', 'orderBy', 'limit',
+    ]) query[method] = jest.fn(() => query);
+    query.first = jest.fn(() => Promise.resolve(firstResults[table]?.shift() ?? null));
+    query.select = jest.fn(() => {
+      selectedTables.push(table);
+      if (table === 'customers') return Promise.resolve([
+        { id: 'customer-1', first_name: 'Dana', phone: '+19415550100' },
+      ]);
+      if (table === 'sms_log') return Promise.resolve(rows);
+      return Promise.resolve([]);
+    });
+    return query;
+  });
+  dbh.raw = knex.raw.bind(knex);
+  return { dbh, selectedTables };
 }
 
 test('persisted gratitude contract accepts only verified live fixed copy', () => {
@@ -83,4 +136,34 @@ test('thread advancement SQL excludes only anchor and owned reservation', async 
     '00000000-0000-4000-8000-000000000002',
     '00000000-0000-4000-8000-000000000099',
   ]));
+});
+
+test('read context rejects when authoritative queues contain pending work', async () => {
+  const { dbh } = readContextDb({ pendingRequest: true });
+  await expect(readGratitudeContext({
+    draftId: 'draft-1', smsLogId: 'sms-1', expectedPromptVersion: 'house_voice_v11',
+    now: '2026-09-24T12:05:00.000Z', activatedAt: '2026-09-24T11:00:00.000Z', dbh,
+  })).resolves.toEqual({ ok: false, reason: 'pending_work' });
+  expect(dbh).toHaveBeenCalledWith('service_requests');
+});
+
+test('read context validates against only the explicitly supplied prompt version', async () => {
+  const matching = readContextDb();
+  await expect(readGratitudeContext({
+    draftId: 'draft-1', smsLogId: 'sms-1', expectedPromptVersion: 'house_voice_v11',
+    now: '2026-09-24T12:05:00.000Z', activatedAt: '2026-09-24T11:00:00.000Z', dbh: matching.dbh,
+  })).resolves.toEqual(expect.objectContaining({ ok: true, expectedReply: 'Our pleasure, Dana!' }));
+
+  const mismatched = readContextDb();
+  await expect(readGratitudeContext({
+    draftId: 'draft-1', smsLogId: 'sms-1', expectedPromptVersion: 'house_voice_v10',
+    now: '2026-09-24T12:05:00.000Z', activatedAt: '2026-09-24T11:00:00.000Z', dbh: mismatched.dbh,
+  })).resolves.toEqual({ ok: false, reason: 'prompt_version_mismatch' });
+  expect(mismatched.selectedTables).not.toContain('sms_log');
+
+  const missing = readContextDb();
+  await expect(readGratitudeContext({
+    draftId: 'draft-1', smsLogId: 'sms-1',
+    now: '2026-09-24T12:05:00.000Z', activatedAt: '2026-09-24T11:00:00.000Z', dbh: missing.dbh,
+  })).resolves.toEqual({ ok: false, reason: 'prompt_version_mismatch' });
 });
