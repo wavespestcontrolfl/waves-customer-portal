@@ -221,6 +221,68 @@ describe('classifyFailedPaymentRetry — guard chain in the sweep order', () => 
   });
 });
 
+// hasUnresolvedSiblingStripeOutcome's ambiguous-attempt fence, run against
+// a tiny in-memory conn that actually applies its predicates — the shared
+// jest.mock above returns fixtures regardless of the where clauses.
+describe('hasUnresolvedSiblingStripeOutcome — ambiguous-attempt resolution path', () => {
+  const { hasUnresolvedSiblingStripeOutcome } = require('../services/retry-collectibility');
+  function memConn({ payments = [] } = {}) {
+    return (table) => {
+      let rows = table === 'payments' ? payments.slice() : [];
+      const qb = {
+        where(a, b, c) {
+          if (typeof a === 'object' && a) {
+            rows = rows.filter((r) => Object.entries(a).every(([k, v]) => r[k] === v));
+          } else if (b === '=') {
+            rows = rows.filter((r) => r[a] === c);
+          }
+          return qb;
+        },
+        whereIn(col, vals) { rows = rows.filter((r) => vals.includes(r[col])); return qb; },
+        whereNull(col) { rows = rows.filter((r) => r[col] == null); return qb; },
+        whereRaw(sql, bindings = []) {
+          const meta = (r) => { try { return r.metadata ? JSON.parse(r.metadata) : {}; } catch { return {}; } };
+          if (String(sql).includes('billed_month')) rows = rows.filter((r) => meta(r).billed_month === bindings[0]);
+          if (String(sql).includes('ambiguous_outcome')) rows = rows.filter((r) => meta(r).ambiguous_outcome === true);
+          // "(superseded_by_payment_id IS NULL OR superseded_by_payment_id = payments.id)"
+          if (String(sql).includes('superseded_by_payment_id')) {
+            rows = rows.filter((r) => r.superseded_by_payment_id == null || r.superseded_by_payment_id === r.id);
+          }
+          return qb;
+        },
+        first: () => Promise.resolve(rows[0] || null),
+      };
+      return qb;
+    };
+  }
+  const ambiguousRow = (overrides = {}) => ({
+    id: 'pay-amb', customer_id: 'cust-1', status: 'failed', superseded_by_payment_id: null,
+    metadata: JSON.stringify({ billed_month: '2026-06', ambiguous_outcome: true }),
+    ...overrides,
+  });
+
+  test('an unreconciled ambiguous attempt for the month fences', async () => {
+    const v = await hasUnresolvedSiblingStripeOutcome('cust-1', '2026-06', memConn({ payments: [ambiguousRow()] }));
+    expect(v).toMatchObject({ blocked: true, reason: 'ambiguous_stripe_outcome' });
+  });
+
+  test('a PARKED (self-superseded) ambiguous attempt still fences — parking is not reconciliation', async () => {
+    const v = await hasUnresolvedSiblingStripeOutcome('cust-1', '2026-06', memConn({ payments: [ambiguousRow({ superseded_by_payment_id: 'pay-amb' })] }));
+    expect(v.blocked).toBe(true);
+  });
+
+  test('an ambiguous attempt linked to a DIFFERENT superseding payment is reconciled — the month collects again', async () => {
+    const v = await hasUnresolvedSiblingStripeOutcome('cust-1', '2026-06', memConn({ payments: [ambiguousRow({ superseded_by_payment_id: 'pay-verified-elsewhere' })] }));
+    expect(v).toEqual({ blocked: false });
+  });
+
+  test('correcting metadata.ambiguous_outcome after verifying Stripe also clears the fence', async () => {
+    const corrected = ambiguousRow({ metadata: JSON.stringify({ billed_month: '2026-06', ambiguous_outcome: false }) });
+    const v = await hasUnresolvedSiblingStripeOutcome('cust-1', '2026-06', memConn({ payments: [corrected] }));
+    expect(v).toEqual({ blocked: false });
+  });
+});
+
 describe('loadRetryContext', () => {
   test('sweep shape (no as-of, default conn) invokes the prepay lookups with their bare defaults', async () => {
     const ctx = loadRetryContext();

@@ -42,20 +42,31 @@ const REASONS = Object.freeze({
 });
 
 /**
- * Codex round-2 P0: does ANOTHER attempt for this SAME customer+month
- * (never the row being classified — callers exclude it themselves) have an
+ * Codex round-2 P0: does an attempt for this SAME customer+month have an
  * unresolved Stripe outcome? Two shapes:
- *   - an unresolved stripe_orphan_charges row (Stripe accepted a charge but
- *     the payments-ledger write failed — STRIPE_CHARGED_DB_FAILED) — money
- *     may already be moving for this customer at all, not just this month;
+ *   - an unresolved, invoice-less stripe_orphan_charges row (Stripe
+ *     accepted a charge but the payments-ledger write failed —
+ *     STRIPE_CHARGED_DB_FAILED) — customer-scoped: money may already be
+ *     moving for this customer, and the row cannot name its month;
  *   - a 'failed' payments row for this exact obligation month stamped
  *     metadata.ambiguous_outcome (a no-PI connection failure that may or
- *     may not have reached Stripe).
+ *     may not have reached Stripe). The row being classified by the retry
+ *     sweep matches here too when it is itself ambiguous — same verdict
+ *     as its own no-PI guard, so nothing is lost.
  * A collector that charges again here — a fresh idempotency key, since this
  * is a distinct attempt — risks a genuine double collection while the
  * FIRST outcome is still unverified. Every monthly collector (charge-now,
  * the monthly cron, and this module's own classifier for the retry sweep)
  * must check this before charging, not just before superseding.
+ *
+ * RESOLUTION (pre-push fallback audit P1): the orphan shape clears through
+ * stripe_orphan_charges.resolved. The ambiguous shape clears exactly the
+ * way the invoice-level fence in services/stripe.js already documents —
+ * a reconciler either links the attempt to a DIFFERENT superseding payment
+ * (superseded_by_payment_id pointing at another row) or corrects its
+ * metadata.ambiguous_outcome after verifying Stripe. A self-superseded
+ * row (superseded_by_payment_id = its own id — the sweep's/charge-now's
+ * "parked" marker) is still unresolved and still fences.
  */
 /**
  * Codex round-1 P1: charge-now and the daily monthly cron both charge this
@@ -161,6 +172,9 @@ async function hasUnresolvedSiblingStripeOutcome(customerId, monthKey, conn = db
     .whereIn('status', ['failed'])
     .whereRaw("metadata->>'billed_month' = ?", [monthKey])
     .whereRaw("COALESCE((metadata->>'ambiguous_outcome')::boolean, false) = true")
+    // Reconciled = linked to a DIFFERENT superseding payment (see the
+    // RESOLUTION note above); parked = self-superseded, still fences.
+    .whereRaw('(superseded_by_payment_id IS NULL OR superseded_by_payment_id = payments.id)')
     .first('id');
   if (ambiguous) return { blocked: true, reason: 'ambiguous_stripe_outcome', detail: ambiguous };
   return { blocked: false };
