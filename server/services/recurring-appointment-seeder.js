@@ -1429,6 +1429,7 @@ module.exports = {
   etDateDiffDays,
   findActiveRecurringSeries,
   duplicateGuardFamilyKey,
+  scheduledServiceColumns,
   seriesCreateLockKeys,
   inferRecurringPattern,
   SEASONAL_FEB_OCT,

@@ -1363,7 +1363,13 @@ function parentRowIsPlanShaped(row, isOneTimeBookingSource) {
 }
 
 async function liveFamilyMatches(database, customerId, serviceId, serviceType) {
-  const { findActiveRecurringSeries, duplicateGuardFamilyKey } = require('./recurring-appointment-seeder');
+  const { findActiveRecurringSeries, duplicateGuardFamilyKey, scheduledServiceColumns } = require('./recurring-appointment-seeder');
+  // Same schema guard the canonical lookup applies before it reads any
+  // recurring column: without is_recurring/recurring_parent_id/
+  // recurring_ongoing there is no series to find (and no supplemental
+  // cancelled-parent probe to run).
+  const columns = await scheduledServiceColumns(database);
+  if (!columns || !columns.is_recurring || !columns.recurring_parent_id || !columns.recurring_ongoing) return [];
   const active = await findActiveRecurringSeries(database, { customerId, serviceId, serviceType });
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
