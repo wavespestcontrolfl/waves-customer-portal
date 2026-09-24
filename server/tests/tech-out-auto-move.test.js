@@ -52,7 +52,7 @@ const DATE = '2026-09-24';
 
 function query(result) {
   const self = {};
-  ['where', 'whereNot', 'whereNull', 'whereIn', 'whereNotIn', 'whereRaw', 'select', 'orderBy', 'orderByRaw']
+  ['where', 'whereNot', 'whereNull', 'whereIn', 'whereNotIn', 'whereRaw', 'select', 'orderBy', 'orderByRaw', 'leftJoin', 'forShare']
     .forEach((m) => { self[m] = jest.fn(() => self); });
   self.first = jest.fn(async () => (Array.isArray(result) ? (result[0] ?? null) : result));
   self.update = jest.fn().mockResolvedValue(1);
@@ -194,9 +194,10 @@ describe('autoAssignParkedAlert', () => {
 
   test('success: moves via the canonical mover, pins the expect CAS, resolves the alert, broadcasts', async () => {
     SmartRebooker.reschedule.mockResolvedValue({ success: true });
+    const stopQuery = query(baseStop());
     const queue = [
       query(baseAlert()),        // dispatch_alerts by id
-      query(baseStop()),         // scheduled_services by id
+      stopQuery,                 // scheduled_services by id
       query([CANDIDATE]),        // technicians crew list
       query([]),                 // fitsWindow fallback: other visits that day
       query([]),                 // fitsWindow fallback: tech_schedule_blocks
@@ -224,6 +225,13 @@ describe('autoAssignParkedAlert', () => {
       },
     });
     expect(typeof options.moveGuard).toBe('function');
+    // Never the whole-visit mover, and a stop grouped after the read misses the CAS.
+    expect(options.visitPolicy).toBe('single');
+    expect(options.expect).toHaveProperty('visit_id', null);
+    expect(typeof options.beforeMove).toBe('function');
+    // The stop read joins customers: guardedCoordSelects falls back to
+    // customers.latitude/longitude and Postgres rejects it without the join.
+    expect(stopQuery.leftJoin).toHaveBeenCalledWith('customers', 'customers.id', 'scheduled_services.customer_id');
 
     // Never customer-facing: the mover mock proves nothing beyond "reschedule was
     // called with no notify/SMS-shaped option"; the header comment documents why
@@ -266,6 +274,48 @@ describe('autoAssignParkedAlert', () => {
 
     const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
     expect(res.reason).toBe('grouped_visit_manual');
+  });
+});
+
+describe('in-transaction still-parked recheck (beforeMove)', () => {
+  async function capturedGuard() {
+    SmartRebooker.reschedule.mockResolvedValue({ success: true });
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE]), query([]), query([])];
+    db.mockImplementation(() => queue.shift());
+    await autoAssignParkedAlert({ alertId: ALERT_ID });
+    return SmartRebooker.reschedule.mock.calls[0][5].beforeMove;
+  }
+  function trxReturning(absence, alert) {
+    const rows = [absence, alert];
+    return jest.fn(() => query(rows.shift()));
+  }
+
+  test('absence cleared ("Tech is back") after the read: refuses inside the move transaction', async () => {
+    const guard = await capturedGuard();
+    await expect(guard(trxReturning(null, { id: ALERT_ID }))).rejects.toMatchObject({ code: 'TECH_OUT_CLEARED' });
+  });
+
+  test('alert resolved or dismissed after the read: refuses inside the move transaction', async () => {
+    const guard = await capturedGuard();
+    await expect(guard(trxReturning({ id: 'abs-1' }, null))).rejects.toMatchObject({ code: 'TECH_OUT_ALERT_RESOLVED' });
+  });
+
+  test('absence still active and alert still open: the move proceeds', async () => {
+    const guard = await capturedGuard();
+    await expect(guard(trxReturning({ id: 'abs-1' }, { id: ALERT_ID }))).resolves.toBeUndefined();
+  });
+
+  test('a stale refusal from the mover is a quiet no-op: no further candidates, no annotation', async () => {
+    SmartRebooker.reschedule.mockRejectedValue(Object.assign(new Error('cleared'), { code: 'TECH_OUT_CLEARED' }));
+    const second = { id: 'tech-3', name: 'Tech Three' };
+    const queue = [query(baseAlert()), query(baseStop()), query([CANDIDATE, second]), query([]), query([]), query([]), query([])];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(db.raw.mock.calls.some(([sql]) => /COALESCE\(payload/.test(sql))).toBe(false);
   });
 });
 

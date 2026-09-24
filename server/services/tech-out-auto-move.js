@@ -235,6 +235,43 @@ function makeCapabilityGuard() {
   };
 }
 
+// Refusals from the in-transaction recheck below: the absence was cleared
+// ("Tech is back") or the alert was resolved/dismissed after this run read
+// it. Either way there is nothing left to do — a no-op, never a retry on
+// the next candidate.
+const STALE_CODES = new Set(['TECH_OUT_CLEARED', 'TECH_OUT_ALERT_RESOLVED']);
+
+/**
+ * Runs inside the mover's own transaction (options.beforeMove — after its
+ * date-occupancy + destination tech-day fences, before any row lock or
+ * write). Re-reads the absence and the alert FOR SHARE: clearTechOut takes
+ * the absence FOR UPDATE and resolveAlert UPDATEs the alert, so each either
+ * commits before this read (and the move refuses) or waits for this move to
+ * commit. clearTechOut never waits on a lock this transaction holds (its
+ * only other lock is the ABSENT tech-day fence, which the mover does not
+ * take), so the wait cannot cycle.
+ */
+function makeStillParkedGuard({ alertId, absentTechId, date }) {
+  return async (trx) => {
+    const absence = await trx('technician_absences')
+      .where({ technician_id: absentTechId, absence_date: date })
+      .whereNull('cleared_at')
+      .forShare()
+      .first('id');
+    if (!absence) {
+      throw Object.assign(new Error('Technician is no longer marked out for this date'), { statusCode: 409, code: 'TECH_OUT_CLEARED' });
+    }
+    const alert = await trx('dispatch_alerts')
+      .where({ id: alertId })
+      .whereNull('resolved_at')
+      .forShare()
+      .first('id');
+    if (!alert) {
+      throw Object.assign(new Error('Overflow alert was already resolved'), { statusCode: 409, code: 'TECH_OUT_ALERT_RESOLVED' });
+    }
+  };
+}
+
 /**
  * Load the alert + its stop and decide whether there is anything for the
  * chokepoint to even ATTEMPT. Returns one of:
@@ -291,11 +328,17 @@ async function loadMovableStop(alertId) {
     return { done: { moved: false, alert_id: alertId, reason: 'no_job_reference' } };
   }
 
+  // guardedCoordSelects reads customers.* as the coordinate fallback, so the
+  // customer join is required (not optional) for this select to parse.
   const stop = await db('scheduled_services')
-    .where({ id: jobId })
+    .leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
+    .where('scheduled_services.id', jobId)
     .first(
-      'id', 'status', 'service_type', 'window_start', 'window_end', 'estimated_duration_minutes',
-      'visit_id', 'technician_id', 'scheduled_date', 'customer_id', ...guardedCoordSelects(db),
+      'scheduled_services.id', 'scheduled_services.status', 'scheduled_services.service_type',
+      'scheduled_services.window_start', 'scheduled_services.window_end',
+      'scheduled_services.estimated_duration_minutes', 'scheduled_services.visit_id',
+      'scheduled_services.technician_id', 'scheduled_services.scheduled_date',
+      'scheduled_services.customer_id', ...guardedCoordSelects(db),
     );
   const refusal = stopMoveRefusal(stop, absentTechId, date);
   if (refusal) {
@@ -367,6 +410,13 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
           technicianId: candidate.tech.id,
           keepStatus: true,
           seriesPolicy: 'single',
+          // Never the whole-visit mover: with visitPolicy 'single' the unit
+          // branch is skipped and the single-row CAS carries expect.visit_id
+          // IS NULL, so a stop grouped after our read refuses (409) instead
+          // of widening into a move of every member. The unit mover honors
+          // `expect` only on its no-op branch, so pinning expect alone is
+          // not enough.
+          visitPolicy: 'single',
           actorId: actorId || null,
           // Atomic re-assertion, inside the mover's own move transaction, of
           // exactly what this function read above: a concurrent change
@@ -374,6 +424,8 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
           // misses this CAS and surfaces as a plain 409 here, caught below
           // and left as a parked, annotated, no-op — never a stale overwrite.
           expect: {
+            // Pinned ungrouped (see visitPolicy above) — grouped visits stay manual.
+            visit_id: null,
             technician_id: absentTechId,
             scheduled_date: date,
             window_start: stop.window_start,
@@ -381,6 +433,7 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
             status: stop.status,
           },
           moveGuard: makeCapabilityGuard(),
+          beforeMove: makeStillParkedGuard({ alertId, absentTechId, date }),
         },
       );
       await db.transaction(async (trx) => {
@@ -398,7 +451,12 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
       }
       return { moved: true, alert_id: alertId, job_id: stop.id, to_technician_id: candidate.tech.id };
     } catch (err) {
+      if (err && STALE_CODES.has(err.code)) {
+        return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
+      }
       lastErr = err;
+      // Membership changed: no other candidate can make it ungrouped again.
+      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED') break;
     }
   }
 
