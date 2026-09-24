@@ -318,6 +318,19 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, fungus_control: 40, color_health: 70, stress_damage: 40 });
   });
 
+  test('a pending legacy save keeps the notes and stress flags it was sent', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null }, { run: false });
+    const result = await request(assessment.id, { adjustedScores: { observations: 'Tech note' }, stress_flags: { drought_stress: true } });
+    expect(result.body).toMatchObject({ confirmed: false, missingScores: ['color_health'] });
+    const row = await read(assessment.id);
+    expect(row.observations).toBe('Tech note');
+    expect(row.confirmed_by_tech).toBe(false);
+    expect(row.stress_flags).toMatchObject({ drought_stress: true });
+    // adjusted_scores (the AI read) is untouched while pending.
+    const snapshot = typeof row.adjusted_scores === 'string' ? JSON.parse(row.adjusted_scores) : row.adjusted_scores;
+    expect(snapshot.color_health ?? null).toBeNull();
+  });
+
   test('clearing an earlier legacy fill (posted as null) removes it', async () => {
     const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
     await request(assessment.id, { adjustedScores: { fungus_control: 60 } });
