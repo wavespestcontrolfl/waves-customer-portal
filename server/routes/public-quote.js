@@ -1305,9 +1305,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // premises for the same contact pair (codex r6 P2).
           .whereRaw("estimate_data->'addressUnverifiedFlag' IS NOT NULL")
           .orderBy('updated_at', 'desc')
-          .select('address', db.raw("estimate_data->'addressUnverifiedFlag' as flag"));
-        const match = rows.find((row) => samePremiseDisplay(row.address, quoteFullAddress, { requireLocality: true }));
-        if (match) priorAddressUnverified = recoverAddressUnverified({ address_unverified: match.flag });
+          .select('address', db.raw("estimate_data->'addressUnverifiedFlag' as flag"), db.raw("estimate_data->'proposal'->>'propertyAddress' as proposal_address"));
+        // Judged on the CUSTOMER-FACING premise (a commercial proposal's
+        // editable propertyAddress over the immutable base column), as the
+        // withdrawal judges it, and the recovered flag itself must cover the
+        // requested premise — a run for A must not inherit B's stored flag
+        // (codex r48 P1).
+        const { customerFacingPremise } = require('../services/website-quote-withdrawal');
+        const match = rows.find((row) => samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true }));
+        if (match) {
+          const recovered = recoverAddressUnverified({ address_unverified: match.flag });
+          if (recovered && (!recovered.address_line1 || flagCoversAddress(recovered, normalizedAddress))) priorAddressUnverified = recovered;
+        }
       } catch (withdrawnErr) {
         logger.warn(`[public-quote] withdrawn-publication flag re-read failed: ${withdrawnErr.code || withdrawnErr.name || 'error'}`);
       }
@@ -3735,7 +3744,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const token = require('crypto').randomUUID();
       try {
         const { ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
+        const CLAIM_STAMP_SQL = "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)";
         const taken = await db.transaction(async (trx) => {
+          // A GROUPED draft's link renders its published siblings too: group
+          // advisory lock first, then the anchor, then every link-visible
+          // sibling locked in id order, verified on-surface and claimed with
+          // the same token — the admin send's and the extension's protocol
+          // (codex r48 P1). Any short claim rolls the whole attempt back.
+          const groupRow = await trx('estimates').where({ id: draftEstimateId }).first('estimate_group_id');
+          if (groupRow?.estimate_group_id) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['estimate-group-send', String(groupRow.estimate_group_id)]);
+          }
           const row = await trx('estimates')
             .where({ id: draftEstimateId })
             .whereNull('archived_at')
@@ -3744,13 +3763,35 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             .forUpdate()
             .first('id');
           if (!row) return false;
+          let visibleSiblingIds = [];
+          if (groupRow?.estimate_group_id) {
+            const siblings = await trx('estimates')
+              .where({ estimate_group_id: groupRow.estimate_group_id })
+              .whereNot({ id: draftEstimateId })
+              .whereNull('archived_at')
+              .whereIn('status', ['sent', 'viewed', 'expired'])
+              .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")
+              .orderBy('id')
+              .forUpdate()
+              .select('id', 'estimate_data');
+            const { estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+            if (siblings.some((sib) => estimateOffCustomerSurface({ estimate_data: sib.estimate_data }))) return false;
+            visibleSiblingIds = siblings.map((sib) => sib.id);
+          }
+          const claimedAt = new Date().toISOString();
           await trx('estimates').where({ id: draftEstimateId }).update({
-            estimate_data: trx.raw(
-              "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)",
-              [new Date().toISOString(), token],
-            ),
+            estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, token]),
             updated_at: trx.fn.now(),
           });
+          if (visibleSiblingIds.length) {
+            const stamped = await trx('estimates')
+              .whereIn('id', visibleSiblingIds)
+              .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+              .update({ estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, token]), updated_at: trx.fn.now() });
+            if (Number(stamped) !== visibleSiblingIds.length) {
+              throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });
+            }
+          }
           return true;
         });
         if (taken) {
@@ -3884,7 +3925,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // invalidation). Non-fatal — an uncleared claim ages out by TTL.
     if (quoteDeliveryClaimToken) {
       try {
-        await require('./admin-estimates').clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken);
+        const adminEstimates = require('./admin-estimates');
+        await adminEstimates.clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken);
+        const groupRow = await db('estimates').where({ id: draftEstimateId }).first('id', 'estimate_group_id');
+        if (groupRow?.estimate_group_id) await adminEstimates.clearGroupSiblingDeliveryClaims(groupRow, quoteDeliveryClaimToken);
       } catch (releaseErr) {
         logger.warn(`[public-quote] quote delivery claim release failed (ages out by TTL): ${releaseErr.code || releaseErr.name || 'db_error'}`);
       }

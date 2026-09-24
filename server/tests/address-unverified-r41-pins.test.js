@@ -197,7 +197,7 @@ describe('codex r45', () => {
     expect(block).toContain('.whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)');
     expect(block).toContain('.whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)');
     expect(block).toContain("jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text)");
-    const release = src.indexOf("require('./admin-estimates').clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken)");
+    const release = src.indexOf('adminEstimates.clearEstimateDeliveryClaim(draftEstimateId, quoteDeliveryClaimToken)');
     expect(release).toBeGreaterThan(src.indexOf('Customer SMS failed'));
   });
   test('the lookup lifts legacy blocks through the withdrawal service', () => {
@@ -282,11 +282,14 @@ describe('codex r46: a corrected commercial proposal is judged on its customer-f
     const src = require('fs').readFileSync(require.resolve('../services/website-quote-withdrawal'), 'utf8');
     expect(src).toContain("const customerFacingPremise = (row) => (String(row?.proposal_address || '').trim() ? row.proposal_address : row?.address);");
     expect(src.split("estimate_data->'proposal'->>'propertyAddress' as proposal_address").length - 1).toBe(2);
+    // /calculate's archived-flag recovery selects it too (r48).
+    const pqSrc = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    expect(pqSrc.split("estimate_data->'proposal'->>'propertyAddress' as proposal_address").length - 1).toBe(3);
     expect(src).toContain('samePremiseDisplay(customerFacingPremise(row), fullAddress, { requireLocality: true })');
     expect(src).not.toContain('samePremiseDisplay(row.address, fullAddress');
     // /calculate's own supersession + legacy lift use the same resolver.
     const pq = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
-    expect(pq.split('samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true })').length - 1).toBe(2);
+    expect(pq.split('samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true })').length - 1).toBe(3);
   });
 });
 
@@ -295,5 +298,21 @@ describe('pre-push audit after r47: both clean timestamps count', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
     expect(src).toContain("const cleanAt = Math.max(lockedClean, Date.parse(cleanEvidenceAt || '') || 0, Date.parse(cachedCleanAt || '') || 0);");
     expect(src).not.toContain('cleanEvidenceAt || cachedCleanAt');
+  });
+});
+
+describe('codex r48', () => {
+  test('the archived-flag recovery judges the customer-facing premise and validates the flag against the request', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    expect(src).toContain("const match = rows.find((row) => samePremiseDisplay(customerFacingPremise(row), quoteFullAddress, { requireLocality: true }));");
+    expect(src).toContain('if (recovered && (!recovered.address_line1 || flagCoversAddress(recovered, normalizedAddress))) priorAddressUnverified = recovered;');
+  });
+  test('/calculate claims a grouped draft\'s link-visible siblings under the group lock and releases them', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
+    const claim = src.slice(src.indexOf('let quoteDeliveryClaimToken = null;'), src.indexOf('await sendQuoteRequestEmail({'));
+    expect(claim.indexOf("['estimate-group-send', String(groupRow.estimate_group_id)]")).toBeLessThan(claim.indexOf('.forUpdate()'));
+    expect(claim).toContain('if (siblings.some((sib) => estimateOffCustomerSurface({ estimate_data: sib.estimate_data }))) return false;');
+    expect(claim).toContain("throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });");
+    expect(src).toContain('await adminEstimates.clearGroupSiblingDeliveryClaims(groupRow, quoteDeliveryClaimToken);');
   });
 });

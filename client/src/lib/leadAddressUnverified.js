@@ -98,7 +98,13 @@ function flagCoversLeadAddress(flag, lead) {
   // column, else the second comma segment of its composed address.
   const leadCity = cityKey(lead?.city) || cityKey(segments.slice(1).find((seg) => !STATE_ZIP_TAIL_RE.test(seg)) || '');
   const flagCity = cityKey(flag.city);
-  return !flagCity || !leadCity || flagCity === leadCity;
+  if (flagCity && leadCity && flagCity !== leadCity) return false;
+  // State too, when both sides carry one (a ZIP-less lead moved to another
+  // state keeps its street and city spelling) — codex r48 P2.
+  const stateOf = (v) => String(v || '').trim().toUpperCase().slice(0, 2);
+  const leadState = stateOf(lead?.state) || stateOf((String(lead?.address || '').split(',').map((s) => s.trim()).find((seg) => /^[a-z]{2}(?:\s*\d{5}(?:-\d{4})?)?$/i.test(seg)) || '').match(/^[a-z]{2}/i)?.[0]);
+  const flagState = stateOf(flag.state);
+  return !flagState || !leadState || flagState === leadState;
 }
 
 // One line for the card: the audit's OWN reason (a missing number, a number
