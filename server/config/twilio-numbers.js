@@ -15,6 +15,19 @@ const TWILIO_NUMBERS = {
   // company number, not a GBP office line.
   mainLine: { number: '+19412975749', formatted: '(941) 297-5749', label: 'Waves Main Line' },
 
+  // Caller ID for INTERNAL alert calls (the new-lead ring to Adam's cell).
+  // Never customer-facing. Reads INTERNAL_ALERT_CALLER_ID (E.164) and falls
+  // back to the main line when unset or malformed, so behavior is unchanged
+  // until the env var is set. Why: the carrier analytics vendors saw the main
+  // line dial one destination ~90x/30d, ring to voicemail, and redial within
+  // minutes — the exact "robocall pattern" that earned it a Spam Likely label
+  // (Twilio support, 2026-09-23). Moving that traffic to a dedicated number
+  // isolates the pattern so the main line's reputation can recover.
+  internalAlertCallerId() {
+    const raw = String(process.env.INTERNAL_ALERT_CALLER_ID || '').trim();
+    return /^\+1\d{10}$/.test(raw) ? raw : this.mainLine.number;
+  },
+
   // ── Pest Control Domain Tracking ────────────────────────────
   domainTracking: [
     { number: '+19412975749', formatted: '(941) 297-5749', domain: 'wavespestcontrol.com', area: 'General', location: 'bradenton', page: 'main site' },
@@ -144,6 +157,8 @@ const TWILIO_NUMBERS = {
       }
       const main = String(this.mainLine.number || '').replace(/\D/g, '').slice(-10);
       if (main.length === 10) set.add(main);
+      const alert = this.internalAlertCallerId().replace(/\D/g, '').slice(-10);
+      if (alert.length === 10) set.add(alert);
       this._ownedLast10 = set;
     }
     return this._ownedLast10.has(last10);
