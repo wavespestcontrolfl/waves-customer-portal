@@ -58,6 +58,30 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   ...jest.requireActual('../services/annual-prepay-renewals'),
   coveredTermsAsOf: jest.fn(),
 }));
+// isDuplicateActiveSeries (Codex GitHub r3 — the four-P1 redesign) reuses
+// the canonical duplicate-series guard directly rather than a second
+// hand-rolled classifier. findActiveRecurringSeries is a full DB query
+// this suite's fake connection can't model (it queries scheduled_services
+// with its own joins/filters independent of makeConn's scripted handler),
+// so it's mocked — every OTHER export (duplicateGuardFamilyKey,
+// customerPrefersNoWeekends, etc.) stays real. Default (see beforeEach):
+// no active duplicate for anyone, so every OTHER describe block in this
+// suite is unaffected unless a test opts in.
+jest.mock('../services/recurring-appointment-seeder', () => ({
+  ...jest.requireActual('../services/recurring-appointment-seeder'),
+  findActiveRecurringSeries: jest.fn(),
+}));
+// buildSeriesAddressScope (estimate-converter.js) resolves the canonical
+// serviceAddressScope shape the SAME way the booking/estimate callers do.
+// Mocked whole-module (never used elsewhere in the top-up code path — Codex
+// GitHub r3's own admin-schedule.js:642 is the only estimate-converter
+// require this suite's code path ever reaches) so a test can assert the
+// EXACT args isDuplicateActiveSeries builds from a series' resolved
+// address, including an override, without needing a real customer_properties
+// row or the converter's own address-key machinery.
+jest.mock('../services/estimate-converter', () => ({
+  buildSeriesAddressScope: jest.fn(),
+}));
 
 const adminScheduleRouter = require('../routes/admin-schedule');
 const {
@@ -69,6 +93,8 @@ const { familyOfServiceRow } = require('../services/cancellation-processor');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { PAYMENT_PENDING_STATUS } = AnnualPrepayRenewals;
 const { ANNUAL_PREPAY_METHOD } = require('../services/prepaid-series');
+const { findActiveRecurringSeries } = require('../services/recurring-appointment-seeder');
+const { buildSeriesAddressScope } = require('../services/estimate-converter');
 
 // A minimal chainable stand-in for coveredTermsAsOf's real knex query
 // builder — isCustomerPrepayLive only ever calls .where(...) (twice, one a
@@ -88,6 +114,11 @@ beforeEach(() => {
   // Default: no covered term for anyone — every OTHER describe block's
   // fixtures are unaffected by the v1 scope cut unless they opt in.
   AnnualPrepayRenewals.coveredTermsAsOf.mockReset().mockReturnValue(chainableCoveredTermsAsOf(undefined));
+  // Default: no active duplicate series for anyone, and no address scope
+  // resolved — every OTHER describe block's fixtures are unaffected by the
+  // duplicate-series guard unless a test opts in.
+  findActiveRecurringSeries.mockReset().mockResolvedValue([]);
+  buildSeriesAddressScope.mockReset().mockResolvedValue(null);
 });
 const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
 const { etDateString } = require('../utils/datetime-et');
@@ -730,426 +761,104 @@ describe('topUpRecurringSeriesLocked — plan-hold exclusion (Codex GitHub r6 P1
   });
 });
 
-// Bespoke fixture for isSupersededSeries (Codex GitHub guards follow-up
-// P1) — models MULTIPLE ongoing root series for one customer, keyed by
-// id, each with its own family (familyOfServiceRow.mockImplementation,
-// keyed by row id), property (property_id — the simplest of the three
-// property-key sources to fixture; the address-fallback logic is pure and
-// has no DB dependency worth re-testing here), and latest-live-visit date.
-// topupScenario's own generic builder assumes a single series and can't
-// express two roots competing for "latest," so this stays separate rather
-// than bloating that shared fixture for a rarely-exercised case.
-function supersededScenario(roots) {
-  const byId = new Map(roots.map((r) => [r.id, r]));
-  familyOfServiceRow.mockImplementation((row) => byId.get(row.id)?.familyKey ?? null);
-  const rowShape = (r) => ({
-    id: r.id, customer_id: r.customerId ?? 5, is_recurring: r.isRecurring !== false,
-    // undefined stays undefined (falsy) rather than the 'weekly' default —
-    // r.recurringPattern === null models a sibling that lost its pattern
-    // (the not_recurring case isCandidateTopUpEligible must catch).
-    recurring_pattern: r.recurringPattern !== undefined ? r.recurringPattern : 'weekly',
-    recurring_ongoing: r.recurringOngoing !== false, scheduled_date: r.latestDate || daysOut(0),
-    property_id: r.propertyId, service_id: 1, created_at: r.createdAt || '2020-01-01T00:00:00Z',
-    estimated_duration_minutes: r.estimatedDurationMinutes ?? 60,
-    // Billable by default (via seriesExtensionUnbillable, the real gate) —
-    // `billable: false` sets both fields unbillable; an explicit
-    // `createInvoiceOnComplete`/`estimatedPrice` overrides either alone
-    // (e.g. an invoice-flagged but $0 root — Codex GitHub guards
-    // follow-up P1, the false-positive a cheap "has an invoice stamp"
-    // proxy let through).
-    create_invoice_on_complete: r.createInvoiceOnComplete ?? (r.billable !== false),
-    estimated_price: r.estimatedPrice !== undefined ? r.estimatedPrice : (r.billable !== false ? '150.00' : null),
-    window_start: r.windowStart ?? null, window_end: r.windowEnd ?? null,
-    // Only set for an UNLINKED root exercising the service-address fallback.
-    service_address_line1: r.serviceAddressLine1 || null,
-    service_address_city: r.serviceAddressCity || null,
-    service_address_zip: r.serviceAddressZip || null,
-  });
-  const seriesDatesById = new Map(roots.map((r) => [r.id, new Set(r.latestDate ? [r.latestDate] : [])]));
-  const conn = makeConn(({ table, calls, op, data }) => {
-    if (table === 'scheduled_services') {
-      if (op === 'columnInfo') return BASE_COLS;
-      if (op === 'pluck') return [];
-      if (op === 'first') {
-        const firstCall = calls.find((c) => c[0] === 'first');
-        const idWhere = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
-        if (firstCall[1] === 'recurring_ongoing') {
-          const root = idWhere ? byId.get(idWhere[1].id) : null;
-          return { recurring_ongoing: root ? root.recurringOngoing !== false : true };
-        }
-        if (calls.some((c) => c[0] === 'orderBy')) {
-          // latestLiveSeriesVisit — find which id it targeted via the
-          // nested whereFn's orWhere('id', targetId) recording.
-          const whereFn = calls.find((c) => c[0] === 'whereFn');
-          const nested = whereFn ? whereFn[1] : [];
-          const idMatch = nested.find((c) => c[0] === 'orWhere' && c[1] === 'id');
-          const targetId = idMatch ? idMatch[2] : null;
-          const dates = seriesDatesById.get(targetId);
-          if (!dates || !dates.size) return undefined;
-          const root = byId.get(targetId);
-          return {
-            scheduled_date: [...dates].sort().slice(-1)[0],
-            // Only set for a root exercising the cadence-position ranking
-            // fix (Codex GitHub r1 P1) — defaults to null/undefined so
-            // every other fixture's raw scheduled_date is unaffected.
-            date_exception_cadence_date: root?.dateExceptionCadenceDate || null,
-          };
-        }
-        if (idWhere) {
-          const root = byId.get(idWhere[1].id);
-          return root ? rowShape(root) : undefined;
-        }
-        return null;
-      }
-      if (op === 'await') {
-        if (calls.some((c) => c[0] === 'whereNull' && c[1] === 'recurring_parent_id') && calls.some((c) => c[0] === 'select' && c[1] === '*')) {
-          const excludeCall = calls.find((c) => c[0] === 'whereNot');
-          const excludeId = excludeCall ? excludeCall[2] : null;
-          return roots.filter((r) => r.id !== excludeId).map(rowShape);
-        }
-        if (calls.some((c) => c[0] === 'del')) return 0;
-        if (calls.some((c) => c[0] === 'whereRaw')) return [];
-        if (calls.some((c) => c[0] === 'select' && c[1] === 'scheduled_date')) return [];
-        return [];
-      }
-      if (op === 'insertReturning') {
-        const row = { id: 900 + Math.floor(Math.random() * 1000), ...data };
-        if (data?.recurring_parent_id != null) {
-          const set = seriesDatesById.get(data.recurring_parent_id) || new Set();
-          set.add(data.scheduled_date);
-          seriesDatesById.set(data.recurring_parent_id, set);
-        }
-        return [row];
-      }
-    }
-    if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
-    if (table === 'customers' && op === 'first') {
-      return { id: 5, active: true, deleted_at: null, service_paused_at: null, pipeline_stage: 'active_customer' };
-    }
-    if (table === 'customer_properties' && op === 'first') {
-      // seriesPropertyKey resolves a linked root's property through its
-      // OWN canonical address_key (Codex GitHub guards-follow-up P1 fix —
-      // never the raw property_id), so two roots' fixture propertyId
-      // strings ('prop-1' vs 'prop-2') double as their address_key here
-      // too: same string in, same canonical key out.
-      const idWhere = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
-      return idWhere ? { address_key: idWhere[1].id } : undefined;
-    }
-    if (table === 'services') return null;
-    if (table === 'system_settings') return null;
-    if (table === 'schedule_blackout_dates') return [];
-    return null;
-  });
-  return conn;
-}
-
-describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Codex GitHub guards follow-up P1)', () => {
-  // A customer can carry 2+ ongoing root series for the SAME family at the
-  // SAME property — almost always a legacy series replaced by a new
-  // cadence but never had its OWN recurring_ongoing cleared. A prod dry
-  // run found 44 active customers with 2+ ongoing roots in one family.
-  test('an older duplicate root (same property/family) is skipped while the newer one tops up', async () => {
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
-      { id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z' },
-    ];
-    const olderResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(olderResult.skipped).toBe('superseded_series');
-    const newerResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    expect(newerResult.skipped).not.toBe('superseded_series');
+describe('topUpRecurringSeriesLocked — duplicate active series (Codex GitHub #4782 r3: canonical duplicate-series guard reuse)', () => {
+  // The FIRST version of this rule (isSupersededSeries, three prior rounds)
+  // hand-rolled its own family classifier, active-series predicate, and
+  // address key — every one of round 3's four P1s traced to a place where
+  // that hand-rolled logic diverged from the SAME canonical guard the three
+  // series CREATORS already use (findActiveRecurringSeries,
+  // recurring-appointment-seeder.js). This suite reuses that canonical
+  // function directly instead: findActiveRecurringSeries is mocked (a full
+  // DB query the fake connection can't model), and every test here is
+  // about what isDuplicateActiveSeries hands it and does with what it
+  // returns — never a second definition of what counts as "active" or
+  // "the same family/property."
+  test('an active duplicate elsewhere skips THIS series with duplicate_series, carrying the sibling id for the ops script\'s review list', async () => {
+    // Not ...Once: topUpRecurringSeriesLocked resolves the canonical guard
+    // TWICE on a hit — once for the eligibility check, once more (reporting
+    // only) to hand the ops script the actual sibling ids — and a real DB
+    // read would return the same live result both times.
+    findActiveRecurringSeries.mockResolvedValue([{ id: 'sibling-b' }]);
+    const { conn, inserted } = topupScenario();
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('duplicate_series');
+    expect(result.duplicateSeriesIds).toEqual(['sibling-b']);
+    expect(inserted).toHaveLength(0);
   });
 
-  test('two roots at DIFFERENT properties both top up — never compared against each other', async () => {
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
-      { id: 99, propertyId: 'prop-2', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z' },
-    ];
-    const firstResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(firstResult.skipped).not.toBe('superseded_series');
-    const secondResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    expect(secondResult.skipped).not.toBe('superseded_series');
+  test('the guard skips BOTH sides, independently — neither "wins," matching what already happens today for these customers', async () => {
+    // Series A (id 10): an active sibling ('sibling-b') exists. Not
+    // ...Once: resolved twice on a hit (eligibility + reporting) — see the
+    // previous test's own comment.
+    findActiveRecurringSeries.mockResolvedValue([{ id: 'sibling-b' }]);
+    const seriesA = topupScenario();
+    const resultA = await topUpRecurringSeriesLocked(seriesA.conn, 10, { horizonDays: 30 });
+    expect(resultA.skipped).toBe('duplicate_series');
+    expect(seriesA.inserted).toHaveLength(0);
+
+    // Series B (id 99): called independently, with its OWN mocked match —
+    // the guard has no memory of A's own skip and no ranking step to
+    // decide a "winner"; it just re-asks the same canonical question from
+    // B's own perspective and gets an active sibling back too (in a real
+    // customer, A itself).
+    findActiveRecurringSeries.mockResolvedValue([{ id: 10 }]);
+    const seriesB = topupScenario({ parentOverrides: { id: 99 } });
+    const resultB = await topUpRecurringSeriesLocked(seriesB.conn, 99, { horizonDays: 30 });
+    expect(resultB.skipped).toBe('duplicate_series');
+    expect(resultB.duplicateSeriesIds).toEqual([10]);
+    expect(seriesB.inserted).toHaveLength(0);
   });
 
-  test('a different family at the same property is unaffected', async () => {
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
-      { id: 99, propertyId: 'prop-1', familyKey: 'pest_control', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z' },
-    ];
-    const result = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(result.skipped).not.toBe('superseded_series');
-  });
-
-  test('a series with no resolvable family is never compared against a sibling', async () => {
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: null, latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
-      { id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z' },
-    ];
-    const result = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(result.skipped).not.toBe('superseded_series');
-  });
-
-  test('a LINKED root and an UNLINKED legacy root at the identical physical address are recognized as duplicates (Codex GitHub guards follow-up P1)', async () => {
-    // seriesPropertyKey resolves a linked root through its OWN
-    // customer_properties.address_key, never a raw property_id — so it
-    // matches an unlinked sibling's directly-computed address key for the
-    // SAME physical address. Comparing `id:<uuid>` against `addr:<key>`
-    // (the pre-fix version) could never match this exact legacy-vs-current
-    // case, which is the one this whole rule exists for.
-    const roots = [
-      // Linked (has a customer_properties row) — customer_properties.address_key
-      // for this fixture's property_id, per supersededScenario's own
-      // customer_properties handler, is the property_id string itself.
-      { id: 10, propertyId: 'prop1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
-      // Unlinked legacy root — no property_id at all, but its OWN service
-      // address ("Prop 1") normalizes (addressKey) to the exact same
-      // 'prop1' key the linked root's property resolves to.
-      {
-        id: 99, familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z',
-        serviceAddressLine1: 'Prop 1',
+  test('no active match (a different property, in practice) never collides — tops up normally, and the canonical guard is called with the resolved OVERRIDE address, never the stale stamped one', async () => {
+    // The RAW stamped address this series was created with — must NOT be
+    // what gets scoped, since recurring_template_overrides.appointment_address
+    // below supersedes it (a moved series scopes on where it is NOW).
+    const { conn, inserted } = topupScenario({
+      parentOverrides: {
+        property_id: 'prop-stale', service_address_line1: '123 Stale St',
+        service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34205',
+        recurring_template_overrides: JSON.stringify({
+          appointment_address: {
+            property_id: 'prop-override', service_address_line1: '456 Override Ave',
+            service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34205',
+          },
+        }),
       },
-    ];
-    const result = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(result.skipped).toBe('superseded_series');
-  });
-
-  test('two UNLINKED roots sharing only city/ZIP — no street on either — are never treated as the same property (Codex GitHub #4782 r1 P2)', async () => {
-    // A street is required before an address counts as identifying a
-    // SPECIFIC property. City/ZIP alone is nowhere near specific enough —
-    // a city can hold thousands of properties on the same ZIP — so two
-    // unrelated roots that only happen to share a city/ZIP (no street on
-    // either) must resolve to an UNKNOWN property, never a coarse match
-    // that groups them as duplicates.
-    const roots = [
-      {
-        id: 10, familyKey: 'lawn_care', createdAt: '2020-01-01T00:00:00Z', latestDate: daysOut(0),
-        serviceAddressCity: 'Bradenton', serviceAddressZip: '34205',
-      },
-      {
-        id: 99, familyKey: 'lawn_care', createdAt: '2026-01-01T00:00:00Z', latestDate: daysOut(30),
-        serviceAddressCity: 'Bradenton', serviceAddressZip: '34205',
-      },
-    ];
-    const firstResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(firstResult.skipped).not.toBe('superseded_series');
-    const secondResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    expect(secondResult.skipped).not.toBe('superseded_series');
-  });
-
-  test('a later-dated but statically UNBILLABLE sibling never wins — never suppresses a genuinely billable series (Codex GitHub guards follow-up P1)', async () => {
-    // Without the billability check, root 99 (no invoice stamp, no price,
-    // a coincidentally LATER live visit) would be crowned winner purely on
-    // recency, suppressing root 10 — the genuinely billable series — as
-    // superseded_series. Root 99 would then refuse every insert on its OWN
-    // turn (the real seriesExtensionUnbillable gate), so NEITHER series
-    // would ever replenish again on any future run.
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z', billable: true },
-      { id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z', billable: false },
-    ];
-    // The genuinely billable, OLDER root tops up normally despite the
-    // unbillable sibling's later visit.
-    const billableResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(billableResult.skipped).not.toBe('superseded_series');
-    // The unbillable sibling is not force-labeled superseded_series either
-    // (that would be its own dishonest-skip-reason problem) — it proceeds
-    // to face its own real billable-amount gate.
-    const unbillableResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    expect(unbillableResult.skipped).not.toBe('superseded_series');
-  });
-
-  test('an invoice flag ALONE with a zero/unset price never counts as billable — the false-positive a cheap proxy let through (Codex GitHub guards follow-up P1, round 2)', async () => {
-    // create_invoice_on_complete: true with NO price and no membership
-    // dues is still $0 — "will invoice" supplies no amount to invoice. A
-    // first fix attempt treated the flag as sufficient on its own; this
-    // pins the corrected version, which reuses seriesExtensionUnbillable
-    // itself rather than a second hand-rolled approximation of it.
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z', billable: true },
-      {
-        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z',
-        createInvoiceOnComplete: true, estimatedPrice: null,
-      },
-    ];
-    const billableResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(billableResult.skipped).not.toBe('superseded_series');
-    const zeroPriceResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    expect(zeroPriceResult.skipped).not.toBe('superseded_series');
-  });
-
-  test('a later-dated sibling with an UNPLACEABLE window never wins — excluded from the pool entirely (Codex GitHub guards follow-up P2)', async () => {
-    // Without an eligibility filter, root 99 (billable, a coincidentally
-    // LATER live visit, but a window assertAdminAppointmentWindow itself
-    // refuses — 21:00 + 60min ends at 22:00, past the 20:00 admin day
-    // bound) would be crowned winner on billability + recency alone,
-    // suppressing root 10 as superseded_series. Root 99 would then refuse
-    // its OWN top-up as window_unplaceable on every future run, so NEITHER
-    // series would ever replenish again.
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
-      {
-        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z',
-        windowStart: '21:00', windowEnd: '22:00',
-      },
-    ];
-    const olderResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(olderResult.skipped).not.toBe('superseded_series');
-    const unplaceableResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    // Faces its own real gate honestly — never mislabeled superseded_series.
-    expect(unplaceableResult.skipped).toBe('window_unplaceable');
-  });
-
-  test('a later-dated sibling with no recurring_pattern never wins — excluded from the pool entirely (Codex GitHub guards follow-up P2)', async () => {
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
-      {
-        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z',
-        recurringPattern: null,
-      },
-    ];
-    const olderResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(olderResult.skipped).not.toBe('superseded_series');
-    const notRecurringResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    expect(notRecurringResult.skipped).toBe('not_recurring');
-  });
-
-  test('an EXACT tie (same latest-visit date AND same created_at) resolves the SAME winner regardless of which root asks (Codex GitHub guards follow-up P1, round 4)', async () => {
-    // Without a final stable tie-break, the winner depended on pool
-    // order — isSupersededSeries always puts its OWN `parent` first in
-    // the candidate list, so calling this once with root 10 as parent and
-    // once with root 99 as parent could crown EACH root a winner in its
-    // own call (both dry-run as eligible; apply's real winner becomes
-    // whichever one's run happens to go first — a genuine race).
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2026-01-01T00:00:00Z' },
-      { id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2026-01-01T00:00:00Z' },
-    ];
-    const asTen = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    const asNinetyNine = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    // Exactly one of the two is superseded_series — never both (both
-    // winning) and never neither (both losing).
-    const outcomes = [asTen.skipped === 'superseded_series', asNinetyNine.skipped === 'superseded_series'];
-    expect(outcomes.filter(Boolean)).toHaveLength(1);
-  });
-
-  test('ranks by cadence POSITION (COALESCE date_exception_cadence_date, scheduled_date), never the raw moved date (Codex GitHub #4782 r1 P1)', async () => {
-    // The legacy root's most recent LIVE visit was moved out to a later
-    // raw scheduled_date by a one-off "this visit only" exception, but its
-    // REAL cadence position (date_exception_cadence_date) is still well
-    // behind the replacement root's genuine booked-through date. Ranking
-    // on the raw scheduled_date alone would crown the legacy root winner
-    // on a date that doesn't reflect where its cadence actually is,
-    // wrongly superseding the replacement it was supposed to have lost to.
-    const roots = [
-      {
-        id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', createdAt: '2020-01-01T00:00:00Z',
-        latestDate: daysOut(90), dateExceptionCadenceDate: daysOut(30),
-      },
-      {
-        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', createdAt: '2026-01-01T00:00:00Z',
-        latestDate: daysOut(60),
-      },
-    ];
-    const legacyResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
-    expect(legacyResult.skipped).toBe('superseded_series');
-    const replacementResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 365 });
-    expect(replacementResult.skipped).not.toBe('superseded_series');
-  });
-
-  test('a newer at-horizon sibling with an unbillable POST-horizon candidate still wins — the billability probe is horizon-aware (Codex GitHub #4782 r2 P1)', async () => {
-    // Root 99 is already booked through nearly the whole horizon (day 29 of
-    // a 30-day horizon) — its real next weekly candidate lands around day
-    // 36, PAST the horizon this run is capped to, and (billable: false)
-    // would read as unbillable if it were ever actually probed. Without a
-    // horizon-aware probe, that post-horizon unbillable read would wrongly
-    // drop root 99 out of billableIds, letting the OLDER root 10 (which
-    // still has real headroom before the horizon) win instead and keep
-    // extending itself — while root 99, never recognized as the winner,
-    // stays "not superseded" too and eventually resumes inserting on some
-    // later run once the horizon catches up, so BOTH series independently
-    // replenish the same family/property (duplicate visits, worse with
-    // overlaps now advisory-only). The fix: a candidate this capped run
-    // would never actually attempt is never probed for billability at all,
-    // so root 99 counts as billable on the strength of what it already
-    // has booked, wins the ranking outright, and its own turn correctly
-    // no-ops as at_horizon (it already covers the horizon — nothing to add).
-    const roots = [
-      { id: 10, propertyId: 'prop-1', familyKey: 'lawn_care', createdAt: '2020-01-01T00:00:00Z', latestDate: daysOut(5) },
-      {
-        id: 99, propertyId: 'prop-1', familyKey: 'lawn_care', createdAt: '2026-01-01T00:00:00Z',
-        latestDate: daysOut(29), billable: false,
-      },
-    ];
-    const olderResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 30 });
-    expect(olderResult.skipped).toBe('superseded_series');
-    const newerResult = await topUpRecurringSeriesLocked(supersededScenario(roots), 99, { horizonDays: 30 });
-    expect(newerResult.skipped).not.toBe('superseded_series');
-    expect(newerResult.skipped).toBe('at_horizon');
-  });
-});
-
-describe('resolveTopUpProbeCandidateDate — probes the REAL next cadence date, never a fixed "today" (Codex GitHub guards follow-up P1, round 3)', () => {
-  // Pins the exact gap the review round caught: isCandidateTopUpBillable
-  // used to probe a fixed etDateString() regardless of the series' own
-  // cadence, so a zero-base sibling with an add-on due TODAY (but not on
-  // its real next visit) could pass the probe, win the superseded-series
-  // ranking, then refuse its own insert on the date that actually matters.
-  // This pins the fix's mechanism directly: the probe now runs the SAME
-  // candidate search extendSeriesOnceLocked itself uses, so it resolves to
-  // the series' real next cadence date rather than "today" whenever those
-  // differ.
-  const { resolveTopUpProbeCandidateDate } = adminScheduleRouter._test;
-
-  function probeDateConn(latestDate) {
-    return makeConn(({ table, calls, op }) => {
-      if (table === 'scheduled_services') {
-        if (op === 'columnInfo') return BASE_COLS;
-        if (op === 'first') {
-          // latestLiveSeriesVisit's own query shape (orderBy + first).
-          if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: latestDate };
-          return null;
-        }
-        if (op === 'await') return []; // loadActiveSeriesDates: no other active dates
-      }
-      if (table === 'property_preferences') return null;
-      if (table === 'schedule_blackout_dates') return [];
-      return null;
+      colsOverrides: { recurring_template_overrides: {} },
     });
-  }
-
-  test('a weekly series anchored a week ago resolves to next week, never today', async () => {
-    const anchor = daysOut(-7);
-    const parent = {
-      id: 10, customer_id: 5, recurring_pattern: 'weekly', scheduled_date: anchor,
-      recurring_nth: null, recurring_weekday: null, recurring_interval_days: null,
-      skip_weekends: false, weekend_shift: null,
-    };
-    const probe = await resolveTopUpProbeCandidateDate(probeDateConn(anchor), 10, parent, BASE_COLS);
-    expect(probe).not.toBeNull();
-    // The real next weekly cadence step is a week past the anchor — NOT
-    // today (today would be the pre-fix probe's fixed date, and if the
-    // anchor happens to be more than a week in the past, today could
-    // otherwise coincidentally look like a plausible "next" date).
-    expect(probe.candidate).not.toBe(etDateString());
-    expect(probe.candidate > etDateString()).toBe(true);
-    expect(probe.candidate).not.toBe(anchor);
-  });
-
-  test('a series with no live visit at all resolves to null — nothing to probe, never a fabricated "today"', async () => {
-    const parent = {
-      id: 10, customer_id: 5, recurring_pattern: 'weekly', scheduled_date: daysOut(-7),
-      recurring_nth: null, recurring_weekday: null, recurring_interval_days: null,
-    };
-    const conn = makeConn(({ table, op }) => {
-      if (table === 'scheduled_services') {
-        if (op === 'columnInfo') return BASE_COLS;
-        if (op === 'first') return null; // no latest live visit
-        if (op === 'await') return [];
-      }
-      return null;
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    // findActiveRecurringSeries defaults to [] (beforeEach) — no active
+    // duplicate anywhere, so this series tops up normally.
+    expect(result.skipped).not.toBe('duplicate_series');
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(buildSeriesAddressScope).toHaveBeenCalledWith(
+      expect.anything(),
+      { property_id: 'prop-override', address: '456 Override Ave, Bradenton, FL 34205' },
+      5,
+    );
+    expect(findActiveRecurringSeries).toHaveBeenCalledWith(expect.anything(), {
+      customerId: 5,
+      serviceId: null,
+      serviceType: 'Weekly Pest Control',
+      excludeParentId: 10,
+      // The default beforeEach mock for buildSeriesAddressScope — this
+      // test only pins the ADDRESS it was asked to scope with (above), not
+      // buildSeriesAddressScope's own internal resolution (that function
+      // has its own dedicated tests).
+      serviceAddressScope: null,
     });
-    const probe = await resolveTopUpProbeCandidateDate(conn, 10, parent, BASE_COLS);
-    expect(probe).toBeNull();
   });
+
+  // Approved separate programs (duplicateSeriesOverride / allowDuplicateSeries,
+  // admin-schedule.js's own booking-creation routes): checked ONLY at
+  // booking time via separateProgramMatches, against the reviewedIds the
+  // SAME request carries — never written anywhere durable afterward (no
+  // column, no linking table; only a logger.warn line survives). With
+  // nothing queryable to distinguish an approved program from an
+  // accidental duplicate after the fact, there is no persisted-approval
+  // exemption to test here — every active match skips both sides,
+  // approved programs included (see isDuplicateActiveSeries's own
+  // comment, and the PR description).
 });
 
 describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
@@ -1581,5 +1290,32 @@ describe('topUpRecurringSeries — the writing wrapper', () => {
     expect(result.skipped).toBe('owner_changed_under_fence');
     expect(result.spawnedVisits).toEqual([]);
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+});
+
+describe('classifySeriesOutcome (scripts/recurring-series-topup.js) — the no_change bucket (Codex GitHub #4782 r3 P2)', () => {
+  // require.main guard on the script (module.exports added alongside it)
+  // lets this suite pull the pure classifier directly without running
+  // main() — which would otherwise hit a real database as a side effect
+  // of require().
+  const { classifySeriesOutcome } = require('../../scripts/recurring-series-topup');
+
+  test('an eligible series that inserted nothing without a skip reason classifies as no_change — not silently missing from the outcome table', () => {
+    expect(classifySeriesOutcome({ spawnedVisits: [], skipped: null })).toBe('no_change');
+    expect(classifySeriesOutcome(undefined)).toBe('no_change');
+  });
+
+  test('a series that actually inserted classifies as toppedUp', () => {
+    expect(classifySeriesOutcome({ spawnedVisits: [{ scheduledDate: '2026-10-01' }], skipped: null })).toBe('toppedUp');
+  });
+
+  test('any named skip reason classifies as skip:<reason>, never toppedUp or no_change, even alongside inserted visits', () => {
+    expect(classifySeriesOutcome({ spawnedVisits: [], skipped: 'duplicate_series' })).toBe('skip:duplicate_series');
+    expect(classifySeriesOutcome({ spawnedVisits: [], skipped: 'at_horizon' })).toBe('skip:at_horizon');
+    // skipped is checked first — topUpRecurringSeriesLocked never returns
+    // both a skip reason and spawned visits from the SAME run today, but
+    // the classifier's own precedence must not silently change if that
+    // ever became possible.
+    expect(classifySeriesOutcome({ spawnedVisits: [{ scheduledDate: '2026-10-01' }], skipped: 'unbillable' })).toBe('skip:unbillable');
   });
 });

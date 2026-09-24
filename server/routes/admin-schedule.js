@@ -1523,6 +1523,7 @@ const {
   copyAppointmentDiscountFields,
   copyBillToFields,
   copyStampedServiceAddressFields,
+  recurringServiceAddress,
   typedDiscountSlot,
   restackOccurrenceDiscounts,
   stampPricingRegimeMarker,
@@ -17392,310 +17393,88 @@ async function isFamilyOnPlanHold(conn, parent, parentId) {
   return !!activeHold;
 }
 
-// A customer can carry 2+ ongoing root series for the SAME family at the
-// SAME property — almost always a legacy series that was replaced by a
-// new cadence (e.g. a monthly lawn plan superseded by an every-6-week
-// reset) but never had its OWN recurring_ongoing cleared, so it keeps
-// regenerating visits alongside the plan the customer is actually on. A
-// prod dry run found 44 active customers with 2+ ongoing roots in one
-// family — a mix of genuinely superseded legacy series and legitimate
-// multi-property customers (two houses, a 4-property vacation-rental
-// account) — so this only ever compares roots that ALSO share a property,
-// never a customer's whole family footprint at once.
+// A customer can carry 2+ ACTIVE recurring series in the same family at
+// the same property — a booking mistake the THREE creators (booking.js
+// self-book, estimate-converter auto-schedule, admin POST
+// /admin/schedule's create + update-details' make-recurring) already
+// guard against at creation time via findActiveRecurringSeries
+// (recurring-appointment-seeder.js). Top-up reuses that SAME canonical
+// guard rather than a second, hand-rolled family/address classifier
+// (Codex GitHub r3: four P1s, every one of them a divergence the first
+// version of this rule introduced — a different family key than
+// duplicateGuardFamilyKey, an "active" predicate that didn't distinguish
+// a fixed-count series with an upcoming visit from a stale
+// recurring_ongoing root with nothing left, a hand-rolled address key
+// instead of the canonical override-aware resolver, and no awareness of
+// the approved-separate-program escape hatch at all).
 //
-// Family: familyOfServiceRow (cancellation-processor.js — the SAME
-// classifier the plan-hold rule above and every cancellation surface
-// share), never a second hand-rolled map. A series with no resolvable
-// family is never compared (nothing to disambiguate against).
+// Unlike the deleted "rank and crown a winner" approach, a hit here skips
+// BOTH sides: this run has no reliable way to tell an accidental duplicate
+// from a deliberately approved separate program (see below), so the
+// conservative call is to withhold NEW top-up inserts from either series
+// until the owner reviews and clears the stale one — never guess which
+// one "should" keep growing. This matches what already happens today for
+// these customers (both series already exist and neither's top-up ran
+// before this PR), so it changes nothing about what's currently on the
+// books; it only stops the SAME mistake from compounding on future runs.
 //
-// Property: property_id when the schema has it and this row is linked;
-// otherwise the row's OWN service address (customer-properties.js's
-// addressKey — the SAME normalization the customer_properties table's
-// uniqueness itself uses, so "123 Main St" and "123 Main Street" key
-// identically); otherwise the CUSTOMER's own address (a legacy row with
-// no service-address snapshot and no property link). A series whose
-// property can't be determined at all (no id, no service address, no
-// customer address) is never compared — refusing to guess "same property"
-// would be the wrong failure direction here: incorrectly SKIPPING a real,
-// distinct series over an unprovable address match stops booking it
-// silently, worse than leaving a genuine duplicate untouched for a human
-// to find.
-//
-// Among the customer's ongoing roots sharing this exact family+property,
-// only the one with the LATEST live visit (latestLiveSeriesVisit — the
-// SAME anchor every extend step uses) tops up; every other root is
-// skipped as superseded_series. Ties (e.g. two roots with no live visit
-// at all, or the same cadence position) break on the most recently
-// CREATED root — the newer series is presumed the replacement.
-async function seriesFamilyOf(conn, row) {
-  const { familyOfServiceRow } = require('../services/cancellation-processor');
-  const svc = row.service_id
-    ? await conn('services').where({ id: row.service_id }).first('service_key', 'name')
-    : null;
-  return familyOfServiceRow({ ...row, service_key: svc?.service_key, service_name: svc?.name });
-}
-function seriesAddressPropertyKey(row) {
-  // A street line is required before trusting this as a property identity
-  // (Codex GitHub r1 P2) — city/zip alone is nowhere near specific enough
-  // (a city can hold thousands of properties sharing a ZIP), so without a
-  // street this must read as "unknown," never a coarse key two genuinely
-  // different properties could collide on.
-  if (!row.service_address_line1) return null;
-  const { addressKey } = require('../services/customer-properties');
-  return addressKey({
-    address_line1: row.service_address_line1,
-    address_line2: row.service_address_line2,
-    city: row.service_address_city,
-    zip: row.service_address_zip,
-  }) || null;
-}
-// ALWAYS resolves to an address key, never a raw property_id — a linked
-// root's key comes from ITS property's own customer_properties.address_key
-// (the SAME canonical value customer-properties.js stamps at creation),
-// not the property's row id, so an unlinked legacy root at the identical
-// physical address (computed here directly from its own service/customer
-// address fields) resolves to the SAME key and the two are correctly
-// compared. Comparing raw `id:<uuid>` against `addr:<key>` would never
-// match two rows for the very legacy-vs-current case this rule targets —
-// exactly the scenario a linked replacement series and its unlinked
-// predecessor create.
-async function seriesPropertyKey(conn, row, cols) {
-  if (cols.property_id && row.property_id) {
-    const property = await conn('customer_properties').where({ id: row.property_id }).first('address_key');
-    if (property?.address_key) return `addr:${property.address_key}`;
-    // Linked to a property row with no computed address_key (customer-
-    // properties.js always stamps one at creation, so this should not
-    // happen in practice) — fail safe with the link itself rather than
-    // silently falling through to a DIFFERENT identity than what it
-    // actually points to.
-    return `id:${row.property_id}`;
+// Approved separate programs (duplicateSeriesOverride / allowDuplicateSeries,
+// admin-schedule.js's own booking-creation routes): checked at BOOKING
+// TIME only — an admin reviews the exact existing-series id SET on that
+// one request (separateProgramMatches) and the resulting row is never
+// durably marked as part of an approved pair afterward. There is no
+// column, no linking table, no queryable record at all — the only trace
+// is a logger.warn line at creation. With nothing to query, this rule
+// cannot distinguish an approved program from an accidental duplicate
+// after the fact, so EVERY active match skips both sides, approved
+// programs included. This never stops an approved program from keeping
+// the visits it already has — it only withholds NEW top-up inserts on
+// both series until the owner clears the stale one (recurring_ongoing) or
+// a future change adds a durable, queryable marker for an approval.
+// Shared by the eligibility rule below (isDuplicateActiveSeries, which
+// only needs the boolean) and topUpRecurringSeriesLocked's own reporting
+// path (which needs the actual sibling ids for the ops script's "Duplicate
+// series for review" list) — one resolver, never two definitions of "what
+// counts as an active duplicate" that could disagree.
+async function resolveDuplicateActiveSeries(conn, parent, parentId) {
+  const { findActiveRecurringSeries } = require('../services/recurring-appointment-seeder');
+  const { buildSeriesAddressScope } = require('../services/estimate-converter');
+  // The canonical override-aware address resolver (visit-financial-
+  // stamps' recurringServiceAddress) — a moved series
+  // (recurring_template_overrides.appointment_address) scopes on its OWN
+  // current address, never a stale stamped one, exactly as
+  // findActiveRecurringSeries itself already resolves every CANDIDATE
+  // parent's address internally (the same function, same call).
+  const addr = recurringServiceAddress(parent);
+  const address = [
+    [addr.service_address_line1, addr.service_address_line2].filter(Boolean).join(' '),
+    addr.service_address_city,
+    `${addr.service_address_state || ''} ${addr.service_address_zip || ''}`.trim(),
+  ].join(', ');
+  let serviceAddressScope = null;
+  try {
+    serviceAddressScope = await buildSeriesAddressScope(
+      conn,
+      { property_id: addr.property_id || null, address },
+      parent.customer_id,
+    );
+  } catch {
+    // Fail OPEN on the scope only, never on the guard itself — the
+    // canonical function's own documented fallback (serviceAddressScope:
+    // null) is exact legacy customer+family behavior: still a correct,
+    // just property-blind, duplicate check for this one series this run.
   }
-  const ownAddress = seriesAddressPropertyKey(row);
-  if (ownAddress) return `addr:${ownAddress}`;
-  const { addressKey } = require('../services/customer-properties');
-  const customer = await conn('customers').where({ id: row.customer_id })
-    .first('address_line1', 'address_line2', 'city', 'zip');
-  // Same street-required rule as seriesAddressPropertyKey above (Codex
-  // GitHub r1 P2) — a customer record with only a city/zip on file is
-  // just as unable to identify a SPECIFIC property as a service address
-  // missing its street. No street anywhere ⇒ the property genuinely
-  // can't be determined, which falls through to `null` below — the
-  // documented fail-safe (skip the comparison rather than guess).
-  const customerAddress = customer?.address_line1 ? addressKey(customer) : '';
-  return customerAddress ? `addr:${customerAddress}` : null;
-}
-// Mirrors extendSeriesOnceLocked's own candidate-date search — the SAME
-// primitives (seriesExtendAnchor, nextRecurringDate, seasonalSafeShift,
-// recurrenceOrdinalOptions, recurringCandidateTooCloseToAnchor), never a
-// second hand-rolled date-math approximation — so isCandidateTopUpBillable
-// below can probe the date a series would ACTUALLY try next, instead of a
-// fixed "today" (Codex GitHub guards-follow-up P1, round 3: a zero-base
-// sibling with an add-on due TODAY but not on its real cadence date could
-// pass a today-only probe, win the ranking, then refuse its own insert on
-// the date that actually matters). Read-only, and deliberately never calls
-// seriesCandidateDateClashes: top-up's own real insert always runs that
-// check in ADVISORY-ONLY mode (opts.overlapAdvisoryOnly), where a clash
-// never changes which date gets picked — only whether a warning is
-// logged — so skipping it here changes no outcome and spares a probe-only
-// occupancy query. opts.maxDate (Codex GitHub r2 P1): the SAME horizon cap
-// extendSeriesOnceLocked's own real insert honors, so a candidate this
-// capped run would never actually attempt is never probed as if it would
-// be. Returns null when there's no live visit to anchor from, when 12
-// cadence steps find nothing open, or when every remaining candidate falls
-// past maxDate — the SAME give-up conditions extendSeriesOnceLocked itself
-// uses (dates only advance forward as `attempt` climbs, so once one
-// candidate passes maxDate every later one does too).
-async function resolveTopUpProbeCandidateDate(conn, parentId, parent, cols, opts = {}) {
-  const latest = await latestLiveSeriesVisit(conn, parentId);
-  if (!latest) return null;
-  const rOpts = {
-    ...recurrenceOrdinalOptions(parent.scheduled_date, {
-      nth: parent.recurring_nth,
-      weekday: parent.recurring_weekday,
-    }),
-    intervalDays: parent.recurring_interval_days,
-  };
-  const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
-  const skipParent = (cols.skip_weekends ? !!parent.skip_weekends : false)
-    || await customerPrefersNoWeekends(conn, parent.customer_id);
-  const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
-  const existingDates = await loadActiveSeriesDates(conn, parentId);
-  const autoExtendBlackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-  let attempt = 1;
-  while (attempt <= 12) {
-    const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
-    const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
-    if (!candidate) { attempt++; continue; }
-    if (recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate)) { attempt++; continue; }
-    if (candidate <= etDateString()) { attempt++; continue; }
-    if (opts.maxDate && candidate > opts.maxDate) { attempt++; continue; }
-    if (existingDates.has(candidate)) { attempt++; continue; }
-    return { candidate, skipParent, autoExtendBlackoutDates };
-  }
-  return null;
-}
-// Never let an unbillable candidate win a superseded-series comparison and
-// suppress a real one (Codex GitHub guards-follow-up P1: round 1, a cheap
-// "invoice stamp OR a price OR membership dues" proxy let a
-// create_invoice_on_complete flag alone count as billable with nothing
-// behind it — the SAME false-positive shape the coordinator's whole
-// prepay scope-cut saga already spent three rounds eliminating from this
-// file; round 3, probing a fixed "today" instead of the series' real next
-// candidate date missed an add-on that's due today but not on the actual
-// cadence date). An unbillable legacy duplicate with a coincidentally
-// LATER live visit could otherwise be crowned winner, suppressing the
-// genuinely billable sibling — and since the "winner" then refuses every
-// insert on its own turn anyway, NEITHER series would ever replenish
-// again on any future run either. Reuses seriesExtensionUnbillable
-// directly — the SAME authoritative verdict extendSeriesOnceLocked itself
-// consults, never a second hand-rolled approximation — against the real
-// next candidate date and its real due add-ons (resolveTopUpProbeCandidateDate
-// above). No candidate date to probe (no live visit, 12 cadence steps
-// found nothing open, or — Codex GitHub r2 P1 — every remaining candidate
-// falls past this run's horizon, so this capped run would never actually
-// attempt it) proves nothing unbillable, so it defaults to billable rather
-// than block the ranking on an inconclusive read — the same "never
-// overcount unbillable" direction as before. Without the horizon check, a
-// newer duplicate already booked THROUGH the horizon (so it should win
-// outright — see isSupersededSeries) could get wrongly disqualified by a
-// coincidentally-unbillable POST-horizon date it will never be asked to
-// fill this run, letting the older root win instead and (with overlaps now
-// advisory-only) insert a genuine duplicate visit alongside it.
-async function isCandidateTopUpBillable(conn, row, cols, effectiveHorizon) {
-  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: row.id });
-  const storedDiscountScope = await loadStoredDiscountScope(conn, row, parentAddons);
-  const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, row.id, row);
-  const probe = await resolveTopUpProbeCandidateDate(conn, row.id, row, cols, { maxDate: effectiveHorizon });
-  if (!probe) return true;
-  const unbillable = await seriesExtensionUnbillable(conn, {
-    parent: row, dates: [probe.candidate], cols, parentAddons, storedDiscountScope,
-    blackoutDates: probe.autoExtendBlackoutDates, skipParent: probe.skipParent, seriesCioc,
+  return findActiveRecurringSeries(conn, {
+    customerId: parent.customer_id,
+    serviceId: parent.service_id || null,
+    serviceType: parent.service_type,
+    excludeParentId: parentId,
+    serviceAddressScope,
   });
-  return !unbillable;
 }
-// Resolves the winning root among a candidate pool: the one with the
-// latest live visit (latestLiveSeriesVisit — the SAME anchor every extend
-// step uses), ties on that broken by the most recently created root, and a
-// FINAL stable tie-break on the row id itself (Codex GitHub guards
-// follow-up P1, round 4): two roots can share both the same latest-visit
-// date and the same created_at (batch-created roots, or two series with no
-// live visit at all — latestDate and createdAt both default the same for
-// either). Without a final total order, the winner depended on POOL ORDER
-// — isSupersededSeries always puts `parent` first in `candidates`, so
-// calling this rule once with root A as parent and once with root B as
-// parent could crown A both times (A first in its own call, and A still
-// wins ties in B's call too) — or, symmetrically, EACH root could crown
-// itself in its own call, so a dry run reports both eligible and apply's
-// winner is whichever one's turn happens to run first. Lexicographic on
-// the id string is a real total order (never a tie) that doesn't depend
-// on which root is doing the asking. A candidate with no live visit at all
-// never outranks one that has one.
-async function pickTopUpWinnerId(conn, pool) {
-  let winner = null;
-  for (const row of pool) {
-    // Sequential, not parallel: pools here are tiny (2-3 candidates at
-    // most even for the busiest customers).
-    const latest = await latestLiveSeriesVisit(conn, row.id);
-    // The SAME cadence-position key latestLiveSeriesVisit itself orders
-    // by (COALESCE(date_exception_cadence_date, scheduled_date)), never
-    // the raw scheduled_date alone (Codex GitHub r1 P1): a "this visit
-    // only" exception row's scheduled_date can be moved well past its
-    // real cadence slot (rescheduleSeries.readSiblings /
-    // recurringCadenceDate treat this identically — ADMIN-BUG-R30). A
-    // legacy root whose October visit got a one-off move to December
-    // must not outrank a replacement root genuinely booked through
-    // November on the strength of that moved date alone.
-    const latestDate = latest ? dateOnly(latest.date_exception_cadence_date || latest.scheduled_date) : null;
-    const createdAt = row.created_at ? new Date(row.created_at).getTime() : 0;
-    const candidate = { id: row.id, latestDate, createdAt };
-    if (!winner) { winner = candidate; continue; }
-    if (candidate.latestDate !== winner.latestDate) {
-      if (candidate.latestDate == null) continue;
-      if (winner.latestDate == null || candidate.latestDate > winner.latestDate) { winner = candidate; }
-      continue;
-    }
-    if (candidate.createdAt !== winner.createdAt) {
-      if (candidate.createdAt > winner.createdAt) winner = candidate;
-      continue;
-    }
-    if (String(candidate.id) > String(winner.id)) winner = candidate;
-  }
-  return winner.id;
-}
-// Never let a sibling that isn't itself top-up eligible win the ranking —
-// a candidate with an unplaceable window, no recurring_pattern, or its
-// OWN annual-prepay stamp would still win here on billability + recency
-// alone, then refuse everything on its own turn instead
-// (window_unplaceable / not_recurring / annual_prepay_series), silently
-// starving BOTH series forever (Codex GitHub guards-follow-up P1).
-// Reuses the SAME non-recursive checks topUpRecurringSeriesLocked itself
-// runs around this very rule — the two structural gates it checks before
-// ever reaching TOPUP_SERIES_INELIGIBILITY_RULES, plus isAnnualPrepaySeries
-// itself (the first rule in that table, and the only one of the other two
-// that can differ PER SERIES rather than per customer+family) — never a
-// third parallel definition of "is this series usable." plan_hold is
-// deliberately not re-checked here: it's keyed on (customer_id,
-// family_key) alone, identical for every candidate in this pool by
-// construction (same customer, same family already established below),
-// and parent already cleared it before this rule ever ran.
-async function isCandidateTopUpEligible(conn, row, cols) {
-  if (!row.is_recurring || !row.recurring_pattern) return false;
-  if (normalizeTopUpWindow(row.window_start, row.estimated_duration_minutes, row.window_end)?.unplaceable) return false;
-  if (await isAnnualPrepaySeries(conn, row, row.id, cols)) return false;
-  return true;
-}
-async function isSupersededSeries(conn, parent, parentId, cols, effectiveHorizon) {
-  const family = await seriesFamilyOf(conn, parent);
-  if (!family) return false;
-  const propertyKey = await seriesPropertyKey(conn, parent, cols);
-  if (propertyKey == null) return false;
-  const siblingRoots = (await conn('scheduled_services')
-    .where({ customer_id: parent.customer_id, is_recurring: true, recurring_ongoing: true })
-    .whereNull('recurring_parent_id')
-    .whereNot('id', parentId)
-    .select('*'))
-    // Series-scope price/service overrides beat a root's own columns —
-    // same overlay applied to `parent` above, before it ever reaches this
-    // function. Without it, an overridden service_id/service_type on one
-    // sibling can classify to a different family than the SAME root would
-    // resolve to as `parent` on its own run, so a real duplicate is missed
-    // (or a distinct series wrongly suppressed) depending only on which of
-    // the two roots is being evaluated.
-    .map((row) => overlayRecurringTemplateOverrides(row, cols));
-  if (!siblingRoots.length) return false;
-  const duplicates = [];
-  for (const row of siblingRoots) {
-    // Sequential, not parallel: siblings are rare (2-3 at most even for
-    // the busiest customers), so there's nothing to gain from Promise.all.
-    const rowFamily = await seriesFamilyOf(conn, row);
-    if (rowFamily !== family) continue;
-    const rowPropertyKey = await seriesPropertyKey(conn, row, cols);
-    if (rowPropertyKey !== propertyKey) continue;
-    // An ineligible sibling is never a real competitor for the winner
-    // slot — it's excluded from the pool entirely rather than merely
-    // deprioritized, so it can neither win (see above) nor suppress the
-    // parent by being counted as "the" duplicate when it's really just
-    // dead weight that will refuse its own top-up regardless.
-    if (!(await isCandidateTopUpEligible(conn, row, cols))) continue;
-    duplicates.push(row);
-  }
-  if (!duplicates.length) return false;
-  // This series is one candidate among itself + its duplicates.
-  const candidates = [parent, ...duplicates];
-  const billableIds = new Set();
-  for (const row of candidates) {
-    // Sequential, not parallel: same small candidate set gathered above.
-    if (await isCandidateTopUpBillable(conn, row, cols, effectiveHorizon)) billableIds.add(row.id);
-  }
-  // A `parent` that is itself unbillable while a sibling is billable is
-  // never labeled superseded_series here — mislabeling would be exactly
-  // the dishonest-skip-reason problem this same PR's other fix corrects;
-  // it proceeds normally and faces its own real gate, reporting
-  // 'unbillable' honestly.
-  if (billableIds.size && !billableIds.has(parentId)) return false;
-  const pool = billableIds.size ? candidates.filter((row) => billableIds.has(row.id)) : candidates;
-  const winnerId = await pickTopUpWinnerId(conn, pool);
-  return winnerId !== parentId;
+async function isDuplicateActiveSeries(conn, parent, parentId) {
+  const matches = await resolveDuplicateActiveSeries(conn, parent, parentId);
+  return matches.length > 0;
 }
 
 // Table-driven (async — needs a DB read, unlike the synchronous customer
@@ -17704,17 +17483,14 @@ async function isSupersededSeries(conn, parent, parentId, cols, effectiveHorizon
 const TOPUP_SERIES_INELIGIBILITY_RULES = [
   ['annual_prepay_series', isAnnualPrepaySeries],
   ['plan_hold', isFamilyOnPlanHold],
-  ['superseded_series', isSupersededSeries],
+  ['duplicate_series', isDuplicateActiveSeries],
 ];
-async function topupSeriesSkipReason(conn, parent, parentId, cols, effectiveHorizon) {
+async function topupSeriesSkipReason(conn, parent, parentId, cols) {
   for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
     // Sequential, not parallel: one rule today, and each is a DB read, so
     // there's nothing to gain from Promise.all here and it'd only cost
-    // clarity. effectiveHorizon is passed to every rule for a uniform
-    // signature; only isSupersededSeries reads it today (Codex GitHub r2
-    // P1) — isAnnualPrepaySeries and isFamilyOnPlanHold simply ignore the
-    // extra argument.
-    if (await test(conn, parent, parentId, cols, effectiveHorizon)) return reason;
+    // clarity.
+    if (await test(conn, parent, parentId, cols)) return reason;
   }
   return null;
 }
@@ -17808,20 +17584,19 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   );
   if (!advisoryTryLockAcquired(prepayLockResult)) return { spawnedVisits: [], skipped: 'annual_prepay_busy' };
 
-  // Computed here — before topupSeriesSkipReason, not after — so
-  // isSupersededSeries's own billability probe (via isCandidateTopUpBillable
-  // → resolveTopUpProbeCandidateDate) can be horizon-aware (Codex GitHub r2
-  // P1): a sibling already booked through the horizon whose real NEXT
-  // occurrence falls past it would otherwise get probed on that
-  // post-horizon date, which this capped run would never actually attempt,
-  // and a coincidentally unbillable result there could wrongly disqualify
-  // an otherwise-winning sibling. Pure/no-DB, so moving it earlier changes
-  // nothing else here.
-  const todayStr = etDateString();
-  const effectiveHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
-
-  const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols, effectiveHorizon);
-  if (seriesSkip) return { spawnedVisits: [], skipped: seriesSkip };
+  const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols);
+  if (seriesSkip) {
+    // duplicate_series: a second, reporting-only resolve of the SAME
+    // canonical guard (resolveDuplicateActiveSeries — no second
+    // definition) so the ops script can print the actual sibling ids for
+    // the owner's review list. Only runs on the rare hit, never on every
+    // series this loop scans.
+    if (seriesSkip === 'duplicate_series') {
+      const duplicates = await resolveDuplicateActiveSeries(conn, parent, parentId);
+      return { spawnedVisits: [], skipped: seriesSkip, duplicateSeriesIds: duplicates.map((m) => m.id) };
+    }
+    return { spawnedVisits: [], skipped: seriesSkip };
+  }
 
   // Pure/no-DB — depends only on parent.window_start/window_end/duration,
   // so it's the SAME verdict extendSeriesOnceLocked's own per-insert
@@ -17831,6 +17606,9 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   if (normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end)?.unplaceable) {
     return { spawnedVisits: [], skipped: 'window_unplaceable' };
   }
+
+  const todayStr = etDateString();
+  const effectiveHorizon = etDateString(addETDays(parseETDateTime(`${todayStr}T12:00`), horizonDays));
 
   const spawnedVisits = [];
   // The raw (non-fast-forwarded) date of the series' latest live visit as of
@@ -23741,11 +23519,8 @@ router._test = {
   isAnnualPrepaySeries,
   isCustomerPrepayLive,
   isFamilyOnPlanHold,
-  isSupersededSeries,
-  isCandidateTopUpBillable,
-  isCandidateTopUpEligible,
-  resolveTopUpProbeCandidateDate,
-  pickTopUpWinnerId,
+  isDuplicateActiveSeries,
+  resolveDuplicateActiveSeries,
   normalizeTopUpWindow,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
   latestLiveSeriesVisit,

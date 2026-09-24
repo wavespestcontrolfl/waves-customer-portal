@@ -658,35 +658,18 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // check (the nightly top-up loop) — extendSeriesOnceLocked's internal
     // call (moved out of runRecurringSeriesMaintenanceLocked, net zero) is
     // the completion path's existing occurrence, not a new one.
-    // 6th: isSupersededSeries' own winner-selection loop (one call per
-    // candidate root sharing a customer/family/property) — a DIFFERENT
-    // question ("which of these roots is the one actually being kept
-    // current") than the anchor-for-extension use every other consumer
-    // makes, but the same shared "latest live visit" definition either way.
-    // 7th: resolveTopUpProbeCandidateDate (Codex GitHub guards follow-up
-    // P1, round 3) anchors the superseded-series billability probe's
-    // candidate-date search on the SAME latest-live-visit definition
-    // extendSeriesOnceLocked's own search uses, so the probe checks the
-    // date a series would actually try next rather than a fixed "today".
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(8);
+    // (Two short-lived extra consumers — isSupersededSeries' own
+    // winner-selection loop and resolveTopUpProbeCandidateDate's
+    // candidate-date search — were introduced and then deleted within the
+    // same PR (#4782): round 3's review replaced that hand-rolled
+    // ranking/billability-probe approach with a direct reuse of the
+    // canonical duplicate-series guard, findActiveRecurringSeries — see
+    // isDuplicateActiveSeries's own comment. Back to the 6 pre-existing
+    // consumers below.)
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(6);
     // The occupied-dates preload is shared the same way — same 4th
-    // consumer, plus resolveTopUpProbeCandidateDate's own 5th (mirrors
-    // extendSeriesOnceLocked's dedupe against active series dates so the
-    // probed date can't be one already booked).
-    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(5);
-  });
-
-  test('isSupersededSeries classifies each sibling root through the SAME template-override overlay `parent` gets (source guard, Codex GitHub guards follow-up P1)', () => {
-    // Without this, an overridden service_id/service_type on one sibling
-    // could classify it into a DIFFERENT family than the same root
-    // resolves to as `parent` on its own run, missing a real duplicate (or
-    // wrongly suppressing a distinct series) depending only on which of
-    // the two roots is being evaluated.
-    const fnStart = src.indexOf('async function isSupersededSeries(');
-    const fnEnd = src.indexOf('\n}\n', fnStart);
-    expect(fnStart).toBeGreaterThan(-1);
-    const fnBody = src.slice(fnStart, fnEnd);
-    expect(fnBody).toContain('.map((row) => overlayRecurringTemplateOverrides(row, cols))');
+    // consumer.
+    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
 
   test('rolls back when the series was stopped while processing (race re-check)', async () => {

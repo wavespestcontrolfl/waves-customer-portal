@@ -128,18 +128,21 @@ describe('seedFollowUpsForParent honors the saved weekday preference', () => {
 
 describe('every consumer consults the preference LIVE (source pins)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-  test('all nine admin-schedule consult sites present', () => {
+  test('all eight admin-schedule consult sites present', () => {
     // import + plan-helper fallback + create route + per-edit snapshot +
     // reconcile fallback + maintenance + annual-prepay weekend gate +
     // alert action. The update-details write paths consume the per-edit
     // snapshot (editPrefNoWeekends) instead of resolving again — one
     // snapshot per edit keeps the plan and the writes on the same value.
-    // 9th: resolveTopUpProbeCandidateDate, isSupersededSeries' own
-    // candidate-date search for its billability probe (Codex GitHub
-    // guards follow-up P1, round 3) — mirrors extendSeriesOnceLocked's own
-    // search exactly, including a LIVE preference read per candidate
-    // root, rather than assuming a static default.
-    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
+    // (A short-lived 9th — resolveTopUpProbeCandidateDate's own candidate-
+    // date search for isSupersededSeries' billability probe, Codex GitHub
+    // guards follow-up P1 round 3 — was introduced and then deleted within
+    // the same PR (#4782): round 3's review replaced that whole hand-rolled
+    // ranking/billability-probe approach with a direct reuse of the
+    // canonical duplicate-series guard, findActiveRecurringSeries, which
+    // has no weekend-preference concern of its own. Back to the 8
+    // pre-existing consult sites below.)
+    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
     expect(src).toContain('(input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))');
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
     expect(src).toContain('const editPrefNoWeekends = await customerPrefersNoWeekends(db, editPrefRow?.customer_id);');
