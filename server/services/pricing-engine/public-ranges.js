@@ -149,7 +149,10 @@ function waveGuardBundleValues() {
       // sets: defaults, and the cheapest selectable lawn/tree-shrub combo.
       for (const optionSet of [
         { lawnSqFt: 6000, lawn: {}, treeShrub: {} },
-        { lawnSqFt: 1500, lawn: { track: 'bahia', tier: 'premium' }, treeShrub: { tier: 'light' } },
+        // Cheapest selectable T&S tier is now Standard (6x) — Light/4x is
+        // retired for new sales (owner directive 2026-09-24) and must not
+        // shape the published minimum via this "cheapest combo" sweep.
+        { lawnSqFt: 1500, lawn: { track: 'bahia', tier: 'premium' }, treeShrub: { tier: 'standard' } },
       ]) {
       const est = generateEstimate({
         propertyType,
