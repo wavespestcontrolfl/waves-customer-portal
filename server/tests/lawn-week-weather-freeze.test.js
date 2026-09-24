@@ -216,6 +216,8 @@ describe('freeze contract in the render path', () => {
     expect(LAWN_RENDER_STRATEGY).not.toBe('p2');
     // p4 changes watering advice from free-text matches to structured evidence.
     expect(LAWN_RENDER_STRATEGY).not.toBe('p3');
+    // p5: Front-only before/after pairing (close-up / trouble never pair).
+    expect(LAWN_RENDER_STRATEGY).not.toBe('p4');
   });
 
   test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
@@ -235,7 +237,7 @@ describe('freeze contract in the render path', () => {
     );
     // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
     // -lap2… / -lap3… — none can match the structured-evidence render.
-    expect(signature.startsWith('-lap4')).toBe(true);
+    expect(signature.startsWith('-lap5')).toBe(true);
     expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature.startsWith('-lap1')).toBe(false);
   });

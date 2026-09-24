@@ -2191,7 +2191,10 @@ class PinnedAssessmentUnavailable extends Error {
 // derived inches + system toggle) — prefs edits must invalidate cached PDFs.
 // p4: watering advice resolves structured moisture evidence, not observation
 // wording. Regenerate older lawn PDFs so they agree with the current report.
-const LAWN_RENDER_STRATEGY = 'p4';
+// p5: before/after pairing is Front-only; close-up / trouble photos never
+// pair or fill the fallback (owner ruling 2026-09-24). PDFs rendered under
+// the old any-zone pairing must not be reused.
+const LAWN_RENDER_STRATEGY = 'p5';
 
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
