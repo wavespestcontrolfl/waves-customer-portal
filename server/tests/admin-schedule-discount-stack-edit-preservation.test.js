@@ -1389,6 +1389,17 @@ describe('previewTotalDrifted (round 15 P1 + round 20 P1: the preview-total witn
     expect(previewTotalDrifted(undefined, null)).toBe(false);
   });
 
+  // GitHub Codex round 26 P1 (#4657, :1605): Number(null) is 0.
+  test('a NUMERIC witness against a plan that resolves to null (unpriced) drifts — a confirmed $0.00 is not "no price"', () => {
+    expect(previewTotalDrifted(0, null)).toBe(true);
+    expect(previewTotalDrifted('0', null)).toBe(true);
+    expect(previewTotalDrifted(150, null)).toBe(true);
+    // the null-witness contract is unchanged
+    expect(previewTotalDrifted(null, null)).toBe(false);
+    expect(previewTotalDrifted(null, undefined)).toBe(false);
+    expect(previewTotalDrifted(null, 0)).toBe(true);
+  });
+
   test('null expectedTotal (confirmed "Not priced") drifts against a plan that would persist a real price', () => {
     expect(previewTotalDrifted(null, 150)).toBe(true);
     expect(previewTotalDrifted(null, 0)).toBe(true);
@@ -1836,5 +1847,35 @@ describe('discountChangeWithoutPricePosted — a discount change with no price i
   test('both routes call the guard right after negativePricePosted (source pin)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
     expect(src.match(/if \(discountChangeWithoutPricePosted\(req\.body \|\| \{\}\)\) \{/g)).toHaveLength(2);
+  });
+});
+
+// GitHub Codex round 26 P0 (#4657, :10432): a legacy add-on row with a null
+// stored service_id round-trips WITHOUT a service id in the desktop payload;
+// the name/key fallback infers a catalog id, and comparing it to the stored
+// null read as a service change on a notes-only save.
+describe('addonServiceIdentityForFreshness — when the service identity is compared for add-on discount freshness (round 26 P0, #4657 :10432)', () => {
+  const { addonServiceIdentityForFreshness } = require('../routes/admin-schedule')._test;
+
+  test('raw id omitted + stored service_id null (the legacy round-trip): identity check SKIPPED (undefined), whatever the fallback inferred', () => {
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow: { service_id: null }, inferredServiceId: 'svc-inferred' })).toBeUndefined();
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow: { service_id: '' }, inferredServiceId: 'svc-inferred' })).toBeUndefined();
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow: null, inferredServiceId: 'svc-inferred' })).toBeUndefined();
+  });
+
+  test('the client POSTED a service id (a real pick): the resolved id is compared, even against a stored null', () => {
+    expect(addonServiceIdentityForFreshness({ rawServiceId: 'svc-new', priorRow: { service_id: null }, inferredServiceId: 'svc-new' })).toBe('svc-new');
+    expect(addonServiceIdentityForFreshness({ rawServiceId: 'svc-new', priorRow: { service_id: 'svc-old' }, inferredServiceId: 'svc-new' })).toBe('svc-new');
+  });
+
+  test('raw id omitted but the stored row HAS a service id: the inferred id is compared (a name/key change is a real change)', () => {
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow: { service_id: 'svc-old' }, inferredServiceId: 'svc-other' })).toBe('svc-other');
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow: { service_id: 'svc-old' }, inferredServiceId: null })).toBeNull();
+  });
+
+  test('the normalizer hands isNewAddonDiscount this helper\'s answer, never the bare inferred id (source pin)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    expect(src.match(/\}, gross, addonServiceIdentityForFreshness\(\{/g)).toHaveLength(1);
+    expect(src.match(/\}, gross, catalogService\?\.id \|\| null\)/g)).toBeNull();
   });
 });

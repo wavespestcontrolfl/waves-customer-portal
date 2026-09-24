@@ -2215,10 +2215,25 @@ const BRONZE_ZERO = {
   is_active: true, is_auto_apply: false, show_in_invoices: true,
 };
 
-it('round 24 P2 (:2220): a zero-value fixed/percent preset is not offered in the line picker; a variable preset still is', async () => {
+// Pre-push fallback audit P1 (round 24b, :2228): the SEEDED custom presets
+// are fixed_amount/percentage rows with amount 0 and discount_key
+// custom_dollar / custom_percent — the same shape as a zero tier, but they
+// prompt for an amount per line and must stay offered.
+const SEEDED_CUSTOM_DOLLAR = {
+  id: 'disc-seed-custom-dollar', discount_key: 'custom_dollar', name: 'Custom Dollar', discount_type: 'fixed_amount', amount: 0,
+  max_discount_dollars: null, stack_group: null, is_stackable: true,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
+const SEEDED_CUSTOM_PERCENT = {
+  id: 'disc-seed-custom-percent', discount_key: 'custom_percent', name: 'Custom Percent', discount_type: 'percentage', amount: 0,
+  max_discount_dollars: null, stack_group: null, is_stackable: true,
+  is_active: true, is_auto_apply: false, show_in_invoices: true,
+};
+
+it('round 24 P2 (:2220) + fallback P1 (:2228): a zero-value fixed/percent TIER is not offered in the line picker; variable and seeded custom_dollar/custom_percent presets still are', async () => {
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     if (url.endsWith('/admin/discounts/stacking')) return { ok: true, json: async () => ({ enabled: true }) };
-    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => [...DISCOUNTS, BRONZE_ZERO, CUSTOM_DOLLAR] };
+    if (url.endsWith('/admin/discounts')) return { ok: true, json: async () => [...DISCOUNTS, BRONZE_ZERO, CUSTOM_DOLLAR, SEEDED_CUSTOM_DOLLAR, SEEDED_CUSTOM_PERCENT] };
     if (url.includes('/update-details/preview')) return { ok: true, json: async () => ({ total: 155, addons: [] }) };
     return { ok: true, json: async () => ({}) };
   }));
@@ -2229,6 +2244,8 @@ it('round 24 P2 (:2220): a zero-value fixed/percent preset is not offered in the
   const values = [...fertPicker.options].map((o) => o.value);
   expect(values).not.toContain('disc-bronze');
   expect(values).toContain('disc-custom');
+  expect(values).toContain('disc-seed-custom-dollar');
+  expect(values).toContain('disc-seed-custom-percent');
 });
 
 // ---------------------------------------------------------------------

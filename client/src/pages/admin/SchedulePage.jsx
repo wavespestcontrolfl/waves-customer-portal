@@ -2223,12 +2223,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // dollars aren't positive — the preview showed no line discount and
         // Save persisted no identity behind the selection. A fixed/percent
         // preset with a zero amount can never survive this path, so it isn't
-        // offered; a variable preset (amount entered per line) still is.
+        // offered. Pre-push fallback audit P1 (round 24b, :2228): the seeded
+        // custom presets are exactly that shape (fixed_amount custom_dollar
+        // and percentage custom_percent, amount 0) but prompt for an amount
+        // per line — isCustomAmountPreset/isCustomPercentagePreset — so they,
+        // like the variable_* types, stay offered; only a true zero tier
+        // (Bronze 0%) is dropped.
         setLineDiscountPresets(
           list.filter((d) => (
             d.is_active && !d.is_auto_apply && d.show_in_invoices
             && !((d.discount_type === "percentage" || d.discount_type === "fixed_amount")
-              && !(Number(d.amount) > 0))
+              && !(Number(d.amount) > 0)
+              && !isCustomAmountPreset(d) && !isCustomPercentagePreset(d))
           )),
         );
       } catch {

@@ -1602,7 +1602,29 @@ function previewTotalDrifted(expectedTotal, plannedEstimatedPrice) {
     return plannedEstimatedPrice !== undefined && plannedEstimatedPrice !== null;
   }
   if (plannedEstimatedPrice === undefined) return true;
+  // GitHub Codex round 26 P1 (#4657, :1605): a numeric witness against a
+  // plan that resolves to NULL (unpriced) is drift — Number(null) is 0, so
+  // a confirmed $0.00 used to pass against a concurrently cleared price.
+  if (plannedEstimatedPrice === null) return true;
   return Math.abs(Number(plannedEstimatedPrice) - Number(expectedTotal)) >= 0.005;
+}
+
+// GitHub Codex round 26 P0 (#4657, :10432): the service identity handed to
+// isNewAddonDiscount. The desktop payload for an UNCHANGED line omits the
+// service id when the stored legacy row never had one (service_id null);
+// the name/key fallback then infers a catalog id, and comparing that
+// inferred id against the stored null read as "service changed" — a
+// notes-only save re-ran resolveLineDiscount/eligibility on the stamp, so
+// a retired preset made the visit unsavable and a changed catalog amount
+// repriced it. Rule: the identity is compared only when the client POSTED
+// a service id (a real pick) or the stored row HAS one to compare against;
+// a raw-omitted id against a stored null is the legacy row round-tripping
+// by name/key (that fallback is how it matched at all) — unchanged.
+// Returns the id to compare, or undefined = skip the identity check.
+function addonServiceIdentityForFreshness({ rawServiceId, priorRow, inferredServiceId }) {
+  if (rawServiceId) return inferredServiceId || null;
+  if (priorRow && priorRow.service_id != null && priorRow.service_id !== '') return inferredServiceId || null;
+  return undefined;
 }
 
 // GitHub Codex round 24 P1 (#4657, :14442): the total this save will
@@ -10426,10 +10448,17 @@ async function normalizeUpdateDetailsAddons({
           // catalog id) round-trips with a null discount_id too, so it
           // must be compared by its own terms + gross here, or a price-
           // only edit on such a row would count as a discount change.
+          // GitHub Codex round 26 P0 (#4657, :10432): identity compared only
+          // when the client posted a service id or the stored row has one —
+          // see addonServiceIdentityForFreshness.
           lineDiscountIsNew = a.discountId
             ? isNewAddonDiscount(a.id || null, {
               discountId: a.discountId, discountType: lineType, discountAmount: lineAmount,
-            }, gross, catalogService?.id || null)
+            }, gross, addonServiceIdentityForFreshness({
+              rawServiceId: a.serviceId || null,
+              priorRow: a.id ? existingAddonDiscountById.get(a.id) : null,
+              inferredServiceId: catalogService?.id || null,
+            }))
             : !customAddonStampRoundTripped(a.id || null, lineType, lineAmount, gross);
           const freshCatalogPick = !!a.discountId && lineDiscountIsNew;
           if (freshCatalogPick) {
@@ -21918,6 +21947,7 @@ function blackoutDateString(value) {
 router._test = {
   negativePricePosted,
   discountChangeWithoutPricePosted,
+  addonServiceIdentityForFreshness,
   buildPresetEligibilityCheck,
   resolvePlannedTotal,
   addonRowIdsDrifted,
