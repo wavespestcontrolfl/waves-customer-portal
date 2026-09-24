@@ -23,6 +23,7 @@ import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/Station
 import CancelFlow from '../components/portal/CancelFlow';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
+import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
 import { etDateString, formatETDateTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { getStripe } from '../lib/stripeLoader';
@@ -9896,7 +9897,13 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'lawn_care', name: 'Lawn Care', icon: 'sprout',
-    frequencies: ['4 Apps', '6 Apps', '9 Apps', '12 Apps'],
+    // My Plan renders frequencies[0] as the cadence line and SERVICE_CATALOG
+    // has no link to the customer's enrolled program — same as mosquito
+    // below. Customers enrolled before a cadence retired (4x 2026-08-04, 6x
+    // bi-monthly 2026-09-24) keep their plan, so naming any one cadence
+    // misstates someone's; variant-neutral until the panel reads the
+    // matched service's real cadence.
+    frequencies: ['Recurring lawn program'],
     basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, soil testing, thatch monitoring',
     products: ['Prodiamine 65 WDG', 'Celsius WG', '16-4-8 + Micros', 'Headway G'],
   },
@@ -14345,7 +14352,7 @@ function PropertyProfileScopedNotice({ primaryEntry, onSwitch }) {
   );
 }
 
-function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, selectedProperty = null, scopeUnavailable = false, onSavedScopeUnavailable = null }) {
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, selectedProperty = null, scopeUnavailable = false, onSavedScopeUnavailable = null, initialValues = null }) {
   // A house is selected (a saved-property id on the selection) whether or
   // not the retained list has an entry for it — see scopeEchoMismatch.
   const selectionNamed = (selectedProperty && selectedProperty.propertyId) || null;
@@ -14379,6 +14386,45 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // the server explicitly grants it.
   const [scheduleData, setScheduleData] = useState(null);
   const fileRef = useRef(null);
+  // Photo ID hands off here with a category/location/note/photos it already
+  // gathered (see PhotoId.jsx) — seed the form on the open transition only,
+  // so it never clobbers what the customer types after the sheet lands.
+  // Every field is REPLACED (including empty ones), not merged — the overlay
+  // stays mounted across opens, so a truthy-only seed would let a stale
+  // value from an earlier session (manual or a different Photo ID handoff)
+  // survive into this one (Codex r2 P1: "open a history result with
+  // photos: [] still shows the previous identification's photos"). The
+  // handoff-seeded state is then cleared again when THIS session closes
+  // (submitted or cancelled), so a later plain "New Request" open — or the
+  // next handoff — never inherits it either.
+  const wasOpenRef = useRef(false);
+  const seededByHandoffRef = useRef(false);
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      if (initialValues) {
+        seededByHandoffRef.current = true;
+        setCategory(initialValues.category || '');
+        setDescription(initialValues.note || '');
+        // A cancelled manual entry (Urgent selected, then closed) must not
+        // leak into a Photo ID handoff — Photo ID never sets urgency itself,
+        // so every handoff restores the routine default explicitly (Codex
+        // r7 P2).
+        setUrgency('routine');
+        setLocation(initialValues.location || '');
+        setPhotos(Array.isArray(initialValues.photos) ? initialValues.photos.slice(0, photoLimit) : []);
+      } else {
+        seededByHandoffRef.current = false;
+      }
+    } else if (!open && wasOpenRef.current && seededByHandoffRef.current) {
+      setCategory('');
+      setDescription('');
+      setUrgency('routine');
+      setLocation('');
+      setPhotos([]);
+      seededByHandoffRef.current = false;
+    }
+    wasOpenRef.current = open;
+  }, [open, initialValues]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -14464,7 +14510,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   const propertyAddressShown = scopeStale ? 'Refreshing your property selection…' : propertyAddress;
   const overlayHandoff = !scopeStale && !!scheduleData?.overlayHandoff;
   const handoffLane = category === 'pest_issue' ? 'pest' : category === 'lawn_concern' ? 'lawn' : null;
-  const pickerHandoffUrl = overlayHandoff && handoffLane && scheduleData?.reservice?.url
+  // A Photo ID handoff (initialValues set) already made its OWN next-step
+  // decision server-side — 'reservice' goes straight to the /reservice/:token
+  // link from the sheet itself and never opens this overlay at all; 'request'
+  // / 'inspection' / 'unclear' land here specifically because Photo ID
+  // decided this is NOT an automatic re-service. This generic
+  // schedule-derived streamline must not override that with its own "book
+  // your free re-service" CTA — doing so would silently swap out the
+  // prefilled note/photos for an unrelated picker (Codex r3 P1).
+  const pickerHandoffUrl = !initialValues && overlayHandoff && handoffLane && scheduleData?.reservice?.url
     && (scheduleData.reservice.lanes || []).includes(handoffLane)
     ? scheduleData.reservice.url
     : null;
@@ -15520,7 +15574,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
   );
 }
 
-function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MORE_TABS }) {
+function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhotoId, tabs = MORE_TABS }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
@@ -15630,6 +15684,31 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
               </button>
             );
           })}
+          {onOpenPhotoId && (
+            <button key="photoid" onClick={() => onOpenPhotoId()} style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '11px 10px',
+              border: 'none',
+              background: 'transparent',
+              borderRadius: 8,
+              cursor: 'pointer',
+              textAlign: 'left',
+              color: B.grayDark,
+              fontFamily: FONTS.body,
+            }}>
+              <span style={iconTile}>
+                <Icon name="camera" size={18} strokeWidth={2} />
+              </span>
+              <span style={{ minWidth: 0, flex: 1 }}>
+                <span style={{ display: 'block', fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text }}>Photo ID</span>
+                <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.35 }}>Bugs, lawn, trees & shrubs</span>
+              </span>
+              <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: muted }} />
+            </button>
+          )}
         </section>
 
         <section data-glass="soft" style={{ ...card, padding: 14 }}>
@@ -16185,6 +16264,33 @@ export default function PortalPage() {
   // Question handed from the Waves AI bar into the assistant on open.
   const [chatPrompt, setChatPrompt] = useState(null);
   const [showMoreSheet, setShowMoreSheet] = useState(false);
+  // Photo ID (GATE_CUSTOMER_PHOTO_ID) — one gate read shared by the floating
+  // button and the More-sheet row so they can never disagree about whether
+  // the feature is live (404 hides both). reportIssuePrefill carries the
+  // category/location/note/photos a "Request service" next-step hands to
+  // the New Request form.
+  const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount);
+  const [showPhotoId, setShowPhotoId] = useState(false);
+  const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
+  const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount;
+  // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
+  // property/account switch (sessionEpoch — another tab, or this one) does
+  // NOT clear it on its own. Left alone, a still-open Photo ID handoff would
+  // survive the switch and could submit the OLD property's note/photos
+  // against the NEWLY selected one once ReportIssueOverlay's own scope-echo
+  // check clears (Codex r6 P1). Only a session actually seeded by a handoff
+  // is affected — an ordinary manually-opened request keeps relying on that
+  // existing scope-echo/staleness handling untouched.
+  const lastPhotoIdSessionEpochRef = useRef(sessionEpoch);
+  useEffect(() => {
+    if (lastPhotoIdSessionEpochRef.current !== sessionEpoch) {
+      lastPhotoIdSessionEpochRef.current = sessionEpoch;
+      if (reportIssuePrefill) {
+        setReportIssuePrefill(null);
+        setShowReportIssue(false);
+      }
+    }
+  }, [sessionEpoch, reportIssuePrefill]);
   // Desktop section nav floats (owner 2026-07-22): it sticks just below the
   // sticky header while the customer scrolls. The header's height varies
   // (safe-area inset, wrapping), so measure it instead of hardcoding.
@@ -16916,9 +17022,28 @@ export default function PortalPage() {
           onClose={() => setShowMoreSheet(false)}
           onRequest={cancelledAccount ? null : () => setShowReportIssue(true)}
           onChat={cancelledAccount ? null : () => setShowChat(true)}
+          onOpenPhotoId={photoIdAvailable ? () => { setShowPhotoId(true); setShowMoreSheet(false); } : null}
           tabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
       )}
+
+      {/* Photo ID — floating button + sheet (GATE_CUSTOMER_PHOTO_ID; hidden
+          entirely on a 404 from GET /api/photo-id, see usePhotoIdGate). */}
+      {photoIdAvailable && !showPhotoId && (
+        <PhotoIdFab onOpen={() => setShowPhotoId(true)} hasBottomNav={isMobileShell} />
+      )}
+      <PhotoIdSheet
+        open={showPhotoId && photoIdAvailable}
+        onClose={() => setShowPhotoId(false)}
+        items={photoIdGate.items}
+        onRefreshHistory={photoIdGate.refresh}
+        onGateUnavailable={photoIdGate.refresh}
+        onOpenRequest={(prefill) => {
+          setReportIssuePrefill(prefill);
+          setShowPhotoId(false);
+          setShowReportIssue(true);
+        }}
+      />
 
       {/* AI Chat Widget */}
       {showChat && <ChatWidget customer={customer} initialQuestion={chatPrompt} onClose={() => { setShowChat(false); setChatPrompt(null); }} />}
@@ -16926,7 +17051,10 @@ export default function PortalPage() {
       {/* Report Issue Overlay */}
       <ReportIssueOverlay
         open={showReportIssue}
-        onClose={() => setShowReportIssue(false)}
+        // Clear the Photo ID handoff on close (submitted or cancelled) — an
+        // ordinary New Request opened afterward must never inherit a stale
+        // category/note/photos from a previous Photo ID result (Codex r1 P1).
+        onClose={() => { setShowReportIssue(false); setReportIssuePrefill(null); }}
         onSubmitted={() => setRequestRefreshKey(k => k + 1)}
         customer={customer}
         propertyAddress={activePropertyAddress}
@@ -16935,6 +17063,7 @@ export default function PortalPage() {
         selectedProperty={selectedProperty}
         scopeUnavailable={propertyUnavailable}
         onSavedScopeUnavailable={refreshProperties}
+        initialValues={reportIssuePrefill}
       />
     </div>
     </PortalReadProvider>

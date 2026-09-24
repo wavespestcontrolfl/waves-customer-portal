@@ -14,6 +14,7 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Plus } from "lucide-react";
 import {
   Button,
@@ -232,6 +233,26 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
   const [selected, setSelected] = useState(null); // { type, id }
   const [showNew, setShowNew] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Deep link from the Communications "Analyze photos" flow:
+  // ?open=<type>:<id> opens the detail sheet straight to that row (the
+  // sheet fetches by type/id itself — no need to wait for the list load).
+  // Runs once on mount; the param is stripped right after so a manual
+  // sheet-close or a later navigation doesn't reopen it.
+  useEffect(() => {
+    const openParam = searchParams.get("open");
+    if (!openParam) return;
+    const [openType, openId] = openParam.split(":");
+    if ((openType === "lawn" || openType === "pest") && openId) {
+      setSelected({ type: openType, id: openId });
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("open");
+    setSearchParams(next, { replace: true });
+    // Deliberately run once on mount only — searchParams/setSearchParams are
+    // left out of the deps so a later navigation never reopens the sheet.
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);

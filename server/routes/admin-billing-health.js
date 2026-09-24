@@ -9,6 +9,8 @@ const { logAutopay } = require('../services/autopay-log');
 const { etDateString, etParts } = require('../utils/datetime-et');
 const { isPaused, autopayActivePredicate } = require('../services/autopay-eligibility');
 const { MONTHLY_LANE_SQL, resolveBillingLane } = require('../services/billing-lane');
+const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+const { hasUnresolvedSiblingStripeOutcome, deriveMonthlyChargeIdempotencyKey } = require('../services/retry-collectibility');
 
 router.use(adminAuthenticate);
 router.use(requireAdmin);
@@ -81,6 +83,60 @@ router.post('/customers/:id/autopay-setup-link', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Shared charge()/chargeOneTime() failure classification for charge-now —
+// used by both the locked monthly-collection path and the unlocked
+// explicit-amount path so the two branches can't drift on how orphan /
+// ambiguous / generic failures are logged and reported.
+async function buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId }) {
+  // Stripe ACCEPTED the charge but the ledger write failed — the
+  // customer WAS billed (orphan row recorded by the service). This
+  // must not look retryable: a second "Charge now" click would use
+  // a fresh idempotency key and take the money again.
+  if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
+    await logAutopay(customerId, 'orphan_charge', {
+      amountCents: Math.round(chargeAmount * 100),
+      details: { source: 'manual_charge', stripe_payment_intent_id: err.stripePaymentIntentId, reason: err.message, admin_id: technicianId || null },
+    }).catch(() => {});
+    return {
+      status: 409,
+      body: {
+        error: `Charge SUCCEEDED at Stripe (PI ${err.stripePaymentIntentId}) but could not be recorded in the ledger. DO NOT charge again — reconcile via stripe_orphan_charges.`,
+        orphan: true,
+        stripe_payment_intent_id: err.stripePaymentIntentId,
+      },
+    };
+  }
+  // Ambiguous outcome — Stripe may have processed the charge even
+  // though the request errored. Don't present as retryable: a
+  // re-click would mint a fresh idempotency key and could charge
+  // twice. charge() already flagged its failed row; park it
+  // non-collectible until reconciled.
+  if (err.code === 'STRIPE_AMBIGUOUS_OUTCOME') {
+    if (err.paymentRecord?.id) {
+      await db('payments').where({ id: err.paymentRecord.id }).update({
+        superseded_by_payment_id: err.paymentRecord.id,
+        failure_reason: 'Ambiguous Stripe outcome (manual charge) — reconcile before re-charging',
+      }).catch(() => {});
+    }
+    await logAutopay(customerId, 'charge_failed', {
+      amountCents: Math.round(chargeAmount * 100),
+      details: { source: 'manual_charge', reason: 'ambiguous_stripe_outcome', admin_id: technicianId || null },
+    }).catch(() => {});
+    return {
+      status: 409,
+      body: {
+        error: 'Charge outcome is AMBIGUOUS — Stripe may have processed it. Check the Stripe dashboard before charging again.',
+        ambiguous: true,
+      },
+    };
+  }
+  await logAutopay(customerId, 'charge_failed', {
+    amountCents: Math.round(chargeAmount * 100),
+    details: { source: 'manual_charge', reason: err.message, admin_id: technicianId || null },
+  });
+  return { status: 502, body: { error: err.message } };
+}
+
 /**
  * POST /api/admin/customers/:id/charge-now
  * Body: { amount?: number, description?: string }
@@ -138,95 +194,123 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     // clicked AFTER this month's collection can't take the month twice.
     // Explicit-amount charges skip the guard: entering an amount is the
     // operator saying "charge this on top, on purpose".
-    if (isMonthlyCollection) {
-      const { year, month } = etParts(new Date());
-      const monthKey = `${year}-${String(month).padStart(2, '0')}`;
-      const monthStart = `${monthKey}-01`;
-      const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-      const monthEnd = `${monthKey}-${String(lastDay).padStart(2, '0')}`;
-      const existingCharge = await db('payments')
-        .where({ customer_id: customerId })
-        .whereIn('status', ['paid', 'processing'])
-        .where(function () {
-          this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
-            .orWhere(function () {
-              this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
-                .andWhere('payment_date', '>=', monthStart)
-                .andWhere('payment_date', '<=', monthEnd)
-                .andWhere('description', 'like', '%WaveGuard Monthly%');
-            });
-        })
-        .first();
-      if (existingCharge) {
-        await logAutopay(customerId, 'skipped_already_paid', {
-          paymentId: existingCharge.id,
-          details: { source: 'manual_charge', billed_month: monthKey, admin_id: req.technicianId || null },
-        }).catch(() => {});
-        return res.status(409).json({
-          error: `${monthKey} is already collected for this customer (payment ${existingCharge.id}). To charge something additional on purpose, enter an explicit amount.`,
-          already_collected: true,
-          payment_id: existingCharge.id,
-        });
-      }
-    }
-
+    //
+    // ADMIN-BUG-R11: the check-then-charge below runs under a per-customer
+    // in-process lock (shared with billing-cron's per-customer monthly loop
+    // AND its retry sweep) so two overlapping amount-less requests — two
+    // tabs/operators, or a click landing while the 8 AM dues cron or 10 AM
+    // retry sweep is mid-charge for this SAME customer — can't both pass
+    // the guard and both call StripeService.charge. The second caller's
+    // callback runs only after the first's fully settles, sees the ledger
+    // row it just wrote, and 409s already_collected. The idempotency key
+    // passed to charge() is the SAME `autopay_monthly_<cid>_<ET date>` key
+    // chargeMonthly() defaults to (not a separate manual_ family) — a
+    // duplicate that slips past this same-process lock (a genuine second
+    // Railway instance overlapping during a deploy) still replays the SAME
+    // Stripe PaymentIntent as that day's cron run, and collapses to one
+    // ledger row under charge()'s own per-PI advisory lock.
     let payment;
-    try {
-      if (isMonthlyCollection) {
-        // Machine provenance (Codex #3598 r5 P1): an admin clicking Charge
-        // Now is not the customer's own action — the PI's ACH lifecycle
-        // notices stay behind the 8AM-8PM send window.
-        payment = await service.charge(customerId, chargeAmount, desc, {
-          type: 'manual_charge',
-          tier: customer.waveguard_tier || '',
-          billed_month: etDateString().slice(0, 7),
-          initiated_by: 'machine',
-        });
-      } else {
-        payment = await service.chargeOneTime(customerId, chargeAmount, desc, null, { initiated_by: 'machine' });
-      }
-    } catch (err) {
-      // Stripe ACCEPTED the charge but the ledger write failed — the
-      // customer WAS billed (orphan row recorded by the service). This
-      // must not look retryable: a second "Charge now" click would use
-      // a fresh idempotency key and take the money again.
-      if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
-        await logAutopay(customerId, 'orphan_charge', {
-          amountCents: Math.round(chargeAmount * 100),
-          details: { source: 'manual_charge', stripe_payment_intent_id: err.stripePaymentIntentId, reason: err.message, admin_id: req.technicianId || null },
-        }).catch(() => {});
-        return res.status(409).json({
-          error: `Charge SUCCEEDED at Stripe (PI ${err.stripePaymentIntentId}) but could not be recorded in the ledger. DO NOT charge again — reconcile via stripe_orphan_charges.`,
-          orphan: true,
-          stripe_payment_intent_id: err.stripePaymentIntentId,
-        });
-      }
-      // Ambiguous outcome — Stripe may have processed the charge even
-      // though the request errored. Don't present as retryable: a
-      // re-click would mint a fresh idempotency key and could charge
-      // twice. charge() already flagged its failed row; park it
-      // non-collectible until reconciled.
-      if (err.code === 'STRIPE_AMBIGUOUS_OUTCOME') {
-        if (err.paymentRecord?.id) {
-          await db('payments').where({ id: err.paymentRecord.id }).update({
-            superseded_by_payment_id: err.paymentRecord.id,
-            failure_reason: 'Ambiguous Stripe outcome (manual charge) — reconcile before re-charging',
+    if (isMonthlyCollection) {
+      const lockOutcome = await withCustomerBillingLock(customerId, async () => {
+        const { year, month } = etParts(new Date());
+        const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+        const monthStart = `${monthKey}-01`;
+        const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+        const monthEnd = `${monthKey}-${String(lastDay).padStart(2, '0')}`;
+        const existingCharge = await db('payments')
+          .where({ customer_id: customerId })
+          .whereIn('status', ['paid', 'processing'])
+          .where(function () {
+            this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+              .orWhere(function () {
+                this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+                  .andWhere('payment_date', '>=', monthStart)
+                  .andWhere('payment_date', '<=', monthEnd)
+                  .andWhere('description', 'like', '%WaveGuard Monthly%');
+              });
+          })
+          .first();
+        if (existingCharge) {
+          await logAutopay(customerId, 'skipped_already_paid', {
+            paymentId: existingCharge.id,
+            details: { source: 'manual_charge', billed_month: monthKey, admin_id: req.technicianId || null },
           }).catch(() => {});
+          return {
+            response: {
+              status: 409,
+              body: {
+                error: `${monthKey} is already collected for this customer (payment ${existingCharge.id}). To charge something additional on purpose, enter an explicit amount.`,
+                already_collected: true,
+                payment_id: existingCharge.id,
+              },
+            },
+          };
         }
-        await logAutopay(customerId, 'charge_failed', {
-          amountCents: Math.round(chargeAmount * 100),
-          details: { source: 'manual_charge', reason: 'ambiguous_stripe_outcome', admin_id: req.technicianId || null },
-        }).catch(() => {});
-        return res.status(409).json({
-          error: 'Charge outcome is AMBIGUOUS — Stripe may have processed it. Check the Stripe dashboard before charging again.',
-          ambiguous: true,
-        });
-      }
-      await logAutopay(customerId, 'charge_failed', {
-        amountCents: Math.round(chargeAmount * 100),
-        details: { source: 'manual_charge', reason: err.message, admin_id: req.technicianId || null },
+
+        // Codex round-2 P0: a SIBLING attempt for this SAME obligation (the
+        // cron, or an earlier charge-now click) left an unresolved Stripe
+        // outcome — Stripe accepted a charge but the ledger write failed
+        // (stripe_orphan_charges), or a no-PI failure came back ambiguous.
+        // Charging again with a fresh key risks a genuine double
+        // collection while the first outcome is still unverified.
+        const unresolvedOutcome = await hasUnresolvedSiblingStripeOutcome(customerId, monthKey, db);
+        if (unresolvedOutcome.blocked) {
+          return {
+            response: {
+              status: 409,
+              body: {
+                error: `A prior charge attempt for this customer has an unresolved Stripe outcome (${unresolvedOutcome.reason}) — reconcile it before charging again.`,
+                unresolved_outcome: unresolvedOutcome.reason,
+              },
+            },
+          };
+        }
+
+        // Attempt-scoped idempotency key (Codex round-1 P1): shared with
+        // chargeMonthly()'s own key derivation (retry-collectibility.js)
+        // so charge-now and the daily cron always agree on the SAME key
+        // for a customer's first attempt today (a genuine race still
+        // collapses under Stripe idempotency) and both correctly advance
+        // to a fresh _r<n> suffix once EITHER side's attempt has failed —
+        // never reusing a key recorded with the OTHER caller's
+        // description/metadata, which Stripe would reject as a mismatch.
+        const idempotencyKey = await deriveMonthlyChargeIdempotencyKey(customerId, monthKey, db);
+
+        try {
+          // Machine provenance (Codex #3598 r5 P1): an admin clicking Charge
+          // Now is not the customer's own action — the PI's ACH lifecycle
+          // notices stay behind the 8AM-8PM send window.
+          const chargedPayment = await service.charge(customerId, chargeAmount, desc, {
+            type: 'manual_charge',
+            tier: customer.waveguard_tier || '',
+            billed_month: monthKey,
+            initiated_by: 'machine',
+          }, idempotencyKey);
+          return { payment: chargedPayment };
+        } catch (err) {
+          return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };
+        }
+      }).catch((err) => {
+        // The cross-process layer (utils/customer-billing-lock.js) found a
+        // genuine other-process claim on this SAME customer — a Railway
+        // deploy overlap racing the 8 AM cron or 10 AM retry sweep. Refuse
+        // as retryable rather than let it fall through to the generic
+        // error handler as a 500.
+        if (err.code === 'BILLING_CLAIM_HELD_ELSEWHERE') {
+          return { response: { status: 409, body: { error: `${err.message} — try again in a moment`, in_progress: true } } };
+        }
+        throw err;
       });
-      return res.status(502).json({ error: err.message });
+
+      if (lockOutcome.response) return res.status(lockOutcome.response.status).json(lockOutcome.response.body);
+      payment = lockOutcome.payment;
+    } else {
+      try {
+        payment = await service.chargeOneTime(customerId, chargeAmount, desc, null, { initiated_by: 'machine' });
+      } catch (err) {
+        const failure = await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId });
+        return res.status(failure.status).json(failure.body);
+      }
     }
 
     await logAutopay(customerId, payment?.status === 'paid' ? 'manual_charge' : 'manual_charge_processing', {

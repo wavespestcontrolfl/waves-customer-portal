@@ -1058,6 +1058,7 @@ router.get('/:id', async (req, res, next) => {
 
     const response = { lead, activities, calls };
     if (req.query.leadReview === '1') {
+      response.linkedHistory = await require('../services/lead-linked-history').readLinkedLeadHistory(db, lead);
       try {
         response.reconciliation = await getLeadStatusReconciliation({
           database: db,

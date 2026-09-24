@@ -21,7 +21,7 @@ let failCalls, calls, callCount, callQueries;
 knex.client.runner = (builder) => ({ run: async () => {
   const compiled = builder.toSQL();
   if (compiled.sql.includes('from "call_log"')) callQueries.push(compiled);
-  if (compiled.sql.includes('from "leads"')) return lead;
+  if (compiled.sql.includes('from "leads"')) return builder._method === 'first' ? lead : [];
   if (compiled.sql.includes('from "lead_activities"')) return activities;
   if (compiled.sql.includes('from "call_log"') && failCalls) throw new Error('synthetic call lookup failure');
   if (compiled.sql.includes('from "call_log"') && compiled.sql.includes('count(*)')) return { count: callCount };

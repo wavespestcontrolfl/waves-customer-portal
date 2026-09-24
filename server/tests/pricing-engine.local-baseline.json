@@ -45,9 +45,9 @@
   },
   "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1806.9,
-      "recurringMonthlyAfterDiscount": 150.58,
-      "year1Total": 1806.9
+      "recurringAnnualAfterDiscount": 2000.7,
+      "recurringMonthlyAfterDiscount": 166.73,
+      "year1Total": 2000.7
     },
     "waveGuard": {
       "tier": "gold",
@@ -60,8 +60,8 @@
         "monthly": 51.48
       },
       "lawn_care": {
-        "annual": 528,
-        "monthly": 44
+        "annual": 756,
+        "monthly": 63
       },
       "tree_shrub": {
         "annual": 980,

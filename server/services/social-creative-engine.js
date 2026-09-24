@@ -53,8 +53,12 @@ const CREATIVE_FLAGS = {
 // Video (Veo Reels) — separate opt-in on top of the creative engine. A video
 // variant is only ever added to DRAFT runs (approval required: ~$1.20/clip and
 // a Reel is the brand's most public artifact), on every Nth ET day.
+// Owner ruling 2026-09-24: Veo output is SynthID-watermarked, so `enabled`
+// is ALSO gated on the shared watermark override — SOCIAL_VIDEO_ENABLED=true
+// alone never schedules a video day (video-generator refuses regardless; the
+// flag check here just keeps the cadence math and logs honest).
 const VIDEO_FLAGS = {
-  get enabled() { return boolEnv('SOCIAL_VIDEO_ENABLED', false); },
+  get enabled() { return boolEnv('SOCIAL_VIDEO_ENABLED', false) && process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS === 'true'; },
   get intervalDays() {
     const value = Number(process.env.SOCIAL_VIDEO_INTERVAL_DAYS);
     if (!Number.isFinite(value)) return 3;
