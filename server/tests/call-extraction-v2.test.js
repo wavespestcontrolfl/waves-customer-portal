@@ -892,6 +892,25 @@ describe('normalize extraction v2', () => {
         expect(result.service_request.price).not.toHaveProperty('caller_response');
       });
 
+      // codex #4722 r2 push-gate P1 (3rd round): accepted: null is a valid,
+      // schema-legal, explicit claim on a caller_response-less prices[]
+      // entry ("acceptance was never discussed" for THIS entry) — checking
+      // for a non-null accepted value missed it and let the merge fall
+      // through to the base's stale caller_response: 'accepted' / accepted:
+      // true instead of clearing it.
+      test('a same-identity entry with an explicit accepted: null and no caller_response still wins, clearing the inherited caller_response', () => {
+        const extraction = validModelOutput();
+        extraction.service_request.price = {
+          amount_usd: 65, unit: 'one_time', caller_response: 'accepted', accepted: true, stated_by: 'agent',
+        };
+        extraction.service_request.prices = [
+          { amount_usd: 65, unit: 'one_time', accepted: null },
+        ];
+        const result = normalizeExtractionV2(extraction);
+        expect(result.service_request.price).toMatchObject({ amount_usd: 65, unit: 'one_time', accepted: null, stated_by: 'agent' });
+        expect(result.service_request.price).not.toHaveProperty('caller_response');
+      });
+
       // codex #4722 r2 push-gate P1 (2nd round): the merged/enriched
       // primary must be written back into prices[0] itself, not just into
       // the sibling `price` field — a reader of prices[] alone (the Calls

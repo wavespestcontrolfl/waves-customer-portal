@@ -183,11 +183,11 @@ function priceIdentityMatches(a, b) {
 //   - overlay sets caller_response (even null): its own already-derived
 //     accepted travels WITH it, never re-derived from an unrelated
 //     caller_response inherited from base.
-//   - overlay omits caller_response but sets an explicit accepted (a
-//     legacy accepted-only shape): that accepted wins outright, and any
-//     caller_response inherited from base is cleared rather than left
-//     contradicting it.
-//   - overlay contributes neither: base's pair is untouched.
+//   - overlay omits caller_response but sets its own accepted key — even
+//     to null (a legacy accepted-only shape, "acceptance never discussed"
+//     included): that accepted wins outright, and any caller_response
+//     inherited from base is cleared rather than left contradicting it.
+//   - overlay contributes neither key: base's pair is untouched.
 function mergePriceEntries(base, overlay) {
   const merged = { ...base };
   for (const [key, value] of Object.entries(overlay)) {
@@ -196,8 +196,11 @@ function mergePriceEntries(base, overlay) {
   }
   if ('caller_response' in overlay) {
     merged.caller_response = overlay.caller_response;
-    merged.accepted = overlay.accepted !== undefined ? overlay.accepted : normalizePriceEntry(merged).accepted;
-  } else if (overlay.accepted !== null && overlay.accepted !== undefined) {
+    merged.accepted = 'accepted' in overlay ? overlay.accepted : normalizePriceEntry(merged).accepted;
+  } else if ('accepted' in overlay) {
+    // Present even when null — a legacy-shape overlay that explicitly says
+    // "acceptance was never discussed" for THIS entry is still overlay's
+    // own claim, not something to backfill from an inherited caller_response.
     merged.accepted = overlay.accepted;
     delete merged.caller_response;
   }
