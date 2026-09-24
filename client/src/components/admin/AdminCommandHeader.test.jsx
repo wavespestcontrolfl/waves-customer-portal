@@ -1,13 +1,30 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import AdminCommandHeader from "./AdminCommandHeader";
 
 afterEach(cleanup);
 
 describe("AdminCommandHeader heading hierarchy", () => {
+  it("puts the primary action first without changing handlers or readiness", () => {
+    const create = vi.fn();
+    const secondary = vi.fn();
+    const { rerender } = render(<AdminCommandHeader title="Pipeline" actions={[
+      { label: "Create estimate", variant: "secondary", onClick: secondary },
+      { label: "New lead", onClick: create, disabled: true },
+    ]} />);
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["New lead", "Create estimate"]);
+    fireEvent.click(screen.getByRole("button", { name: "New lead" }));
+    expect(create).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Create estimate" }));
+    expect(secondary).toHaveBeenCalledOnce();
+    rerender(<AdminCommandHeader title="Pipeline" action={{ label: "New lead", onClick: create }} />);
+    fireEvent.click(screen.getByRole("button", { name: "New lead" }));
+    expect(create).toHaveBeenCalledOnce();
+  });
+
   it("uses a primary heading and sticky behavior by default", () => {
     const { container } = render(<AdminCommandHeader title="Services" />);
 
