@@ -9846,6 +9846,12 @@ const CallRecordingProcessor = {
     // confirmed ask: the standing-card recovery below must NOT count it as
     // filed, or both fallback paths would suppress the task (codex r11 P1).
     let disputeClaimedUnrecorded = false;
+    // This pass POSITIVELY found no conflict (corroborated AV on the
+    // record's own number, or a known independent property) and either
+    // retired the earlier card or left a confirmed one standing for its
+    // scheduling obligation only: the standing-card recovery must not
+    // re-arm the address hold from that card (codex r16 P1).
+    let disputePositivelyResolved = false;
     // The scheduling snapshot from the extraction that drives booking in
     // the current mode — shared with the shadow-mode fallback (codex r11 P1).
     let disputeSchedulingAuthority = null;
@@ -10090,8 +10096,17 @@ const CallRecordingProcessor = {
                 .update({ review_status: 'resolved', updated_at: new Date() });
             }
           }
-          return retired ? 'retired' : 'nothing';
+          if (retired) return 'retired';
+          // A confirmed card deliberately kept open (its scheduling ask):
+          // report it so the standing-card recovery keeps the OBLIGATION
+          // without the address hold (codex r16 P1).
+          const confirmedKept = await trx('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
+            .whereRaw("COALESCE(payload->'scheduling_window'->>'status', payload->>'scheduling_status') = 'confirmed'")
+            .first('id');
+          return confirmedKept ? 'confirmed_kept' : 'nothing';
         });
+        if (outcome === 'retired' || outcome === 'confirmed_kept') disputePositivelyResolved = true;
         if (outcome === 'filed') {
           // Only a landed write may suppress the second-address fallback
           // and mark the call for review — a thrown or fenced-out write
@@ -10140,7 +10155,14 @@ const CallRecordingProcessor = {
           const standingPayload = typeof standing.payload === 'string' ? (() => { try { return JSON.parse(standing.payload); } catch { return null; } })() : standing.payload;
           standingConflictCoversCall = !standingPayload?.stated_street
             || sameHouseNumberStreet(standingPayload.stated_street, corroboratingStreet || extracted?.address_line1);
-          if (standingConflictCoversCall) {
+          if (standingConflictCoversCall && disputePositivelyResolved) {
+            // The card stands for its confirmed scheduling ask only; this
+            // pass established the address is not in dispute, so nothing
+            // is held or pulled on its account (codex r16 P1).
+            if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
+            if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+            logger.info(`[call-proc] house-number card still open for ${maskSid(callSid)} for its scheduling ask — dispute resolved this pass, no hold`);
+          } else if (standingConflictCoversCall) {
             if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
             houseNumberDisputed = true;
             if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');

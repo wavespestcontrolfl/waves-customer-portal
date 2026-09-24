@@ -24,6 +24,16 @@ const av = (street, extra = {}) => ({
 });
 const ON_FILE = { address_line1: '1260 Example Street', address_line2: null, city: 'Parrish', zip: '34219' };
 
+describe('onFileHouseNumberConflict — fractional numbers', () => {
+  test('12 1/2 is one house token: it conflicts with 12 and stays on the same street as 13', () => {
+    const onFile12 = { ...ON_FILE, address_line1: '12 Example Street' };
+    expect(onFileHouseNumberConflict({ addressValidation: av('12 1/2 Example Street'), onFileAddress: onFile12 })).toMatchObject({ stated_house_number: '12 1/2', on_file_house_number: '12' });
+    const onFile13 = { ...ON_FILE, address_line1: '13 Example Street' };
+    expect(onFileHouseNumberConflict({ addressValidation: av('12 1/2 Example Street'), onFileAddress: onFile13 })).toMatchObject({ stated_house_number: '12 1/2', on_file_house_number: '13' });
+    expect(sameHouseNumberStreet('12 1/2 Example Street', '12 1/2 Example St')).toBe(true);
+  });
+});
+
 describe('onFileHouseNumberConflict', () => {
   test('same street, different house number → the two streets and numbers', () => {
     expect(onFileHouseNumberConflict({ addressValidation: av('1250 Example Street'), onFileAddress: ON_FILE })).toEqual({
@@ -291,6 +301,14 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(d.approvedWindow.requested_address.street_line_1).toBe('1250 Example St');
     expect(d.approvedPayload.on_file_address.address_line1).toBe('1250 Example St');
     expect(heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '' } }).approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
+  });
+
+  test('a live address that is neither reviewed premise does not retarget the ask', () => {
+    const moved = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '9 Other Road', address_line2: null, city: 'Parrish', zip: '34219' } });
+    expect(moved.approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
+    expect(moved.approvedPayload.on_file_address.address_line1).toBe('1260 Example St');
+    const retyped = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: 'Apt 2', city: 'Parrish', zip: '34219' } });
+    expect(retyped.approvedWindow.requested_address.street_line_2).toBe('Apt 2');
   });
 
   test('an unconfirmed card still files the reassignment task for a held booking', () => {

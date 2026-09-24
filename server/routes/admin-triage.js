@@ -644,7 +644,18 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
   // A Deny that marks the scheduling OR the service extraction wrong leaves
   // no trustworthy appointment to hand on (codex r9 P2).
   const scheduleDenied = verdict === 'deny' && (wrongFields.includes('scheduling') || wrongFields.includes('service'));
-  const onFile = (liveOnFile && String(liveOnFile.address_line1 || '').trim()) ? liveOnFile : (payload?.on_file_address || null);
+  // The live address stands in for the snapshot ONLY when it is one of the
+  // two premises the reviewer compared (the office adopted the caller's
+  // number, or the on-file line was retyped): a customer moved to a third
+  // property, or a call relinked to another customer, must not retarget
+  // the confirmed ask to an address nobody reviewed (codex r16 P1).
+  const { sameHouseNumberStreet } = require('../services/call-triage-flags');
+  const liveLine = String(liveOnFile?.address_line1 || '').trim();
+  const liveIsReviewedPremise = !!liveLine && (
+    sameHouseNumberStreet(liveLine, payload?.stated_street)
+    || sameHouseNumberStreet(liveLine, payload?.on_file_address?.address_line1)
+    || (!payload?.stated_street && !payload?.on_file_address?.address_line1));
+  const onFile = liveIsReviewedPremise ? liveOnFile : (payload?.on_file_address || null);
   const approvedAddress = onFile
     ? { street_line_1: onFile.address_line1, street_line_2: onFile.address_line2 || null, city: onFile.city || null, postal_code: onFile.zip || null }
     : null;

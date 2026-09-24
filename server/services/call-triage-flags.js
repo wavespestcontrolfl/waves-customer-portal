@@ -1782,14 +1782,17 @@ function restatesOnFileAddress(sa, knownCustomer) {
  * second_service_address own that); a different ZIP or city is not a typo.
  * Returns the evidence for an advisory review card, or null. Pure.
  */
-const HOUSE_TOKEN = /^(\d+[a-z]?(?:-\d+[a-z]?)?)\b\s*/i;
+// A fractional premise ("12 1/2 Main St") is ONE house token: without the
+// fraction 12 1/2 reads as 12 (no conflict) or leaves "1/2" in the street
+// name (a different street) — codex r16 P2.
+const HOUSE_TOKEN = /^(\d+[a-z]?(?:-\d+[a-z]?)?(?:\s+\d\/\d)?)\b\s*/i;
 function houseAndName(line) {
   const text = String(line || '').trim();
   const m = text.match(HOUSE_TOKEN);
   if (!m) return { house: '', name: '', withoutSuffix: '' };
   const tokens = normalizeStreetLine(text.slice(m[0].length)).toLowerCase().split(/\s+/).filter(Boolean)
     .map(token => String(STREET_SUFFIX_ALIASES[token] || DIRECTIONAL_ALIASES[token] || token).toLowerCase());
-  return { house: m[1].toLowerCase(), ...streetNameParts(tokens) };
+  return { house: m[1].toLowerCase().replace(/\s+/g, ' '), ...streetNameParts(tokens) };
 }
 
 // Do two street lines name the SAME house on the same street by the
