@@ -1626,8 +1626,12 @@ render the out-of-area stop card with the waitlist prompt: `{ state:
 needs coordinates (the linked customer's stored coords, else a geocode of
 whichever address is on file); with none resolvable, `availability: null`
 and `needs_address: true` — the page asks for an address via `POST
-/:token/availability { address }` (ephemeral: not persisted until a visit
-actually books) before showing times. GET is routed through the SAME
+/:token/availability { address }` (not persisted by the availability
+call; the commit persists the validated, in-area address onto the customer
+in its phase 1 and KEEPS it even if the booking attempt then fails — owner
+ruling 2026-09-24, since undoing it raced concurrent bookings that had
+already adopted it; a retry with a different address writes that one)
+before showing times. GET is routed through the SAME
 `finalizeBookingLocation` every other producer of a booking location in
 this file uses (resolveServiceAddress wrapped by checkServiceArea) — a
 stored address that resolves is never taken as "covered" without also

@@ -912,7 +912,12 @@ function InspectionCoveredCard({ data }) {
   const converted = data?.state === 'converted';
   return (
     <Card>
-      <CardTitle>{data?.lead?.first_name ? `Hi ${data.lead.first_name} — ` : ''}you&apos;re already on the calendar</CardTitle>
+      {/* A converted lead with no upcoming visit is a customer, not "on the
+          calendar" (Codex #4737 r4 P2). */}
+      <CardTitle>
+        {data?.lead?.first_name ? `Hi ${data.lead.first_name} — ` : ''}
+        {converted && !visit ? <>you&apos;re already a Waves customer</> : <>you&apos;re already on the calendar</>}
+      </CardTitle>
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
         {converted ? (
           <>You&apos;re already a Waves customer{visit ? <> with a visit on the books</> : ''}.</>
@@ -1096,7 +1101,7 @@ function InspectionHero({ data, details, onDetails }) {
           {lead.first_name ? `Hi ${lead.first_name} — ` : ''}pick a time for us to stop by
         </h1>
         <div style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
-          About 30 minutes. We arrive in a 2-hour window.
+          {data?.durationMinutes ? `About ${data.durationMinutes} minutes. ` : ''}We arrive in a 2-hour window.
         </div>
       </div>
       <Card>
@@ -1141,7 +1146,9 @@ function InspectionSuccessCard({ result }) {
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
         Your free consultation is set for <strong style={{ color: S.text }}>{formatDateLabel(visit.date)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(visit.window?.start) || result.startLabel}</strong>.
-        {' '}We&apos;ll text you a confirmation shortly.
+        {/* Channel-neutral: an existing customer's confirmation follows their
+            own text/email preference (Codex #4737 r4 P2). */}
+        {' '}You&apos;ll get a confirmation shortly.
       </div>
       {result?.rescheduleUrl ? (
         <a href={result.rescheduleUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>

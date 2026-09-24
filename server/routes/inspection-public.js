@@ -191,12 +191,14 @@ const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
-const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { isInServiceAreaBox } = require('../services/service-area');
 const { isAssessmentServiceType, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
+// The Waves Assessment's catalog identity for travel-gap padding — shared by
+// the offer (buildAvailabilityForLead) and the commit (callbackVisit).
+const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSMENT_SERVICE_KEY, serviceType: 'Waves Assessment' });
 const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
 const { parseRawAddress } = require('../utils/address-normalizer');
 const { buildRescheduleLink } = require('../services/reschedule-link');
@@ -512,9 +514,13 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     lat: coords.lat,
     lng: coords.lng,
     duration,
-    // Any active field tech, no lane concept here — the reservice pest lane's
-    // key drives the same route-capacity computation for a one-off visit.
-    serviceKey: 'pest_control',
+    // The assessment's OWN catalog identity (Codex #4737 r1 P2), the same one
+    // createSelfBooking's commit probe measures with (callbackVisit), so the
+    // offered travel gap and the commit-time check always agree. No funnel
+    // key → no service-type filter: any active field tech (owner decision —
+    // all active techs, scope doc §7).
+    serviceKey: ASSESSMENT_SERVICE_KEY,
+    serviceIdentity: ASSESSMENT_EXPECTED_IDENTITY,
     rangeFrom,
     rangeTo,
     config,
@@ -821,69 +827,14 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
       // A legacy profile with no stored coordinates gets the validated ones
       // (Codex #4737 r3 P1): createSelfBooking reloads the customer's own
       // coordinates for its commit-time travel check, so leaving them null
-      // would run that check locationless. Undone if the booking fails.
+      // would run that check locationless.
       const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
       await trx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
-      return {
-        customer: { ...matched, ...after },
-        location: resolved.location,
-        addressWrite: { customerId: matched.id, before: { latitude: null, longitude: null }, after, writtenAt: new Date() },
-      };
+      return { customer: { ...matched, ...after }, location: resolved.location };
     }
   }
   const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
-  // The new row's address is as ephemeral as any other phase-1 write
-  // (local audit P1): a failed booking returns it to the empty shape the
-  // insert uses when no address is known, so a retry with a corrected
-  // address is not overridden by this one.
-  const addressFields = ['address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude'];
-  return {
-    customer: created,
-    addressWrite: {
-      customerId: created.id,
-      before: { address_line1: '', address_line2: null, city: '', zip: '', latitude: null, longitude: null },
-      after: Object.fromEntries(addressFields.map((f) => [f, created[f] ?? null])),
-      writtenAt: new Date(),
-    },
-  };
-}
-
-// Puts back a customer address/coordinate write phase 1 made, when the
-// booking it was for did not happen (Codex #4737 r3 P1). Guarded: only a row
-// still holding exactly the values phase 1 wrote is reverted, so a newer
-// edit (the office, another commit) is never clobbered. Best-effort — logged,
-// never thrown over the booking's own answer.
-async function undoAddressWrite(addressWrite, leadId) {
-  if (!addressWrite) return;
-  try {
-    await db.transaction(async (undoTrx) => {
-      // Serialize against other writers of this customer row, then keep the
-      // write if ANY live visit was booked for the customer since it landed
-      // (local audit P1): a concurrent commit may have booked against the
-      // address this request wrote, and reverting would strand that visit.
-      // The same per-customer comms fence booking.js's insert transaction
-      // takes (local audit P1) — FIRST, so an in-flight booking for this
-      // customer either finished inserting its visit (seen below) or waits
-      // until this rollback commits and then books against the restored row.
-      await lockCustomerComms(undoTrx, addressWrite.customerId);
-      await undoTrx('customers').where({ id: addressWrite.customerId }).forUpdate().first('id');
-      const adopted = await undoTrx('scheduled_services')
-        .where({ customer_id: addressWrite.customerId })
-        // 5s slack for app-vs-DB clock skew — over-inclusive keeps the write.
-        .where('created_at', '>=', new Date(addressWrite.writtenAt.getTime() - 5000))
-        .whereNotIn('status', ['cancelled', 'skipped', 'no_show'])
-        .first('id');
-      if (adopted) return;
-      const q = undoTrx('customers').where({ id: addressWrite.customerId });
-      for (const [field, value] of Object.entries(addressWrite.after)) {
-        if (value == null) q.whereNull(field);
-        else q.where(field, value);
-      }
-      await q.update({ ...addressWrite.before, updated_at: new Date() });
-    });
-  } catch (err) {
-    logger.warn(`[inspection-public] address write-back undo failed for lead ${leadId}: ${err.message}`);
-  }
+  return { customer: created };
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -948,6 +899,9 @@ router.get('/:token', async (req, res, next) => {
       availability,
       needs_address: !resolved.location,
       selfServeNotice: true,
+      // The catalog duration the visit is actually built and booked with
+      // (Codex #4737 r4 P2) — the page shows this, never a hardcoded number.
+      durationMinutes: catalog.durationMinutes,
     });
   } catch (err) {
     next(err);
@@ -1056,6 +1010,283 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   }
 });
 
+// Phase 1 of the commit (split out of the handler, Codex #4737 r1 P2): under
+// the per-lead advisory lock, re-read the lead + customer, re-run
+// eligibility, and provision/link the customer. Returns { eligibility } for a
+// terminal state, { locationFailure } for an address that changed under the
+// lock, or { custRow, location } to book with. DB work on `trx` only — no
+// network I/O while the lock is held (see the handler's phase-1 note).
+async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${COMMIT_LOCK_NS}:${lead.id}`]);
+
+    const freshLead = await loadLead(trx, lead.id);
+    if (!freshLead) return { eligibility: { state: 'gone', visit: null, rescheduleUrl: null } };
+    const freshCustRow = freshLead.customer_id ? await loadCustomer(trx, freshLead.customer_id) : null;
+
+    // includeRescheduleUrl:false — see resolveEligibility's own docblock.
+    const eligibility = await resolveEligibility(trx, freshLead, freshCustRow, { includeRescheduleUrl: false });
+    if (eligibility.state !== 'ok') return { eligibility };
+
+    let provisioned = freshCustRow;
+    let location = resolved.location;
+
+    if (!freshCustRow) {
+      // ensureCustomerAccount may resolve an EXISTING customer by phone
+      // even though this lead itself was never linked to one — see
+      // resolveOrLinkCustomerForLead's docblock (Codex pre-push P1,
+      // 2026-09-24). Its eligibility short-circuit (already_booked on
+      // the MATCHED customer's own open assessment) takes priority over
+      // ever linking or inserting anything. Everything it does is
+      // trx-scoped DB work — no network I/O of its own.
+      const linkResult = await resolveOrLinkCustomerForLead(trx, freshLead, resolved, verified);
+      if (linkResult.eligibility) return { eligibility: linkResult.eligibility };
+      provisioned = linkResult.customer;
+      // A reused (verified) profile's OWN stored location, when it has
+      // one — never the lead's pre-lock resolved.location — so the
+      // post-transaction "location differs from pre-lock" re-check below
+      // re-validates the slot against the REAL property and fails
+      // closed (SLOT_TAKEN) on any mismatch instead of booking a
+      // technician dispatched for a different address (Codex pre-push
+      // P1, 2026-09-24).
+      if (linkResult.location) location = linkResult.location;
+      await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
+    } else {
+      // Compare the fresh row's stored-address fields against the
+      // PRE-LOCK custRow snapshot `resolved` was actually computed
+      // against (Codex pre-push P1, 2026-09-24) — never re-resolve here,
+      // which would mean a geocode/county network call while holding the
+      // lock. Identical → the pre-lock resolution still describes this
+      // exact row, safe to reuse outright, no new work needed.
+      const addressUnchanged = STORED_ADDRESS_FIELDS.every(
+        (f) => (freshCustRow[f] ?? null) === (custRow?.[f] ?? null)
+      );
+      if (!addressUnchanged) {
+        // Another commit changed this row's stored address between the
+        // pre-lock read and the lock, or the lead linked to a customer
+        // in that same window — the pre-lock resolution may no longer
+        // describe this row, and re-resolving here is exactly the
+        // network call under the lock this rule forbids. Fail closed
+        // and recoverable; the client retries.
+        return { locationFailure: 'address_unresolved' };
+      }
+      provisioned = freshCustRow;
+      if (resolved.source !== 'customer') {
+        // The pre-lock resolution did NOT come from this row's own
+        // stored address (it was empty, or the stored one failed to
+        // geocode and a lead/supplied fallback won) — write the
+        // validated resolution back so a missing/bad address isn't
+        // asked for again (this file's own contract — see the header).
+        const after = {
+          address_line1: resolved.address.line1,
+          address_line2: resolved.address.line2,
+          city: resolved.address.city,
+          state: resolved.address.state,
+          zip: resolved.address.zip,
+          latitude: resolved.location.lat,
+          longitude: resolved.location.lng,
+        };
+        await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
+        provisioned = {
+          ...freshCustRow,
+          address_line1: resolved.address.line1, address_line2: resolved.address.line2,
+          city: resolved.address.city, state: resolved.address.state, zip: resolved.address.zip,
+          latitude: resolved.location.lat, longitude: resolved.location.lng,
+        };
+      }
+      // else resolved.source === 'customer': the pre-lock resolution WAS
+      // this row's own stored address. Its text needs no write-back, but
+      // coordinates it lacked are persisted (local audit P1) —
+      // createSelfBooking reloads the row for its commit-time travel check,
+      // which must never run locationless.
+      else if (freshCustRow.latitude == null || freshCustRow.longitude == null) {
+        const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
+        await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
+        provisioned = { ...freshCustRow, ...after };
+      }
+    }
+
+    return { custRow: provisioned, location };
+  });
+}
+
+// Commit-handler helpers (split out, Codex #4737 r1 P2) — each maps one
+// repeated decision to its response so the handler reads as phases.
+
+function sendLocationFailure(res, failure, county) {
+  if (failure === 'address_required') return res.status(400).json({ error: 'address required' });
+  if (failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
+  if (failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: county || null });
+  return res.status(422).json({ error: 'address_unresolved' });
+}
+
+// 409 SLOT_TAKEN with the latest open times at `location` (best-effort
+// refresh — answered without it on failure).
+async function sendSlotTaken(res, { location, range, config, catalog, leadId, error }) {
+  let refreshed = null;
+  try {
+    refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes });
+  } catch (err) {
+    logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
+  }
+  return res.status(409).json({
+    error: error || 'That time is no longer open. Here are the latest available times.',
+    code: 'SLOT_TAKEN',
+    availability: refreshed ? shapeAvailability(refreshed, range) : null,
+  });
+}
+
+// The picked slot re-checked at a location that differs from the one it
+// was offered for — the MATCHED slot object (technician/end_time can differ
+// by location), or null when it is not open there.
+async function revalidateSlotAt(location, { date, time, config, catalog, leadId }) {
+  let refreshedDay = null;
+  try {
+    refreshedDay = await buildAvailabilityForLead(location, {
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
+    });
+  } catch (err) {
+    logger.warn(`[inspection-public] slot re-validation failed for lead ${leadId}: ${err.message}`);
+  }
+  return findSlotIn(refreshedDay, date, time);
+}
+
+// The offered slot object for `date` at `time` in an availability build, or null.
+function findSlotIn(availability, date, time) {
+  const day = availability?.days?.find((d) => d.date === date);
+  return day?.slots?.find((s) => s.start_time === time) || null;
+}
+
+function sameLocation(a, b) {
+  return a.lat === b.lat && a.lng === b.lng;
+}
+
+// After a successful createSelfBooking: the reschedule link, the internal
+// note, and the response body. Lookups here are best-effort — the booking
+// already committed.
+async function finishCommittedBooking({ result, notes, date, bookingSlot }) {
+  let rescheduleUrl = null;
+  let scheduledServiceId = null;
+  try {
+    const serviceRow = await db('scheduled_services')
+      .where({ self_booking_id: result.body?.booking?.id })
+      .first('id', 'reschedule_token');
+    scheduledServiceId = serviceRow?.id || null;
+    if (serviceRow?.reschedule_token) rescheduleUrl = `/reschedule/${serviceRow.reschedule_token}`;
+  } catch (err) {
+    logger.warn(`[inspection-public] reschedule-link lookup failed for booking ${result.body?.booking?.id}: ${err.message}`);
+  }
+
+  if (notes && scheduledServiceId) {
+    try {
+      await db('scheduled_services').where({ id: scheduledServiceId }).update({ internal_notes: notes });
+    } catch (err) {
+      logger.warn(`[inspection-public] internal_notes write failed for ${scheduledServiceId}: ${err.message}`);
+    }
+  }
+
+  return {
+    success: true,
+    state: 'ok',
+    replayed: !!result.body?.replayed,
+    visit: { date, window: { start: bookingSlot.start_time, end: bookingSlot.end_time } },
+    startLabel: bookingSlot.start_label,
+    endLabel: bookingSlot.end_label,
+    rescheduleUrl,
+  };
+}
+
+function parseCommitBody(body) {
+  const date = typeof body?.date === 'string' ? body.date.trim() : '';
+  const time = typeof body?.time === 'string' ? body.time.trim() : '';
+  const addressInput = typeof body?.address === 'string' ? body.address.trim() : '';
+  const notes = typeof body?.notes === 'string' ? body.notes.trim().slice(0, MAX_NOTES_LENGTH) : '';
+  const invalid = !/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^([01]\d|2[0-3]):00$/.test(time);
+  return { date, time, addressInput, notes, invalid };
+}
+
+// Phase 2 — createSelfBooking with the assessment's internal callbackVisit
+// (see the handler's phase-2 note for the lane-dedupe contract).
+async function bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog }) {
+  const { createSelfBooking } = booking._internals;
+  return createSelfBooking({
+    slot_date: date,
+    slot_start: bookingSlot.start_time,
+    slot_end: bookingSlot.end_time,
+    technician_id: bookingSlot.technician_id || null,
+    // The customer-VISIBLE `notes` column stays generic — the free-text
+    // note rides internal_notes below (never customer/tech visible notes).
+    customer_notes: null,
+    source: 'inspection_link',
+    // Server-resolved trust context — the token proved the lead's identity.
+    authedCustomer: custRow,
+    payAtVisit: false,
+    customersOnly: false,
+    callbackVisit: {
+      serviceKey: ASSESSMENT_SERVICE_KEY,
+      serviceId: catalog.serviceId,
+      serviceType: catalog.serviceType,
+      durationMinutes: catalog.durationMinutes,
+      // Not a re-service warranty callback — see booking.js's callbackVisit
+      // contract. dedupeLane is left at its true default (on): the
+      // 'assessment' lane above is what makes this call atomic.
+      isCallback: false,
+      // The identity the offer side measured the travel gap with, so the
+      // commit-time check agrees (Codex #4737 r1 P2).
+      expectedIdentity: ASSESSMENT_EXPECTED_IDENTITY,
+      alertLabel: '🔁 Free consultation self-booked:',
+    },
+  });
+}
+
+// A failed createSelfBooking mapped to the page's responses: ALREADY_BOOKED
+// resolves to GET's already_booked shape; a 409 is SLOT_TAKEN with fresh
+// times; anything else passes through.
+async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog }) {
+  // A validated, in-area address the lead supplied through their own
+  // link stays on the customer even when this attempt fails (owner
+  // ruling 2026-09-24): undoing it raced concurrent bookings that had
+  // already adopted it (Codex #4737 r3/r4). A retry with a different
+  // address simply writes that one.
+  if (result.code === 'ALREADY_BOOKED') {
+    // The atomic lane dedupe inside createSelfBooking's own insert
+    // transaction caught a duplicate — resolve and return the SAME
+    // already_booked shape GET returns, pointing at whichever visit is
+    // now the customer's open assessment.
+    const eligibility = await resolveEligibility(db, lead, custRow);
+    return res.json(eligibilityResponse(eligibility, leadPayload));
+  }
+  if (result.status === 409) {
+    return sendSlotTaken(res, { location: bookingLocation, range, config, catalog, leadId: lead.id, error: result.error });
+  }
+  return res.status(result.status || 500).json({ error: result.error });
+}
+
+// Phase 1 ended in a terminal answer: eligibility changed under the lock
+// (with the reschedule URL filled in now that the lock is released), or the
+// customer's stored address changed under it.
+async function sendPhase1Terminal(res, phase1, leadPayload) {
+  if (phase1.eligibility) {
+    // The lock-protected eligibility check above skipped the reschedule
+    // URL (no second connection while the lock was held) — the lock is
+    // released now, so a normal, unlocked call is safe.
+    if (phase1.eligibility.visit && !phase1.eligibility.rescheduleUrl) {
+      phase1.eligibility.rescheduleUrl = await rescheduleUrlFor(phase1.eligibility.visit.id);
+    }
+    return res.json(eligibilityResponse(phase1.eligibility, leadPayload));
+  }
+  if (phase1.locationFailure) return sendLocationFailure(res, phase1.locationFailure, phase1.county);
+}
+
+// The picked date outside the online window, or no assessment catalog row.
+function commitWindowFailure(date, range, catalog) {
+  if (date < range.rangeFrom || date > range.rangeTo) {
+    return { status: 400, error: 'That date is outside the online scheduling window.' };
+  }
+  if (!catalog.serviceId) return { status: 503, error: 'Booking is temporarily unavailable — please text or call us.' };
+  return null;
+}
+
 router.post('/:token', commitLimiter, async (req, res, next) => {
   if (!leadInspectionLinkLive()) return res.status(404).json({ error: 'not_found' });
   // Token before body validation (Codex #4737 r1 P0): an invalid token
@@ -1063,15 +1294,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   const verified = verifyLeadConsultationToken(req.params.token);
   if (!verified) return res.status(404).json({ error: 'not_found' });
 
-  const date = typeof req.body?.date === 'string' ? req.body.date.trim() : '';
-  const time = typeof req.body?.time === 'string' ? req.body.time.trim() : '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^([01]\d|2[0-3]):00$/.test(time)) {
-    return res.status(400).json({ error: 'date (YYYY-MM-DD) and time (HH:00) required' });
-  }
-  const addressInput = typeof req.body?.address === 'string' ? req.body.address.trim() : '';
-  const notes = typeof req.body?.notes === 'string'
-    ? req.body.notes.trim().slice(0, MAX_NOTES_LENGTH)
-    : '';
+  const { date, time, addressInput, notes, invalid } = parseCommitBody(req.body);
+  if (invalid) return res.status(400).json({ error: 'date (YYYY-MM-DD) and time (HH:00) required' });
 
   try {
     const lead = await loadLead(db, verified.leadId);
@@ -1091,44 +1315,22 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
 
     const resolved = await finalizeBookingLocation(lead, custRow, addressInput);
-    if (resolved.failure) {
-      if (resolved.failure === 'address_required') return res.status(400).json({ error: 'address required' });
-      if (resolved.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
-      if (resolved.failure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: resolved.county || null });
-      return res.status(422).json({ error: 'address_unresolved' });
-    }
+    if (resolved.failure) return sendLocationFailure(res, resolved.failure, resolved.county);
 
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
-    if (date < range.rangeFrom || date > range.rangeTo) {
-      return res.status(400).json({ error: 'That date is outside the online scheduling window.' });
-    }
     const catalog = await loadAssessmentCatalog();
-    if (!catalog.serviceId) {
-      return res.status(503).json({ error: 'Booking is temporarily unavailable — please text or call us.' });
-    }
+    const windowFailure = commitWindowFailure(date, range, catalog);
+    if (windowFailure) return res.status(windowFailure.status).json({ error: windowFailure.error });
 
     // Anti-forgery: re-validate against a fresh single-day availability
     // build at the CATALOG's real duration (reservice-public's model).
     const dayAvailability = await buildAvailabilityForLead(resolved.location, {
       rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
     });
-    const day = dayAvailability?.days?.find((d) => d.date === date);
-    const slot = day?.slots?.find((s) => s.start_time === time);
-    if (!slot) {
-      let refreshed = null;
-      try {
-        refreshed = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
-      } catch (err) {
-        logger.warn(`[inspection-public] refresh availability failed for lead ${lead.id}: ${err.message}`);
-      }
-      return res.status(409).json({
-        error: 'That time is no longer open. Here are the latest available times.',
-        code: 'SLOT_TAKEN',
-        availability: refreshed ? shapeAvailability(refreshed, range) : null,
-      });
-    }
+    const slot = findSlotIn(dayAvailability, date, time);
+    if (!slot) return sendSlotTaken(res, { location: resolved.location, range, config, catalog, leadId: lead.id });
 
     // Phase 1 — lock, re-read the lead's customer_id FRESH (a concurrent
     // commit's phase 1 may have just linked one), re-run eligibility, then
@@ -1155,130 +1357,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // resolve sees the row as it stands now. (2) the chosen slot is
     // re-validated AFTER this transaction commits and the lock releases,
     // never inside it — see below.
-    const phase1 = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${COMMIT_LOCK_NS}:${lead.id}`]);
+    const phase1 = await provisionCommitCustomer({ lead, custRow, resolved, verified });
 
-      const freshLead = await loadLead(trx, lead.id);
-      if (!freshLead) return { eligibility: { state: 'gone', visit: null, rescheduleUrl: null } };
-      const freshCustRow = freshLead.customer_id ? await loadCustomer(trx, freshLead.customer_id) : null;
-
-      // includeRescheduleUrl:false — see resolveEligibility's own docblock.
-      const eligibility = await resolveEligibility(trx, freshLead, freshCustRow, { includeRescheduleUrl: false });
-      if (eligibility.state !== 'ok') return { eligibility };
-
-      let provisioned = freshCustRow;
-      let location = resolved.location;
-      // Any customer address/coordinate write phase 1 makes, so a booking
-      // that then fails can undo it (undoAddressWrite).
-      let addressWrite = null;
-
-      if (!freshCustRow) {
-        // ensureCustomerAccount may resolve an EXISTING customer by phone
-        // even though this lead itself was never linked to one — see
-        // resolveOrLinkCustomerForLead's docblock (Codex pre-push P1,
-        // 2026-09-24). Its eligibility short-circuit (already_booked on
-        // the MATCHED customer's own open assessment) takes priority over
-        // ever linking or inserting anything. Everything it does is
-        // trx-scoped DB work — no network I/O of its own.
-        const linkResult = await resolveOrLinkCustomerForLead(trx, freshLead, resolved, verified);
-        if (linkResult.eligibility) return { eligibility: linkResult.eligibility };
-        provisioned = linkResult.customer;
-        if (linkResult.addressWrite) addressWrite = linkResult.addressWrite;
-        // A reused (verified) profile's OWN stored location, when it has
-        // one — never the lead's pre-lock resolved.location — so the
-        // post-transaction "location differs from pre-lock" re-check below
-        // re-validates the slot against the REAL property and fails
-        // closed (SLOT_TAKEN) on any mismatch instead of booking a
-        // technician dispatched for a different address (Codex pre-push
-        // P1, 2026-09-24).
-        if (linkResult.location) location = linkResult.location;
-        await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
-      } else {
-        // Compare the fresh row's stored-address fields against the
-        // PRE-LOCK custRow snapshot `resolved` was actually computed
-        // against (Codex pre-push P1, 2026-09-24) — never re-resolve here,
-        // which would mean a geocode/county network call while holding the
-        // lock. Identical → the pre-lock resolution still describes this
-        // exact row, safe to reuse outright, no new work needed.
-        const addressUnchanged = STORED_ADDRESS_FIELDS.every(
-          (f) => (freshCustRow[f] ?? null) === (custRow?.[f] ?? null)
-        );
-        if (!addressUnchanged) {
-          // Another commit changed this row's stored address between the
-          // pre-lock read and the lock, or the lead linked to a customer
-          // in that same window — the pre-lock resolution may no longer
-          // describe this row, and re-resolving here is exactly the
-          // network call under the lock this rule forbids. Fail closed
-          // and recoverable; the client retries.
-          return { locationFailure: 'address_unresolved' };
-        }
-        provisioned = freshCustRow;
-        if (resolved.source !== 'customer') {
-          // The pre-lock resolution did NOT come from this row's own
-          // stored address (it was empty, or the stored one failed to
-          // geocode and a lead/supplied fallback won) — write the
-          // validated resolution back so a missing/bad address isn't
-          // asked for again (this file's own contract — see the header).
-          const after = {
-            address_line1: resolved.address.line1,
-            address_line2: resolved.address.line2,
-            city: resolved.address.city,
-            state: resolved.address.state,
-            zip: resolved.address.zip,
-            latitude: resolved.location.lat,
-            longitude: resolved.location.lng,
-          };
-          await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
-          // Recorded so a failed booking can put the row back (Codex #4737
-          // r3 P1 — the address stays ephemeral until a visit commits).
-          addressWrite = {
-            customerId: freshCustRow.id,
-            before: Object.fromEntries(Object.keys(after).map((f) => [f, freshCustRow[f] ?? null])),
-            after,
-            writtenAt: new Date(),
-          };
-          provisioned = {
-            ...freshCustRow,
-            address_line1: resolved.address.line1, address_line2: resolved.address.line2,
-            city: resolved.address.city, state: resolved.address.state, zip: resolved.address.zip,
-            latitude: resolved.location.lat, longitude: resolved.location.lng,
-          };
-        }
-        // else resolved.source === 'customer': the pre-lock resolution WAS
-        // this row's own stored address. Its text needs no write-back, but
-        // coordinates it lacked are persisted (local audit P1) —
-        // createSelfBooking reloads the row for its commit-time travel check,
-        // which must never run locationless.
-        else if (freshCustRow.latitude == null || freshCustRow.longitude == null) {
-          const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
-          await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
-          addressWrite = {
-            customerId: freshCustRow.id,
-            before: { latitude: freshCustRow.latitude ?? null, longitude: freshCustRow.longitude ?? null },
-            after,
-            writtenAt: new Date(),
-          };
-          provisioned = { ...freshCustRow, ...after };
-        }
-      }
-
-      return { custRow: provisioned, location, addressWrite };
-    });
-
-    if (phase1.eligibility) {
-      // The lock-protected eligibility check above skipped the reschedule
-      // URL (no second connection while the lock was held) — the lock is
-      // released now, so a normal, unlocked call is safe.
-      if (phase1.eligibility.visit && !phase1.eligibility.rescheduleUrl) {
-        phase1.eligibility.rescheduleUrl = await rescheduleUrlFor(phase1.eligibility.visit.id);
-      }
-      return res.json(eligibilityResponse(phase1.eligibility, leadPayload));
-    }
-    if (phase1.locationFailure) {
-      if (phase1.locationFailure === 'out_of_area') return res.status(422).json({ error: 'out_of_area', county: phase1.county || null });
-      if (phase1.locationFailure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
-      return res.status(422).json({ error: 'address_unresolved' });
-    }
+    if (phase1.eligibility || phase1.locationFailure) return sendPhase1Terminal(res, phase1, leadPayload);
     custRow = phase1.custRow;
     const bookingLocation = phase1.location;
 
@@ -1286,10 +1367,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // stored coordinates, which the pre-lock area check never saw (local
     // audit P1). Area-check it now, after the lock is released — the
     // availability rebuild below checks slots, not county eligibility.
-    if (bookingLocation.lat !== resolved.location.lat || bookingLocation.lng !== resolved.location.lng) {
+    const locationMoved = !sameLocation(bookingLocation, resolved.location);
+    if (locationMoved) {
       const areaFailure = await serviceAreaFailure(bookingLocation);
-      if (areaFailure?.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
-      if (areaFailure) return res.status(422).json({ error: 'out_of_area', county: areaFailure.county || null });
+      if (areaFailure) return sendLocationFailure(res, areaFailure.failure, areaFailure.county);
     }
 
     // Re-validate the chosen slot when the final location differs from
@@ -1303,32 +1384,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // always uses the global `db` connection and can do real network I/O
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
-    let bookingSlot = slot;
-    if (bookingLocation.lat !== resolved.location.lat || bookingLocation.lng !== resolved.location.lng) {
-      let refreshedDay = null;
-      try {
-        refreshedDay = await buildAvailabilityForLead(bookingLocation, {
-          rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
-        });
-      } catch (err) {
-        logger.warn(`[inspection-public] slot re-validation failed for lead ${lead.id}: ${err.message}`);
-      }
-      bookingSlot = refreshedDay?.days?.find((d) => d.date === date)?.slots
-        ?.find((s) => s.start_time === time) || null;
-    }
-    if (!bookingSlot) {
-      let refreshed = null;
-      try {
-        refreshed = await buildAvailabilityForLead(bookingLocation, { ...range, config, duration: catalog.durationMinutes });
-      } catch (err) {
-        logger.warn(`[inspection-public] refresh availability failed for lead ${lead.id}: ${err.message}`);
-      }
-      return res.status(409).json({
-        error: 'That time is no longer open. Here are the latest available times.',
-        code: 'SLOT_TAKEN',
-        availability: refreshed ? shapeAvailability(refreshed, range) : null,
-      });
-    }
+    const bookingSlot = locationMoved
+      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id })
+      : slot;
+    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -1349,95 +1408,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // A duplicate throws ALREADY_BOOKED, caught below and mapped to the
     // same `{ state: 'already_booked', visit, rescheduleUrl }` shape GET
     // returns, resolved against whichever visit survived.
-    const { createSelfBooking } = booking._internals;
-    let result;
-    try {
-      result = await createSelfBooking({
-      slot_date: date,
-      slot_start: bookingSlot.start_time,
-      slot_end: bookingSlot.end_time,
-      technician_id: bookingSlot.technician_id || null,
-      // The customer-VISIBLE `notes` column stays generic — the free-text
-      // note rides internal_notes below (never customer/tech visible notes).
-      customer_notes: null,
-      source: 'inspection_link',
-      // Server-resolved trust context — the token proved the lead's identity.
-      authedCustomer: custRow,
-      payAtVisit: false,
-      customersOnly: false,
-      callbackVisit: {
-        serviceKey: ASSESSMENT_SERVICE_KEY,
-        serviceId: catalog.serviceId,
-        serviceType: catalog.serviceType,
-        durationMinutes: catalog.durationMinutes,
-        // Not a re-service warranty callback — see booking.js's callbackVisit
-        // contract. dedupeLane is left at its true default (on): the
-        // 'assessment' lane above is what makes this call atomic.
-        isCallback: false,
-        alertLabel: '🔁 Free consultation self-booked:',
-      },
-      });
-    } catch (err) {
-      await undoAddressWrite(phase1.addressWrite, lead.id);
-      throw err;
-    }
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog });
 
     if (!result.ok) {
-      // No visit from THIS request — phase 1's address write-back must not
-      // outlive it (Codex #4737 r3 P1). Except ALREADY_BOOKED: another
-      // commit's visit exists and may be using that address.
-      if (result.code !== 'ALREADY_BOOKED') await undoAddressWrite(phase1.addressWrite, lead.id);
-      if (result.code === 'ALREADY_BOOKED') {
-        // The atomic lane dedupe inside createSelfBooking's own insert
-        // transaction caught a duplicate — resolve and return the SAME
-        // already_booked shape GET returns, pointing at whichever visit is
-        // now the customer's open assessment.
-        const eligibility = await resolveEligibility(db, lead, custRow);
-        return res.json(eligibilityResponse(eligibility, leadPayload));
-      }
-      if (result.status === 409) {
-        let refreshed = null;
-        try {
-          refreshed = await buildAvailabilityForLead(bookingLocation, { ...range, config, duration: catalog.durationMinutes });
-        } catch { /* answer without the refresh */ }
-        return res.status(409).json({
-          error: result.error,
-          code: 'SLOT_TAKEN',
-          availability: refreshed ? shapeAvailability(refreshed, range) : null,
-        });
-      }
-      return res.status(result.status || 500).json({ error: result.error });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog });
     }
 
-    let rescheduleUrl = null;
-    let scheduledServiceId = null;
-    try {
-      const serviceRow = await db('scheduled_services')
-        .where({ self_booking_id: result.body?.booking?.id })
-        .first('id', 'reschedule_token');
-      scheduledServiceId = serviceRow?.id || null;
-      if (serviceRow?.reschedule_token) rescheduleUrl = `/reschedule/${serviceRow.reschedule_token}`;
-    } catch (err) {
-      logger.warn(`[inspection-public] reschedule-link lookup failed for booking ${result.body?.booking?.id}: ${err.message}`);
-    }
-
-    if (notes && scheduledServiceId) {
-      try {
-        await db('scheduled_services').where({ id: scheduledServiceId }).update({ internal_notes: notes });
-      } catch (err) {
-        logger.warn(`[inspection-public] internal_notes write failed for ${scheduledServiceId}: ${err.message}`);
-      }
-    }
-
-    return res.json({
-      success: true,
-      state: 'ok',
-      replayed: !!result.body?.replayed,
-      visit: { date, window: { start: bookingSlot.start_time, end: bookingSlot.end_time } },
-      startLabel: bookingSlot.start_label,
-      endLabel: bookingSlot.end_label,
-      rescheduleUrl,
-    });
+    return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));
   } catch (err) {
     next(err);
   }

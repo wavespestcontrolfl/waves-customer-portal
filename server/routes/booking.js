@@ -1675,7 +1675,7 @@ async function createSelfBooking(payload = {}) {
 
     // callbackVisit is INTERNAL-ONLY (reservice-public.js, inspection-public.js):
     // a server-resolved { serviceKey, serviceId, serviceType, durationMinutes,
-    // isCallback?, dedupeLane?, alertLabel? } describing a free internal-
+    // isCallback?, dedupeLane?, expectedIdentity?, alertLabel? } describing a free internal-
     // caller booking. It swaps the funnel catalog resolution for the caller's
     // catalog row and skips the funnel-only follow-ons (signed-offer gate,
     // card-capture step, ad attribution, customer promotion, quarterly
@@ -2907,7 +2907,8 @@ async function createSelfBooking(payload = {}) {
           lat: Number.isFinite(offerLat) ? offerLat : null,
           lng: Number.isFinite(offerLng) ? offerLng : null,
           // Same credit buildBookingAvailability offered this window under.
-          expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration),
+          // expectedIdentity: consultation page only (#4737 r1 P2).
+          expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
         },
       });
       if (globalClash.length) {

@@ -389,6 +389,10 @@ app.use('/api/public/a2a', (req, res, next) => {
 // of the global /api limiter and JSON parsing, so while
 // GATE_LEAD_INSPECTION_LINK is off every request is a uniform 404, never a
 // 429/413/400 (Codex #4737 r2 P0). Call-time gate read.
+// Privacy headers first (Codex #4737 r4 P0), exactly as the careers
+// interview surface does: the dark 404 and any global-limiter 429 for a
+// bearer-token URL still carry Cache-Control/X-Robots-Tag/Referrer-Policy.
+app.use('/api/public/inspection', require('./middleware/no-store').noStore);
 app.use('/api/public/inspection', (req, res, next) => {
   if (!require('./config/feature-gates').leadInspectionLinkLive()) {
     return res.status(404).json({ error: 'not_found' });

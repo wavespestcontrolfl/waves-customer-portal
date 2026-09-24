@@ -138,6 +138,30 @@ describe('InspectionPage terminal states', () => {
     expect(await screen.findByText(/already a Waves customer/i)).toBeInTheDocument();
   });
 
+  // Codex #4737 r4 P2: a converted lead with no upcoming visit is never told
+  // they are "on the calendar".
+  it('converted with no visit: customer wording, never "already on the calendar"', async () => {
+    stubFetch({
+      get: jsonResponse({
+        state: 'converted',
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: null },
+        visit: null,
+        rescheduleUrl: null,
+      }),
+    });
+    renderPage();
+    expect((await screen.findAllByText(/already a Waves customer/i)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/already on the calendar/i)).toBeNull();
+  });
+
+  // Codex #4737 r4 P2: the page shows the catalog duration the server books with.
+  it('ok: shows the server-supplied catalog duration, not a hardcoded one', async () => {
+    stubFetch({ get: jsonResponse({ ...okPayload(), durationMinutes: 45 }) });
+    renderPage();
+    expect(await screen.findByText(/About 45 minutes/)).toBeInTheDocument();
+    expect(screen.queryByText(/About 30 minutes/)).toBeNull();
+  });
+
   // Round 9 (Codex pre-push P1, 2026-09-24): GET now routes through
   // finalizeBookingLocation, same as every other producer of a booking
   // location — a stored address outside the service area stops the page
