@@ -44,6 +44,9 @@ jest.mock('../services/rebooker', () => ({
 jest.mock('../routes/admin-schedule', () => ({
   sendRescheduleNoticeForVisit: jest.fn(async () => ({ sent: true, error: null })),
 }));
+jest.mock('../services/scheduling/quality-after-change', () => ({
+  refreshScheduleQualityAfterChange: jest.fn(async () => {}),
+}));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
 }));
@@ -271,4 +274,33 @@ test('codex round-3: PUT /:id/reorder now rejects a stale visit for a technician
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ routeOrder: 3 }),
   });
   expect(res.status).toBe(403);
+});
+
+// Pre-push fallback audit on f8b88eb9a8 (P1, rebutted): it read the reorder
+// write's CAS as "scheduled_date only". It is not — the UPDATE pins
+// technician_id to the provisional read's value (admin-dispatch.js reorder +
+// reorder/bulk `.modify(... q.where('technician_id', prov.technician_id))`),
+// so a reassignment landing between the unlocked provisional read and the
+// tech-day advisory lock makes the write miss (0 rows → STALE_OPTIMIZE 409)
+// instead of stamping the former technician's route_order on the row.
+test('fallback-audit: PUT /:id/reorder — a reassignment landing right after the provisional read makes the technician-pinned CAS miss (409), route_order untouched', async () => {
+  db.__state.raceAfterNextRead = { to: 'tech-B' };
+  const res = await fetch(`${baseUrl}/api/admin/dispatch/svc-1/reorder`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ routeOrder: 3 }),
+  });
+  expect(res.status).toBe(409);
+  expect(db.__state.scheduledServices[0].technician_id).toBe('tech-B');
+  expect(db.__state.scheduledServices[0].route_order).toBeUndefined();
+  const writes = db.__state.writes.filter((w) => w.op === 'update');
+  expect(writes).toHaveLength(1);
+  expect(writes[0].where).toMatchObject({ id: 'svc-1', technician_id: 'tech-A' });
+  expect(writes[0].hit).toEqual([]);
+});
+
+test('control: PUT /:id/reorder writes route_order for the owning technician when no reassignment lands', async () => {
+  const res = await fetch(`${baseUrl}/api/admin/dispatch/svc-1/reorder`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ routeOrder: 3 }),
+  });
+  expect(res.status).toBe(200);
+  expect(db.__state.scheduledServices[0].route_order).toBe(3);
 });
