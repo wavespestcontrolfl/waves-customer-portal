@@ -49,6 +49,7 @@ import {
   stackablePresets,
   isCustomAmountPreset,
   isCustomPercentagePreset,
+  isPercentDiscountType,
 } from "../../lib/discountStack";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
 import {
@@ -3667,6 +3668,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     || null;
   const effectiveDiscountTypeForExclusion =
     discountType || storedAppointmentDiscount?.discount_type || "";
+  // GitHub Codex round 26 P2 (#4657, :3681): a RETAINED stored appointment
+  // discount leaves discountType/discountAmount empty by design, so the
+  // exclusion notices below (gated on the selection state) never explained
+  // which lines a stored percentage skipped — and a stored
+  // variable_percentage was not classified as percent at all. One
+  // effective predicate pair for every notice: percent-ness through the
+  // shared helper (covers variable_percentage), "in play" = a live
+  // selection with an amount OR a retained stored discount.
+  const effectiveDiscountIsPercent = isPercentDiscountType(effectiveDiscountTypeForExclusion);
+  const effectiveDiscountInPlay =
+    (!!discountType && discountAmount !== "") || !!storedAppointmentDiscount;
   const lineInDiscountScope = (line) =>
     (!effectivePresetKeyFilter || effectivePresetKeyFilter === (line.serviceKey || null)) &&
     (!effectivePresetCategoryFilter ||
@@ -3677,7 +3689,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // P2) — the row is withheld from the percentage base.
   const lineTakesDiscount = (line) =>
     lineInDiscountScope(line) &&
-    !(effectiveDiscountTypeForExclusion === "percentage"
+    !(effectiveDiscountIsPercent
       && (line.excludedFromPercentDiscount === true || line.excludedFromPercentDiscount === null));
   const percentExcludedLines = serviceLines.filter(
     (l) => !lineTakesDiscount(l),
@@ -5496,8 +5508,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
-                {discountType === "percentage" &&
-                  discountAmount !== "" &&
+                {effectiveDiscountIsPercent &&
+                  effectiveDiscountInPlay &&
                   !catalogLive && (
                     <div
                       style={{
@@ -5511,8 +5523,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       this preview; the server applies the live rules on save.
                     </div>
                   )}
-                {discountType &&
-                  discountAmount !== "" &&
+                {effectiveDiscountInPlay &&
                   percentExcludedLines.length > 0 && (
                     <div
                       style={{

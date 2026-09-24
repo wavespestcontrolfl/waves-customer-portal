@@ -1873,9 +1873,100 @@ describe('addonServiceIdentityForFreshness — when the service identity is comp
     expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow: { service_id: 'svc-old' }, inferredServiceId: null })).toBeNull();
   });
 
+  // GitHub Codex round 26 P1 (#4657, :1627): an ID-less fallback switch
+  // posts serviceId null too — key/name decide.
+  test('raw id omitted + stored null service_id, but the submitted KEY differs from the stored snapshot: an explicit switch, compares the inferred id', () => {
+    const priorRow = { service_id: null, service_key_snapshot: 'lawn_fert', service_name: 'Quarterly Fertilization' };
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow, inferredServiceId: 'svc-mosq', submittedServiceKey: 'mosquito', submittedServiceName: 'Mosquito Add-on' })).toBe('svc-mosq');
+  });
+
+  test('raw id omitted + stored null service_id, same key (case/space-insensitive): the round-trip, skipped', () => {
+    const priorRow = { service_id: null, service_key_snapshot: 'lawn_fert', service_name: 'Quarterly Fertilization' };
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow, inferredServiceId: 'svc-fert', submittedServiceKey: ' LAWN_FERT ', submittedServiceName: 'Quarterly Fertilization' })).toBeUndefined();
+  });
+
+  test('no stored key: the NAME decides — a different name is a switch, the same name (any case) is the round-trip; nothing to compare = skipped', () => {
+    const priorRow = { service_id: null, service_key_snapshot: null, service_name: 'Quarterly Fertilization' };
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow, inferredServiceId: 'svc-mosq', submittedServiceName: 'Mosquito Add-on' })).toBe('svc-mosq');
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow, inferredServiceId: 'svc-fert', submittedServiceName: 'quarterly fertilization' })).toBeUndefined();
+    expect(addonServiceIdentityForFreshness({ rawServiceId: null, priorRow: { service_id: null }, inferredServiceId: 'svc-x', submittedServiceName: 'Anything' })).toBeUndefined();
+  });
+
   test('the normalizer hands isNewAddonDiscount this helper\'s answer, never the bare inferred id (source pin)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
     expect(src.match(/\}, gross, addonServiceIdentityForFreshness\(\{/g)).toHaveLength(1);
     expect(src.match(/\}, gross, catalogService\?\.id \|\| null\)/g)).toBeNull();
+    expect(src.match(/submittedServiceKey: a\.serviceKey \|\| null,/g)).toHaveLength(1);
+  });
+});
+
+// GitHub Codex round 26 P1 (#4657, :11100): the unknown-primary-gross refusal
+// used to fire only under canonical adoption; a composition change (delete
+// an undiscounted sibling) on a legacy null-gross row recomputed from the
+// echoed NET ($100 + $90 priced as $90 + $90 = $180, not $190).
+describe('legacyPrimaryGrossUnknownFor — refuse a non-preserved reprice of a legacy null-gross row unless a real gross was entered (round 26 P1, #4657 :11100)', () => {
+  const { legacyPrimaryGrossUnknownFor } = require('../routes/admin-schedule')._test;
+  // $100 primary (gross unknown), a $100 add-on stored net $90, a $50 undiscounted sibling: stored total $240.
+  const existing = { primary_line_price: null, estimated_price: 240, discount_type: null, line_discount_type: null };
+  const rows = [
+    { id: 'a1', base_price: 100, estimated_price: 90, discount_id: 'disc-10', discount_type: 'percentage' },
+    { id: 'a2', base_price: 50, estimated_price: 50, discount_id: null, discount_type: null },
+  ];
+  const base = {
+    existing, existingAddonDiscountRows: rows, anyExistingAddonDiscounted: true,
+    adoptCanonicalPricing: false, legacyPreservationCandidate: true, legacyEconomicsPreserved: false,
+  };
+
+  test('Codex\'s repro: sibling deleted, adoption off, not preserved, primary posted as the SEEDED net ($240 − $100 − $50 = $90): refused', () => {
+    expect(legacyPrimaryGrossUnknownFor({ ...base, primaryGross: 90 })).toBe(true);
+  });
+
+  test('the same save with an independently ENTERED primary gross ($100 ≠ seed $90): allowed, the recompute can trust it', () => {
+    expect(legacyPrimaryGrossUnknownFor({ ...base, primaryGross: 100 })).toBe(false);
+  });
+
+  test('economics preserved (a notes-only save): never refused', () => {
+    expect(legacyPrimaryGrossUnknownFor({ ...base, legacyEconomicsPreserved: true, primaryGross: 90 })).toBe(false);
+  });
+
+  test('canonical adoption requested: refused regardless of what was posted (round 12 rule unchanged)', () => {
+    expect(legacyPrimaryGrossUnknownFor({ ...base, adoptCanonicalPricing: true, primaryGross: 100 })).toBe(true);
+  });
+
+  test('not a legacy-preservation candidate (gate off / marked row): the widened rule stays out of the way', () => {
+    expect(legacyPrimaryGrossUnknownFor({ ...base, legacyPreservationCandidate: false, primaryGross: 90 })).toBe(false);
+  });
+
+  test('a known primary gross, or no discount reaching the primary anywhere: never refused', () => {
+    expect(legacyPrimaryGrossUnknownFor({ ...base, existing: { ...existing, primary_line_price: 100 }, primaryGross: 90 })).toBe(false);
+    expect(legacyPrimaryGrossUnknownFor({ ...base, anyExistingAddonDiscounted: false, primaryGross: 90 })).toBe(false);
+  });
+
+  test('no posted primary at all on a non-preserved reprice of this shape: refused (nothing trustworthy to price from)', () => {
+    expect(legacyPrimaryGrossUnknownFor({ ...base, primaryGross: null })).toBe(true);
+  });
+});
+
+// GitHub Codex round 26 P1 (#4657, :10824): the financial CAS compares the
+// primary's SERVICE identity too.
+describe('financialStateDrifted — a concurrent same-price primary service switch is drift (round 26 P1, #4657 :10824)', () => {
+  const { financialStateDrifted } = require('../routes/admin-schedule')._test;
+  const parent = {
+    estimated_price: 160, primary_line_price: 100, discount_type: null, discount_amount: null, discount_dollars: null,
+    service_id: 'svc-pest', service_key_snapshot: 'pest_general_quarterly', service_category_snapshot: 'pest',
+  };
+  const snapshot = { parent, addons: [] };
+  test('identical identity: no drift', () => {
+    expect(financialStateDrifted(snapshot, { parent: { ...parent }, addons: [] })).toBe(false);
+  });
+  test('service_id / key / category changed at the same price: drift', () => {
+    expect(financialStateDrifted(snapshot, { parent: { ...parent, service_id: 'svc-termite' }, addons: [] })).toBe(true);
+    expect(financialStateDrifted(snapshot, { parent: { ...parent, service_key_snapshot: 'termite_bond' }, addons: [] })).toBe(true);
+    expect(financialStateDrifted(snapshot, { parent: { ...parent, service_category_snapshot: 'termite' }, addons: [] })).toBe(true);
+  });
+  test('both CAS snapshot builders capture the identity fields (source pin)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    expect(src.match(/service_id: existing\.service_id,\n\s+\.\.\.\(cols\.service_key_snapshot \? \{ service_key_snapshot: existing\.service_key_snapshot \}/g)).toHaveLength(1);
+    expect(src.match(/\.\.\.\(cols\.service_id \? \{ service_id: existingPrice\.service_id \} : null\),/g)).toHaveLength(1);
   });
 });

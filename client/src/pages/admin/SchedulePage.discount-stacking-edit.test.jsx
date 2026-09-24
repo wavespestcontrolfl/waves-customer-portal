@@ -2470,3 +2470,33 @@ it('round 24b fallback P1 (:3242): a negative price on an undiscounted add-on li
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled());
   expect(screen.getByText(/A price must be a number of \$0 or more/)).toBeInTheDocument();
 });
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 26 P2 (#4657, :3681): a RETAINED stored percentage
+// discount (no live selection) never got the "Not discounted:" notice for
+// the lines it skips, and a stored variable_percentage was not classified
+// as percent at all.
+// ---------------------------------------------------------------------
+
+const storedVariablePercentVisit = {
+  ...baseService,
+  primaryLinePrice: 100,
+  estimatedPrice: 136,
+  discountType: 'variable_percentage', discountAmount: 10,
+  serviceAddons: [
+    {
+      id: 'addon-rodent', serviceId: 'svc-rodent', serviceName: 'Rodent Bait Station', serviceKey: 'rodent_bait',
+      serviceCategory: 'pest', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20, excludedFromPercentDiscount: true,
+    },
+  ],
+};
+
+it('round 26 P2 (:3681): a retained stored variable_percentage discount lists the percent-excluded line under "Not discounted:" with no live selection', async () => {
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: storedVariablePercentVisit }));
+  render(<Harness service={storedVariablePercentVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  expect(apptDiscountSelect().value).not.toBe('percentage');
+  const notice = await screen.findByText(/Not discounted:/);
+  expect(notice.textContent).toContain('Rodent Bait Station');
+});

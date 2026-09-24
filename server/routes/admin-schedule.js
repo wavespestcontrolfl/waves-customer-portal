@@ -1553,7 +1553,10 @@ function financialStateDrifted(snapshot, fresh) {
     if (key === 'pricing_provenance') {
       if (provenanceCompareKey(before) !== provenanceCompareKey(after)) return true;
     } else if (key === 'discount_type' || key === 'discount_id'
-      || key === 'line_discount_id' || key === 'line_discount_type') {
+      || key === 'line_discount_id' || key === 'line_discount_type'
+      // GitHub Codex round 26 P1 (#4657, :10824): the primary's service
+      // identity is compared as identity, never as money.
+      || key === 'service_id' || key === 'service_key_snapshot' || key === 'service_category_snapshot') {
       if (identityValuesDiffer(before, after)) return true;
     } else if (moneyValuesDiffer(before, after)) {
       return true;
@@ -1621,9 +1624,29 @@ function previewTotalDrifted(expectedTotal, plannedEstimatedPrice) {
 // a raw-omitted id against a stored null is the legacy row round-tripping
 // by name/key (that fallback is how it matched at all) — unchanged.
 // Returns the id to compare, or undefined = skip the identity check.
-function addonServiceIdentityForFreshness({ rawServiceId, priorRow, inferredServiceId }) {
+// GitHub Codex round 26 P1 (#4657, :1627): the client serializes an ID-less
+// FALLBACK selection as `serviceId: null` too — the same value an untouched
+// legacy line posts — so "raw id omitted" alone cannot tell a round-trip
+// from a deliberate switch by key/name. When the stored row has no
+// service_id, the submitted key/name is compared against the stored row's
+// own service_key_snapshot / service_name: a differing key or name is an
+// explicit switch and compares the inferred id (against the stored null →
+// fresh, so eligibility re-runs on the new service); an identical one is
+// the round-trip and skips.
+function addonServiceIdentityForFreshness({
+  rawServiceId, priorRow, inferredServiceId, submittedServiceKey = null, submittedServiceName = null,
+}) {
   if (rawServiceId) return inferredServiceId || null;
   if (priorRow && priorRow.service_id != null && priorRow.service_id !== '') return inferredServiceId || null;
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+  if (priorRow) {
+    const storedKey = norm(priorRow.service_key_snapshot);
+    const postedKey = norm(submittedServiceKey);
+    if (storedKey && postedKey && storedKey !== postedKey) return inferredServiceId || null;
+    const storedName = norm(priorRow.service_name);
+    const postedName = norm(submittedServiceName);
+    if (storedName && postedName && storedName !== postedName) return inferredServiceId || null;
+  }
   return undefined;
 }
 
@@ -2061,6 +2084,35 @@ function discountChangeWithoutPricePosted({
   return !finite(estimatedPrice) && !finite(primaryLinePrice);
 }
 const DISCOUNT_PRICE_REQUIRED_MESSAGE = 'Enter the visit price to change or remove its discount.';
+
+// GitHub Codex round 12 P0 (#4657, :10306), widened GitHub Codex round 26
+// P1 (#4657, :11100). Pure: is this save about to reprice a legacy row
+// whose real primary gross is unknown? The shape: primary_line_price NULL
+// plus a stored discount that reaches the primary (appointment-level, the
+// primary line's own, or any existing add-on's — all three hide the gross
+// behind a net total). Refused when (a) canonical adoption is requested
+// (round 12 rule, unchanged), or (b) the row is a legacy-preservation
+// candidate whose economics this save does NOT preserve (a composition
+// change) AND the posted primary is the modal's own seeded NET — computed
+// with the identical shared derivation the client uses — rather than a
+// gross the operator typed. A row with no discount anywhere is unaffected.
+function legacyPrimaryGrossUnknownFor({
+  existing, existingAddonDiscountRows, anyExistingAddonDiscounted,
+  adoptCanonicalPricing, legacyPreservationCandidate, legacyEconomicsPreserved, primaryGross,
+}) {
+  const grossUnknown = existing?.primary_line_price == null || existing.primary_line_price === '';
+  const discountReachesPrimary = !!existing?.discount_type || !!existing?.line_discount_type || !!anyExistingAddonDiscounted;
+  if (!grossUnknown || !discountReachesPrimary) return false;
+  if (adoptCanonicalPricing) return true;
+  if (!legacyPreservationCandidate || legacyEconomicsPreserved) return false;
+  const seededNet = deriveLegacyPrimarySubmission({
+    primaryLinePrice: null,
+    estimatedPrice: existing?.estimated_price,
+    addons: (existingAddonDiscountRows || []).map((r) => ({ basePrice: r.base_price, estimatedPrice: r.estimated_price })),
+  });
+  if (primaryGross == null || seededNet == null) return true;
+  return Math.abs(Number(primaryGross) - Number(seededNet)) < 0.005;
+}
 
 function calculateDiscountDollars(row, baseAmount, clientAmount) {
   if (!row || !(baseAmount > 0)) return { amount: 0, dollars: 0 };
@@ -10110,6 +10162,11 @@ async function computeSingleServiceEstimatedPricePlan({
             estimated_price: existingPrice.estimated_price,
             discount_type: existingPrice.discount_type,
             discount_amount: existingPrice.discount_amount,
+            // GitHub Codex round 26 P1 (#4657, :10824): service identity,
+            // same as the addons-array branch's snapshot.
+            ...(cols.service_id ? { service_id: existingPrice.service_id } : null),
+            ...(cols.service_key_snapshot ? { service_key_snapshot: existingPrice.service_key_snapshot } : null),
+            ...(cols.service_category_snapshot ? { service_category_snapshot: existingPrice.service_category_snapshot } : null),
             ...(cols.primary_line_price ? { primary_line_price: existingPrice.primary_line_price } : null),
             ...(cols.discount_dollars ? { discount_dollars: existingPrice.discount_dollars } : null),
             ...(cols.discount_id ? { discount_id: existingPrice.discount_id } : null),
@@ -10333,9 +10390,12 @@ async function normalizeUpdateDetailsAddons({
       // set of rows can also serve as computeUpdateDetailsFinancialPlan's
       // financialCasSnapshot — the under-lock financial re-check needs every
       // add-on's own priced/discounted state, not just its id.
+      // GitHub Codex round 26 P1 (#4657, :1627): the full row — service_name
+      // and service_key_snapshot join the identity compare for a legacy
+      // null-service_id line (addonServiceIdentityForFreshness).
       const existingAddonDiscountRows = await db('scheduled_service_addons')
         .where({ scheduled_service_id: id })
-        .select('id', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars', 'base_price', 'estimated_price', 'service_id');
+        .select('*');
       const existingAddonDiscountById = new Map(existingAddonDiscountRows.map((r) => [r.id, r]));
       // Codex pre-push audit P1 (round 4 on #4657, :9542): the terms alone
       // (id/type/amount) are not enough — removing and reselecting the
@@ -10458,6 +10518,8 @@ async function normalizeUpdateDetailsAddons({
               rawServiceId: a.serviceId || null,
               priorRow: a.id ? existingAddonDiscountById.get(a.id) : null,
               inferredServiceId: catalogService?.id || null,
+              submittedServiceKey: a.serviceKey || null,
+              submittedServiceName: serviceName || null,
             }))
             : !customAddonStampRoundTripped(a.id || null, lineType, lineAmount, gross);
           const freshCatalogPick = !!a.discountId && lineDiscountIsNew;
@@ -10809,6 +10871,11 @@ async function computeUpdateDetailsFinancialPlan({
         // ones above); estimated_price/primary_line_price/discount_type/
         // discount_amount/discount_dollars are unconditional selects on
         // this table (same assumption `existingFields` itself makes).
+        // GitHub Codex round 26 P1 (#4657, :10824): the primary's SERVICE
+        // identity too — the planner scopes/eligibility-checks discounts by
+        // service_id/key/category, so a concurrent same-price primary
+        // service switch changed no money field yet invalidated this plan.
+        // Compared as identity under the lock (financialStateDrifted).
         if (existing) {
           financialCasSnapshot = {
             parent: {
@@ -10817,6 +10884,9 @@ async function computeUpdateDetailsFinancialPlan({
               discount_type: existing.discount_type,
               discount_amount: existing.discount_amount,
               discount_dollars: existing.discount_dollars,
+              service_id: existing.service_id,
+              ...(cols.service_key_snapshot ? { service_key_snapshot: existing.service_key_snapshot } : null),
+              ...(cols.service_category_snapshot ? { service_category_snapshot: existing.service_category_snapshot } : null),
               ...(cols.discount_id ? { discount_id: existing.discount_id } : null),
               ...(cols.line_discount_id ? { line_discount_id: existing.line_discount_id } : null),
               ...(cols.line_discount_type ? { line_discount_type: existing.line_discount_type } : null),
@@ -11095,9 +11165,22 @@ async function computeUpdateDetailsFinancialPlan({
         // legacyPreservationCandidate's own scope.
         const anyExistingAddonDiscounted = existingAddonDiscountRows
           .some((r) => !!(r.discount_id || r.discount_type));
-        legacyPrimaryGrossUnknown = adoptCanonicalPricing
-          && (existing?.primary_line_price == null || existing.primary_line_price === '')
-          && (!!existing?.discount_type || !!existing?.line_discount_type || anyExistingAddonDiscounted);
+        // GitHub Codex round 26 P1 (#4657, :11100): not only canonical
+        // adoption — ANY non-preserved reprice of this legacy shape
+        // recomputes from the untrustworthy derived primary (deleting an
+        // undiscounted sibling leaves every discount term unchanged, so
+        // adoption stays off, preservation is off because the composition
+        // changed, and the legacy engine prices $100 + $90 as $90 + $90).
+        // Refused unless the operator entered a primary gross of their own:
+        // the modal seeds Price with the SAME derivation the server can
+        // re-run here (deriveLegacyPrimarySubmission over the stored total
+        // and stored add-on rows), so a posted primary equal to that seed
+        // is the echoed NET, and anything else is an independently entered
+        // gross the recompute can trust. See legacyPrimaryGrossUnknownFor.
+        legacyPrimaryGrossUnknown = legacyPrimaryGrossUnknownFor({
+          existing, existingAddonDiscountRows, anyExistingAddonDiscounted,
+          adoptCanonicalPricing, legacyPreservationCandidate, legacyEconomicsPreserved, primaryGross,
+        });
         const {
           financials, primaryNet, canonicalRestackedAddonDollars: canonicalDollars, capsSnapshotToPersist,
           restackedPrimaryLineDiscountDollars, canonicalPricingApplied,
@@ -21948,6 +22031,7 @@ router._test = {
   negativePricePosted,
   discountChangeWithoutPricePosted,
   addonServiceIdentityForFreshness,
+  legacyPrimaryGrossUnknownFor,
   buildPresetEligibilityCheck,
   resolvePlannedTotal,
   addonRowIdsDrifted,
