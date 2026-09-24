@@ -192,10 +192,21 @@ function prefillFor(type, { location, note } = {}) {
 // multi-property model, GATE_APP_PROPERTY_SCOPE) the same way every other
 // property-aware read does — resolveSessionScope / applyPropertyPredicate
 // are the ONE rule (services/account-properties.js). Gate off, or a
-// single-home customer, or the lookup failing: resolves to the unscoped
-// default (today's customer-wide behavior), never a 500 or a wrong-property
-// leak — a lookup failure fails toward the SAME customer-wide reading
-// everyone already gets pre-scoping, not toward any other customer's data.
+// single-home customer: resolves to the unscoped default (today's
+// customer-wide behavior).
+//
+// A lookup FAILURE is different from those two cases (codex GH r11 P1): the
+// non-strict default below still degrades to unscoped for a READ (GET /,
+// GET /:type/:id) — those only widen or narrow which rows a query matches,
+// and the ownership check (customer_id) is a separate, unaffected guard, so
+// the worst case is a temporarily broader read, never a cross-customer leak.
+// A WRITE is not safe to degrade the same way: silently treating a failed
+// lookup as "unscoped" on POST would persist property_id=null, load the
+// PRIMARY property's grass context, and offer its re-service link — for a
+// submission that may actually be for a secondary property. That
+// misattribution is stored and outlives the transient lookup failure. The
+// POST dispatcher below passes `{ strict: true }` so a lookup failure there
+// propagates instead of resolving to a silent (and wrong) default.
 // `isSecondary` (codex GH r2 P1): reserviceStreamlineAccess checks ACCOUNT-
 // WIDE coverage, not the selected property's — it has no property parameter
 // anywhere in the codebase today (same repo-wide gap as loadCustomerGrassContext,
@@ -208,12 +219,13 @@ function prefillFor(type, { location, note } = {}) {
 // with) is the one existing signal that's safe to act on without extending
 // either shared service — it costs nothing extra since scope is already
 // resolved.
-async function resolvePropertyScope(req) {
+async function resolvePropertyScope(req, { strict = false } = {}) {
   try {
     const scope = await resolveSessionScope(req);
     return { ...scope, isSecondary: isSecondarySelection(scope) };
   } catch (err) {
     logger.warn(`[photo-id] property scope resolution failed: ${err.message}`);
+    if (strict) throw err;
     return {
       customerId: req.customerId, enabled: false, multi: false, scoped: false, closed: false, property: null, isSecondary: false,
     };
@@ -824,7 +836,19 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
     if (!photoInputs.length) return res.status(400).json({ error: 'Photos could not be read.' });
     req._photoInputs = photoInputs;
 
-    const scope = await resolvePropertyScope(req);
+    // codex GH r11 P1: strict — a resolution failure here must not silently
+    // fall back to "unscoped" (see resolvePropertyScope's comment above for
+    // why a write can't degrade the way a read safely can). Caught locally
+    // for the same customer-safe copy + office phone pattern as the
+    // closed-scope 409 just below, rather than falling through to a bare
+    // next(err) 500.
+    let scope;
+    try {
+      scope = await resolvePropertyScope(req, { strict: true });
+    } catch (err) {
+      logger.warn(`[photo-id] property scope resolution failed on submit: ${err.message}`);
+      return res.status(503).json({ error: `We couldn't confirm which property this is for right now. Please try again in a few minutes or call our office at ${OFFICE_PHONE}.` });
+    }
     // codex GH r4 P1: a closed scope (every saved property retired) has no
     // property to stamp — applyPropertyPredicate then matches NOTHING for
     // this customer (its own "closed" branch is whereNull('id'), never

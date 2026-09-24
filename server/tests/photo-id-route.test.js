@@ -917,6 +917,32 @@ describe('property scope (GATE_APP_PROPERTY_SCOPE)', () => {
       expect(TABLES.pest_identifications).toHaveLength(0);
     });
   });
+
+  test('POST fails closed (503) when scope resolution throws, rather than silently persisting as unscoped/primary (codex GH r11 P1)', async () => {
+    // A silent fallback to unscoped here would stamp property_id=null, load
+    // the PRIMARY property's grass context, and offer its re-service link —
+    // for a submission that might actually belong to a secondary property.
+    // That misattribution is stored and outlives the transient failure, so
+    // this must reject instead of degrading, and never spend the paid
+    // vision call or write a row.
+    mockResolveSessionScope.mockRejectedValue(new Error('db unavailable'));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(503);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.pest_identifications).toHaveLength(0);
+    });
+  });
+
+  test('GET / still degrades to an unscoped read when scope resolution throws (reads may safely widen, never persist a wrong attribution)', async () => {
+    mockResolveSessionScope.mockRejectedValue(new Error('db unavailable'));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/photo-id`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.items)).toBe(true);
+    });
+  });
 });
 
 // ── Real averageScores regression (codex GH r6 P1) ───────────────────────
