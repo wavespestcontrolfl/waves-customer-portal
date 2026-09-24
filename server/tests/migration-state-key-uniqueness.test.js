@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // Migrations that keep a rollback ownership record derive its key from their
 // own stamp — `migration.<stamp>.state` in system_settings, or the
@@ -13,6 +14,47 @@ const path = require('path');
 // same defect one rename away (a stale key after moving the file).
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'models', 'migrations');
 const DERIVED_KEY = /['"`](migration[.:](\d{14})(?:\.state)?)['"`]/g;
+const ARCHIVE_FILE = '20260924000098_archive_shared_000020_state.js';
+const HISTORICAL_COLLISION = Object.freeze({
+  literal: 'migration.20260924000020.state',
+  owners: Object.freeze({
+    '20260924000020_bimonthly_lawn_service_not_offered.js': '08c8b103c6bd95e33d771de5320f7b20a7a75fd5f6389bbec41112c905c9e2e3',
+    '20260924000020_mosquito_misting_catalog_row.js': 'c21207ac6cbf54f66cabfda75117a85dfae9f74de6065a9c6a71a540e9cc7bdf',
+  }),
+  archiveKey: 'migration.20260924000098.state',
+});
+
+function migrationSource(file) {
+  return fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function archiveContractForSource(src) {
+  return src.includes(`const LEGACY_STATE_KEY = '${HISTORICAL_COLLISION.literal}';`)
+    && src.includes(`const STATE_KEY = '${HISTORICAL_COLLISION.archiveKey}';`)
+    && Object.entries(HISTORICAL_COLLISION.owners)
+      .every(([file, hash]) => src.includes(`file: '${file}'`) && src.includes(`sha256: '${hash}'`))
+    && src.includes("where({ key: LEGACY_STATE_KEY }).first('value')")
+    && !/where\(\{ key: LEGACY_STATE_KEY \}\)\.(?:update|del)\(/.test(src)
+    && /exports\.down = async function down\(\) \{\s*\/\/ Documented no-op:[^\n]*\n\s*\};/.test(src);
+}
+
+function hasArchiveContract(readSource = migrationSource) {
+  return archiveContractForSource(readSource(ARCHIVE_FILE));
+}
+
+function isContainedHistoricalCollision(literal, files, readSource = migrationSource) {
+  const expected = Object.keys(HISTORICAL_COLLISION.owners).sort();
+  const actual = [...files].sort();
+  if (literal !== HISTORICAL_COLLISION.literal
+    || actual.length !== expected.length
+    || actual.some((file, index) => file !== expected[index])
+    || !hasArchiveContract(readSource)) return false;
+  return expected.every((file) => sha256(readSource(file)) === HISTORICAL_COLLISION.owners[file]);
+}
 
 // The corrective termite changelog migration READS the prior seed's audit tag
 // to copy its value into a new changelog row. It never owns or writes that tag.
@@ -28,9 +70,23 @@ function isReadOnlySeedAuditReference(file, src, literal, matchIndex) {
     && [...src.matchAll(/\bSEED_TAG\b/g)].length === 2;
 }
 
+// The containment migration reads the frozen shared key as opaque text and
+// writes only its own uniquely stamped archive key. Keep the exemption pinned
+// to that exact declaration and the full archive contract so a mutation of the
+// legacy row becomes an owner and fails the stale/duplicate scans.
+function isReadOnlyCollisionArchiveReference(file, src, literal, matchIndex) {
+  const declaration = `const LEGACY_STATE_KEY = '${HISTORICAL_COLLISION.literal}';`;
+  return file === ARCHIVE_FILE
+    && literal === HISTORICAL_COLLISION.literal
+    && matchIndex === src.indexOf(declaration) + 'const LEGACY_STATE_KEY = '.length
+    && [...src.matchAll(/\bLEGACY_STATE_KEY\b/g)].length === 5
+    && archiveContractForSource(src);
+}
+
 function derivedKeys(file, src) {
   return [...src.matchAll(DERIVED_KEY)]
-    .filter((match) => !isReadOnlySeedAuditReference(file, src, match[1], match.index))
+    .filter((match) => !isReadOnlySeedAuditReference(file, src, match[1], match.index)
+      && !isReadOnlyCollisionArchiveReference(file, src, match[1], match.index))
     .map(([, literal, stamp]) => ({ literal, stamp }));
 }
 
@@ -72,6 +128,26 @@ describe('migration-derived state keys and audit tags', () => {
     expect(stale).toEqual([]);
   });
 
+  test('the applied 000020 collision exception is hash-pinned, exactly two-owner, and archive-conditioned', () => {
+    const owners = Object.keys(HISTORICAL_COLLISION.owners);
+    expect(isContainedHistoricalCollision(HISTORICAL_COLLISION.literal, owners)).toBe(true);
+    expect(isContainedHistoricalCollision(HISTORICAL_COLLISION.literal, [...owners, 'third_owner.js'])).toBe(false);
+    expect(isContainedHistoricalCollision('migration.20260924000021.state', owners)).toBe(false);
+
+    const changedOwner = owners[0];
+    const readChangedSource = (file) => `${migrationSource(file)}${file === changedOwner ? '\n// changed' : ''}`;
+    expect(isContainedHistoricalCollision(HISTORICAL_COLLISION.literal, owners, readChangedSource)).toBe(false);
+
+    const mutatingArchive = migrationSource(ARCHIVE_FILE).replace(
+      '  const legacy =',
+      "  await knex('system_settings').where({ key: LEGACY_STATE_KEY }).del();\n  const legacy ="
+    );
+    expect(derivedKeys(ARCHIVE_FILE, mutatingArchive)).toContainEqual({
+      literal: HISTORICAL_COLLISION.literal,
+      stamp: '20260924000020',
+    });
+  });
+
   test('no two migration files derive the same key', () => {
     const owners = new Map();
     for (const [file, keys] of byFile) {
@@ -80,7 +156,9 @@ describe('migration-derived state keys and audit tags', () => {
         owners.get(literal).push(file);
       }
     }
-    const shared = [...owners].filter(([, files]) => files.length > 1).map(([literal, files]) => `${literal}: ${files.join(', ')}`);
+    const shared = [...owners]
+      .filter(([literal, files]) => files.length > 1 && !isContainedHistoricalCollision(literal, files))
+      .map(([literal, files]) => `${literal}: ${files.join(', ')}`);
     expect(shared).toEqual([]);
   });
 });

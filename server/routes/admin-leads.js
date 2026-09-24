@@ -13,6 +13,7 @@ const { assertAdminAppointmentWindow, slotOverlapWarning } = require('../service
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer, markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
+const { getLeadStatusReconciliation, verifiedContactCallIds } = require('../services/lead-status-reconciliation');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const logger = require('../services/logger');
 
@@ -58,7 +59,7 @@ function isRealCalendarDate(value) {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
-const { startOfETMonth, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString, etParts, parseETDateTime, etWallClockOccurrences } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // A date-only end_date (e.g. "2026-06-30") parses as midnight UTC, so an
@@ -937,6 +938,8 @@ router.get('/:id', async (req, res, next) => {
     // leads, so a call attached to a form lead is still found). Best-effort:
     // a call_log failure must never break the lead fetch.
     let calls = [];
+    let associatedCallsAvailable = true;
+    let associatedCallCount = 0;
     try {
       const digits = String(lead.phone || '').replace(/\D/g, '');
       let ten = digits.length >= 10 ? digits.slice(-10) : null;
@@ -982,9 +985,14 @@ router.get('/:id', async (req, res, next) => {
             // exact failure this dissent guard exists to prevent.
             .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
         };
+        const settledLeadStamp = function settledLeadStamp() {
+          this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
+            .whereNull('processing_token')
+            .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
+        };
         // The phone arms below would match a sandbox bake-off from a lead's
         // number and surface its transcript as lead history (codex r15 P2).
-        const rows = await require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
+        const associatedCallsQuery = require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
           .where(function () {
             if (lead.twilio_call_sid) {
               this.orWhere(function sidArm() {
@@ -1000,16 +1008,7 @@ router.get('/:id', async (req, res, next) => {
             // mid-flight pass's provisional stamp can still be cleared or
             // repointed, and surfacing it here could expose another
             // caller's transcript on the wrong lead card (pre-push P1 r3).
-            this.orWhere(function stampArm() {
-              // Settled = token NULL AND a durable successful pass — the
-              // error path clears the token while the stamp stays pending
-              // the extraction_failed retry (pre-push P1 r8).
-              this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-                .whereNull('processing_token')
-                // Same settled definition as the dissent arm above — legacy
-                // NULL status included (codex P1).
-                .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
-            });
+            this.orWhere(settledLeadStamp);
             if (ten) {
               this.orWhere(function phoneFromArm() {
                 this.whereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
@@ -1020,7 +1019,25 @@ router.get('/:id', async (req, res, next) => {
                   .whereNot(settledDissentingStamp);
               });
             }
-          })
+          });
+        if (req.query.leadReview === '1' && lead.status === 'new') {
+          const lifecycleStartMs = new Date(lead.first_contact_at || lead.created_at).getTime();
+          if (Number.isFinite(lifecycleStartMs)) {
+            const countRow = await associatedCallsQuery.clone()
+              .where(function lifecycleOrExactCall() {
+                this.where('created_at', '>=', new Date(lifecycleStartMs))
+                  .orWhere(settledLeadStamp);
+                // A call starts before the lead it creates. Exact linkage
+                // keeps that initiating call; phone-only matches stay bounded.
+                if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
+              })
+              .whereNotIn(db.raw('id::text'), verifiedContactCallIds(lead, activities))
+              .count({ count: '*' })
+              .first();
+            associatedCallCount = Number(countRow?.count) || 0;
+          }
+        }
+        const rows = await associatedCallsQuery
           .where(function () {
             this.whereNotNull('transcription').orWhereNotNull('recording_url');
           })
@@ -1044,10 +1061,35 @@ router.get('/:id', async (req, res, next) => {
         }));
       }
     } catch (e) {
+      associatedCallsAvailable = false;
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
-    res.json({ lead, activities, calls });
+    const response = { lead, activities, calls };
+    if (req.query.leadReview === '1') {
+      response.linkedHistory = await require('../services/lead-linked-history').readLinkedLeadHistory(db, lead);
+      try {
+        response.reconciliation = await getLeadStatusReconciliation({
+          database: db,
+          lead,
+          activities,
+          associatedCallCount,
+          associatedCallsAvailable,
+        });
+      } catch {
+        logger.warn('[leads] status reconciliation preview unavailable', { leadId: lead.id });
+        response.reconciliation = {
+          mode: 'read_only',
+          status: 'unavailable',
+          current_status: lead.status,
+          summary: 'Status reconciliation could not be loaded. No lead data was changed.',
+          findings: [],
+          scope: { kind: 'single_record', writes: false, global_sweep: false },
+        };
+      }
+    }
+
+    res.json(response);
   } catch (err) { next(err); }
 });
 
@@ -1433,6 +1475,16 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
     const [hour, minute] = time.split(':').map(Number);
     if (etDateString(callbackAt) !== date || callbackParts.hour !== hour || callbackParts.minute !== minute) {
       return res.status(400).json({ error: 'The selected time does not exist in Eastern time' });
+    }
+    // The fall-back Sunday repeats 1:00-1:59 AM ET (once in EDT, once in
+    // EST): a wall time that occurs twice round-trips cleanly under BOTH
+    // offsets, so the gap check above cannot see it, and parseETDateTime
+    // silently keeps the first (EDT) occurrence — an hour away from what the
+    // operator may have meant. Reject the ambiguity the way
+    // parseQuotedETDeadline does instead of storing a guess (codex round-3
+    // P2).
+    if (etWallClockOccurrences(callbackAt) !== 1) {
+      return res.status(400).json({ error: 'That time happens twice in Eastern time on the daylight saving change — pick a time outside 1:00–1:59 AM' });
     }
     const saved = await db.transaction(async (trx) => {
       const changed = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({

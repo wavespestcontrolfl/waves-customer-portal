@@ -271,7 +271,15 @@ describe('generateVariants', () => {
 describe('VIDEO_FLAGS + isVideoDay', () => {
   test('video is OFF by default; interval defaults to 3 and clamps to 1..14', () => {
     delete process.env.SOCIAL_VIDEO_ENABLED;
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
     expect(Engine.VIDEO_FLAGS.enabled).toBe(false);
+    // Owner ruling 2026-09-24: Veo is SynthID-marked — the flag alone never enables video.
+    process.env.SOCIAL_VIDEO_ENABLED = 'true';
+    expect(Engine.VIDEO_FLAGS.enabled).toBe(false);
+    process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true';
+    expect(Engine.VIDEO_FLAGS.enabled).toBe(true);
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
+    delete process.env.SOCIAL_VIDEO_ENABLED;
     delete process.env.SOCIAL_VIDEO_INTERVAL_DAYS;
     expect(Engine.VIDEO_FLAGS.intervalDays).toBe(3);
     process.env.SOCIAL_VIDEO_INTERVAL_DAYS = '99';

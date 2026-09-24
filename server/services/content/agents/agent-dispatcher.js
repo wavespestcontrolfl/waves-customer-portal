@@ -22,7 +22,7 @@
 const logger = require('../../logger');
 const { isSessionTerminal, isSessionError } = require('../../agent-control/session-events');
 const { readSessionFrames } = require('../../agent-control/session-stream');
-const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint } = require('./brief-driven-tools');
+const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint, registerSessionEditorial } = require('./brief-driven-tools');
 const { recordSessionUsage } = require('../../llm-dispatch-metrics');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -210,23 +210,28 @@ class AgentDispatcher {
       return { ok: false, reason: `session_create_failed: ${err.message}`, agent_id: route.agent_id };
     }
     const sessionId = session.id;
+    // Call ledger (never throws): one session row per created session, on
+    // every exit from here on — including editorial-registration failures.
+    // Upserted by session id, so calling it twice is safe.
+    const recordSession = (failure = null) => recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure });
+
+    // The agent's own end — the recorder's usage GET after it (up to its
+    // 15 s timeout) is observability time, not agent time.
+    let agentEndedAt;
+
     // Arm the writer's in-loop self-lint (W1) with the caller's precomputed
     // guardrail options — the runner derives them from the SAME shared
     // module gate 3c uses, so the lint can never disagree with the gate
     // that parks runs. Cleared with clearDraft below.
     if (selfLintOptions) registerSessionLint(sessionId, selfLintOptions);
-    // Call ledger (never throws): one session row per created session, on
-    // every exit from here on — a failed initial message, a streaming
-    // failure or timeout, a session that never emitted a draft, and success
-    // all consumed (or reserved) tokens — carrying this exit's outcome.
-    // Upserted by session id, so calling it twice is safe. Awaited (it never
-    // throws) so a preview / CLI process cannot exit before the row lands.
-    const recordSession = (failure = null) => recordSessionUsage({ laneId: route.role === 'meta' ? 'agent_meta' : 'agent_content', sessionId, agentId: route.agent_id, model: null, startedAt: t0, failure });
-
-    // The agent's own end — the recorder's usage GET after it (up to its
-    // 15 s timeout) is observability time, not agent time (Codex r12/r13);
-    // every exit stops this clock before it awaits the recorder.
-    let agentEndedAt;
+    try {
+      await registerSessionEditorial(sessionId, brief);
+    } catch (err) {
+      agentEndedAt = Date.now();
+      await recordSession(err.code || 'editorial_registration_failed');
+      clearDraft(sessionId);
+      return { ok: false, reason: `editorial_registration_failed: ${err.message}`, session_id: sessionId, agent_id: route.agent_id, duration_ms: agentEndedAt - t0 };
+    }
 
     // Post the initial input to the session. Schema mirrors the
     // live Managed Agents contract used by lead-response-agent.js:

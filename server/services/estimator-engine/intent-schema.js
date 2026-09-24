@@ -55,7 +55,10 @@ const SERVICE_OPTION_SCHEMAS = {
       // grass is recorded; classifyLane yellow-flags any track the pricer
       // priced as a different one, so the coercion can never green-lane.
       track: { enum: ['st_augustine', 'bahia', 'zoysia', 'bermuda', 'paspalum'] },
-      tier: { enum: ['basic', 'standard', 'enhanced', 'premium'] },
+      // basic/4x and standard/6x are retired for new sales (2026-08-04,
+      // 2026-09-24): the pricer would silently price them as enhanced, so a
+      // draft naming one fails validation instead of riding on prompt text.
+      tier: { enum: ['enhanced', 'premium'] },
     },
     additionalProperties: false,
   },
@@ -69,6 +72,8 @@ const SERVICE_OPTION_SCHEMAS = {
       // Optional like lawn's — absent still defaults, but a stated grass
       // now carries. paspalum coercion note on lawn.track applies here too.
       track: { enum: ['st_augustine', 'bahia', 'zoysia', 'bermuda', 'paspalum'] },
+      // One-time pricing anchors on the internal 6x rate whatever tier is
+      // named, so the retired recurring tiers stay harmless here.
       tier: { enum: ['basic', 'standard', 'enhanced', 'premium'] },
     },
     additionalProperties: false,

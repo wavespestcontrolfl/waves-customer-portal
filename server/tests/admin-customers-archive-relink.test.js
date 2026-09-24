@@ -128,7 +128,12 @@ describe('PATCH /admin/customers/:id/restore', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/customers/cust-1/restore`, { method: 'PATCH' });
       expect(res.status).toBe(200);
-      await expect(res.json()).resolves.toEqual({ success: true });
+      // Restore never re-arms billing, and the response says so.
+      await expect(res.json()).resolves.toEqual({
+        success: true,
+        billing_rearmed: false,
+        message: expect.stringMatching(/Auto Pay and automatic charges stay off/),
+      });
     });
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(mockState.updates).toEqual([

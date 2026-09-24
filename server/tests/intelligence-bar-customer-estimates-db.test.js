@@ -156,7 +156,7 @@ suite('existing-customer estimates from another workspace', () => {
   test('the model cannot substitute another estimate on the same customer and property', async () => {
     const fixture = await customerFixture();
     const first = await confirm(await propose(fixture));
-    const second = await confirm(await propose(fixture, { lawn_applications: 6 }));
+    const second = await confirm(await propose(fixture, { lawn_applications: 12 }));
     const ids = [first.body.result.estimate_id, second.body.result.estimate_id];
     const before = await db('estimates').whereIn('id', ids).orderBy('id');
     const wrong = await propose(fixture, { estimate_id: ids[1], lawn_applications: 12 }, ids[0]);
@@ -169,21 +169,55 @@ suite('existing-customer estimates from another workspace', () => {
     expect(await db('estimates').whereIn('id', ids).orderBy('id')).toEqual(before);
   }, 90000);
 
-  test('revision preserves a six-application program unless the request changes cadence', async () => {
+  test('revision preserves a twelve-application program unless the request changes cadence', async () => {
+    // (Was a six-application program; 6x/bi-monthly is retired for new
+    // sales 2026-09-24 — the retired-cadence revision is pinned below.)
     const fixture = await customerFixture();
-    const created = await confirm(await propose(fixture, { lawn_applications: 6 }));
+    const created = await confirm(await propose(fixture, { lawn_applications: 12 }));
     const estimateId = created.body.result.estimate_id;
     const before = await db('estimates').where({ id: estimateId }).first();
     const revised = await confirm(await propose(fixture, { estimate_id: estimateId }));
     expect(revised.body).toMatchObject({ success: true, result: { estimate_id: estimateId } });
     const saved = await db('estimates').where({ id: estimateId }).first();
-    expect(saved.estimate_data.engineResult.lineItems[0].frequency).toBe(6);
-    expect(saved.estimate_data.engineInputs.services.lawn.lawnFreq).toBe(6);
-    expect(saved.estimate_data.inputs.lawnFreq).toBe('6');
+    expect(saved.estimate_data.engineResult.lineItems[0].frequency).toBe(12);
+    expect(saved.estimate_data.engineInputs.services.lawn.lawnFreq).toBe(12);
+    expect(saved.estimate_data.inputs.lawnFreq).toBe('12');
     expect(saved.token).toBe(before.token);
     expect(saved.sent_at).toBeNull();
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(1);
   }, 60000);
+
+  test('a new six-application draft is refused — 6x/bi-monthly is retired for new sales (owner directive 2026-09-24)', async () => {
+    const fixture = await customerFixture();
+    const proposed = await propose(fixture, { lawn_applications: 6 });
+    expect(proposed.body.pendingActions || []).toHaveLength(0);
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
+  }, 60000);
+
+  test('a saved 6x estimate is never silently repriced at 9x on revision; an explicit sold cadence revises it', async () => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    // A pre-retirement draft still quoting the 6-application program.
+    const row = await db('estimates').where({ id: estimateId }).first();
+    const legacy = structuredClone(row.estimate_data);
+    legacy.engineInputs.services.lawn.lawnFreq = 6;
+    legacy.inputs.lawnFreq = '6';
+    await db('estimates').where({ id: estimateId }).update({ estimate_data: JSON.stringify(legacy) });
+    const before = await db('estimates').where({ id: estimateId }).first();
+
+    const kept = await propose(fixture, { estimate_id: estimateId });
+    expect(kept.body.pendingActions || []).toHaveLength(0);
+    expect(JSON.stringify(mockModel.mock.calls)).toContain('retired_lawn_cadence_selection');
+    expect(await db('estimates').where({ id: estimateId }).first()).toEqual(before);
+
+    const revised = await confirm(await propose(fixture, { estimate_id: estimateId, lawn_applications: 9 }));
+    expect(revised.body).toMatchObject({ success: true, result: { estimate_id: estimateId } });
+    const saved = await db('estimates').where({ id: estimateId }).first();
+    expect(saved.estimate_data.engineResult.lineItems[0].frequency).toBe(9);
+    expect(saved.estimate_data.engineInputs.services.lawn.lawnFreq).toBe(9);
+    expect(saved.token).toBe(before.token);
+  }, 90000);
 
   test('a cadence revision preserves the naming audit and customer-facing service name on the same live link', async () => {
     const fixture = await customerFixture();

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import useVisiblePageRefresh from "../../../hooks/useVisiblePageRefresh";
 import { adminFetch } from "../../../utils/admin-fetch";
 
 // Operations go first. Four workers publish results individually, so a slow
@@ -34,7 +35,7 @@ const REQUESTS = [
   ["billing", "/admin/billing-health", "cash"],
 ];
 const OPERATIONAL_KEYS = new Set(["alerts", "today", "staleVisits"]);
-const DASHBOARD_REFRESH_MS = 180000;
+const DASHBOARD_REFRESH_MS = 60000;
 
 async function fetchDashboard(path, signal) {
   const controller = new AbortController();
@@ -135,17 +136,9 @@ export default function useDashboardData(section, periodQS) {
     return () => { controller.abort(); running.current = false; };
   }, [requests, revision, section, periodQS]);
 
-  useEffect(() => {
-    const autoRefresh = () => {
-      if (document.visibilityState !== "hidden" && !running.current) refresh();
-    };
-    const interval = setInterval(autoRefresh, DASHBOARD_REFRESH_MS);
-    document.addEventListener("visibilitychange", autoRefresh);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", autoRefresh);
-    };
-  }, [refresh]);
+  useVisiblePageRefresh(() => {
+    if (!running.current) refresh();
+  }, { intervalMs: DASHBOARD_REFRESH_MS });
 
   const values = {};
   const errors = {};

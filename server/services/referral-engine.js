@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const { postCreditMovement, round2 } = require('./customer-credit');
-const { toE164, isLikelyE164 } = require('../utils/phone');
+const { toE164, isLikelyE164, phoneMatchDigits } = require('../utils/phone');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -422,10 +422,23 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     throw new Error('Cannot refer yourself');
   }
 
-  // Already a customer (lookup by phone OR email — either disqualifies)
+  // Already a customer (lookup by phone OR email — either disqualifies).
+  // Match phone by digits, not exact string: customers.phone mixes stored
+  // E.164 / domestic-formatted / bare-digit shapes (same reasoning as
+  // admin-customers.js's cross-account phone check and creditReferralOnFirstService
+  // below), so a legacy '(941) 555-1234' row must still match a typed
+  // '941-555-1234' that normalizes to the same E.164 number.
+  const phoneDigitVariants = phoneMatchDigits(normalizedPhone);
   const existingCustomer = await db('customers')
     .where(function () {
-      this.where('phone', normalizedPhone).orWhere('phone', phone.trim());
+      if (phoneDigitVariants.length) {
+        this.whereRaw(
+          `regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (${phoneDigitVariants.map(() => '?').join(',')})`,
+          phoneDigitVariants,
+        ).orWhere('phone', normalizedPhone).orWhere('phone', phone.trim());
+      } else {
+        this.where('phone', normalizedPhone).orWhere('phone', phone.trim());
+      }
       if (refEmailLc) this.orWhereRaw('LOWER(email) = ?', [refEmailLc]);
     })
     .first();

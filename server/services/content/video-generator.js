@@ -9,10 +9,22 @@
  *
  * Returns { buffer, mimeType, model } or throws — callers (the social
  * creative engine) catch and treat a throw as "no video variant today".
+ *
+ * ⛔ PIXEL-WATERMARKED (owner ruling 2026-09-24): every Veo model embeds
+ * Google's SynthID in the frames, which survives re-encoding and cannot be
+ * removed — the same reason the Gemini image models are banned from the image
+ * chains. generate() therefore REFUSES unless ALLOW_PIXEL_WATERMARKED_IMAGE_
+ * PROVIDERS=true (the one shared override, deliberate runs only), so flipping
+ * SOCIAL_VIDEO_ENABLED on can never ship a watermarked Reel by itself. No
+ * non-watermarked video provider is known; this stays a hard stop until one is.
  */
 
 const logger = require('../logger');
 const { GEMINI_VIDEO_FAST, GEMINI_VIDEO_QUALITY } = require('../../config/models');
+const { PIXEL_WATERMARK_OVERRIDE_ENV, pixelWatermarkAllowed } = require('./image-generator')._internals;
+
+// Every Veo model output carries SynthID (see header).
+const PIXEL_WATERMARK = 'synthid';
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -117,7 +129,13 @@ async function downloadVideo({ uri, fetchFn }) {
  * → { buffer, mimeType: 'video/mp4', model }
  * Throws if every model in the chain failed.
  */
-async function generate({ prompt, aspectRatio = '9:16', timeoutMs = DEFAULT_TIMEOUT_MS, pollIntervalMs, fetchFn = fetch } = {}) {
+async function generate({ prompt, aspectRatio = '9:16', timeoutMs = DEFAULT_TIMEOUT_MS, pollIntervalMs, fetchFn = fetch, allowPixelWatermark = pixelWatermarkAllowed() } = {}) {
+  // Checked before the key and before any request: a refused call costs nothing.
+  if (!allowPixelWatermark) {
+    const err = new Error(`video-generator: refused — every Veo model is pixel-watermarked (${PIXEL_WATERMARK}); owner ruling 2026-09-24 bans watermarked output. Set ${PIXEL_WATERMARK_OVERRIDE_ENV}=true only for a deliberate run that will not ship.`);
+    err.code = 'PIXEL_WATERMARKED_PROVIDER';
+    throw err;
+  }
   if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set');
   if (!prompt) throw new Error('video prompt required');
 
@@ -156,6 +174,7 @@ module.exports = {
   generate,
   _internals: {
     VIDEO_CHAIN,
+    PIXEL_WATERMARK,
     DEFAULT_TIMEOUT_MS,
     extractVideo,
     isModelUnavailable,

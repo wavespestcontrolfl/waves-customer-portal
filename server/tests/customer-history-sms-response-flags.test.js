@@ -96,3 +96,19 @@ test('customer comms does not classify a proactive follow-up as an answer', () =
   expect(mapped.responseIsAnswer).toBe(false);
   expect(mapped.responseReplyToMessageId).toBeNull();
 });
+
+test('customer comms uses durable STOP chronology while preserving the canonical privacy type', () => {
+  const canonicalAt = new Date('2026-09-23T12:03:00Z');
+  const receiptAt = new Date('2026-09-23T12:01:00Z');
+  const mapped = mapCommsMessage({
+    id: 'message-delayed-stop', conversation_id: 'conversation-1', channel: 'sms', direction: 'inbound',
+    body: 'STOP', media: [], message_type: 'job_applicant_reply', response_message_type: 'opt_out',
+    effective_created_at: receiptAt, created_at: canonicalAt,
+  }, { phone: '+19415550100' }, null);
+
+  expect(mapped).toMatchObject({
+    messageType: 'job_applicant_reply',
+    responseMessageType: 'opt_out',
+    createdAt: receiptAt,
+  });
+});

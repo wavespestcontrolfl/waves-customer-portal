@@ -23,6 +23,7 @@ import {
 } from "../../components/ui";
 import ReviewVelocityEngine from "./ReviewVelocityEngine";
 import GBPManagementPanel from "./GBPManagement";
+import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 // Flat leaf sections (one per content tab). `activeTab` holds a LEAF key, so
@@ -898,7 +899,8 @@ function ReviewIncentivesPanel() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [markingPaid, setMarkingPaid] = useState(false);
-  const [error, setError] = useState(null);
+  const [readError, setReadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
   const [queue, setQueue] = useState([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [activeRepairId, setActiveRepairId] = useState(null);
@@ -912,22 +914,27 @@ function ReviewIncentivesPanel() {
   // — the rendered candidates would belong to A while the attribute POST
   // carries B's review id (pre-push codex P1).
   const candidateReqRef = useRef(0);
-  const load = useCallback(() => {
-    setLoading(true);
-    setQueueLoading(true);
-    setError(null);
-    Promise.all([
+  const loadGen = useRef(0);
+  const load = useCallback((background = false) => {
+    const gen = ++loadGen.current;
+    if (!background) setLoading(true);
+    if (!background) setQueueLoading(true);
+    if (!background) setReadError(null);
+    return Promise.all([
       adminFetch(`/admin/reviews/incentives?days=${days}`),
       adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`),
     ])
       .then(([d, q]) => {
+        if (gen !== loadGen.current) return;
+        setReadError(null);
         setData(d);
         setQueue(q.items || []);
         setLoading(false);
         setQueueLoading(false);
       })
       .catch((e) => {
-        setError(e.message);
+        if (gen !== loadGen.current) return;
+        setReadError(e.message);
         setLoading(false);
         setQueueLoading(false);
       });
@@ -935,9 +942,19 @@ function ReviewIncentivesPanel() {
   useEffect(() => {
     load();
   }, [load]);
+  useVisiblePageRefresh(
+    () => {
+      if (loading || queueLoading || running || markingPaid || candidateLoading || Object.values(matching).some(Boolean)) return undefined;
+      return load(true);
+    },
+    { intervalMs: 120_000 },
+  );
   const runSync = async () => {
+    loadGen.current += 1;
+    setLoading(false);
+    setQueueLoading(false);
     setRunning(true);
-    setError(null);
+    setActionError(null);
     try {
       const d = await adminFetch("/admin/reviews/incentives/sync", {
         method: "POST",
@@ -946,8 +963,9 @@ function ReviewIncentivesPanel() {
       const q = await adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`);
       setData(d);
       setQueue(q.items || []);
+      setReadError(null);
     } catch (e) {
-      setError(e.message);
+      setActionError(e.message);
     } finally {
       setRunning(false);
     }
@@ -957,8 +975,11 @@ function ReviewIncentivesPanel() {
       .filter((p) => p.status !== "paid")
       .map((p) => p.id);
     if (!ids.length) return;
+    loadGen.current += 1;
+    setLoading(false);
+    setQueueLoading(false);
     setMarkingPaid(true);
-    setError(null);
+    setActionError(null);
     try {
       await adminFetch("/admin/reviews/incentives/mark-paid", {
         method: "POST",
@@ -966,12 +987,13 @@ function ReviewIncentivesPanel() {
       });
       load();
     } catch (e) {
-      setError(e.message);
+      setActionError(e.message);
     } finally {
       setMarkingPaid(false);
     }
   };
   const downloadCsv = async () => {
+    setActionError(null);
     try {
       const res = await fetch(
         `${API_BASE}/admin/reviews/incentives/export?days=${days}`,
@@ -992,7 +1014,7 @@ function ReviewIncentivesPanel() {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      setError(e.message);
+      setActionError(e.message);
     }
   };
   const openRepair = (review) => {
@@ -1014,7 +1036,7 @@ function ReviewIncentivesPanel() {
   const searchCandidates = async (review, qOverride) => {
     const reqId = ++candidateReqRef.current;
     setCandidateLoading(true);
-    setError(null);
+    setActionError(null);
     try {
       // The box opens holding the reviewer name; sent untouched it would be
       // an explicit q and lose the surname expansion — only what the admin
@@ -1032,12 +1054,15 @@ function ReviewIncentivesPanel() {
       setCandidateResults(result.candidates || []);
       setLikelyReviewers(result.likelyReviewers || []);
     } catch (e) {
-      if (candidateReqRef.current === reqId) setError(e.message);
+      if (candidateReqRef.current === reqId) setActionError(e.message);
     } finally {
       if (candidateReqRef.current === reqId) setCandidateLoading(false);
     }
   };
   const attributeCandidate = async (review, candidate, service) => {
+    loadGen.current += 1;
+    setLoading(false);
+    setQueueLoading(false);
     // service = null → technician-less click_auto confirm (payout stays
     // unminted server-side; only allowed for click_auto rows there).
     const matchKey = `${review.id}:${candidate.id}:${service ? service.id : "none"}`;
@@ -1045,7 +1070,7 @@ function ReviewIncentivesPanel() {
       ...prev,
       [matchKey]: true,
     }));
-    setError(null);
+    setActionError(null);
     try {
       await adminFetch("/admin/reviews/incentives/attribute", {
         method: "POST",
@@ -1064,7 +1089,7 @@ function ReviewIncentivesPanel() {
       setCandidateResults([]);
       load();
     } catch (e) {
-      setError(e.message);
+      setActionError(e.message);
     } finally {
       setMatching((prev) => ({
         ...prev,
@@ -1144,9 +1169,17 @@ function ReviewIncentivesPanel() {
         </div>
       </div>
 
-      {error && (
+      {readError && (
+        <Card className="text-alert-fg p-[12px] mb-[14px] text-ui-body flex items-center justify-between gap-[12px]">
+          <span>{readError}</span>
+          <Button onClick={() => load()} disabled={loading || running} variant="secondary">
+            Retry
+          </Button>
+        </Card>
+      )}
+      {actionError && (
         <Card className="text-alert-fg p-[12px] mb-[14px] text-ui-body">
-          {error}
+          {actionError}
         </Card>
       )}
 
@@ -1238,15 +1271,6 @@ function ReviewIncentivesPanel() {
                   Confirmed Google reviews without a technician bonus row.
                 </div>
               </div>
-              <Button
-                onClick={load}
-                disabled={queueLoading}
-                variant="secondary"
-                className="inline-flex items-center gap-[6px]"
-              >
-                <RefreshCw size={14} />
-                Refresh
-              </Button>
             </div>
 
             {queueLoading && !queue.length ? (
@@ -1617,6 +1641,7 @@ export default function ReviewsPage() {
     return adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
+        setError(null);
         setData(d);
         setHasMore(
           d.hasMore != null
@@ -1671,7 +1696,6 @@ export default function ReviewsPage() {
     const t = setTimeout(loadData, search.trim() ? 250 : 0);
     return () => clearTimeout(t);
   }, [loadData, search]);
-
   // Auto-reply pipeline actions: retract (delete on Google), post-now
   // (publish the pending draft immediately), skip (leave the pipeline). The
   // row's reply / autoReply state changes server-side, so reload the list.

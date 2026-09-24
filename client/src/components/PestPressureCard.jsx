@@ -37,6 +37,7 @@ function ComponentsTable({ components }) {
     reServiceImpact: 'Re-services / callbacks',
     recurringIssueRating: 'Recurring issue areas',
     riskFactorRating: 'Risk factors / conditions',
+    technicianActivityRating: 'Technician activity rating',
   };
   const rows = Object.entries(components).map(([key, c]) => ({
     key,

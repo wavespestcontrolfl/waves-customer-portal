@@ -17753,11 +17753,13 @@ function storedLawnRowBelowProgramFloor(estData = null) {
 // Is a recurring lawn service row (still) at a RETIRED cadence? Used by the
 // accept handler AFTER all tier restamps: the converter schedules from these
 // rows, so an old mixed estimate whose stored/selected lawn row is Basic
-// would create a 4-visit program at the floored price if the accept request
-// carried no lawn cadence selection (stale/crafted client, or a legacy shape
-// with no selectable lawn axis). Cadence is only inferred from EXPLICIT
-// data — a lawn row with no visit count/cadence stays unflagged rather than
-// defaulting to quarterly.
+// (4x/quarterly, fully removed 2026-08-04) or Standard (6x/bimonthly,
+// hidden 2026-09-24 — owner directive to stop selling bi-monthly lawn care)
+// would create a retired-cadence program at the floored/hidden-tier price if
+// the accept request carried no lawn cadence selection (stale/crafted
+// client, or a legacy shape with no selectable lawn axis). Cadence is only
+// inferred from EXPLICIT data — a lawn row with no visit count/cadence stays
+// unflagged rather than defaulting to quarterly/bimonthly.
 function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   if (!estDataLike || typeof estDataLike !== 'object') return false;
   const retiredFreqs = new Set([
@@ -17781,7 +17783,7 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
     // same precedence (an explicit sold cadence field beats stale quarterly
     // text, exactly as the converter would schedule it).
     const pattern = converter.explicitServiceCadence(svc);
-    if (pattern) return pattern === 'quarterly' && retiredFreqs.has(4);
+    if (pattern) return retiredFreqs.has(LAWN_CADENCE_PATTERN_FREQS[pattern]);
     // Aliases the converter's reader skips but older rows still carry: bare
     // `v` visit counts (tier-row shorthand) and cadence tokens inside
     // service keys ('lawn_care_quarterly'). Rows with none of it stay
@@ -17790,7 +17792,11 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
     if (Number.isFinite(vAlias) && vAlias > 0) return retiredFreqs.has(vAlias);
     const keyText = [svc?.service, svc?.serviceKey, svc?.service_key]
       .filter(Boolean).join(' ').toLowerCase();
-    return /\bquarterly\b|_quarterly\b/.test(keyText) && retiredFreqs.has(4);
+    if (/\bquarterly\b|_quarterly\b/.test(keyText) && retiredFreqs.has(4)) return true;
+    // lawn_care_recurring IS the 6-visit catalog row (LAWN_CADENCE_RUNTIME
+    // .standard / converter LAWN_CADENCE_CATALOG_KEYS.bimonthly), so its key
+    // alone proves the retired cadence.
+    return /\bbimonthly\b|_bimonthly\b|\blawn_care_recurring\b/.test(keyText) && retiredFreqs.has(6);
   });
 }
 
@@ -19937,6 +19943,12 @@ function threadedProgramMinMonthly(value) {
 // key explicitly; hidden:true keeps covering any future soft-retired tier.
 const REMOVED_LAWN_TIER_KEYS = new Set(['basic']);
 const REMOVED_LAWN_TIER_FREQS = new Set([4]);
+// Mirrors estimate-converter's LAWN_VISITS_PATTERNS (freq -> pattern),
+// inverted, so recurringLawnRowAtRetiredCadence can map ANY normalized
+// cadence pattern (not just 'quarterly') onto its visit count and test it
+// against retiredFreqs — needed so the 6x/'bimonthly' retirement (owner
+// directive 2026-09-24) is caught the same way 4x/'quarterly' was.
+const LAWN_CADENCE_PATTERN_FREQS = { quarterly: 4, bimonthly: 6, every_6_weeks: 9, monthly: 12 };
 function isRetiredLawnTierKey(tierKey) {
   const key = String(tierKey || '').trim().toLowerCase();
   if (REMOVED_LAWN_TIER_KEYS.has(key)) return true;
