@@ -450,7 +450,7 @@ function LeadStatusReviewPanel({ reconciliation }) {
               {finding.evidence.type}
               {finding.evidence.id ? ` · ${finding.evidence.id}` : ""}
               {finding.evidence.occurred_at
-                ? ` · ${new Date(finding.evidence.occurred_at).toLocaleString()}`
+                ? ` · ${new Date(finding.evidence.occurred_at).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`
                 : ""}
             </div>
           )}
