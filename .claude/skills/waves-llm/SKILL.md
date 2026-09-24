@@ -93,9 +93,13 @@ Currently live:
 a provider issue never causes a gap:
 - OpenAI features → Claude (the estimate assistant then falls to a
   deterministic template).
-- Gemini vision → retry `GEMINI_VISION_FALLBACK_MODEL` only when it names a
+- Gemini vision ladders (lawn, pest, tree-shrub, treatment-zone, tech-caption
+  photo read) → retry `GEMINI_VISION_FALLBACK_MODEL` only when it names a
   different model (the default equals BEST, so the retry rung is skipped),
-  THEN Claude VISION only if both Gemini rungs miss. **Owner ruling
+  THEN Claude VISION only if both Gemini rungs miss. Two exceptions make ONE
+  Gemini call with no retry: completion-photo captions
+  (`TEXT_POLICIES.photoCaptions`, Gemini → Claude through the dispatcher) and
+  `satellite-analyzer.js` (Gemini → Claude → OpenAI). **Owner ruling
   2026-09-24: the four customer photo-scoring lanes below (lawn, pest,
   tree-shrub, satellite) are Gemini-first ladders — no parallel fan-out or
   averaging.** The ruling does NOT cover every vision lane: `property_trio`,
