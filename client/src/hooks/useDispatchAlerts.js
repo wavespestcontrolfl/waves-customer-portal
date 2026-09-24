@@ -122,7 +122,12 @@ export function useDispatchAlerts() {
     if (!gone.size) return;
     for (const id of gone) {
       resolvedIdsRef.current.add(id);
-      relayTechOutAlertChange(alertsRef.current.find((a) => a.id === id));
+      const known = alertsRef.current.find((a) => a.id === id);
+      // A card this board never saw (resolved before hydration landed) could
+      // be anyone's tech-out card: relay it as tech_id null so an open drawer
+      // re-reads its count rather than keep a stale one.
+      if (known) relayTechOutAlertChange(known);
+      else relayTechOutAlertChange({ type: TECH_OUT_ALERT_TYPE, tech_id: null });
     }
     setAlerts((prev) => prev.filter((a) => !gone.has(a.id)));
   }, []);

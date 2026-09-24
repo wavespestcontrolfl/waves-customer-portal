@@ -454,6 +454,28 @@ describe('auto-assign parked stops (GATE_TECH_OUT_AUTO_MOVE)', () => {
     expect(await screen.findByText('1 stop parked in the Action Queue — decide who to move')).toBeInTheDocument();
   });
 
+  it('a card resolved before the board knew whose it was (tech_id null) still refreshes the open drawer\'s count', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('2 stops parked in the Action Queue — decide who to move');
+
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence({ parked_open_count: 1 }), auto_move_enabled: true }) });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(TECH_OUT_ALERTS_EVENT, { detail: { tech_id: null } }));
+    });
+    expect(await screen.findByText('1 stop parked in the Action Queue — decide who to move')).toBeInTheDocument();
+  });
+
+  it('a run with per-stop failures says so instead of a clean zero', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Emergency');
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ moved: [], left_parked: [], failed: [{ alert_id: 'a1', reason: 'auto_move_error' }] }) });
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-assign parked stops' }));
+    expect(await screen.findByText(/1 couldn't be processed — try again\./)).toBeInTheDocument();
+  });
+
   it('a slow count read for a previous selection never overwrites the count a newer status read brought', async () => {
     fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: outAbsence(), auto_move_enabled: true }) });
     const { rerender } = render(<TechOutSection techId="tech-1" techName="Tech One" />);

@@ -353,6 +353,7 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     // tracked while closed, so a reopen on the same date must refetch.
     if (!date) {
       fetchedTechsForDateRef.current = null;
+      setAvailableTechs([]);
       return;
     }
     if (fetchedTechsForDateRef.current === date) return;

@@ -255,6 +255,17 @@ describe('autoAssignParkedAlert', () => {
     expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, auto: true }));
   });
 
+  test('a tracker-complete stop (geofence auto-completion, status still confirmed) is stale: closed, never moved', async () => {
+    const queue = [query(baseAlert()), query(baseStop({ status: 'confirmed', track_state: 'complete' }))];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    const res = await autoAssignParkedAlert({ alertId: ALERT_ID });
+
+    expect(res).toEqual({ moved: false, alert_id: ALERT_ID, skipped: 'already_resolved' });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, auto: true }));
+  });
+
   test('a superseded (rescheduled) row is stale: no move, and its card is closed as a systemic resolution', async () => {
     const queue = [query(baseAlert()), query(baseStop({ status: 'rescheduled' }))];
     db.mockImplementation(() => queue.shift() || query({}));
@@ -612,5 +623,21 @@ describe('autoAssignTechDay', () => {
     expect(emitDispatchJobUpdate).toHaveBeenCalledWith(expect.objectContaining({ qualityDates: passed }));
     expect(flushDispatchQualityDates).toHaveBeenCalledTimes(1);
     expect(flushDispatchQualityDates).toHaveBeenCalledWith(passed);
+  });
+
+  test('an unexpected per-alert failure is annotated with a safe reason and reported as failed, not as a clean zero', async () => {
+    const alertsList = query([{ id: 'alert-a' }]);
+    const boom = query({});
+    boom.first = jest.fn(async () => { throw new Error('connection reset'); });
+    const annotate = query({});
+    const queue = [alertsList, boom, annotate];
+    db.mockImplementation(() => queue.shift() || query({}));
+
+    const res = await autoAssignTechDay({ technicianId: ABSENT_TECH, date: DATE });
+
+    expect(res.failed).toEqual([{ alert_id: 'alert-a', reason: 'auto_move_error' }]);
+    expect(res.moved).toEqual([]);
+    const rawCall = db.raw.mock.calls.find(([sql]) => /COALESCE\(payload/.test(sql));
+    expect(JSON.parse(rawCall[1][0]).auto_attempt.reason).toBe('auto_move_error');
   });
 });

@@ -255,7 +255,8 @@ async function annotateAttempt(alertId, reason, stillParked = null) {
       q.whereExists(db('scheduled_services')
         .select(db.raw('1'))
         .where({ id: stillParked.jobId, technician_id: stillParked.absentTechId, scheduled_date: stillParked.date })
-        .whereNotIn('status', ABSENT_STOP_EXCLUDE_STATUSES));
+        .whereNotIn('status', ABSENT_STOP_EXCLUDE_STATUSES)
+        .where((w) => w.whereNull('track_state').orWhereNot('track_state', 'complete')));
     }
     const [row] = await q
       .update({
@@ -369,7 +370,10 @@ function stopMoveRefusal(stop, absentTechId, date) {
   // longer needs reassigning either — same list, so both sides agree.
   if (String(stop.technician_id || '') !== String(absentTechId || '')
     || scheduledDateStr !== String(date)
-    || ABSENT_STOP_EXCLUDE_STATUSES.includes(String(stop.status))) {
+    || ABSENT_STOP_EXCLUDE_STATUSES.includes(String(stop.status))
+    // Geofence auto-completion advances the tracker to 'complete' without
+    // touching status — a finished visit, same as status 'completed'.
+    || stop.track_state === 'complete') {
     return { reason: 'already_resolved', skipped: true, stale: true };
   }
   // A grouped visit the alert didn't know about (grouped after park) is a
@@ -653,6 +657,7 @@ async function autoAssignTechDay({ technicianId, date, actorId } = {}) {
 
   const moved = [];
   const left_parked = [];
+  const failed = [];
   // One schedule-quality refresh for the whole run, after every move.
   const qualityDates = new Set();
   try {
@@ -661,8 +666,12 @@ async function autoAssignTechDay({ technicianId, date, actorId } = {}) {
       try {
         result = await autoAssignParkedAlert({ alertId: id, actorId, qualityDates });
       } catch (err) {
+        // Isolated: one alert's unexpected failure never stops the rest. The
+        // card says so (safe reason, never the raw error) and the response
+        // reports it, so the drawer can say the run was not a clean zero.
         logger.error(`[tech-out-auto-move] alert ${id} threw during batch auto-assign: ${err.message}`);
-        left_parked.push({ alert_id: id, reason: `error: ${err.message}` });
+        await annotateAttempt(id, 'auto_move_error');
+        failed.push({ alert_id: id, reason: 'auto_move_error' });
         continue;
       }
       if (result.moved) moved.push(result);
@@ -671,7 +680,7 @@ async function autoAssignTechDay({ technicianId, date, actorId } = {}) {
   } finally {
     await flushDispatchQualityDates(qualityDates);
   }
-  return { moved, left_parked };
+  return { moved, left_parked, failed };
 }
 
 module.exports = {

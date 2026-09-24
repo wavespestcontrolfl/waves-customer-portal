@@ -177,8 +177,11 @@ export default function TechOutSection({ techId, techName, onChanged }) {
   // same absence, under its own sequence, so a late read never regresses.
   useEffect(() => {
     async function onTechOutAlertsChange(event) {
-      const changedTechId = event?.detail?.tech_id;
-      if (!changedTechId || changedTechId !== techIdRef.current) return;
+      // tech_id null = a card resolved before the board knew whose it was.
+      const eventTechId = event?.detail?.tech_id;
+      if (eventTechId && eventTechId !== techIdRef.current) return;
+      const changedTechId = techIdRef.current;
+      if (!changedTechId) return;
       const seq = ++countSeqRef.current;
       try {
         const res = await fetch(`${API_BASE}/admin/tech-out/${changedTechId}?date=${etDateString()}`, {
@@ -354,7 +357,8 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       }
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const moved = Array.isArray(data.moved) ? data.moved.length : 0;
-      setAutoAssignResult({ moved });
+      const failed = Array.isArray(data.failed) ? data.failed.length : 0;
+      setAutoAssignResult({ moved, failed });
       // Re-read status so the parked count (parked_open_count) and any
       // resolved cards reflect what the batch just did.
       await fetchStatus(requestTechId);
@@ -406,6 +410,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
                     remainder — it counts every stop of a grouped visit, which a
                     per-card tally here would undercount (Codex r4 P2). */}
                 Moved {autoAssignResult.moved} {autoAssignResult.moved === 1 ? 'stop' : 'stops'} automatically.
+                {autoAssignResult.failed > 0 && ` ${autoAssignResult.failed} couldn't be processed — try again.`}
               </div>
             )}
             {autoAssignError && <div className="text-14 text-alert-fg mt-1">{autoAssignError}</div>}

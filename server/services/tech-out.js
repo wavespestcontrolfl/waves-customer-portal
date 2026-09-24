@@ -185,10 +185,13 @@ async function openStopsForTechDay(trx, { technicianId, date }) {
       'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.is_recurring', 'scheduled_services.visit_id',
       'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at',
+      'scheduled_services.track_state',
       'customers.first_name', 'customers.last_name',
     ],
   }).orderBy('scheduled_services.window_start', 'asc');
-  return rows.filter((row) => !isUncommittedHold(row));
+  // A tracker-complete row (geofence auto-completion leaves status as-is) is
+  // a finished visit: never parked, and its open card reconciles away.
+  return rows.filter((row) => !isUncommittedHold(row) && row.track_state !== 'complete');
 }
 
 /**

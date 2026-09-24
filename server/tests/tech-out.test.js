@@ -771,6 +771,23 @@ describe('sweepAbsentTechDays', () => {
     expect(resolveAlert).not.toHaveBeenCalled();
   });
 
+  test('a tracker-complete stop (status still confirmed) is never parked, and its open card reconciles away', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'done-by-geofence', track_state: 'complete' })]));
+    db.__state.alerts.push({
+      id: 'alert-done', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'done-by-geofence', resolved_at: null, payload: { date: DATE },
+    });
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
+    expect(createAlert).not.toHaveBeenCalled();
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-done', auto: true }));
+  });
+
   test('reconcile: an open card whose stop left the absent day is closed systemically, never left as a phantom', async () => {
     process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
     db.__state.absences['absence-1'] = {
