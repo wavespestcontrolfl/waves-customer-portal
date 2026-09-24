@@ -1328,6 +1328,7 @@ describe('Customer360ProfileV2 profile state', () => {
 
   it('uses prefetched SMS context beyond a call-only page when the opening refresh fails', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const prefetched = deferred();
     const refreshed = deferred();
     let reads = 0;
     const thread = {
@@ -1344,6 +1345,7 @@ describe('Customer360ProfileV2 profile state', () => {
       if (parsed.pathname.endsWith('/comms')) {
         if (parsed.searchParams.get('channel') === 'voice') return response({ comms: [] });
         reads += 1;
+        if (reads === 1) return prefetched.promise;
         return reads === 2 ? refreshed.promise : response(thread);
       }
       return response({ timeline: [], commitments: [], enabled: true, has_more: false });
@@ -1351,6 +1353,7 @@ describe('Customer360ProfileV2 profile state', () => {
     const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
     await screen.findByRole('heading', { name: 'Avery Customer' });
     await waitFor(() => expect(reads).toBe(1));
+    await act(async () => prefetched.resolve(await response(thread)));
     container.querySelector('.c360-panel').scrollTo = vi.fn();
     fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
     await waitFor(() => expect(reads).toBe(2));

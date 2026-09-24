@@ -35,6 +35,57 @@ import {
 } from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+const CONTACT_EVIDENCE_LABELS = new Map([
+  ["live_conversation", "Contacted after a live conversation"],
+  ["assessment_booked", "Contacted after an assessment was booked"],
+  ["assessment_completed", "Contacted after an assessment was completed"],
+]);
+
+function contactEvidenceDetails(activity) {
+  if (activity?.activity_type !== "status_change" || !activity.metadata)
+    return null;
+
+  let metadata;
+  try {
+    metadata =
+      typeof activity.metadata === "string"
+        ? JSON.parse(activity.metadata)
+        : activity.metadata;
+  } catch {
+    return null;
+  }
+
+  const label = CONTACT_EVIDENCE_LABELS.get(metadata?.evidenceType);
+  if (!label) return null;
+
+  const evidenceId = String(metadata?.evidenceId || "").trim();
+  const safeId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(evidenceId)
+    ? evidenceId
+    : "";
+  const reference =
+    safeId.length > 16
+      ? `${safeId.slice(0, 8)}…${safeId.slice(-4)}`
+      : safeId;
+
+  return { label, reference };
+}
+
+function ContactEvidenceExplanation({ activity }) {
+  const details = contactEvidenceDetails(activity);
+  if (!details) return null;
+
+  return (
+    <div className="mt-[2px] text-zinc-900">
+      {details.label}
+      {details.reference && (
+        <span className="text-ink-secondary">
+          {" "}· Evidence reference {details.reference}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // leads.address may hold either a street-only line or a fully composed
 // "street, City, FL zip" string depending on which intake path wrote the row —
 // only append the standalone city/zip columns when the stored address doesn't
@@ -2138,6 +2189,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           <span className="text-zinc-900">
                                             {a.description}
                                           </span>{" "}
+                                          {leadReviewEnabled && (
+                                            <ContactEvidenceExplanation
+                                              activity={a}
+                                            />
+                                          )}
                                           {(() => {
                                             if (
                                               a.activity_type !== "ai_triage" ||
@@ -3920,7 +3976,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   key={match.id}
                   onClick={() => {
                     setShowModal(null);
-                    navigate(`/admin/pipeline?lead=${match.id}`);
+                    const next = new URLSearchParams();
+                    if (leadReviewEnabled)
+                      next.set("leadReview", "1");
+                    next.set("lead", match.id);
+                    navigate(`/admin/pipeline?${next}`);
                   }}
                 >
                   {[match.first_name, match.last_name]
