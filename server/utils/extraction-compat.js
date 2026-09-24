@@ -13,18 +13,24 @@ function isV2Extraction(extraction) {
   return !!(extraction && extraction.meta && extraction.meta.schema_version);
 }
 
-// prices_signature (schema 1.13.0, codex #4722 r1 P1): price_count alone
-// collapses two extractors that both return 2 prices but disagree on the
-// SECONDARY entry's contents — the count matches while the actual prices
-// differ. This builds a deterministic per-entry signature so replay
-// variance can see that disagreement. Order-sensitive by design (the
-// prompt asks for most-consequential-first, so a reorder is itself a
-// meaningful change).
+// prices_signature (schema 1.13.0, codex #4722 r1 P1, extended r2
+// push-gate P1): price_count alone collapses two extractors that both
+// return 2 prices but disagree on the SECONDARY entry's contents — the
+// count matches while the actual prices differ. This builds a
+// deterministic per-entry signature so replay variance can see that
+// disagreement. Order-sensitive by design (prices[0] is always the
+// canonical primary, so a reorder is itself a meaningful change).
+// Includes stated_by and accepted (a v9 extractor that silently swaps a
+// competitor's price from caller to agent, or a legacy accepted-only
+// entry's acceptance, must not read as unchanged) and evidence PRESENCE
+// only — never the verbatim evidence_quote text itself, which is free
+// text and never diffed (matching price_has_evidence's own convention).
 function priceEntrySignature(entry) {
   const e = entry || {};
-  return ['amount_usd', 'amount_max_usd', 'unit', 'caller_response', 'prepay_term', 'tier_mentioned']
-    .map((key) => (e[key] === null || e[key] === undefined ? '' : String(e[key])))
-    .join('|');
+  const fields = ['amount_usd', 'amount_max_usd', 'unit', 'caller_response', 'accepted', 'stated_by', 'prepay_term', 'tier_mentioned']
+    .map((key) => (e[key] === null || e[key] === undefined ? '' : String(e[key])));
+  const hasEvidence = typeof e.evidence_quote === 'string' && e.evidence_quote.trim() ? '1' : '0';
+  return [...fields, hasEvidence].join('|');
 }
 
 function pricesSignature(prices) {

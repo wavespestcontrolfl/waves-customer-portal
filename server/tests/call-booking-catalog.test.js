@@ -1237,8 +1237,12 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(withPrices).not.toHaveProperty('prices');
   });
 
-  // prices_signature (codex #4722 r1 P1): price_count alone can't tell two
-  // 2-price extractions with a differing secondary entry apart.
+  // prices_signature (codex #4722 r1 P1, extended r2 push-gate P1):
+  // price_count alone can't tell two 2-price extractions with a differing
+  // secondary entry apart. amount_usd|amount_max_usd|unit|caller_response|
+  // accepted|stated_by|prepay_term|tier_mentioned, plus an evidence
+  // PRESENCE flag (never the verbatim quote — that's free text and never
+  // diffed).
   test('flatView exposes prices_signature as a deterministic per-entry string, null when prices absent', () => {
     const absent = flatView({ meta: { schema_version: '1.13.0' }, service_request: { price: {} } });
     expect(absent.prices_signature).toBeNull();
@@ -1253,7 +1257,7 @@ describe('extraction plumbing for the new booking fields', () => {
         ],
       },
     });
-    expect(withPrices.prices_signature).toBe('65||one_time|accepted||;40||per_month|not_at_issue||gold');
+    expect(withPrices.prices_signature).toBe('65||one_time|accepted|||||0;40||per_month|not_at_issue||||gold|0');
 
     // Order-sensitive, and differs when only the secondary entry's unit changes.
     const secondaryChanged = flatView({
@@ -1266,6 +1270,60 @@ describe('extraction plumbing for the new booking fields', () => {
       },
     });
     expect(secondaryChanged.prices_signature).not.toBe(withPrices.prices_signature);
+  });
+
+  // codex #4722 r2 push-gate P1: stated_by, accepted, and evidence
+  // PRESENCE must be part of the signature — otherwise a secondary entry
+  // that silently flips from a caller-mentioned competitor price to an
+  // agent-stated one (or drops its supporting evidence, or a legacy
+  // accepted-only entry's acceptance changes) reads as unchanged even
+  // though the Calls tab "All prices" row would display it differently.
+  test('prices_signature changes when only a secondary entry\'s stated_by, accepted, or evidence presence changes', () => {
+    const base = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', stated_by: 'caller', evidence_quote: 'a competitor charges forty a month' },
+        ],
+      },
+    });
+    const statedByChanged = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', stated_by: 'agent', evidence_quote: 'a competitor charges forty a month' },
+        ],
+      },
+    });
+    const evidenceDropped = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', stated_by: 'caller' },
+        ],
+      },
+    });
+    const acceptedChanged = flatView({
+      meta: { schema_version: '1.13.0' },
+      service_request: {
+        prices: [
+          { amount_usd: 300, unit: 'one_time', caller_response: 'accepted' },
+          { amount_usd: 40, unit: 'per_month', accepted: false },
+        ],
+      },
+    });
+    // Every variant reads as a real change against the base.
+    expect(statedByChanged.prices_signature).not.toBe(base.prices_signature);
+    expect(evidenceDropped.prices_signature).not.toBe(base.prices_signature);
+    expect(acceptedChanged.prices_signature).not.toBe(base.prices_signature);
+    // And the primary entry alone (identical on all four) doesn't hide it —
+    // price_count is unchanged, so it's the signature carrying the signal.
+    expect(base.price_count).toBe(statedByChanged.price_count);
+    expect(base.price_count).toBe(evidenceDropped.price_count);
+    expect(base.price_count).toBe(acceptedChanged.price_count);
   });
 
   test('normalizeCallExtraction sanitizes the new V1 fields', () => {
