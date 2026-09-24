@@ -158,4 +158,38 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       { description: 'missing', card_brand: 'VISA', card_last_four: '1310' },
     ]);
   });
+
+  test('removing a bank method snapshots its tender onto a bare (failed-attempt) payment row (GH codex r3 P2 x2)', async () => {
+    const [customer] = await db('customers')
+      .insert({ first_name: 'FkProbe', last_name: 'Ach', phone: '+15550001237' })
+      .returning('id');
+    const customerId = customer.id ?? customer;
+    try {
+      const [method] = await db('payment_methods')
+        .insert({
+          customer_id: customerId, processor: 'stripe', method_type: 'ach',
+          bank_name: 'FIFTH THIRD BANK', last_four: '2017', bank_last_four: '2017',
+        })
+        .returning('id');
+      // A failed-attempt writer that stores only the pointer — no snapshot.
+      await db('payments').insert({
+        customer_id: customerId, payment_method_id: method.id ?? method,
+        payment_date: '2026-09-10', amount: '99.00', status: 'failed',
+      });
+      await StripeService.removeCard(customerId, method.id ?? method, { cascadeAutopay: false });
+
+      const [row] = await StripeService.getPaymentHistory(customerId);
+      expect(row).toMatchObject({
+        payment_method_id: null,
+        method_type: 'ach',
+        bank_name: 'FIFTH THIRD BANK',
+        last_four: '2017',
+        status: 'failed',
+      });
+    } finally {
+      await db('payments').where({ customer_id: customerId }).del();
+      await db('payment_methods').where({ customer_id: customerId }).del();
+      await db('customers').where({ id: customerId }).del();
+    }
+  });
 });
