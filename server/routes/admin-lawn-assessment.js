@@ -129,10 +129,28 @@ function finiteNumberOrNull(value) {
 // floor stored at /assess (which already folds in insect/drought/mechanical
 // and the worst per-photo disease/thatch). Pre-stress_damage rows (null
 // floor) fall back to worst-of(fungus, thatch) — never 0.
+const LEGACY_SCORE_KEYS = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
+// The AI's read for a legacy (no-run) row: the adjusted_scores snapshot /assess
+// wrote (a pending save never rewrites it). A missing or score-less snapshot
+// (very old rows, or a normalized {}) falls back to the columns. One helper
+// for /confirm and the reload response, so the drawer and server agree.
+function legacyAiRead(assessment) {
+  const snapshot = parseJsonObject(assessment.adjusted_scores, null);
+  const hasScores = snapshot && LEGACY_SCORE_KEYS.some((key) => key in snapshot);
+  return hasScores ? snapshot : null;
+}
+function legacyAiScores(assessment) {
+  const aiRead = legacyAiRead(assessment);
+  return Object.fromEntries(LEGACY_SCORE_KEYS.map((key) => {
+    const value = aiRead ? aiRead[key] : assessment[key];
+    return [key, value == null || value === '' ? null : scoreValue(value)];
+  }));
+}
+
 // Whether a legacy Stress is a real value (AI-read or typed now) rather than
 // a derivation — only a real value is stored on a pending save.
 function legacyStressIsFixed(assessment, adjustedScores) {
-  const aiRead = parseJsonObject(assessment.adjusted_scores, null);
+  const aiRead = legacyAiRead(assessment);
   const ai = aiRead ? aiRead.stress_damage : assessment.stress_damage;
   const typedStress = adjustedScores?.stress_damage;
   const earlierEntry = aiRead && assessment.stress_damage != null && assessment.stress_damage !== '';
@@ -145,7 +163,7 @@ function legacyConfirmFinalScores(assessment, adjustedScores) {
   // save never rewrites it, so a technician's earlier fill (stored in the
   // columns) stays correctable. Very old rows without a snapshot fall back to
   // the columns.
-  const aiRead = parseJsonObject(assessment.adjusted_scores, null);
+  const aiRead = legacyAiRead(assessment);
   const aiValue = (key) => (aiRead ? aiRead[key] : assessment[key]);
   const aiKnown = (key) => aiValue(key) != null && aiValue(key) !== '';
   // The drawer posts only typed keys, so a key that is neither AI-known nor
@@ -1338,6 +1356,9 @@ router.get('/service/:serviceId', async (req, res, next) => {
         photo_records: photos,
       },
       visitAssessment: visitRuns.responseForRun(visitRun),
+      // Legacy rows: the server's own AI read, so the drawer locks exactly
+      // what /confirm will ignore (run-backed rows carry visitAssessment.aiScores).
+      ...(visitRun ? {} : { aiScores: legacyAiScores(assessment) }),
     });
   } catch (err) {
     next(err);

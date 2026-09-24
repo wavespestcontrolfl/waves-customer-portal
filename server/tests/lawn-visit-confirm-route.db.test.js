@@ -318,6 +318,16 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, fungus_control: 40, color_health: 70, stress_damage: 40 });
   });
 
+  test('legacy reload sends the server AI read, so a partial fill stays editable', async () => {
+    const { assessment, visit } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false, service: true });
+    await request(assessment.id, { adjustedScores: { fungus_control: 60 } });
+    const reloaded = await reloadService(visit.id);
+    expect(reloaded.visitAssessment).toBeNull();
+    // fungus was filled by the technician, not read by the AI — still blank here.
+    expect(reloaded.aiScores).toMatchObject({ turf_density: 80, color_health: null, fungus_control: null });
+    expect(reloaded.assessment.fungus_control).toBe(60);
+  });
+
   test('a legacy explicit Stress entry survives a later partial save', async () => {
     const blanks = { ...COMPLETE, color_health: null, fungus_control: 75, thatch_level: 85, stress_damage: null };
     const { assessment } = await seed(blanks, { run: false });

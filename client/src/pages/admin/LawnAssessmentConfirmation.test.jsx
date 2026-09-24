@@ -13,6 +13,7 @@ let confirmation;
 let loadedAssessment;
 let analysisScores;
 let visitAssessment;
+let serverAiScores;
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'fixture-token');
@@ -24,11 +25,12 @@ beforeEach(() => {
   loadedAssessment = assessment;
   analysisScores = scores;
   visitAssessment = null;
+  serverAiScores = undefined;
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     let data = {};
     if (url.includes('feature-flags')) data = { flags: {} };
     if (url.includes('lawn-assessment/customers')) data = { customers: [{ id: 'fixture-customer', firstName: 'Fixture', lastName: 'Lawn' }] };
-    if (url.includes('lawn-assessment/service/')) data = { assessment: loadedAssessment, visitAssessment };
+    if (url.includes('lawn-assessment/service/')) data = { assessment: loadedAssessment, visitAssessment, ...(serverAiScores ? { aiScores: serverAiScores } : {}) };
     if (url.endsWith('lawn-assessment/assess')) data = { assessment, adjustedScores: analysisScores, displayScores: analysisScores, visitAssessment };
     if (url.endsWith('lawn-assessment/confirm')) data = confirmation;
     if (url.includes('lawn-assessment/history')) data = { history: [] };
@@ -193,6 +195,17 @@ it('two partial saves: a server-derived Stress is never posted back as an explic
   await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm'))).toHaveLength(2));
   const posts = fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm')).map(([, init]) => JSON.parse(init.body).adjustedScores);
   expect(posts).toEqual([{ fungus_control: 80 }, { fungus_control: 40 }]);
+});
+
+it('a legacy reload uses the server AI read, so an earlier fill stays editable', async () => {
+  // No run: the row already carries a technician fill (fungus 60) from a
+  // pending save; the server says the AI never read fungus.
+  loadedAssessment = { ...assessment, fungus_control: 60 };
+  serverAiScores = { turf_density: 80, weed_suppression: 80, color_health: null, fungus_control: null, thatch_level: 85, stress_damage: 85 };
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  await screen.findByRole('button', { name: 'Confirm assessment' });
+  expect(screen.getByLabelText('Enter Fungus control').value).toBe('60');
+  expect(screen.queryByLabelText('Enter Thatch condition')).toBeNull();
 });
 
 it('a confirmed assessment shows its saved scores, not the AI read', async () => {

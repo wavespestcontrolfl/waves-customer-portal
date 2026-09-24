@@ -9832,14 +9832,11 @@ function withAiScores(scores, aiScores) {
   return out;
 }
 
-function resolveAiScores(assessment = {}, visitAssessment) {
+function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
   if (visitAssessment?.aiScores) return visitAssessment.aiScores;
-  // Legacy rows: the adjusted_scores snapshot /assess wrote is the AI read (a
-  // pending save never rewrites it); very old rows fall back to the columns.
-  let snapshot = assessment.adjusted_scores;
-  if (typeof snapshot === "string") { try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; } }
-  const source = snapshot && typeof snapshot === "object" ? snapshot : assessment;
-  const raw = (a, b) => lawnScores.lawnScoreValue(source[a] ?? source[b]);
+  // Legacy rows: the reload route sends the server's own AI read.
+  if (serverAiScores) return serverAiScores;
+  const raw = (a, b) => lawnScores.lawnScoreValue(assessment[a] ?? assessment[b]);
   return {
     turf_density: raw("turf_density", "turfDensity"),
     weed_suppression: raw("weed_suppression", "weedSuppression"),
@@ -9989,12 +9986,12 @@ function LawnAssessmentCompletionBlock({
           assessment,
           adjustedScores: scores,
           displayScores: scores,
-          aiScores: resolveAiScores(assessment, data.visitAssessment),
+          aiScores: resolveAiScores(assessment, data.visitAssessment, data.aiScores),
           observations: assessment.observations || "",
         });
         // A confirmed row shows exactly what was saved (and what the customer
         // report uses); only a pending row shows the AI read for locked keys.
-        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment)));
+        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
         setTypedKeys(new Set());
         setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
         if (assessment.confirmed_by_tech) {
