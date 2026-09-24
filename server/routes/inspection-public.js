@@ -2182,10 +2182,11 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
   // always gets the generic 404, never a validation 400.
   const verified = verifyLeadConsultationToken(req.params.token);
   if (!verified) return res.status(404).json({ error: 'not_found' });
+  // The email is validated only AFTER the ticket and current eligibility
+  // (Codex #4737 r21 P0): an ineligible lead gets the generic 404 whatever
+  // the body looks like.
   const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'A valid email is required' });
-  }
+  const emailValid = Boolean(email) && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
   try {
     const lead = await loadLead(db, verified.leadId);
@@ -2199,7 +2200,14 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
     // Eligibility and BOTH writes in ONE transaction under the same
     // inspection-lead lock the booking takes (Codex #4737 r19 P0): a
     // concurrent commit either finished first (and is seen here) or waits.
+    // The trusted profiles' comms fences FIRST (Codex #4737 r21 P0), sorted
+    // — every booking writer (admin scheduling, the booking funnel, this
+    // page) holds a customer's comms fence while it inserts a visit, so no
+    // visit can land on a trusted profile between the eligibility read and
+    // the writes. Same order as the booking: comms, inspection-lead, lead.
+    const preIds = (await trustedLeadProfileIds(db, lead.id, verified, null)).map(String).sort();
     const written = await db.transaction(async (trx) => {
+      for (const id of preIds) await lockCustomerComms(trx, id);
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['inspection-lead', String(lead.id)]);
       // Row-locked too (Codex #4737 r20 P0): staff conversions/closures do
       // not take the advisory lock, so the lead row itself is held until
@@ -2207,8 +2215,14 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
       const freshLead = await loadLead(trx, lead.id, { forUpdate: true });
       if (!freshLead) return false;
       // Lead-wide, every trusted profile (Codex #4737 r17 P0).
+      // A trusted profile that appeared after the fences were taken is not
+      // covered by them — fail closed (generic 404), recoverable.
+      const lockedIds = new Set(preIds);
+      const nowIds = await trustedLeadProfileIds(trx, lead.id, verified, null);
+      if (nowIds.some((id) => !lockedIds.has(String(id)))) return false;
       const eligibility = await readEligibility(freshLead, await loadTrustedCustomer(trx, freshLead, verified), verified, { conn: trx, includeRescheduleUrl: false });
       if (eligibility.state !== 'ok') return false;
+      if (!emailValid) return 'invalid_email';
       const county = ticket.county || '';
 
       // status: 'waitlist' — deliberately NOT 'active' (Codex pre-push P1,
@@ -2251,6 +2265,7 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
 
       return true;
     });
+    if (written === 'invalid_email') return res.status(400).json({ error: 'A valid email is required' });
     if (!written) return res.status(404).json({ error: 'not_found' });
     return res.json({ ok: true });
   } catch (err) {

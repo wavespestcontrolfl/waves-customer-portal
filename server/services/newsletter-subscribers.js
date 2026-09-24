@@ -188,14 +188,9 @@ async function subscribeOrResubscribeOnce({
     if (existing.status === 'waitlist') {
       // Its own status-specific transition (Codex #4737 r9 P2) — see
       // transitionWaitlistRow below.
-      const transitioned = await transitionWaitlistRow(existing, {
-        source, firstName, lastName, requireConfirmation, promoteWaitlist, linkCustomer, lc,
-      });
-      if (transitioned || retried) return transitioned || { subscriber: existing, action: 'already_pending' };
-      // Another request moved the row first: re-run once against its state.
-      return subscribeOrResubscribeOnce({
-        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist,
-      }, { retried: true });
+      return waitlistBranch(existing, {
+        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist, lc,
+      }, retried);
     }
 
     if (existing.status === 'unsubscribed' || existing.status === 'inactive') {
@@ -255,7 +250,30 @@ async function subscribeOrResubscribeOnce({
     return { subscriber: fresh, action: 'already_active' };
   }
 
-  // New row.
+  // New row — its own step (keeps this state machine's complexity down).
+  return insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer }, () => (retried
+    ? null
+    : subscribeOrResubscribeOnce({
+      email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist,
+    }, { retried: true })));
+}
+
+// Inserts a brand-new subscriber. If another writer created the same email
+// first (a concurrent signup, or the consultation page's waitlist insert —
+// Codex #4737 r21 P2), `onConflict` re-runs the state machine once against
+// the row that now exists instead of surfacing a unique-key 500.
+// The waitlist branch of the state machine: the conditional transition, and
+// — when an overlapping request moved the row first (Codex #4737 r20 P2) —
+// one re-run against the row's new state.
+async function waitlistBranch(existing, params, retried) {
+  const { lc, ...signup } = params;
+  const transitioned = await transitionWaitlistRow(existing, { ...signup, lc });
+  if (transitioned) return transitioned;
+  if (retried) return { subscriber: existing, action: 'already_pending' };
+  return subscribeOrResubscribeOnce(signup, { retried: true });
+}
+
+async function insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer }, onConflict) {
   const insertRow = {
     email: lc,
     first_name: firstName,
@@ -268,7 +286,14 @@ async function subscribeOrResubscribeOnce({
   } else {
     insertRow.confirmed_at = new Date();
   }
-  const [row] = await db('newsletter_subscribers').insert(insertRow).returning('*');
+  let row;
+  try {
+    [row] = await db('newsletter_subscribers').insert(insertRow).returning('*');
+  } catch (err) {
+    const retry = err && err.code === '23505' ? onConflict() : null;
+    if (retry) return retry;
+    throw err;
+  }
 
   if (linkCustomer) await linkToCustomer(lc);
   // Re-read for the same reason — surfaces the freshly populated

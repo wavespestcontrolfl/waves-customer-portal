@@ -149,3 +149,47 @@ describe('joining the waitlist alone sends no email (unaffected by the fix)', ()
     expect(row.confirmed_at).toBeNull();
   });
 });
+
+// Codex #4737 r20 / r21 P2s: races with the consultation page's waitlist.
+describe('subscribeOrResubscribe — waitlist races', () => {
+  test('a waitlist promotion that loses the race (0 rows) re-runs against the row\'s new state — never overwrites its token', async () => {
+    const db = require('../models/db');
+    let reads = 0;
+    db.mockImplementation((table) => {
+      const q = {};
+      for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'select', 'limit']) q[m] = () => q;
+      q.first = async () => {
+        reads += 1;
+        // First read: still waitlist; after the lost update: already pending.
+        return reads === 1 ? { ...WAITLIST_ROW } : { ...WAITLIST_ROW, status: 'pending', confirmation_token: 'first-token', confirmation_sent_at: new Date() };
+      };
+      q.update = async (payload) => { updateCalls.push({ table, payload }); return 0; };
+      q.insert = () => q;
+      q.returning = async () => [{ id: 'new-id' }];
+      return q;
+    });
+    const result = await subscribeOrResubscribe({ email: 'pat@example.com', source: 'newsletter_footer', requireConfirmation: true, linkCustomer: false });
+    expect(result.action).not.toBe('confirmation_sent');
+    // Only the one conditional (lost) promotion update was attempted.
+    expect(updateCalls.filter((c) => c.payload.status === 'pending')).toHaveLength(1);
+  });
+
+  test('a new-email insert that loses the unique race to the waitlist insert re-runs the state machine, never a 500', async () => {
+    const db = require('../models/db');
+    let reads = 0;
+    db.mockImplementation(() => {
+      const q = {};
+      for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'select', 'limit']) q[m] = () => q;
+      q.first = async () => {
+        reads += 1;
+        return reads === 1 ? null : { ...WAITLIST_ROW };
+      };
+      q.update = async (payload) => { updateCalls.push({ payload }); return 1; };
+      q.insert = () => q;
+      q.returning = async () => { throw Object.assign(new Error('duplicate key'), { code: '23505' }); };
+      return q;
+    });
+    const result = await subscribeOrResubscribe({ email: 'pat@example.com', source: 'newsletter_footer', requireConfirmation: true, linkCustomer: false });
+    expect(result.action).toBe('confirmation_sent');
+  });
+});

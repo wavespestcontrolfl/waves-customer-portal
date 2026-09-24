@@ -2928,7 +2928,7 @@ describe('POST /:token/waitlist', () => {
   test('rejects a missing/invalid email', async () => {
     firstResults.leads = LEAD_ROW;
     const token = mintLeadConsultationToken(LEAD_ID);
-    const res = await callWaitlist(token, { email: 'not-an-email' });
+    const res = await callWaitlist(token, { email: 'not-an-email', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
     expect(res.statusCode).toBe(400);
   });
 
@@ -3024,6 +3024,35 @@ describe('POST /:token/waitlist', () => {
     expect(wl.slice(0, 3000)).toContain('loadLead(trx, lead.id, { forUpdate: true })');
     const ns = fs.readFileSync(path.join(__dirname, '../services/newsletter-subscribers.js'), 'utf8');
     expect(ns).toContain(".where({ id: existing.id, status: 'waitlist' }).update(updates)");
+  });
+
+  // Codex #4737 r21 P0s: an ineligible lead gets the generic 404 whatever
+  // the body; every trusted profile's comms fence is held before the writes.
+  test('an ineligible lead with a malformed email still gets the generic 404', async () => {
+    firstResults.leads = { ...LEAD_ROW, status: 'spam' };
+    const res = await callWaitlist(mintLeadConsultationToken(LEAD_ID), { email: 'not-an-email', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('the waitlist holds every trusted profile\'s comms fence (sorted) before the lead lock', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-b' }) };
+    listResults.lead_activities = [
+      { metadata: JSON.stringify({ customer_id: 'cust-b' }) },
+      { metadata: JSON.stringify({ customer_id: 'cust-a' }) },
+    ];
+    firstResults.customers = (q) => ({ id: q.conds.id, phone: '9415550101', address_line1: '1 X St' });
+    listResults.scheduled_services = [];
+    const rawCalls = [];
+    const origRaw = db.raw.getMockImplementation();
+    db.raw.mockImplementation((sql, b) => { rawCalls.push([String(sql), b]); return origRaw(sql, b); });
+    const res = await callWaitlist(mintLeadConsultationToken(LEAD_ID), { email: 'someone@example.com', waitlist_ticket: mintWaitlistTicket(LEAD_ID, 'Hardee') });
+    db.raw.mockImplementation(origRaw);
+    expect(res.statusCode).toBe(200);
+    const leadLock = rawCalls.findIndex(([, b]) => Array.isArray(b) && b[0] === 'inspection-lead');
+    expect(leadLock).toBeGreaterThan(-1);
+    const commsCalls = rawCalls.slice(0, leadLock).filter(([sql]) => /advisory/i.test(sql));
+    expect(commsCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   test('the region is the ticket\'s, never a caller-supplied county', async () => {
