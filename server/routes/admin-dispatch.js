@@ -4276,16 +4276,17 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         if (!cardOnly && overlapDates.length) parts.push(result.arrivalWindowDates?.length
           ? `${overlapDates.length} occurrence(s) need route review to keep every promised arrival window (${overlapDates.join(', ')}) — check those days' routes`
           : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
-        // Deep link: DispatchPageV2 reads ?date= (opens that day) and
-        // ?appointment= (opens that visit's detail sheet); nothing reads a
-        // service id. Land on the earliest affected day, focused on the
-        // first untimed conflict when there is one.
+        // Deep link: AdminDispatchPage mounts the Schedule tab only with
+        // ?tab=schedule (Board is the default); DispatchPageV2 then reads
+        // ?date= (opens that day) and ?appointment= (opens that visit's
+        // detail sheet). Nothing reads a service id. Land on the earliest
+        // affected day, focused on the first untimed conflict when there is one.
         const affectedDates = [...dueConflicts.map((c) => c.date), ...(cardOnly ? [] : [...overlapDates, ...preserved.map((c) => c.date)])]
           .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d))).sort();
         const focusConflict = dueConflicts.find((c) => c.date === affectedDates[0]);
         const link = affectedDates.length
-          ? `/admin/dispatch?date=${affectedDates[0]}${focusConflict ? `&appointment=${encodeURIComponent(focusConflict.id)}` : ''}`
-          : '/admin/dispatch';
+          ? `/admin/dispatch?tab=schedule&date=${affectedDates[0]}${focusConflict ? `&appointment=${encodeURIComponent(focusConflict.id)}` : ''}`
+          : '/admin/dispatch?tab=schedule';
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           preserved.length ? 'Recurring move needs a future visit review'

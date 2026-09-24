@@ -374,7 +374,7 @@ export default function NotificationBell() {
           >
             {" "}
             <a
-              href="/admin/communications#tab=events"
+              href="/admin/communications#notifications"
               style={{ color: D.teal, fontSize: 12, textDecoration: "none" }}
             >
               Notification settings →
