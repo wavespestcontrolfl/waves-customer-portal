@@ -690,7 +690,11 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
     heard_address: approvedAddress || payload.heard_address,
     ...(approvedWindow ? { scheduling_window: approvedWindow } : {}),
   } : null;
-  const heldBooking = heldIdsIn.length > 0 && !scheduleDenied;
+  // Visits the dispute already unassigned stay actionable on EVERY verdict
+  // — a denial that marks the scheduling wrong still leaves live, quiet
+  // rows behind that staff must cancel or reassign (codex r18 P1).
+  const heldBooking = heldIdsIn.length > 0;
+  const heldDenied = heldBooking && scheduleDenied;
   return {
     confirmed,
     approvedPayload,
@@ -699,10 +703,12 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
     heldUnassignedBookingId: heldBooking ? heldIdsIn[0] : null,
     heldUnassignedBookingIds: heldBooking ? heldIdsIn : [],
     skippedReason: heldBooking
-      ? 'house_number_dispute_settled_reassign_held_booking'
+      ? (heldDenied ? 'house_number_dispute_denied_cancel_or_reassign_held_booking' : 'house_number_dispute_settled_reassign_held_booking')
       : (verdict === 'accept' ? 'address_confirmed_on_file_after_house_number_dispute' : 'house_number_dispute_denied_appointment_unbooked'),
     summary: heldBooking
-      ? 'House-number dispute settled — the appointment the dispute left unassigned needs a technician and its confirmation re-armed'
+      ? (heldDenied
+        ? 'House-number dispute denied with the appointment marked wrong — the visit(s) the dispute left unassigned must be cancelled or rebooked by hand'
+        : 'House-number dispute settled — the appointment the dispute left unassigned needs a technician and its confirmation re-armed')
       : (verdict === 'accept'
         ? 'Address confirmed on file after a house-number dispute — the confirmed appointment still needs booking'
         : 'House-number dispute card denied — the confirmed appointment still needs booking'),
@@ -767,8 +773,13 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
     : [];
   // The reminder hold the dispute placed on those visits is released with
   // the settlement (the task re-arms what the hold quieted).
+  // …only the hold THIS dispute placed (its token) — a grouped-move hold
+  // a visit acquired meanwhile keeps its own token and expiry (codex r18 P1).
   if (heldIds.length) {
-    await trx('appointment_reminders').whereIn('scheduled_service_id', heldIds).update({ move_hold_until: null });
+    await trx('appointment_reminders')
+      .whereIn('scheduled_service_id', heldIds)
+      .where({ move_hold_token: `house-number-dispute:${item.call_log_id}` })
+      .update({ move_hold_until: null, move_hold_token: null });
   }
   const decision = heldConflictTaskDecision({
     verdict, wrongFields, heldConflictPayload, liveOnFile, bookingCovered: evidence.get(item.id)?.booking_after_card === true,

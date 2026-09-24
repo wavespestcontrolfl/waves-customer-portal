@@ -1224,9 +1224,13 @@ function summarizeKnownCaller(customer) {
 const DISPUTE_REMINDER_HOLD_MS = 45 * 24 * 60 * 60 * 1000;
 async function noteDisputeHeldBooking(conn, callLogId, scheduledServiceId) {
   try {
+    // Tokenized like the grouped-move hold it reuses, and never over a live
+    // hold another owner placed (codex r18 P1). A visit with no reminder
+    // row yet is covered by the self-heal's held-visit exclusion.
     await conn('appointment_reminders')
       .where({ scheduled_service_id: scheduledServiceId })
-      .update({ move_hold_until: new Date(Date.now() + DISPUTE_REMINDER_HOLD_MS) });
+      .where((q) => q.whereNull('move_hold_until').orWhere('move_hold_until', '<', new Date()))
+      .update({ move_hold_until: new Date(Date.now() + DISPUTE_REMINDER_HOLD_MS), move_hold_token: `house-number-dispute:${callLogId}` });
     await conn('triage_items')
       .where({ call_log_id: callLogId, reason_code: 'on_file_house_number_conflict' })
       .whereIn('status', ['open', 'in_progress'])

@@ -2845,6 +2845,19 @@ const AppointmentReminders = {
             .whereRaw('customers.id = ss.customer_id')
             .whereNotNull('customers.deleted_at');
         })
+        // A visit an OPEN house-number dispute card holds (its technician
+        // was pulled pending the address verdict) is not registered here:
+        // a fresh row would carry no hold and enter the send scan while
+        // the address is unresolved (codex #4666 r18 P1). The settlement
+        // task re-arms it.
+        .whereNotExists(function () {
+          this.select(1)
+            .from('triage_items as ti')
+            .where('ti.reason_code', 'on_file_house_number_conflict')
+            .whereIn('ti.status', ['open', 'in_progress'])
+            .whereRaw("jsonb_typeof(ti.payload->'held_unassigned_booking_ids') = 'array'")
+            .whereRaw("ti.payload->'held_unassigned_booking_ids' ? ss.id::text");
+        })
         .orderBy('ss.scheduled_date', 'asc')
         .limit(SELF_HEAL_REGISTRATION_LIMIT)
         .select('ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.created_at');

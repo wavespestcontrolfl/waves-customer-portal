@@ -327,11 +327,19 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(d.file).toBe(true);
     expect(d.skippedReason).toBe('house_number_dispute_settled_reassign_held_booking');
     expect(d.heldUnassignedBookingId).toBe('ss-9');
+    // A denial that marks the appointment wrong still hands the held visits to staff.
+    const denied = heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held, heldUnassignedBookingIds: ['ss-9'] });
+    expect(denied.file).toBe(true);
+    expect(denied.skippedReason).toBe('house_number_dispute_denied_cancel_or_reassign_held_booking');
+    expect(denied.heldUnassignedBookingIds).toEqual(['ss-9']);
     // Every held visit (parent + follow-up) rides on the task.
     const many = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, bookingCovered: true, heldUnassignedBookingIds: ['ss-9', 'ss-10'] });
     expect(many.heldUnassignedBookingIds).toEqual(['ss-9', 'ss-10']);
     expect(many.heldUnassignedBookingId).toBe('ss-9');
-    expect(heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held, heldUnassignedBookingId: 'ss-9' }).file).toBe(false);
+    // A denial that marks the appointment wrong no longer drops the held visit (codex r18 P1): staff cancel or rebook it by hand.
+    const deniedHeld = heldConflictTaskDecision({ verdict: 'deny', wrongFields: ['scheduling'], heldConflictPayload: held, heldUnassignedBookingId: 'ss-9' });
+    expect(deniedHeld.file).toBe(true);
+    expect(deniedHeld.skippedReason).toBe('house_number_dispute_denied_cancel_or_reassign_held_booking');
   });
 
   test('a covering booking, or a card whose call never confirmed, files nothing', () => {
