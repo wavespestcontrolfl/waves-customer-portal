@@ -476,11 +476,19 @@ async function clearSeriesPrepaid(db, anchor) {
     // claimed, same shape the single-visit DELETE route reconciles) —
     // reapply each affected term's coverage so a now-unstamped, in-window
     // visit is picked up if the term still needs it. Best-effort: never
-    // blocks the clear response itself.
+    // blocks the clear response itself — but Postgres aborts the WHOLE
+    // transaction on any statement error, so catching a failed refresh on
+    // `trx` directly would still leave it poisoned and take the stamp
+    // clear/audit-retire above down with it despite the caught error. A
+    // SAVEPOINT (nested transaction) isolates each refresh: a failure
+    // inside it rolls back only that savepoint, leaving the outer clear
+    // free to commit.
     const linkedTermIds = [...new Set(cleared.map((row) => row.annual_prepay_term_id).filter(Boolean))];
     for (const termId of linkedTermIds) {
       try {
-        await require('./annual-prepay-renewals').refreshTermSnapshot(termId, trx);
+        await trx.transaction(async (sp) => {
+          await require('./annual-prepay-renewals').refreshTermSnapshot(termId, sp);
+        });
       } catch (err) {
         logger.warn(`[prepaid-series] series clear: term coverage re-apply failed for term ${termId}: ${err.message}`);
       }

@@ -85,7 +85,9 @@ describe('audit r1-sched-series-1: non-palm row linked to another term must not 
   });
 
   test('coverageRowsForTerm excludes a row explicitly linked to a different term (non-palm)', async () => {
-    setDbQueues({ scheduled_services: [query({ rows: [PRIOR_TERM_ROW] })] });
+    // term-OLD is NOT released (still live paid coverage) — the query for
+    // positively-released other terms finds nothing.
+    setDbQueues({ scheduled_services: [query({ rows: [PRIOR_TERM_ROW] })], annual_prepay_terms: [query({ rows: [] })] });
     const selected = await _private.coverageRowsForTerm({
       id: 'term-NEW', customer_id: 'customer-1',
       coverage_service_type: 'Quarterly Pest Control Service', coverage_visit_count: 4,
@@ -110,7 +112,12 @@ describe('audit r1-sched-series-1: non-palm row linked to another term must not 
       query({ returning: [{ id: 'svc-t3', scheduled_date: '2026-12-15' }] }),
       query({ returning: [{ id: 'svc-t4', scheduled_date: '2027-03-15' }] }),
     ];
-    setDbQueues({ scheduled_services: [colQ, rowsQ, query({ first: undefined }), ...inserts] });
+    // term-OLD is NOT released — ensureCoverageRowsForTerm's own check plus
+    // the nested coverageRowsForTerm call each query this once.
+    setDbQueues({
+      scheduled_services: [colQ, rowsQ, query({ first: undefined }), ...inserts],
+      annual_prepay_terms: [query({ rows: [] }), query({ rows: [] })],
+    });
 
     const result = await _private.ensureCoverageRowsForTerm({
       id: 'term-NEW', customer_id: 'customer-1',
@@ -129,7 +136,11 @@ describe('audit r1-sched-series-1: non-palm row linked to another term must not 
   });
 
   test('coverageRowsForTerm INCLUDES a row linked to a REFUNDED prior term (its stamp was cleared, only the audit link remains)', async () => {
-    setDbQueues({ scheduled_services: [query({ rows: [REFUNDED_PRIOR_TERM_ROW] })] });
+    // term-OLD IS positively verified released (cancelled, no renewal decision).
+    setDbQueues({
+      scheduled_services: [query({ rows: [REFUNDED_PRIOR_TERM_ROW] })],
+      annual_prepay_terms: [query({ rows: [{ id: 'term-OLD' }] })],
+    });
     const selected = await _private.coverageRowsForTerm({
       id: 'term-NEW', customer_id: 'customer-1',
       coverage_service_type: 'Quarterly Pest Control Service', coverage_visit_count: 4,
@@ -142,7 +153,26 @@ describe('audit r1-sched-series-1: non-palm row linked to another term must not 
   });
 
   test('coverageRowsForTerm still EXCLUDES the row while its prior term retains live paid coverage (contrast)', async () => {
-    setDbQueues({ scheduled_services: [query({ rows: [PRIOR_TERM_ROW] })] });
+    setDbQueues({ scheduled_services: [query({ rows: [PRIOR_TERM_ROW] })], annual_prepay_terms: [query({ rows: [] })] });
+    const selected = await _private.coverageRowsForTerm({
+      id: 'term-NEW', customer_id: 'customer-1',
+      coverage_service_type: 'Quarterly Pest Control Service', coverage_visit_count: 4,
+      term_start: '2026-06-15', term_end: '2027-06-15',
+    });
+    expect(selected.map((r) => r.id)).toEqual([]);
+  });
+
+  test('coverageRowsForTerm still EXCLUDES an unstamped row when its prior term is NOT positively verified released (mid-activation or a failed activation, not a refund)', async () => {
+    // Same row SHAPE as the refunded case (linked, unstamped) — attachment
+    // precedes stamping, so this is indistinguishable from a refund by the
+    // row alone. The only thing that may differ is the OTHER term's own
+    // status: here it comes back with nothing released (still active, or a
+    // failed activation that never got as far as clearing/cancelling
+    // anything) — the row must NOT be adopted into term-NEW's coverage.
+    setDbQueues({
+      scheduled_services: [query({ rows: [REFUNDED_PRIOR_TERM_ROW] })],
+      annual_prepay_terms: [query({ rows: [] })],
+    });
     const selected = await _private.coverageRowsForTerm({
       id: 'term-NEW', customer_id: 'customer-1',
       coverage_service_type: 'Quarterly Pest Control Service', coverage_visit_count: 4,
@@ -166,7 +196,12 @@ describe('audit r1-sched-series-1: non-palm row linked to another term must not 
       query({ returning: [{ id: 'svc-t3', scheduled_date: '2026-12-15' }] }),
       query({ returning: [{ id: 'svc-t4', scheduled_date: '2027-03-15' }] }),
     ];
-    setDbQueues({ scheduled_services: [colQ, rowsQ, query({ first: undefined }), ...inserts] });
+    // term-OLD IS released — both the direct check and the nested
+    // coverageRowsForTerm call see it as released.
+    setDbQueues({
+      scheduled_services: [colQ, rowsQ, query({ first: undefined }), ...inserts],
+      annual_prepay_terms: [query({ rows: [{ id: 'term-OLD' }] }), query({ rows: [{ id: 'term-OLD' }] })],
+    });
 
     const result = await _private.ensureCoverageRowsForTerm({
       id: 'term-NEW', customer_id: 'customer-1',

@@ -338,4 +338,35 @@ postgres('r1-sched-visits-1: in-person series prepay vs booster rows', () => {
     expect(spy).toHaveBeenCalledWith(termId, expect.anything());
     spy.mockRestore();
   });
+
+  test('a refresh failure after clearing a linked manual stamp does not poison the transaction — the clear still commits', async () => {
+    const { parentId } = await insertFamily({ childDates: ['2027-02-02', '2027-05-03', '2027-08-02'] });
+    const [term] = await trx('annual_prepay_terms').insert({
+      customer_id: customerId, term_start: '2026-01-01', term_end: '2027-01-01',
+      status: 'active', prepay_amount: 400, coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4,
+    }).returning('id');
+    const termId = term.id || term;
+    await trx('scheduled_services').where({ id: parentId })
+      .update({ annual_prepay_term_id: termId, prepaid_method: 'cash', prepaid_amount: 90, prepaid_at: new Date() });
+    const anchor = await trx('scheduled_services').where({ id: parentId }).first();
+    // A genuine SQL-level error (not just a rejected JS promise) — Postgres
+    // aborts the WHOLE transaction on any statement error, so this must
+    // actually reach the database to exercise the poisoning risk. Without a
+    // savepoint isolating this best-effort refresh, this would abort `trx`
+    // itself and take the clear/audit-retire above down with it, even
+    // though the caller only sees a caught, logged warning.
+    const spy = jest.spyOn(AnnualPrepayRenewals, 'refreshTermSnapshot')
+      .mockImplementation(async (_termOrId, conn) => { await conn.raw('SELECT 1/0'); });
+    const result = await clearSeriesPrepaid(trx, anchor);
+    spy.mockRestore();
+    // EXPECTED: clearSeriesPrepaid still resolves normally (the failure was
+    // caught, not propagated)...
+    expect(result.success).toBe(true);
+    // ...AND the clear it reported actually committed — provable only
+    // because the surrounding transaction survives the refresh failure and
+    // this SAME `trx` can still run a follow-up query against it.
+    const after = await trx('scheduled_services').where({ id: parentId }).first('prepaid_method', 'prepaid_amount');
+    expect(after.prepaid_method).not.toBe('cash');
+    expect(Number(after.prepaid_amount)).not.toBe(90);
+  });
 });
