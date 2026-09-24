@@ -15,6 +15,45 @@ const TWILIO_NUMBERS = {
   // company number, not a GBP office line.
   mainLine: { number: '+19412975749', formatted: '(941) 297-5749', label: 'Waves Main Line' },
 
+  // Caller ID for INTERNAL alert calls (the new-lead ring to Adam's cell).
+  // Never customer-facing. Reads INTERNAL_ALERT_CALLER_ID (E.164) and falls
+  // back to the main line when unset or malformed, so behavior is unchanged
+  // until the env var is set. Why: the carrier analytics vendors saw the main
+  // line dial one destination ~90x/30d, ring to voicemail, and redial within
+  // minutes — the exact "robocall pattern" that earned it a Spam Likely label
+  // (Twilio support, 2026-09-23). Moving that traffic to a dedicated number
+  // isolates the pattern so the main line's reputation can recover.
+  internalAlertCallerId() {
+    const raw = String(process.env.INTERNAL_ALERT_CALLER_ID || '').trim();
+    return /^\+1\d{10}$/.test(raw) ? raw : this.mainLine.number;
+  },
+
+  // The env-backed alert line as a fleet entry, or null when the env var is
+  // unset / falls back to the main line / already names a registered line
+  // (prod 2026-09-23 reuses the dark tech line, which fieldTech already
+  // covers). Feeds allNumbers + findByNumber so inbound SMS/voice to the
+  // line routes like an office line and the fleet audit does not flag it.
+  internalAlertLine() {
+    const number = this.internalAlertCallerId();
+    if (number === this.mainLine.number) return null;
+    if (this._registeredNumbers().has(number)) return null;
+    const d = number.slice(2);
+    return { number, formatted: `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`, label: 'Internal Alerts — lead ring to Adam' };
+  },
+  _registeredNumbers() {
+    return new Set([
+      ...Object.values(this.locations).map(l => l.number),
+      ...this.domainTracking.map(d => d.number),
+      ...this.lawnDomainTracking.map(d => d.number),
+      ...Object.values(this.paidTracking).map(p => p.number),
+      ...Object.values(this.gbpTracking).map(g => g.number),
+      this.tracking.vanWrap.number,
+      this.tollFree.number,
+      ...this.fieldTech.map(t => t.number),
+      ...this.unassigned.map(u => u.number),
+    ]);
+  },
+
   // ── Pest Control Domain Tracking ────────────────────────────
   domainTracking: [
     { number: '+19412975749', formatted: '(941) 297-5749', domain: 'wavespestcontrol.com', area: 'General', location: 'bradenton', page: 'main site' },
@@ -123,6 +162,7 @@ const TWILIO_NUMBERS = {
       { ...this.tollFree, type: 'customer_chat' },
       ...this.fieldTech.map(t => ({ ...t, type: 'tech_line' })),
       ...this.unassigned.map(u => ({ ...u, type: 'unassigned', label: 'Unassigned' })),
+      ...(this.internalAlertLine() ? [{ ...this.internalAlertLine(), type: 'internal_alert' }] : []),
     ];
   },
 
@@ -144,6 +184,8 @@ const TWILIO_NUMBERS = {
       }
       const main = String(this.mainLine.number || '').replace(/\D/g, '').slice(-10);
       if (main.length === 10) set.add(main);
+      const alert = this.internalAlertCallerId().replace(/\D/g, '').slice(-10);
+      if (alert.length === 10) set.add(alert);
       this._ownedLast10 = set;
     }
     return this._ownedLast10.has(last10);
@@ -235,6 +277,9 @@ const TWILIO_NUMBERS = {
     // Unassigned — still handle
     const unassigned = this.unassigned.find(u => u.number === phoneNumber);
     if (unassigned) return { ...unassigned, type: 'location', locationId: 'bradenton' };
+    // Env-backed internal alert line — office semantics, like unassigned.
+    const alert = this.internalAlertLine();
+    if (alert && alert.number === phoneNumber) return { ...alert, type: 'location', locationId: 'bradenton' };
     return null;
   },
 

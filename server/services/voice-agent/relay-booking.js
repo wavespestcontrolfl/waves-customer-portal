@@ -142,6 +142,19 @@ function slotStartMinutes(slot) {
  * `window_end` and `estimated_duration_minutes` all describe the SAME window.
  * A service that no longer fits at the offered start simply fails the re-check
  * (slot_gone) — fail closed, exactly like any other stale offer.
+ *
+ * The resolved catalog service's IDENTITY (as opposed to its duration) is
+ * deliberately NOT threaded into buildBookingAvailability here either
+ * (Codex r6 P2 — a round-5 attempt to add it was reverted): the offer came
+ * from relay-tools.resolveAvailability's get_availability/find_slots, which
+ * has no service parameter at all and so was NEVER built with any identity —
+ * threading one in only at recheck time gives buildBookingAvailability a
+ * credit the offer's own packed-ends geometry never had, so the exact
+ * grid-aligned candidate the offer promised can shift to a different hour
+ * (or vanish) and a genuinely still-open slot comes back slot_gone. Identity
+ * here would only be safe once the OFFER step can also resolve and thread
+ * the same identity — until then, matching the offer's inputs exactly (this
+ * function's own contract, above) beats a one-sided credit.
  */
 async function revalidateSlot({ offer, durationMinutes = null }) {
   const { isEnabled } = require('../../config/feature-gates');
@@ -179,6 +192,8 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     today: new Date(),
     timeOfDay: offer.timeOfDay || 'any',
     expandOpenDays: offer.expandOpenDays === true,
+    // No serviceIdentity — see this function's doc comment (Codex r6 P2):
+    // the offer never had one, so the recheck must not manufacture one.
   });
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);
@@ -363,9 +378,17 @@ async function commitVoiceBooking({
 
       // Commit-time max_self_books_per_day re-check, the same predicate the
       // availability builder drops full days with (shared helper). The builder's
-      // cap is advisory-only without this.
-      const dayCount = await countActiveSelfBookingsForDay(trx, dateStr);
-      if (dayCount >= maxPerDay) return { status: 'day_full' };
+      // cap is advisory-only without this. GATE_SELF_BOOK_DAY_CAP (owner
+      // ruling 2026-09-23): the cap is retired — the shared builder no longer
+      // drops full days for anyone while the gate is unset, so this commit
+      // check must skip too or every voice pick on a 3-booking day comes back
+      // day_full for a time the builder just offered (offer/commit parity).
+      // The self-serve NOTICE rule is separate and still never reaches the
+      // voice agent.
+      if (require('../../config/feature-gates').selfBookDayCapEnabled()) {
+        const dayCount = await countActiveSelfBookingsForDay(trx, dateStr);
+        if (dayCount >= maxPerDay) return { status: 'day_full' };
+      }
 
       // The GLOBAL, tech-blind occupancy probe the contract requires of every
       // rung-1 holder. Excludes this customer's own rows only via the dedupe

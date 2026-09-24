@@ -272,14 +272,27 @@ test('capacity estimates keep late work within the shared shift and its last arr
   process.env.GATE_SCHEDULING_CAPACITY = 'true';
   mockDb();
   const certified = { date: '2027-05-20', windowStart: '16:00', windowEnd: '17:30', techId: 'tech-1', routeMode: 'arrival_windows' };
+  // A 17:00 start ending at 17:30 now fits placementFitsShift too (Codex r1
+  // P1 on #4663 — capacity mode used to require 2 hours of headroom past
+  // start regardless of the job's own end, rejecting 17:00 even though it
+  // ends well before the 18:00 close); only a window actually running past
+  // 18:00 is still rejected.
+  const lateStart = { ...certified, windowStart: '17:00', windowEnd: '17:30' };
   try {
     await expect(filterCollidingSlots([
       certified,
-      { ...certified, windowStart: '17:00', windowEnd: '17:30' },
+      lateStart,
       { ...certified, windowEnd: '18:30' },
-    ], { dateFrom: certified.date, dateTo: certified.date })).resolves.toEqual([certified]);
+    ], { dateFrom: certified.date, dateTo: certified.date })).resolves.toEqual([certified, lateStart]);
     process.env.GATE_SCHEDULING_CAPACITY = 'false';
-    expect(estimateSlotAvailability._internals.slotWindowFitsDay('16:00', '17:30')).toBe(false);
+    // Non-capacity path caps at the customer-facing day end — 18:00 since PR 2
+    // (2026-09-23, scheduling/customer-windows.js CUSTOMER_DAY_END_MINUTES): a
+    // 17:00 offer + the 60-minute visit legitimately ends at 18:00, and a
+    // 16:00-17:30 window (an odd-duration probe, not a real offer) now fits
+    // too. Anything ending past 18:00 still does not.
+    expect(estimateSlotAvailability._internals.slotWindowFitsDay('16:00', '17:30')).toBe(true);
+    expect(estimateSlotAvailability._internals.slotWindowFitsDay('17:00', '18:00')).toBe(true);
+    expect(estimateSlotAvailability._internals.slotWindowFitsDay('17:30', '18:30')).toBe(false);
   } finally {
     if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
     else process.env.GATE_SCHEDULING_CAPACITY = previous;

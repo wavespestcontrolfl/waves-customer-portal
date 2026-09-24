@@ -3195,6 +3195,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
       const { cleanLines, sendAddons, addonsPayload } = buildAddonsPayload(serviceLines);
+      // Merged from main #4674: the Price field always holds the PRIMARY
+      // line's own GROSS, and it is sent unconditionally (not only with
+      // add-on lines) so the server's no-add-on save path can tell this
+      // payload's gross convention apart from MobileServiceEditModal's net
+      // convention by the field's presence, never by guessing from the number.
+      const primaryLinePriceValue =
+        form.price !== "" && !isNaN(parseFloat(form.price))
+          ? parseFloat(form.price)
+          : undefined;
       const notifyOnMove = scheduleMoved && notificationType === "sms";
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
@@ -3205,13 +3214,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
           ...seriesAckPayload(seriesPreview.preview),
+          // Sent unconditionally (see primaryLinePriceValue's own comment) —
+          // NOT only when sendAddons — so the server can tell this payload's
+          // gross-Price convention apart from MobileServiceEditModal's net
+          // convention even for a no-add-on save.
+          primaryLinePrice: primaryLinePriceValue,
           ...(sendAddons
             ? {
                 addons: addonsPayload,
-                primaryLinePrice:
-                  form.price !== "" && !isNaN(parseFloat(form.price))
-                    ? parseFloat(form.price)
-                    : undefined,
                 // Parent estimated_duration_minutes drives schedule-grid sizing
                 // and capacity, so send the summed group duration (primary line
                 // + add-on lines), matching the create flow.

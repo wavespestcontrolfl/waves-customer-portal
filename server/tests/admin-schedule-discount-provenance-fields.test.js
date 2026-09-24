@@ -786,7 +786,11 @@ postgres('POST /:id/update-details/preview — dry-run parity with the real save
     // visit, which is what routes this save through the single-service
     // no-op branch (an `addons: []` array would take the addons branch,
     // which always restates discount_dollars itself).
-    const body = { estimatedPrice: 90, primaryLinePrice: 100 };
+    // Merged from main #4674: with primaryLinePrice present the caller
+    // declares the desktop GROSS convention, so estimatedPrice is the gross
+    // too — exactly what EditServiceModal posts for an untouched row (its
+    // Price field is seeded from primaryLinePrice).
+    const body = { estimatedPrice: 100, primaryLinePrice: 100 };
     const previewResult = await preview(visitId, body);
     expect(previewResult.err).toBeFalsy();
     expect(previewResult.statusCode).toBe(200);
@@ -1455,7 +1459,13 @@ postgres('round 5 on #4657 — service-swap freshness, and a gross echo does not
     // single-service branch. estimatedPrice echoes the STORED GROSS ($100),
     // exactly what the OLD (buggy) client seed would have sent; no
     // discountType/discountAmount posted (notes-only, control untouched).
-    const body = { estimatedPrice: 100 };
+    // Merged from main #4674: the value-based gross-echo backstop this test
+    // originally pinned was superseded by an explicit signal — every
+    // EditServiceModal save (Month-launched included) now posts
+    // primaryLinePrice, and a bare estimatedPrice with no primaryLinePrice is
+    // the mobile NET convention, where $100 is a genuine price change (pinned
+    // the other way in update-details-discount-preserved-no-addons-mock.test.js).
+    const body = { estimatedPrice: 100, primaryLinePrice: 100 };
     const previewResult = await preview(visitId, body);
     expect(previewResult.err).toBeFalsy();
     expect(previewResult.statusCode).toBe(200);

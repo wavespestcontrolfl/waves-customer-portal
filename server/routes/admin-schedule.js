@@ -9780,7 +9780,7 @@ async function resolveMembershipBookingContext({
 }
 
 async function computeSingleServiceEstimatedPricePlan({
-  db, id, updates, discountType, discountAmount, estimatedPrice,
+  db, id, updates, discountType, discountAmount, estimatedPrice, primaryLinePrice,
   appointmentDiscountPreset, appointmentDiscountChanged, presetEligibilityCheck,
 }) {
   // Codex pre-push audit P2 (structural round 3 on #4657, :9310): the
@@ -9798,6 +9798,7 @@ async function computeSingleServiceEstimatedPricePlan({
           .where({ id: id })
           .first('estimated_price', 'discount_type', 'discount_amount',
             ...(cols.discount_max_dollars ? ['discount_max_dollars'] : []),
+            ...(cols.service_id ? ['service_id'] : []),
             ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []),
             ...(cols.service_category_snapshot ? ['service_category_snapshot'] : []),
             ...(cols.primary_line_price ? ['primary_line_price'] : []))
@@ -9812,23 +9813,40 @@ async function computeSingleServiceEstimatedPricePlan({
           ? (updates.service_category_snapshot || null)
           : (existingPrice?.service_category_snapshot || null);
         const existingEstimatedPrice = Number(existingPrice?.estimated_price);
-        // Codex pre-push audit P1 (round 5 on #4657, :6083): estimatedPrice
-        // here is meant to be the visit's stored NET total resubmitted
-        // unchanged — but a caller can echo the stored primary GROSS
-        // instead (primary_line_price, set BEFORE any appointment
-        // discount — a Month-view row supplies primaryLinePrice +
-        // serviceAddons: [], which the client form seed now avoids
-        // trusting for a zero-add-on visit, but this is the server's own
-        // backstop for any other caller doing the same). That echo is not
-        // a genuine price edit either, even though it numerically differs
-        // from the stored net by exactly the stored discount.
-        const existingPrimaryGross = existingPrice?.primary_line_price != null
-          ? Number(existingPrice.primary_line_price) : null;
-        const isUnchangedGrossEcho = existingPrimaryGross != null
-          && Number.isFinite(existingPrimaryGross)
-          && Math.abs(existingPrimaryGross - basePrice) < 0.005;
-        const priceChanged = !Number.isFinite(existingEstimatedPrice)
-          || (Math.abs(existingEstimatedPrice - basePrice) >= 0.005 && !isUnchangedGrossEcho);
+        // Merged from main #4674 (ADMIN-BUG-R01, Codex round 3 P0 there):
+        // the caller's price CONVENTION is declared by the presence of
+        // primaryLinePrice, never guessed from the number. The desktop
+        // Edit-appointment modal posts primaryLinePrice on every save and
+        // its estimatedPrice is the row's GROSS, so it is diffed against the
+        // stored row's own re-derived gross (the same shared helper the
+        // client seeded from); MobileServiceEditModal never posts it and
+        // its estimatedPrice is the stored NET, diffed against the stored
+        // net exactly as this branch always did. This supersedes the
+        // round-5 :6083 value-based gross-echo backstop that lived here,
+        // which #4674 showed collides with a genuine mobile edit that
+        // happens to equal the stored gross.
+        const addonRows = cols.primary_line_price
+          ? await db('scheduled_service_addons')
+              .where({ scheduled_service_id: id })
+              .catch(() => [])
+          : [];
+        const desktopGrossConvention = primaryLinePrice !== undefined && primaryLinePrice !== null
+          && primaryLinePrice !== '' && !isNaN(Number(primaryLinePrice));
+        let priceChanged;
+        if (desktopGrossConvention) {
+          const existingGrossPrice = deriveLegacyPrimarySubmission({
+            primaryLinePrice: existingPrice?.primary_line_price,
+            estimatedPrice: existingPrice?.estimated_price,
+            addons: addonRows.map((addon) => ({
+              basePrice: addon.base_price != null ? addon.base_price : addon.estimated_price,
+            })),
+          });
+          priceChanged = !Number.isFinite(existingGrossPrice)
+            || Math.abs(existingGrossPrice - basePrice) >= 0.005;
+        } else {
+          priceChanged = !Number.isFinite(existingEstimatedPrice)
+            || Math.abs(existingEstimatedPrice - basePrice) >= 0.005;
+        }
         const discountTypeChanged = discountType !== undefined
           && (discountType || null) !== (existingPrice?.discount_type || null);
         const nextDiscountAmount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
@@ -9861,24 +9879,39 @@ async function computeSingleServiceEstimatedPricePlan({
         // legacy row shape. See :9465-p0-legacy-null-gross-double-discount
         // in admin-schedule-discount-provenance-fields.test.js for the
         // pinned repro.
-        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged || appointmentDiscountChanged;
+        // Merged from main #4674 (Codex round 1 P1 there): a same-priced
+        // SERVICE SWITCH rebases (clears) a stored discount that was scoped
+        // to the old service. Scoped here, on this branch, to a row with a
+        // RECORDED gross under the desktop gross convention: the owner
+        // revert-and-carry P0 above pinned (:9465) that a legacy NULL-gross
+        // row must never have its stored discount re-derived on a
+        // service-only swap, and that legacy shape is exactly the one this
+        // trigger cannot price safely, so it keeps the plain no-op there.
+        const storedGrossKnown = existingPrice?.primary_line_price != null
+          && Number.isFinite(Number(existingPrice.primary_line_price));
+        const primaryServiceChanged = desktopGrossConvention && storedGrossKnown && (
+          (updates.service_id !== undefined
+            && String(updates.service_id ?? '') !== String(existingPrice?.service_id ?? ''))
+          || (updates.service_key_snapshot !== undefined
+            && String(updates.service_key_snapshot ?? '') !== String(existingPrice?.service_key_snapshot ?? ''))
+          || (updates.service_category_snapshot !== undefined
+            && String(updates.service_category_snapshot ?? '') !== String(existingPrice?.service_category_snapshot ?? ''))
+        );
+        const shouldRebaseStoredDiscounts = priceChanged || discountTypeChanged || discountAmountChanged
+          || appointmentDiscountChanged || primaryServiceChanged;
         if (!shouldRebaseStoredDiscounts) {
-          // The gross-echo case must write back the STORED NET, never the
-          // echoed gross itself — writing basePrice ($100) here would
-          // silently overwrite the correct stored $90 even though this
-          // save decided nothing actually changed.
-          if (cols.estimated_price) updates.estimated_price = isUnchangedGrossEcho ? existingEstimatedPrice : basePrice;
+          // A no-op must write back the STORED NET (never a gross echo):
+          // the preview route reads updates.estimated_price as `total`, and
+          // the stored net is the one figure both conventions agree on.
+          if (cols.estimated_price) {
+            updates.estimated_price = Number.isFinite(existingEstimatedPrice) ? existingEstimatedPrice : basePrice;
+          }
           throw new Error('noop-price-save');
         }
         let finalPrice = basePrice;
         if (discountType && discountAmount != null && discountAmount !== '') {
           finalPrice = applyDiscount(finalPrice, discountType, discountAmount);
         }
-        const addonRows = cols.primary_line_price
-          ? await db('scheduled_service_addons')
-              .where({ scheduled_service_id: id })
-              .catch(() => [])
-          : [];
         const addonBaseTotal = addonRows.reduce((sum, addon) => {
           const value = Number(addon.base_price != null ? addon.base_price : addon.estimated_price);
           return Number.isFinite(value) && value > 0 ? sum + value : sum;
@@ -10853,7 +10886,7 @@ async function computeUpdateDetailsFinancialPlan({
       }
     } else if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
       clearAddonDiscountsOnPriceEdit = await computeSingleServiceEstimatedPricePlan({
-        db, id, updates, discountType, discountAmount, estimatedPrice,
+        db, id, updates, discountType, discountAmount, estimatedPrice, primaryLinePrice,
         appointmentDiscountPreset, appointmentDiscountChanged, presetEligibilityCheck,
       });
     } else if (!isRecurring && (discountType !== undefined || discountAmount !== undefined)) {

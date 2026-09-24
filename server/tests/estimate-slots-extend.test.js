@@ -580,7 +580,13 @@ describe('legacy route generation excludes the own hold', () => {
     const at = fn.indexOf('const ownHolds');
     expect(fn.slice(at, at + 320)).toContain(".whereNull('customer_id')");
     expect(fn.slice(at, at + 320)).toContain(".whereNotNull('reservation_expires_at')");
-    // One set, so dayStops and every other consumer honour it.
-    expect(fn.indexOf('for (const row of ownHolds)')).toBeLessThan(fn.indexOf('const dayStops = services'));
+    // One set, so dayStops and every other consumer honour it. dayStops
+    // itself now builds inside buildDayStops (Codex r4 P2 complexity
+    // refactor — findAvailableSlots delegates its per-day/per-tech
+    // candidate generation to candidatesForDay, which calls buildDayStops),
+    // so the ordering check is against that call site within
+    // findAvailableSlots' own body, not the (now relocated) literal
+    // "const dayStops = services" line.
+    expect(fn.indexOf('for (const row of ownHolds)')).toBeLessThan(fn.indexOf('candidatesForDay('));
   });
 });
