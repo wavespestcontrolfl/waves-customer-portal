@@ -39,7 +39,9 @@ describe('editorial review document inventory', () => {
 
 test('keeps factual prose that begins with a word also used in calls to action', () => {
   const passage = 'Contact with treated surfaces kills 90% of ants.';
-  expect(analyzeDocument(`# Guide\n\n${passage}`, 'Guide').passages).toEqual([expect.objectContaining({ text: passage })]);
+  const analysis = analyzeDocument(`# Guide\n\n${passage}`, 'Guide');
+  expect(analysis.passages).toEqual([expect.objectContaining({ text: passage })]);
+  expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
 });
 
 test('rejects repairs that change MDX tag nesting', () => {

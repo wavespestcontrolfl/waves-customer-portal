@@ -94,7 +94,7 @@ function sentenceCandidates(paragraphs) {
     for (const raw of sentences) {
       const passage = raw.trim();
       const words = passage.match(/[A-Za-z0-9][A-Za-z0-9'’-]*/g) || [];
-      if (words.length < 2 || passage.endsWith('?') || /^\s*(?:call|contact|book|learn more)\b/i.test(passage)) continue;
+      if (words.length < 2 || passage.endsWith('?') || CTA_PARAGRAPH_RE.test(passage)) continue;
       candidates.push({ id: `C${candidates.length + 1}`, passage, paragraphId: paragraph.id });
     }
   }
