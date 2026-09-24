@@ -803,6 +803,19 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
     if (!rejectsScheduling) {
       throw Object.assign(new Error('This call was relinked to another customer since the card was filed — reprocess the call to refresh the card, then review it.'), { statusCode: 409, code: 'CONFLICT_CUSTOMER_RELINKED' });
     }
+    // …and never while the visit the dispute RETAINED is still live: a
+    // relink does not cancel scheduled_services, so closing the only
+    // warning would leave that appointment scheduled at the rejected
+    // number under nobody's task. The card stays open until the office
+    // cancels the visit (or a reprocess re-stamps the card) — pre-push
+    // audit P1 after r38.
+    const relinkedRetainedId = heldConflictPayload?.retained_service_id || null;
+    const relinkedRetained = relinkedRetainedId
+      ? await trx('scheduled_services').where({ id: relinkedRetainedId, source_call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled']).first('id')
+      : null;
+    if (relinkedRetained) {
+      throw Object.assign(new Error(`This call was relinked to another customer, and the appointment it retained (visit ${relinkedRetained.id}) is still scheduled at the disputed number — cancel that visit or reprocess the call before closing this card.`), { statusCode: 409, code: 'CONFLICT_RETAINED_VISIT_LIVE' });
+    }
     logger.info(`[admin-triage] house-number card ${item.id} settled by ${verdict} after a relink — no recovery task filed`);
     return;
   }

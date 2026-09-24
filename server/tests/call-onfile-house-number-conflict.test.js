@@ -332,6 +332,10 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(guard).toContain("if (!rejectsScheduling) {");
     expect(guard).toContain("wrongFields.includes('spam_status'));");
     expect(guard).toContain("code: 'CONFLICT_CUSTOMER_RELINKED'");
+    // A relinked Deny must not close the card while the retained visit is
+    // still live — a relink never cancels scheduled_services.
+    expect(guard).toContain("code: 'CONFLICT_RETAINED_VISIT_LIVE'");
+    expect(guard.indexOf("code: 'CONFLICT_RETAINED_VISIT_LIVE'")).toBeLessThan(guard.indexOf('no recovery task filed'));
     expect(guard).toContain('no recovery task filed');
     // The retained visit is looked up by the column scheduled_services actually carries (codex local audit).
     expect(src).toContain("where({ id: retainedId, source_call_log_id: item.call_log_id }).whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'])");
