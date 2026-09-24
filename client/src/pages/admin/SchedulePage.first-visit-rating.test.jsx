@@ -187,4 +187,17 @@ describe('first-visit pest activity rating', () => {
     expect(body.clientPestRating).toBe(5);
     expect(body).not.toHaveProperty('clientPestRatingPrefilled');
   });
+
+  it('a restored prefill keeps its marker even when the gate now says not-first-visit', async () => {
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Prefill only', clientPestRating: 5, clientPestRatingTouched: false }));
+    const onSubmit = await mount();
+    await answer({ allowed: true, firstVisit: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
+    });
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.clientPestRating).toBe(5);
+    expect(body.clientPestRatingPrefilled).toBe(true);
+  });
 });

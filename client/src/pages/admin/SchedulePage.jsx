@@ -15871,10 +15871,11 @@ export function CompletionPanel({
       // strict validation passes.
       if (clientPestRating != null && Number.isInteger(clientPestRating)) {
         body.clientPestRating = clientPestRating;
-        // The untouched first-visit 5: the server re-checks it, since another
-        // visit may have completed since this form opened.
-        if (!clientPestRatingSetByTechRef.current && clientPestRatingDefault != null
-          && clientPestRating === clientPestRatingDefault) {
+        // A rating the tech never set can only be the first-visit prefill
+        // (live or restored from a draft). Mark it regardless of what the
+        // gate says now — the server re-checks first-visit status, since
+        // another visit may have completed since the prefill.
+        if (!clientPestRatingSetByTechRef.current) {
           body.clientPestRatingPrefilled = true;
         }
       } else if (clientPestRatingSetByTechRef.current) {
