@@ -1237,7 +1237,10 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     expect(updates).toHaveLength(1);
     expect(database.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['estimate-group-send', groupedDraft.estimate_group_id]);
     expect(typeof forUpdate).toBe('function');
-    expect(order).toEqual(['group-lock', 'address-verdict-lock']);
+    // Contact pair FIRST, then the group (pre-push audit P1 after r42 on
+    // #4667): the proposal editor and the public paths take
+    // address-verdict before any group lock.
+    expect(order).toEqual(['address-verdict-lock', 'group-lock']);
   });
 
   test('dryRun refuses exactly like the real save (no reprice confirm the write would then 409)', async () => {

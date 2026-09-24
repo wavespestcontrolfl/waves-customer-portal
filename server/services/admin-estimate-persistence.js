@@ -3111,9 +3111,6 @@ async function reviseAdminEstimate({
     // and resets its baseline. The baseline must snapshot the composition
     // this UPDATE actually replaces, so the locked row — not the pre-read —
     // feeds the capture below.
-    // Group advisory lock(s) BEFORE the row lock — see
-    // lockScheduledGroupGuardGroups for the deadlock this order prevents.
-    const lockedGuardGroups = await lockScheduledGroupGuardGroups(trx, estimate, writeFields);
     // The contact-pair address-verdict advisory lock BEFORE the row lock —
     // the public paths (lookup, /calculate) take it first and then touch
     // this row during withdrawal / supersession; the reverse order here
@@ -3132,6 +3129,12 @@ async function reviseAdminEstimate({
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
       }
     }
+    // Group advisory lock(s) AFTER the contact-pair locks and BEFORE the
+    // row lock — see lockScheduledGroupGuardGroups for the deadlock the
+    // group-before-row order prevents; the contact pair goes first because
+    // PUT /:id/proposal and the public paths take address-verdict before
+    // any group or row lock (pre-push audit P1 after r42).
+    const lockedGuardGroups = await lockScheduledGroupGuardGroups(trx, estimate, writeFields);
     // A blocked row's correction fans out to the linked customer under
     // the row lock, while the Customer 360 edit locks the customer FIRST
     // and then rewrites matching estimates — so the customer row is
