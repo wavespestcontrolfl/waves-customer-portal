@@ -212,7 +212,7 @@ export default function GBPManagement() {
     },
     {
       key: "info",
-      label: "Business Info",
+      label: "Info",
     },
     {
       key: "hours",
@@ -228,16 +228,16 @@ export default function GBPManagement() {
     },
     {
       key: "updates",
-      label: "Update Queue",
+      label: "Queue",
       badge: locations.reduce((s, l) => s + (l.pendingUpdates || 0), 0),
     },
     {
       key: "history",
-      label: "Change History",
+      label: "History",
     },
     {
       key: "bulk",
-      label: "Bulk Edit",
+      label: "Bulk",
     },
     {
       key: "notifications",

@@ -61,7 +61,7 @@ it("deep-links PPC tabs and preserves query and hash through browser history", a
   );
   await screen.findByText("Existing PPC dashboard");
 
-  fireEvent.click(screen.getByRole("button", { name: "Call Bridge" }));
+  fireEvent.click(screen.getByRole("button", { name: "Bridge" }));
   expect(screen.getByTestId("location")).toHaveTextContent(
     "?source=audit&tab=call-bridge#evidence",
   );
@@ -71,7 +71,7 @@ it("deep-links PPC tabs and preserves query and hash through browser history", a
   );
   fireEvent.click(screen.getByRole("button", { name: "Browser Back" }));
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Call Bridge" })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "Bridge" })).toHaveAttribute(
       "aria-current",
       "page",
     ),
@@ -85,7 +85,7 @@ it("renders the dashboard for an invalid PPC tab", async () => {
     </MemoryRouter>,
   );
   expect(await screen.findByText("Existing PPC dashboard")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "PPC Dashboard" })).toHaveAttribute(
+  expect(screen.getByRole("button", { name: "Dashboard" })).toHaveAttribute(
     "aria-current",
     "page",
   );
@@ -113,9 +113,9 @@ it("retains all six PPC workflows and their data reads without starting an actio
   expect(await screen.findByText("Existing PPC dashboard")).toBeInTheDocument();
   for (const [label, endpoint] of [
     ["Overview", "/admin/ads/campaigns"],
-    ["Call Bridge", "/admin/ads/call-bridge?period=30d"],
-    ["Service Lines", "/admin/ads/service-lines?period=30d"],
-    ["AI Advisor", "/admin/ads/advisor"],
+    ["Bridge", "/admin/ads/call-bridge?period=30d"],
+    ["Services", "/admin/ads/service-lines?period=30d"],
+    ["Advisor", "/admin/ads/advisor"],
     ["Capacity", "/admin/ads/capacity-heatmap"],
   ]) {
     fireEvent.click(screen.getByRole("button", { name: label, exact: true }));
@@ -141,7 +141,7 @@ it("retains all six PPC workflows and their data reads without starting an actio
     ),
   ).toBe(true);
   fireEvent.click(
-    screen.getByRole("button", { name: "PPC Dashboard", exact: true }),
+    screen.getByRole("button", { name: "Dashboard", exact: true }),
   );
   expect(await screen.findByText("Existing PPC dashboard")).toBeInTheDocument();
 });

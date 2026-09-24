@@ -11,7 +11,7 @@ import { EmailSummary, EmailInbox, BlockedSenders } from "./email/EmailMailbox";
 
 const EMAIL_SECTIONS = [
   { key: "inbox", label: "Inbox", Icon: Inbox },
-  { key: "blocked", label: "Blocked senders", Icon: Ban },
+  { key: "blocked", label: "Blocked", Icon: Ban },
 ];
 
 export default function EmailPage({ navigation, active }) {

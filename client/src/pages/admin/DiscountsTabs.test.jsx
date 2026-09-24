@@ -123,7 +123,7 @@ describe("DiscountsSection", () => {
     );
     render(<DiscountsSection />);
     fireEvent.click(screen.getByRole("tab", { name: "Stats" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Discount Catalog" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Catalog" }));
     fireEvent.click(screen.getByRole("tab", { name: "Stats" }));
     await act(async () =>
       pending[1]({

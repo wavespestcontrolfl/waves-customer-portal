@@ -225,7 +225,7 @@ function findKnownWavesNumber(value) {
 const TABS = [
   {
     key: "events",
-    label: "Message Automations",
+    label: "Automations",
     Icon: Zap,
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
@@ -239,19 +239,19 @@ const TABS = [
   // not day-to-day comms work. Events/SMS/Calls/Triage stay staff-wide.
   {
     key: "templates",
-    label: "Message Templates",
+    label: "Templates",
     Icon: FileText,
     adminOnly: true,
   },
   {
     key: "csr",
-    label: "CSR Coach",
+    label: "Coach",
     Icon: Headphones,
     adminOnly: true,
   },
   {
     key: "call_routing",
-    label: "Call Routing",
+    label: "Routing",
     Icon: Bot,
     adminOnly: true,
   },
@@ -3403,8 +3403,8 @@ export function usageLeafFor(tab, templateKind) {
 }
 
 const TEMPLATE_KINDS = [
-  { key: "sms", label: "SMS Templates" },
-  { key: "email", label: "Email Templates" },
+  { key: "sms", label: "Text" },
+  { key: "email", label: "Mail" },
 ];
 
 export default function CommunicationsPageV2() {

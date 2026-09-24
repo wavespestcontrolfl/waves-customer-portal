@@ -176,7 +176,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
         <Tabs value={tab} onValueChange={setTab} variant="section">
           <TabList scrollable aria-label="Payer sections">
             <Tab value="statements" disabled={pending}>Statements</Tab>
-            <Tab value="ar" disabled={pending}>AR / aging</Tab>
+            <Tab value="ar" disabled={pending}>Aging</Tab>
           </TabList>
 
           {/* Keep a payment draft across section navigation. The directory keys

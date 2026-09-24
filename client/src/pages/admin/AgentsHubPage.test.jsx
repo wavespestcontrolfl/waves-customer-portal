@@ -70,9 +70,9 @@ describe("AgentsHubPage area strip", () => {
   it("shows the product-area strip on the Models tab only and writes ?area= without touching ?tab=", async () => {
     renderHub("/admin/agents?tab=models");
     expect(screen.getByText("Models workspace")).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "SMS & messaging" }));
+    fireEvent.click(await screen.findByRole("button", { name: "SMS" }));
     expect(screen.getByTestId("search")).toHaveTextContent("?tab=models&area=sms");
-    fireEvent.click(screen.getByRole("button", { name: "All areas" }));
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(screen.getByTestId("search")).toHaveTextContent("?tab=models");
     // The beacon reports the tab alone, never the area (the lib dedupes re-asserts).
     expect(trackAdminPageView).toHaveBeenCalledWith(expect.objectContaining({ search: "?tab=models" }));
@@ -82,7 +82,7 @@ describe("AgentsHubPage area strip", () => {
   it("keeps the strip off the Overview and labels the activity tab Runs", async () => {
     renderHub("/admin/agents?tab=overview");
     expect(await screen.findByRole("button", { name: "Runs" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "SMS & messaging" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "SMS" })).toBeNull();
     expect(screen.getByText("Overview workspace")).toBeInTheDocument();
     expect(screen.queryByText("Control center workspace")).toBeNull();
   });
@@ -133,9 +133,9 @@ describe("AgentsHubPage usage reporting", () => {
     );
     trackAdminPageView.mockClear();
 
-    fireEvent.click(screen.getByRole("button", { name: "Shadow Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Shadow" }));
     expect(screen.getByText("Shadow workspace")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Shadow Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Shadow" }));
 
     expect(trackAdminPageView).toHaveBeenCalledTimes(1);
     expect(trackAdminPageView).toHaveBeenCalledWith({

@@ -374,7 +374,7 @@ async function main() {
       await scenario('Blocked sender failures retain the entered address and confirmed writes update the list', async () => {
         const { page, state } = await openPage(390);
         await inbox(page);
-        await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked senders', exact: true }).click();
+        await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked', exact: true }).click();
         await page.getByText('unwanted.example.invalid', { exact: true }).waitFor();
         assert.equal(await page.getByRole('region', { name: 'Blocked senders', exact: true }).locator('ul').evaluate((node) => {
           const card = node.parentElement.getBoundingClientRect(), row = node.firstElementChild.getBoundingClientRect();

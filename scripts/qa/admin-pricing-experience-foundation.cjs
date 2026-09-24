@@ -202,7 +202,7 @@ async function main() {
         desktop.waitForRequest((request) => request.url().endsWith('/api/admin/pricing-config/global_labor_rate') && request.method() === 'PUT' && request.postDataJSON().data.value === 42),
         editor.press('Enter'),
       ]);
-      await desktop.getByRole('button', { name: 'Lawn care', exact: true }).click();
+      await desktop.getByRole('button', { name: 'Lawn', exact: true }).click();
       await desktop.getByRole('table', { name: 'Monthly lawn price brackets' }).waitFor();
       await desktop.getByRole('button', { name: 'WaveGuard', exact: true }).click();
       await desktop.getByRole('table', { name: 'Service discount rules' }).waitFor();
@@ -227,7 +227,7 @@ async function main() {
     await scenario('strategy calculation, offers, upsell and LTV actions', async () => {
       await desktop.goto(`${server.baseUrl}/admin/pricing-logic?area=strategy`);
       await desktop.getByText('Total customers', { exact: true }).waitFor();
-      await desktop.getByRole('button', { name: 'Value equation', exact: true }).click();
+      await desktop.getByRole('button', { name: 'Value', exact: true }).click();
       await desktop.getByText('Premium — high perceived value, charge accordingly', { exact: true }).waitFor();
       const dreamOutcome = desktop.getByLabel('Dream outcome');
       await dreamOutcome.focus();
@@ -240,13 +240,13 @@ async function main() {
       // satisfy it. Wait for the recalculated score the fixture returns for
       // dreamOutcome 9 before leaving the tab.
       await desktop.getByText('7', { exact: true }).waitFor();
-      await desktop.getByRole('button', { name: 'Offer builder', exact: true }).click();
+      await desktop.getByRole('button', { name: 'Offers', exact: true }).click();
       await desktop.getByText('Synthetic package', { exact: true }).waitFor();
-      await desktop.getByRole('button', { name: 'Upsell engine', exact: true }).click();
+      await desktop.getByRole('button', { name: 'Upsells', exact: true }).click();
       await desktop.getByText('Synthetic customer', { exact: true }).waitFor();
       await desktop.getByRole('button', { name: 'Send offer', exact: true }).click();
       await desktop.getByText('Upsell SMS sent!', { exact: true }).waitFor();
-      await desktop.getByRole('button', { name: 'LTV analysis', exact: true }).click();
+      await desktop.getByRole('button', { name: 'LTV', exact: true }).click();
       await desktop.getByText('Referral', { exact: true }).first().waitFor();
       await Promise.all([
         desktop.waitForRequest((request) => request.url().endsWith('/api/admin/pricing/recalculate-ltv') && request.method() === 'POST'),
@@ -276,7 +276,7 @@ async function main() {
     await scenario('mobile pricing strategy remains readable without page overflow', async () => {
       await mobile.goto(`${server.baseUrl}/admin/pricing-logic?area=strategy`);
       await mobile.getByText('Total customers', { exact: true }).waitFor();
-      await mobile.getByRole('button', { name: 'Upsell engine', exact: true }).click();
+      await mobile.getByRole('button', { name: 'Upsells', exact: true }).click();
       await mobile.getByText('Synthetic customer', { exact: true }).waitFor();
       await assertFoundation(mobile);
       assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);

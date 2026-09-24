@@ -12,11 +12,11 @@ import { UiSurface } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
 
 export const PRICING_AREAS = [
-  { key: "logic", label: "Logic & Margins", Icon: Calculator },
+  { key: "logic", label: "Logic", Icon: Calculator },
   // /api/admin/pricing is admin-only (requireAdmin) — hide the area for
   // technicians rather than mounting a page whose every request 403s.
-  { key: "strategy", label: "Strategy & Offers", Icon: BarChart3, adminOnly: true },
-  { key: "notices", label: "Price Notices", Icon: Megaphone },
+  { key: "strategy", label: "Strategy", Icon: BarChart3, adminOnly: true },
+  { key: "notices", label: "Notices", Icon: Megaphone },
 ];
 
 export default function PricingHubPage() {

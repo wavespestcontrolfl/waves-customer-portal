@@ -141,7 +141,7 @@ describe('CompliancePage Staff authentication', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderCompliance();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Application Log' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Applications' }));
     fireEvent.change(screen.getByLabelText('Product name'), { target: { value: 'Synthetic product' } });
 
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => (
@@ -164,7 +164,7 @@ describe('CompliancePage Staff authentication', () => {
       ? { ok: !fail, status: fail ? 503 : 200, blob: readBlob }
       : { ok: true, json: async () => ({ applications: [], total: 0 }) }));
     renderCompliance('/admin/compliance?tab=applications');
-    fireEvent.click(screen.getByRole('button', { name: 'Application Log' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Applications' }));
     fireEvent.click(screen.getByRole('button', { name: 'Export for DACS' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Export failed (HTTP 503)');
     expect(readBlob).not.toHaveBeenCalled();

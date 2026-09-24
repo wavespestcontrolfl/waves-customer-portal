@@ -71,10 +71,10 @@ const TAB_LIST = [
   // while the gate is off (the endpoint answers { available: false }).
   { key: TABS.ACTIVITY, label: "Runs", Icon: Activity },
   { key: TABS.DISPATCH, label: "Dispatch", Icon: Bot, adminOnly: true },
-  { key: TABS.DECISIONS, label: "Triage & Decisions", Icon: ListChecks },
-  { key: TABS.DRAFTS, label: "Pending Drafts", Icon: MailCheck },
-  { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
-  { key: TABS.HYGIENE, label: "Data Hygiene", Icon: DatabaseZap },
+  { key: TABS.DECISIONS, label: "Decisions", Icon: ListChecks },
+  { key: TABS.DRAFTS, label: "Drafts", Icon: MailCheck },
+  { key: TABS.SHADOW, label: "Shadow", Icon: MessageSquareDashed },
+  { key: TABS.HYGIENE, label: "Hygiene", Icon: DatabaseZap },
   // Models — which model every AI lane runs on today, and the Railway env
   // change that moves it (server/services/model-switchboard.js).
   { key: TABS.MODELS, label: "Models", Icon: Cpu },
@@ -87,6 +87,21 @@ const QUEUE_TAB = { key: TABS.QUEUE, label: "Queue", Icon: Layers };
 // Control center (the old Overview does not read the area).
 const AREA_TABS = new Set([TABS.MODELS]);
 const ALL_AREAS = "all";
+const AREA_LABELS = {
+  sms: "SMS",
+  calls: "Calls",
+  voice: "Voice",
+  photos: "Photos",
+  estimates: "Sales",
+  reports: "Reports",
+  email: "Email",
+  content: "Content",
+  ib: "Intelligence",
+  portal: "Portal",
+  agents: "Agents",
+  office: "Office",
+};
+const areaLabel = (area) => AREA_LABELS[area.key] || area.label || area.key;
 function readsArea(tab, controlCenter) {
   return AREA_TABS.has(tab) || (controlCenter && tab === TABS.OVERVIEW);
 }
@@ -158,7 +173,7 @@ export default function AgentsHubPage() {
   const handleRefresh = () => refreshRef.current?.();
 
   const showAreas = readsArea(tab, controlCenter) && hub.areas.length > 0;
-  const areaSections = showAreas ? [{ key: ALL_AREAS, label: "All areas" }, ...hub.areas.map((a) => ({ key: a.key, label: a.label }))] : [];
+  const areaSections = showAreas ? [{ key: ALL_AREAS, label: "All" }, ...hub.areas.map((a) => ({ key: a.key, label: areaLabel(a) }))] : [];
   const activeArea = hub.areas.some((a) => a.key === area) ? area : ALL_AREAS;
 
   return (

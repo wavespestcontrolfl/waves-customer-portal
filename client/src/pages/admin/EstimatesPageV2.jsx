@@ -2762,12 +2762,12 @@ const TABS = [
   },
   {
     key: "new",
-    label: "Create Estimate",
+    label: "Create",
     Icon: FilePlus2,
   },
   {
     key: "pricing",
-    label: "Pricing Logic",
+    label: "Pricing",
     Icon: SlidersHorizontal,
   },
 ];

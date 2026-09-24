@@ -208,7 +208,7 @@ const TAX_SECTIONS = [
   },
   {
     key: "rates",
-    label: "Tax Rates",
+    label: "Rates",
     Icon: Percent,
   },
   {
@@ -233,7 +233,7 @@ const TAX_SECTIONS = [
   },
   {
     key: "bankimport",
-    label: "Bank Import",
+    label: "Import",
     Icon: Landmark,
   },
   {
@@ -253,12 +253,12 @@ const TAX_SECTIONS = [
   },
   {
     key: "filings",
-    label: "Filing Calendar",
+    label: "Filings",
     Icon: CalendarDays,
   },
   {
     key: "advisor",
-    label: "AI Advisor",
+    label: "Advisor",
     Icon: Bot,
   },
   {
@@ -285,7 +285,7 @@ const TAX_TAB_GROUPS = [
   },
   {
     key: "setup",
-    label: "Tax Setup",
+    label: "Setup",
     Icon: ShieldCheck,
     tabs: ["rates", "services", "exemptions"],
   },
@@ -315,7 +315,7 @@ const TAX_TAB_GROUPS = [
   },
   {
     key: "compliance",
-    label: "Exports & A/R",
+    label: "Compliance",
     Icon: Download,
     tabs: ["exports", "ar"],
   },

@@ -40,10 +40,10 @@ describe('autonomous blog monitor', () => {
     expect(screen.queryByRole('button', { name: 'Requeue' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Publish PR' })).toBeNull();
   });
-  it('preserves non-blog recovery in Other content while keeping blog controls absent', async () => {
+  it('preserves non-blog recovery in Review while keeping blog controls absent', async () => {
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
-    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     await screen.findByRole('button', { name: 'Requeue' });
     fireEvent.click(screen.getByRole('button', { name: 'Requeue' }));
     await waitFor(() => expect(fetch.mock.calls.some(([url, opts]) => url.includes('/other-1/decision') && opts.method === 'POST' && JSON.parse(opts.body).decision === 'requeue')).toBe(true));
@@ -78,7 +78,7 @@ describe('review regressions', () => {
       : original(url, opts));
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
-    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     const note = await screen.findByPlaceholderText('Reviewer note (optional)');
     fireEvent.change(note, { target: { value: 'First record note' } });
     revision = 2;
@@ -174,7 +174,7 @@ describe('failed activity queries', () => {
       ? Promise.reject(new Error('Activity unavailable')) : original(url, opts));
     if (change === 'page') fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     if (change === 'status') fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'skipped' } });
-    if (change === 'lane') fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    if (change === 'lane') fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     await screen.findByText('Activity unavailable');
     expect(screen.queryByText('Seasonal ants blog-1')).toBeNull();
     expect(screen.queryByText('Full draft revision 1')).toBeNull();
@@ -192,7 +192,7 @@ describe('background refresh boundaries', () => {
       ? Promise.reject(new Error('Decision failed')) : original(url, opts));
     render(<AutonomousContentReviewPage embedded />);
     await act(async () => {});
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Other content' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Review' })); });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Requeue' })); });
     expect(screen.getByText('Decision failed')).toBeTruthy();
     revision = 2;
@@ -248,7 +248,7 @@ describe('slow and failed detail refresh', () => {
     vi.useFakeTimers();
     render(<AutonomousContentReviewPage embedded />);
     await act(async () => {});
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Other content' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Review' })); });
     fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Keep this note' } });
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => url.includes('/review?')
@@ -262,7 +262,7 @@ describe('slow and failed detail refresh', () => {
   it('shows a failed query alongside an earlier decision failure', async () => {
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
-    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     await screen.findByRole('button', { name: 'Requeue' });
     const original = fetch.getMockImplementation();
     fetch.mockImplementation((url, opts) => opts?.method === 'POST'
@@ -285,7 +285,7 @@ describe('navigation and background loading', () => {
       ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ item: item('other-1') }) }); }) : original(url, opts));
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
-    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     await screen.findByRole('button', { name: 'Requeue' });
     fireEvent.click(screen.getByRole('button', { name: 'Requeue' }));
     fireEvent.click(screen.getByRole('button', { name: 'Content' }));
@@ -328,7 +328,7 @@ describe('3916 follow-ups', () => {
     });
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
-    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     await screen.findByPlaceholderText('Reviewer note (optional)');
     if (query === 'page') fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     else fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'all' } });
@@ -358,7 +358,7 @@ describe('3916 follow-ups', () => {
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
     vi.useFakeTimers();
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Other content' })));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Review' })));
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
     fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Keep this note' } });
     hold = true;
@@ -376,14 +376,14 @@ describe('3916 follow-ups', () => {
   it('treats clicking the active tab as a no-op for review notes and queries', async () => {
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');
-    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     await screen.findByPlaceholderText('Reviewer note (optional)');
     fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Unsaved review' } });
     fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'all' } });
     await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull());
     await screen.findByText('Full draft revision 1');
     const calls = fetch.mock.calls.length;
-    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     expect(screen.getByDisplayValue('Unsaved review')).toBeTruthy();
     expect(screen.getByRole('combobox', { name: 'Activity status' }).value).toBe('all');
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();

@@ -159,7 +159,7 @@ describe("Social media workspace foundation", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Automation" }));
     expect(await screen.findByText("Blog RSS Feed")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Run Audit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Audit" }));
     expect(await screen.findByText("Approve this draft")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Approve & Publish" }));
 
@@ -174,7 +174,7 @@ describe("Social media workspace foundation", () => {
 
   it("deep-links leaf tabs and restores them with browser history", async () => {
     renderPage(["/admin/social-media?tab=history&source=audit#evidence"]);
-    expect(screen.getByRole("button", { name: "Post History" })).toHaveClass(
+    expect(screen.getByRole("button", { name: "History" })).toHaveClass(
       "bg-zinc-900",
     );
 

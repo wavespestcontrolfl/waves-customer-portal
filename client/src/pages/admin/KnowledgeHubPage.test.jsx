@@ -95,7 +95,7 @@ describe("KnowledgeHubPage", () => {
       "legacy",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Knowledge Base" }));
+    fireEvent.click(screen.getByRole("button", { name: "Library" }));
     const base = await screen.findByText("Embedded Knowledge Base workspace");
     expect(base.closest('[data-ui-density]')).toHaveAttribute(
       "data-ui-density",
