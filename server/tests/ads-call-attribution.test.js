@@ -82,6 +82,11 @@ describe('shared service-line inference (utils/service-line-infer)', () => {
     expect(inferServiceBucket('mosquito misting system')).toBe('high_ticket_specialty');
     expect(inferServiceLine('mosquito misting system')).toBe('mosquito');
     expect(inferSpecificService('Mosquito Misting System Service')).toBe('mosquito_misting');
+    // A bare "misting system" — no literal "mosquito" in the lead copy —
+    // still routes to the mosquito line (Codex round-1 P2 on PR #4762).
+    expect(inferServiceLine('misting system')).toBe('mosquito');
+    expect(inferServiceLine('Automatic Misting System Install')).toBe('mosquito');
+    expect(inferSpecificService('misting system')).toBe('mosquito_misting');
     // Plain "mosquito control" (barrier program) is unaffected — still the
     // recurring bucket.
     expect(inferSpecificService('mosquito control')).toBe('mosquito_program');

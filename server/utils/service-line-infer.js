@@ -14,7 +14,10 @@ const PALM_NOT_PALMETTO_RE = /palm(?!etto)/;
 function inferServiceLine(interest) {
   const t = (interest || '').toLowerCase();
   if (t.includes('lawn') || t.includes('grass') || t.includes('turf')) return 'lawn';
-  if (t.includes('mosquito')) return 'mosquito';
+  // 'misting' alone (no "mosquito") still routes here — the misting system
+  // pages (catalog: 20260924000020 mosquito_misting_system) don't always
+  // say "mosquito" in their lead copy.
+  if (t.includes('mosquito') || t.includes('misting')) return 'mosquito';
   if (t.includes('termite')) return 'termite';
   if (t.includes('rodent') || t.includes('rat') || t.includes('mouse')) return 'rodent';
   if (t.includes('tree') || t.includes('shrub') || PALM_NOT_PALMETTO_RE.test(t)) return 'tree_shrub';

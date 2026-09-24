@@ -963,6 +963,24 @@ recurring program joined this contract then, so a direct-API caller that
 posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
 quote where it previously received a price)).
 
+Keyed quote-on-request (a catalog `serviceKey`/`service_key` whose row is
+`public_quote_selectable=true` but carries NO `PUBLIC_QUOTE_REQUESTS` entry,
+`services/public-services-menu.js`): the route skips the pricing engine
+entirely and calls `quoteOnRequestEstimate` (`routes/public-quote.js`) —
+the lead is captured with `leads.service_key` + `service_interest` set to
+the catalog name verbatim, zero totals, no self-book handoff — and the
+response is `202 { quote_required: true, service, reason:
+'quote_on_request', service_interest, message }`. `message` is a generic
+"{catalog name} is priced by our team, not the calculator — we'll send
+your estimate shortly." UNLESS the key carries its own service-specific
+copy. `mosquito_misting_system` (Mosquito Misting System Service, catalog
+row `20260924000020_mosquito_misting_catalog_row`; no engine pricer —
+misting is quoted after an on-site design visit) is the one keyed
+exception today: its `message` is "Mosquito misting systems are designed
+and priced on site — we'll call to schedule your free design visit."
+instead of the generic copy. No pricing, no self-book slot, no new auth
+surface — additive response-copy branching only.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed
