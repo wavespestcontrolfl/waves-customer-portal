@@ -482,12 +482,39 @@ describe('buildReferralLink', () => {
 describe('buildConsultationLink', () => {
   const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 
-  test('a caller-supplied leadId override wins over the customer lookup', async () => {
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-override', first_name: 'Pat' } }) };
+  test('a caller-supplied leadId override wins over the customer lookup when it is the resolved customer\'s own lead', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: 'lead-override', first_name: 'Pat', customer_id: 'c1', phone: '+19415550111' } }) };
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/abc', line: 'line\n\n', standalone: true });
     const r = await buildConsultationLink('c1', 'lead-override');
     expect(r.url).toBe('https://waves.link/l/abc');
     expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-override', 'Pat');
+  });
+
+  test('a caller-supplied leadId override wins when it is not the customer\'s own lead by customer_id but shares the resolved phone', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: 'lead-other', first_name: 'Jamie', customer_id: 'c9', phone: '+19415550111' } }),
+      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
+    };
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://waves.link/l/phone-match', line: 'line\n\n', standalone: true });
+    const r = await buildConsultationLink('c1', 'lead-other');
+    expect(r.url).toBe('https://waves.link/l/phone-match');
+    expect(buildLeadConsultationSmsLine).toHaveBeenCalledWith('lead-other', 'Jamie');
+  });
+
+  // Pre-push Codex P1: the customer path let leadIdOverride select ANY
+  // non-deleted lead with no check against the resolved customer at all —
+  // a request carrying customer A's phone and lead B's id would insert B's
+  // bearer consultation link into A's message. Binds the override to the
+  // resolved recipient exactly like the lead-only fallback does.
+  test('a leadId override for a DIFFERENT customer\'s lead (mismatched customer_id and phone) is rejected — no link inserted', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: 'lead-b', first_name: 'Robin', customer_id: 'customer-b', phone: '+19415559999' } }),
+      customers: chainBuilder({ firstRow: { phone: '+19415550111' } }),
+    };
+    const r = await buildConsultationLink('customer-a', 'lead-b');
+    expect(r.url).toBeNull();
+    expect(r.reason).toBe('That lead does not match the destination number');
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
   });
 
   test('no leadId override: resolves the customer\'s newest non-deleted lead', async () => {
