@@ -21,6 +21,7 @@ function memoryDb() {
     let requiredState = null;
     let executionTokenCondition = null;
     let expectedExecutionToken = null;
+    let expectedExecutionStartedAt = null;
     let order = null;
     let pendingInsert = null;
     const matching = () => rows.filter(row => Object.entries(filters).every(([key, value]) => row[key] === value)
@@ -28,7 +29,9 @@ function memoryDb() {
       && (executionTokenCondition !== 'absent' || snapshot(row)?.executionToken == null)
       && (executionTokenCondition !== 'equal' || snapshot(row)?.executionToken === expectedExecutionToken)
       && (executionTokenCondition !== 'absent_or_equal'
-        || snapshot(row)?.executionToken == null || snapshot(row)?.executionToken === expectedExecutionToken));
+        || snapshot(row)?.executionToken == null || snapshot(row)?.executionToken === expectedExecutionToken)
+      && (expectedExecutionStartedAt == null
+        || snapshot(row)?.executionStartedAt === expectedExecutionStartedAt));
     const query = {
       where(values) { filters = { ...filters, ...values }; return query; },
       whereRaw(sql, bindings = []) {
@@ -40,6 +43,8 @@ function memoryDb() {
         } else if (sql === "(input_snapshot->>'executionToken' IS NULL OR input_snapshot->>'executionToken' = ?)") {
           executionTokenCondition = 'absent_or_equal';
           [expectedExecutionToken] = bindings;
+        } else if (sql === "input_snapshot->>'executionStartedAt' = ?") {
+          [expectedExecutionStartedAt] = bindings;
         }
         else throw new Error(`unexpected whereRaw ${sql}`);
         return query;
@@ -88,7 +93,8 @@ function setSnapshot(row, value) {
 }
 
 function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lockError = null,
-  runExclusiveImpl = null, mutateDraft = null, beforeDispatch = null, draftServedModel = undefined } = {}) {
+  runExclusiveImpl = null, lockHeldOutcome = false, lockHeldError = null,
+  mutateDraft = null, beforeDispatch = null, draftServedModel = undefined } = {}) {
   jest.resetModules();
   const previousVerify = process.env.SHADOW_DRAFT_VERIFY;
   const previousRevisions = process.env.SHADOW_DRAFT_VERIFY_MAX_REVISIONS;
@@ -128,8 +134,13 @@ function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lock
     return lockOutcome || task();
   };
   const runExclusive = jest.fn(runExclusiveImpl || defaultRunExclusive);
+  const lockHeldByAnySession = jest.fn(async () => {
+    if (lockHeldError) throw new Error(lockHeldError);
+    return lockHeldOutcome;
+  });
   jest.doMock('../utils/cron-lock', () => ({
     runExclusive,
+    lockHeldByAnySession,
     wasLockSkipped: result => result?.skipped === true
       && ['lease_held', 'no_connection'].includes(result.reason),
   }));
@@ -149,6 +160,7 @@ function loadQualification({ dbi, verifyEnabled = true, lockOutcome = null, lock
     createDeepMessage,
     Anthropic,
     runExclusive,
+    lockHeldByAnySession,
     drafter,
     profile: dbi.profile,
   };
@@ -266,6 +278,119 @@ describe('sms gratitude qualification', () => {
     expect(store.rows[0]).toMatchObject({ status: 'failed', correction_note: 'stale_run_recovered' });
     expect(snapshot(store.rows[1])).toMatchObject({ state: 'running' });
     expect(store.rows[1].status).toBe('initiated');
+  });
+
+  test('an old created row with a recent execution claim remains in progress', async () => {
+    const store = memoryDb();
+    const { qualification, lockHeldByAnySession } = loadQualification({ dbi: store });
+    const first = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    store.rows[0].created_at = '2000-01-01T00:00:00.000Z';
+    setSnapshot(store.rows[0], {
+      ...snapshot(store.rows[0]),
+      executionToken: '00000000-0000-4000-8000-000000000111',
+      executionStartedAt: new Date().toISOString(),
+    });
+
+    await expect(qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' }))
+      .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS', runId: first.id });
+    expect(lockHeldByAnySession).not.toHaveBeenCalled();
+    expect(store.rows).toHaveLength(1);
+    expect(snapshot(store.rows[0])).toMatchObject({ state: 'running' });
+  });
+
+  test.each([
+    ['unknown', null, null],
+    ['probe failure', false, 'synthetic lease probe failure'],
+  ])('an old execution claim fails closed when the lease probe is %s', async (_label, lockHeldOutcome, lockHeldError) => {
+    const store = memoryDb();
+    const { qualification, lockHeldByAnySession } = loadQualification({
+      dbi: store, lockHeldOutcome, lockHeldError,
+    });
+    const first = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    store.rows[0].created_at = '2000-01-01T00:00:00.000Z';
+    setSnapshot(store.rows[0], {
+      ...snapshot(store.rows[0]),
+      executionToken: '00000000-0000-4000-8000-000000000222',
+      executionStartedAt: '2000-01-01T01:00:00.000Z',
+    });
+
+    await expect(qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' }))
+      .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS', runId: first.id });
+    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${first.id}`);
+    expect(store.rows).toHaveLength(1);
+    expect(snapshot(store.rows[0])).toMatchObject({ state: 'running' });
+  });
+
+  test('an aged claim remains in progress while its real runner still holds the per-run lease', async () => {
+    const store = memoryDb();
+    let releaseDraft;
+    let announceDraft;
+    const draftStarted = new Promise(resolve => { announceDraft = resolve; });
+    const draftRelease = new Promise(resolve => { releaseDraft = resolve; });
+    const beforeDispatch = jest.fn(async () => {
+      if (beforeDispatch.mock.calls.length > 1) return;
+      announceDraft();
+      await draftRelease;
+    });
+    const { qualification, lockHeldByAnySession, generateGroundedDraft } = loadQualification({
+      dbi: store, lockHeldOutcome: true, beforeDispatch,
+    });
+    const run = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    const owner = qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id });
+    await draftStarted;
+    store.rows[0].created_at = '2000-01-01T00:00:00.000Z';
+    setSnapshot(store.rows[0], {
+      ...snapshot(store.rows[0]), executionStartedAt: '2000-01-01T01:00:00.000Z',
+    });
+
+    await expect(qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' }))
+      .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS', runId: run.id });
+    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${run.id}`);
+    expect(store.rows).toHaveLength(1);
+
+    releaseDraft();
+    await expect(owner).resolves.toMatchObject({ id: run.id, state: 'complete', qualified: true });
+    expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
+  });
+
+  test('recovers an old execution claim only after its per-run lease is confirmed free', async () => {
+    const store = memoryDb();
+    const { qualification, lockHeldByAnySession } = loadQualification({ dbi: store, lockHeldOutcome: false });
+    const first = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    store.rows[0].created_at = '2000-01-01T00:00:00.000Z';
+    setSnapshot(store.rows[0], {
+      ...snapshot(store.rows[0]),
+      executionToken: '00000000-0000-4000-8000-000000000333',
+      executionStartedAt: '2000-01-01T01:00:00.000Z',
+    });
+
+    const replacement = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    expect(lockHeldByAnySession).toHaveBeenCalledWith(`sms-gratitude-qualification:${first.id}`);
+    expect(replacement.id).not.toBe(first.id);
+    expect(snapshot(store.rows[0])).toMatchObject({ state: 'failed', failure: 'stale_run_recovered' });
+    expect(snapshot(store.rows[1])).toMatchObject({ state: 'running' });
+  });
+
+  test('a claim that wins after the stale read defeats the recovery CAS', async () => {
+    const store = memoryDb();
+    const { qualification } = loadQualification({ dbi: store });
+    const first = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    store.rows[0].created_at = '2000-01-01T00:00:00.000Z';
+    store.hooks.beforeUpdate = () => {
+      store.hooks.beforeUpdate = null;
+      setSnapshot(store.rows[0], {
+        ...snapshot(store.rows[0]),
+        executionToken: '00000000-0000-4000-8000-000000000444',
+        executionStartedAt: new Date().toISOString(),
+      });
+    };
+
+    await expect(qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' }))
+      .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS', runId: first.id, state: 'running' });
+    expect(store.rows).toHaveLength(1);
+    expect(snapshot(store.rows[0])).toMatchObject({
+      state: 'running', executionToken: '00000000-0000-4000-8000-000000000444',
+    });
   });
 
   test('stale recovery loses safely when the owner completes after the stale read', async () => {
