@@ -852,7 +852,9 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     let gen;
     let img;
     try {
-      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt });
+      // Opt in to the Waves logo reference: this path screens the result with
+      // the uniform-logo allowance below (owner directive 2026-09-24).
+      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt, uniformLogo: true });
       img = await fetchImageBuffer(gen.dataUrl);
       if (!img?.buffer) throw new Error(`${mode} image generation produced no usable image`);
     } catch (err) {

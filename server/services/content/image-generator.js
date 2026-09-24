@@ -60,6 +60,10 @@ const { GEMINI_IMAGE_PRO, GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('..
 // faithfully). Gemini legs take no reference and keep the logo-free line.
 // If every leg fails WITH the reference, the chain runs once more without it
 // inside the same deadline — a rejected reference must not cost the image.
+// OPT-IN per call (generate({ uniformLogo: true })): only a caller whose
+// text/logo screen knows to allow the uniform logo (the astro publisher) may
+// attach it — a social tile or newsletter image has no screen to catch the
+// mark pasted elsewhere (pre-push fallback P1 on 440cc8b947).
 // Kill switch: BLOG_IMAGE_UNIFORM_LOGO=false (prompt falls back to logo-free).
 const UNIFORM_LOGO_ENV = 'BLOG_IMAGE_UNIFORM_LOGO';
 const UNIFORM_LOGO_PATH = path.join(__dirname, '..', '..', 'assets', 'brand', 'waves-logo.png');
@@ -626,14 +630,14 @@ class ImageGenerator {
   // deadlineAt — an absolute ms timestamp the whole call must respect; a
   // caller that generates more than once for one slot (screen retry) passes
   // the same deadline to both calls so the slot never gets a second budget.
-  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, captions = [], avoidDepicting = [], prompt: customPrompt, deadlineAt = null } = {}) {
+  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, captions = [], avoidDepicting = [], prompt: customPrompt, deadlineAt = null, uniformLogo = false } = {}) {
     const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
     const deadline = Number.isFinite(deadlineAt) ? deadlineAt : this._now() + this._chainBudgetMs;
     // The logo reference rides only on a prompt this module built (a caller's
     // custom prompt says nothing about a reference) and never on an infographic.
-    const logo = this._uniformLogo === undefined ? loadUniformLogo() : this._uniformLogo;
+    const logo = uniformLogo === true ? (this._uniformLogo === undefined ? loadUniformLogo() : this._uniformLogo) : null;
     const logoBuffer = !customPrompt && Buffer.isBuffer(logo) && logo.length && !(plan && plan.style === 'infographic') ? logo : null;
     const logoPrompt = logoBuffer ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: true }) : null;
 

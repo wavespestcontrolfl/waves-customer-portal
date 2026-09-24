@@ -172,13 +172,18 @@ function matchExclusion(detection, exclusions) {
  *   beyond the captions the caller allowed (an infographic's own labels).
  */
 // Belt to the prompt's braces: a model that lists the uniform logo anyway.
-// Dropped only when the detection names Waves AND a uniform location AND no
-// other surface — "Waves logo on the van door" stays a violation.
-const UNIFORM_LOGO_WORDS = /\bwaves?\b/i;
-const UNIFORM_LOCATION = /\b(cap|hat|shirt|chest|polo|uniform|technician|badge)\b/i;
-const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground)\b/i;
+// Dropped only when the detection names "Waves" (never the generic "wave")
+// AND a positive garment surface (cap / hat / chest / polo / shirt — not
+// "technician" or "uniform" alone, which would pass a clipboard or a glove)
+// AND no other surface — "Waves logo on the van door" stays a violation
+// (pre-push fallback P1 on 440cc8b947).
+const UNIFORM_LOGO_WORDS = /\bwaves\b/i;
+const UNIFORM_LOCATION = /\b(cap|hat|chest|polo|shirt)\b/i;
+const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground|clipboard|tablet|backpack|bag|glove|gloves|tool|tools|mailbox|fence)\b/i;
 const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t);
-// The logo's own lettering ("WAVES", "LAWN & PEST") read back as text.
+// The logo's own lettering ("WAVES", "LAWN & PEST") read back as text —
+// dropped only alongside a detected cap/chest logo it can belong to; a
+// standalone "WAVES" string (a sign, a van door) stays readable text.
 const LOGO_LETTERING = new Set(['waves', 'lawn', 'pest', 'lawn pest', 'waves lawn pest', 'waves lawn and pest', 'lawn and pest']);
 const isLogoLettering = (t) => LOGO_LETTERING.has(normalizeText(t));
 
@@ -210,8 +215,9 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       return open;
     }
     if (allowUniformLogo) {
+      const sawUniformLogo = parsed.logos.some(isAllowedUniformLogo);
       parsed.logos = parsed.logos.filter((t) => !isAllowedUniformLogo(t));
-      parsed.readableText = parsed.readableText.filter((t) => !isLogoLettering(t));
+      if (sawUniformLogo) parsed.readableText = parsed.readableText.filter((t) => !isLogoLettering(t));
     }
     // An allowed caption may come back split ("1", "OFF") or joined. A
     // detected string is the caption's only when it is a contiguous, in-order

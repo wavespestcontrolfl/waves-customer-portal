@@ -126,13 +126,25 @@ describe('screenGeneratedImage: uniform logo allowance (owner directive 2026-09-
     expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/EXCEPTION/);
   });
 
-  test('helpers: only a Waves mark on a uniform surface with no other surface named is allowed', () => {
+  test('standalone WAVES lettering with no cap/chest logo detected stays readable text (a sign or van door)', async () => {
+    mockDispatch.mockResolvedValue(answer({ readable_text: ['WAVES'], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toEqual(['readable text: WAVES']);
+  });
+
+  test('helpers: only a Waves mark on a garment surface with no other surface named is allowed', () => {
     const { isAllowedUniformLogo, isLogoLettering } = _internals;
     expect(isAllowedUniformLogo('Waves logo on the cap')).toBe(true);
     expect(isAllowedUniformLogo('Waves badge on the polo chest')).toBe(true);
     expect(isAllowedUniformLogo('Waves logo on the cap and on the van')).toBe(false);
     expect(isAllowedUniformLogo('Orkin logo on shirt')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo')).toBe(false);
+    expect(isAllowedUniformLogo("Waves logo on the technician's clipboard")).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo on the technician')).toBe(false);
+    expect(isAllowedUniformLogo('Waves badge on the uniform')).toBe(false);
+    expect(isAllowedUniformLogo('wave pattern on the shirt')).toBe(false);
+    expect(isAllowedUniformLogo('Waves logo on the glove and cap')).toBe(false);
     expect(isLogoLettering('WAVES')).toBe(true);
     expect(isLogoLettering('Lawn & Pest')).toBe(true);
     expect(isLogoLettering('Waves Pest Control')).toBe(false);
