@@ -1230,15 +1230,19 @@ async function dbLevelMergeConflict(database, winner, loser) {
   // IB preview via this same function, so an operator never sees a
   // confirmation card for a merge the executor would refuse anyway.
   //
-  // Scoped to a MATCHING customer-level address only: /link-as-property
-  // exists precisely to merge an address_conflict pair (two different
-  // homes), and two legitimate same-family series at two different
-  // properties are not a duplicate — a scoped merge there must not be told
-  // to cancel one plan. addressCompat was already computed above when the
-  // winner has an address; recompute here for the (address-less winner)
-  // case that skipped it, at negligible cost (pure/no I/O).
+  // Scoped to a MATCHING customer-level address as a cheap pre-filter only
+  // (skip the series lookups entirely for an address_conflict pair, which
+  // /link-as-property exists precisely to merge); duplicateSeriesMergeConflict
+  // itself re-compares each colliding pair's OWN resolved service property
+  // (stamped service_address_*, else that row's owning customer's primary
+  // address) — a multi-property account can share a primary address with
+  // another customer while its actual series lives at a different saved
+  // property, and that is not a duplicate. addressCompat was already
+  // computed above when the winner has an address; recompute here for the
+  // (address-less winner) case that skipped it, at negligible cost (pure/no
+  // I/O) — a coarse skip, not the final same-property decision.
   if (addressCompat(winner, loser).status === 'match') {
-    const seriesConflict = await duplicateSeriesMergeConflict(database, winner.id, loser.id);
+    const seriesConflict = await duplicateSeriesMergeConflict(database, winner, loser);
     if (seriesConflict) {
       return {
         code: 'duplicate_series_conflict',
@@ -1249,18 +1253,32 @@ async function dbLevelMergeConflict(database, winner, loser) {
   return null;
 }
 
-// A genuinely ACTIVE (not lapsed) recurring series of the same family on
-// both the winner and the loser — the shape a plain merge must never
-// produce. Reuses findActiveRecurringSeries (recurring-appointment-seeder.js)
-// — the SAME "ongoing OR an upcoming/rescheduled/in-progress occurrence"
-// liveness rule the booking-duplicate guard applies — rather than a parallel
-// predicate: a fixed-length series that already ran its course (no
-// outstanding children, recurring_ongoing=false) is lapsed, not a live
-// duplicate, and must not block an otherwise-clean merge.
-async function duplicateSeriesMergeConflict(database, winnerId, loserId) {
+// The effective service street key for a findActiveRecurringSeries match:
+// its own stamped service address when present, else the OWNING customer's
+// primary address (legacy/unstamped rows implicitly serve the customer's
+// home — the same fallback the schedule board's day view applies via
+// COALESCE(scheduled_services.service_address_line1, customers.address_line1)).
+function seriesPropertyKey(match, ownerCustomer) {
+  const line1 = match.service_address_line1 || ownerCustomer.address_line1;
+  return normalizeStreetKey(line1)?.key || null;
+}
+
+// A genuinely ACTIVE (not lapsed) recurring series of the same family AT THE
+// SAME PROPERTY on both the winner and the loser — the shape a plain merge
+// must never produce. Liveness reuses findActiveRecurringSeries
+// (recurring-appointment-seeder.js) — the SAME "ongoing OR an
+// upcoming/rescheduled/in-progress occurrence" rule the booking-duplicate
+// guard applies — rather than a parallel predicate: a fixed-length series
+// that already ran its course (no outstanding children,
+// recurring_ongoing=false) is lapsed, not a live duplicate, and must not
+// block an otherwise-clean merge. Property comparison is by each match's OWN
+// resolved service address (see seriesPropertyKey), not the customers'
+// account-level addresses — a multi-property account's series can live at a
+// different saved property than its primary address.
+async function duplicateSeriesMergeConflict(database, winner, loser) {
   const { findActiveRecurringSeries } = require('./recurring-appointment-seeder');
   const loserParentRows = await database('scheduled_services')
-    .where({ customer_id: loserId, is_recurring: true })
+    .where({ customer_id: loser.id, is_recurring: true })
     .whereNull('recurring_parent_id')
     .whereNotIn('status', ['cancelled'])
     .select('service_type');
@@ -1268,10 +1286,18 @@ async function duplicateSeriesMergeConflict(database, winnerId, loserId) {
   const families = [...new Set(loserParentRows.map((row) => row.service_type).filter(Boolean))];
   for (const serviceType of families) {
     const [loserActive, winnerActive] = await Promise.all([
-      findActiveRecurringSeries(database, { customerId: loserId, serviceType }),
-      findActiveRecurringSeries(database, { customerId: winnerId, serviceType }),
+      findActiveRecurringSeries(database, { customerId: loser.id, serviceType }),
+      findActiveRecurringSeries(database, { customerId: winner.id, serviceType }),
     ]);
-    if (Array.isArray(loserActive) && loserActive.length && Array.isArray(winnerActive) && winnerActive.length) {
+    if (!Array.isArray(loserActive) || !loserActive.length || !Array.isArray(winnerActive) || !winnerActive.length) continue;
+    const winnerPropertyKeys = new Set(
+      winnerActive.map((m) => seriesPropertyKey(m, winner)).filter(Boolean),
+    );
+    const samePropertyCollision = loserActive.some((m) => {
+      const key = seriesPropertyKey(m, loser);
+      return key && winnerPropertyKeys.has(key);
+    });
+    if (samePropertyCollision) {
       return { family: serviceType };
     }
   }
