@@ -1138,14 +1138,20 @@ async function attachLinkedProfileToOwnAccount(trx, linked) {
 // Whether this token may use an existing profile: verified-phone proof, or
 // the profile is an outright (flow-created) prospect in this lead's own
 // provenance.
-async function tokenMayUseProfile(dbConn, lead, profile, token) {
-  if (await verifiedForCustomer(lead, profile, token, dbConn)) return true;
-  const rows = await dbConn('lead_activities').where({ lead_id: lead.id, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata');
+// Whether any provenance row of this lead already makes this profile an
+// outright (flow-created, merge-free) prospect.
+async function profileAlreadyOutright(dbConn, leadId, profileId) {
+  const rows = await dbConn('lead_activities').where({ lead_id: leadId, activity_type: CONSULTATION_PROSPECT_ACTIVITY }).select('metadata');
   for (const row of rows || []) {
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-    if (await outrightProspect(dbConn, meta, profile.id)) return true;
+    if (await outrightProspect(dbConn, meta, profileId)) return true;
   }
   return false;
+}
+
+async function tokenMayUseProfile(dbConn, lead, profile, token) {
+  if (await verifiedForCustomer(lead, profile, token, dbConn)) return true;
+  return profileAlreadyOutright(dbConn, lead.id, profile.id);
 }
 
 async function resolveOtherAccountProperty(trx, freshLead, linked, resolved, token) {
@@ -1175,8 +1181,14 @@ async function resolveOtherAccountProperty(trx, freshLead, linked, resolved, tok
   // (Codex #4737 r7 pre-push P1): only an independently existing account's
   // property needs the verified-phone proof.
   if (chosen.customer) {
+    // Outright trust carries over ONLY to a profile this flow just created
+    // while extending its own outright prospect, or to an existing profile
+    // already outright on its own (Codex #4737 r13 pre-push P0) — never to
+    // a staff-added sibling merely reached through a verified token.
     const prior = await latestProvenance(trx, freshLead.id);
-    const ownProspect = await outrightProspect(trx, prior, linked.id);
+    const ownProspect = existing
+      ? await profileAlreadyOutright(trx, freshLead.id, chosen.customer.id)
+      : await outrightProspect(trx, prior, linked.id);
     await trx('lead_activities').insert({
       lead_id: freshLead.id,
       activity_type: CONSULTATION_PROSPECT_ACTIVITY,

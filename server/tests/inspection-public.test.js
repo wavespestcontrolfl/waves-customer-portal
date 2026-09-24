@@ -680,6 +680,28 @@ describe('Codex #4737 r12 pre-push: closed leads stop; untrusted sibling propert
     expect(mockBuildAvailability).not.toHaveBeenCalled();
   });
 
+  // Codex #4737 r13 pre-push P0: a VERIFIED token may reuse the sibling,
+  // but its provenance keeps the verification requirement.
+  test('P0: a verified token reusing a staff-added sibling records it requires_verification, never outright', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
+    listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-prospect' }) }];
+    firstResults.customers = { id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101', address_line1: '1 Typo St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
+    const sibling = { id: 'cust-sibling', account_id: 'acct-p', phone: '9415550101', address_line1: '5 Sibling St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.45, longitude: -82.55 };
+    listResults.customers = [firstResults.customers, sibling];
+    mockGeocode.mockResolvedValueOnce({ location: { lat: 27.45, lng: -82.55 } });
+    mockBuildAvailability.mockResolvedValue({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    const smsToken = mintLeadConsultationToken(LEAD_ID, undefined, require('../utils/lead-consultation-token').smsChannelFor(LEAD_ROW.phone));
+    await callPost(smsToken, { date: FUTURE_DATE, time: '09:00', address: '5 Sibling St, Bradenton, FL 34209' });
+    const provenance = insertCalls.filter((c) => c.table === 'lead_activities' && c.payload.activity_type === 'consultation_prospect')
+      .map((c) => JSON.parse(c.payload.metadata))
+      .find((m) => m.customer_id === 'cust-sibling');
+    expect(provenance).toEqual({ customer_id: 'cust-sibling', requires_verification: true });
+  });
+
   test('P0: an unverified token\'s own prospect cannot reuse a staff-added sibling property by typing its address', async () => {
     firstResults.leads = { ...LEAD_ROW, customer_id: null };
     // The flow's own prospect (outright trust), in account acct-p, with visit history.
