@@ -557,42 +557,55 @@ describe('uniform logo reference (owner directive 2026-09-24: logo on cap + righ
     expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
   });
 
-  test('every leg failing WITH the reference reruns the chain logo-free (the reference must not cost the image)', async () => {
+  test('a leg that REJECTS the request with the reference (non-retryable 4xx) is retried once logo-free before the chain moves on', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     const mockFetch = jest.fn()
-      .mockReturnValueOnce(err(400, 'unsupported reference'))
       .mockReturnValueOnce(err(400, 'unsupported reference'))
       .mockReturnValueOnce(ok(OPENAI_OK_BODY));
     const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5', fetchFn: mockFetch, uniformLogo: LOGO });
     const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
-    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/edits');
-    expect(mockFetch.mock.calls[1][0]).toBe('https://api.openai.com/v1/images/edits');
-    expect(mockFetch.mock.calls[2][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(mockFetch.mock.calls[1][0]).toBe('https://api.openai.com/v1/images/generations');
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body).model).toBe('gpt-image-2');
     expect(r.model).toBe('gpt-image-2');
     expect(r.logoReference).toBe(false);
     expect(r.prompt).not.toMatch(/reference image/);
-    expect(r.attempts.map((a) => a.logoReference)).toEqual([true, true, false]);
+    expect(r.attempts.map((a) => `${a.provider}:${a.logoReference}`)).toEqual(['gpt-image-2:true', 'gpt-image-2:false']);
   });
 
-  test('a Gemini leg runs once, logo-free, on the second pass only', async () => {
+  test('a rejected reference on one leg does not strip it from the next leg', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const mockFetch = jest.fn()
+      .mockReturnValueOnce(err(400, 'unsupported reference'))
+      .mockReturnValueOnce(err(400, 'still no'))
+      .mockReturnValueOnce(ok(OPENAI_OK_BODY));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5', fetchFn: mockFetch, uniformLogo: LOGO });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
+    expect(mockFetch.mock.calls.map((c) => c[0].split('/').pop())).toEqual(['edits', 'generations', 'edits']);
+    expect(r.model).toBe('gpt-image-1.5');
+    expect(r.logoReference).toBe(true);
+  });
+
+  test('a retryable failure (429/5xx/timeout) WITH the reference falls straight through to the next provider — never a second call on the same leg (fallback P1 on ae29283fcc)', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     process.env.GEMINI_API_KEY = 'g-test';
     const mockFetch = jest.fn((url) => (url.includes('openai') ? err(500) : ok(GEMINI_OK_BODY)));
-    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini-image', fetchFn: mockFetch, allowPixelWatermark: true, uniformLogo: LOGO });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gpt-image-1.5,gemini-image', fetchFn: mockFetch, allowPixelWatermark: true, uniformLogo: LOGO });
     const r = await gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true });
     expect(r.model).toBe('gemini-image');
     expect(r.logoReference).toBe(false);
-    const urls = mockFetch.mock.calls.map((c) => c[0]);
-    expect(urls.filter((u) => u.includes('generativelanguage'))).toHaveLength(1);
-    expect(r.attempts.map((a) => `${a.provider}:${a.logoReference}`)).toEqual(['gpt-image-2:true', 'gpt-image-2:false', 'gemini-image:false']);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch.mock.calls.map((c) => c[0].split('/').pop())).toEqual(['edits', 'edits', expect.stringMatching(/generateContent/)]);
+    expect(r.attempts.map((a) => `${a.provider}:${a.logoReference}`)).toEqual(['gpt-image-2:true', 'gpt-image-1.5:true', 'gemini-image:false']);
+    expect(r.prompt).not.toMatch(/reference image/);
   });
 
-  test('a spent budget on the logo pass does not restart the clock for the logo-free pass', async () => {
+  test('the logo-free retry of a rejected leg runs inside the same deadline (a spent budget skips it)', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     let t = 0;
     const now = () => t;
-    const mockFetch = jest.fn(() => { t += 10_000_000; return err(500); });
+    const mockFetch = jest.fn(() => { t += 10_000_000; return err(400, 'rejected'); });
     const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, now, chainBudgetMs: 400_000, uniformLogo: LOGO });
     await expect(gen.generate({ title: 'Test', mode: 'blog-hero', uniformLogo: true })).rejects.toThrow(/all providers failed/);
     expect(mockFetch).toHaveBeenCalledTimes(1);

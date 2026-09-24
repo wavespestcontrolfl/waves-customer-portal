@@ -58,8 +58,10 @@ const { GEMINI_IMAGE_PRO, GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('..
 // 09-23 trade-off), so the real mark rides along as a REFERENCE IMAGE on the
 // OpenAI legs (/v1/images/edits — gpt-image reproduces an attached mark
 // faithfully). Gemini legs take no reference and keep the logo-free line.
-// If every leg fails WITH the reference, the chain runs once more without it
-// inside the same deadline — a rejected reference must not cost the image.
+// A leg that REJECTS the request outright with the reference (a non-retryable
+// 4xx from /v1/images/edits) is retried once logo-free before the chain moves
+// on — a rejected reference must not cost the image. Retryable failures
+// (408/429/5xx, timeouts) fall through to the next provider exactly as before.
 // OPT-IN per call (generate({ uniformLogo: true })): only a caller whose
 // text/logo screen knows to allow the uniform logo (the astro publisher) may
 // attach it — a social tile or newsletter image has no screen to catch the
@@ -641,51 +643,61 @@ class ImageGenerator {
     const logoBuffer = !customPrompt && Buffer.isBuffer(logo) && logo.length && !(plan && plan.style === 'infographic') ? logo : null;
     const logoPrompt = logoBuffer ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: true }) : null;
 
-    // Pass 1 carries the reference on the OpenAI legs; pass 2 (only if pass 1
-    // produced nothing) reruns the chain logo-free under the same deadline.
-    for (const withLogo of (logoPrompt ? [true, false] : [false])) {
-      if (withLogo === false && logoPrompt) logger.warn('[image-generator] every leg failed with the logo reference — retrying the chain without it');
-      for (const slug of this.chain) {
-        const cfg = MODEL_MAP[slug];
-        const size = sizeFor(mode, cfg.api);
-        const timeoutMs = legTimeoutMs(deadline, this._now());
-        // Gemini takes no reference: its prompt is the logo-free one.
-        const legLogo = withLogo && cfg.api === 'openai';
-        const legPrompt = legLogo ? logoPrompt : prompt;
-        let result;
-        if (timeoutMs === null) {
-          // A spent budget is a timing condition, not a verdict on the provider:
-          // retryable so the runner retries the post instead of parking it
-          // (Codex r10 P2 on #3964).
-          result = { skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
-        } else if (cfg.api === 'openai') {
-          const referenceImages = legLogo ? [{ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
-          result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: legPrompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
-        } else if (cfg.api === 'gemini') {
-          if (withLogo) continue; // a Gemini leg runs once, on the logo-free pass
-          const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
-          result = await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs });
-        } else {
-          result = { fatal: true, status: 'unknown_api' };
-        }
-        attempts.push({ provider: slug, logoReference: legLogo, result });
+    const done = (slug, result, legLogo) => {
+      logger.info(`[image-generator] generated via ${slug}${legLogo ? ' with the uniform logo reference' : ''} (${result.mimeType}, ${result.dataUrl.length} chars)`);
+      return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: legLogo ? logoPrompt : prompt, alt, plan: plan || null, logoReference: legLogo };
+    };
+    const budgetSpent = () => ({ skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` });
 
-        if (result.dataUrl) {
-          logger.info(`[image-generator] generated via ${slug}${legLogo ? ' with the uniform logo reference' : ''} (${result.mimeType}, ${result.dataUrl.length} chars)`);
-          return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: legPrompt, alt, plan: plan || null, logoReference: legLogo };
+    for (const slug of this.chain) {
+      const cfg = MODEL_MAP[slug];
+      const size = sizeFor(mode, cfg.api);
+      const timeoutMs = legTimeoutMs(deadline, this._now());
+      // Only OpenAI legs take the reference; Gemini's prompt is the logo-free one.
+      let legLogo = Boolean(logoPrompt) && cfg.api === 'openai';
+      let result;
+      if (timeoutMs === null) {
+        // A spent budget is a timing condition, not a verdict on the provider:
+        // retryable so the runner retries the post instead of parking it
+        // (Codex r10 P2 on #3964).
+        result = budgetSpent();
+      } else if (cfg.api === 'openai') {
+        const referenceImages = legLogo ? [{ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
+        result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: legLogo ? logoPrompt : prompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
+        if (legLogo && result.fatal) {
+          // The request itself was refused with the reference attached (a
+          // non-retryable 4xx): the same leg once more, logo-free, inside the
+          // same deadline. A retryable failure falls through to the next
+          // provider as before — never a second call on the same leg
+          // (pre-push fallback P1 on ae29283fcc).
+          attempts.push({ provider: slug, logoReference: true, result });
+          logger.warn(`[image-generator] ${slug} rejected the request with the logo reference (${result.status} ${result.body || ''}) — retrying this leg without it`);
+          legLogo = false;
+          const retryMs = legTimeoutMs(deadline, this._now());
+          result = retryMs === null
+            ? budgetSpent()
+            : await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs: retryMs });
         }
-        // Skipped / fatal / retryable → next provider. The whole point
-        // of the chain is resilience: a 408/429/5xx on OpenAI should fall
-        // through to Gemini, not abort the chain. Admin and social
-        // callers do not retry, so bailing here used to defeat the
-        // fallback entirely.
-        if (result.skipped) {
-          logger.info(`[image-generator] ${slug} skipped: ${result.reason}`);
-        } else if (result.fatal) {
-          logger.warn(`[image-generator] ${slug} fatal: ${result.status} ${result.body || ''}`);
-        } else if (result.retryable) {
-          logger.warn(`[image-generator] ${slug} retryable: ${result.status || result.error} — trying next provider`);
-        }
+      } else if (cfg.api === 'gemini') {
+        const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
+        result = await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs });
+      } else {
+        result = { fatal: true, status: 'unknown_api' };
+      }
+      attempts.push({ provider: slug, logoReference: legLogo, result });
+
+      if (result.dataUrl) return done(slug, result, legLogo);
+      // Skipped / fatal / retryable → next provider. The whole point
+      // of the chain is resilience: a 408/429/5xx on OpenAI should fall
+      // through to Gemini, not abort the chain. Admin and social
+      // callers do not retry, so bailing here used to defeat the
+      // fallback entirely.
+      if (result.skipped) {
+        logger.info(`[image-generator] ${slug} skipped: ${result.reason}`);
+      } else if (result.fatal) {
+        logger.warn(`[image-generator] ${slug} fatal: ${result.status} ${result.body || ''}`);
+      } else if (result.retryable) {
+        logger.warn(`[image-generator] ${slug} retryable: ${result.status || result.error} — trying next provider`);
       }
     }
 
