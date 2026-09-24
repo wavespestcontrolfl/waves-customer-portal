@@ -9818,6 +9818,13 @@ const CallRecordingProcessor = {
     // The scheduling snapshot from the extraction that drives booking in
     // the current mode — shared with the shadow-mode fallback (codex r11 P1).
     let disputeSchedulingAuthority = null;
+    // The corroborating street (routing-authority extraction) — read by the
+    // standing-card recovery too, so it is declared outside the try.
+    let corroboratingStreet = null;
+    // A standing card from an earlier pass covers the second-address lane
+    // only when its stated street is this pass's street (codex r14 P1).
+    // A card THIS pass filed always covers it.
+    let standingConflictCoversCall = true;
     try {
       const canCompare = !!(customerId && !createdCustomerFromCall && onFileAddress);
       // `detected` is the detector's own verdict; the guards below may
@@ -9837,7 +9844,7 @@ const CallRecordingProcessor = {
       // current mode: with V2 in charge, V1's missing or disagreeing street
       // must not clear a conflict V2 and Address Validation agree on
       // (codex r13 P1). Shadow / kill-switch mode keeps the legacy record.
-      const corroboratingStreet = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
+      corroboratingStreet = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
         ? (v2CanonicalExtraction?.property?.service_address?.street_line_1 || extracted?.address_line1)
         : extracted?.address_line1;
       const corroboratingZip = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
@@ -9866,7 +9873,13 @@ const CallRecordingProcessor = {
       // confirmation of it — manual / self-book / backfill rows count.
       // The canonical unit first (V1's in shadow/kill-switch mode), the V2
       // unit as fallback — the same read the second-address check makes.
-      const statedUnit = extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
+      // The unit follows the same authority as the corroborating street:
+      // V2's in enforce mode (V1 only as a fallback), V1's in shadow /
+      // kill-switch mode — never a hybrid of one's street and the other's
+      // unit (codex r14 P1).
+      const statedUnit = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
+        ? (v2CanonicalExtraction?.property?.service_address?.street_line_2 || extracted?.address_line2 || null)
+        : (extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null);
       let knownIndependentProperty = false;
       if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
         const statedKey = propertyKey({ address_line1: avNormalized.street_line_1, address_line2: statedUnit, city: avNormalized.city, zip: avNormalized.postal_code });
@@ -10070,9 +10083,16 @@ const CallRecordingProcessor = {
         const standing = await db('triage_items')
           .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
           .whereIn('status', ['open', 'in_progress'])
-          .first('id');
+          .first('id', 'payload');
         if (standing) {
           if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
+          // Does the standing card describe THIS pass's address? A
+          // reprocess that moved the call to a different street keeps the
+          // hold, but the second-address lane below must still review the
+          // new street on its own card (codex r14 P1).
+          const standingPayload = typeof standing.payload === 'string' ? (() => { try { return JSON.parse(standing.payload); } catch { return null; } })() : standing.payload;
+          standingConflictCoversCall = !!standingPayload?.stated_street
+            && sameHouseNumberStreet(standingPayload.stated_street, corroboratingStreet || extracted?.address_line1);
           houseNumberDisputed = true;
           if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
           logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
@@ -10262,7 +10282,7 @@ const CallRecordingProcessor = {
         // door, and the house-number card's auto-resolve strips units, so
         // closing it on a line-1 edit would drop the only unit warning
         // (codex r1 P1).
-        const houseNumberCardCoversThis = houseNumberConflictFiled && !callAddsDifferentUnit;
+        const houseNumberCardCoversThis = houseNumberConflictFiled && standingConflictCoversCall && !callAddsDifferentUnit;
         if (!knownProperty && !houseNumberCardCoversThis && onFileStreet && fromCallStreet && locationDiffers && !bridgeNeedsConfirmation.includes('second_service_address')) {
           bridgeNeedsConfirmation.push('second_service_address');
           logger.info(`[call-proc-bridge] ${callSid} service address differs from customer record (possible second property)`);

@@ -767,8 +767,18 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
           on_file_address: decision.approvedPayload?.on_file_address || null,
         },
       }))
+      // An OPEN task for an older ask (a force-reprocess left one standing)
+      // is refreshed with this settlement's window and held ids rather
+      // than silently discarded — otherwise the visits this dispute pulled
+      // would have no task naming them (codex r14 P1). A claimed
+      // (in_progress) task is left to its owner.
       .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-      .ignore();
+      .merge({
+        payload: trx.raw('EXCLUDED.payload'),
+        summary: trx.raw('EXCLUDED.summary'),
+        updated_at: new Date(),
+      })
+      .where('triage_items.status', 'open');
   }
 }
 
