@@ -2719,4 +2719,33 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/converted or closed/);
   });
+
+  // Pre-push Codex P1: checkConsultationLinkSend validated but never
+  // registered the bearer in ctx.bearers, so a verified consultation link
+  // skipped BOTH shared bearerLinkSendCheck protections below — the non-US-
+  // destination rejection and the customer-owner recovery. Registered now
+  // (third `ctx` arg, only when called from bearerLinkSendCheck).
+  test('a consultation-only body to a non-US destination is refused — the bearer is registered even though consultation binds by lead phone, not customer ownership', async () => {
+    wireConsultation();
+    const result = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null, usDestination: false });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/US number/);
+  });
+
+  test('customer-owner recovery runs for a consultation bearer — exactly one live customer on the number rides back as customerId', async () => {
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [{ id: 'c1' }] });
+    expect(await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null }))
+      .toEqual({ ok: true, customerId: 'c1' });
+    // Several live customers on the number: never an arbitrary pick.
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [{ id: 'c1' }, { id: 'c2' }] });
+    const refusal = await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null });
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error).toMatch(/more than one customer/);
+    // None on the number (the ordinary case — a not-yet-converted lead): stays a lead.
+    wireConsultation();
+    mockBuilders.customers = chainBuilder({ rows: [] });
+    expect(await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true });
+  });
 });

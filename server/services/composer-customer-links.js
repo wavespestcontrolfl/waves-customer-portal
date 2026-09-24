@@ -1372,7 +1372,7 @@ async function checkContractLinks(ctx, contracts) {
 // primitive every other bearer check in this file binds by — rather than a
 // customerId/leadId param, so the identical check works unmodified from
 // either route: the consultation lead's OWN phone must be the destination.
-async function checkConsultationLinkSend(body, toLast10) {
+async function checkConsultationLinkSend(body, toLast10, ctx = null) {
   const runs = decodedRuns(body);
   const hosts = ownedPortalHosts();
   const codes = [...new Set(
@@ -1403,6 +1403,13 @@ async function checkConsultationLinkSend(body, toLast10) {
     if (digitsLast10(lead.phone) !== String(toLast10 || '')) {
       return refuseSend('This consultation link belongs to a different lead — remove it before sending.');
     }
+    // Pre-push Codex P1: a verified consultation link is a bearer like any
+    // other — omitted from ctx.bearers, it silently skipped the shared
+    // non-US-destination rejection and customer-owner recovery below. ctx is
+    // only supplied by bearerLinkSendCheck; the standalone call from
+    // admin-leads.js's lead-only send-sms route (no customer/owner recovery
+    // to run there) passes none.
+    if (ctx) ctx.bearers += 1;
   }
   return null;
 }
@@ -1486,7 +1493,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     // checked by destination phone alone (ctx.toLast10), independent of
     // ctx.trustedCustomerId, so this same check works unmodified from the
     // lead-only /admin/leads/:id/send-sms route too (see that route).
-    () => checkConsultationLinkSend(ctx.body, ctx.toLast10),
+    () => checkConsultationLinkSend(ctx.body, ctx.toLast10, ctx),
   ];
   for (const check of checks) {
     const refusal = await check();

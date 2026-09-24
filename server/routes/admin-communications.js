@@ -431,7 +431,15 @@ router.post('/sms', async (req, res, next) => {
       // Composer Insert Link: the contract a freshly inserted (unwritten)
       // signing link belongs to — activated before the provider call.
       contractId,
+      // Consultation's lead-only fallback (no customer row yet): the
+      // resolved lead id, so a real send records the SAME audit trail
+      // POST /admin/leads/:id/send-sms would (pre-push Codex P1) — the
+      // send itself stays on THIS route, never rerouted, so every
+      // interlock below (the Agent Review claim, thread parking, the
+      // auto-send check) still applies.
+      leadId,
     } = req.body;
+    const trustedLeadId = leadId && UUID_RE.test(String(leadId)) ? String(leadId) : null;
     reviewRequestEmail = req.body.reviewRequestEmail === true;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -1233,6 +1241,28 @@ router.post('/sms', async (req, res, next) => {
       }
     } catch (stampErr) {
       logger.warn(`[admin-communications] first-response stamp failed: ${stampErr.message}`);
+    }
+
+    // Consultation's lead-only fallback: no customer resolved, but a
+    // specific lead did (leadId, verified above). The audit row + status
+    // transition POST /admin/leads/:id/send-sms records for its OWN sends
+    // — the SAME function, so the two routes can never drift (pre-push
+    // Codex P1: this send is never rerouted there, only leadId rides
+    // along). Fail-soft, same rule as the stamp above — the text already left.
+    if (!trustedCustomerId && trustedLeadId) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        if (isRealProviderSend(result)) {
+          const { recordLeadSmsOutreach } = require('../services/lead-outreach');
+          await recordLeadSmsOutreach({
+            leadId: trustedLeadId,
+            message: cleanBody,
+            performedBy: req.technician?.name || [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin',
+          });
+        }
+      } catch (outreachErr) {
+        logger.warn(`[admin-communications] lead outreach audit failed: ${outreachErr.message}`);
+      }
     }
 
     let linkedDecisionSettlementComplete = true;

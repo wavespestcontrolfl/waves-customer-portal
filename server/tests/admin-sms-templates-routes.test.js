@@ -276,6 +276,47 @@ describe('admin SMS template routes', () => {
     });
   });
 
+  // Pre-push Codex P1: the earlier detector checked `dropStop(body) !==
+  // body` — dropStop also normalizes whitespace unrelated to the STOP
+  // line (collapses 3+ newlines, trims trailing spaces before a newline,
+  // trims trailing whitespace), so a body with a whitespace-only quirk and
+  // NO STOP line at all still came out "changed" and was wrongly accepted.
+  test('rejects a lead_consultation_link edit whose ONLY difference from a stripped body is whitespace, not the STOP line', async () => {
+    const updateQuery = chain();
+    setDbQueues({
+      sms_templates: [
+        chain({
+          first: {
+            id: 'sms-4',
+            template_key: 'lead_consultation_link',
+            category: 'leads',
+            variables: JSON.stringify(['first_name', 'consultation_url']),
+          },
+        }),
+        updateQuery,
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      // Trailing whitespace before a newline, and no "Reply STOP to opt
+      // out." anywhere — dropStop's whitespace normalization alone made
+      // this differ from its own stripped form under the old heuristic.
+      const res = await fetch(`${baseUrl}/admin/sms-templates/sms-4`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ body: "Hi {first_name}, it's Waves.   \nPick a time: {consultation_url}\n\n\n\nOr reply here." }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toMatch(/Reply STOP to opt out/);
+      expect(updateQuery.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('accepts a lead_consultation_link edit that keeps "Reply STOP to opt out."', async () => {
     const updateQuery = chain();
     setDbQueues({

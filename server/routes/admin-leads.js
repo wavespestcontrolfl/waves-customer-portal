@@ -1357,28 +1357,16 @@ router.post('/:id/send-sms', async (req, res, next) => {
       return res.status(422).json(sendResult);
     }
 
-    // Log activity
-    await db('lead_activities').insert({
-      lead_id: req.params.id,
-      activity_type: 'sms_sent',
-      description: `SMS sent: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
-      performed_by: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
-      metadata: JSON.stringify({ message }),
+    // Audit row + first-response stamp + new→contacted transition — the
+    // SAME function admin-communications.js's POST /sms calls for a
+    // consultation send that resolved a lead with no customer (pre-push
+    // Codex P1), so the two routes can never drift on what this records.
+    const { recordLeadSmsOutreach } = require('../services/lead-outreach');
+    const updated = await recordLeadSmsOutreach({
+      leadId: req.params.id,
+      message,
+      performedBy: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
     });
-
-    // Record first response time if not yet recorded
-    if (lead.response_time_minutes == null) {
-      await leadAttribution.logFirstResponse(req.params.id);
-    }
-
-    // Update status to 'contacted' if currently 'new'
-    if (lead.status === 'new') {
-      const changed = await db('leads').where('id', req.params.id).where('status', 'new').update({ status: 'contacted', updated_at: new Date() });
-      // Funnel-row mirror (monotonic, best-effort).
-      if (changed) await bridgeLeadFunnelStage(req.params.id, 'contacted');
-    }
-
-    const updated = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updated, sent: true, providerMessageId: sendResult.providerMessageId });
   } catch (err) { next(err); }
 });

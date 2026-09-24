@@ -248,6 +248,27 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(result.standalone).toBeUndefined();
   });
 
+  // Pre-push Codex P1: hasStopLine (admin-sms-templates.js) used to detect
+  // the disclosure by diffing against dropStop's STRIP output, which also
+  // normalizes whitespace unrelated to the STOP line — a rendered body
+  // with a whitespace-only quirk and no STOP line at all read as "has the
+  // line". Reused here (this module's own hasStopLine call is the SAME
+  // function), so this render-time re-check inherits the real fix.
+  test('a rendered body with a whitespace-only quirk but NO STOP line is unavailable, not a false pass', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    getTemplate.mockResolvedValue(
+      "Hi Pat, it's Waves.   \nPick a time for us to stop by for a free consultation: https://waves.link/l/abc123\n\n\n\nOr reply here.",
+    );
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toMatch(/Reply STOP to opt out/);
+    expect(result.standalone).toBeUndefined();
+  });
+
   test('missing first name falls back to "there"', async () => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),

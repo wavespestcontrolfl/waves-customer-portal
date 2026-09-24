@@ -89,6 +89,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 0),
   sweepStaleSuggestionsAfterReply: jest.fn(async () => undefined),
   lockSuggestThread: jest.fn(async () => {}),
+  suggestionAnchorIsStale: jest.fn(async () => false),
 }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
 // reply under the park lock. Default to "none in flight" so the send tests
@@ -2503,5 +2504,122 @@ describe('Communications review ask serialization', () => {
       expect(history.lastManualAskAt).not.toHaveBeenCalled();
       expect(locks.runExclusive).not.toHaveBeenCalled();
     });
+  });
+});
+
+// Pre-push Codex P1: an earlier round rerouted a lead-only consultation
+// send to POST /admin/leads/:id/send-sms, bypassing THIS route's own
+// interlocks (the Agent Review draft's atomic claim, pending-suggestion
+// thread parking, the active auto-send check). The send stays on THIS
+// route; leadId rides in the body and the SAME audit trail
+// /admin/leads/:id/send-sms records (lead_activities row, first-response
+// stamp, new→contacted transition) is recorded here too, via the shared
+// server/services/lead-outreach.js.
+describe('leadId in the body (consultation lead-only fallback): the send stays on /sms, records the lead audit trail, interlocks still run', () => {
+  const send = (baseUrl, overrides = {}) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: '+15551234567', body: "Pick a time for us to stop by.", leadId: 'aaaaaaaa-1111-4111-8111-111111111111', ...overrides }),
+  });
+
+  beforeEach(() => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-lead-outreach' });
+  });
+
+  test('records the lead_activities row, first-response stamp, and new→contacted transition — same as POST /admin/leads/:id/send-sms', async () => {
+    const leadActivities = [];
+    let leadUpdated = null;
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', status: 'new', response_time_minutes: null, first_contact_at: new Date(Date.now() - 60000).toISOString() };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        b.update = jest.fn(async (patch) => { leadUpdated = patch; Object.assign(lead, patch); return 1; });
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    // logFirstResponse also writes its own lead_activities row (first_response)
+    // since response_time_minutes started null — both are expected.
+    expect(leadActivities).toContainEqual(expect.objectContaining({ lead_id: lead.id, activity_type: 'sms_sent' }));
+    expect(leadActivities).toContainEqual(expect.objectContaining({ lead_id: lead.id, activity_type: 'first_response' }));
+    expect(leadUpdated).toEqual(expect.objectContaining({ status: 'contacted' }));
+  });
+
+  test('a resolved customerId takes priority — no lead outreach recorded even with leadId also present', async () => {
+    const leadActivities = [];
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ id: 'cust-A', phone: '+15551234567' }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async (row) => { leadActivities.push(row); return [1]; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { customerId: 'cust-A' });
+      expect(res.status).toBe(200);
+    });
+    expect(leadActivities).toEqual([]);
+  });
+
+  test('the Agent Review draft claim interlock still runs for a leadId send — not bypassed by rerouting', async () => {
+    const claimUpdates = [];
+    const lead = { id: 'aaaaaaaa-1111-4111-8111-111111111111', status: 'contacted', response_time_minutes: 5 };
+    db.mockImplementation((table) => {
+      if (table === 'leads') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({ ...lead }));
+        return b;
+      }
+      if (table === 'lead_activities') {
+        const b = makeUniversalBuilder();
+        b.insert = jest.fn(async () => [1]);
+        return b;
+      }
+      // The verify query joins agent_decisions AS ad — a distinct table
+      // string from the plain 'agent_decisions' the claim/settle updates use.
+      if (table === 'agent_decisions as ad') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => ({
+          id: 'dec-1', customer_id: null, sms_log_id: null,
+          suggested_message: "Pick a time for us to stop by.",
+          inbound_created_at: null, sms_from_phone: '+15551234567', sms_to_phone: null, customer_phone: null,
+        }));
+        return b;
+      }
+      if (table === 'agent_decisions') {
+        const b = makeUniversalBuilder();
+        b.update = jest.fn(async (patch) => { claimUpdates.push(patch); return 1; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {
+        agentDecisionId: 'dec-1',
+        agentDraft: "Pick a time for us to stop by.",
+      });
+      expect(res.status).toBe(200);
+    });
+    // The atomic claim (pending_review -> scheduled) ran BEFORE the
+    // provider call — proof the interlock was not skipped for this send.
+    expect(claimUpdates.some((u) => u.status === 'scheduled')).toBe(true);
+    // ...and settled (scheduled/pending_review -> accepted) after a real send.
+    expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
   });
 });

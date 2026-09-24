@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-// Pre-push Codex P1: the consultation-link lane's lead-only send (no
-// resolved customer) routes through POST /admin/leads/:id/send-sms instead
-// of the generic /admin/communications/sms — the audit-trail fix's own
-// regression. This file proves attachments and the operator-picked
-// fromNumber reach that route the same way they reach the generic one,
-// instead of silently disappearing while the composer reports success.
+// Pre-push Codex P1: an earlier round rerouted the consultation-link lane's
+// lead-only send (no resolved customer) to POST /admin/leads/:id/send-sms,
+// bypassing THIS route's own interlocks (the Agent Review draft's atomic
+// claim, pending-suggestion thread parking, the active auto-send check).
+// Reverted: the send stays on /admin/communications/sms, carrying `leadId`
+// in the body so the server records the same lead audit trail via a shared
+// helper. This file proves attachments and the operator-picked fromNumber
+// reach that route alongside leadId, instead of the send being rerouted.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
@@ -40,7 +42,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); window.history.replaceState({}, "", "/"); });
 
-it("routes the lead-only send through /admin/leads/:id/send-sms carrying fromNumber, mediaUrls and mediaAttachments", async () => {
+it("keeps the lead-only consultation send on /admin/communications/sms, carrying leadId, fromNumber, mediaUrls and mediaAttachments — never rerouted", async () => {
   const attachment = { url: "https://example.invalid/qa.png", key: "qa/image", fileName: "qa.png", size: 4, mimeType: "image/png", attachmentToken: "synthetic-signed-token" };
   responses["/admin/communications/customer-link"] = {
     kind: "consultation",
@@ -51,7 +53,7 @@ it("routes the lead-only send through /admin/leads/:id/send-sms carrying fromNum
     leadId: "lead-99",
   };
   responses["/admin/communications/attach"] = { attachments: [attachment] };
-  responses["/admin/leads/lead-99/send-sms"] = { sent: true, providerMessageId: "SMbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
+  responses["/admin/communications/sms"] = { sent: true, providerMessageId: "SMbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
 
   const onSent = vi.fn();
   const { container } = render(<SmsTab active onSent={onSent} />, { wrapper: MemoryRouter });
@@ -74,17 +76,19 @@ it("routes the lead-only send through /admin/leads/:id/send-sms carrying fromNum
 
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  await waitFor(() => expect(requests("/admin/leads/lead-99/send-sms")).toHaveLength(1));
-  const sentBody = bodyOf("/admin/leads/lead-99/send-sms");
+  await waitFor(() => expect(requests("/admin/communications/sms")).toHaveLength(1));
+  const sentBody = bodyOf("/admin/communications/sms");
   expect(sentBody).toMatchObject({
     to: "9415551234",
+    leadId: "lead-99",
     fromNumber: "+19412975749",
     mediaUrls: [attachment.url],
     mediaAttachments: [attachment],
   });
-  expect(sentBody.message).toContain("Pick a time");
-  // Never the generic route for this send — the whole point of the fix.
-  expect(requests("/admin/communications/sms")).toHaveLength(0);
+  expect(sentBody.customerId).toBeUndefined();
+  expect(sentBody.body).toContain("Pick a time");
+  // Never rerouted to the leads route — the whole point of the fix.
+  expect(requests("/admin/leads/lead-99/send-sms")).toHaveLength(0);
   // No `customer` prop here (this is the standalone Communications inbox,
   // not a Customer 360 panel), so a successful send reloads the inbox list
   // rather than calling onSent — the provider-accepted toast is what

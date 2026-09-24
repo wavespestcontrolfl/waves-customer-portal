@@ -6,13 +6,6 @@ const { formatSmsTemplateVars } = require('../utils/sms-time-format');
 const { TEMPLATES: CLEAN_DEFAULT_SMS_TEMPLATES } = require('../models/migrations/20260514000002_tighten_sms_template_copy');
 const SmsTemplateVariants = require('../services/sms-template-variants');
 const { auditNotificationTemplateIssue } = require('../services/audit-log');
-// Reuses the STOP-line sweep's own strip helper as the detector (docs/
-// sms-stop-line-policy.md, "existing test/helper" — server/tests/
-// stop-line-off-remaining-transactional-migration.test.js imports this
-// same export) rather than a fresh copy of the literal 'Reply STOP to opt
-// out.' — same require-from-a-migration pattern this file already uses
-// for CLEAN_DEFAULT_SMS_TEMPLATES above.
-const { _dropStop: dropStop } = require('../models/migrations/20260911000010_stop_line_off_remaining_transactional');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -49,15 +42,22 @@ function extractTemplatePlaceholders(body) {
   return [...placeholders];
 }
 
-// A body "carries" the disclosure iff stripping it actually removes
-// something — dropStop is the sweep migrations' own regex
-// (/\n{1,2}Reply STOP to opt out\.?/ / / ?Reply STOP to opt out\.?/), so
-// this stays byte-identical to what those migrations (and their pinning
-// test) already treat as "has the line" — never a second, independently
-// maintained copy of the literal.
+// The keep-list's canonical STOP-line literal (docs/sms-stop-line-policy.md)
+// — the SAME pattern server/tests/stop-line-off-remaining-transactional-
+// migration.test.js's own pinning assertion uses
+// (`expect(templateRows[2].body).toMatch(/Reply STOP to opt out\./)`), so
+// this detector and that pinning test can never disagree about what "has
+// the line" means. Matched directly against the body (pre-push Codex P1):
+// the earlier version used the sweep migrations' dropStop STRIP function
+// and checked `dropStop(body) !== body`, but dropStop ALSO normalizes
+// whitespace unrelated to the STOP line (3+ newlines collapse to 2,
+// trailing spaces before a newline are trimmed, trailing whitespace is
+// trimmed) — a body with a stray extra blank line and NO STOP line at all
+// still came out different, a false positive that let the disclosure be
+// silently dropped.
+const STOP_LINE_RE = /Reply STOP to opt out\./;
 function hasStopLine(body) {
-  const raw = String(body || '');
-  return dropStop(raw) !== raw;
+  return STOP_LINE_RE.test(String(body || ''));
 }
 // Template keys whose keep-list membership (docs/sms-stop-line-policy.md)
 // makes "Reply STOP to opt out." a REQUIRED literal, not just a default —
