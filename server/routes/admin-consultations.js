@@ -68,6 +68,8 @@ router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmi
       quoteNotes,
       followUpAt,
       recordedBy: req.technician?.name || req.technicianId || null,
+      actingTechnicianId: req.technicianId || null,
+      actingIsAdmin: req.techRole === 'admin',
     }, { trx: db });
 
     res.json({ outcome: saved });

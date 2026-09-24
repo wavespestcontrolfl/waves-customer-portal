@@ -281,18 +281,35 @@ function isConsultationVisit(svcRow) {
 // schedule-appointment: an assessment booking claims the lead by stamping
 // leads.customer_id, so the newest non-deleted lead on that customer is the
 // link — best-effort, never blocks the outcome write.
+// The lead a consultation belongs to (Codex #4710 P2): the lead whose own
+// appointment_scheduled activity names this visit, else the customer's
+// newest lead created on/before the visit was booked, else the newest lead —
+// never simply the customer's most recent inquiry, which could be a later,
+// unrelated one (and would skew the per-source breakdown).
 async function deriveLinkage(svcRow, database) {
   const customerId = svcRow.customer_id || null;
   const technicianId = svcRow.technician_id || null;
   let leadId = null;
   if (customerId) {
     try {
-      const leadRow = await database('leads')
-        .where({ customer_id: customerId })
-        .whereNull('deleted_at')
-        .orderBy('created_at', 'desc')
-        .first('id');
-      leadId = leadRow ? leadRow.id : null;
+      const booked = await database('lead_activities as la')
+        .join('leads as l', 'l.id', 'la.lead_id')
+        .where('l.customer_id', customerId)
+        .whereNull('l.deleted_at')
+        .where('la.activity_type', 'appointment_scheduled')
+        .whereRaw("la.metadata->>'appointmentId' = ?", [String(svcRow.id)])
+        .orderBy('la.created_at', 'desc')
+        .first('la.lead_id');
+      if (booked?.lead_id) {
+        leadId = booked.lead_id;
+      } else {
+        const base = () => database('leads').where({ customer_id: customerId }).whereNull('deleted_at');
+        const beforeBooking = svcRow.created_at
+          ? await base().where('created_at', '<=', svcRow.created_at).orderBy('created_at', 'desc').first('id')
+          : null;
+        const leadRow = beforeBooking || await base().orderBy('created_at', 'desc').first('id');
+        leadId = leadRow ? leadRow.id : null;
+      }
     } catch (err) {
       logger.warn(`[consultation-outcomes] lead lookup failed for customer ${customerId}: ${err.message}`);
     }
@@ -313,7 +330,17 @@ async function deriveLinkage(svcRow, database) {
 function isValidFollowUpAt(followUpAt) {
   if (followUpAt == null || followUpAt === '') return true; // optional — not a validation failure
   const parsed = parseETDateTime(followUpAt);
-  return parsed instanceof Date && !Number.isNaN(parsed.getTime());
+  if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) return false;
+  // A naive wall-clock value must round-trip (Codex #4710 P2): parsing
+  // normalizes overflow ("2026-02-31T09:00" → March 3, "T99:99" → days
+  // later) and a nonexistent DST wall time shifts an hour, so the ET
+  // date/hour/minute the Date lands on must equal what was typed.
+  const naive = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::\d{2})?$/.exec(String(followUpAt).trim());
+  if (!naive) return true;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(parsed).map((p) => [p.type, p.value]));
+  return etDateString(parsed) === naive[1] && parts.hour === naive[2] && parts.minute === naive[3];
 }
 
 function defaultFollowUpAt(outcome, followUpAt) {
@@ -675,6 +702,9 @@ async function recordOutcome(params = {}, { trx } = {}) {
     scheduledServiceId, outcome, lostReason = null, interests = [],
     quotedAmount = null, quotedCadence = null, quoteNotes = null,
     followUpAt = null, recordedBy = null,
+    // The acting technician (route-supplied) — the ownership check re-runs
+    // under the lock, atomic with the write (Codex #4710 P2). Admins skip it.
+    actingTechnicianId = null, actingIsAdmin = false,
   } = params;
 
   if (!scheduledServiceId) throw makeError('scheduledServiceId is required', 400, 'VALIDATION');
@@ -745,6 +775,22 @@ async function recordOutcome(params = {}, { trx } = {}) {
   // against the first side's committed state.
   const txResult = database.transaction(async (locked) => {
     await lockCustomerRow(locked, customerId);
+
+    // The visit re-read under the lock, so both guards are atomic with the
+    // write below (Codex #4710 P2 x2): a consultation that never happened
+    // (no-show / cancelled / skipped) cannot be re-opened by a late or
+    // concurrent closeout, and a technician reassigned off the visit
+    // between the route's check and this write cannot overwrite it.
+    const liveVisit = await locked('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .forNoKeyUpdate()
+      .first('status', 'technician_id');
+    if (liveVisit && DEAD_CONSULTATION_STATUSES.includes(liveVisit.status)) {
+      throw makeError('That consultation was marked no-show, cancelled or skipped — its outcome cannot be recorded', 409, 'CONSULTATION_NOT_HELD');
+    }
+    if (actingTechnicianId && !actingIsAdmin && String(liveVisit?.technician_id || '') !== String(actingTechnicianId)) {
+      throw makeError('Not assigned to this consultation', 403, 'NOT_ASSIGNED');
+    }
 
     // Atomic upsert guard (waves-db-adjacent — no read-then-write TOCTOU
     // against markWonForCustomer's concurrent reconciliation): the conflict

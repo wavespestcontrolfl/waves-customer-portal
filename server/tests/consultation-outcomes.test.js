@@ -661,9 +661,48 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
       estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: new Date('2026-09-15T00:00:00Z') }],
       leads: [],
     });
+    // Codex #4710 P2: refused outright now — a no-showed consultation's
+    // outcome cannot be re-recorded at all, so it can never be won either.
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_NOT_HELD' });
+    expect(fakeDb.__store.consultation_outcomes).toHaveLength(0);
+  });
+
+  test('Codex #4710 P2: the outcome keeps the lead that existed when the consultation was booked, not a later unrelated inquiry', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: SCHEDULED_DATE, created_at: new Date('2026-09-01T12:00:00Z') },
+      ],
+      leads: [
+        { id: 'lead-original', customer_id: 'cust-1', deleted_at: null, created_at: new Date('2026-08-30T12:00:00Z') },
+        { id: 'lead-later', customer_id: 'cust-1', deleted_at: null, created_at: new Date('2026-09-15T12:00:00Z') },
+      ],
+    });
     const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.lead_id).toBe('lead-original');
+  });
+
+  test('Codex #4710 P2: a technician reassigned off the visit cannot write its outcome (checked under the lock); an admin can', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-new', scheduled_date: SCHEDULED_DATE },
+      ],
+      leads: [],
+    });
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', actingTechnicianId: 'tech-old' }, { trx: fakeDb }))
+      .rejects.toMatchObject({ statusCode: 403, code: 'NOT_ASSIGNED' });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', actingTechnicianId: 'admin-1', actingIsAdmin: true }, { trx: fakeDb });
     expect(saved.outcome).toBe('warm');
   });
+
+  test.each(['2026-02-31T09:00', '2026-09-25T99:99', '2026-03-08T02:30'])(
+    'Codex #4710 P2: an impossible follow-up wall time (%s) is rejected, never normalized onto another day',
+    async (followUpAt) => {
+      const fakeDb = makeFakeDb({ scheduled_services: [], leads: [] });
+      await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm', followUpAt }, { trx: fakeDb }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION' });
+    },
+  );
 
   test('local audit P1: a converted lead whose only booking is a free Estimate Visit is NOT a win — converted_at alone is never evidence', async () => {
     const fakeDb = seededDb({
