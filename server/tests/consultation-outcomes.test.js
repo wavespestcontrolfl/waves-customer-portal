@@ -723,6 +723,23 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
     expect(saved.won_via).toBe('office_booking');
   });
 
+  test('P1 :761 regression — a booking created at 21:00 ET (01:00Z the NEXT calendar day) on the visit\'s own day is still same-day evidence (etDateString, not toDateOnlyString, reads a TIMESTAMP\'s calendar day)', async () => {
+    // 2026-09-10 21:00 America/New_York (EDT, UTC-4) serializes as
+    // 2026-09-11T01:00:00Z — a DIFFERENT UTC calendar day than the visit's
+    // own SCHEDULED_DATE ('2026-09-10'). The pre-fix isCloseoutEvidence ran
+    // this TIMESTAMP through toDateOnlyString (the UTC-calendar-day reader
+    // meant for DATE columns), reading '2026-09-11' and missing the match —
+    // every booking made after ~8pm ET silently lost its closeout credit.
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.push({
+      id: 'visit-late-close', service_type: 'Quarterly Pest Control', customer_id: 'cust-1',
+      created_at: new Date('2026-09-11T01:00:00Z'), status: 'confirmed', technician_id: 'tech-1',
+    });
+    const saved = await recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb });
+    expect(saved.outcome).toBe('won');
+    expect(saved.won_via).toBe('closeout_booking');
+  });
+
   test('P1-2: evidence dated in the FUTURE relative to `now` does not count', async () => {
     // Sanity companion to the markWonForCustomer future-consultation test
     // below — the upper bound applies to evidence dates here too.
@@ -822,7 +839,7 @@ describe('markWonForCustomer', () => {
       .resolves.toBe(0);
   });
 
-  test('atomic guard (P1 fix): the outcome + 90-day window are one UPDATE statement, not a SELECT-candidates-then-update TOCTOU', async () => {
+  test('atomic guard (round 12 shape, P1 :774): a SELECT gathers candidate rows, but each row is only ever committed by its OWN guarded UPDATE — never a batch decision applied blind', async () => {
     const fakeDb = seededDb();
     const tableCalls = [];
     const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
@@ -830,22 +847,27 @@ describe('markWonForCustomer', () => {
 
     const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
     expect(count).toBe(2);
-    // Exactly one touch of consultation_outcomes (the atomic UPDATE) — the
-    // pre-fix version made a SEPARATE `select('id','scheduled_service_id')`
-    // read of consultation_outcomes before ever writing, which is the
-    // TOCTOU window a concurrent recordOutcome/markNoShow could land in.
-    // scheduled_services is never queried as a standalone step either — its
-    // 90-day check rides inside the UPDATE's WHERE as a subquery.
-    expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(1);
+    // One SELECT (the join-aliased 'consultation_outcomes as co') gathers
+    // the open in-window candidates; already-lost/outside-window rows are
+    // filtered out of THAT query (its own WHERE, not a later JS check) so
+    // they never reach an UPDATE attempt at all. Then exactly one guarded
+    // UPDATE per row the SELECT found (2 open rows here — co-recent,
+    // co-lead) — the outcome IN (warm,cold) guard rides in EACH of those
+    // UPDATEs' own WHERE, so a row that resolved between the SELECT and
+    // its write is provably untouched (a 0-row update), never a stale
+    // overwrite. scheduled_services is never queried as a standalone step
+    // — its data rides on the SELECT's own join and each UPDATE's window
+    // subquery.
+    expect(tableCalls.filter((n) => n === 'consultation_outcomes as co')).toHaveLength(1);
+    expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(2);
     expect(tableCalls.filter((n) => n === 'scheduled_services')).toHaveLength(0);
     // 'customers' first (P1-A round 5's row lock), then leads, then the
-    // atomic UPDATE.
-    expect(tableCalls).toEqual(['customers', 'leads', 'consultation_outcomes']);
+    // SELECT, then the two per-row UPDATEs.
+    expect(tableCalls).toEqual(['customers', 'leads', 'consultation_outcomes as co', 'consultation_outcomes', 'consultation_outcomes']);
 
     // And the guard is real, not just "fewer calls": a row whose outcome is
-    // NOT warm/cold at UPDATE time is provably excluded by the same
-    // statement (see the 'leaves older/lost rows alone' case above) —
-    // there is no separate JS branch that could diverge from the WHERE.
+    // NOT warm/cold is provably excluded (never even reaches the SELECT —
+    // see the 'leaves older/lost rows alone' case above).
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
     expect(byId['co-already-lost'].outcome).toBe('lost');
   });
@@ -887,9 +909,9 @@ describe('markWonForCustomer', () => {
   });
 });
 
-// ---- markWonForCustomer — P1 :923 closeout_booking provenance (round 12) --
+// ---- markWonForCustomer — P1 :774/:923 per-row closeout_booking provenance (round 12) --
 
-describe('markWonForCustomer — P1 :923 closeout_booking provenance pre-check (round 12)', () => {
+describe('markWonForCustomer — per-row closeout_booking provenance (round 12, P1 :774 fixing the P1 :923 pre-check)', () => {
   function seededDb() {
     return makeFakeDb({
       scheduled_services: [
@@ -902,7 +924,7 @@ describe('markWonForCustomer — P1 :923 closeout_booking provenance pre-check (
     });
   }
 
-  test('evidence created same-day, same-technician as the customer\'s own open visit sets won_via closeout_booking for the batch UPDATE', async () => {
+  test('evidence created same-day, same-technician as the customer\'s own open visit sets won_via closeout_booking on that row\'s own UPDATE', async () => {
     const fakeDb = seededDb();
     const count = await markWonForCustomer('cust-1', {
       via: 'office_booking',
@@ -939,17 +961,58 @@ describe('markWonForCustomer — P1 :923 closeout_booking provenance pre-check (
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
   });
 
-  test('no evidence hint passed (backward compatible with every pre-round-12 caller) — won_via is exactly `via`, and the pre-check query never runs', async () => {
+  test('P1 :761 regression — a booking made at 21:00 ET (01:00Z the NEXT calendar day) on the visit\'s own day still reads as the same ET day, so it IS closeout evidence', async () => {
+    // 2026-09-10 21:00 America/New_York (EDT, UTC-4) is 2026-09-11 01:00Z —
+    // a different UTC calendar day than the visit's own scheduled_date.
+    // The pre-fix code ran evidenceCreatedAt through toDateOnlyString (the
+    // UTC-calendar-day reader for DATE columns), which read this as
+    // 2026-09-11 and silently lost the closeout credit for every booking
+    // made after 8pm ET. etDateString reads its correct ET day, 2026-09-10,
+    // matching the visit.
     const fakeDb = seededDb();
-    const tableCalls = [];
-    const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
-    spyDb.transaction = async (fn) => fn(spyDb);
-    await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: new Date('2026-09-10T20:00:00Z') });
+    await markWonForCustomer('cust-1', {
+      via: 'office_booking',
+      trx: fakeDb,
+      now: new Date('2026-09-11T02:00:00Z'),
+      evidenceCreatedAt: new Date('2026-09-11T01:00:00Z'), // 2026-09-10 21:00 ET
+      evidenceTechnicianId: 'tech-1',
+    });
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('closeout_booking');
+  });
+
+  test('no evidence hint passed (backward compatible with every pre-round-12 caller) — won_via is exactly `via` on every row', async () => {
+    const fakeDb = seededDb();
+    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').won_via).toBe('office_booking');
-    // Matches the existing atomic-guard test's expectation of exactly one
-    // touch of consultation_outcomes when no evidence hint is passed — the
-    // pre-check only adds a query when there's actually a hint to check.
-    expect(tableCalls.filter((n) => n === 'consultation_outcomes as co')).toHaveLength(0);
+  });
+
+  test('P1 :774 — two open outcomes for the same customer (last week\'s and today\'s); a same-day booking by today\'s technician credits ONLY today\'s row as closeout_booking — last week\'s wins as office_booking, not copied', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-last-week', scheduled_date: '2026-09-03', technician_id: 'tech-1' },
+        { id: 'visit-today', scheduled_date: '2026-09-10', technician_id: 'tech-1' },
+      ],
+      leads: [],
+      consultation_outcomes: [
+        { id: 'co-last-week', scheduled_service_id: 'visit-last-week', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
+        { id: 'co-today', scheduled_service_id: 'visit-today', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
+      ],
+    });
+
+    const count = await markWonForCustomer('cust-1', {
+      via: 'office_booking',
+      trx: fakeDb,
+      now: new Date('2026-09-10T20:00:00Z'),
+      evidenceCreatedAt: new Date('2026-09-10T15:00:00Z'), // today, by tech-1 — matches ONLY visit-today
+      evidenceTechnicianId: 'tech-1',
+    });
+
+    expect(count).toBe(2); // both are still within the 90-day window and both win
+    const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
+    expect(byId['co-today'].outcome).toBe('won');
+    expect(byId['co-today'].won_via).toBe('closeout_booking');
+    expect(byId['co-last-week'].outcome).toBe('won');
+    expect(byId['co-last-week'].won_via).toBe('office_booking'); // NOT closeout_booking — the pre-fix P1 :774 bug
   });
 });
 

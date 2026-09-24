@@ -362,8 +362,19 @@ function isQualifyingSaleBooking(row) {
 // office_booking/estimate_accept values unconditionally.
 function isCloseoutEvidence(evidenceCreatedAt, evidenceTechnicianId, visitScheduledDateStr, visitTechnicianId) {
   if (!evidenceCreatedAt || !evidenceTechnicianId || !visitTechnicianId) return false;
+  // round 12 fix (codex P1 :761): evidenceCreatedAt is a TIMESTAMP (an
+  // instant, e.g. scheduled_services.created_at) — it must go through
+  // etDateString to read its ET calendar day, exactly like every other
+  // timestamp this file compares to a day (accepted_at, converted_at
+  // above). Running a TIMESTAMP through toDateOnlyString (the DATE-column
+  // reader — see its own comment) instead reads the UTC calendar day, so a
+  // booking made at, say, 9pm ET (already past midnight UTC) compared as
+  // the day AFTER the visit and silently lost its closeout credit.
+  // visitScheduledDateStr stays exactly as passed in — it is always
+  // already a DATE-column string (toDateOnlyString'd by the caller), never
+  // run through etDateString here.
   return String(evidenceTechnicianId) === String(visitTechnicianId)
-    && toDateOnlyString(evidenceCreatedAt) === visitScheduledDateStr;
+    && etDateString(evidenceCreatedAt) === visitScheduledDateStr;
 }
 
 /**
@@ -699,6 +710,13 @@ async function recordOutcome(params = {}, { trx } = {}) {
  * inside a SAVEPOINT on the caller's `trx` so a failure here can never abort
  * the booking/accept that is reconciling. Returns the count won (0 on any
  * failure or no match) — never throws.
+ *
+ * won_via provenance (round 12, P1 :774): optional evidenceCreatedAt/
+ * evidenceTechnicianId (the booking/accept row that triggered this call)
+ * decide 'closeout_booking' vs `via` PER open row, against THAT row's own
+ * visit (isCloseoutEvidence) — never once for the whole batch. Each row
+ * wins through its own guarded UPDATE (see the loop below); no row is a
+ * bulk-decided value copied onto every other open row for the customer.
  */
 async function markWonForCustomer(customerId, {
   via, trx, now = new Date(), evidenceCreatedAt = null, evidenceTechnicianId = null,
@@ -741,59 +759,71 @@ async function markWonForCustomer(customerId, {
       // median_days_to_close negative. Bounds the window on BOTH sides.
       const nowDateStr = etDateString(now);
 
-      // Provenance pre-check (round 12, P1 :923): a direct hook only knows
-      // the ONE booking/accept row that just closed, not which (if any) of
-      // the customer's open consultation_outcomes rows it is reconciling —
-      // that's still decided entirely by the atomic UPDATE's own WHERE
-      // below. This SELECT only picks the VALUE written into won_via for
-      // the whole batch: closeout_booking when the evidence (the booking
-      // that just closed) was created on the SAME calendar day and by the
-      // SAME technician as one of those open rows' own visit — i.e. the
-      // technician booked it themselves, at the door, during their own
-      // visit — matching attemptEvidenceBasedWin's isCloseoutEvidence rule
-      // for the sweep. No match, or no evidence hint passed, keeps `via`
-      // as given (office_booking/estimate_accept). This is a read before
-      // the write, but it never governs row SELECTION (no TOCTOU on P1-A's
-      // guarantee) — only which of two known-safe won_via strings the one
-      // UPDATE below writes into every row it touches.
-      let wonVia = via;
-      if (evidenceCreatedAt && evidenceTechnicianId) {
-        const evidenceDateStr = toDateOnlyString(evidenceCreatedAt);
-        const closeoutMatch = await sp('consultation_outcomes as co')
-          .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
-          .whereIn('co.outcome', ['warm', 'cold'])
-          .where(function matchCustomerOrItsLeads() {
-            this.where('co.customer_id', customerId);
-            if (leadIds.length) this.orWhereIn('co.lead_id', leadIds);
-          })
-          .where('ss.scheduled_date', '>=', cutoff)
-          .where('ss.scheduled_date', '<=', nowDateStr)
-          .where('ss.technician_id', evidenceTechnicianId)
-          .where('ss.scheduled_date', evidenceDateStr)
-          .first('co.id');
-        if (closeoutMatch) wonVia = 'closeout_booking';
-      }
-
-      // One atomic UPDATE: the outcome guard (only an open warm/cold row can
-      // win) and the [90-day-ago, today] window (a subquery against
-      // scheduled_services, not a prior SELECT) both live in the same
-      // statement's WHERE, so nothing can flip a row's outcome between
-      // "read" and "write" — there is no read. The win count is the rows
-      // this UPDATE actually touched, never a pre-computed candidate list.
-      const updated = await sp('consultation_outcomes')
-        .whereIn('outcome', ['warm', 'cold'])
+      // Round 12, P1 :774: won_via is decided PER ROW, against THAT row's
+      // own visit — not once for the whole batch. A single bulk-wide
+      // decision (the pre-round-12 shape: one SELECT deciding one wonVia,
+      // then one UPDATE writing it into every open row) let a same-day
+      // booking credit a consultation from WEEKS earlier as "won at the
+      // door" merely because it shared the customer and was also still
+      // open — wrong provenance on every row but the one the booking
+      // actually closed. This SELECT gathers the customer's open in-window
+      // rows joined to each row's own visit (scheduled_date + technician_id
+      // — exactly what isCloseoutEvidence needs); it is not itself a win —
+      // every row it finds is committed only by its OWN guarded UPDATE
+      // below, which re-checks outcome IN (warm, cold) at write time, so a
+      // row this SELECT sees can never be double-won or overwrite a
+      // concurrent resolution (the same no-TOCTOU guarantee the old single
+      // UPDATE gave, now per row instead of per batch — mirrors how
+      // reconcileOpenConsultationOutcomes' sweep already SELECTs candidate
+      // rows and then guards each one's own UPDATE separately).
+      const openRows = await sp('consultation_outcomes as co')
+        .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
+        .whereIn('co.outcome', ['warm', 'cold'])
         .where(function matchCustomerOrItsLeads() {
-          this.where('customer_id', customerId);
-          if (leadIds.length) this.orWhereIn('lead_id', leadIds);
+          this.where('co.customer_id', customerId);
+          if (leadIds.length) this.orWhereIn('co.lead_id', leadIds);
         })
-        .whereIn('scheduled_service_id', function liveVisits() {
-          this.select('id').from('scheduled_services')
-            .where('scheduled_date', '>=', cutoff)
-            .where('scheduled_date', '<=', nowDateStr);
-        })
-        .update({ outcome: 'won', won_at: now, won_via: wonVia, updated_at: now })
-        .returning('id');
-      winCount = updated.length;
+        .where('ss.scheduled_date', '>=', cutoff)
+        .where('ss.scheduled_date', '<=', nowDateStr)
+        .select('co.id as outcome_id', 'ss.scheduled_date', 'ss.technician_id');
+
+      for (const row of openRows) {
+        // isCloseoutEvidence compares the evidence's TIMESTAMP (via
+        // etDateString) against THIS row's own visit DATE (toDateOnlyString
+        // — see its own comment on why a DATE column must never go through
+        // etDateString) and THIS row's own visit's technician — never a
+        // different open row's. No evidence hint passed (the common case:
+        // estimate-converter.js/proposal-win.js never pass one) always
+        // returns false, so wonVia is exactly `via`, unchanged from before
+        // round 12.
+        const wonVia = isCloseoutEvidence(
+          evidenceCreatedAt, evidenceTechnicianId, toDateOnlyString(row.scheduled_date), row.technician_id,
+        ) ? 'closeout_booking' : via;
+        // Same WHERE shape the old single bulk UPDATE used — outcome guard
+        // + customer/lead match + live-visit window — scoped to this ONE
+        // row by id. A row that resolved (won/lost) between the SELECT
+        // above and this write is provably untouched: a 0-row update, not
+        // a stale overwrite.
+        // Each row's UPDATE lands before the next is attempted
+        // (savepoint-serial, not a real bottleneck: this is a best-effort
+        // per-customer reconcile over at most a handful of open rows, not
+        // a bulk sweep).
+        const wonRow = await sp('consultation_outcomes')
+          .where({ id: row.outcome_id })
+          .whereIn('outcome', ['warm', 'cold'])
+          .where(function matchCustomerOrItsLeads() {
+            this.where('customer_id', customerId);
+            if (leadIds.length) this.orWhereIn('lead_id', leadIds);
+          })
+          .whereIn('scheduled_service_id', function liveVisits() {
+            this.select('id').from('scheduled_services')
+              .where('scheduled_date', '>=', cutoff)
+              .where('scheduled_date', '<=', nowDateStr);
+          })
+          .update({ outcome: 'won', won_at: now, won_via: wonVia, updated_at: now })
+          .returning('id');
+        if (wonRow.length) winCount += 1;
+      }
     });
     return winCount;
   } catch (err) {
