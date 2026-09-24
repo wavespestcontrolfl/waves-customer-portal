@@ -9684,7 +9684,19 @@ const InvoiceService = {
       for (const invId of reopenedIds) {
         try {
           const FollowUps = require("./invoice-followups");
-          await FollowUps.resumeSequence(invId);
+          // ADMIN-BUG-R54: the coverage settle stops the sequence via
+          // stopInvoiceFollowupSequence(id, "annual_prepay_covered") →
+          // stopSequence, whose preservePriorStop keeps an ALREADY-stopped
+          // row's original reason/admin id intact under that system stamp —
+          // so a row an admin explicitly stopped before coverage settled it
+          // reaches here still admin-attributed. resumeSequence itself has
+          // no status guard (the operator's own /followup/resume route
+          // needs it to lift an admin stop on request), so this reopen may
+          // only lift the stop the settlement itself created, never an
+          // admin's.
+          if (await FollowUps.canSystemResumeInvoice(invId)) {
+            await FollowUps.resumeSequence(invId);
+          }
           await FollowUps.scheduleForInvoice(invId);
         } catch (err) {
           logger.warn(`[invoice] annual-prepay reopen follow-up re-arm failed for ${invId}: ${err.message}`);

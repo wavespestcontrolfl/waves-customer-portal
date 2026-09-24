@@ -1370,6 +1370,39 @@ async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
   });
 }
 
+// System settlement stops that resumeSequence's two AUTOMATIC re-arm
+// callers (reverse-prepaid, annual-prepay coverage reopen) may lift on
+// their own — never an admin's stop, and never a payment-plan stop that
+// merely rode along under one of these reasons. stopSequence's
+// preservePriorStop (:1636-1639) keeps the ORIGINAL reason/admin id on a
+// row that was already 'stopped' before the system stop landed, so a row
+// only carries one of these exact reasons with no admin id when the
+// system stop really was the first/only stop — the same fence
+// scheduleForInvoice's own isSystemVoidStop applies for the unvoid re-arm
+// (:385-388).
+const SYSTEM_SETTLEMENT_STOP_REASONS = ['annual_prepay_covered'];
+
+function canSystemResume(seq) {
+  if (!seq) return false;
+  if (seq.status === 'completed') return true;
+  return seq.status === 'stopped'
+    && !seq.stopped_by_admin_id
+    && SYSTEM_SETTLEMENT_STOP_REASONS.includes(String(seq.stopped_reason || ''));
+}
+
+// Read-then-decide helper for the two system re-arm callers: they must NOT
+// call resumeSequence at all when the row is an admin (or plan) stop that
+// happens to still be in place — resumeSequence itself has no status guard
+// (by design: the operator's explicit POST /:id/followup/resume legitimately
+// lifts an admin stop) and would silently reactivate it and erase
+// stopped_reason/stopped_by_admin_id.
+async function canSystemResumeInvoice(invoiceId, dbc = db) {
+  const seq = await dbc('invoice_followup_sequences')
+    .where({ invoice_id: invoiceId })
+    .first('status', 'stopped_reason', 'stopped_by_admin_id');
+  return canSystemResume(seq);
+}
+
 async function resumeSequence(invoiceId, dbc = db) {
   const seq = await dbc('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq) return;
@@ -1737,6 +1770,7 @@ module.exports = {
   handleAutopayFailure,
   pauseSequence,
   resumeSequence,
+  canSystemResumeInvoice,
   rescheduleForInvoiceEdit,
   stopSequence,
   sendNextTouchNow,

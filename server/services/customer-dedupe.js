@@ -4819,6 +4819,31 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: winnerId });
     }
 
+    // ADMIN-BUG-R57: an undone merge is an explicit operator decision to
+    // keep these two records separate. Without a dismissal, the next
+    // findDuplicateGroups/runAutoMergeSweep tick sees the same live pair
+    // sharing a phone with the SAME empty blocker set the shell had before
+    // (the undo repointed exactly those rows back), classifies it 'green'
+    // again, and re-merges it — silently reversing the undo overnight.
+    // Record the dismissal in the SAME transaction as the undo, mirroring
+    // runRedPairAutoDismissSweep's own write (:2544-2553): idempotent via
+    // the ordered-pair unique constraint, so a re-run or a race with a
+    // manual dismissal is an ignored conflict, never an error. The pair
+    // stays visible in the review queue (findDuplicateGroups only filters
+    // dismissals from the DEFAULT display, not detection) for a human to
+    // re-adjudicate; it just never auto-merges again.
+    const [dismissA, dismissB] = pairKey(winnerId, loserId);
+    await acquirePairAdjudicationLock(trx, dismissA, dismissB);
+    await trx('customer_duplicate_dismissals')
+      .insert({
+        customer_id_a: dismissA,
+        customer_id_b: dismissB,
+        reason: 'undone merge',
+        created_by: performedBy || 'unknown',
+      })
+      .onConflict(['customer_id_a', 'customer_id_b'])
+      .ignore();
+
     await trx('customer_merge_journal').where({ id: journalId }).update({
       undone_at: trx.fn.now(),
       undone_by: performedBy || 'unknown',

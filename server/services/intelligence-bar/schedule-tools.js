@@ -768,16 +768,18 @@ async function optimizeTechRoute(input) {
 
 
 async function assignTechnician(input, actionContext = {}) {
-  const { service_ids: serviceIds, technician_name: techName, confirmed } = input;
+  const { service_ids: rawServiceIds, technician_name: techName, confirmed } = input;
+  let serviceIds = rawServiceIds;
   let tech = await db('technicians').whereILike('name', `%${techName}%`).first();
   if (!tech) return { error: `Technician "${techName}" not found` };
 
-  const services = await db('scheduled_services')
+  const allServices = await db('scheduled_services')
     .whereIn('scheduled_services.id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .leftJoin('technicians as cur_tech', 'scheduled_services.technician_id', 'cur_tech.id')
     .select(
       'scheduled_services.id',
+      'scheduled_services.status',
       'customers.first_name', 'customers.last_name',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
@@ -798,7 +800,24 @@ async function assignTechnician(input, actionContext = {}) {
       'cur_tech.name as current_tech_name',
     );
 
-  if (!services.length) return { error: 'No services found for the given IDs' };
+  if (!allServices.length) return { error: 'No services found for the given IDs' };
+
+  // Terminal rows are one-way — reassigning a completed/no_show/skipped
+  // visit silently rewrites who performed it (pay validation, tech stats,
+  // visit history all read scheduled_services.technician_id), while the
+  // REST reassign path (assignDispatchJob) already refuses the same rows
+  // with a 409. Fence here the same way moveStopsToDay fences a terminal
+  // move: drop them from the preview/commit set and disclose what was left
+  // behind, refusing outright when nothing remains.
+  const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
+  const services = allServices.filter((s) => !TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)));
+  const skippedTerminal = allServices
+    .filter((s) => TERMINAL_APPOINTMENT_STATUSES.includes(String(s.status)))
+    .map((s) => ({ id: s.id, status: s.status }));
+  if (!services.length) {
+    return { error: 'All matching stops are in a terminal status (completed/cancelled/skipped/no_show) — nothing to reassign' };
+  }
+  serviceIds = services.map((s) => s.id);
 
   const stops = services.map(s => ({
     id: s.id,
@@ -820,7 +839,10 @@ async function assignTechnician(input, actionContext = {}) {
       would_assign_to_id: String(tech.id),
       stop_count: stops.length,
       stops,
-      note: `Would reassign ${stops.length} stop(s) to ${tech.name}. Re-call with confirmed:true to apply.`,
+      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
+      note: `Would reassign ${stops.length} stop(s) to ${tech.name}.`
+        + (skippedTerminal.length ? ` ${skippedTerminal.length} stop(s) are in a terminal status (completed/cancelled/skipped/no_show) and will NOT be reassigned.` : '')
+        + ' Re-call with confirmed:true to apply.',
     };
   }
 
@@ -926,6 +948,11 @@ async function assignTechnician(input, actionContext = {}) {
     // describe the old window.
     committedAssignRows = await trx('scheduled_services')
       .whereIn('id', serviceIds)
+      // Belt-and-braces (ADMIN-BUG-R56): serviceIds is already narrowed to
+      // non-terminal rows above, but the in-trx UPDATE — the decisive write
+      // — must never depend on that alone reassigning a row a status change
+      // landed on between the preview and this lock.
+      .whereNotIn('status', TERMINAL_APPOINTMENT_STATUSES)
       .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
       .update({ technician_id: tech.id, route_order: null, updated_at: new Date() })
       .returning(['id', 'scheduled_date', 'window_start', 'window_end']);
@@ -982,6 +1009,7 @@ async function assignTechnician(input, actionContext = {}) {
     assigned_count: count,
     technician: tech.name,
     stops,
+    ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(groupWarning ? { warning: groupWarning } : {}),
   };
 }
@@ -1573,9 +1601,16 @@ async function swapTechAssignments(input, actionContext = {}) {
   if (!techA) return { error: `Tech "${techAName}" not found` };
   if (!techB) return { error: `Tech "${techBName}" not found` };
 
+  // ADMIN-BUG-R56: the old exclusion list ['cancelled','completed','rescheduled']
+  // omitted 'skipped' and 'no_show' — both terminal (proposal-pins.js
+  // TERMINAL_APPOINTMENT_STATUSES) — so a no-show or skipped visit was
+  // parked and re-pointed to the other tech, rewriting who performed it.
+  const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
+  const NON_SWAPPABLE_STATUSES = [...TERMINAL_APPOINTMENT_STATUSES, 'rescheduled'];
+
   // Get both sets of services
-  const aServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
-  const bServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }).whereNotIn('status', ['cancelled', 'completed', 'rescheduled']);
+  const aServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techA.id }).whereNotIn('status', NON_SWAPPABLE_STATUSES);
+  const bServices = await db('scheduled_services').where({ scheduled_date: date, technician_id: techB.id }).whereNotIn('status', NON_SWAPPABLE_STATUSES);
 
   if (confirmed !== true) {
     return {
@@ -1620,7 +1655,7 @@ async function swapTechAssignments(input, actionContext = {}) {
   let bIds = [];
   const liveStops = async (trx, techId) => trx('scheduled_services')
     .where({ scheduled_date: date, technician_id: techId })
-    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
+    .whereNotIn('status', NON_SWAPPABLE_STATUSES)
     .forUpdate()
     .select('id', 'visit_id');
   let committedSwapRows = [];

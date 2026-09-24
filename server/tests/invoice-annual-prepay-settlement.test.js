@@ -4,6 +4,10 @@ jest.mock('../services/invoice-followups', () => ({
   stopSequence: jest.fn(async () => undefined),
   resumeSequence: jest.fn(async () => undefined),
   scheduleForInvoice: jest.fn(async () => undefined),
+  // ADMIN-BUG-R54: the coverage reopen now consults this guard before ever
+  // calling resumeSequence — this fixture's rows carry no admin stop, so
+  // the system re-arm is legitimately allowed.
+  canSystemResumeInvoice: jest.fn(async () => true),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
 
