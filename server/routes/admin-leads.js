@@ -1255,9 +1255,19 @@ router.get('/:id/consultation-link', async (req, res, next) => {
 });
 
 // POST /api/admin/leads/:id/send-sms — send SMS to lead via Twilio
+// attachments (mediaUrls + mediaAttachments) and fromNumber: same shape and
+// same validation as POST /admin/communications/sms, since a consultation
+// link with no resolved customer routes its Communications-composer send
+// through THIS route instead, for the lead_activities audit trail below
+// (pre-push Codex P1 on the consultation-link lane — the composer sent
+// {to, message} only, so media silently vanished and an operator-picked
+// fromNumber was ignored while the UI reported success). Both flow through
+// the SAME shared send helper the generic route uses (sendCustomerMessage →
+// providers/twilio-sms.js, which reads metadata.fromNumber / .mediaUrls /
+// .media) — nothing route-specific is duplicated.
 router.post('/:id/send-sms', async (req, res, next) => {
   try {
-    const { message } = req.body;
+    const { message, mediaUrls, mediaAttachments, fromNumber } = req.body;
     if (!message) return res.status(400).json({ error: 'Message is required' });
 
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
@@ -1265,6 +1275,24 @@ router.post('/:id/send-sms', async (req, res, next) => {
     if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number' });
     if (req.body.to && leadAttribution.normalizePhone(req.body.to) !== leadAttribution.normalizePhone(lead.phone)) {
       return res.status(409).json({ error: 'The lead phone changed. Reopen messages before sending.' });
+    }
+
+    const { mediaFromOutboundAttachments } = require('../services/sms-media');
+    const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
+    const media = mediaFromOutboundAttachments(mediaAttachments, cleanMediaUrls);
+    // Twilio caps a single MMS at 5MB total across all media — same check
+    // and message as the generic route, so an attachment rejected here
+    // reads the same to the operator whichever composer sent it.
+    const MAX_TOTAL_MEDIA_BYTES = 5 * 1024 * 1024;
+    const totalMediaBytes = media.reduce((sum, m) => sum + (Number(m.size) || 0), 0);
+    if (media.length > 0 && totalMediaBytes > MAX_TOTAL_MEDIA_BYTES) {
+      return res.status(413).json({
+        error: `Attachments total ${(totalMediaBytes / 1024 / 1024).toFixed(1)}MB, over Twilio's 5MB per-message limit`,
+      });
+    }
+    const TWILIO_NUMBERS = require('../config/twilio-numbers');
+    if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
+      return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -1284,6 +1312,10 @@ router.post('/:id/send-sms', async (req, res, next) => {
       metadata: {
         original_message_type: 'lead_outreach',
         adminUserId: req.technicianId,
+        fromNumber: fromNumber || undefined,
+        mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
+        allowMediaUrls: cleanMediaUrls.length > 0,
+        media,
       },
     });
     const { isRealProviderSend } = require('../services/sms-auto-send');

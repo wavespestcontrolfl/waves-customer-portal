@@ -1508,10 +1508,27 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         // lead_activities row, first-response timestamp, and new→contacted
         // transition (pre-push Codex P2) that any other lead SMS gets.
         const consultationLeadId = !selectedCustomerId ? insertedCustomerLinks.consultation?.leadId : null;
+        // Attachments and the operator-picked fromNumber must reach the
+        // leads route the same way they reach the generic one (pre-push
+        // Codex P1) — same field names, same shape; the leads route now
+        // forwards both into the same sendCustomerMessage metadata the
+        // generic route already relies on.
         const sent = consultationLeadId
           ? await adminFetch(`/admin/leads/${consultationLeadId}/send-sms`, {
               method: "POST",
-              body: JSON.stringify({ to: toNumber.trim(), message: msgBody.trim() }),
+              body: JSON.stringify({
+                to: toNumber.trim(),
+                message: msgBody.trim(),
+                fromNumber,
+                mediaUrls:
+                  attachments.length > 0
+                    ? attachments.map((a) => a.url)
+                    : undefined,
+                mediaAttachments:
+                  attachments.length > 0
+                    ? attachments.map(({ previewUrl, ...a }) => a)
+                    : undefined,
+              }),
             })
           : await adminFetch("/admin/communications/sms", {
               method: "POST",

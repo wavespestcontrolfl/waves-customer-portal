@@ -15,6 +15,12 @@ jest.mock('../services/lead-attribution', () => ({
   logFirstResponse: jest.fn(async () => {}),
 }));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn(async () => {}) }));
+// Deterministic fromNumber validation only — mediaFromOutboundAttachments
+// is left real (pure, no I/O) so attachment shape assertions below exercise
+// the actual transform the generic /admin/communications/sms route relies on.
+jest.mock('../config/twilio-numbers', () => ({
+  findByNumber: jest.fn((n) => (n === '+19415559999' ? { number: n } : null)),
+}));
 
 const express = require('express');
 const db = require('../models/db');
@@ -93,4 +99,68 @@ test('does not move an already progressed lead back to contacted', async () => {
   expect((await send()).status).toBe(200);
   expect(update).not.toHaveBeenCalled();
   expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+});
+
+// Pre-push Codex P1: the consultation-link lane routes the Communications
+// composer's send through THIS route (for the audit trail above) whenever
+// the resolved recipient is a lead with no customer row — attachments and
+// the operator-picked fromNumber must reach sendCustomerMessage the same
+// way they reach the generic /admin/communications/sms route, not vanish.
+describe('attachments and fromNumber reach the sender (same shape as /admin/communications/sms)', () => {
+  test('mediaUrls + mediaAttachments + fromNumber all land in the sendCustomerMessage metadata', async () => {
+    const response = await send({
+      message: 'Synthetic outreach with a photo',
+      to: '+19415550103',
+      fromNumber: '+19415559999',
+      mediaUrls: ['https://cdn.example.com/a.jpg'],
+      mediaAttachments: [{ url: 'https://cdn.example.com/a.jpg', fileName: 'a.jpg', mimeType: 'image/jpeg', size: 1024 }],
+    });
+    expect(response.status).toBe(200);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      leadId: 'lead-qa',
+      metadata: expect.objectContaining({
+        fromNumber: '+19415559999',
+        mediaUrls: ['https://cdn.example.com/a.jpg'],
+        allowMediaUrls: true,
+        media: expect.arrayContaining([expect.objectContaining({
+          url: 'https://cdn.example.com/a.jpg',
+          fileName: 'a.jpg',
+          contentType: 'image/jpeg',
+          size: 1024,
+        })]),
+      }),
+    }));
+  });
+
+  test('an unregistered fromNumber is refused before any send is attempted', async () => {
+    const response = await send({ message: 'Synthetic outreach', to: '+19415550103', fromNumber: '+19995550000' });
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatch(/Waves Twilio number/i);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('attachments over the 5MB Twilio MMS cap are refused before any send is attempted', async () => {
+    const response = await send({
+      message: 'Synthetic outreach',
+      to: '+19415550103',
+      mediaAttachments: [
+        { url: 'https://cdn.example.com/big1.jpg', size: 3 * 1024 * 1024 },
+        { url: 'https://cdn.example.com/big2.jpg', size: 3 * 1024 * 1024 },
+      ],
+    });
+    expect(response.status).toBe(413);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('no attachments and no fromNumber: metadata carries neither (unchanged plain-text contract)', async () => {
+    await send();
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({
+        fromNumber: undefined,
+        mediaUrls: undefined,
+        allowMediaUrls: false,
+        media: [],
+      }),
+    }));
+  });
 });
