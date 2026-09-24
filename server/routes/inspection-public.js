@@ -66,11 +66,26 @@
  *   supplied one whenever the stored address is missing OR fails to geocode
  *   — never the reverse. A resolved address that isn't the customer's own
  *   on-file one is written back onto the customer row before booking, so a
- *   fixed-up address isn't asked for again next time. geocode failure /
- *   unparseable input → 422 `address_unresolved` (recoverable — the client
- *   keeps the address form up); an actually-resolved location outside the
- *   service area → 422 `out_of_area` (the client stops on the waitlist
- *   card). Either way nothing books. The slot is re-validated against a
+ *   fixed-up address isn't asked for again next time. Street-level quality
+ *   filtering (no ZIP/city centroids, no partial matches) always applies,
+ *   but the geocode itself no longer discards a result for being outside
+ *   the service box (`requireInServiceArea: false` — geocoder.js) — that
+ *   determination belongs to `checkServiceArea` alone (below), so a
+ *   genuinely out-of-box address answers `out_of_area`, never the
+ *   misleading `address_unresolved` a swallowed box-reject used to produce
+ *   (Codex pre-push P1, 2026-09-24). geocode failure / unparseable input →
+ *   422 `address_unresolved` (recoverable — the client keeps the address
+ *   form up); an actually-resolved location outside the service area → 422
+ *   `out_of_area` (the client stops on the waitlist card); the service-area
+ *   check itself unavailable (a Google key is configured but the reverse-
+ *   geocode came back empty — provider timeout/outage, never silently
+ *   treated as "fine") → 503 `service_area_unavailable` (recoverable — the
+ *   client keeps the form up with a "try again" message). Either way
+ *   nothing books. checkServiceArea applies uniformly to every resolved
+ *   location, including a customer's STORED coordinates, which otherwise
+ *   never pass through the geocoder's own box test at all (the short-circuit
+ *   branch in resolveServiceAddress returns them directly). The slot is
+ *   re-validated against a
  *   fresh single-day availability build (anti-forgery, matching
  *   reservice-public). Booking goes through booking.js's createSelfBooking
  *   with the internal-only `callbackVisit` option — `isCallback: false` and
@@ -113,8 +128,16 @@
  *   createSelfBooking's own standard confirmation.
  *
  * POST /:token/waitlist — the out-of-area stop's one-field ask: inserts (or
- *   no-ops on) a newsletter_subscribers row tagged `expansion_waitlist:<county>`.
- *   No email sent.
+ *   no-ops on) a newsletter_subscribers row tagged `expansion_waitlist:<county>`
+ *   at status `waitlist` — deliberately NOT `active` (buildSubscriberQuery in
+ *   newsletter-sender.js selects status='active' with no source exclusion,
+ *   so an active row enrols in ordinary newsletter sends, and this token
+ *   never proved ownership of the typed email) and NOT `pending` either
+ *   (that status has its own live double-opt-in meaning — a future
+ *   unrelated admin CSV import matching this email would queue it a REAL
+ *   confirmation email). `waitlist` is a new, otherwise-unused value on this
+ *   free-text column — invisible to every existing status-keyed query. No
+ *   email sent (Codex pre-push P1, 2026-09-24).
  */
 
 const express = require('express');
@@ -129,6 +152,7 @@ const { verifyLeadConsultationToken } = require('../utils/lead-consultation-toke
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
+const { isInServiceAreaBox } = require('../services/service-area');
 const { isAssessmentServiceType, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
 const { parseRawAddress } = require('../utils/address-normalizer');
@@ -297,7 +321,14 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
     if (!addressStr) return null;
     anyAddressText = true;
     try {
-      const { location } = await geocodeAddressWithStatus(addressStr, { serviceAddress: true });
+      // requireInServiceArea:false — street-level quality filtering stays
+      // (partial matches, ZIP/city centroids, no-match all still reject),
+      // but a genuinely out-of-box address is no longer silently discarded
+      // here as "unresolved". checkServiceArea (below, applied by every
+      // caller) is the one place that decides in/out of area, so a valid
+      // address that's simply outside the box correctly reaches out_of_area
+      // instead of address_unresolved (Codex pre-push P1, 2026-09-24).
+      const { location } = await geocodeAddressWithStatus(addressStr, { serviceAddress: true, requireInServiceArea: false });
       return location || null;
     } catch (err) {
       logger.warn(`[inspection-public] address geocode failed: ${err.message}`);
@@ -334,25 +365,39 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
   return { location: null, address: null, source: null, unresolved: anyAddressText };
 }
 
-// County/box verdict for an ALREADY-RESOLVED location — reverse-geocodes the
-// county when a Google key is configured (authoritative — SERVICE_AREA_COUNTIES),
-// else trusts the box test the geocoder itself already enforced via
-// serviceAddress:true (any location resolveServiceAddress returned already
-// passed it). Takes a location, never raw address text, so a geocode
-// failure upstream can never be conflated with "resolved but out of area."
+// County/box verdict for an ALREADY-RESOLVED location — takes a location,
+// never raw address text, so a geocode failure upstream can never be
+// conflated with "resolved but out of area". Applies uniformly regardless
+// of where the location came from, INCLUDING a customer's stored
+// latitude/longitude (resolveServiceAddress's short-circuit branch returns
+// those directly, skipping the geocoder's own box test entirely, so this is
+// the only place stored coordinates ever get checked against the service
+// area at all).
+//
+// With a Google key configured: reverse-geocodes the county
+// (SERVICE_AREA_COUNTIES is authoritative). A null county here is NOT
+// permission to book (Codex pre-push P1, 2026-09-24) — it means the
+// provider call failed/timed out, or Google genuinely couldn't place a
+// county on the coordinate; either way it's unknowable, not "fine", so this
+// answers a distinct `unavailable:true` the caller turns into a recoverable
+// 503 rather than silently letting the booking through.
+//
+// Without a key (documented fallback): the box test is the ONLY area check
+// available, so it's run explicitly here — never a bare `ok: true`.
 async function checkServiceArea(location) {
   if (!location) return { ok: false, county: null };
   const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
-  let county = null;
-  if (key) {
-    try {
-      county = await reverseGeocodeCounty({ latitude: location.lat, longitude: location.lng }, key);
-    } catch (err) {
-      logger.warn(`[inspection-public] county reverse-geocode failed: ${err.message}`);
-    }
+  if (!key) {
+    return { ok: isInServiceAreaBox(location.lat, location.lng), county: null };
   }
-  if (county) return { ok: isInServiceAreaCounty(county), county };
-  return { ok: true, county: null };
+  let county = null;
+  try {
+    county = await reverseGeocodeCounty({ latitude: location.lat, longitude: location.lng }, key);
+  } catch (err) {
+    logger.warn(`[inspection-public] county reverse-geocode failed: ${err.message}`);
+  }
+  if (!county) return { ok: false, county: null, unavailable: true };
+  return { ok: isInServiceAreaCounty(county), county };
 }
 
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay }) {
@@ -581,6 +626,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
       return res.status(422).json({ error: 'address_unresolved' });
     }
     const area = await checkServiceArea(resolved.location);
+    if (area.unavailable) return res.status(503).json({ error: 'service_area_unavailable' });
     if (!area.ok) return res.status(422).json({ error: 'out_of_area', county: area.county || null });
 
     const booking = require('./booking');
@@ -695,6 +741,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'address required' });
     }
     const area = await checkServiceArea(resolved.location);
+    if (area.unavailable) return res.status(503).json({ error: 'service_area_unavailable' });
     if (!area.ok) return res.status(422).json({ error: 'out_of_area', county: area.county || null });
 
     const booking = require('./booking');
@@ -887,11 +934,26 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: 'not_found' });
     const county = typeof req.body?.county === 'string' ? req.body.county.trim() : '';
 
+    // status: 'waitlist' — deliberately NOT 'active' (Codex pre-push P1,
+    // 2026-09-24: an 'active' row enrols in ordinary newsletter sends —
+    // buildSubscriberQuery in newsletter-sender.js selects on status='active'
+    // with no source exclusion — and this token never proved ownership of
+    // the typed email, so it must not be treated as a confirmed subscriber
+    // either). Also deliberately NOT 'pending': that status has its own live
+    // meaning (server/services/newsletter-subscribers.js's double-opt-in) —
+    // a future unrelated admin CSV import matching this email would queue it
+    // a REAL confirmation email (admin-newsletter.js's
+    // status='pending' AND confirmation_sent_at IS NULL sweep), which is
+    // exactly the send this route must never trigger. 'waitlist' is a new,
+    // otherwise-unused value on this free-text column (no CHECK constraint)
+    // — invisible to every existing status-keyed query, so this row is held
+    // only for a future expansion announcement (owner ruling, scope doc
+    // lead-inspection-link-scope.md §7), never today's newsletter.
     await db('newsletter_subscribers')
       .insert({
         email,
         source: `expansion_waitlist:${county || 'unknown'}`,
-        status: 'active',
+        status: 'waitlist',
         subscribed_at: new Date(),
       })
       .onConflict('email')

@@ -995,6 +995,13 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
         setError("We couldn't find that address. Please check it and try again, or text or call us.");
         return;
       }
+      // Recoverable: the service-area check itself couldn't run (provider
+      // timeout/outage) — not a verdict either way, so stay on the form and
+      // let them try again rather than stopping the page.
+      if (res.status === 503 && body.error === 'service_area_unavailable') {
+        setError("We couldn't confirm your service area just now. Please try again in a moment, or text or call us.");
+        return;
+      }
       if (!res.ok) throw new Error(body.error || 'failed');
       onAddressResolved?.(value);
       onResolved({ availability: body.availability, needs_address: false });
@@ -1437,6 +1444,13 @@ export default function ScheduleFlowPage({ flow }) {
       // code or a generic failure line.
       if (flow === 'inspection' && body.error === 'address_unresolved') {
         setSubmitError("We couldn't verify that address. Please text or call us and we'll get you booked.");
+        return;
+      }
+      // Inspection only: the service-area check itself couldn't run — not a
+      // verdict, so stay on the picker and let them retry rather than
+      // stopping on the out-of-area card.
+      if (flow === 'inspection' && body.error === 'service_area_unavailable') {
+        setSubmitError("We couldn't confirm your service area just now. Please try again, or text or call us.");
         return;
       }
       if (body.code === 'SLOT_TAKEN') {

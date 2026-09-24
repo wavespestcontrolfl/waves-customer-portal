@@ -94,6 +94,23 @@ describe('newsletter buildSubscriberQuery', () => {
     expect(sql).not.toMatch(/tags/);
   });
 
+  // Codex pre-push P1, 2026-09-24: inspection-public.js's out-of-area
+  // waitlist (POST /:token/waitlist) stores a newsletter_subscribers row at
+  // status='waitlist' specifically because the audience filter below is an
+  // EXACT equality on 'active', not a negative filter (e.g. != 'unsubscribed')
+  // that a new status value could accidentally slip through. Any status
+  // other than 'active' — waitlist, pending, unsubscribed — is excluded by
+  // construction; pin the exact-equality shape so a future change to `!=`
+  // semantics can't silently start mailing waitlist rows.
+  test('the status filter is an exact equality on "active", excluding every other status by construction', () => {
+    const { sql, bindings } = shapeOf(null);
+    expect(sql).toMatch(/"status" = (?:\$1|\?)/);
+    expect(sql).not.toMatch(/"status"\s*(!=|<>)/);
+    expect(bindings).toContain('active');
+    expect(bindings).not.toContain('waitlist');
+    expect(bindings).not.toContain('pending');
+  });
+
   test('always anti-joins the global email_suppressions ledger (bounce/spam/do_not_email)', () => {
     const { sql, bindings } = shapeOf(null);
     expect(sql).toMatch(/not exists/i);

@@ -72,6 +72,7 @@ const firstResults = {};
 const listResults = {};
 const insertResults = {};
 const updateCalls = [];
+const insertCalls = [];
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
@@ -86,7 +87,7 @@ jest.mock('../models/db', () => {
     q.del = async () => 1;
     q.ignore = async () => [];
     q.merge = async () => [];
-    q.insert = () => q;
+    q.insert = (payload) => { insertCalls.push({ table, payload }); return q; };
     q.returning = async () => (insertResults[table] || [{ id: 'new-cust-1' }]);
     q.then = (onOk, onErr) => Promise.resolve(listResults[table] || []).then(onOk, onErr);
     q.catch = (fn) => Promise.resolve(listResults[table] || []).catch(fn);
@@ -173,6 +174,7 @@ afterEach(() => {
   for (const key of Object.keys(listResults)) delete listResults[key];
   for (const key of Object.keys(insertResults)) delete insertResults[key];
   updateCalls.length = 0;
+  insertCalls.length = 0;
   gateState.live = true;
   mockGeocode.mockClear();
   mockGeocode.mockImplementation(async () => ({ location: { lat: 27.4, lng: -82.5 } }));
@@ -440,6 +442,37 @@ describe('POST /:token commit', () => {
     expect(mockCreateSelfBooking).not.toHaveBeenCalled();
   });
 
+  // P1 :300 — the geocode call itself must not discard an out-of-box result
+  // as if it were unresolvable; the area verdict belongs to checkServiceArea
+  // alone. Pin the actual contract: inspection-public.js's tryGeocode calls
+  // geocodeAddressWithStatus with requireInServiceArea:false (street-level
+  // quality filtering stays on via serviceAddress:true).
+  test('geocodes with requireInServiceArea:false — an out-of-box address reaches checkServiceArea, never silently "unresolved"', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', address_line1: '1 Rooftop Rd', city: 'Fort Worth', state: 'TX', zip: '76102' };
+    listResults.scheduled_services = [];
+    mockCounty.mockResolvedValueOnce('Tarrant'); // real county, not in SERVICE_AREA_COUNTIES
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, okBody());
+    expect(res.statusCode).toBe(422);
+    expect(res.body.error).toBe('out_of_area'); // never address_unresolved
+    expect(mockGeocode).toHaveBeenCalledWith(
+      expect.stringContaining('1 Rooftop Rd'),
+      expect.objectContaining({ serviceAddress: true, requireInServiceArea: false }),
+    );
+  });
+
+  test('a garbage/unparseable address still answers address_unresolved (unaffected by the requireInServiceArea change)', async () => {
+    firstResults.leads = LEAD_ROW;
+    listResults.scheduled_services = [];
+    mockGeocode.mockResolvedValueOnce({ location: null });
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: 'asdkjhasdkjh' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'address_unresolved' });
+    expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+  });
+
   test('address required when neither the lead nor its customer has one on file', async () => {
     firstResults.leads = LEAD_ROW;
     listResults.scheduled_services = [];
@@ -603,6 +636,88 @@ describe('POST /:token commit', () => {
     expect(customerUpdate.payload.latitude).toBe(27.5);
     expect(customerUpdate.payload.longitude).toBe(-82.6);
   });
+
+  // P1 :355 — a null county (provider timeout/outage) must never silently
+  // pass a booking through, including for a customer's STORED coordinates
+  // (which never touch the geocoder's own box test at all — checkServiceArea
+  // is the only place they're ever checked against the service area).
+  describe('service-area verification failures (P1 :355)', () => {
+    test('a Google key configured + reverseGeocodeCounty returns null: recoverable 503, no booking', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      listResults.scheduled_services = [];
+      mockCounty.mockResolvedValueOnce(null); // provider timeout/outage — not "fine"
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const res = await callPost(token, okBody());
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toEqual({ error: 'service_area_unavailable' });
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
+
+    test('no Google key configured + in-box STORED coordinates: books successfully', async () => {
+      delete process.env.GOOGLE_API_KEY;
+      delete process.env.GOOGLE_MAPS_API_KEY;
+      try {
+        firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+        firstResults.customers = { id: 'cust-1', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4989, longitude: -82.5748 };
+        listResults.scheduled_services = [];
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockBuildAvailability.mockResolvedValueOnce({
+          days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+        });
+        firstResults.scheduled_services = { id: 'ss-nokey', reschedule_token: 'tok-nokey' };
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, okBody());
+        expect(res.statusCode).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+        expect(mockCounty).not.toHaveBeenCalled(); // no key — box test only
+      } finally {
+        process.env.GOOGLE_API_KEY = 'test-google-key';
+      }
+    });
+
+    test('no Google key configured + out-of-box STORED coordinates: out_of_area, no booking', async () => {
+      delete process.env.GOOGLE_API_KEY;
+      delete process.env.GOOGLE_MAPS_API_KEY;
+      try {
+        firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-1' };
+        // Fort Worth, TX — a real rooftop, just nowhere near SW Florida.
+        firstResults.customers = { id: 'cust-1', address_line1: '1 Rooftop Rd', city: 'Fort Worth', state: 'TX', zip: '76102', latitude: 32.7555, longitude: -97.3308 };
+        listResults.scheduled_services = [];
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, okBody());
+        expect(res.statusCode).toBe(422);
+        expect(res.body).toEqual({ error: 'out_of_area', county: null });
+        expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+      } finally {
+        process.env.GOOGLE_API_KEY = 'test-google-key';
+      }
+    });
+  });
+});
+
+describe('checkServiceArea unit coverage (P1 :355)', () => {
+  const { checkServiceArea } = inspectionPublicRouter._test;
+
+  test('no location → not ok, no county', async () => {
+    expect(await checkServiceArea(null)).toEqual({ ok: false, county: null });
+  });
+
+  test('key configured, county resolves and IS served → ok', async () => {
+    mockCounty.mockResolvedValueOnce('Manatee');
+    expect(await checkServiceArea({ lat: 27.4989, lng: -82.5748 })).toEqual({ ok: true, county: 'Manatee' });
+  });
+
+  test('key configured, county resolves and is NOT served → out_of_area shape', async () => {
+    mockCounty.mockResolvedValueOnce('Hardee');
+    expect(await checkServiceArea({ lat: 27.4, lng: -81.8 })).toEqual({ ok: false, county: 'Hardee' });
+  });
+
+  test('key configured, county lookup throws → treated the same as a null county (unavailable, not a silent pass)', async () => {
+    mockCounty.mockRejectedValueOnce(new Error('timeout'));
+    expect(await checkServiceArea({ lat: 27.4989, lng: -82.5748 })).toEqual({ ok: false, county: null, unavailable: true });
+  });
 });
 
 describe('POST /:token/waitlist', () => {
@@ -622,6 +737,24 @@ describe('POST /:token/waitlist', () => {
     const token = mintLeadConsultationToken(LEAD_ID);
     const res = await callWaitlist(token, { email: 'not-an-email' });
     expect(res.statusCode).toBe(400);
+  });
+
+  // Codex pre-push P1, 2026-09-24: NOT 'active' (enrols in ordinary
+  // newsletter sends — see newsletter.test.js's buildSubscriberQuery
+  // exact-equality pin) and NOT 'pending' (that status has its own live
+  // double-opt-in meaning — a future admin CSV import matching this email
+  // would queue it a real confirmation email).
+  test('inserts at status "waitlist", never "active" or "pending" — never enrols in the newsletter', async () => {
+    firstResults.leads = LEAD_ROW;
+    const token = mintLeadConsultationToken(LEAD_ID);
+    const res = await callWaitlist(token, { email: 'someone@example.com', county: 'Hardee' });
+    expect(res.statusCode).toBe(200);
+    const insert = insertCalls.find((c) => c.table === 'newsletter_subscribers');
+    expect(insert).toBeTruthy();
+    expect(insert.payload.status).toBe('waitlist');
+    expect(insert.payload.status).not.toBe('active');
+    expect(insert.payload.status).not.toBe('pending');
+    expect(insert.payload.source).toBe('expansion_waitlist:Hardee');
   });
 });
 

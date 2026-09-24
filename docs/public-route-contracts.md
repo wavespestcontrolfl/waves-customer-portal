@@ -1621,12 +1621,20 @@ body `{ date, time, address?, notes? }`; idempotent — a lead whose customer
 already holds an open assessment short-circuits to the SAME `already_booked`
 shape (200, before geocoding or creating anything) instead of a second
 visit. Address required only when neither the lead nor its (existing)
-customer has one on file, parsed with `parseRawAddress` and geocoded;
-checked against the service area (county via `services/address-
-validation`'s `reverseGeocodeCounty` when a Google key is configured, else
-the box test `services/geocoder.js` already enforces via
-`serviceAddress:true`) — out of area 422s `{ error: 'out_of_area', county }`
-and books nothing. The slot is re-validated against a fresh single-day
+customer has one on file (`resolveServiceAddress`: stored address wins only
+when it actually geocodes — never merely by being present — else a
+supplied one is tried), parsed with `parseRawAddress` and geocoded with
+street-level quality filtering but `requireInServiceArea:false` (the box
+alone is never grounds to discard a geocode as unresolvable); checked
+against the service area via `checkServiceArea`, applied uniformly to every
+resolved location including a customer's stored coordinates: county via
+`services/address-validation`'s `reverseGeocodeCounty` when a Google key is
+configured (a null county is NOT permission — 503
+`{ error: 'service_area_unavailable' }`, recoverable), else the box test
+`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'out_of_area', county }` and books nothing; an unresolvable
+address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
+The slot is re-validated against a fresh single-day
 availability build (same anti-forgery model as reservice-public) before
 committing through `createSelfBooking`'s `callbackVisit` option with
 `isCallback: false` and `dedupeLane: false` (booking.js: skips the funnel's
@@ -1647,10 +1655,16 @@ reservice-public's shape (fresh `availability` attached). Office alert:
 `createSelfBooking`'s own standard confirmation. `POST /:token/waitlist`
 (the out-of-area stop's one-field ask): body `{ email, county? }`, inserts
 (idempotent on email, `onConflict('email').ignore()`) a
-`newsletter_subscribers` row tagged `expansion_waitlist:<county>`; no email
-sent. Generic 404 for bad/unknown tokens and while the gate is off. Treat
-the lead-consultation token, the assessment-not-a-win invariant, and the
-out-of-area/no-booking contract as security-critical).
+`newsletter_subscribers` row tagged `expansion_waitlist:<county>` at status
+`waitlist` (deliberately not `active` — buildSubscriberQuery selects
+status='active' with no source exclusion, so an active row would enrol in
+ordinary newsletter sends and this token never proved ownership of the
+typed email; deliberately not `pending` either — that status has its own
+live double-opt-in meaning elsewhere, incl. a future admin CSV import
+queuing it a real confirmation email); no email sent. Generic 404 for
+bad/unknown tokens and while the gate is off. Treat the lead-consultation
+token, the assessment-not-a-win invariant, and the out-of-area/no-booking
+contract as security-critical).
 `/api/reviews/featured` (read-only public featured Google reviews for the
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).

@@ -204,6 +204,26 @@ describe('InspectionPage address-first gate', () => {
     expect(screen.getByLabelText('Address for the visit')).toBeInTheDocument();
     expect(screen.queryByText(/we don.t service this area yet/i)).not.toBeInTheDocument();
   });
+
+  it('needs_address + service_area_unavailable: stays on the form with a retry message — not a verdict either way', async () => {
+    stubFetch({
+      get: jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })),
+      availability: jsonResponse({ error: 'service_area_unavailable' }, 503),
+    });
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+
+    expect(await screen.findByText(/couldn.t confirm your service area/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Address for the visit')).toBeInTheDocument();
+    expect(screen.queryByText(/we don.t service this area yet/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('service_area_unavailable')).not.toBeInTheDocument();
+  });
 });
 
 describe('InspectionPage booking', () => {
@@ -282,6 +302,18 @@ describe('InspectionPage booking', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     expect(await screen.findByText(/couldn.t verify that address/i)).toBeInTheDocument();
     expect(screen.queryByText('address_unresolved')).not.toBeInTheDocument();
+    expect(screen.queryByText(/we don.t service this area yet/i)).not.toBeInTheDocument();
+  });
+
+  it('service_area_unavailable on commit: a retry message, never the raw error code or the out-of-area stop', async () => {
+    stubFetch({
+      post: jsonResponse({ error: 'service_area_unavailable' }, 503),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText(/couldn.t confirm your service area/i)).toBeInTheDocument();
+    expect(screen.queryByText('service_area_unavailable')).not.toBeInTheDocument();
     expect(screen.queryByText(/we don.t service this area yet/i)).not.toBeInTheDocument();
   });
 
