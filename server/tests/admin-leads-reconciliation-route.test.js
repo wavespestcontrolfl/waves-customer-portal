@@ -37,6 +37,7 @@ async function request(query = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   failCalls = false; calls = []; callCount = 0; callQueries = [];
+  delete lead.twilio_call_sid;
   db.mockImplementation((table) => knex(table));
   db.raw = knex.raw.bind(knex);
   getLeadStatusReconciliation.mockResolvedValue({
@@ -90,4 +91,14 @@ test('counts lifecycle-associated calls independently of displayable call rows',
   expect(countQuery.sql).not.toMatch(/"(?:transcription|recording_url)" is not null/);
   expect(countQuery.sql).toContain("metadata->>'lead_id' = ?");
   expect(countQuery.bindings).toContain(lead.id);
+});
+test('retains initiating SID and settled-stamp calls even when they started before lead creation', async () => {
+  lead.twilio_call_sid = 'CA-initiating';
+  callCount = 1;
+  await request({ leadReview: '1' });
+  const countQuery = callQueries.find(({ sql }) => sql.includes('count(*)'));
+  expect(countQuery.sql).toContain('"created_at" >= ? or (metadata->>\'lead_id\' = ?');
+  expect(countQuery.sql).toContain('or "twilio_call_sid" = ?');
+  expect(countQuery.bindings.filter((value) => value === lead.twilio_call_sid)).toHaveLength(2);
+  expect(getLeadStatusReconciliation).toHaveBeenCalledWith(expect.objectContaining({ associatedCallCount: 1 }));
 });

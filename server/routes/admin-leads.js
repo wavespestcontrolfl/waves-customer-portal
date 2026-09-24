@@ -977,6 +977,11 @@ router.get('/:id', async (req, res, next) => {
             // exact failure this dissent guard exists to prevent.
             .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
         };
+        const settledLeadStamp = function settledLeadStamp() {
+          this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
+            .whereNull('processing_token')
+            .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
+        };
         // The phone arms below would match a sandbox bake-off from a lead's
         // number and surface its transcript as lead history (codex r15 P2).
         const associatedCallsQuery = require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
@@ -995,16 +1000,7 @@ router.get('/:id', async (req, res, next) => {
             // mid-flight pass's provisional stamp can still be cleared or
             // repointed, and surfacing it here could expose another
             // caller's transcript on the wrong lead card (pre-push P1 r3).
-            this.orWhere(function stampArm() {
-              // Settled = token NULL AND a durable successful pass — the
-              // error path clears the token while the stamp stays pending
-              // the extraction_failed retry (pre-push P1 r8).
-              this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-                .whereNull('processing_token')
-                // Same settled definition as the dissent arm above — legacy
-                // NULL status included (codex P1).
-                .whereRaw("(processing_status IS NULL OR processing_status = 'processed')");
-            });
+            this.orWhere(settledLeadStamp);
             if (ten) {
               this.orWhere(function phoneFromArm() {
                 this.whereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
@@ -1020,7 +1016,13 @@ router.get('/:id', async (req, res, next) => {
           const lifecycleStartMs = new Date(lead.first_contact_at || lead.created_at).getTime();
           if (Number.isFinite(lifecycleStartMs)) {
             const countRow = await associatedCallsQuery.clone()
-              .where('created_at', '>=', new Date(lifecycleStartMs))
+              .where(function lifecycleOrExactCall() {
+                this.where('created_at', '>=', new Date(lifecycleStartMs))
+                  .orWhere(settledLeadStamp);
+                // A call starts before the lead it creates. Exact linkage
+                // keeps that initiating call; phone-only matches stay bounded.
+                if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
+              })
               .count({ count: '*' })
               .first();
             associatedCallCount = Number(countRow?.count) || 0;

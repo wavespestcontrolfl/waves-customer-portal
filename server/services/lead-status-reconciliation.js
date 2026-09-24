@@ -36,7 +36,9 @@ function assessmentQuery(database, lead, association) {
       .orWhere((completed) => completed
         .where('ss.status', 'completed')
         .where('ss.completed_at', '>=', lifecycleFloor(lead))))
-    .whereNull('ss.reservation_expires_at')
+    .where((builder) => builder
+      .whereNull('ss.reservation_expires_at')
+      .orWhereNotNull('ss.customer_id'))
     .modify((builder) => scopeToAssessmentBookings(builder, 'ss', 'svc'))
     .orderByRaw("CASE WHEN ss.status = 'completed' THEN COALESCE(ss.completed_at, ss.created_at) ELSE ss.created_at END DESC")
     .limit(ASSESSMENT_RESULT_LIMIT + 1)

@@ -73,6 +73,7 @@ test('matches committed assessment history by exact source estimate after first 
   expect(queries[0].bindings).not.toContain('cancelled');
   expect(queries[0].bindings).not.toContain('skipped');
   expect(queries[0].sql).toContain('"ss"."reservation_expires_at" is null');
+  expect(queries[0].sql).toContain('or "ss"."customer_id" is not null');
   expect(queries[0].sql.toLowerCase()).toContain('lower(trim("ss"."service_type"))');
   expect(queries[0].sql.toLowerCase()).toContain('lower(trim("svc"."name"))');
   expect(queries[0].bindings).toContain('estimate-1');
