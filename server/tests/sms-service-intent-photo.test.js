@@ -27,7 +27,8 @@ describe('regex fast path', () => {
     ['are these termites', 'pest'],
     ['ants everywhere', 'pest'],
     // A tie between lawn and pest words runs the pest identifier.
-    ['bugs in my lawn', 'pest'],
+    ['bugs in my lawn?', 'pest'],
+    ['seeing bugs all over the lawn', 'pest'],
     ['whats this', 'pest'],
     ["what's wrong with it", 'pest'],
     ['can you tell what this is', 'pest'],
@@ -44,8 +45,19 @@ describe('regex fast path', () => {
     const result = await classifyPhotoDiagnosisIntent('what is wrong with my palm tree leaves');
     expect(result).toEqual({ intent: 'photo_diagnosis', assessmentType: TREE_SHRUB_TRIAGE_TYPE, method: 'regex' });
     // Tree words count on the pest side, so they outvote a single lawn word.
-    await expect(classifyPhotoDiagnosisIntent('shrubs and bushes next to the lawn'))
+    await expect(classifyPhotoDiagnosisIntent('shrubs and bushes next to the lawn are dying'))
       .resolves.toMatchObject({ assessmentType: TREE_SHRUB_TRIAGE_TYPE });
+  });
+
+  test.each([
+    'Attached is my receipt for lawn service',
+    'Here is the gate code for the yard',
+    'Lawn guy can come Tuesday',
+    'Photo of the pest control invoice',
+  ])('a subject word without a problem cue is not fast-pathed: %p goes to the model', async (body) => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'none' } });
+    await expect(classifyPhotoDiagnosisIntent(body)).resolves.toEqual({ intent: null, assessmentType: null, method: 'ai' });
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
   test('subject words need a word boundary ("want", "giant", "plantation" do not match)', async () => {

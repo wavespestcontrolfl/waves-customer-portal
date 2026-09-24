@@ -26,9 +26,10 @@
  *   }>
  *
  * Only meaningful for a message that already carries an image. Same shape
- * of decision: regex fast path first (a subject word or a "what is this"
- * question, or an EMPTY caption — a bare photo is a show-and-ask), Claude
- * FAST only for a caption the regex can't place.
+ * of decision: regex fast path first (a "what is this" question, a subject
+ * word WITH a problem cue, or an EMPTY caption — a bare photo is a
+ * show-and-ask), Claude FAST for everything else, including subject-only
+ * captions such as a receipt or a scheduling note that mentions the lawn.
  */
 
 const logger = require('./logger');
@@ -160,7 +161,11 @@ const PHOTO_TREE_SHRUB_WORDS = [
 ];
 // Subject words that say "diagnose this" without leaning lawn or pest.
 const PHOTO_NEUTRAL_WORDS = ['fungus', 'fungi', 'mold', 'mushroom', 'mushrooms'];
-const PHOTO_QUESTION_RE = /\b(what(?:['’]?s| is| are)? (?:this|that|these|those|it)\b|what(?:['’]?s| is) wrong|what(?:['’]?s| is) going on|can you tell|could you tell|any idea|identify|what kind of|what type of)/i;
+const PHOTO_QUESTION_RE = /\b(what(?:['’]?s| is| are)? (?:this|that|these|those|it)\b|what(?:['’]?s| is) wrong|what(?:['’]?s| is) going on|can you tell|could you tell|any idea|identify|what kind of|what type of|\b(?:is|are) (?:this|that|these|those|it)\b)/i;
+// A subject word alone is not a diagnosis request ("Attached is my receipt
+// for lawn service"): the fast path also needs a problem cue — a question
+// mark or a symptom/sighting word. Subject-only captions go to the model.
+const PHOTO_PROBLEM_RE = /\?|\b(wrong|problem|issue|help|dead|dying|brown|yellow(?:ing)?|patch(?:es|y)?|spots?|holes?|damaged?|eat(?:ing|en)?|chew(?:ed|ing)?|sick|diseased?|infest(?:ed|ation)?|everywhere|all over|taking over|spreading|popping up|found|seeing|spotted|crawling|nests?|mounds?|droppings|swarm(?:ing)?|bites?|stung)\b/i;
 
 // TODO(tree_shrub): tree/shrub photos run the pest identifier until the
 // tree_shrub assessment type lands in its own PR; flip this constant then.
@@ -188,7 +193,8 @@ function regexClassifyPhoto(body) {
   const subject = tokenMatches(lower, [
     ...PHOTO_LAWN_WORDS, ...PHOTO_PEST_WORDS, ...PHOTO_TREE_SHRUB_WORDS, ...PHOTO_NEUTRAL_WORDS,
   ]);
-  if (!subject && !PHOTO_QUESTION_RE.test(text)) return null;
+  const diagnostic = PHOTO_QUESTION_RE.test(text) || (subject && PHOTO_PROBLEM_RE.test(text));
+  if (!diagnostic) return null;
   return { intent: 'photo_diagnosis', assessmentType: photoAssessmentType(lower), method: 'regex' };
 }
 

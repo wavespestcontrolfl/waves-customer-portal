@@ -320,7 +320,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
 
   test('a pipeline refusal (vision unavailable) logs an error and parks nothing', async () => {
     mockIdentifyPest.mockResolvedValue({ ok: false, reason: 'vision_unavailable' });
-    await expect(triageInboundPhotoText(input({ body: 'bugs' })))
+    await expect(triageInboundPhotoText(input({ body: 'bugs everywhere' })))
       .resolves.toEqual({ status: 'skipped', reason: 'assessment_failed' });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[photo-triage] assessment failed'));
     expect(mockState.inserts.message_drafts).toBeUndefined();
