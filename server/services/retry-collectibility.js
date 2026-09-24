@@ -86,15 +86,18 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
             .andWhere('description', 'like', `%${MONTHLY_MARKER}%`);
         });
     })
-    // Codex round-2 P1: only consider failures from the SHARED monthly key
-    // family (charge-now / chargeMonthly's own bare/_r<n> keys) — a
-    // retry-sweep attempt for this SAME obligation uses its own
-    // per-payment-id key (autopay_retry_<paymentId>_<rung>), which never
-    // matches the _r<n> pattern below and must not be mistaken for "no
-    // suffix, so treat as attempt 1" — that would silently REUSE whatever
-    // _r<n> key a genuine monthly attempt already consumed, regardless of
-    // insertion order between the two families.
-    .whereRaw("(metadata->>'idempotency_key' IS NULL OR metadata->>'idempotency_key' NOT LIKE 'autopay_retry_%')")
+    // Codex round-2 + round-3 P1: only consider failures that actually
+    // recorded a key in the SHARED monthly family (charge-now /
+    // chargeMonthly's own bare/_r<n> keys) — POSITIVE match, not "exclude
+    // the one bad shape I thought of": a retry-sweep attempt for this same
+    // obligation writes its own per-payment-id key
+    // (autopay_retry_<paymentId>_<rung>), and the lock-contention deferred
+    // row (billing-cron.js) has NO idempotency_key at all — either one
+    // being the most-recently-created 'failed' row must not be mistaken
+    // for "no monthly attempt yet, start at 1", which would silently
+    // REUSE whatever _r<n> key a genuine monthly attempt already
+    // consumed, regardless of insertion order between the families.
+    .whereRaw("metadata->>'idempotency_key' LIKE 'autopay_monthly_%'")
     .orderBy('created_at', 'desc')
     .first('metadata');
   let attemptNumber = 0;
