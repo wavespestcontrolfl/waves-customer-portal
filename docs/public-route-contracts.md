@@ -55,6 +55,20 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Pest Pressure technician direct score (owner ruling 2026-09-24): on the
+service-report payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), when the visit's rating was entered by staff
+(`client_pest_rating_source = 'technician'`) `pestPressure.score` /
+`displayScore` equal that 0–5 rating exactly, and `label` resolves from the
+active six-band labels (0 None · 1 Very Low · 2 Low · 3 Moderate · 4 Elevated ·
+5 High; a customized label set is kept). When `showComponentBreakdownToCustomer`
+is on, such reports' `components` object is a single
+`technicianActivityRating` entry (`{ value, weight: 100, present: true }`)
+instead of the five weighted components; customer-rated reports keep the
+five-component blend. Customer-visible pressure numbers no longer floor at
+0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
+unchanged.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may

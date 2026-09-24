@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
@@ -202,4 +202,49 @@ describe("Social media workspace foundation", () => {
       "page",
     );
   });
+});
+
+
+it("resumes autonomous reads when a failed run supersedes the initial read", async () => {
+  let finishRead;
+  let reads = 0;
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (String(url).includes("autonomous/runs?")) {
+      reads += 1;
+      if (reads === 1) return new Promise((resolve) => { finishRead = resolve; });
+    }
+    if (String(url).endsWith("autonomous/run")) throw new Error("run failed");
+    return response(fixtureFor(url, options));
+  });
+  renderPage(["/admin/social-media?tab=audit"]);
+  await waitFor(() => expect(finishRead).toBeTypeOf("function"));
+  fireEvent.click(screen.getByRole("button", { name: "Run Draft" }));
+  await screen.findByText("Autonomous run failed: run failed");
+  await act(async () => { finishRead(response({ runs: [] })); });
+  fireEvent(window, new Event("online"));
+  await screen.findByText("Approve this draft");
+  expect(reads).toBe(2);
+});
+
+it("does not restore a dismissed alert from an older refresh bundle", async () => {
+  let finishHistory;
+  let historyReads = 0;
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (String(url).endsWith("/alerts")) return response(options.method === "DELETE" ? {} : {
+      active: true, alert: { message: "Synthetic failure alert", raised_at: "2026-09-24T00:00:00Z" },
+    });
+    if (String(url).includes("/history?")) {
+      historyReads += 1;
+      if (historyReads === 2) return new Promise((resolve) => { finishHistory = resolve; });
+    }
+    return response(fixtureFor(url, options));
+  });
+  renderPage();
+  await screen.findByText("Synthetic failure alert");
+  fireEvent(window, new Event("online"));
+  await waitFor(() => expect(finishHistory).toBeTypeOf("function"));
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(screen.queryByText("Synthetic failure alert")).not.toBeInTheDocument());
+  await act(async () => { finishHistory(response({ posts: [] })); });
+  expect(screen.queryByText("Synthetic failure alert")).not.toBeInTheDocument();
 });

@@ -1897,15 +1897,20 @@ function EstimateToolView() {
       });
 
       const verify = (data.fieldVerify || []).length;
-      const conf =
-        data.confidence === "high"
+      // The satellite ladder stops at the first valid model, so a live result
+      // is normally `single_model` with no agreement to report.
+      const single = data.confidence === "single_model";
+      const conf = single
+        ? `single model (${data.source || "AI"})`
+        : data.confidence === "high"
           ? " HIGH"
           : data.confidence === "medium"
             ? " MEDIUM"
             : " LOW";
+      const agreement = single || data.agreementPct == null ? "" : ` (${data.agreementPct}% model agreement)`;
       setSatelliteStatus({
         type: "ok",
-        msg: `AI Analysis complete — Confidence: ${conf} (${data.agreementPct || "?"}% model agreement)${verify > 0 ? ` · ${verify} field(s) flagged for field verification` : ""}`,
+        msg: `AI Analysis complete — ${single ? conf : `Confidence: ${conf}`}${agreement}${verify > 0 ? ` · ${verify} field(s) flagged for field verification` : ""}`,
       });
     } catch (e) {
       setSatelliteStatus({ type: "err", msg: e.message });

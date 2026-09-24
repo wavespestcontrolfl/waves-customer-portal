@@ -1,6 +1,7 @@
 import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
 import lawnScores from '@lawn-scores';
 import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
+import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 // client/src/pages/admin/SchedulePage.jsx
 //
 // Shared-utility module for the V2 dispatch surface. The V1 page
@@ -45,6 +46,13 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import {
+  stackablePresets,
+  isCustomAmountPreset,
+  isCustomPercentagePreset,
+  isPercentDiscountType,
+} from "../../lib/discountStack";
+import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -123,6 +131,8 @@ import {
 import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
+// Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
+const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
 const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
 // Area fields that changed from free text to chips in this PR: restored legacy
@@ -958,11 +968,28 @@ export function formatReentryStepperMinutes(min) {
   return rem ? `${hr} hr ${rem} min` : `${hr} hr`;
 }
 
+const DEFAULT_PEST_RATING_SCALE = ["none", "very low", "low", "moderate", "elevated", "high"];
+
+// "0 = none · 1 = very low · … · 5 = high" from the active labels (the
+// tech-rating-allowed gate resolves each integer against them).
+export function pestRatingScaleCaptionText(labels) {
+  const names = [0, 1, 2, 3, 4, 5].map((n) => {
+    const name = Array.isArray(labels) && typeof labels[n] === "string" && labels[n].trim()
+      ? labels[n].trim().toLowerCase()
+      : DEFAULT_PEST_RATING_SCALE[n];
+    return `${n} = ${name}`;
+  });
+  return `${names.join(" · ")}.`;
+}
+
 export function completionPreferencesNeedDraft({
   sendSms = true,
   includePayLink = true,
   requestReview = true,
   clientPestRating = null,
+  // First visits start the picker at 5 (owner ruling 2026-09-24): the
+  // prefilled default is not tech input, but clearing it is.
+  clientPestRatingDefault = null,
   backfillCloseout = false,
   backfillCloseoutDefault = false,
   backfillTimeOnSite = "",
@@ -974,7 +1001,7 @@ export function completionPreferencesNeedDraft({
   return sendSms !== true
     || includePayLink !== true
     || requestReview !== true
-    || clientPestRating != null
+    || (clientPestRating ?? null) !== (clientPestRatingDefault ?? null)
     // The inspection-credit opt-out is default-ON: a cleared box that does
     // not survive the billing/draft detour silently records a credit
     // promise the tech explicitly declined (Codex #3178 r25 P2).
@@ -1636,9 +1663,60 @@ const EDIT_FALLBACK_SERVICES = [
   },
 ];
 
+// GATE_DISCOUNT_STACKING (slice 7): the appointment-level "Discount" control
+// (pre-existing) can now compound with an add-on line's own discount slot
+// once the gate is truly ON — a fact this session's client math can only
+// preview correctly once the live probe has confirmed it. An unconfirmed
+// probe with BOTH an appointment discount selected AND a line discount in
+// play (a fresh pick this session, or an untouched line's own stored stamp)
+// is exactly the ambiguous case: additive vs. compound gives a different
+// dollar figure, and posting either guess risks saving totals the operator
+// never actually saw. A visit with no line-level discount anywhere is
+// unaffected — a plain single (appointment-only) discount stays byte-
+// identical to main regardless of gate confirmation.
+export function lineDiscountSaveBlocked({ known, appointmentDiscountSelected, lines }) {
+  // GitHub review round 2 on #4657 (P2, :1678): a stamp whose Price was
+  // edited without touching its own discount control is no longer "in
+  // play" — the preview and the save payload both already drop it (see
+  // origStampOf's own priceEditedFromSeed guard) — so this predicate must
+  // agree, or an appointment-only save can be refused (or stay disabled)
+  // purely because a NOW-STALE stamp still counts here.
+  const lineDiscountInPlay = Array.isArray(lines)
+    && lines.some((l) => !!l?.lineDiscount || (
+      !l?.lineDiscountTouched && !!l?._origDiscountType && String(l?.price) === String(l?._seededPrice ?? '')
+    ));
+  return !known && !!appointmentDiscountSelected && lineDiscountInPlay;
+}
+
+// GitHub Codex round 21 P2 (#4657, :2935): an overflowing exponent like
+// "1e309" parses through parseFloat/Number as Infinity — non-finite, but
+// every `!isNaN(parseFloat(...))` guard on a line/primary price in this
+// modal let it straight through as a "valid" price. The discount-needs-
+// a-price predicate then accepted the line, buildAddonsPayload posted
+// Infinity as basePrice, JSON.stringify silently dropped it to null on
+// the wire, and the server persisted an unpriced line while the picker
+// still showed a discount. One helper: a finite number in, that number
+// back; blank, non-numeric, NaN or +/-Infinity input is null — the same
+// "no valid price" outcome every caller already treats a blank field as.
+// GitHub Codex round 23 P2 (#4657, :1685): a finite NEGATIVE value ("-1")
+// passed too — the price inputs' min={0} is native form validation that
+// these direct-handler buttons never trigger — so a discounted line was
+// posted with basePrice -1, the server's toMoney turned it into null, and
+// the save dropped the picked discount while persisting an unpriced line.
+// A price below zero is not a price: null, same as blank.
+function parseFinitePrice(value) {
+  if (value === "" || value == null) return null;
+  const n = parseFloat(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 export function EditServiceModal({ service, technicians, onClose, onSaved, onMarkPrepaid }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
+  // Deploy-wide release gate (GATE_DISCOUNT_STACKING), read before any state
+  // that consults it. Fails closed — off (or unconfirmed), this is exactly
+  // the pre-lane modal until the owner flips it.
+  const { enabled: stackingEnabled, known: stackingKnown, retry: retryStackingProbe } = useDiscountStackingState();
   const serviceHasSeries = !!(
     service.isRecurring ||
     service.recurringParentId ||
@@ -1830,6 +1908,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             ? String(a.basePrice)
             : "";
       return {
+        // GATE_DISCOUNT_STACKING (slice 7): a fresh pick (or explicit
+        // removal) this session, when `lineDiscountTouched`. Untouched, the
+        // line's discount is whatever `_origDiscountType` etc. below already
+        // carry — see effectiveLineDiscount/lineDiscountTouched's own notes.
+        lineDiscount: null,
+        lineDiscountTouched: false,
         _key: `addon-${a.id || i}`,
         id: a.id || null,
         serviceId: a.serviceId || null,
@@ -2040,7 +2124,29 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [discountType, setDiscountType] = useState("");
   const [discountAmount, setDiscountAmount] = useState("");
   const [discountPresets, setDiscountPresets] = useState([]);
+  // GATE_DISCOUNT_STACKING (slice 7, #4405 P2 "Populate Edit line pickers
+  // with every supported type"): the appointment-level select above keeps
+  // its own long-standing percentage/fixed_amount-only list untouched (its
+  // "custom" mode has no way to prompt a NAMED variable preset's amount) —
+  // this second, wider list backs ONLY the new per-line pickers below,
+  // whose pickLineDiscount already prompts inline for a variable preset's
+  // amount, the same way Create/Invoices do.
+  const [lineDiscountPresets, setLineDiscountPresets] = useState([]);
+  // GitHub Codex round 16 P2 (#4657, :2413): an UNFILTERED id -> row map from
+  // the same /admin/discounts response, kept only for resolving a STORED
+  // stamp's own catalog metadata (stack_group/is_stackable) when the preset
+  // behind it has since gone inactive — the active-list-only filters above
+  // must stay the sole source of what's OFFERED to the operator.
+  const [discountMetaById, setDiscountMetaById] = useState({});
   const [discountPresetId, setDiscountPresetId] = useState("");
+  // GitHub Codex round 14 on #4657 (P2 @ :2494): the row's STORED
+  // appointment discount used to sit behind an empty picker ("None") while
+  // still applying, and picking None serialized `undefined` — the server's
+  // "leave it alone" — so an operator could never remove it. The stored
+  // stamp now renders as its own "(current)" option; choosing None sets
+  // this, which posts an explicit null discount (preview AND save).
+  const [storedDiscountCleared, setStoredDiscountCleared] = useState(false);
+  const serviceHasStoredAppointmentDiscount = !!service.discountType && service.discountAmount != null;
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
@@ -2107,6 +2213,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       try {
         const r = await adminFetch("/admin/discounts");
         const list = Array.isArray(r) ? r : [];
+        // GitHub Codex round 16 P2 (#4657, :2413): capture the UNFILTERED
+        // list by id, same response, before any active/visibility filtering
+        // below — the server's own loadDiscountStackMetaById is unfiltered
+        // too, so a visit carrying a now-retired preset's id must still
+        // resolve its stack_group/is_stackable here, or the pickers offer a
+        // same-group replacement the server then 400s.
+        const metaById = {};
+        for (const d of list) metaById[String(d.id)] = d;
+        setDiscountMetaById(metaById);
         // Same invoice-visibility contract as CreateAppointmentModal: the
         // save posts the preset id and the server loads it with
         // show_in_invoices=true, so an invoice-hidden preset must not be
@@ -2120,6 +2235,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               d.discount_type === "fixed_amount"),
         );
         setDiscountPresets(filtered);
+        // GitHub Codex round 24 P2 (#4657, :2220): a ZERO-value preset (the
+        // seeded WaveGuard Bronze 0% tier) was offered here and stayed
+        // visibly "chosen", but a fresh line pick runs through the server's
+        // resolveLineDiscount, which returns null whenever the resolved
+        // dollars aren't positive — the preview showed no line discount and
+        // Save persisted no identity behind the selection. A fixed/percent
+        // preset with a zero amount can never survive this path, so it isn't
+        // offered. Pre-push fallback audit P1 (round 24b, :2228): the seeded
+        // custom presets are exactly that shape (fixed_amount custom_dollar
+        // and percentage custom_percent, amount 0) but prompt for an amount
+        // per line — isCustomAmountPreset/isCustomPercentagePreset — so they,
+        // like the variable_* types, stay offered; only a true zero tier
+        // (Bronze 0%) is dropped.
+        setLineDiscountPresets(
+          list.filter((d) => (
+            d.is_active && !d.is_auto_apply && d.show_in_invoices
+            && !((d.discount_type === "percentage" || d.discount_type === "fixed_amount")
+              && !(Number(d.amount) > 0)
+              && !isCustomAmountPreset(d) && !isCustomPercentagePreset(d))
+          )),
+        );
       } catch {
         /* discounts optional */
       }
@@ -2198,10 +2334,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
 
   const applyDiscountPreset = (id) => {
+    if (id === STORED_APPOINTMENT_DISCOUNT_OPTION) {
+      // Back to the row's own stored stamp: nothing posted, nothing cleared.
+      setDiscountPresetId("");
+      setDiscountType("");
+      setDiscountAmount("");
+      setStoredDiscountCleared(false);
+      return;
+    }
     setDiscountPresetId(id);
     if (!id) {
       setDiscountType("");
       setDiscountAmount("");
+      if (serviceHasStoredAppointmentDiscount) setStoredDiscountCleared(true);
       return;
     }
     if (id === "custom") return;
@@ -2210,6 +2355,364 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     setDiscountType(d.discount_type);
     setDiscountAmount(String(d.amount ?? ""));
   };
+
+  // GATE_DISCOUNT_STACKING (slice 7): an add-on line's discount slot. Three
+  // states — untouched this session (the line's own STORED stamp, if any:
+  // `_origDiscountType`/`_origBasePrice`/etc., seeded on open), a fresh pick
+  // (`lineDiscountTouched` + `lineDiscount` an object), or explicitly
+  // removed (`lineDiscountTouched` + `lineDiscount` null). Only a genuinely
+  // untouched line still round-trips through deriveLegacyAddonSubmission in
+  // handleSave below — never recomputing its own stored stamp — so this
+  // stays a pure display/preview helper, not part of the save contract.
+  // Codex pre-push audit P1 (round 2, #4657): `lineDiscountTouched` is
+  // React state that survives a mid-session gate flip — the hook polls and
+  // fails closed on a probe error, so a line picked while the gate read on
+  // must not stay "active" once it reads off/unknown again (the control
+  // that set it is no longer even rendered). Every reader below gates on
+  // `stackingEnabled` too, so a hidden pick reverts to exactly the
+  // untouched/legacy behavior for both the preview AND the save payload —
+  // never silently posted with no way for the operator to see it.
+  const lineDiscountActive = (l) => stackingEnabled && !!l.lineDiscountTouched;
+  // Structural round 3 on #4657: rowIsMarked/frozenAddonCap/previewSlot/
+  // storedPrimaryLineDiscount/previewPrimarySlot (the client-side
+  // discount-stacking ENGINE's own input builders) are gone from this
+  // component entirely — every money figure this modal shows now comes
+  // from the server's own POST .../update-details/preview dry-run
+  // (moneyPreview, below), never a client re-derivation of the frozen-cap/
+  // marked-row rules those functions used to encode.
+  // GATE_DISCOUNT_STACKING (:2803 follow-up, Codex pre-push audit P1 round
+  // 2 on #4657, PRRT_kwDOR3YQi86krxFI's own fix-suggestion): a fresh pick
+  // (or explicit removal) leaves `lineDiscountTouched` set in React state
+  // for the rest of the session; `lineDiscountActive` above already gates
+  // every READER on `stackingEnabled` so a hidden pick can never reach the
+  // preview or the save. But setLineDiscount's own firstTouch also snapped
+  // Price from the seeded net to the true gross as a SIDE EFFECT of the
+  // pick — reverting the read-side gate alone leaves that mutation in
+  // place, so priceUnchanged (keyed on the now-stale `_seededPrice`) reads
+  // false and a SWAP (Military -> a fresh Silver pick, gate closes before
+  // Save) degrades to a silent full-gross, no-discount save instead of
+  // restoring the original stamp. This fully resets any touched line back
+  // to pristine — lineDiscountTouched, lineDiscount, AND Price — the moment
+  // the gate reads anything other than confirmed-on, so the line's next
+  // read is indistinguishable from "never touched this session" and
+  // round-trips its true original stamp exactly like #2306/#2803 already do.
+  useEffect(() => {
+    if (stackingEnabled) return;
+    setServiceLines((lines) => lines.map((l) => {
+      if (!l.lineDiscountTouched) return l;
+      // Codex pre-push audit P2 (round 4 on #4657, :2330; corrected round 6
+      // on #4657, :2342): only a line whose FIRST touch this session
+      // ACTUALLY snapped net -> gross has a Price this reset needs to
+      // undo. Recomputing that from _origDiscountType/_origBasePrice alone
+      // (round 4's version) drifts from what setLineDiscount's own
+      // firstTouch guard decides — round 5's :2441 fix added an
+      // "unless Price was already edited away from the seed" exception
+      // there, which this reset had no way to see; it would restore
+      // _seededPrice for every originally-stamped line regardless, silently
+      // discarding an operator's own reprice ($55 -> $70) the instant the
+      // gate flips. _touchSnappedPrice is the one flag both paths now
+      // share — set only when a touch this session genuinely performed the
+      // snap.
+      const priceWasSnapped = l._touchSnappedPrice === true;
+      return {
+        ...l,
+        lineDiscountTouched: false,
+        lineDiscount: null,
+        // GitHub Codex round 10 on #4657 (P2, :2328): undo the snap ONLY
+        // while Price still sits at the snapped gross — an operator who
+        // edited it AFTER the snap ($55 -> snapped $60 -> typed $70) made
+        // an explicit edit this reset must not discard.
+        price: priceWasSnapped && String(l.price) === String(l._origBasePrice)
+          ? (l._seededPrice ?? l.price)
+          : l.price,
+        _touchSnappedPrice: false,
+      };
+    }));
+  }, [stackingEnabled]);
+  // Codex pre-push audit P1 (round 2, #4657): a Price edit on an untouched
+  // stamped line (the discount CONTROL itself never touched) must also
+  // stop trusting the frozen stamp — handleSave's own priceUnchanged check
+  // already falls through to the flat-net branch the moment Price differs
+  // from its seed, so a preview that kept showing the old discount here
+  // would show a total the save can never actually produce (an edited $60
+  // line previewing $55 net-with-discount, then saving $70 flat with none).
+  const priceEditedFromSeed = (l) => String(l.price) !== String(l._seededPrice ?? "");
+  const origStampOf = (l) =>
+    l._origDiscountType && l._origBasePrice != null && !priceEditedFromSeed(l)
+      ? {
+          id: l._origDiscountId || null,
+          name: l._origDiscountName || null,
+          discount_type: l._origDiscountType,
+          amount: l._origDiscountAmount != null ? l._origDiscountAmount : null,
+        }
+      : null;
+  const effectiveLineDiscount = (l) => (lineDiscountActive(l) ? l.lineDiscount : origStampOf(l));
+  // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349): origStampOf
+  // above already hides a stored stamp whose gross was never recorded
+  // (_origBasePrice null — a row predating the base_price column, net only)
+  // because there is no gross to round-trip. But hiding the stamp alone
+  // still let the Line discount CONTROL render as "None" — an operator who
+  // then picked a replacement had setLineDiscount's own firstTouch guard
+  // (:2444, requires _origBasePrice != null) skip the net->gross snap, so
+  // the stored NET posted as the new discount's basePrice and the server
+  // applied a fresh discount on top of an already-discounted figure,
+  // permanently underpricing the line (rounds 7/8's exact regression class,
+  // from the opposite direction — reconstructing a gross by GUESSING it was
+  // never the bug; here it's silently trusting the net AS a gross). This
+  // line's own shape is the client's own, independent source of truth —
+  // needs no server round trip and catches the case even before any
+  // preview response has landed.
+  const lineGrossUnknownClient = (l) => !!l?._origDiscountType && l?._origBasePrice == null;
+  // The PRIMARY line's stored discount (service.lineDiscountType, read-only
+  // in this slice — see :3620's own note) has the identical shape: a
+  // pre-base_price-column row carries the discount type/amount but no
+  // recorded gross (service.primaryLinePrice null).
+  // GitHub Codex round 26 P1 (#4657, :3942): a MARKED row (priced by the
+  // canonical engine — pricingProvenance carries the regime marker) with a
+  // null primaryLinePrice is an add-on-only visit whose primary is a KNOWN
+  // $0, exactly as the server's restackStoredVisitFinancials reads it —
+  // never an unknown legacy gross. The same shared reader the server uses
+  // (shared/pricing-regime-marker.cjs), so the two can't disagree.
+  const visitCanonicallyMarked = isCanonicallyMarkedProvenance(service?.pricingProvenance);
+  const primaryGrossUnknownClient =
+    !visitCanonicallyMarked && !!service.lineDiscountType && service.primaryLinePrice == null;
+  // A line's own GROSS for the preview/subtotal: the true stored gross for
+  // an untouched, price-unedited stamped line (never the seeded NET `price`
+  // — recomputing a discount against a net figure would double-discount
+  // it), the operator's own entry once the line's discount slot has been
+  // touched this session (picking a discount redefines Price as "before
+  // discount" — the same contract Create appointment already uses) or its
+  // Price has been edited away from the stamped seed, or just Price when
+  // the line carries no discount at all (gross === net there).
+  const lineGrossFor = (l) => {
+    const typed = parseFinitePrice(l.price) ?? 0;
+    if (!stackingEnabled || lineDiscountActive(l)) return typed;
+    return l._origDiscountType && l._origBasePrice != null && !priceEditedFromSeed(l) ? l._origBasePrice : typed;
+  };
+  // Catalog row for a line slot (stack group, cap) — a stored stamp only
+  // carries id/type/amount until the presets load.
+  // GitHub Codex round 16 P2 (#4657, :2413): fall back to the unfiltered
+  // discountMetaById when the active/visible list has no match — a visit
+  // can carry a preset id that's since gone inactive (or been hidden from
+  // invoices), and this lookup backs every conflict-row builder below
+  // (storedAppointmentDiscountRow, storedPrimaryLineDiscountRow,
+  // lineDiscountCatalogRow for a stored add-on stamp), never the OFFERED
+  // option lists themselves — those still read the filtered lists only.
+  const linePresetById = (id) =>
+    id
+      ? lineDiscountPresets.find((d) => String(d.id) === String(id)) ||
+        discountMetaById[String(id)] ||
+        null
+      : null;
+  const lineDiscountCatalogRow = (ld) => (ld ? { ...(linePresetById(ld.id) || {}), ...ld } : null);
+  const presetOptionLabel = (d) => {
+    // GitHub Codex round 11 on #4657 (P2, :2381): the server resolves a
+    // free_service preset by discounting the WHOLE line, so it must read
+    // "Free" here exactly as Create appointment / the mobile picker
+    // render it — never `$0.00`, which misstates a full-service credit.
+    if (d.discount_type === "free_service") return `${d.name} - Free`;
+    if (isCustomPercentagePreset(d)) return `${d.name} - custom %`;
+    if (isCustomAmountPreset(d)) return `${d.name} - custom $`;
+    return `${d.name} - ${
+      d.discount_type === "percentage"
+        ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
+        : `$${Number(d.amount).toFixed(2)}`
+    }`;
+  };
+  // GitHub Codex round 15 P2 (#4657, :5003): the stored appointment
+  // discount's own "(current)" option — read off the raw stamp
+  // ({discountType, discountAmount} on `service`), never a catalog preset
+  // row, so presetOptionLabel's own shape doesn't fit — same three type
+  // rules (free_service reads "Free", a percentage OR variable_percentage
+  // reads "N%", everything else is a dollar amount) applied to the stamp
+  // directly.
+  const formatStoredDiscountAmount = (discountType, amount) => {
+    if (discountType === "free_service") return "Free";
+    if (discountType === "percentage" || discountType === "variable_percentage") {
+      return `${Number(amount)}%`;
+    }
+    return `$${Number(amount).toFixed(2)}`;
+  };
+  // A line-slot pick: the catalog preset, or (for a variable preset) the
+  // operator's own amount — the same inline prompt Create/Invoices use.
+  // Returns undefined on a cancelled/invalid prompt (caller must not act).
+  const pickLineDiscount = (presetId) => {
+    const d = linePresetById(presetId);
+    if (!d) return null;
+    let amount = d.amount;
+    if (isCustomAmountPreset(d)) {
+      const raw = window.prompt(`Discount amount for ${d.name} ($)`, "");
+      if (raw === null) return undefined;
+      // Codex pre-push audit P2 (round 1, #4657): reject a non-finite typed
+      // amount (e.g. "1e309" -> Infinity) the same way the percentage branch
+      // already does — Infinity survives the old `amount > 0` check, then
+      // JSON.stringify silently drops it to null on the wire, so the save
+      // posts NO discount at all while the preview showed the full line
+      // covered.
+      const parsedAmount = Number(raw);
+      amount = Number.isFinite(parsedAmount) ? Math.round(parsedAmount * 100) / 100 : NaN;
+      if (!Number.isFinite(amount) || !(amount > 0)) return undefined;
+    } else if (isCustomPercentagePreset(d)) {
+      const raw = window.prompt(`Discount percentage for ${d.name} (%)`, "");
+      if (raw === null) return undefined;
+      amount = Number(raw);
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 100) return undefined;
+    }
+    return {
+      id: d.id,
+      name: d.name,
+      discount_type: d.discount_type,
+      amount,
+      max_discount_dollars: d.max_discount_dollars,
+      stack_group: d.stack_group,
+      is_stackable: d.is_stackable,
+    };
+  };
+  const setLineDiscount = (key, presetId) => {
+    const picked = presetId ? pickLineDiscount(presetId) : null;
+    if (picked === undefined) return;
+    setServiceLines((lines) =>
+      lines.map((l) => {
+        if (l._key !== key) return l;
+        // Codex pre-push audit P1 (round 1): the FIRST touch this session of
+        // an already-stamped line's discount control — a fresh pick that
+        // replaces the stamp, or an explicit Remove — must snap Price to the
+        // line's true GROSS. Price was showing this line's normal (net)
+        // seed; lineGrossFor only reads the frozen _origBasePrice for an
+        // UNTOUCHED line, so leaving Price at net here would have the save's
+        // flat-net (Remove) or fresh-pick (new discount) branch post that
+        // net figure as the line's new permanent basePrice — silently
+        // erasing the true gross and, on Remove, the discount's own record.
+        // Codex pre-push audit P2 (round 5 on #4657, :2441): but ONLY when
+        // Price still holds the seeded NET — an operator who already
+        // retyped Price (e.g. $55 -> $70) before ever touching the discount
+        // control has nothing here to snap FROM; overwriting that edit with
+        // _origBasePrice ($60) would silently discard it.
+        const firstTouch = !l.lineDiscountTouched && l._origDiscountType && l._origBasePrice != null
+          && !priceEditedFromSeed(l);
+        return {
+          ...l,
+          lineDiscount: picked,
+          lineDiscountTouched: true,
+          price: firstTouch ? String(l._origBasePrice) : l.price,
+          // Codex pre-push audit P2 (round 6 on #4657, :2342): recorded
+          // HERE, at the moment firstTouch actually decides to snap, so the
+          // gate-close reset effect below can undo exactly what THIS touch
+          // did instead of recomputing a similar-looking condition that
+          // doesn't know whether the snap actually fired (it can't see
+          // whether Price already diverged from the seed by the time IT
+          // runs, only setLineDiscount can). A later touch this session
+          // (firstTouch already false) leaves the recorded flag as-is —
+          // it reflects whether Price was EVER snapped this session, not
+          // just on the most recent pick.
+          _touchSnappedPrice: firstTouch ? true : l._touchSnappedPrice,
+        };
+      }),
+    );
+  };
+  // :3293 (Codex pre-push audit P1 on #4657): the row's OWN stored
+  // appointment-level discount — read-only, from the new GET field, never
+  // the operator's own selection state (discountType/discountAmount/
+  // discountPresetId stay untouched: "leave alone" on Save is unaffected).
+  // Only relevant while the operator hasn't overridden it THIS session —
+  // once they pick something in the Discount control, THEIR pick is what
+  // will actually save, and the stored value is being replaced.
+  const storedAppointmentDiscount = !discountType && !storedDiscountCleared && serviceHasStoredAppointmentDiscount
+    ? {
+        id: service.discountId || null,
+        discount_type: service.discountType,
+        amount: service.discountAmount,
+        max_discount_dollars: service.discountMaxDollars ?? null,
+        // :3421 — the stamp's OWN scope, read straight from the row (never
+        // re-derived from a catalog lookup, which could drift from what
+        // was actually true when this was saved).
+        service_key_filter: service.discountServiceKeyFilter ?? null,
+        service_category_filter: service.discountServiceCategoryFilter ?? null,
+      }
+    : null;
+  // The stored discount's OWN catalog row (stack_group/is_stackable) —
+  // needed only for line-picker conflict filtering below; the stamp itself
+  // carries no group/stackable info (that lives on the catalog id it
+  // names). Unresolvable (id null, or presets not loaded yet) still counts
+  // as "an appointment discount exists" for the interaction guard, just
+  // with no group to conflict on.
+  const storedAppointmentDiscountRow = storedAppointmentDiscount
+    ? { ...(linePresetById(storedAppointmentDiscount.id) || {}), spansAll: true }
+    : null;
+  // GitHub Codex round 15 P2 (#4657, :2567/:2585): the PRIMARY line's own
+  // stored catalog discount (service.lineDiscountId, read-only in this
+  // modal — see :3620's note) is a stack-group participant exactly like an
+  // add-on's chosen row, but chosenLineDiscountRows below only walks
+  // serviceLines (add-ons) — the primary line's discount was invisible to
+  // both pickers' conflict check, so the UI could still offer a same-group
+  // preset on an add-on line or at appointment level that the server then
+  // refused with a stack-group error. `scope: 'primary'` marks it
+  // distinctly from every add-on's own `line-N` scope and from the
+  // appointment slot's own (unscoped, spansAll) query. Unresolvable (no
+  // catalog id, or the presets haven't loaded yet) is null — no group to
+  // conflict on, the same posture storedAppointmentDiscountRow's own
+  // comment above documents.
+  const storedPrimaryLineDiscountRow = service.lineDiscountId
+    ? { ...(linePresetById(service.lineDiscountId) || {}), scope: "primary" }
+    : null;
+  // Every OTHER line's chosen discount row, in the shape stackablePresets
+  // reads (stack_group/is_stackable/scope) — one WaveGuard tier per visit:
+  // a tier already on another line is hidden here, though the same tier may
+  // sit on two different lines (the server's own one-tier check counts
+  // items, not deduped rows, and refuses a genuine duplicate either way).
+  const chosenLineDiscountRows = (exceptKey) =>
+    serviceLines
+      .filter((l) => l._key !== exceptKey)
+      .map((l) => effectiveLineDiscount(l))
+      .filter(Boolean)
+      .map((ld, i) => ({ ...lineDiscountCatalogRow(ld), scope: `line-${i}` }));
+  // Codex pre-push audit P1 (round 1, #4657) — partial, client-only
+  // mitigation: a preset's OWN catalog service_key_filter/
+  // service_category_filter (when it has one) must also match THIS line
+  // before it's even offered, mirroring lineInDiscountScope's read of the
+  // APPOINTMENT-level preset's filter. This narrows the obviously
+  // out-of-scope cases (a termite-only preset on a mosquito line); it does
+  // NOT reach customer-level eligibility (military status, minimum
+  // subtotal, WaveGuard tier requirement, customer assignment) — those need
+  // the server's manualEligibilityFailures path, which the merged
+  // update-details route doesn't yet call for a per-line discountId. Real,
+  // separate gap; server-route work outside this slice's file ownership
+  // (see the PR's own carried-findings note).
+  const presetReachesLine = (d, line) => (
+    (!d?.service_key_filter || d.service_key_filter === (line?.serviceKey || null))
+    && (!d?.service_category_filter || d.service_category_filter === (line?.serviceCategory || null))
+  );
+  const lineDiscountOptionsFor = (line) => {
+    const ownKey = line?._key;
+    return stackablePresets(
+      lineDiscountPresets.filter((d) => presetReachesLine(d, line)),
+      [
+        ...chosenLineDiscountRows(ownKey),
+        storedPrimaryLineDiscountRow,
+        // The appointment-level pick spans every line it reaches — never
+        // offer the same non-stackable tier again on a line it already
+        // compounds with. Either the operator's OWN pick this session, or
+        // (:3293) the row's stored one when they haven't overridden it —
+        // both reach every line exactly the same way.
+        discountType && discountPresetId && discountPresetId !== "custom" && selectedDiscountPreset
+          ? { ...selectedDiscountPreset, spansAll: true }
+          : storedAppointmentDiscountRow,
+      ].filter(Boolean),
+      { scope: ownKey },
+    );
+  };
+  // The appointment-level select hides a preset that would conflict with a
+  // non-stackable group already chosen on a line — an operator could
+  // otherwise pick Silver on the pest line then Military appointment-wide,
+  // see a valid-looking (but wrong) compounded total, and only learn of the
+  // conflict from the server's 400 on Save.
+  const appointmentPresetOptions = stackingEnabled
+    ? stackablePresets(
+        discountPresets,
+        [...chosenLineDiscountRows(null), storedPrimaryLineDiscountRow].filter(Boolean),
+        { spansAll: true },
+      )
+    : discountPresets;
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   // Bill-to select: one control drives payerId + the self-pay pin (mutually
@@ -2307,6 +2810,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     setServiceLines((lines) => [
       ...lines,
       {
+        lineDiscount: null,
+        lineDiscountTouched: false,
         _key: `addon-new-${Date.now()}-${lines.length}`,
         id: null,
         serviceId: null,
@@ -2354,8 +2859,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // server, and the Discount control always opens empty (it never seeds the
   // stored discount), so a non-empty selection is always a change made in
   // this session — without this the operator could never apply a discount
-  // change to following visits.
-  const discountDirty = discountType !== "";
+  // change to following visits. GitHub Codex round 15 P2 (#4657, :2735):
+  // choosing None on a stored appointment discount posts a removal
+  // (discountType/discountAmount/discountId all null) without ever setting
+  // discountType — storedDiscountCleared is the only signal that removal
+  // happened, so it must count as dirty too, or the scope control never
+  // offers applying that removal to following visits.
+  const discountDirty = discountType !== "" || storedDiscountCleared;
   // Base-series rows only: boosters share recurring_parent_id but carry
   // is_recurring=false and their OWN pricing — a booster edit must stay
   // per-visit, never rewrite the base series (the server refuses a posted
@@ -2466,11 +2976,251 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       (form.windowStart || "") !== initialWindowStart) &&
     !!form.windowStart;
 
+  // See lineDiscountSaveBlocked's own comment for the compounding hazard
+  // this guards against. Also the ONE condition (interaction between the
+  // appointment-level pick and a line's own slot) that needs a submit-time
+  // freshness probe below — a save touching neither never depends on it.
+  // :3293 — "an appointment discount exists" now includes the row's OWN
+  // stored one (never the operator's own touched state), not just an
+  // active selection this session: the server compounds a preserved
+  // stored discount with a fresh line pick exactly the same way, so the
+  // guard/preview must see it too.
+  const appointmentDiscountSelected = !!(discountType && discountAmount !== "") || !!storedAppointmentDiscount;
+  const stackingUnconfirmedBlocksSave = lineDiscountSaveBlocked({
+    known: stackingKnown,
+    appointmentDiscountSelected,
+    lines: serviceLines,
+  });
+  // Codex pre-push audit P2 (round 4 on #4657, :2850): a line preset picked
+  // while Price is blank fails buildAddonsPayload's own price !== "" guard
+  // and falls through to the flat-net (no discount) branch — the payload
+  // silently drops the operator's selection while the picker keeps showing
+  // it chosen. Block Save until every actively-picked line has a valid
+  // price to submit it against, rather than let the pick vanish unseen.
+  const lineDiscountPriceMissing = serviceLines.some(
+    (l) => lineDiscountActive(l) && l.lineDiscount && parseFinitePrice(l.price) == null,
+  );
+  // GitHub Codex round 24 P1 (#4657, :3315): the same trap one level up —
+  // an appointment-discount change (a pick, or None clearing the stored
+  // one) with Price cleared posts the discount fields while OMITTING both
+  // price fields, so the server has no gross to recompute against (it now
+  // refuses 422 DISCOUNT_PRICE_REQUIRED; the preview refuses identically).
+  // Block Save here with a reason instead of letting the operator hit
+  // that refusal after the fact.
+  const appointmentDiscountPriceMissing = discountDirty && parseFinitePrice(form.price) == null;
+  // Pre-push fallback audit P1 on #4657 round 24b (:3242): every payload
+  // builder maps a typed price through `parseFinitePrice(...) ?? undefined`,
+  // so a NEGATIVE or non-numeric entry ("-50", "1e309", "abc") was posted
+  // as "leave the price alone" — the server's negativePricePosted refusal
+  // never saw it, the preview and the PUT both reported the STORED total,
+  // and Save closed the modal with the edit silently discarded. The two
+  // gates above only fire while a discount is in play. Any NON-BLANK price
+  // entry that parses to nothing (primary Price, or any named add-on
+  // line's Price) now blocks Save with the reason; blank stays "no price",
+  // the contract every caller already has.
+  const priceEntryInvalid = (v) => String(v ?? "").trim() !== "" && parseFinitePrice(v) == null;
+  const invalidPriceEntered =
+    priceEntryInvalid(form.price) || serviceLines.some((l) => l.serviceType && priceEntryInvalid(l.price));
+
+  // Codex pre-push audit structural round on #4657 (:3526/:2394's class):
+  // extracted so the preview debounce below can send the SAME add-on
+  // payload shape handleSave will actually POST — the server's dry-run
+  // preview endpoint is the source of truth for the numbers shown, but
+  // the REQUEST BODY itself must still genuinely match what Save sends,
+  // or a preview of a different payload proves nothing.
+  const buildAddonsPayload = (lines) => {
+      const cleanLines = lines
+        .map((l) => ({ ...l, serviceType: (l.serviceType || "").trim() }))
+        .filter((l) => l.serviceType);
+      const sendAddons = cleanLines.length > 0 || hadAddonsInitially;
+      const addonsPayload = sendAddons
+        ? cleanLines.map((l) => {
+            const common = {
+              // Codex pre-push audit P1 (round 3 on #4657): the server's
+              // new stack-group grandfathering (:2513) matches THIS line
+              // back to its own prior stored discount by row id — without
+              // it, every existing line looked "new" and an unrelated
+              // resave of two already-persisted same-group stamps 400'd.
+              id: l.id || undefined,
+              serviceId: l.serviceId || null,
+              // Stable catalog key for a fallback pick (no serviceId) — the
+              // server resolves the row by it before trying the label.
+              serviceKey: l.serviceKey || undefined,
+              serviceName: l.serviceType,
+              estimatedDuration:
+                l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
+                  ? parseInt(l.estimatedDuration, 10)
+                  : null,
+              recurringPattern: l.recurringPattern || null,
+              recurringIntervalDays: l.recurringIntervalDays ?? null,
+              recurringNth: l.recurringNth ?? null,
+              recurringWeekday: l.recurringWeekday ?? null,
+              skipWeekends: l.skipWeekends,
+              weekendShift: l.weekendShift,
+            };
+            // GATE_DISCOUNT_STACKING (slice 7): a line whose discount slot
+            // was touched THIS session (a fresh pick, or an explicit
+            // removal) never round-trips the original stamp below — that
+            // path is for a genuinely untouched line only. A fresh pick
+            // posts its GROSS price (Price now means "before discount" for
+            // this line — see lineGrossFor's own note) plus the slot; the
+            // server keeps an unchanged stamp verbatim elsewhere and
+            // resolves a new pick through the catalog. An explicit removal
+            // falls through to the flat-net branch at the bottom exactly
+            // like a line that never had a discount. lineDiscountActive
+            // (not the raw flag) — Codex pre-push audit P1 (round 2,
+            // #4657): if the gate closed since this line was touched, its
+            // hidden pick must NOT be posted at all; falling through to the
+            // flat-net branch below is exactly the behavior an operator who
+            // never saw a Line discount control would get.
+            const lineGrossPrice = parseFinitePrice(l.price);
+            if (lineDiscountActive(l) && l.lineDiscount && lineGrossPrice != null) {
+              return {
+                ...common,
+                basePrice: lineGrossPrice,
+                discountType: l.lineDiscount.discount_type,
+                discountAmount: l.lineDiscount.amount != null ? l.lineDiscount.amount : null,
+                discountId: l.lineDiscount.id || null,
+                discountName: l.lineDiscount.name || null,
+                // Codex pre-push audit P1 (structural round on #4657,
+                // :2994/:2186): this branch is the ONLY place a line's
+                // discount pick was actually touched this session (a fresh
+                // catalog/custom pick — lineDiscountActive gates it) — tell
+                // the server so it runs manualEligibilityFailures against
+                // THIS pick; an untouched round-tripped stamp (below) never
+                // sets this.
+                lineDiscountFresh: true,
+              };
+            }
+            const priceUnchanged =
+              !lineDiscountActive(l) && !!l.id && String(l.price) === String(l._seededPrice ?? "");
+            // Unchanged existing line: derive its submission the SAME way
+            // the server expects (shared module, slice 4 of #4405 GitHub
+            // round 3 structural fix) — a real gross + line discount
+            // round-trips the full stamp so the server reconstructs the
+            // same line ($100 − $10), preserving the discount audit; a
+            // discount whose gross was never recorded (a legacy row
+            // predating the base_price column) sends only the flat net,
+            // because this editor cannot reconstruct a gross it never had
+            // and must not guess one (re-applying a stored discount to a
+            // price it can't verify would double-discount the row).
+            if (priceUnchanged) {
+              return {
+                ...common,
+                ...deriveLegacyAddonSubmission({
+                  basePrice: l._origBasePrice,
+                  netPrice: l._seededPrice,
+                  discountType: l._origDiscountType,
+                  discountAmount: l._origDiscountAmount,
+                  discountId: l._origDiscountId,
+                  discountName: l._origDiscountName,
+                }),
+              };
+            }
+            // New line, price-edited line, or a line whose discount slot was
+            // explicitly cleared this session (lineDiscountTouched with
+            // lineDiscount null — setLineDiscount already restored Price to
+            // the true gross when there was an original stamp to clear):
+            // treat Price as the final (net) charge with no discount.
+            // (Re-applying a stored discount here would double-discount rows
+            // whose seeded price was already net.)
+            return {
+              ...common,
+              price: lineGrossPrice,
+            };
+          })
+        : undefined;
+    return { cleanLines, sendAddons, addonsPayload };
+  };
+
+  // GitHub Codex round 13 on #4657 (P2 @ :3011): handleSave awaits the
+  // gate re-probe below with the payload still to be built from THIS
+  // render's closure. Only the service/price/discount/notes controls are
+  // frozen by `saving` — date, time, technician, duration, recurrence,
+  // series scope and add/remove-service stay live, so an edit made while
+  // a slow probe is pending would be silently dropped: the old closure
+  // resumes, posts its pre-edit values, and closes the modal. Rather than
+  // chase every control with a disabled prop, every state the payload
+  // reads is snapshotted here each render; the await compares the
+  // snapshot it started with against the latest one and refuses to post
+  // a payload the operator has since changed.
+  const saveInputsRef = useRef(null);
+  saveInputsRef.current = {
+    // seriesPreview itself is a fresh object every render (hook return) —
+    // the payload reads only its `preview`, so that is what is compared.
+    form, selectedPropertyId, notificationType, serviceLines, seriesPreviewValue: seriesPreview.preview,
+    isRecurring, recurringFreq, recurringCount, recurringOngoing, seriesSummary,
+    recurringNth, recurringWeekday, recurringIntervalDays, skipWeekends, weekendShift,
+    discountType, discountAmount, discountPresetId, storedDiscountCleared, createInvoice, assignmentScope,
+    priceServiceScope, timeOnSiteMinutes, reentryExterior, reentryInterior,
+  };
+  const saveInputsDrifted = (before) => {
+    const after = saveInputsRef.current;
+    return Object.keys(before).some((k) => !Object.is(before[k], after[k]));
+  };
+
   const handleSave = async ({ takePayment = false } = {}) => {
+    if (stackingUnconfirmedBlocksSave) return;
+    if (lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) return;
+    // Codex pre-push audit structural round on #4657: Save is blocked while
+    // a discount is in play until the server's OWN dry-run (moneyPreview)
+    // has confirmed what THIS exact form would persist — moneyPreviewBlocksSave
+    // and appointmentTotal are declared further down this component body but
+    // are in scope here by closure; handleSave itself is only ever invoked
+    // after the full render (and every const in it) has completed.
+    if (takePayment ? takePaymentBlocksSave : moneyPreviewBlocksSave) return;
     if (savingRef.current || cancellingRef.current) return;
     savingRef.current = true;
     setSaveError("");
     setSaving(true);
+    // Revalidate right before POSTING money — the hook polls, but a gate
+    // flip between the last probe and this click would still save under the
+    // semantics the preview used. Codex pre-push audit P1 (round 4 on
+    // #4657, :2936): running this ONLY for "appointment discount + a line
+    // discount together" missed a MARKED visit with just a single capped
+    // line stamp (canonical frozen-cap restack on, cap-unaware applyDiscount
+    // off) — round 4 made it unconditional instead. Codex pre-push audit P2
+    // (round 5 on #4657, :2958): unconditional went too far the OTHER way —
+    // an ordinary notes/scheduling-only save on an undiscounted visit has
+    // no money that changes across the gate at all, so it should not
+    // depend on this endpoint's own uptime (a 15s stacking-probe failure
+    // backoff would otherwise block an unrelated edit). Re-scoped to every
+    // save whose economics genuinely ARE gate-sensitive: any appointment
+    // discount, any line discount at all (a fresh pick OR an untouched
+    // stored stamp — effectiveLineDiscount already covers both — capped or
+    // not, which is exactly what round 4's own repro needed), or an
+    // existing prepay balance (its reconciliation depends on the exact
+    // total the gate itself changes). Ordered AFTER setSaving so the await
+    // cannot widen the double-click window; alert() is how this handler
+    // already reports a blocking validation failure (see the time-on-site
+    // check below).
+    const lineDiscountGateSensitive = serviceLines.some((l) => !!effectiveLineDiscount(l));
+    // Codex pre-push audit P1 (round 10 on #4657, :2974): serviceLines holds
+    // ADD-ON lines only — the PRIMARY line's own stored discount (read-only
+    // here, but restacked by the marked-row canonical branch and replayed
+    // by the legacy one) is just as gate-sensitive: repricing the primary
+    // on a marked visit with a 10% primary discount previews $230 and would
+    // save $240 under a gate that closed before Save.
+    const primaryLineDiscountGateSensitive = !!service.lineDiscountType;
+    const prepayGateSensitive = service.prepaidAmount != null && Number(service.prepaidAmount) > 0;
+    if (appointmentDiscountSelected || lineDiscountGateSensitive || primaryLineDiscountGateSensitive || prepayGateSensitive) {
+      const inputsAtClick = saveInputsRef.current;
+      const fresh = await ensureStackingFresh();
+      if (!fresh.known || fresh.enabled !== stackingEnabled) {
+        savingRef.current = false;
+        setSaving(false);
+        alert("The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.");
+        return;
+      }
+      // Round 13 P2 (:3011): a field edited while that probe was pending
+      // is not in this closure's payload — never post it silently.
+      if (saveInputsDrifted(inputsAtClick)) {
+        savingRef.current = false;
+        setSaving(false);
+        alert("Something changed while the discount setting was being checked. Review the form and save again.");
+        return;
+      }
+    }
     // Time-on-site correction rides the same Save button but its own
     // endpoint: validate before anything writes so a typo aborts the whole
     // save rather than landing the update-details half only. The PATCH
@@ -2530,83 +3280,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
-      const cleanLines = serviceLines
-        .map((l) => ({ ...l, serviceType: (l.serviceType || "").trim() }))
-        .filter((l) => l.serviceType);
-      const sendAddons = cleanLines.length > 0 || hadAddonsInitially;
-      // The Price field always holds the PRIMARY line's own GROSS (see this
-      // form's own `price` seed, above: deriveLegacyPrimarySubmission
-      // returns primaryLinePrice verbatim whenever add-ons are known, which
-      // they always are on this modal) — never the stored NET total, with
-      // or without add-on lines. Sending it explicitly, unconditionally
-      // (not only when add-ons are present), tells the server's no-add-on
-      // save path which convention this payload's `estimatedPrice` uses, so
-      // an unrelated (echoed) save can be told apart from a genuine price
-      // change without guessing from the number alone (ADMIN-BUG-R01 fix:
-      // a purely value-based guess on the server collides whenever a
-      // genuine edit's new number happens to equal the other convention's
-      // reading of the same stored row).
-      const primaryLinePriceValue =
-        form.price !== "" && !isNaN(parseFloat(form.price))
-          ? parseFloat(form.price)
-          : undefined;
-      const addonsPayload = sendAddons
-        ? cleanLines.map((l) => {
-            const common = {
-              serviceId: l.serviceId || null,
-              // Stable catalog key for a fallback pick (no serviceId) — the
-              // server resolves the row by it before trying the label.
-              serviceKey: l.serviceKey || undefined,
-              serviceName: l.serviceType,
-              estimatedDuration:
-                l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))
-                  ? parseInt(l.estimatedDuration, 10)
-                  : null,
-              recurringPattern: l.recurringPattern || null,
-              recurringIntervalDays: l.recurringIntervalDays ?? null,
-              recurringNth: l.recurringNth ?? null,
-              recurringWeekday: l.recurringWeekday ?? null,
-              skipWeekends: l.skipWeekends,
-              weekendShift: l.weekendShift,
-            };
-            const priceUnchanged =
-              !!l.id && String(l.price) === String(l._seededPrice ?? "");
-            // Unchanged existing line: derive its submission the SAME way
-            // the server expects (shared module, slice 4 of #4405 GitHub
-            // round 3 structural fix) — a real gross + line discount
-            // round-trips the full stamp so the server reconstructs the
-            // same line ($100 − $10), preserving the discount audit; a
-            // discount whose gross was never recorded (a legacy row
-            // predating the base_price column) sends only the flat net,
-            // because this editor cannot reconstruct a gross it never had
-            // and must not guess one (re-applying a stored discount to a
-            // price it can't verify would double-discount the row).
-            if (priceUnchanged) {
-              return {
-                ...common,
-                ...deriveLegacyAddonSubmission({
-                  basePrice: l._origBasePrice,
-                  netPrice: l._seededPrice,
-                  discountType: l._origDiscountType,
-                  discountAmount: l._origDiscountAmount,
-                  discountId: l._origDiscountId,
-                  discountName: l._origDiscountName,
-                }),
-              };
-            }
-            // New or price-edited line: the editor has no per-line discount UI,
-            // so treat the Price as the final (net) charge with no discount.
-            // (Re-applying a stored discount here would double-discount rows
-            // whose seeded price was already net.)
-            return {
-              ...common,
-              price:
-                l.price !== "" && !isNaN(parseFloat(l.price))
-                  ? parseFloat(l.price)
-                  : null,
-            };
-          })
-        : undefined;
+      const { cleanLines, sendAddons, addonsPayload } = buildAddonsPayload(serviceLines);
+      // Merged from main #4674: the Price field always holds the PRIMARY
+      // line's own GROSS, and it is sent unconditionally (not only with
+      // add-on lines) so the server's no-add-on save path can tell this
+      // payload's gross convention apart from MobileServiceEditModal's net
+      // convention by the field's presence, never by guessing from the number.
+      const primaryLinePriceValue = parseFinitePrice(form.price) ?? undefined;
       const notifyOnMove = scheduleMoved && notificationType === "sms";
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
@@ -2692,22 +3372,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           skipWeekends: recurringControlsActive ? !!skipWeekends : undefined,
           weekendShift:
             recurringControlsActive && skipWeekends ? weekendShift : undefined,
-          discountType: discountType || undefined,
+          // Round 14 P2 (:2494): an explicitly cleared stored discount posts
+          // null (the server's "remove it"), never undefined ("leave it").
+          discountType: discountType || (storedDiscountCleared ? null : undefined),
           discountAmount:
             discountType && discountAmount !== ""
               ? Number(discountAmount)
-              : undefined,
+              : (storedDiscountCleared ? null : undefined),
           // A catalog preset posts its id so the row keeps the discount's
           // identity (name on the invoice line, service filters); "custom"
           // stays an anonymous type/amount pair.
           discountId:
             discountType && discountPresetId && discountPresetId !== "custom"
               ? discountPresetId
-              : undefined,
-          estimatedPrice:
-            form.price !== "" && !isNaN(parseFloat(form.price))
-              ? parseFloat(form.price)
-              : undefined,
+              : (storedDiscountCleared ? null : undefined),
+          estimatedPrice: parseFinitePrice(form.price) ?? undefined,
           createInvoice: takePayment || createInvoice,
           assignmentScope:
             form.technicianId !== (service.technicianId || "")
@@ -2716,6 +3395,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           priceServiceScope: priceServiceScopeActive
             ? priceServiceScope
             : undefined,
+          // GitHub Codex round 15 P1 (#4657, :3019): a confirmed preview's
+          // own total, sent back as a witness the server compares against
+          // what it's about to persist — refuses (409 VISIT_CHANGED_RETRY,
+          // reason PREVIEW_TOTAL_DRIFT) rather than silently saving a
+          // different figure than the one just confirmed on screen.
+          // appointmentTotal is null until a preview has actually resolved
+          // for these exact inputs (moneyPreviewFresh); omit the key
+          // entirely rather than post null — undefined is this route's
+          // "don't check" contract, and a notes-only save whose money can
+          // never change (saveTouchesMoney false) may never even get a
+          // resolved preview total to send.
+          // GitHub Codex round 20 P1 (#4657, :3330): a CONFIRMED preview
+          // that resolved to no priceable total ("Not priced" — total null
+          // with moneyPreviewFresh true, r16 :5318) also has to witness that
+          // confirmed state. Sending undefined there is indistinguishable
+          // from never having previewed at all, so a concurrent save that
+          // priced the visit in the meantime could be silently overwritten
+          // by this stale, still-unpriced save. Server contract: key absent
+          // → no check; explicit null → refuse if the server's own plan
+          // would persist a price; a number → must match exactly.
+          expectedTotal:
+            moneyPreviewFresh && moneyPreview.total == null
+              ? null
+              : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
         }),
       });
       if (notifyOnMove && result?.notificationSent === false) {
@@ -2883,6 +3586,28 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         seriesPreview.replace(ack.preview);
         setSeriesStale(ack.message || "The recurring plan changed — confirm again.");
         setSaveError(ack.message || "This save moves a recurring visit and its later visits — review the recurring-plan line and save again.");
+      } else if (e.code === "VISIT_CHANGED_RETRY") {
+        // GATE_DISCOUNT_STACKING (slice 7): a marked row's frozen
+        // stamp/add-on rows moved under this save's own compare-and-swap
+        // (another save landed while this modal was open) — the server
+        // refused rather than silently overwriting the concurrent change.
+        // Nothing here was written; reopening shows the current numbers
+        // rather than this modal silently retrying a stale preview.
+        // GitHub Codex round 20 P2 (#4657, :3498): the server returns this
+        // SAME code for route changes, moved/resized windows, grouping
+        // changes, the legacy-price CAS, and now preview-total drift too —
+        // each with its own actionable message — but the fixed stacked-
+        // discount copy here was shown for every one of them regardless.
+        // The error middleware forwards the body's `error` as e.message
+        // (adminFetch), so show the server's own message and fall back to
+        // the stacked-discount copy only when it's empty.
+        setSaveError(e.message || "This appointment's stacked discounts changed since it opened (likely another save). Close and reopen it to see the current numbers, then save again.");
+        // GitHub Codex round 23 P2 (#4657, :3517): the preview that
+        // produced the refused expectedTotal is stale by definition —
+        // without this, the same witness is resent on the next click and
+        // the operator gets the same 409 until they happen to edit a
+        // field. Invalidate it and re-run the dry-run now.
+        setPreviewNonce((n) => n + 1);
       } else {
         setSaveError("Save failed: " + e.message);
       }
@@ -2942,16 +3667,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     "Customer";
   const customerPhone = service.customerPhone || customer.phone || "";
   const customerEmail = customer.email || "";
-  const primaryPrice =
-    form.price !== "" && !isNaN(parseFloat(form.price))
-      ? parseFloat(form.price)
-      : 0;
-  const addonLinesTotal = serviceLines.reduce(
-    (sum, l) =>
-      sum + (l.price !== "" && !isNaN(parseFloat(l.price)) ? parseFloat(l.price) : 0),
-    0,
-  );
-  const servicePrice = primaryPrice + addonLinesTotal;
+  const primaryPrice = parseFinitePrice(form.price) ?? 0;
   const selectedDiscountPreset =
     discountPresetId && discountPresetId !== "custom"
       ? discountPresets.find((d) => String(d.id) === String(discountPresetId))
@@ -2962,66 +3678,370 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // percent-excluded lines (termite bond, rodent bait, ...). The primary
   // line's identity comes from the list payload or a catalog pick in this
   // session; the server is authoritative either way.
-  const presetKeyFilter = selectedDiscountPreset?.service_key_filter || null;
-  const presetCategoryFilter =
-    selectedDiscountPreset?.service_category_filter || null;
+  // :3421 (GitHub review round 2 on #4657): a STORED, untouched appointment
+  // discount has its OWN scope/type — resolveUpdateDetailsAddonFinancials
+  // saves using the row's stored discount_service_key_filter/
+  // discount_service_category_filter and discount_type, never the (empty)
+  // current-selection state, so the preview must fall back to them too
+  // whenever the operator hasn't picked something THIS session.
+  const effectivePresetKeyFilter =
+    selectedDiscountPreset?.service_key_filter
+    || (!discountType ? storedAppointmentDiscount?.service_key_filter : null)
+    || null;
+  const effectivePresetCategoryFilter =
+    selectedDiscountPreset?.service_category_filter
+    || (!discountType ? storedAppointmentDiscount?.service_category_filter : null)
+    || null;
+  const effectiveDiscountTypeForExclusion =
+    discountType || storedAppointmentDiscount?.discount_type || "";
+  // GitHub Codex round 26 P2 (#4657, :3681): a RETAINED stored appointment
+  // discount leaves discountType/discountAmount empty by design, so the
+  // exclusion notices below (gated on the selection state) never explained
+  // which lines a stored percentage skipped — and a stored
+  // variable_percentage was not classified as percent at all. One
+  // effective predicate pair for every notice: percent-ness through the
+  // shared helper (covers variable_percentage), "in play" = a live
+  // selection with an amount OR a retained stored discount.
+  const effectiveDiscountIsPercent = isPercentDiscountType(effectiveDiscountTypeForExclusion);
+  const effectiveDiscountInPlay =
+    (!!discountType && discountAmount !== "") || !!storedAppointmentDiscount;
   const lineInDiscountScope = (line) =>
-    (!presetKeyFilter || presetKeyFilter === (line.serviceKey || null)) &&
-    (!presetCategoryFilter ||
-      presetCategoryFilter === (line.serviceCategory || null));
+    (!effectivePresetKeyFilter || effectivePresetKeyFilter === (line.serviceKey || null)) &&
+    (!effectivePresetCategoryFilter ||
+      effectivePresetCategoryFilter === (line.serviceCategory || null));
   // excludedFromPercentDiscount === null means UNKNOWN (static fallback
   // row while the live catalog is unavailable): a percentage preview must
   // not assume eligibility the server may refuse on save (codex #3591 r24
   // P2) — the row is withheld from the percentage base.
   const lineTakesDiscount = (line) =>
     lineInDiscountScope(line) &&
-    !(discountType === "percentage"
+    !(effectiveDiscountIsPercent
       && (line.excludedFromPercentDiscount === true || line.excludedFromPercentDiscount === null));
-  const primaryLineForDiscount = {
-    serviceKey: form.serviceKey,
-    serviceCategory: form.serviceCategory,
-    excludedFromPercentDiscount: form.excludedFromPercentDiscount === null
-      ? null
-      : form.excludedFromPercentDiscount === true,
-  };
   const percentExcludedLines = serviceLines.filter(
     (l) => !lineTakesDiscount(l),
   );
-  const percentDiscountBase =
-    (lineTakesDiscount(primaryLineForDiscount) ? primaryPrice : 0) +
-    serviceLines.reduce(
-      (sum, l) =>
-        !lineTakesDiscount(l) || l.price === "" || isNaN(parseFloat(l.price))
-          ? sum
-          : sum + parseFloat(l.price),
-      0,
-    );
-  // Clamped the way calculateAppointmentDiscountDollars clamps on the server:
-  // never more than the lines the discount can reach.
-  // A catalog preset's max_discount_dollars caps a percentage the same way
-  // calculateDiscountDollars / calculateAppointmentDiscountDollars do.
-  // Any non-null cap counts — an explicit $0 cap saves a $0 discount.
-  const presetMaxDiscountDollars =
-    selectedDiscountPreset?.max_discount_dollars != null &&
-    selectedDiscountPreset.max_discount_dollars !== "" &&
-    !isNaN(Number(selectedDiscountPreset.max_discount_dollars))
-      ? Math.max(0, Number(selectedDiscountPreset.max_discount_dollars))
-      : null;
+  // Structural round 3 on #4657: the server preview is now the ONLY money
+  // source this modal shows — no client engine (stackVisitDiscounts is no
+  // longer called anywhere in this component), no "is a discount even in
+  // play" gate on whether to ask it (every save has SOME total, so the
+  // debounce below always runs). The request body mirrors handleSave's own
+  // PUT body (the identical `...form` spread, `isRecurring`, and
+  // addons/discount construction) so a primary-service change, a cadence
+  // change, or a fresh line pick can never diverge between what this shows
+  // and what Save actually persists — closing :3606 (service changes),
+  // :2859 (the primary line's own discount no longer needs a special
+  // "count it as in play" carve-out — the preview isn't gated on that
+  // concept at all any more), :3659 (the stacking gate/probe state is in
+  // the dependency key below, so a flip invalidates any cached response),
+  // and :2394 (an unmarked add-on's preserved stored dollars come back
+  // from the server's own legacyEconomicsPreservationDecision, never a
+  // client guess at its catalog cap) by construction — there is no
+  // separate client computation left that could drift from the server.
+  const previewRequestRef = useRef(0);
+  const previewAbortRef = useRef(null);
+  const [moneyPreview, setMoneyPreview] = useState(null);
+  const [moneyPreviewLoading, setMoneyPreviewLoading] = useState(false);
+  // GitHub Codex round 23 P2 (#4657, :3517): a VISIT_CHANGED_RETRY (the
+  // server refused this save against what it would now persist — preview-
+  // total drift after a catalog price/eligibility change, or any other
+  // concurrent change) must invalidate the preview that produced the
+  // refused witness. Bumping this nonce changes the inputs key below, so
+  // the stale response reads as not-fresh on the very next render (Save
+  // disables, the stale expectedTotal can never be resent) and the effect
+  // re-runs the dry-run against the server's CURRENT figures.
+  const [previewNonce, setPreviewNonce] = useState(0);
+  const moneyPreviewInputsKey = JSON.stringify({
+    previewNonce,
+    form,
+    isRecurring, recurringOngoing,
+    discountType, discountAmount, discountPresetId, storedDiscountCleared,
+    lines: serviceLines.map((l) => [
+      l.id || null, l.serviceType, l.price, l.serviceId || null,
+      !!l.lineDiscountTouched, l.lineDiscount, l._seededPrice ?? null,
+    ]),
+    // The stacking gate/probe state is itself an input to what the save
+    // resolves against (compound-vs-additive engine choice, which cap
+    // source wins) — a transition here must invalidate any cached preview
+    // even when nothing else on the form changed (:3659).
+    stackingEnabled, stackingKnown,
+  });
+  useEffect(() => {
+    const requestId = ++previewRequestRef.current;
+    if (previewAbortRef.current) previewAbortRef.current.abort();
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    const timer = setTimeout(async () => {
+      setMoneyPreviewLoading(true);
+      try {
+        const { sendAddons, addonsPayload } = buildAddonsPayload(serviceLines);
+        const result = await adminFetch(`/admin/schedule/${service.id}/update-details/preview`, {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            ...form,
+            isRecurring,
+            ...(sendAddons ? { addons: addonsPayload } : {}),
+            primaryLinePrice: parseFinitePrice(form.price) ?? undefined,
+            estimatedPrice: parseFinitePrice(form.price) ?? undefined,
+            discountType: discountType || (storedDiscountCleared ? null : undefined),
+            discountAmount:
+              discountType && discountAmount !== "" ? Number(discountAmount) : (storedDiscountCleared ? null : undefined),
+            discountId:
+              discountType && discountPresetId && discountPresetId !== "custom" ? discountPresetId : (storedDiscountCleared ? null : undefined),
+          }),
+        });
+        if (requestId !== previewRequestRef.current) return;
+        // Codex pre-push audit P1 (round 10 on #4657, :3468): bind the
+        // response to the exact inputs it answered — moneyPreviewFresh
+        // compares this key against the CURRENT render's key, so a price
+        // typed after a confirmed preview disables Save on that very
+        // render, not 500ms later when the debounce finally fires.
+        setMoneyPreview({ forRequestId: requestId, forInputsKey: moneyPreviewInputsKey, ...result });
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+        if (requestId !== previewRequestRef.current) return;
+        setMoneyPreview({ forRequestId: requestId, forInputsKey: moneyPreviewInputsKey, error: err.message || "Could not preview totals" });
+      } finally {
+        if (requestId === previewRequestRef.current) setMoneyPreviewLoading(false);
+      }
+    }, 500);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [moneyPreviewInputsKey, service.id]);
+  // Codex pre-push audit P1 (round 10 on #4657, :3468): forRequestId alone
+  // was not enough — the ref increments inside the effect, AFTER the render
+  // that changed an input, so that render still read the old response as
+  // fresh and Save stayed enabled (a confirmed $100 preview, price retyped
+  // to $200, Save clickable with the $100 figure until the debounce ran).
+  // The response now carries the inputs key it answered; a mismatch with
+  // THIS render's key is stale, synchronously.
+  const moneyPreviewFresh =
+    !!moneyPreview
+    && moneyPreview.forRequestId === previewRequestRef.current
+    && moneyPreview.forInputsKey === moneyPreviewInputsKey
+    && !moneyPreview.error;
+  // Save is held until the server's own dry-run has confirmed what THIS
+  // exact form would persist — never a client guess, and never a stale
+  // response (moneyPreviewFresh requires it be for the LATEST request).
+  // GitHub Codex round 14 on #4657 (P1 @ :3597): a preview 5xx / network
+  // failure left moneyPreviewFresh false forever and disabled EVERY save,
+  // including a notes-only, assignment or date edit on an undiscounted
+  // visit — an edit whose money the server preserves untouched and which
+  // never needed the dry-run's figure. A failed preview (for THIS render's
+  // inputs — a stale error never counts) only unblocks a save that cannot
+  // change money: no money input edited since the modal opened, no
+  // discount anywhere (picked or stored, appointment or line), no prepay
+  // to reconcile, no invoice being minted. Anything else still waits for a
+  // confirmed figure exactly as before.
+  const previewErroredForLatest =
+    !!moneyPreview
+    && moneyPreview.forRequestId === previewRequestRef.current
+    && moneyPreview.forInputsKey === moneyPreviewInputsKey
+    && !!moneyPreview.error;
+  const moneyEditKey = JSON.stringify({
+    price: form.price, serviceType: form.serviceType, serviceKey: form.serviceKey,
+    isRecurring, recurringOngoing,
+    discountType, discountAmount, discountPresetId, storedDiscountCleared,
+    lines: serviceLines.map((l) => [
+      l.id || null, l.serviceType, l.price, l.serviceId || null, !!l.lineDiscountTouched, l.lineDiscount,
+    ]),
+  });
+  const moneyEditSeedRef = useRef(moneyEditKey);
+  // GitHub Codex round 19 P2 (#4657, :3737): createInvoice initializes
+  // from the visit's own stored create_invoice_on_complete, so it reads
+  // true for the whole life of the modal on a visit that already has
+  // invoicing on — `!!createInvoice` alone made saveTouchesMoney true on
+  // every such visit's edit, even a notes-only or scheduling change that
+  // never touched money. Combined with a permanently-failed preview (the
+  // r14 previewErroredForLatest path), that left Save disabled forever
+  // although nothing money-bearing changed. Only a CHANGE to the checkbox
+  // from its mount-time value touches money; the seed is captured once,
+  // like moneyEditSeedRef, and never updated.
+  const createInvoiceSeedRef = useRef(createInvoice);
+  const saveTouchesMoney =
+    moneyEditKey !== moneyEditSeedRef.current
+    || appointmentDiscountSelected
+    || serviceLines.some((l) => !!effectiveLineDiscount(l))
+    || !!service.lineDiscountType
+    || (service.prepaidAmount != null && Number(service.prepaidAmount) > 0)
+    || createInvoice !== createInvoiceSeedRef.current;
+  const moneyPreviewBlocksSave =
+    moneyPreviewLoading || (!moneyPreviewFresh && !(previewErroredForLatest && !saveTouchesMoney));
+  // GitHub Codex round 24 P1 (#4657, :3794): the failed-preview bypass
+  // above is justified by "this save cannot change money" — but
+  // saveTouchesMoney cannot see the per-click `takePayment` argument, and
+  // "Save & take payment" posts createInvoice true and moves into billing.
+  // That action always needs the server's confirmed figure (and a witness
+  // to send), whatever the form's money inputs did, so it never takes the
+  // bypass: a preview 5xx / network failure disables it until a fresh
+  // preview resolves, while the plain Save keeps the r14 exception.
+  const takePaymentBlocksSave = moneyPreviewLoading || !moneyPreviewFresh;
+  // null (not 0, not a stale figure) while unconfirmed — the render below
+  // shows "Confirming…" rather than ever displaying a client-computed
+  // guess as if it were the real total.
+  const appointmentTotal =
+    moneyPreviewFresh && moneyPreview.total != null ? Number(moneyPreview.total) : null;
   const manualDiscount =
-    discountType && discountAmount !== ""
-      ? discountType === "percentage"
-        ? Math.min(
-            percentDiscountBase,
-            presetMaxDiscountDollars != null
-              ? Math.min(
-                  presetMaxDiscountDollars,
-                  percentDiscountBase * (Number(discountAmount) / 100),
-                )
-              : percentDiscountBase * (Number(discountAmount) / 100),
-          )
-        : Math.min(percentDiscountBase, Number(discountAmount))
+    moneyPreviewFresh && moneyPreview.appointmentDiscountDollars != null
+      ? Number(moneyPreview.appointmentDiscountDollars)
       : 0;
-  const appointmentTotal = Math.max(0, servicePrice - manualDiscount);
+  // Codex pre-push audit P2 (owner revert-and-carry on #4657, this round,
+  // legacy-visit-money-submission.cjs:52 / SchedulePage.jsx): form.price
+  // (primaryPrice, above) is seeded with the stored NET for a legacy
+  // zero-add-on row with no stored gross (deriveLegacyPrimarySubmission —
+  // a KNOWN gross seeds the gross itself as of round 10's :49 fix) —
+  // correct for the SAVE contract, wrong for the Subtotal DISPLAY. Such a
+  // visit otherwise renders Subtotal $90 / Discount ($10) / Total $90 —
+  // an itemization no arithmetic ever produces. Prefer the server
+  // preview's own primaryLinePrice (the authoritative gross this exact
+  // save would persist); fall back to the visit's own stored
+  // primaryLinePrice while the preview hasn't resolved yet; only fall
+  // back to the (net) seed itself when neither is known at all — the same
+  // degenerate legacy shape where net already equals gross, so there is
+  // nothing to correct.
+  const displayPrimaryGross =
+    moneyPreviewFresh && moneyPreview.primaryLinePrice != null
+      ? Number(moneyPreview.primaryLinePrice)
+      : service.primaryLinePrice != null
+        ? Number(service.primaryLinePrice)
+        : primaryPrice;
+  // GitHub Codex round 19 P2 (#4657, :3768): the fallback above lands on
+  // the (net) seed only when BOTH the preview and the stored visit are
+  // silent on the gross. That's broader than "net already equals gross" —
+  // a zero-add-on legacy visit with primary_line_price NULL and a STORED
+  // discount hits it too, and there the seed is genuinely the NET
+  // post-discount figure, not the gross. Track that fallback distinctly
+  // so the Subtotal row can say the gross is unknown instead of quietly
+  // asserting a wrong number as if it were confirmed.
+  const primaryGrossGenuinelyUnknown =
+    !(moneyPreviewFresh && moneyPreview.primaryLinePrice != null)
+    && service.primaryLinePrice == null;
+  // cleanServiceLines mirrors buildAddonsPayload's own filter exactly (the
+  // same "trimmed serviceType" test) — the server's addons[] is ordered
+  // and filtered identically, so a brand-new (id-less) line correlates by
+  // its position among OTHER id-less lines, and an existing line by its
+  // own stored id, never by raw index into the full serviceLines array.
+  const cleanServiceLines = serviceLines.filter((l) => (l.serviceType || "").trim());
+  const previewAddonAt = (idx) => {
+    if (!moneyPreviewFresh || !Array.isArray(moneyPreview.addons)) return null;
+    const line = serviceLines[idx];
+    if (!line) return null;
+    if (line.id) {
+      return moneyPreview.addons.find((row) => row.submittedAddonId === line.id) || null;
+    }
+    const cleanIdx = cleanServiceLines.indexOf(line);
+    if (cleanIdx === -1) return null;
+    const idLessBefore = cleanServiceLines.slice(0, cleanIdx).filter((l) => !l.id).length;
+    const idLessRows = moneyPreview.addons.filter((row) => !row.submittedAddonId);
+    return idLessRows[idLessBefore] || null;
+  };
+  // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349): combines the
+  // client-only shape check (lineGrossUnknownClient, works before any
+  // preview response) with the server's own per-line legacyGrossUnknown
+  // flag on the preview response — either one is enough to lock the
+  // picker; this must not depend on the server field alone.
+  const lineGrossUnknownAt = (idx) =>
+    lineGrossUnknownClient(serviceLines[idx]) || previewAddonAt(idx)?.legacyGrossUnknown === true;
+  // Same combination at the appointment level, for the primary line's own
+  // stored discount (moneyPreview.legacyGrossUnknown === true means the
+  // PRIMARY line's gross specifically, per the preview response contract).
+  const primaryGrossUnknown =
+    primaryGrossUnknownClient || (moneyPreviewFresh && moneyPreview.legacyGrossUnknown === true);
+  // GitHub Codex round 13 on #4657 (P0 @ admin-schedule.js:10660, P2 @
+  // :4888): the server refuses canonical adoption (LEGACY_PRIMARY_GROSS_
+  // UNKNOWN) whenever the primary gross is unknown AND a stored discount
+  // sits ANYWHERE on the visit — appointment level, the primary line, or
+  // any existing add-on — because the primary figure this modal posts was
+  // derived from a stored total that already has that discount baked in.
+  // Any discount-term change would trip it, so every control that can
+  // change a term (the appointment Discount picker and each add-on's Line
+  // discount picker) locks for that shape — never a confirmed-looking
+  // edit that only fails at the PUT. Client shape first (works before any
+  // preview response), the server's own flag as the backstop.
+  // GitHub Codex round 26 P1 (#4657, :3942): a MARKED add-on-only visit is
+  // excluded — its null primary is a known $0 (see visitCanonicallyMarked),
+  // the server never refuses it (legacyPrimaryGrossUnknownFor is scoped to
+  // unmarked rows), and it restacks safely from its add-on grosses; locking
+  // it disabled every discount edit on a visit that can take them.
+  const visitGrossUnknownClient =
+    !visitCanonicallyMarked
+    && service.primaryLinePrice == null
+    && (
+      !!service.lineDiscountType
+      || (!!service.discountType && service.discountAmount != null)
+      || serviceLines.some((l) => !!l?._origDiscountType)
+    );
+  const visitDiscountsLocked =
+    stackingEnabled
+    && (visitGrossUnknownClient || (moneyPreviewFresh && moneyPreview.legacyGrossUnknown === true));
+  // Subtotal's add-on share. GATE_DISCOUNT_STACKING (slice 7): lineGrossFor
+  // reads a discounted line's true GROSS (never its net) so an untouched
+  // stamped line doesn't get double-discounted; every other line is
+  // unaffected (gross===net), so gate OFF this is byte-identical to the
+  // pre-lane sum. Gate ON (GitHub Codex round 9 on #4657, P2): prefer the
+  // server preview's own per-line `gross` — the figure THIS exact save
+  // would persist — over the form's pre-save value. An eligible member
+  // converting a priced visit to a free callback has every line zeroed by
+  // the save (reServiceConversionZeroPrice, mirrored by the preview), so
+  // the Subtotal must itemize $0 too — never the pre-conversion add-on
+  // total sitting above a $0 Total with no discount to explain the gap.
+  // A line the preview has no figure for yet (unresolved, or a blank-
+  // priced quote-pending line the server leaves null) keeps the form's
+  // own gross, exactly as before.
+  const displayAddonGrossAt = (idx) => {
+    const row = stackingEnabled ? previewAddonAt(idx) : null;
+    return row && row.gross != null ? Number(row.gross) : lineGrossFor(serviceLines[idx]);
+  };
+  const displaySubtotal =
+    displayPrimaryGross + serviceLines.reduce((sum, _l, i) => sum + displayAddonGrossAt(i), 0);
+  // Per-line dollars for renderServiceLine's own display box (index-aligned
+  // to serviceLines).
+  const lineDiscountDollarsAt = (idx) => {
+    const row = previewAddonAt(idx);
+    return row?.discountDollars != null ? Number(row.discountDollars) : 0;
+  };
+  // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P2 @ :3622): gated on
+  // stackingEnabled — the server's dry-run preview returns these dollar
+  // figures regardless of the gate (it always knows a line's stored
+  // economics), but displayAddonGrossAt above deliberately reads each
+  // line's stored NET while the gate is off (lineGrossFor's own
+  // `!stackingEnabled` branch), matching the pre-lane Subtotal exactly.
+  // Showing these rows anyway split that net into a false "Subtotal
+  // (gross) / Line discount / Total (net)" breakdown no arithmetic on a
+  // gate-off save actually produces — a $100 add-on stored at $90 rendered
+  // Subtotal $90 / Line discount ($10) / Total $90. Gate-off must stay
+  // byte-identical to the pre-lane modal, so these rows are withheld
+  // outright rather than reconciled against a different gross source.
+  const lineDiscountRows = stackingEnabled && moneyPreviewFresh
+    ? [
+        // The primary line's own stored discount — read directly off the
+        // server's response (primaryLineDiscountDollars/Name), never
+        // re-derived; this slice has no picker for it, so it's always
+        // whatever the row itself carries.
+        ...(moneyPreview.primaryLineDiscountDollars > 0
+          ? [{
+              name: moneyPreview.primaryLineDiscountName || "Primary line discount",
+              dollars: Number(moneyPreview.primaryLineDiscountDollars),
+            }]
+          : []),
+        ...serviceLines.map((l, i) => {
+          const row = previewAddonAt(i);
+          return {
+            name: row?.discountName || "Line discount",
+            dollars: row?.discountDollars != null ? Number(row.discountDollars) : 0,
+          };
+        }),
+      ].filter((row) => row.dollars > 0)
+    : [];
+  // GitHub Codex round 19 P2 (#4657, :3768): only worth flagging when a
+  // discount is actually being reported alongside the unknown gross — an
+  // undiscounted visit with no stored gross is the ordinary "net equals
+  // gross, nothing to correct" shape the fallback above already handles.
+  const primaryGrossDisplayUnresolvedWithDiscount =
+    primaryGrossGenuinelyUnknown
+    && (manualDiscount > 0 || lineDiscountRows.some((row) => row.dollars > 0));
   const appointmentHistory = customerPanelHistory(customerData, service?.id);
   const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
 
@@ -3101,6 +4121,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     label,
     showStaff = false,
     showSeriesScope = false,
+    lineDiscount = null,
+    onLineDiscount = null,
+    lineDiscountOptions = [],
+    lineDiscountDollars = 0,
+    // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349): true when
+    // this line's true gross is unknown (a legacy net-only stamp) — the
+    // picker is replaced with a plain notice instead of rendering as if no
+    // discount exists at all.
+    lineDiscountLocked = false,
+    // GitHub Codex round 23 P2 (#4657, :4994): true when removing this
+    // line is itself a discount-term change the server would refuse
+    // (LEGACY_PRIMARY_GROSS_UNKNOWN) — the button stays visible but
+    // disabled, with the reason, instead of a confirmed-looking removal
+    // that only fails at the PUT.
+    removeLocked = false,
   }) => {
     const picking = pickerKey === pickerId;
     return (
@@ -3130,6 +4165,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <button
                 type="button"
                 onClick={onRemove}
+                disabled={removeLocked}
+                title={removeLocked
+                  ? "This visit carries a legacy discount and its original price was never recorded, so lines can't be removed here. Set the primary service's price and save first, then remove it."
+                  : undefined}
                 className="font-medium"
                 style={{
                   padding: "4px 10px",
@@ -3138,7 +4177,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   color: "#B42318",
                   border: "1px solid #FCA5A5",
                   fontSize: 12,
-                  cursor: "pointer",
+                  cursor: removeLocked ? "not-allowed" : "pointer",
+                  opacity: removeLocked ? 0.5 : 1,
                 }}
               >
                 Remove
@@ -3171,6 +4211,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     setPickerKey(pickerId);
                     setExpandedCategory(null);
                   }}
+                  disabled={saving}
                   className="font-medium"
                   style={{
                     padding: "8px 10px",
@@ -3205,6 +4246,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         onClick={() =>
                           setExpandedCategory(isOpen ? null : group.category)
                         }
+                        disabled={saving}
                         className="font-medium"
                         style={{
                           width: "100%",
@@ -3276,6 +4318,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                 setPickerKey(null);
                                 setExpandedCategory(null);
                               }}
+                              disabled={saving}
                               className="font-medium"
                               style={{
                                 padding: "8px 10px",
@@ -3354,6 +4397,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               value={price}
               onChange={(e) => onField("price", e.target.value)}
               placeholder="0.00"
+              disabled={saving}
               className="font-medium"
               style={inputStyle}
             />
@@ -3383,6 +4427,95 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               </div>
             )}
           </div>
+          {(onLineDiscount || lineDiscountLocked) && (
+            <div>
+              <label style={labelStyle}>Line discount</label>
+              {lineDiscountLocked ? (
+                // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349):
+                // this line's true gross is unknown (a legacy net-only
+                // stamp) — no picker at all, so a replacement pick can never
+                // post the stored net as a fresh discount's basePrice and
+                // double-discount the line. 14px floor (AGENTS.md/CLAUDE.md).
+                <div style={{ fontSize: 14, color: D.muted }}>
+                  Discount can't be changed on this legacy line until its
+                  price is re-entered.
+                </div>
+              ) : lineDiscount ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ flex: 1, fontSize: 14, color: "#111827", minWidth: 0 }}>
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {lineDiscount.name || "Discount"}
+                    </div>
+                    {/* Codex pre-push audit P1 (round 1, #4657): routine
+                        financial info, not a warning — the page's neutral
+                        muted tone, matching the guidance text below it,
+                        never the alert-fg red reserved for genuine warnings
+                        (AGENTS.md / CLAUDE.md). */}
+                    <div style={{ fontSize: 14, color: D.muted }}>
+                      {
+                        // GitHub Codex round 16 P2 (#4657, :4245): a chosen
+                        // free_service preset discounts the WHOLE line — read
+                        // "Free" here exactly like presetOptionLabel and the
+                        // stored-stamp summary do, never the dollar branch
+                        // ("$0.00" misstates a full-service credit).
+                        lineDiscount.discount_type === "free_service"
+                          ? "Free"
+                          : lineDiscount.discount_type === "percentage" || lineDiscount.discount_type === "variable_percentage"
+                          ? `${Number(lineDiscount.amount)}%`
+                          : `$${Number(lineDiscount.amount || 0).toFixed(2)}`
+                      }
+                      {" · "}(${Number(lineDiscountDollars || 0).toFixed(2)})
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onLineDiscount("")}
+                    aria-label="Remove line discount"
+                    disabled={saving}
+                    className="font-medium"
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 4,
+                      background: "#fff",
+                      color: "#B42318",
+                      border: "1px solid #FCA5A5",
+                      fontSize: 14,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <select
+                  value=""
+                  onChange={(e) => onLineDiscount(e.target.value)}
+                  disabled={saving}
+                  className="font-medium"
+                  style={inputStyle}
+                  aria-label={`Line discount for ${serviceType || "service"}`}
+                >
+                  <option value="">None</option>
+                  {lineDiscountOptions.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {presetOptionLabel(d)}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {!lineDiscountLocked && !lineDiscount && (
+                // Codex pre-push audit P2 (round 1, #4657): the portal's
+                // 14px readability floor (AGENTS.md / CLAUDE.md) — this text
+                // explains a real money-entry contract change (Price becomes
+                // "before discount"), so it must not be the hardest-to-read
+                // line on the screen, especially on mobile.
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                  Picking one treats the Price above as the amount before this
+                  discount.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -3512,7 +4645,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             )}{" "}
             <button
               onClick={() => handleSave({ takePayment: true })}
-              disabled={saving || cancelling || newPayerSaving}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -3521,8 +4654,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#fff",
                 border: "none",
                 fontSize: 13,
-                cursor: saving ? "wait" : "pointer",
-                opacity: saving ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || takePaymentBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -3530,7 +4663,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </button>{" "}
             <button
               onClick={() => handleSave()}
-              disabled={saving || cancelling || newPayerSaving}
+              disabled={saving || cancelling || newPayerSaving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -3539,8 +4672,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#111827",
                 border: `1px solid ${D.inputBorder}`,
                 fontSize: 13,
-                cursor: saving ? "wait" : "pointer",
-                opacity: saving ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave || moneyPreviewBlocksSave || lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -3952,9 +5085,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 onRemove: null,
                 showStaff: true,
                 showSeriesScope: priceServiceScopeActive,
+                // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @ :2349):
+                // this slice has no picker for the primary line's OWN
+                // stored discount (read-only, restated by :3620's note) —
+                // nothing here can post the stored net as a fresh
+                // basePrice. But an unknown-gross stamp must still not be
+                // SILENTLY invisible: surface the same explanatory notice
+                // an add-on line shows, so the operator can see this line
+                // carries a legacy discount neither this control nor any
+                // other in this modal can touch.
+                lineDiscountLocked: primaryGrossUnknown,
                 label: serviceLines.length > 0 ? "Primary service" : null,
               })}
-              {serviceLines.map((line) =>
+              {serviceLines.map((line, idx) =>
                 <div key={line._key}>
                   {renderServiceLine({
                     pickerId: line._key,
@@ -3963,6 +5106,31 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     price: line.price,
                     onField: (k, v) => updateLine(line._key, k, v),
                     onRemove: () => removeServiceLine(line._key),
+                    lineDiscount: effectiveLineDiscount(line),
+                    // GATE_DISCOUNT_STACKING (#4657 round 12, Codex P0 @
+                    // :2349): a gross-unknown line's picker is never wired
+                    // up at all — no path can post its stored net as a
+                    // fresh discount's basePrice.
+                    onLineDiscount: stackingEnabled && !lineGrossUnknownAt(idx) && !visitDiscountsLocked
+                      ? (presetId) => setLineDiscount(line._key, presetId)
+                      : null,
+                    lineDiscountOptions: lineDiscountOptionsFor(line),
+                    lineDiscountDollars: lineDiscountDollarsAt(idx),
+                    lineDiscountLocked: stackingEnabled && (lineGrossUnknownAt(idx) || visitDiscountsLocked),
+                    // GitHub Codex round 23 P2 (#4657, :4994): under the
+                    // visit lock, deleting a row that carries a stored
+                    // discount is a term change too (the server's
+                    // discountedAddonRowDeleted requests canonical
+                    // adoption, which LEGACY_PRIMARY_GROSS_UNKNOWN refuses).
+                    // GitHub Codex round 26 P2 (#4657, :5095): since round
+                    // 26's :11100, the server refuses ANY non-preserved
+                    // reprice of this shape — removing an UNDISCOUNTED
+                    // sibling changes the composition, preservation fails,
+                    // and the PUT deterministically 422s — so every Remove
+                    // locks under the visit lock, not only discounted rows.
+                    // The unlock is the same two-step the title spells out:
+                    // set the primary price, save, then remove.
+                    removeLocked: visitDiscountsLocked,
                   })}
                 </div>,
               )}
@@ -4084,6 +5252,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   onClick={() =>
                     setDiscountPresetId(discountPresetId || "custom")
                   }
+                  disabled={saving || visitDiscountsLocked}
                   className="font-medium"
                   style={{
                     padding: "9px 12px",
@@ -4111,14 +5280,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   {" "}
                   <label style={labelStyle}>Discount</label>{" "}
                   <select
-                    value={discountPresetId}
+                    value={discountPresetId || (storedAppointmentDiscount ? STORED_APPOINTMENT_DISCOUNT_OPTION : "")}
                     onChange={(e) => applyDiscountPreset(e.target.value)}
+                    disabled={saving || visitDiscountsLocked}
                     className="font-medium"
                     style={inputStyle}
                   >
                     {" "}
                     <option value="">None</option>
-                    {discountPresets.map((d) => (
+                    {serviceHasStoredAppointmentDiscount && (
+                      <option value={STORED_APPOINTMENT_DISCOUNT_OPTION}>
+                        {storedAppointmentDiscountRow?.name || "Custom Discount"} (current) -{" "}
+                        {formatStoredDiscountAmount(service.discountType, service.discountAmount)}
+                      </option>
+                    )}
+                    {appointmentPresetOptions.map((d) => (
                       <option key={d.id} value={d.id}>
                         {d.name} -{" "}
                         {d.discount_type === "percentage"
@@ -4128,6 +5304,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     ))}
                     <option value="custom">Custom</option>{" "}
                   </select>{" "}
+                  {visitDiscountsLocked && (
+                    // 14px floor (AGENTS.md/CLAUDE.md).
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                      Discounts can't be changed on this legacy visit until its
+                      primary price is re-entered.
+                    </div>
+                  )}
+                  {storedDiscountCleared && !discountType && (
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                      The stored discount will be removed when you save.
+                    </div>
+                  )}
                 </div>
                 {discountPresetId === "custom" && (
                   <>
@@ -4138,6 +5326,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={discountType}
                         onChange={(e) => setDiscountType(e.target.value)}
+                        disabled={saving || visitDiscountsLocked}
                         className="font-medium"
                         style={inputStyle}
                       >
@@ -4161,6 +5350,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           step={discountType === "percentage" ? 1 : 0.01}
                           value={discountAmount}
                           onChange={(e) => setDiscountAmount(e.target.value)}
+                          disabled={saving || visitDiscountsLocked}
                           className="font-medium"
                           style={inputStyle}
                         />{" "}
@@ -4169,6 +5359,119 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </>
                 )}
               </div>{" "}
+              {stackingUnconfirmedBlocksSave && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 14,
+                    color: "#DC2626",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                  }}
+                >
+                  <span>
+                    Could not confirm how multiple discounts combine — retry before saving.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={retryStackingProbe}
+                    style={{
+                      background: "none",
+                      border: "1px solid #DC2626",
+                      color: "#DC2626",
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      fontSize: 14,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+              {!stackingUnconfirmedBlocksSave && moneyPreview?.error && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 14,
+                    color: "#DC2626",
+                  }}
+                >
+                  Could not confirm the totals this save would produce: {moneyPreview.error}.{" "}
+                  {moneyPreviewBlocksSave
+                    ? "Edit a discount field to retry, or reload before saving."
+                    : "This save changes no pricing, so it can still be saved; the stored totals are kept as they are."}
+                </div>
+              )}
+              {!stackingUnconfirmedBlocksSave && !moneyPreview?.error && moneyPreviewBlocksSave && (
+                <div
+                  style={{
+                    fontSize: 14,
+                    color: D.textMuted || D.textSecondary || "#6B7280",
+                    marginBottom: 14,
+                  }}
+                >
+                  Confirming totals with the server…
+                </div>
+              )}
+              {invalidPriceEntered && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 14,
+                    color: "#DC2626",
+                  }}
+                >
+                  A price must be a number of $0 or more. Fix the price before saving.
+                </div>
+              )}
+              {appointmentDiscountPriceMissing && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 14,
+                    color: "#DC2626",
+                  }}
+                >
+                  Enter the visit price to change or remove its discount.
+                </div>
+              )}
+              {lineDiscountPriceMissing && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 14,
+                    color: "#DC2626",
+                  }}
+                >
+                  A line has a discount selected but no price — enter a price for that line, or
+                  remove the discount, before saving.
+                </div>
+              )}
               <div
                 style={{
                   borderTop: `1px solid ${D.border}`,
@@ -4190,8 +5493,43 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 >
                   {" "}
                   <span>Subtotal</span>
-                  <strong>${servicePrice.toFixed(2)}</strong>{" "}
+                  <strong>
+                    {primaryGrossDisplayUnresolvedWithDiscount
+                      ? "—"
+                      : `$${displaySubtotal.toFixed(2)}`}
+                  </strong>{" "}
                 </div>
+                {primaryGrossDisplayUnresolvedWithDiscount && (
+                  // GitHub Codex round 19 P2 (#4657, :3768): the gross is
+                  // genuinely unknown here (neither the preview nor the
+                  // stored visit has it) while a discount is being
+                  // reported — showing a number for Subtotal would assert
+                  // a pre-discount figure this visit never recorded.
+                  // 14px floor (AGENTS.md/CLAUDE.md).
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                    Original price not recorded
+                  </div>
+                )}
+                {/* Codex pre-push audit P1 (round 1, #4657): routine
+                    financial info, not a warning — no color override, so
+                    this inherits the same neutral tone Subtotal/Total use
+                    right above/below it, never the alert-fg red reserved
+                    for genuine warnings. */}
+                {lineDiscountRows.map((row, i) => (
+                  <div
+                    key={`line-discount-${i}`}
+                    style={{
+                      minWidth: 220,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 40,
+                      fontSize: 14,
+                    }}
+                  >
+                    <span>{row.name}</span>
+                    <strong>(${row.dollars.toFixed(2)})</strong>
+                  </div>
+                ))}
                 {manualDiscount > 0 && (
                   <div
                     style={{
@@ -4204,12 +5542,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     }}
                   >
                     {" "}
-                    <span>{selectedDiscountPreset?.name || "Custom Discount"}</span>
+                    <span>{selectedDiscountPreset?.name || storedAppointmentDiscountRow?.name || "Custom Discount"}</span>
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
-                {discountType === "percentage" &&
-                  discountAmount !== "" &&
+                {effectiveDiscountIsPercent &&
+                  effectiveDiscountInPlay &&
                   !catalogLive && (
                     <div
                       style={{
@@ -4223,8 +5561,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       this preview; the server applies the live rules on save.
                     </div>
                   )}
-                {discountType &&
-                  discountAmount !== "" &&
+                {effectiveDiscountInPlay &&
                   percentExcludedLines.length > 0 && (
                     <div
                       style={{
@@ -4252,7 +5589,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 >
                   {" "}
                   <span>Total</span>
-                  <strong>${appointmentTotal.toFixed(2)}</strong>{" "}
+                  <strong>
+                    {appointmentTotal != null
+                      ? `$${appointmentTotal.toFixed(2)}`
+                      : moneyPreview?.error
+                        ? "—"
+                        : // GitHub Codex round 16 P2 (#4657, :5318): a
+                          // CONFIRMED preview of a legitimately unpriced
+                          // visit also returns total null — that's not the
+                          // same state as "still waiting on the server".
+                          // Distinguish the two so Save (already enabled,
+                          // since this preview IS fresh) doesn't look stuck
+                          // behind a "Confirming…" that will never resolve.
+                          moneyPreviewFresh && !moneyPreviewLoading && moneyPreview?.total == null
+                          ? "Not priced"
+                          : "Confirming…"}
+                  </strong>{" "}
                 </div>{" "}
               </div>{" "}
             </section>{" "}
@@ -4748,6 +6100,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <textarea
                 value={form.notes}
                 onChange={(e) => update("notes", e.target.value)}
+                disabled={saving}
                 rows={5}
                 className="font-medium"
                 style={{ ...inputStyle, resize: "vertical" }}
@@ -11467,6 +12820,17 @@ export function CompletionPanel({
   // hides the UI rather than letting the tech enter data the backend
   // will silently drop.
   const [techRatingAllowed, setTechRatingAllowed] = useState(null);
+  // Owner ruling 2026-09-24: on a customer's first visit on this service
+  // line the picker starts at 5 and the tech lowers it if they saw less.
+  const [clientPestRatingDefault, setClientPestRatingDefault] = useState(null);
+  // Set once the rating came from the tech (a tap) or a restored draft;
+  // the late first-visit prefill must never overwrite either. A dedicated
+  // ref — the draft snapshot ref is replaced on every autosave.
+  const clientPestRatingSetByTechRef = useRef(false);
+  // Active label names for 0..5 from the gate, so the caption never
+  // contradicts labels edited in Settings; falls back to the default scale.
+  const [pestRatingScaleLabels, setPestRatingScaleLabels] = useState(null);
+  const pestRatingScaleCaption = pestRatingScaleCaptionText(pestRatingScaleLabels);
   useEffect(() => {
     let cancelled = false;
     // Per-service `allowed` boolean from the server. The endpoint
@@ -11486,7 +12850,15 @@ export function CompletionPanel({
     adminFetch(`/admin/dispatch/${service.id}/tech-rating-allowed`)
       .then((body) => {
         if (cancelled) return;
-        setTechRatingAllowed(!!(body && body.allowed === true));
+        const allowed = !!(body && body.allowed === true);
+        setTechRatingAllowed(allowed);
+        if (allowed && Array.isArray(body.scaleLabels)) setPestRatingScaleLabels(body.scaleLabels);
+        if (allowed && body.firstVisit === true) {
+          setClientPestRatingDefault(5);
+          // Never over a value the tech already tapped or a restored draft
+          // (including a draft where the tech cleared the default).
+          if (!clientPestRatingSetByTechRef.current) setClientPestRating(5);
+        }
       })
       .catch(() => {
         // Fetch failure — keep the picker hidden so the tech can still
@@ -13064,6 +14436,7 @@ export function CompletionPanel({
         includePayLink,
         requestReview,
         clientPestRating,
+        clientPestRatingDefault,
         backfillCloseout,
         backfillCloseoutDefault,
         backfillTimeOnSite,
@@ -13114,6 +14487,9 @@ export function CompletionPanel({
         includePayLink,
         requestReview,
         clientPestRating,
+        // Tells restore whether a null rating was a deliberate clear or an
+        // untouched picker (pre-2026-09-24 drafts never set it).
+        clientPestRatingTouched: clientPestRatingSetByTechRef.current,
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
@@ -13242,6 +14618,7 @@ export function CompletionPanel({
     includePayLink,
     requestReview,
     clientPestRating,
+    clientPestRatingDefault,
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
@@ -13363,11 +14740,22 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
-    setClientPestRating(
-      Number.isInteger(savedDraft.clientPestRating)
-        ? savedDraft.clientPestRating
-        : null,
-    );
+    // An untouched picker (legacy drafts stored null for it) keeps whatever
+    // is showing now — including the first-visit 5; a tap or a deliberate
+    // clear is restored and locks out the late prefill.
+    // Drafts since 2026-09-24 record whether the tech touched the picker;
+    // an untouched prefill restores as a prefill (the server re-checks it).
+    // Older drafts have no marker: a number there was the tech's choice.
+    const draftRating = Number.isInteger(savedDraft.clientPestRating) ? savedDraft.clientPestRating : null;
+    const draftTouched = typeof savedDraft.clientPestRatingTouched === "boolean"
+      ? savedDraft.clientPestRatingTouched
+      : draftRating != null;
+    if (draftTouched) {
+      clientPestRatingSetByTechRef.current = true;
+      setClientPestRating(draftRating);
+    } else if (draftRating != null) {
+      setClientPestRating(draftRating);
+    }
     setReviewTiming(normalizeReviewTiming(savedDraft.reviewTiming));
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     // Bed bug hides the recap-only control (typed-era billing parity) — a
@@ -15819,6 +17207,18 @@ export function CompletionPanel({
       // strict validation passes.
       if (clientPestRating != null && Number.isInteger(clientPestRating)) {
         body.clientPestRating = clientPestRating;
+        // A rating the tech never set can only be the first-visit prefill
+        // (live or restored from a draft). Mark it regardless of what the
+        // gate says now — the server re-checks first-visit status, since
+        // another visit may have completed since the prefill.
+        if (!clientPestRatingSetByTechRef.current) {
+          body.clientPestRatingPrefilled = true;
+        }
+      } else if (clientPestRatingSetByTechRef.current) {
+        // A deliberate clear. Without this the server applies the
+        // first-visit 5 (owner ruling 2026-09-24) — which it also does when
+        // the picker's gate hadn't answered before submit.
+        body.clientPestRatingCleared = true;
       }
       // Typed specialty findings payload. Skipped on incomplete visits —
       // the server ignores typed findings for them anyway.
@@ -18408,9 +19808,10 @@ export function CompletionPanel({
                       <button
                         key={n}
                         type="button"
-                        onClick={() =>
-                          setClientPestRating(selected ? null : n)
-                        }
+                        onClick={() => {
+                          clientPestRatingSetByTechRef.current = true;
+                          setClientPestRating(selected ? null : n);
+                        }}
                         style={{
                           minWidth: 44,
                           height: 44,
@@ -18442,7 +19843,12 @@ export function CompletionPanel({
                     textAlign: "center",
                   }}
                 >
-                  0 = none, 5 = severe. Tap a number again to clear.
+                  {pestRatingScaleCaption} Tap a number again to clear.
+                  {clientPestRatingDefault === 5 && (
+                    <div style={{ marginTop: 4 }}>
+                      First visit — starts at 5. Lower it if you saw less.
+                    </div>
+                  )}
                 </div>
               </Field>
             )}
@@ -20789,9 +22195,10 @@ export function CompletionPanel({
                     <button
                       key={n}
                       type="button"
-                      onClick={() =>
-                        setClientPestRating(selected ? null : n)
-                      }
+                      onClick={() => {
+                        clientPestRatingSetByTechRef.current = true;
+                        setClientPestRating(selected ? null : n);
+                      }}
                       style={{
                         minWidth: 44,
                         height: 40,
@@ -20819,7 +22226,12 @@ export function CompletionPanel({
                   color: D.muted,
                 }}
               >
-                0 = none, 5 = severe. Tap a number again to clear.
+                {pestRatingScaleCaption} Tap a number again to clear.
+                {clientPestRatingDefault === 5 && (
+                  <div style={{ marginTop: 4 }}>
+                    First visit — starts at 5. Lower it if you saw less.
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -75,7 +75,9 @@ const ESTIMATE_BUTTON_BG = B.glassNavy;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';
 const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
-const PRESSURE_INDEX_DISPLAY_FLOOR = 0.3;
+// No display floor (owner ruling 2026-09-24): a technician's 0 means no
+// pests and must read 0.0, matching the Pest Pressure gauge.
+const PRESSURE_INDEX_DISPLAY_FLOOR = 0;
 const DEFAULT_PORTAL_DESCRIPTION = 'Your Waves service reports, billing, and account — view past visits, track action items, and schedule the next service.';
 const sentReportEvents = new Set();
 // Tokens whose /data payload came back flagged staffViewer: trackReportEvent

@@ -18,6 +18,7 @@ const {
   formatAssessmentScores,
   buildTreeShrubAssessmentReportData,
   isCompleteVisionResult,
+  isValidTreeShrubScores,
   VISION_RESULT_SCHEMA,
   SCHEMA_PROMPT_SHAPES,
   SCHEMA_VALIDATORS,
@@ -435,6 +436,15 @@ describe('isCompleteVisionResult — generic walk over VISION_RESULT_SCHEMA', ()
     // provider that sent a field must have sent a valid value.
     expect(isCompleteVisionResult(result({ ...fullRead(), [field]: value }, fullRead()))).toBe(false);
     expect(isCompleteVisionResult(result(fullRead(), { ...fullRead(), [field]: value }))).toBe(false);
+  });
+
+  it('the per-provider gate (isValidTreeShrubScores, which decides the Claude fallback) walks the SAME schema', () => {
+    expect(isValidTreeShrubScores(fullRead())).toBe(true);
+    for (const [field, _label, value] of cases) {
+      const bad = { ...fullRead(), [field]: value };
+      if (value === undefined) delete bad[field];
+      expect({ field, value, valid: isValidTreeShrubScores(bad) }).toEqual({ field, value, valid: false });
+    }
   });
 
   it.each(Object.entries(VISION_RESULT_SCHEMA))('%s: one provider omitting it while the other read it validly is complete', (field) => {
