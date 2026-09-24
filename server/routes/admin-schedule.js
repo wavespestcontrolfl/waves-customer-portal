@@ -17491,8 +17491,39 @@ async function isSupersededSeries(conn, parent, parentId, cols) {
   // the winner (latest live visit, ties by most-recently-created) and skip
   // whichever candidate isn't it.
   const candidates = [parent, ...duplicates];
+  // Never let a statically unbillable candidate win and suppress a real
+  // one (Codex GitHub guards-follow-up P1): an unpriced, no-invoice-stamp
+  // legacy duplicate with a coincidentally LATER live visit could
+  // otherwise be crowned winner, suppressing the genuinely billable
+  // sibling — and since the "winner" then refuses every insert on its own
+  // turn (extendSeriesOnceLocked's real seriesExtensionUnbillable gate),
+  // NEITHER series would ever replenish again on any future run either.
+  // seriesLooksBillable is a cheap, deliberately conservative proxy for
+  // "this series can plausibly bill something" — NOT the full
+  // seriesExtensionUnbillable verdict, which needs per-date add-on/
+  // discount/blackout context this rule has no reason to reproduce a
+  // second time (that would be exactly the kind of parallel
+  // reimplementation the v1 prepay scope cut spent three rounds
+  // eliminating). It only rules out the OBVIOUS case (no invoice stamp,
+  // no price, no membership dues); the real, authoritative gate still
+  // runs on the actual winner's own candidate dates once picked. A
+  // `parent` that itself looks unbillable while a sibling looks billable
+  // is never labeled superseded_series here — mislabeling would be
+  // exactly the dishonest-skip-reason problem this same PR's other fix
+  // corrects; it proceeds normally and faces its own real gate, reporting
+  // 'unbillable' honestly if it truly is one.
+  const customer = await conn('customers').where({ id: parent.customer_id })
+    .first('billing_mode', 'monthly_rate');
+  const looksBillable = (row) => !!(
+    (cols.create_invoice_on_complete && row.create_invoice_on_complete)
+    || Number(row.estimated_price) > 0
+    || (customer?.billing_mode === 'monthly_membership' && Number(customer?.monthly_rate) > 0)
+  );
+  const billableIds = new Set(candidates.filter(looksBillable).map((row) => row.id));
+  if (billableIds.size && !billableIds.has(parentId)) return false;
+  const pool = billableIds.size ? candidates.filter((row) => billableIds.has(row.id)) : candidates;
   let winner = null;
-  for (const row of candidates) {
+  for (const row of pool) {
     // Sequential, not parallel: same small candidate set gathered above.
     const latest = await latestLiveSeriesVisit(conn, row.id);
     const latestDate = latest ? dateOnly(latest.scheduled_date) : null;
