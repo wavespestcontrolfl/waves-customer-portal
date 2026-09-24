@@ -111,16 +111,28 @@ function normalizeKind(value, party = null) {
 // vocabulary slip fails soft (to 'unknown' / 'other') instead of failing the
 // response. Structural problems (missing evidence, wrong types) still reach
 // the schema.
-function normalizeModelOutput(parsed) {
+function normalizeModelOutput(parsed, transcript = '') {
   if (!parsed || !Array.isArray(parsed.commitments)) return parsed;
+  const flat = normalizeForMatch(transcript);
   for (const item of parsed.commitments) {
     if (!item || typeof item !== 'object') continue;
     if (typeof item.channel === 'string') item.channel = normalizeChannel(item.channel);
     if (typeof item.kind === 'string') item.kind = normalizeKind(item.kind, item.party);
     // A fourth quote for the same promise is surplus evidence, not a bad
-    // promise: keep the first three (schema maxItems) rather than fail the
-    // whole response — the 2026-09-23 replay found one call lost this way.
-    if (Array.isArray(item.evidence) && item.evidence.length > 3) item.evidence = item.evidence.slice(0, 3);
+    // promise: keep three (schema maxItems) rather than fail the whole
+    // response — the 2026-09-23 replay found one call lost this way. Keep
+    // the quotes groundModelCommitments will accept (verbatim in the
+    // transcript AND action-bearing) ahead of the rest, so a promise whose
+    // only usable quote came fourth is not lost to the trim (Codex r2 P2).
+    if (Array.isArray(item.evidence) && item.evidence.length > 3) {
+      const usable = (e) => {
+        const q = normalizeForMatch(e?.quote);
+        return q.length >= 3 && flat.includes(q) && quoteExpressesAction(q, item);
+      };
+      const preferred = item.evidence.filter(usable);
+      const rest = item.evidence.filter((e) => !preferred.includes(e));
+      item.evidence = preferred.concat(rest).slice(0, 3);
+    }
   }
   if (parsed.commitments.length > 12) parsed.commitments = parsed.commitments.slice(0, 12);
   return parsed;
@@ -681,7 +693,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   } catch (err) {
     return { items: [], skipped: 'parse_failed', error: err.message, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
-  normalizeModelOutput(parsed);
+  normalizeModelOutput(parsed, transcript);
   const validate = getValidator();
   if (!validate(parsed)) {
     // Paths and keywords only — never the model text (it quotes the caller).

@@ -977,6 +977,15 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     expect(out.skipped).toBeUndefined();
     expect(out.items).toHaveLength(1);
     expect(out.items[0].evidence.length).toBeLessThanOrEqual(3);
+    // Grounded quotes survive the trim even when they come last (Codex r2 P2).
+    const bogus = (n) => ({ quote: `not in the transcript number ${n}`, speaker: 'agent' });
+    const mixed = [bogus(1), bogus(2), bogus(3), { quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }];
+    const create2 = jest.fn(async () => reply([item({ evidence: mixed })]));
+    const out2 = await extractCommitmentsWithModel(transcript, { client: { messages: { create: create2 } } });
+    expect(out2.skipped).toBeUndefined();
+    expect(out2.droppedUngrounded).toBe(0);
+    expect(out2.items).toHaveLength(1);
+    expect(out2.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
     const many = { commitments: Array.from({ length: 13 }, () => item()) };
     expect(normalizeModelOutput(many).commitments).toHaveLength(12);
     expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most three quotes per commitment/);
