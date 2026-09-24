@@ -142,7 +142,13 @@ const STATE_ZIP_SEGMENT = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i;
 const STATE_ONLY_SEGMENT = /^[a-z]{2}$/i;
 const isUnitSegment = (part) => UNIT_SEGMENT.test(part) && !STATE_ZIP_SEGMENT.test(part) && !STATE_ONLY_SEGMENT.test(part);
 function parseDisplayAddress(text) {
-  const parts = String(text || '').split(',').map((part) => part.trim()).filter(Boolean);
+  // The repository's unit-first forms ("Apt 4, 123 Main St, …", "Unit 204
+  // 123 Main St") are normalized first, or the unit reads as the street
+  // and the street as the city (codex #4667 r32 P1).
+  const { splitUnitFirstLine } = require('../utils/address-normalizer');
+  const unitFirst = splitUnitFirstLine(String(text || ''));
+  const source = unitFirst ? unitFirst.rest : String(text || '');
+  const parts = source.split(',').map((part) => part.trim()).filter(Boolean);
   const streetLine = parts[0] || '';
   const city = parts.slice(1).find((part) => !isUnitSegment(part) && !STATE_ZIP_SEGMENT.test(part) && !STATE_ONLY_SEGMENT.test(part)) || '';
   const tail = parts.slice(1).find((part) => STATE_ZIP_SEGMENT.test(part) || /^\d{5}(?:-\d{4})?$/.test(part)) || '';
@@ -160,7 +166,7 @@ function parseDisplayAddress(text) {
   // and customer records (pre-push audit P1 on r24).
   const unitSegments = parts.slice(1).filter(isUnitSegment);
   const line1 = String(split.street || streetLine).trim();
-  const unit = [split.unit, ...unitSegments].map((part) => String(part || '').trim()).filter(Boolean).join(' ') || null;
+  const unit = [unitFirst?.unit, split.unit, ...unitSegments].map((part) => String(part || '').trim()).filter(Boolean).join(' ') || null;
   return { streetLine, line1, unit, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
 }
 

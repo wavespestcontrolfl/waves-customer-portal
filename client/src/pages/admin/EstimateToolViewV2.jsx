@@ -3899,6 +3899,13 @@ export default function EstimateToolViewV2({
       if (d.addressUnverified === false || (isEditRevision && addressUnverified && confirmAddress)) {
         setAddressUnverified(null);
         setConfirmAddress(false);
+      } else if (d.addressUnverified === true && !addressUnverified) {
+        // A county lookup flagged this estimate after the editor loaded: the
+        // save reports the standing block, so the warning and the
+        // confirmation control appear now, not after a failed send (codex
+        // #4667 r32 P2).
+        setAddressUnverified({ source: 'county_roll', reason: 'County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.' });
+        setConfirmAddress(false);
       }
       setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", hasInputs: true });
       savedFormRef.current = savingForm;

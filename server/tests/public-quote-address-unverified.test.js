@@ -249,6 +249,9 @@ describe('parseDisplayAddress', () => {
     // A ZIP-less tail's bare state is a region, never the floor designator.
     expect(parseDisplayAddress('1260 Example St, Parrish, FL')).toMatchObject({ line1: '1260 Example St', unit: null, city: 'Parrish', state: 'FL', zip: '' });
     expect(parseDisplayAddress('1260 Example St, Fl 2, Parrish, FL')).toMatchObject({ unit: 'Fl 2', city: 'Parrish', state: 'FL' });
+    // Unit-first forms normalize before the split (codex r32 P1).
+    expect(parseDisplayAddress('Apt 4, 123 Main St, Sarasota, FL 34236')).toMatchObject({ line1: '123 Main St', unit: 'Apt 4', city: 'Sarasota', state: 'FL', zip: '34236' });
+    expect(samePremiseDisplay('Apt 4, 123 Main St, Sarasota, FL 34236', '123 Main St, Sarasota, FL 34236')).toBe(true);
     expect(parseDisplayAddress('')).toMatchObject({ streetLine: '', city: '', zip: '' });
   });
 });

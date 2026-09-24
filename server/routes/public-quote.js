@@ -3349,10 +3349,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           });
         });
       } catch (carryErr) {
-        logger.warn(`[public-quote] carried address flag not written to the lead: ${carryErr.code || carryErr.name || 'error'}`);
+        // FAIL CLOSED (codex r32 P1): when the draft is the only carrier of
+        // the block, a lead returned without its flag lets a bare booking
+        // request book the county-rejected premise. The caller refuses the
+        // run; the visitor retries.
+        logger.error(`[public-quote] carried address flag not written to the lead: ${carryErr.code || carryErr.name || 'error'}`);
+        throw carryErr;
       }
     };
-    await carryFlagToLead();
+    try {
+      await carryFlagToLead();
+    } catch {
+      return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
+    }
 
     try {
       const NotificationService = require('../services/notification-service');
@@ -3635,8 +3644,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // holds a live bookingUrl. Under the same lock: a newer matching flag
     // withholds the link, withdraws this run's own publication and lands on
     // the lead. A failed recheck refuses the run (fail closed).
-    if ((bookingUrl || websiteEstimateUrl) && !addressUnverified && !draftAddressBlockCarried && contactEmail && contactPhone) {
-      try {
+    // Re-run immediately before EACH provider send (codex r32 P1): the
+    // email is awaited first and the SMS follows, so the SMS gets its own
+    // locked recheck rather than reusing the email's answer.
+    const recheckBeforeSend = async () => {
+      if (!((bookingUrl || websiteEstimateUrl) && !addressUnverified && !draftAddressBlockCarried && contactEmail && contactPhone)) return;
+      {
         const late = await db.transaction(async (trx) => {
           await draftVerdictLock(trx);
           const rec = await reconcileUnderLock(trx);
@@ -3656,10 +3669,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           logger.info('[public-quote] address flag committed before delivery — link withheld and this run\'s publication withdrawn');
           await carryFlagToLead();
         }
-      } catch (deliveryRecheckErr) {
-        logger.error(`[public-quote] pre-delivery address recheck failed — refusing the run: ${deliveryRecheckErr.code || deliveryRecheckErr.name || 'error'}`);
-        return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
       }
+    };
+    try {
+      await recheckBeforeSend();
+    } catch (deliveryRecheckErr) {
+      logger.error(`[public-quote] pre-delivery address recheck failed — refusing the run: ${deliveryRecheckErr.code || deliveryRecheckErr.name || 'error'}`);
+      return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
 
     // Per-application phrasing when the quote resolves to one (owner
@@ -3719,7 +3735,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // {service_label}") belongs to the estimate-acceptance moment; at the
     // quote moment nothing is booked yet, so leads were thanked for a
     // booking that doesn't exist (owner report, 2026-06-12).
-    if (normalizedPhone && !quoteRequired && bookingUrl) {
+    // The SMS's own locked recheck (codex r32 P1): the email above was
+    // awaited first, and a flag that committed meanwhile must withhold
+    // the link here too. Past the email, a failed recheck WITHHOLDS the
+    // SMS (nothing else can be refused now) rather than sending a link it
+    // could not vouch for.
+    let smsLinkDeliverable = !!bookingUrl;
+    if (smsLinkDeliverable) {
+      try {
+        await recheckBeforeSend();
+        smsLinkDeliverable = !!bookingUrl;
+      } catch (smsRecheckErr) {
+        smsLinkDeliverable = false;
+        logger.error(`[public-quote] pre-SMS address recheck failed — booking SMS withheld: ${smsRecheckErr.code || smsRecheckErr.name || 'error'}`);
+      }
+    }
+    if (normalizedPhone && !quoteRequired && bookingUrl && smsLinkDeliverable) {
       try {
         const customerBody = await renderTemplate(
           'quote_wizard_booking_invite',
