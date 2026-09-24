@@ -13,15 +13,25 @@
  *
  *   cd ~/waves-customer-portal && railway run --service waves-customer-portal -- \
  *     node <portal wt>/ops/agents/uniform-image-regenerate.js \
- *       --report uniform-audit.json --astro ~/wt-astro-uniform [--only <file>] [--execute]
+ *       --report uniform-audit.json --astro ~/wt-astro-uniform [--only <file>] [--avoid "a; b"] [--execute]
+ *
+ * Before any write the replacement is run through the same uniform classifier
+ * the audit uses; a still-wrong picture retries ONCE with a fresh seed and is
+ * otherwise left untouched (the flagged original stays, listed as a failure).
+ * `--avoid` carries a post's brief-level `image_avoid` exclusions (semicolon
+ * separated) — a published post does not record them, so pass them by hand
+ * for the comparison / no-repair posts that have any.
  */
 const fs = require('fs');
 const path = require('path');
 const { etDateString } = require('../../server/utils/datetime-et');
+const { classifyUniform, outOfUniform } = require('./uniform-image-audit');
+const contentGuardrails = require('../../server/services/content/content-guardrails');
 
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const REPORT = opt('--report'); const ASTRO = opt('--astro'); const ONLY = opt('--only', null);
+const AVOID = String(opt('--avoid', '') || '').split(';').map((v) => v.trim()).filter(Boolean);
 const LIVE = args.includes('--execute');
 if (!REPORT || !ASTRO) { console.error('usage: --report <audit.json> --astro <astro worktree> [--only <file>] [--execute]'); process.exit(1); }
 // A linked worktree's `.git` is a FILE (`gitdir: .../worktrees/<name>`); the main
@@ -37,7 +47,10 @@ const HERO_WIDTH = 1600; const BODY_WIDTH = 1200; const EST_COST = 0.17;
 function repoPathFor(auditFile) {
   const parts = auditFile.replace(/\.webp$/, '').split('__');
   const file = parts.pop();
-  return { dir: parts.join('/'), file, kind: file === 'hero' ? 'hero' : 'body', index: file === 'hero' ? 0 : Number(file.replace('body-', '')) };
+  // `body-N` is a FILE NAME, not the generation slot: the publisher allocates
+  // the next free N and plans framing/style from the image's placement (section
+  // index) — the slot is recovered below from the post body's image order.
+  return { dir: parts.join('/'), file, kind: file === 'hero' ? 'hero' : 'body' };
 }
 function findPostFile(dir) {
   const stem = dir.split('/').pop();
@@ -67,16 +80,45 @@ function bumpModified(text) {
   if (/^published:.*$/m.test(text)) return text.replace(/^(published:.*)$/m, `$1\nupdated: "${today}"`);
   return text.replace(/^---\n([\s\S]*?)\n---/, (_, fm) => `---\n${fm}\nupdated: "${today}"\n---`);
 }
-// The H2 heading + first prose paragraph of the section that holds the image.
-function sectionFor(text, imagePath) {
-  const lines = text.split('\n');
-  const at = lines.findIndex((l) => l.includes(`](${imagePath})`));
-  if (at < 0) return null;
+function splitPost(text) {
+  const m = text.match(/^---\n[\s\S]*?\n---\n?/);
+  return { fmText: m ? m[0] : '', body: m ? text.slice(m[0].length) : text };
+}
+// The post's rendered body images in order, through the publisher's own
+// parser (inline, titled, angle-bracket and reference-style forms alike).
+function bodyRefs(body, publisher) {
+  const { bodyImageRefs } = publisher._internals;
+  return bodyImageRefs(body).map((r) => ({ ...r, src: String(r.src || '').split(/[?#]/)[0] }));
+}
+// The H2 heading + first prose paragraph of the section that holds the image
+// (`at` = the image's line within the body, from the parser).
+function sectionFor(body, at) {
+  const lines = body.split('\n');
   let h = at; while (h >= 0 && !/^##\s/.test(lines[h])) h--;
   const heading = h >= 0 ? lines[h].replace(/^##\s+/, '').trim() : null;
   let lead = '';
   for (let i = h + 1; i < at; i++) { const l = lines[i].trim(); if (l && !l.startsWith('!') && !l.startsWith('<') && !l.startsWith('#') && !l.startsWith('import')) { lead = l; break; } }
   return { heading, lead, line: at };
+}
+// Rewrite the alt of the ONE body image reference whose destination is
+// `imagePath`, by span (the shared balanced parser — titled, angle-bracket
+// and reference-style forms included), never by a hand regex. Returns the
+// new post text, or null when there is not exactly one such reference.
+function replaceBodyAlt(text, imagePath, alt) {
+  const { fmText, body } = splitPost(text);
+  const defs = new Map();
+  for (const m of body.matchAll(/^[ \t]{0,3}\[([^\]]+)\]:[ \t]*(\S+)/gm)) defs.set(contentGuardrails.normalizeReferenceLabel(m[1]), m[2].replace(/^<|>$/g, ''));
+  const spans = [];
+  for (const span of contentGuardrails.eachMarkdownLink(body)) {
+    if (!span.isImage) continue;
+    let dest = null;
+    if (span.kind === 'inline') dest = contentGuardrails.parseLinkDestination(body.slice(span.destStart, span.destEnd + 1), { allowEmpty: true });
+    else if (span.kind === 'reference') dest = defs.get(contentGuardrails.normalizeReferenceLabel(body.slice(span.refStart + 1, span.refEnd))) || defs.get(contentGuardrails.normalizeReferenceLabel(body.slice(span.labelStart + 1, span.labelEnd))) || null;
+    if (dest !== null && String(dest).split(/[?#]/)[0] === imagePath) spans.push(span);
+  }
+  if (spans.length !== 1) return null;
+  const s = spans[0];
+  return fmText + body.slice(0, s.labelStart + 1) + alt.replace(/[\[\]]/g, '') + body.slice(s.labelEnd);
 }
 function cityFrom(fm) {
   const m = String(fm.title || '').match(/\b(Sarasota|Bradenton|Venice|Parrish|Lakewood Ranch|Palmetto|North Port|Manatee County)\b/i);
@@ -94,21 +136,27 @@ function cityFrom(fm) {
 
   const plan = [];
   for (const t of targets) {
-    const { dir, file, kind, index } = repoPathFor(t);
+    const { dir, file, kind } = repoPathFor(t);
     const postFile = findPostFile(dir);
     if (!postFile) { plan.push({ t, skip: 'post file not found' }); continue; }
     const text = fs.readFileSync(postFile, 'utf8');
     const fm = frontmatter(text);
+    const { body } = splitPost(text);
+    let index = 0;
     const imagePath = `/images/blog/${dir}/${file}.webp`;
     const target = path.join(ASTRO, 'public/images/blog', dir, `${file}.webp`);
     if (!fs.existsSync(target)) { plan.push({ t, skip: `image not in worktree: ${target}` }); continue; }
     const slug = String(fm.slug || dir).replace(/^\/|\/$/g, '');
     const item = { t, postFile: path.relative(ASTRO, postFile), imagePath, target, kind, index, slug, title: fm.title, keyword: fm.primary_keyword || fm.keyword || '', topic: fm.meta_description || '', city: cityFrom(fm) };
     if (kind === 'body') {
-      const sec = sectionFor(text, imagePath);
-      if (!sec) { plan.push({ t, skip: 'image reference not found in post body' }); continue; }
+      const refs = bodyRefs(body, publisher);
+      const hits = refs.map((r, i) => ({ ...r, ordinal: i })).filter((r) => r.src === imagePath);
+      if (hits.length !== 1) { plan.push({ t, skip: hits.length ? `image referenced ${hits.length}× in post body (need exactly one)` : 'image reference not found in post body' }); continue; }
+      const ref = hits[0];
+      index = ref.ordinal + 1; item.index = index; item.refLine = ref.line;
+      const sec = sectionFor(body, ref.line);
       item.keyword = sec.heading || item.keyword; item.topic = sec.lead || item.topic;
-      item.shot = BODY_IMAGE_SHOTS[(index - 1) % BODY_IMAGE_SHOTS.length];
+      item.shot = BODY_IMAGE_SHOTS[ref.ordinal % BODY_IMAGE_SHOTS.length];
       item.avoid = fm.hero_image_alt || fm.title;
     }
     plan.push(item);
@@ -122,8 +170,20 @@ function cityFrom(fm) {
   let done = 0; const results = [];
   for (const p of doable) {
     try {
-      const gen = await generatePlannedImage({ title: p.title, topic: p.topic, keyword: p.keyword, city: p.city, mode: p.kind === 'hero' ? 'blog-hero' : 'blog-body', shot: p.shot, avoid: p.avoid, slug: p.slug, index: p.index });
-      const webp = await compressToWebp(gen.buffer, { width: p.kind === 'hero' ? HERO_WIDTH : BODY_WIDTH });
+      // Generate, then VERIFY the uniform before anything is overwritten: the
+      // provider can ignore the uniform sentence, and the publisher's own
+      // screen only checks text/logos. One retry under a fresh seed (the
+      // publisher's +100 convention); a second miss leaves the original.
+      let gen = null; let webp = null; let verdict = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        gen = await generatePlannedImage({ title: p.title, topic: p.topic, keyword: p.keyword, city: p.city, mode: p.kind === 'hero' ? 'blog-hero' : 'blog-body', shot: p.shot, avoid: p.avoid, slug: p.slug, index: p.index + attempt * 100, avoidDepicting: AVOID });
+        webp = await compressToWebp(gen.buffer, { width: p.kind === 'hero' ? HERO_WIDTH : BODY_WIDTH });
+        verdict = await classifyUniform({ buffer: webp, mimeType: 'image/webp' });
+        if (!verdict.ok) throw new Error(`uniform check unavailable (${verdict.reason}) — original left untouched`);
+        if (!outOfUniform(verdict.parsed)) break;
+        console.log(`    replacement ${attempt === 0 ? 'out of uniform, retrying with a fresh seed' : 'STILL out of uniform'}: ${verdict.parsed.shirt}; cap ${verdict.parsed.cap} (${verdict.parsed.head || '?'}); pants ${verdict.parsed.pants}`);
+        if (attempt === 1) throw new Error('replacement still out of uniform after retry — original left untouched');
+      }
       fs.writeFileSync(p.target, webp);
       // The image is on disk now; nothing below may leave the post untouched.
       // Vision alt is best-effort (fail-open to the generator's prompt-derived
@@ -133,20 +193,23 @@ function cityFrom(fm) {
       let vision = null;
       try { vision = await describeHeroForAlt({ buffer: webp, mimeType: 'image/webp', title: p.title, keyword: p.keyword }); } catch (err) { console.log(`    (vision alt failed: ${err.message} — using generator alt)`); }
       const alt = sanitizeAlt(vision) || sanitizeAlt(gen.alt) || null;
+      let altUpdated = false;
       {
         let text = fs.readFileSync(path.join(ASTRO, p.postFile), 'utf8');
         if (!alt) {
           console.log(`    WARNING ${p.t}: no alt could be derived — image swapped, alt left as-is (fix by hand)`);
         } else if (p.kind === 'hero') {
           // nested hero_image.alt — replace only the alt line inside that block
-          text = text.replace(/^(hero_image:\n(?:[ \t]+\w+:.*\n)*?[ \t]+alt:[ \t]*).*$/m, (_, head) => `${head}${JSON.stringify(alt)}`);
+          const next = text.replace(/^(hero_image:\n(?:[ \t]+\w+:.*\n)*?[ \t]+alt:[ \t]*).*$/m, (_, head) => `${head}${JSON.stringify(alt)}`);
+          altUpdated = next !== text; text = next;
         } else {
-          const re = new RegExp(`!\\[[^\\]]*\\]\\(${p.imagePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`);
-          text = text.replace(re, `![${alt.replace(/\]/g, '')}](${p.imagePath})`);
+          const next = replaceBodyAlt(text, p.imagePath, alt);
+          altUpdated = next !== null; if (next !== null) text = next;
         }
+        if (alt && !altUpdated) console.log(`    WARNING ${p.t}: image reference could not be rewritten in place — image swapped, alt left as-is (fix by hand)`);
         fs.writeFileSync(path.join(ASTRO, p.postFile), bumpModified(text));
       }
-      done++; results.push({ t: p.t, ok: true, altUpdated: Boolean(alt), model: gen.model, style: gen.plan.style, screen: gen.screen && gen.screen.ok, alt });
+      done++; results.push({ t: p.t, ok: true, altUpdated, model: gen.model, style: gen.plan.style, screen: gen.screen && gen.screen.ok, uniform: verdict.parsed, alt });
       console.log(`  ✓ ${p.t} via ${gen.model} (${gen.plan.style}) — alt: ${alt ? alt.slice(0, 80) : '(kept)'}`);
     } catch (err) {
       results.push({ t: p.t, ok: false, error: err.message }); console.log(`  ✗ ${p.t}: ${err.message}`);

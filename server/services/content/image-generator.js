@@ -294,15 +294,17 @@ function retryStyleFor({ slug, mode = 'blog-hero', index = 0, captions = [] } = 
 // depict" lines (a brief's rules — e.g. no repair scenes on a post that says
 // Waves does not repair irrigation; no competitor vehicles on a comparison).
 const STANDARD_GUARDS = [
-  'no company logos, brand names, or brand marks of any kind — equipment, vehicles and uniforms carry no logo or lettering (uniform COLORS follow the Waves uniform line above)',
+  'no company logos, brand names, or brand marks of any kind — equipment and vehicles are generic and unbranded, and uniforms carry no logo or lettering (only the uniform COLORS follow the Waves uniform line)',
   'no invented control-panel labels, dials with fake words, or gibberish lettering',
 ];
 // Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
 // a blue long-sleeve and khakis): any Waves technician in a generated image wears
 // the REAL uniform. Every scene mode carries the line — a hero, body slot or social
-// tile can all put a person in frame — only the plain-background infographic
-// skips it. The logo itself stays OFF the shirt/cap: generators render marks as
-// gibberish and the post-generation text/logo screen would reject the image.
+// tile can all put a person in frame, and a captioned infographic about an
+// inspection or treatment can still draw a technician icon (Codex P2), so the
+// infographic carries it too. The logo itself stays OFF the shirt/cap:
+// generators render marks as gibberish and the post-generation text/logo
+// screen would reject the image.
 const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering.';
 
 function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [] }) {
@@ -337,8 +339,10 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
   // Brand palette is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the
   // brand brief explicitly forbids teal, so steer the grade, don't paint it.
+  // The limited illustration palettes (blue / gold / neutrals) must not
+  // steer a technician's shirt back to blue: uniform red is always allowed.
   const styleLine = style
-    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast.`
+    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast; a technician's red shirt or red cap is part of the palette.`
     : `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).`;
   const captionList = (style && style.allowsText ? captions : []).map((c) => String(c || '').trim()).filter(Boolean);
   const textRule = captionList.length
@@ -349,7 +353,7 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
-  const uniform = isInfographic ? '' : WAVES_UNIFORM_LINE;
+  const uniform = WAVES_UNIFORM_LINE;
   const van = plan && plan.van && !isInfographic ? VAN_LINE : '';
   return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
 }

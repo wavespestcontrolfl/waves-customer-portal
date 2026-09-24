@@ -107,15 +107,25 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/Subject: k\./);
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).not.toMatch(/Framing:/);
   });
-  test('every scene mode pins the real Waves uniform (owner directive 2026-09-23); infographics skip it', () => {
+  test('every scene mode AND the infographic pin the real Waves uniform (owner directive 2026-09-23)', () => {
     const uniform = /red long-sleeve polo .* a baseball cap that is either light blue or red, and plain black or dark navy work pants/;
     expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(uniform);
     expect(buildPrompt({ keyword: 'k', topic: 'lead', mode: 'blog-body', shot: 'action' })).toMatch(uniform);
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(uniform);
     expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/never a blue shirt, never khaki or tan pants/);
+    // A captioned infographic about an inspection can still draw a technician
+    // icon, so it carries the line too (Codex P2 on #4696).
     const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' } });
-    expect(info).not.toMatch(uniform);
+    expect(info).toMatch(uniform);
     expect(info).toMatch(/plain light background/);
+  });
+
+  test('the limited illustration palettes admit uniform red, and equipment/vehicles stay generic (Codex P2s on #4696)', () => {
+    for (const style of ['illustration', 'cartoon', 'infographic']) {
+      const prompt = buildPrompt({ title: 'Post', keyword: 'k', mode: 'blog-hero', captions: ['One'], plan: { style, setting: 's', timeOfDay: 'noon', vantage: 'v' } });
+      expect(prompt).toMatch(/a technician's red shirt or red cap is part of the palette/);
+    }
+    expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/equipment and vehicles are generic and unbranded/);
   });
 
   test('the unmarked Waves van appears in the background of SOME yard scenes only (owner ask 2026-09-23)', () => {
