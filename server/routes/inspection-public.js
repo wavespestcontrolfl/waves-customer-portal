@@ -190,7 +190,7 @@ const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
-const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
+const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
@@ -291,7 +291,7 @@ function buildLeadPayload(lead, custRow) {
 // `freshLead.<field>` access and asserts each one is a member here.
 const LEAD_ROW_FIELDS = [
   'id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
-  'status', 'customer_id', 'converted_at', 'first_contact_channel',
+  'status', 'customer_id', 'converted_at', 'first_contact_channel', 'twilio_call_sid',
 ];
 
 async function loadLead(dbConn, leadId) {
@@ -694,10 +694,19 @@ async function createCustomerForLead(dbConn, lead, address, location, account) {
 // was delivered by SMS to that exact phone number
 // (verifyLeadConsultationToken — server/utils/lead-consultation-token.js).
 // Anything else (a web-form or email-delivered lead) is UNVERIFIED.
-function leadContactVerified(lead, token) {
-  if (!lead) return false;
-  if (lead.first_contact_channel === 'call') return true;
-  return token?.channel === 'sms';
+//
+// Both proofs are bound to the lead's CURRENT phone (Codex #4737 r1 P1): a
+// phone corrected after the link went out must not inherit the old proof.
+// A call lead counts only while its phone still equals the caller ID on
+// its originating call_log row; an SMS claim only when its signed digest
+// (smsChannelFor) is of this exact phone. Reads run on the caller's trx.
+async function leadContactVerified(lead, token, dbConn = db) {
+  if (!lead || !lead.phone) return false;
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  if (token?.channel && token.channel === smsChannelFor(lead.phone)) return true;
+  if (lead.first_contact_channel !== 'call' || !lead.twilio_call_sid) return false;
+  const call = await dbConn('call_log').where({ twilio_call_sid: lead.twilio_call_sid }).first('from_phone');
+  return Boolean(call?.from_phone) && last10(call.from_phone) === last10(lead.phone);
 }
 
 // Round 11 (Codex pre-push P1, 2026-09-24): a "small tolerance" for two
@@ -786,7 +795,7 @@ async function matchExistingAccountProfile(dbConn, account, address, location) {
 // location? }`.
 async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   const { ensureCustomerAccount } = require('./admin-customers');
-  const verifiedContact = leadContactVerified(freshLead, token);
+  const verifiedContact = await leadContactVerified(freshLead, token, trx);
   const account = await ensureCustomerAccount(trx, {
     firstName: freshLead.first_name || 'New Lead',
     lastName: freshLead.last_name || '',
@@ -882,10 +891,12 @@ router.get('/:token', async (req, res, next) => {
 
 router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => {
   if (!leadInspectionLinkLive()) return res.status(404).json({ error: 'not_found' });
-  const addressInput = typeof req.body?.address === 'string' ? req.body.address.trim() : '';
-  if (!addressInput) return res.status(400).json({ error: 'address required' });
+  // Token before body validation (Codex #4737 r1 P0): an invalid token
+  // always gets the generic 404, never a validation 400.
   const verified = verifyLeadConsultationToken(req.params.token);
   if (!verified) return res.status(404).json({ error: 'not_found' });
+  const addressInput = typeof req.body?.address === 'string' ? req.body.address.trim() : '';
+  if (!addressInput) return res.status(400).json({ error: 'address required' });
 
   try {
     const lead = await loadLead(db, verified.leadId);
@@ -918,12 +929,14 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
 
 router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   if (!leadInspectionLinkLive()) return res.status(404).json({ error: 'not_found' });
+  // Token before body validation (Codex #4737 r1 P0): an invalid token
+  // always gets the generic 404, never a validation 400.
+  const verified = verifyLeadConsultationToken(req.params.token);
+  if (!verified) return res.status(404).json({ error: 'not_found' });
   const query = typeof req.body?.query === 'string' ? req.body.query.trim() : '';
   if (!query) return res.status(400).json({ error: 'query required' });
   if (query.length > 500) return res.status(400).json({ error: 'query too long' });
   const addressInput = typeof req.body?.address === 'string' ? req.body.address.trim() : '';
-  const verified = verifyLeadConsultationToken(req.params.token);
-  if (!verified) return res.status(404).json({ error: 'not_found' });
 
   try {
     const lead = await loadLead(db, verified.leadId);
@@ -980,6 +993,10 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
 
 router.post('/:token', commitLimiter, async (req, res, next) => {
   if (!leadInspectionLinkLive()) return res.status(404).json({ error: 'not_found' });
+  // Token before body validation (Codex #4737 r1 P0): an invalid token
+  // always gets the generic 404, never a validation 400.
+  const verified = verifyLeadConsultationToken(req.params.token);
+  if (!verified) return res.status(404).json({ error: 'not_found' });
 
   const date = typeof req.body?.date === 'string' ? req.body.date.trim() : '';
   const time = typeof req.body?.time === 'string' ? req.body.time.trim() : '';
@@ -990,9 +1007,6 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   const notes = typeof req.body?.notes === 'string'
     ? req.body.notes.trim().slice(0, MAX_NOTES_LENGTH)
     : '';
-
-  const verified = verifyLeadConsultationToken(req.params.token);
-  if (!verified) return res.status(404).json({ error: 'not_found' });
 
   try {
     const lead = await loadLead(db, verified.leadId);
@@ -1331,12 +1345,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
 router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
   if (!leadInspectionLinkLive()) return res.status(404).json({ error: 'not_found' });
+  // Token before body validation (Codex #4737 r1 P0): an invalid token
+  // always gets the generic 404, never a validation 400.
+  const verified = verifyLeadConsultationToken(req.params.token);
+  if (!verified) return res.status(404).json({ error: 'not_found' });
   const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({ error: 'A valid email is required' });
   }
-  const verified = verifyLeadConsultationToken(req.params.token);
-  if (!verified) return res.status(404).json({ error: 'not_found' });
 
   try {
     const lead = await loadLead(db, verified.leadId);

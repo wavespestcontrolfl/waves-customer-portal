@@ -75,4 +75,15 @@ function verifyLeadConsultationToken(token, nowSec = Math.floor(Date.now() / 100
   return channel ? { leadId, channel } : { leadId };
 }
 
-module.exports = { mintLeadConsultationToken, verifyLeadConsultationToken, TTL_SECONDS };
+// The SMS delivery claim, bound to the number the link was texted to
+// (Codex #4737 r1 P1): `sms-<digest of the last ten digits>`. A lead whose
+// phone is corrected after the text no longer matches, so an old link can
+// never vouch for the new number. Hex digest — no '.' to break the token's
+// segment split.
+function smsChannelFor(phone) {
+  const last10 = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (last10.length !== 10) return null;
+  return `sms-${crypto.createHash('sha256').update(`lead-consultation-sms:${last10}`).digest('hex').slice(0, 16)}`;
+}
+
+module.exports = { mintLeadConsultationToken, verifyLeadConsultationToken, smsChannelFor, TTL_SECONDS };

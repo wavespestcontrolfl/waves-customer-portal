@@ -269,6 +269,20 @@ describe('token verification', () => {
     expect(res.body).toEqual({ error: 'not_found' });
   });
 
+  // Codex #4737 r1 P0: every POST checks the token BEFORE validating the
+  // body — an invalid token with an empty body is the generic 404, never a
+  // 400 that reveals the route's validation rules.
+  test.each(['/:token/availability', '/:token/find-slots', '/:token', '/:token/waitlist'])(
+    'POST %s with a garbage token and an empty body → 404, not 400',
+    async (route) => {
+      const handler = findHandler(route, 'post');
+      const res = mkRes();
+      await handler({ params: { token: 'not-a-real-token' }, body: {} }, res, jest.fn());
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toEqual({ error: 'not_found' });
+    },
+  );
+
   test('a well-formed but expired token answers 200 { state: "expired" }', async () => {
     // Minted with nowSec far in the past — the mint's own TTL math makes exp
     // long gone by the time the handler checks it.
@@ -852,7 +866,8 @@ describe('POST /:token commit', () => {
     // stored coordinates differ from the lead's pre-lock resolution (round
     // 11/13), re-validated AFTER the transaction commits.
     test('a verified lead reusing a matched profile at a different stored location books the REFRESHED slot\'s own technician, never the pre-lock one', async () => {
-      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       const slotAtSupplied = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-pre' }] }] };
       const slotAtMatched = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:45', start_label: '9:00 AM', end_label: '9:45 AM', technician_id: 'tech-matched' }] }] };
@@ -1088,8 +1103,11 @@ describe('POST /:token commit', () => {
     });
 
     describe('verified (inbound-call lead)', () => {
+      // The originating call's caller ID still matches the lead's phone.
+      beforeEach(() => { firstResults.call_log = { from_phone: '+19415550101' }; });
+
       test('an open assessment on the matched profile → already_booked, no new profile, nothing linked', async () => {
-        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot();
         const existingCustomer = existingCustomerAt('123 Palm Ave');
@@ -1111,7 +1129,7 @@ describe('POST /:token commit', () => {
       });
 
       test('same address (street + zip), no open visits → reuses the existing property profile, never a new one', async () => {
-        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot();
         const existingCustomer = existingCustomerAt('123 Palm Ave');
@@ -1131,7 +1149,7 @@ describe('POST /:token commit', () => {
       });
 
       test('a genuinely new address → a new profile under the SAME account, never a new customer_accounts row', async () => {
-        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot();
         // The matched account's existing property is a DIFFERENT street —
@@ -1158,7 +1176,7 @@ describe('POST /:token commit', () => {
       });
 
       test('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books', async () => {
-        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call' };
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot(); // satisfies the pre-lock anti-forgery day check only
         // Matches by full address (street + zip) — the OR branch that never
@@ -1237,7 +1255,7 @@ describe('POST /:token commit', () => {
         listResults.scheduled_services = [];
         firstResults.scheduled_services = { id: 'ss-sms', reschedule_token: 'tok-sms' };
 
-        const token = mintLeadConsultationToken(LEAD_ID, undefined, 'sms'); // this exact link was texted to the lead's phone
+        const token = mintLeadConsultationToken(LEAD_ID, undefined, require('../utils/lead-consultation-token').smsChannelFor(LEAD_ROW.phone)); // this exact link was texted to the lead's current phone
         const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
 
         expect(res.statusCode).toBe(200);
@@ -1249,29 +1267,46 @@ describe('POST /:token commit', () => {
   });
 });
 
-describe('leadContactVerified unit coverage (P1 :585, round 11)', () => {
+describe('leadContactVerified unit coverage (P1 :585, round 11; phone-bound Codex #4737 r1 P1)', () => {
   const { leadContactVerified } = inspectionPublicRouter._test;
+  const { smsChannelFor } = require('../utils/lead-consultation-token');
+  const CALL_LEAD = { first_contact_channel: 'call', twilio_call_sid: 'CA-1', phone: '9415550101' };
 
-  test('no lead → false', () => {
-    expect(leadContactVerified(null, { channel: 'sms' })).toBe(false);
+  test('no lead → false', async () => {
+    expect(await leadContactVerified(null, { channel: smsChannelFor('9415550101') }, db)).toBe(false);
   });
 
-  test('an inbound-call lead → true regardless of the token', () => {
-    expect(leadContactVerified({ first_contact_channel: 'call' }, undefined)).toBe(true);
-    expect(leadContactVerified({ first_contact_channel: 'call' }, { leadId: 'x' })).toBe(true);
+  test('an inbound-call lead whose phone still equals the call\'s caller ID → true', async () => {
+    firstResults.call_log = { from_phone: '+19415550101' };
+    expect(await leadContactVerified(CALL_LEAD, undefined, db)).toBe(true);
   });
 
-  test('an sms-channel token → true even for a form lead', () => {
-    expect(leadContactVerified({ first_contact_channel: 'form' }, { leadId: 'x', channel: 'sms' })).toBe(true);
+  test('an inbound-call lead whose phone was corrected since the call → false', async () => {
+    firstResults.call_log = { from_phone: '+19415550999' };
+    expect(await leadContactVerified(CALL_LEAD, undefined, db)).toBe(false);
   });
 
-  test('a form lead with no channel claim → false', () => {
-    expect(leadContactVerified({ first_contact_channel: 'form' }, { leadId: 'x' })).toBe(false);
-    expect(leadContactVerified({ first_contact_channel: 'form' }, undefined)).toBe(false);
+  test('an inbound-call lead with no call record to corroborate → false', async () => {
+    firstResults.call_log = null;
+    expect(await leadContactVerified(CALL_LEAD, undefined, db)).toBe(false);
+    expect(await leadContactVerified({ ...CALL_LEAD, twilio_call_sid: null }, undefined, db)).toBe(false);
   });
 
-  test('an email-channel claim is never trusted (phone-only)', () => {
-    expect(leadContactVerified({ first_contact_channel: 'email' }, { leadId: 'x', channel: 'email' })).toBe(false);
+  test('an sms claim bound to the lead\'s CURRENT phone → true, even for a form lead', async () => {
+    const lead = { first_contact_channel: 'form', phone: '9415550101' };
+    expect(await leadContactVerified(lead, { leadId: 'x', channel: smsChannelFor('+1 (941) 555-0101') }, db)).toBe(true);
+  });
+
+  test('an sms claim for a DIFFERENT phone (lead phone corrected after the text), or a bare "sms" → false', async () => {
+    const lead = { first_contact_channel: 'form', phone: '9415550101' };
+    expect(await leadContactVerified(lead, { leadId: 'x', channel: smsChannelFor('9415550999') }, db)).toBe(false);
+    expect(await leadContactVerified(lead, { leadId: 'x', channel: 'sms' }, db)).toBe(false);
+  });
+
+  test('a form lead with no channel claim, or an email claim → false', async () => {
+    const lead = { first_contact_channel: 'form', phone: '9415550101' };
+    expect(await leadContactVerified(lead, { leadId: 'x' }, db)).toBe(false);
+    expect(await leadContactVerified(lead, { leadId: 'x', channel: 'email' }, db)).toBe(false);
   });
 });
 

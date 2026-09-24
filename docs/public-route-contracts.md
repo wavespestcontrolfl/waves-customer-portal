@@ -1665,19 +1665,26 @@ address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
 The slot is re-validated against a fresh single-day
 availability build (same anti-forgery model as reservice-public) before
 committing through `createSelfBooking`'s `callbackVisit` option with
-`isCallback: false` and `dedupeLane: false` (booking.js: skips the funnel's
-signed-offer/card-capture/ad-attribution/customer-promotion machinery like a
-re-service callback, WITHOUT setting `is_callback` or taking the
-reservice-lane advisory lock/dedupe, which is keyed to pest/lawn re-service
-lanes and would false-hit on an unrelated open re-service). The lead gets
+`isCallback: false` and `dedupeLane` left at its default (on). booking.js
+skips the funnel's signed-offer/card-capture/ad-attribution/customer-promotion
+machinery like a re-service callback, without setting `is_callback`. The lane
+dedupe runs on a dedicated `assessment` lane (`laneForCallbackRow` in
+`services/reservice-scheduler.js` classifies `lawn_inspection` before the
+pest/lawn cases): the check and the insert share one transaction under
+`pg_advisory_xact_lock(['reservice-lane', customerId:assessment])`, so two
+concurrent commits at different slots can never both book, and an unrelated
+open pest/lawn re-service never false-hits. A duplicate returns the same
+`already_booked` shape GET does. The lead gets
 (or keeps) a customer row and is linked (`leads.customer_id`) but nothing
 else on the lead changes — status/pipeline_stage/converted_at/member_since
 all stay untouched (`promoteCustomerOnBooking`'s own
 `isAssessmentServiceType` guard, matching `admin-leads.js`'s identical
 assessment posture). An unlinked lead whose phone matches an existing
 customer (`leadContactVerified`) only reuses that customer when the phone
-is independently corroborated — an inbound-call lead's caller ID, or an
-SMS-delivered token's `channel` claim — never a bare public-form
+is independently corroborated and still the lead's CURRENT phone — an
+inbound-call lead whose phone equals its originating `call_log.from_phone`,
+or an SMS-delivered token whose signed `channel` claim is `smsChannelFor`
+of this exact phone — never a bare public-form
 submission; otherwise it always gets its own separate prospect profile and
 never sees another customer's visit data, reschedule URL, or booking
 (Codex pre-push P1, 2026-09-24). The free-text note rides
