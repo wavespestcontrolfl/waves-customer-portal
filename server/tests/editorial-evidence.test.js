@@ -229,12 +229,16 @@ test('repairs before returning draft and requires another independent review', a
   reviewer.review.mockResolvedValueOnce(failed).mockResolvedValueOnce(passing());
   reviewer.repair.mockResolvedValue(fm.stringify({ title: 'How to inspect a door' }, 'Look for daylight around the closed door.'));
   const frontmatter = { title: 'How to inspect a door' };
-  const result = await evidence.prepareDraft({ frontmatter, body: 'Inspect' }, { page_type: 'supporting-blog' });
+  const factsPack = { evidence_strength: 'supported', disallowed_claims: ['guaranteed prevention'] };
+  const result = await evidence.prepareDraft({ frontmatter, body: 'Inspect' }, {
+    page_type: 'supporting-blog', facts_pack: factsPack,
+  });
   expect(result.body).toContain('Look for daylight');
   expect(result.frontmatter).toBe(frontmatter);
   expect(publisher.resolveExistingAstroFileForTarget).not.toHaveBeenCalled();
   expect(reviewer.review).toHaveBeenCalledTimes(2);
   expect(reviewer.repair).toHaveBeenCalledTimes(1);
+  expect(reviewer.repair).toHaveBeenCalledWith(expect.objectContaining({ factsPack }));
 });
 test.each([
   ['an explicit file_path', { file_path: path }, path],

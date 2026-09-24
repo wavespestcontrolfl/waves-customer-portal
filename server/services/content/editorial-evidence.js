@@ -107,6 +107,7 @@ async function prepareDraft(draft, brief = {}) {
     if (attempt === 0 && !result?.checks?.some((check) => check.status === 'error')) {
       const repaired = await require('./editorial-review').repair({ document,
         findings: result.checks.flatMap((check) => check.findings || []), sources: result.sources || [],
+        factsPack: brief.facts_pack || null,
         title: reviewFrontmatter.title || reviewFrontmatter.metaTitle || '', domain: DOMAIN_CONTEXT });
       document = typeof repaired === 'string' ? repaired : repaired?.document;
       if (!document || JSON.stringify(fm.parse(document).data) !== JSON.stringify(fm.parse(original).data)) throw reviewError(result);
