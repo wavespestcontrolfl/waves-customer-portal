@@ -718,6 +718,25 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
   };
 }
 
+// Visit 2 already owned by dispatch (a follow-up child — AI or completion-
+// CTA — off any of this call's visits, whatever its status: a cancelled
+// child was cancelled on purpose) or already handled by staff (a resolved
+// or dismissed follow-up card for this call): the settlement files no
+// "follow-up still unbooked" task, the same ownership rule the processor's
+// reuse path applies (codex r31 P1).
+async function followUpAlreadyOwnedOrHandled(trx, callLogId) {
+  const callVisits = trx('scheduled_services').where({ source_call_log_id: callLogId }).select('id');
+  const owned = await trx('scheduled_services')
+    .where((q) => q.whereIn('parent_service_id', callVisits).orWhereIn('followup_source_service_id', callVisits))
+    .first('id');
+  if (owned) return true;
+  const handled = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'attached_booking_followup_unbooked' })
+    .whereIn('status', ['resolved', 'dismissed'])
+    .first('id');
+  return !!handled;
+}
+
 // Settles the appointment a house-number card was holding when that card
 // leaves review — from the call verdict AND from the single-card Resolve /
 // Dismiss transitions (codex r11 P1): a confirmed, unbooked appointment or
@@ -839,7 +858,8 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
         summary: trx.raw('EXCLUDED.summary'),
         updated_at: new Date(),
       });
-  } else if (heldConflictPayload?.follow_up_plan && !decision.scheduleDenied) {
+  } else if (heldConflictPayload?.follow_up_plan && !decision.scheduleDenied
+    && !(await followUpAlreadyOwnedOrHandled(trx, item.call_log_id))) {
     // No task filed (the primary is covered) but the card recorded a
     // PROMISED follow-up the hold kept from booking: that owed visit 2
     // gets its own card, as the reuse path files it, unless one already

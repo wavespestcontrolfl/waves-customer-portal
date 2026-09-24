@@ -327,6 +327,10 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     expect(src).toContain("if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {");
     expect(src).toContain("...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),");
     expect(src).toContain("retained_service_id: retained ? retained.id : null,");
+    // The settlement's follow-up card is filed only when visit 2 is neither owned by dispatch nor already handled (codex r31 P1).
+    expect(src).toContain("&& !(await followUpAlreadyOwnedOrHandled(trx, item.call_log_id))) {");
+    expect(src).toContain("orWhereIn('followup_source_service_id', callVisits)");
+    expect(src).toContain("whereIn('status', ['resolved', 'dismissed'])");
     const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     // A reprocess re-binds the identity only for a LINKED call; an unlink keeps the filing identity (codex r29 P2).
     expect(processor).toContain("...(customerId ? { dispute_customer_id: String(customerId), on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) } : {}),");
