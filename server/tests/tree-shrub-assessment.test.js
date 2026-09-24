@@ -18,8 +18,11 @@ const {
   formatAssessmentScores,
   buildTreeShrubAssessmentReportData,
   isCompleteVisionResult,
+  VISION_RESULT_SCHEMA,
+  SCHEMA_PROMPT_SHAPES,
+  SCHEMA_VALIDATORS,
+  OBSERVATIONS_MIN_LENGTH,
   NUMERIC_SCORE_FIELDS,
-  NUMERIC_SCORE_RANGE,
   SEVERITY_SCORE_FIELDS,
   VISION_PROMPT,
 } = require('../services/tree-shrub-assessment');
@@ -339,83 +342,123 @@ describe('scoreAndStoreTreeShrubAssessment — auto-score + persist', () => {
   });
 });
 
-describe('isCompleteVisionResult — every schema field read, never a silent default', () => {
-  const full = {
-    foliage_fullness: 80, leaf_color_vigor: 70, pest_signals: 'minor',
-    disease_signals: 'none', water_heat_stress: 'moderate', pruning_mechanical: 'none', observations: 'x',
+describe('VISION_RESULT_SCHEMA — one declared shape for the prompt, the merge lists, and validation', () => {
+  it('every schema kind has a prompt renderer and a validator (nothing can be prompted but unvalidated)', () => {
+    const kinds = [...new Set(Object.values(VISION_RESULT_SCHEMA).map((spec) => spec.kind))].sort();
+    expect(Object.keys(SCHEMA_PROMPT_SHAPES).sort()).toEqual(kinds);
+    expect(Object.keys(SCHEMA_VALIDATORS).sort()).toEqual(kinds);
+  });
+
+  it('the prompt\'s JSON block is exactly the schema, field by field, in order', () => {
+    const block = VISION_PROMPT.slice(VISION_PROMPT.lastIndexOf('{'));
+    const lines = block.split('\n').slice(1, -1).map((line) => line.trim().replace(/,$/, ''));
+    expect(lines).toEqual(Object.entries(VISION_RESULT_SCHEMA)
+      .map(([field, spec]) => `"${field}": ${SCHEMA_PROMPT_SHAPES[spec.kind](spec)}`));
+    expect(VISION_PROMPT).toContain('"foliage_fullness": <number 0-100>');
+    expect(VISION_PROMPT).toContain('"pest_signals": <"none" | "minor" | "moderate" | "severe">');
+    expect(VISION_PROMPT).toContain('"observations": "<one concise paragraph>"');
+  });
+
+  it('the merge field lists are derived from the schema', () => {
+    expect(NUMERIC_SCORE_FIELDS).toEqual(['foliage_fullness', 'leaf_color_vigor']);
+    expect(SEVERITY_SCORE_FIELDS).toEqual(['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical']);
+    expect(VISION_RESULT_SCHEMA.observations).toEqual({ kind: 'text', minLength: OBSERVATIONS_MIN_LENGTH });
+    expect(OBSERVATIONS_MIN_LENGTH).toBe(20);
+  });
+});
+
+describe('isCompleteVisionResult — generic walk over VISION_RESULT_SCHEMA', () => {
+  // A valid value for every field, built from the schema itself.
+  const VALID_BY_KIND = {
+    score: (spec) => Math.round((spec.min + spec.max) / 2),
+    severity: (spec) => spec.values[1],
+    text: (spec) => 'Canopy looks full with even color. '.padEnd(spec.minLength + 5, '.'),
   };
-  const result = (claude, gemini) => ({ claude, gemini, composite: averageScores(claude, gemini).composite });
+  // Invalid values per kind, parameterized by the field's own spec.
+  const INVALID_BY_KIND = {
+    score: (spec) => [
+      ['a numeric string', String(spec.min + 1)],
+      ['a boolean (num(false) → 0)', false],
+      ['above range', spec.max + 1],
+      ['below range', spec.min - 1],
+      ['NaN', NaN],
+      ['Infinity', Infinity],
+    ],
+    severity: (spec) => [
+      ['a number', 1],
+      ['a boolean', false],
+      ['an unknown word', 'high'],
+      ['blank', ''],
+    ],
+    text: (spec) => [
+      ['a number', 42],
+      ['empty', ''],
+      ['whitespace only', ' '.repeat(spec.minLength + 5)],
+      ['one char too short', 'x'.repeat(spec.minLength - 1)],
+    ],
+  };
+  const fullRead = () => Object.fromEntries(Object.entries(VISION_RESULT_SCHEMA)
+    .map(([field, spec]) => [field, VALID_BY_KIND[spec.kind](spec)]));
+  // analyzePhoto's shape. averageScores itself throws on a non-string
+  // observation (.trim()) — analyzePhoto would reject and the admin lane
+  // treats that as unscored — so the helper falls back to a bare composite
+  // to let the validator judge the raw reads directly.
+  const result = (claude, gemini) => {
+    let composite;
+    try { ({ composite } = averageScores(claude, gemini)); } catch { composite = {}; }
+    return { claude, gemini, composite };
+  };
+  const cases = Object.entries(VISION_RESULT_SCHEMA).flatMap(([field, spec]) => [
+    [field, 'missing from both providers', undefined],
+    ...INVALID_BY_KIND[spec.kind](spec).map(([label, value]) => [field, label, value]),
+  ]);
 
-  it('the canonical field lists are exactly the vision prompt schema', () => {
-    for (const f of [...NUMERIC_SCORE_FIELDS, ...SEVERITY_SCORE_FIELDS]) expect(VISION_PROMPT).toContain(`"${f}"`);
-    expect(NUMERIC_SCORE_FIELDS.length + SEVERITY_SCORE_FIELDS.length).toBe(6);
+  it('the valid-value and invalid-value tables cover every schema kind', () => {
+    const kinds = Object.keys(SCHEMA_VALIDATORS).sort();
+    expect(Object.keys(VALID_BY_KIND).sort()).toEqual(kinds);
+    expect(Object.keys(INVALID_BY_KIND).sort()).toEqual(kinds);
   });
 
-  it('accepts a full read from one or both providers', () => {
-    expect(isCompleteVisionResult(result(full, full))).toBe(true);
-    expect(isCompleteVisionResult(result(full, null))).toBe(true);
-    expect(isCompleteVisionResult(result(null, { ...full, pest_signals: 'Severe ' }))).toBe(true);
+  it('a full valid read (from one or both providers) is complete', () => {
+    expect(isCompleteVisionResult(result(fullRead(), fullRead()))).toBe(true);
+    expect(isCompleteVisionResult(result(fullRead(), null))).toBe(true);
+    expect(isCompleteVisionResult(result(null, { ...fullRead(), pest_signals: ' Severe ' }))).toBe(true);
   });
 
-  it('rejects a field both providers omitted, even though the composite defaults it to "none"', () => {
-    const { disease_signals: _d, ...partial } = full;
-    const r = result(partial, partial);
-    expect(r.composite.disease_signals).toBe('none'); // the silent default being guarded
-    expect(isCompleteVisionResult(r)).toBe(false);
-  });
-
-  it('rejects an invalid severity word or non-numeric score from any provider that sent it', () => {
-    expect(isCompleteVisionResult(result(full, { ...full, pest_signals: 'high' }))).toBe(false);
-    expect(isCompleteVisionResult(result({ ...full, foliage_fullness: 'lush' }, full))).toBe(false);
-  });
-
-  it('rejects a blank reading from one provider — averageScores would count it as "none" and average the other down', () => {
-    const r = result({ ...full, pest_signals: 'severe' }, { ...full, pest_signals: '' });
-    expect(r.composite.pest_signals).toBe('moderate'); // the dilution being guarded
-    expect(isCompleteVisionResult(r)).toBe(false);
-    expect(isCompleteVisionResult(result({ ...full, foliage_fullness: '' }, full))).toBe(false);
-  });
-
-  it('the numeric range is the one the prompt states for every numeric field', () => {
-    for (const f of NUMERIC_SCORE_FIELDS) {
-      expect(VISION_PROMPT).toContain(`"${f}": <number ${NUMERIC_SCORE_RANGE.min}-${NUMERIC_SCORE_RANGE.max}>`);
+  it.each(cases)('%s %s → incomplete', (field, _label, value) => {
+    if (value === undefined) {
+      const { [field]: _omitted, ...partial } = fullRead();
+      expect(isCompleteVisionResult(result(partial, partial))).toBe(false);
+      return;
     }
-    expect(NUMERIC_SCORE_RANGE).toEqual({ min: 0, max: 100 });
+    // Bad from ONE provider while the other is valid still fails: every
+    // provider that sent a field must have sent a valid value.
+    expect(isCompleteVisionResult(result({ ...fullRead(), [field]: value }, fullRead()))).toBe(false);
+    expect(isCompleteVisionResult(result(fullRead(), { ...fullRead(), [field]: value }))).toBe(false);
   });
 
-  it.each([
-    ['above range', 101],
-    ['far above range', 250],
-    ['below range', -1],
-    ['far below range', -5],
-    ['numeric string', '80'],
-    ['NaN', NaN],
-    ['Infinity', Infinity],
-    ['boolean false (num() would read 0)', false],
-    ['boolean true', true],
-  ])('rejects a numeric score that is %s', (_label, bad) => {
-    expect(isCompleteVisionResult(result({ ...full, leaf_color_vigor: bad }, full))).toBe(false);
-    expect(isCompleteVisionResult(result(full, { ...full, foliage_fullness: bad }))).toBe(false);
+  it.each(Object.entries(VISION_RESULT_SCHEMA))('%s: one provider omitting it while the other read it validly is complete', (field) => {
+    const { [field]: _omitted, ...partial } = fullRead();
+    expect(isCompleteVisionResult(result(fullRead(), partial))).toBe(true);
   });
 
-  it('accepts the range boundaries and fractional in-range scores', () => {
-    for (const ok of [0, 100, 55.5]) {
-      expect(isCompleteVisionResult(result({ ...full, foliage_fullness: ok, leaf_color_vigor: ok }, null))).toBe(true);
+  it('boundary values are accepted: score min/max, observations at exactly the minimum length', () => {
+    for (const field of NUMERIC_SCORE_FIELDS) {
+      const { min, max } = VISION_RESULT_SCHEMA[field];
+      expect(isCompleteVisionResult(result({ ...fullRead(), [field]: min }, null))).toBe(true);
+      expect(isCompleteVisionResult(result({ ...fullRead(), [field]: max }, null))).toBe(true);
     }
+    expect(isCompleteVisionResult(result({ ...fullRead(), observations: 'y'.repeat(OBSERVATIONS_MIN_LENGTH) }, null))).toBe(true);
   });
 
-  it('rejects a non-string severity (boolean / number)', () => {
-    expect(isCompleteVisionResult(result({ ...full, pest_signals: false }, null))).toBe(false);
-    expect(isCompleteVisionResult(result({ ...full, pest_signals: 0 }, null))).toBe(false);
-  });
-
-  it('accepts one provider omitting a field the other read validly', () => {
-    const { water_heat_stress: _w, ...partial } = full;
-    expect(isCompleteVisionResult(result(full, partial))).toBe(true);
+  it('the guarded silent defaults are real: an omitted severity averages to "none", a blank dilutes a signal', () => {
+    const { disease_signals: _d, ...partial } = fullRead();
+    expect(result(partial, partial).composite.disease_signals).toBe('none');
+    expect(result({ ...fullRead(), pest_signals: 'severe' }, { ...fullRead(), pest_signals: '' }).composite.pest_signals).toBe('moderate');
   });
 
   it('rejects null / composite-less results', () => {
     expect(isCompleteVisionResult(null)).toBe(false);
-    expect(isCompleteVisionResult({ claude: full, gemini: null, composite: null })).toBe(false);
+    expect(isCompleteVisionResult({ claude: fullRead(), gemini: null, composite: null })).toBe(false);
   });
 });

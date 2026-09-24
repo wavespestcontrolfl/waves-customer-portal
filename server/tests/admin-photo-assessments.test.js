@@ -1430,6 +1430,22 @@ describe('tree & shrub — third assessment type', () => {
     });
   });
 
+  test.each([
+    ['missing', undefined],
+    ['whitespace only', '    '],
+    ['a placeholder shorter than the minimum', 'n/a'],
+  ])('observations %s from both providers counts as unscored → 503, no row', async (_label, observations) => {
+    const { observations: _o, ...scoresOnly } = HEDGE_CLOSEUP;
+    mockAnalyzeTreeShrub.mockResolvedValue(visionResult(observations === undefined ? scoresOnly : { ...scoresOnly, observations }));
+    await withServer(async (base) => {
+      const res = await postTreeShrub(base, { photos: [{ data: 'aGVsbG8=' }] });
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toMatch(/Could not analyze every photo/);
+      expect(inserts.tree_shrub_identifications).toBeUndefined();
+      expect(storeFunnelPhotos).not.toHaveBeenCalled();
+    });
+  });
+
   test('range-boundary scores (0 and 100) are accepted and stored as-is', async () => {
     mockAnalyzeTreeShrub.mockResolvedValue(visionResult({ ...HEDGE_CLOSEUP, foliage_fullness: 100, leaf_color_vigor: 0 }));
     await withServer(async (base) => {

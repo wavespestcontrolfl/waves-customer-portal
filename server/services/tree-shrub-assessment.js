@@ -55,12 +55,60 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
-// The vision prompt's score schema — the canonical field lists and numeric
-// range the prompt states, every merge below iterates, and
-// isCompleteVisionResult validates against.
-const NUMERIC_SCORE_FIELDS = ['foliage_fullness', 'leaf_color_vigor'];
-const NUMERIC_SCORE_RANGE = { min: 0, max: 100 };
-const SEVERITY_SCORE_FIELDS = ['pest_signals', 'disease_signals', 'water_heat_stress', 'pruning_mechanical'];
+// Severity word → 0-100 "health" display (higher = healthier). Same ramp as the
+// lawn scorer's FUNGUS_DISPLAY so the two reports agree on how a signal reads.
+const SEVERITY_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
+const SEVERITY_INDEX = { none: 0, minor: 1, moderate: 2, severe: 3 };
+const SEVERITY_REVERSE = ['none', 'minor', 'moderate', 'severe'];
+
+// Shortest observation paragraph accepted as a real read. The prompt asks for
+// 2-3 homeowner sentences; 20 characters is below any real sentence and above
+// placeholder replies ("n/a", "none", "ok", "see photo").
+const OBSERVATIONS_MIN_LENGTH = 20;
+
+// THE declared shape of one vision provider's JSON reply — the single source
+// for the prompt's "Return this exact JSON structure" block (VISION_JSON_SHAPE),
+// the field lists every merge below iterates (NUMERIC_SCORE_FIELDS /
+// SEVERITY_SCORE_FIELDS), and isCompleteVisionResult's validation. A field
+// added here is prompted for, merged, and validated with no other edit.
+const VISION_RESULT_SCHEMA = {
+  foliage_fullness: { kind: 'score', min: 0, max: 100 },
+  leaf_color_vigor: { kind: 'score', min: 0, max: 100 },
+  pest_signals: { kind: 'severity', values: SEVERITY_REVERSE },
+  disease_signals: { kind: 'severity', values: SEVERITY_REVERSE },
+  water_heat_stress: { kind: 'severity', values: SEVERITY_REVERSE },
+  pruning_mechanical: { kind: 'severity', values: SEVERITY_REVERSE },
+  observations: { kind: 'text', minLength: OBSERVATIONS_MIN_LENGTH },
+};
+
+const schemaFieldsOfKind = (kind) => Object.keys(VISION_RESULT_SCHEMA)
+  .filter((field) => VISION_RESULT_SCHEMA[field].kind === kind);
+const NUMERIC_SCORE_FIELDS = schemaFieldsOfKind('score');
+const SEVERITY_SCORE_FIELDS = schemaFieldsOfKind('severity');
+
+// Per-kind rendering of a schema field in the prompt's JSON block, and the
+// per-kind validator for a provider's value. Every kind in the schema has one
+// of each (pinned by tests), so neither the prompt nor the validator can
+// drift from the schema.
+const SCHEMA_PROMPT_SHAPES = {
+  score: (spec) => `<number ${spec.min}-${spec.max}>`,
+  severity: (spec) => `<${spec.values.map((word) => `"${word}"`).join(' | ')}>`,
+  text: () => '"<one concise paragraph>"',
+};
+const SCHEMA_VALIDATORS = {
+  // A real JSON number in range — not num()'s coercion (false → 0, "80" → 80)
+  // and not clampScore's rescue of 250 / -5. NaN/Infinity fail the range.
+  score: (value, spec) => typeof value === 'number' && value >= spec.min && value <= spec.max,
+  // An exact severity word (case/whitespace-insensitive, as normalizeSeverity
+  // reads it) — never the "none" default an unknown word falls back to.
+  severity: (value, spec) => typeof value === 'string' && spec.values.includes(value.trim().toLowerCase()),
+  // Real prose: whitespace-only or placeholder-short text is not a read.
+  text: (value, spec) => typeof value === 'string' && value.trim().length >= spec.minLength,
+};
+
+const VISION_JSON_SHAPE = `{\n${Object.entries(VISION_RESULT_SCHEMA)
+  .map(([field, spec]) => `  "${field}": ${SCHEMA_PROMPT_SHAPES[spec.kind](spec)}`)
+  .join(',\n')}\n}`;
 
 const VISION_PROMPT = `You are a tree & shrub (landscape ornamental) plant-health assessment tool for a professional lawn & pest company in Southwest Florida. Analyze the provided photo of shrubs, hedges, palms, trees, or landscape beds and return ONLY a JSON object with the scores below. Base your analysis strictly on what is visible.
 
@@ -87,21 +135,7 @@ Agronomic tells to weigh:
 Write "observations" as ONE concise, plain-English paragraph for a homeowner — 2-3 sentences, no contradictions, no lists.
 
 Return this exact JSON structure and nothing else — no markdown, no backticks, no preamble:
-{
-  "foliage_fullness": <number ${NUMERIC_SCORE_RANGE.min}-${NUMERIC_SCORE_RANGE.max}>,
-  "leaf_color_vigor": <number ${NUMERIC_SCORE_RANGE.min}-${NUMERIC_SCORE_RANGE.max}>,
-  "pest_signals": <"none" | "minor" | "moderate" | "severe">,
-  "disease_signals": <"none" | "minor" | "moderate" | "severe">,
-  "water_heat_stress": <"none" | "minor" | "moderate" | "severe">,
-  "pruning_mechanical": <"none" | "minor" | "moderate" | "severe">,
-  "observations": "<one concise paragraph>"
-}`;
-
-// Severity word → 0-100 "health" display (higher = healthier). Same ramp as the
-// lawn scorer's FUNGUS_DISPLAY so the two reports agree on how a signal reads.
-const SEVERITY_DISPLAY = { none: 95, minor: 75, moderate: 50, severe: 20 };
-const SEVERITY_INDEX = { none: 0, minor: 1, moderate: 2, severe: 3 };
-const SEVERITY_REVERSE = ['none', 'minor', 'moderate', 'severe'];
+${VISION_JSON_SHAPE}`;
 
 
 function num(v) {
@@ -250,40 +284,23 @@ function averageScores(claude, gemini) {
   return { composite, divergenceFlags };
 }
 
-// A numeric score reading is a real JSON number inside the prompt's stated
-// range. Stricter than num(), which coerces booleans (false → 0) and numeric
-// strings, and than clampScore, which would turn 250 or -5 into a
-// legitimate-looking 100 or 0. NaN/Infinity fail the range comparison.
-function isInRangeScore(value) {
-  return typeof value === 'number' && value >= NUMERIC_SCORE_RANGE.min && value <= NUMERIC_SCORE_RANGE.max;
-}
-
-// A provider's reading of one field is valid when it is an in-range number
-// (numeric fields) or an exact severity word — never the "none"/95 default
-// the scorers fall back to for an omitted or unrecognized value.
-function isValidScoreReading(field, value) {
-  return NUMERIC_SCORE_FIELDS.includes(field)
-    ? isInRangeScore(value)
-    : SEVERITY_INDEX[String(value).trim().toLowerCase()] != null;
-}
-
 /**
- * True when an analyzePhoto result read EVERY schema field: at least one
- * provider returned it, and every provider that returned it returned a valid
- * value. averageScores fills a field both providers omitted with "none" (a
- * clean 95), so completeness has to be judged on the raw provider results,
- * not the composite. Callers that must not persist a silently-defaulted
- * score (the admin assessment lane) gate on this.
+ * True when an analyzePhoto result satisfies VISION_RESULT_SCHEMA: for EVERY
+ * schema field, at least one provider returned it, and every provider that
+ * returned it passes that field kind's validator. One generic walk over the
+ * schema — no per-field checks. averageScores fills a field both providers
+ * omitted with "none" (a clean 95) and falls back to "" observations, so
+ * completeness is judged on the raw provider results, not the composite.
+ * "Present" matches averageScores (!= null): a blank string IS a reading
+ * there, so it is judged (and fails) here, not skipped. Callers that must not
+ * persist a silently-defaulted read (the admin assessment lane) gate on this.
  */
 function isCompleteVisionResult(result) {
   if (!result || !result.composite) return false;
   const readings = [result.claude, result.gemini].filter(Boolean);
-  return [...NUMERIC_SCORE_FIELDS, ...SEVERITY_SCORE_FIELDS].every((field) => {
-    // "Present" matches averageScores exactly (!= null): a blank string IS a
-    // reading there — it normalizes to "none" and averages a real signal
-    // down — so it must be judged (and fail) here, not skipped.
+  return Object.entries(VISION_RESULT_SCHEMA).every(([field, spec]) => {
     const present = readings.map((raw) => raw[field]).filter((value) => value != null);
-    return present.length > 0 && present.every((value) => isValidScoreReading(field, value));
+    return present.length > 0 && present.every((value) => SCHEMA_VALIDATORS[spec.kind](value, spec));
   });
 }
 
@@ -761,8 +778,11 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
 module.exports = {
   VISION_PROMPT,
   SEVERITY_DISPLAY,
+  VISION_RESULT_SCHEMA,
+  SCHEMA_PROMPT_SHAPES,
+  SCHEMA_VALIDATORS,
+  OBSERVATIONS_MIN_LENGTH,
   NUMERIC_SCORE_FIELDS,
-  NUMERIC_SCORE_RANGE,
   SEVERITY_SCORE_FIELDS,
   isCompleteVisionResult,
   toCategoryScores,
