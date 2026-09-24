@@ -129,18 +129,35 @@ function finiteNumberOrNull(value) {
 // floor stored at /assess (which already folds in insect/drought/mechanical
 // and the worst per-photo disease/thatch). Pre-stress_damage rows (null
 // floor) fall back to worst-of(fungus, thatch) — never 0.
+// Whether a legacy Stress is a real value (AI-read or typed now) rather than
+// a derivation — only a real value is stored on a pending save.
+function legacyStressIsFixed(assessment, adjustedScores) {
+  const aiRead = parseJsonObject(assessment.adjusted_scores, null);
+  const ai = aiRead ? aiRead.stress_damage : assessment.stress_damage;
+  const typedStress = adjustedScores?.stress_damage;
+  return (ai != null && ai !== '') || (typedStress != null && typedStress !== '' && Number.isFinite(Number(typedStress)));
+}
+
 function legacyConfirmFinalScores(assessment, adjustedScores) {
-  const aiKnown = (key) => assessment[key] != null;
+  // The AI's read is the adjusted_scores snapshot /assess wrote; a pending
+  // save never rewrites it, so a technician's earlier fill (stored in the
+  // columns) stays correctable. Very old rows without a snapshot fall back to
+  // the columns.
+  const aiRead = parseJsonObject(assessment.adjusted_scores, null);
+  const aiValue = (key) => (aiRead ? aiRead[key] : assessment[key]);
+  const aiKnown = (key) => aiValue(key) != null && aiValue(key) !== '';
   // The drawer posts only typed keys, so a key that is neither AI-known nor
-  // typed stays unknown (null) — never scoreValue's 0 default.
+  // typed keeps the earlier saved fill, else stays unknown (null) — never
+  // scoreValue's 0 default.
   const typed = (key) => adjustedScores?.[key] != null && adjustedScores[key] !== ''
     && Number.isFinite(Number(adjustedScores[key]));
+  const saved = (key) => (assessment[key] != null ? scoreValue(assessment[key]) : null);
   const finalScores = Object.fromEntries(
     ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
-      .map((key) => [key, aiKnown(key) ? scoreValue(assessment[key]) : (typed(key) ? scoreValue(adjustedScores[key]) : null)]),
+      .map((key) => [key, aiKnown(key) ? scoreValue(aiValue(key)) : (typed(key) ? scoreValue(adjustedScores[key]) : saved(key))]),
   );
   if (aiKnown('stress_damage')) {
-    finalScores.stress_damage = scoreValue(assessment.stress_damage);
+    finalScores.stress_damage = scoreValue(aiValue('stress_damage'));
     return finalScores;
   }
   if (typed('stress_damage')) {
@@ -1139,9 +1156,7 @@ router.post('/confirm', async (req, res, next) => {
           // would read as AI-known on the next save and freeze.
           .update({
             ...finalScores,
-            stress_damage: assessment.stress_damage != null || Number.isFinite(Number(adjustedScores?.stress_damage ?? NaN))
-              ? finalScores.stress_damage
-              : null,
+            stress_damage: legacyStressIsFixed(assessment, adjustedScores) ? finalScores.stress_damage : null,
             overall_score: null,
             updated_at: new Date(),
           })

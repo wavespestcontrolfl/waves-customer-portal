@@ -9834,7 +9834,12 @@ function withAiScores(scores, aiScores) {
 
 function resolveAiScores(assessment = {}, visitAssessment) {
   if (visitAssessment?.aiScores) return visitAssessment.aiScores;
-  const raw = (a, b) => lawnScores.lawnScoreValue(assessment[a] ?? assessment[b]);
+  // Legacy rows: the adjusted_scores snapshot /assess wrote is the AI read (a
+  // pending save never rewrites it); very old rows fall back to the columns.
+  let snapshot = assessment.adjusted_scores;
+  if (typeof snapshot === "string") { try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; } }
+  const source = snapshot && typeof snapshot === "object" ? snapshot : assessment;
+  const raw = (a, b) => lawnScores.lawnScoreValue(source[a] ?? source[b]);
   return {
     turf_density: raw("turf_density", "turfDensity"),
     weed_suppression: raw("weed_suppression", "weedSuppression"),
