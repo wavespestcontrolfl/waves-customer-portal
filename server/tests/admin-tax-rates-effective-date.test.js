@@ -222,6 +222,42 @@ const FUTURE = `${FUTURE_YEAR}-01-01`;
   });
 });
 
+(process.env.DATABASE_URL?.includes('waves_audit_') ? describe : describe.skip)('correcting a staged future rate must not show the discarded draft as upcoming too (codex round-4 P1)', () => {
+  const county = 'Lee';
+  const staged = etDateString(addETDays(new Date(), 45));
+
+  afterAll(async () => {
+    await db('tax_rates').where({ county, effective_date: staged }).del();
+  });
+
+  test('GET /rates labels the replaced draft superseded, not a second staged row', async () => {
+    const first = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ county, stateRate: 0.06, countySurtax: 0.01, effectiveDate: staged, notes: 'draft' }),
+    }).then((r) => r.json()));
+    expect(first.success).toBe(true);
+
+    const second = await withServer((base) => fetch(`${base}/admin/tax/rates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ county, stateRate: 0.06, countySurtax: 0.02, effectiveDate: staged, notes: 'corrected' }),
+    }).then((r) => r.json()));
+    expect(second.success).toBe(true);
+
+    const { body } = await withServer((base) => fetch(`${base}/admin/tax/rates`)
+      .then(async (r) => ({ status: r.status, body: await r.json() })));
+    const leeRows = body.rates.filter((r) => r.county === county && r.effectiveDate && String(r.effectiveDate).slice(0, 10) === staged);
+    // EXPECTED: only the corrected (0.08 combined) draft is 'staged'; the
+    // discarded first draft (0.07 combined, now active:false) is
+    // 'superseded', not shown a second time as an upcoming rate.
+    const stagedRows = leeRows.filter((r) => r.status === 'staged');
+    expect(stagedRows).toHaveLength(1);
+    expect(parseFloat(stagedRows[0].combinedRate)).toBeCloseTo(0.08, 6);
+    const supersededDraft = leeRows.find((r) => r.status === 'superseded');
+    expect(supersededDraft).toBeDefined();
+    expect(parseFloat(supersededDraft.combinedRate)).toBeCloseTo(0.07, 6);
+  });
+});
+
 // No database needed: validation runs (and rejects) before the route ever
 // touches tax_rates, so this runs unconditionally.
 describe('POST /admin/tax/rates rejects malformed rate strings before retiring anything (codex round-1 P1)', () => {

@@ -154,7 +154,11 @@ function withRateStatus(rows, nowET) {
   }
   return rows.map((r, i) => {
     let status;
-    if (eachEff[i] > nowET) status = 'staged';
+    // A future row that was itself replaced by a same-date correction (the
+    // exact-date replace in POST /rates demotes it to active=false) is a
+    // discarded draft, not an upcoming rate — label it superseded, not
+    // staged (codex round-4 P1).
+    if (eachEff[i] > nowET) status = r.active ? 'staged' : 'superseded';
     else if (currentIdByCounty.get(r.county) === r.id) status = 'current';
     else status = 'superseded';
     return { ...r, status };
