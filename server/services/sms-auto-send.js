@@ -584,10 +584,10 @@ async function maybeAutoSend(params = {}) {
       await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
       return { sent: false, reason: 'reservation_failed' };
     }
-    // Reuse the canonical sender's awaited provider-boundary guard so its
-    // own contact/template/line lookups cannot make this observation stale.
-    const checkGratitudeHandoff = gratitudeLane ? async () => {
-      const advanced = await gratitudeThreadAdvanced(db, {
+    // Recheck after Twilio's final awaited guard, using its held connection
+    // when present. Earlier provider preparation cannot stale this read.
+    const checkGratitudeHandoff = gratitudeLane ? async ({ dbi = db } = {}) => {
+      const advanced = await gratitudeThreadAdvanced(dbi, {
         inboundId: claim.inboundId,
         fromPhone: claim.inboundFromPhone,
         toPhone: claim.inboundToPhone,
@@ -621,7 +621,7 @@ async function maybeAutoSend(params = {}) {
         customerId,
         identityTrustLevel: 'phone_matches_customer',
         entryPoint: 'sms_auto_send_executor',
-        ...(gratitudeLane ? { preSendCheck: checkGratitudeHandoff } : {}),
+        ...(gratitudeLane ? { providerPreSendCheck: checkGratitudeHandoff } : {}),
         // Send-window inbound-reply provenance: the auto-send executor only
         // dispatches green-judged replies to a message the customer just
         // texted into an active thread — the send class the window

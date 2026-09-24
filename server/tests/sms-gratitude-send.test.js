@@ -346,7 +346,7 @@ test('qualified live gratitude preserves mode/graduation checks and reaches only
   }));
 });
 
-// Simulate the canonical sender doing its own awaited work before handoff.
+// Simulate provider preparation before the distinct final SMS predicate.
 // The provider mock is reached only after the caller's boundary verdict.
 test.each([
   ['new inbound', () => { mockState.threadAdvanced = true; }, 'thread_advanced'],
@@ -356,10 +356,10 @@ test.each([
 ])('%s during the sender pipeline blocks the provider handoff', async (_label, change, reason) => {
   jest.useFakeTimers();
   const provider = jest.fn();
-  sendCustomerMessage.mockImplementationOnce(async ({ preSendCheck }) => {
+  sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
     await Promise.resolve();
     change();
-    const verdict = await preSendCheck();
+    const verdict = await providerPreSendCheck();
     if (!verdict.ok) return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code };
     provider();
     return { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'b'.repeat(32)}` };
