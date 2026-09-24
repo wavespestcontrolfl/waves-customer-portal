@@ -11,7 +11,12 @@
 // numbers are context for the callback, not corrections. Returns null when
 // the roll vouched for the number or never answered (a GIS outage yields
 // no audit at all).
-function deriveAddressUnverified(enriched, address = null) {
+// `evidenceAt`: when the audit came from a CACHED profile, the flag's
+// stamp is the evidence time (the audit's own stamp, else the cache save
+// time), never "now" — a staff confirmation that committed after the
+// cache but before this derivation must outrank it under the locked
+// reconciliation (pre-push audit P1 on r24).
+function deriveAddressUnverified(enriched, address = null, { evidenceAt = null } = {}) {
   const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
   const flag = flags.find((f) => f && f.field === 'address' && f.priority === 'HIGH' && f.reason);
   if (!flag) return null;
@@ -33,9 +38,10 @@ function deriveAddressUnverified(enriched, address = null) {
     city: String(address?.city || '').trim() || null,
     state: String(address?.state || '').trim().toUpperCase().slice(0, 2) || null,
     zip: zip5(address?.zip) || null,
-    flagged_at: new Date().toISOString(),
+    flagged_at: evidenceStamp(audit.auditedAt) || evidenceStamp(evidenceAt) || new Date().toISOString(),
   };
 }
+const evidenceStamp = (v) => { const t = Date.parse(v || ''); return t ? new Date(t).toISOString() : null; };
 
 const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
 const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -127,7 +133,9 @@ function flagCoversAddress(flag, address) {
 // "FL 34219" tail, and the ZIP comes from that tail only (a five-digit
 // house number is not a ZIP). Shared by the premise comparison and the
 // staff clean-verdict stamp (pre-push audit P1).
-const UNIT_SEGMENT = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b/i;
+// '#' has no word boundary of its own ("# 4" is a unit segment too —
+// pre-push audit P1 on r24).
+const UNIT_SEGMENT = /^(?:#|(?:apt|apartment|unit|ste|suite|bldg|building|lot|rm|room|fl|floor|spc|space)\b)/i;
 const STATE_ZIP_SEGMENT = /^[a-z]{2}\s*\d{5}(?:-\d{4})?$/i;
 function parseDisplayAddress(text) {
   const parts = String(text || '').split(',').map((part) => part.trim()).filter(Boolean);
@@ -179,8 +187,8 @@ function countyRollAnswered(enriched) {
 // outage on a recalculation must not erase an authoritative earlier
 // warning and mint a self-book link for a still-unverified address
 // (codex #4667 r5 P1). `prior` is already address-matched by the caller.
-function nextAddressUnverified({ enriched = null, profileFound = false, prior = null } = {}) {
-  const derived = profileFound ? deriveAddressUnverified(enriched) : null;
+function nextAddressUnverified({ enriched = null, profileFound = false, prior = null, evidenceAt = null } = {}) {
+  const derived = profileFound ? deriveAddressUnverified(enriched, null, { evidenceAt }) : null;
   if (derived) return derived;
   if (profileFound && countyRollAnswered(enriched)) return null;
   return prior || null;

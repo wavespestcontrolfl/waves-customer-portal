@@ -36,6 +36,18 @@ describe('deriveAddressUnverified', () => {
     expect(stamped).toMatchObject({ address_line1: '1260 Example St', zip: '34219' });
   });
 
+  test('a cached audit keeps its evidence time as the flag stamp; a live one is stamped now', () => {
+    const cached = deriveAddressUnverified({ fieldVerifyFlags: [ADDRESS_FLAG], addressAudit: AUDIT }, null, { evidenceAt: '2026-09-20T10:00:00.000Z' });
+    expect(cached.flagged_at).toBe('2026-09-20T10:00:00.000Z');
+    const stamped = deriveAddressUnverified({ fieldVerifyFlags: [ADDRESS_FLAG], addressAudit: { ...AUDIT, auditedAt: '2026-09-21T10:00:00.000Z' } }, null, { evidenceAt: '2026-09-20T10:00:00.000Z' });
+    expect(stamped.flagged_at).toBe('2026-09-21T10:00:00.000Z');
+    // A staff confirmation after the cache save outranks the cached audit's flag.
+    const confirmedAt = Date.parse('2026-09-22T10:00:00Z');
+    expect(Date.parse(cached.flagged_at)).toBeLessThan(confirmedAt);
+    expect(Date.parse(nextAddressUnverified({ enriched: { fieldVerifyFlags: [ADDRESS_FLAG], addressAudit: AUDIT }, profileFound: true, evidenceAt: '2026-09-20T10:00:00Z' }).flagged_at)).toBeLessThan(confirmedAt);
+    expect(Date.parse(deriveAddressUnverified({ fieldVerifyFlags: [ADDRESS_FLAG], addressAudit: AUDIT }).flagged_at)).toBeGreaterThan(confirmedAt);
+  });
+
   test('a snapped-record audit (typed number resolved to a neighbour) is flagged the same way', () => {
     const r = deriveAddressUnverified({
       fieldVerifyFlags: [{ field: 'address', priority: 'HIGH', reason: 'Typed house number 1260, but the property record below describes 1250 — the geocoder snapped to a nearby premise.' }],
@@ -231,6 +243,9 @@ describe('parseDisplayAddress', () => {
     expect(parseDisplayAddress('1250 Example St, Bldg 2, Apt 4, Parrish, FL 34219')).toMatchObject({ line1: '1250 Example St', unit: 'Bldg 2 Apt 4', city: 'Parrish', zip: '34219' });
     expect(parseDisplayAddress('1250 Example St Bldg 2, Apt 4, Parrish, FL 34219')).toMatchObject({ line1: '1250 Example St', unit: 'Bldg 2 Apt 4', city: 'Parrish' });
     expect(parseDisplayAddress('12345 Example St, Parrish, FL 34219-1234')).toMatchObject({ city: 'Parrish', zip: '34219' });
+    // A hash unit with a space is a unit segment, never the city.
+    expect(parseDisplayAddress('1260 Example St, # 4, Parrish, FL 34219')).toMatchObject({ line1: '1260 Example St', unit: '# 4', city: 'Parrish', zip: '34219' });
+    expect(parseDisplayAddress('1260 Example St, #4, Parrish, FL 34219')).toMatchObject({ unit: '#4', city: 'Parrish' });
     expect(parseDisplayAddress('')).toMatchObject({ streetLine: '', city: '', zip: '' });
   });
 });

@@ -1325,6 +1325,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       enriched: profileEvidence ? trustedTurf : null,
       profileFound: profileEvidence,
       prior: leadCleanVerdict ? null : priorAddressUnverified,
+      evidenceAt: trustedProfileCachedAt,
     });
     // Did the county roll answer on THIS run (or, for this premise, on the
     // lookup stage)? Only an answer may clear a marker an existing draft
