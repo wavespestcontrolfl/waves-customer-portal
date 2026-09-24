@@ -2,6 +2,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => {
   const fn = jest.fn();
+  fn.raw = jest.fn(async () => ({ rows: [] }));
   // The /sms route wraps suggestion parking and the post-send sweep in
   // db.transaction; pass the mock itself through as the trx handle.
   fn.transaction = jest.fn(async (cb) => cb(fn));
@@ -169,6 +170,7 @@ function makeQueryBuilder(rows = []) {
   const builder = {
     calls,
     leftJoin: jest.fn(() => builder),
+    joinRaw: jest.fn(() => builder),
     whereNull: jest.fn(() => builder),
     whereRaw: jest.fn(() => builder),
     where: jest.fn((arg) => {
@@ -1896,7 +1898,13 @@ describe('admin communications SMS route', () => {
   });
 
   test('bounds the SMS log by default and returns pagination metadata', async () => {
-    const builder = makeQueryBuilder([smsMessageRow()]);
+    const builder = makeQueryBuilder([smsMessageRow({
+      body: 'Thanks!',
+      metadata: { courtesyOnly: true, privateClassifierDetail: 'not-for-client' },
+      response_metadata: { spam_verdict: { enforced: true, privateScore: 0.99 } },
+      response_message_type: 'opt_out',
+      response_status: 'received',
+    })]);
     db.mockReturnValue(builder);
 
     await withServer(async (baseUrl) => {
@@ -1907,6 +1915,12 @@ describe('admin communications SMS route', () => {
 
       expect(res.status).toBe(200);
       expect(body.messages).toHaveLength(1);
+      expect(body.messages[0]).toMatchObject({
+        courtesyOnly: true, spamEnforced: true,
+        responseMessageType: 'opt_out', responseStatus: 'received',
+        responseIsAnswer: false,
+      });
+      expect(body.messages[0]).not.toHaveProperty('metadata');
       expect(body).toMatchObject({
         page: 1,
         limit: 500,
@@ -1915,6 +1929,46 @@ describe('admin communications SMS route', () => {
       });
       expect(builder.calls.limit).toEqual([501]);
       expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test('keeps an acknowledgment actionable when it answers the prior outbound question', async () => {
+    const builder = makeQueryBuilder([smsMessageRow({
+      body: 'Okay',
+      metadata: {},
+      response_prior_outbound_body: 'Does 9am work?',
+    })]);
+    db.mockReturnValue(builder);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.messages[0].courtesyOnly).toBe(false);
+    });
+  });
+
+  test('serializes exact audit-linked proactive sends as non-answers', async () => {
+    const builder = makeQueryBuilder([smsMessageRow({
+      direction: 'outbound',
+      message_type: 'ai_approved',
+      status: 'sent',
+      response_message_type: 'ai_approved',
+      response_status: 'sent',
+      response_is_click_followup: true,
+      response_audit_metadata: { draft_id: 'private-draft-id' },
+    })]);
+    db.mockReturnValue(builder);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(body.messages[0]).toMatchObject({
+        responseMessageType: 'ai_approved', responseStatus: 'sent', responseIsAnswer: false,
+      });
+      expect(body.messages[0]).not.toHaveProperty('metadata');
+      expect(body.messages[0]).not.toHaveProperty('responseAuditMetadata');
     });
   });
 

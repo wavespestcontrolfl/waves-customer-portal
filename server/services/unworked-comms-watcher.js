@@ -54,7 +54,8 @@ const MAX_REQUEST_ROWS = 25;
 // ai_assistant = the conversational AI's own successful answer — a real
 // reply for thread-clearing purposes (codex r20). The reschedule watcher
 // keeps its stricter list (the AI stands down on reschedule intent).
-const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'ai_assistant', 'ai_assistant_reply', 'follow_up')";
+const { HUMAN_REPLY_TYPES: HUMAN_REPLY_TYPE_VALUES } = require('./sms-response-policy');
+const HUMAN_REPLY_TYPES = `(${HUMAN_REPLY_TYPE_VALUES.map((type) => `'${type}'`).join(', ')})`;
 
 // Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
 // marker), bounded to 7 days — windows tile exactly run-to-run, including
