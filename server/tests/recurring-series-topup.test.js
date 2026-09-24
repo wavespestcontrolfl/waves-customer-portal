@@ -783,6 +783,13 @@ describe('topUpRecurringSeriesLocked — duplicate active series (Codex GitHub #
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
     expect(result.skipped).toBe('duplicate_series');
     expect(result.duplicateSeriesIds).toEqual(['sibling-b']);
+    // customerId/serviceType must be stamped on THIS early-return path too
+    // (local pre-push audit) — every other early skip reason never needs
+    // them (the script prints just `[skip: reason]`), but the review row
+    // this ONE reason feeds needs the real values, not the ops script's
+    // own "(unknown)"/"(no service type)" fallback text.
+    expect(result.customerId).toBe(5);
+    expect(result.serviceType).toBe('Weekly Pest Control');
     expect(inserted).toHaveLength(0);
   });
 

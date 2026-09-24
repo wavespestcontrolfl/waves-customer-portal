@@ -239,12 +239,16 @@ describe('admin-schedule child-insert sites (source)', () => {
   test('no child row copies parent.service_type verbatim any more', () => {
     expect(src).not.toMatch(/service_type:\s*parent\.service_type/);
     // The only remaining parent.service_type "serviceType" occurrences are
-    // duplicate-series GUARD calls (never a child row): the booking-time
-    // checkActiveSeriesLocked call, and — Codex GitHub #4782 r3 —
-    // resolveDuplicateActiveSeries' own findActiveRecurringSeries call, the
-    // nightly top-up's reuse of the SAME canonical guard.
+    // duplicate-series GUARD uses (never a child row): the booking-time
+    // checkActiveSeriesLocked call; resolveDuplicateActiveSeries' own
+    // findActiveRecurringSeries call (Codex GitHub #4782 r3, the nightly
+    // top-up's reuse of the SAME canonical guard); and that same rule's
+    // reporting-only skip payload (Codex GitHub #4782 r3, local pre-push
+    // audit) — the ops script's duplicate-series review row needs the
+    // real service type on this one early-return skip reason, unlike
+    // every other skip reason.
     const remaining = src.split('\n').filter((l) => /serviceType:\s*parent\.service_type/.test(l));
-    expect(remaining).toHaveLength(2);
+    expect(remaining).toHaveLength(3);
   });
 
   test('every child-insert site resolves the identity on its own connection and stamps link + snapshot from it', () => {

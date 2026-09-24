@@ -17590,10 +17590,19 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // canonical guard (resolveDuplicateActiveSeries — no second
     // definition) so the ops script can print the actual sibling ids for
     // the owner's review list. Only runs on the rare hit, never on every
-    // series this loop scans.
+    // series this loop scans. customerId/serviceType are stamped here too
+    // (unlike every other early-skip reason, which the script prints as a
+    // bare `[skip: reason]` line needing neither) — without them, the
+    // review row's own customer_id/service_type columns always read
+    // "(unknown)"/"(no service type)" since this is an early return, never
+    // reaching the reporting-fields section at the bottom of this
+    // function (local pre-push audit).
     if (seriesSkip === 'duplicate_series') {
       const duplicates = await resolveDuplicateActiveSeries(conn, parent, parentId);
-      return { spawnedVisits: [], skipped: seriesSkip, duplicateSeriesIds: duplicates.map((m) => m.id) };
+      return {
+        spawnedVisits: [], skipped: seriesSkip, duplicateSeriesIds: duplicates.map((m) => m.id),
+        customerId: parent.customer_id, serviceType: parent.service_type,
+      };
     }
     return { spawnedVisits: [], skipped: seriesSkip };
   }
