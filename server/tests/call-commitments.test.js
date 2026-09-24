@@ -970,6 +970,17 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     expect(out.droppedMismatched).toBe(0);
     expect(out.items.map((i) => i.kind)).toEqual(['callback']);
   });
+  test('surplus evidence is trimmed to the schema cap instead of failing the response; more than 12 commitments are capped too', async () => {
+    const four = Array.from({ length: 4 }, () => ({ quote: 'I will call you back tomorrow morning with the price', speaker: 'agent' }));
+    const create = jest.fn(async () => reply([item({ evidence: four })]));
+    const out = await extractCommitmentsWithModel(transcript, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0].evidence.length).toBeLessThanOrEqual(3);
+    const many = { commitments: Array.from({ length: 13 }, () => item()) };
+    expect(normalizeModelOutput(many).commitments).toHaveLength(12);
+    expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most three quotes per commitment/);
+  });
   test('the prompt names the channel vocabulary', () => {
     const prompt = buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' });
     expect(prompt).toMatch(/"channel" is exactly one of "sms", "email", "call", "in_person", "unknown"/);
