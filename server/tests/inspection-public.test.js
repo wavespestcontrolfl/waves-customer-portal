@@ -94,6 +94,9 @@ jest.mock('../models/db', () => {
       'select', 'join', 'leftJoin', 'groupBy', 'modify', 'onConflict', 'forUpdate', 'forNoKeyUpdate', 'distinct',
     ];
     for (const m of passthrough) q[m] = () => q;
+    // A list result may be a function of the query's selected columns.
+    q.select = (...cols) => { q.selectedColumns = cols; return q; };
+    const listFor = () => (typeof listResults[table] === 'function' ? listResults[table](q) : listResults[table]) || [];
     q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
     q.update = async (payload) => { updateCalls.push({ table, payload }); return 1; };
     q.del = async () => 1;
@@ -101,8 +104,8 @@ jest.mock('../models/db', () => {
     q.merge = async () => [];
     q.insert = (payload) => { insertCalls.push({ table, payload }); return q; };
     q.returning = async () => (insertResults[table] || [{ id: 'new-cust-1' }]);
-    q.then = (onOk, onErr) => Promise.resolve(listResults[table] || []).then(onOk, onErr);
-    q.catch = (fn) => Promise.resolve(listResults[table] || []).catch(fn);
+    q.then = (onOk, onErr) => Promise.resolve(listFor()).then(onOk, onErr);
+    q.catch = (fn) => Promise.resolve(listFor()).catch(fn);
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(table));
@@ -594,6 +597,17 @@ describe('POST /:token/availability — address resolution (P1 :219)', () => {
     const res = await callAvailability(token, { address: '1 Somewhere Rd, Wauchula, FL 33873' });
     expect(res.statusCode).toBe(422);
     expect(res.body).toEqual({ error: 'out_of_area', county: 'Hardee' });
+  });
+
+  // Codex #4737 r6 P2: outside the box (no county lookup) the supplied
+  // city/ZIP still reaches the waitlist as the requested market.
+  test('an out-of-box supplied address answers out_of_area with its city/ZIP as the region', async () => {
+    firstResults.leads = LEAD_ROW;
+    mockGeocode.mockResolvedValueOnce({ location: { lat: 32.7555, lng: -97.3308 } });
+    const res = await callAvailability(mintLeadConsultationToken(LEAD_ID), { address: '1 Rooftop Rd, Fort Worth, TX 76102' });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ error: 'out_of_area', county: 'Fort Worth 76102' });
+    expect(mockCounty).not.toHaveBeenCalled();
   });
 
   test('a resolved in-area location returns availability', async () => {
@@ -1179,6 +1193,27 @@ describe('POST /:token commit', () => {
       expect(updateCalls.find((c) => c.table === 'customers').payload.address_line1).toBe('2 Corrected Ave');
     });
 
+    // Codex #4737 r6 P1: an ESTABLISHED linked profile (it has visits) is
+    // never overwritten by a different supplied address — that is another
+    // property of the account, booked on its own profile.
+    test('a different supplied address on an established profile books a new profile in the same account, leaving the linked one untouched', async () => {
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = { id: 'cust-1', account_id: 'acct-1', phone: '9415550101', address_line1: '1 Home St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+      // Visit history exists (the id-only probe), but no open visit.
+      listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
+      listResults.customers = [firstResults.customers];
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.6, lng: -82.4 } });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '9 Rental Ln, Bradenton, FL 34209' });
+      expect(res.statusCode).toBe(200);
+      expect(updateCalls.some((c) => c.table === 'customers' && c.payload.address_line1)).toBe(false);
+      const created = insertCalls.find((c) => c.table === 'customers');
+      expect(created.payload).toMatchObject({ account_id: 'acct-1', address_line1: '9 Rental Ln', profile_label: 'Additional property' });
+    });
+
     test('a supplied address that does not geocode is address_unresolved — never a silent fall-back to the stored one', async () => {
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
       firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '1 First Try Rd', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
@@ -1317,7 +1352,8 @@ describe('POST /:token commit', () => {
         const token = mintLeadConsultationToken(LEAD_ID);
         const res = await callPost(token, okBody());
         expect(res.statusCode).toBe(422);
-        expect(res.body).toEqual({ error: 'out_of_area', county: null });
+        // No county outside the box — the stored city/ZIP is the region signal.
+        expect(res.body).toEqual({ error: 'out_of_area', county: 'Fort Worth 76102' });
         expect(mockCreateSelfBooking).not.toHaveBeenCalled();
       } finally {
         process.env.GOOGLE_API_KEY = 'test-google-key';
@@ -1731,7 +1767,10 @@ describe('structural: the inspection dark guard precedes global /api middleware'
     // the dark 404 (and any limiter 429) keeps the privacy headers.
     // Codex #4737 r5 P0: the same pre-parser guard refuses an unsigned
     // token (signature only — expiry passes through for GET's expired state).
-    expect(src.slice(guard, guard + 900)).toContain('verifyLeadConsultationToken(token, 0)');
+    expect(src.slice(guard, guard + 1400)).toContain('verifyLeadConsultationToken(token, 0)');
+    // Codex #4737 r6 P0: only GET tolerates an expired token; any other
+    // method needs a live one before the body parsers run.
+    expect(src.slice(guard, guard + 1400)).toContain("req.method === 'GET' ? verifyLeadConsultationToken(token, 0) : verifyLeadConsultationToken(token)");
     const noStoreMount = src.indexOf("app.use('/api/public/inspection', require('./middleware/no-store').noStore);");
     expect(noStoreMount).toBeGreaterThan(-1);
     expect(noStoreMount).toBeLessThan(guard);

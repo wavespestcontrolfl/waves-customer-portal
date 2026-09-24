@@ -1048,7 +1048,13 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
       }
       if (!res.ok) throw new Error(body.error || 'failed');
       onAddressResolved?.(value);
-      onResolved({ availability: body.availability, needs_address: false });
+      // The hero shows the address being booked, not the stale one on file
+      // (Codex #4737 r6 P2).
+      onResolved({
+        availability: body.availability,
+        needs_address: false,
+        lead: { ...(data?.lead || {}), address_display: value, has_address: true },
+      });
     } catch {
       setError("We couldn't look up that address. Please check it and try again, or text or call us.");
     } finally {
@@ -1157,9 +1163,9 @@ function InspectionSuccessCard({ result }) {
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
         Your free consultation is set for <strong style={{ color: S.text }}>{formatDateLabel(visit.date)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(visit.window?.start) || result.startLabel}</strong>.
-        {/* Channel-neutral: an existing customer's confirmation follows their
-            own text/email preference (Codex #4737 r4 P2). */}
-        {' '}You&apos;ll get a confirmation shortly.
+        {/* No delivery promise: a confirmation follows the profile's own
+            preferences, and an additional-property profile starts with
+            confirmations off (Codex #4737 r4 + r6 P2). */}
       </div>
       {result?.rescheduleUrl ? (
         <a href={result.rescheduleUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>

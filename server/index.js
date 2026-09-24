@@ -403,7 +403,12 @@ app.use('/api/public/inspection', (req, res, next) => {
   // router, which answers GET { state: 'expired' }.
   let token = String(req.path || '').split('/').filter(Boolean)[0] || '';
   try { token = decodeURIComponent(token); } catch { token = ''; }
-  if (!token || !require('./utils/lead-consultation-token').verifyLeadConsultationToken(token, 0)) {
+  // GET keeps an expired-but-genuine link alive for its { state: 'expired' }
+  // page (signature only, nowSec 0); every other method needs a LIVE token
+  // here, before parsing (Codex #4737 r6 P0).
+  const { verifyLeadConsultationToken } = require('./utils/lead-consultation-token');
+  const live = req.method === 'GET' ? verifyLeadConsultationToken(token, 0) : verifyLeadConsultationToken(token);
+  if (!token || !live) {
     return res.status(404).json({ error: 'not_found' });
   }
   next();

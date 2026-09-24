@@ -342,7 +342,7 @@ async function loadTrustedCustomer(dbConn, lead, token) {
 
 async function loadCustomer(dbConn, customerId) {
   return dbConn('customers').where({ id: customerId }).whereNull('deleted_at').first(
-    'id', 'first_name', 'last_name', 'phone', 'email',
+    'id', 'first_name', 'last_name', 'phone', 'email', 'account_id',
     'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude'
   );
 }
@@ -556,7 +556,7 @@ async function finalizeBookingLocation(lead, custRow, suppliedAddress) {
   if (!resolved.location) {
     return { location: null, failure: resolved.unresolved ? 'address_unresolved' : 'address_required' };
   }
-  const areaFailure = await serviceAreaFailure(resolved.location);
+  const areaFailure = await serviceAreaFailure(resolved.location, resolved.address);
   if (areaFailure) return { location: null, ...areaFailure };
   return resolved;
 }
@@ -565,10 +565,13 @@ async function finalizeBookingLocation(lead, custRow, suppliedAddress) {
 // failure shape (null when the location is in the area). Shared with the
 // commit's adopted-property recheck — the only location that does not come
 // out of finalizeBookingLocation (local audit P1).
-async function serviceAreaFailure(location) {
+async function serviceAreaFailure(location, address = null) {
   const area = await checkServiceArea(location);
   if (area.unavailable) return { failure: 'service_area_unavailable' };
-  if (!area.ok) return { failure: 'out_of_area', county: area.county || null };
+  // Outside the box there is no county lookup; the address's own city/ZIP
+  // is the waitlist's region signal instead (Codex #4737 r6 P2).
+  const region = [address?.city, address?.zip].filter(Boolean).join(' ') || null;
+  if (!area.ok) return { failure: 'out_of_area', county: area.county || region };
   return null;
 }
 
@@ -955,6 +958,28 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   return { customer: created };
 }
 
+// A linked lead booking a DIFFERENT property of its account: that account's
+// matching profile is reused, else a new "Additional property" profile is
+// created under it (a legacy profile with no account is attached to one
+// first, through the same non-blocking fence the lead convert uses).
+async function resolveOtherAccountProperty(trx, freshLead, linked, resolved) {
+  let account = linked.account_id ? { accountId: linked.account_id, existingCustomer: linked } : null;
+  if (!account) {
+    const { ensureCustomerAccount } = require('./admin-customers');
+    account = await ensureCustomerAccount(trx, {
+      firstName: linked.first_name || freshLead.first_name || 'New Lead',
+      lastName: linked.last_name || freshLead.last_name || '',
+      phone: linked.phone || freshLead.phone || '',
+      email: linked.email || null,
+      fenceAttach: true,
+    });
+  }
+  const existing = await matchExistingAccountProfile(trx, account, resolved.address, resolved.location);
+  if (existing) return reuseMatchedProfile(trx, freshLead, existing, resolved);
+  const created = await createCustomerForLead(trx, freshLead, resolved.address, resolved.location, account);
+  return { customer: created };
+}
+
 // A verified lead's existing property, reused: its own open assessment wins
 // (already_booked), else it is the booking customer, at its OWN stored pin
 // when it has one.
@@ -1158,6 +1183,82 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   }
 });
 
+// The linked-customer half of phase 1 (split out of provisionCommitCustomer).
+// Runs under its locks; returns { custRow, location } or a terminal
+// { locationFailure } / { eligibility }.
+async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, resolved }) {
+  let provisioned = freshCustRow;
+  const location = resolved.location;
+  // Compare the fresh row's stored-address fields against the
+  // PRE-LOCK custRow snapshot `resolved` was actually computed
+  // against (Codex pre-push P1, 2026-09-24) — never re-resolve here,
+  // which would mean a geocode/county network call while holding the
+  // lock. Identical → the pre-lock resolution still describes this
+  // exact row, safe to reuse outright, no new work needed.
+  const addressUnchanged = STORED_ADDRESS_FIELDS.every(
+    (f) => (freshCustRow[f] ?? null) === (custRow?.[f] ?? null)
+  );
+  if (!addressUnchanged) {
+    // Another commit changed this row's stored address between the
+    // pre-lock read and the lock, or the lead linked to a customer
+    // in that same window — the pre-lock resolution may no longer
+    // describe this row, and re-resolving here is exactly the
+    // network call under the lock this rule forbids. Fail closed
+    // and recoverable; the client retries.
+    return { locationFailure: 'address_unresolved' };
+  }
+  provisioned = freshCustRow;
+  // A supplied address that is NOT an established profile's own address
+  // is ANOTHER property of the account (Codex #4737 r6 P1) — it reuses
+  // that account's matching profile or becomes a new one; the linked
+  // profile is never overwritten (its visits would otherwise dispatch to
+  // the new address). A profile with no visits yet (this flow's own
+  // prospect, a lead's unvalidated address) is still corrected in place.
+  const anotherProperty = resolved.source === 'supplied'
+    && Boolean(freshCustRow.address_line1)
+    && !profileMatchesAddress(freshCustRow, resolved.address, resolved.location)
+    && (await trx('scheduled_services').where({ customer_id: freshCustRow.id }).select('id').limit(1)).length > 0;
+  if (anotherProperty) {
+    const other = await resolveOtherAccountProperty(trx, freshLead, freshCustRow, resolved);
+    if (other.eligibility) return { eligibility: other.eligibility };
+    return { custRow: other.customer, location: other.location || resolved.location };
+  }
+  if (resolved.source !== 'customer') {
+    // The pre-lock resolution did NOT come from this row's own
+    // stored address (it was empty, or the stored one failed to
+    // geocode and a lead/supplied fallback won) — write the
+    // validated resolution back so a missing/bad address isn't
+    // asked for again (this file's own contract — see the header).
+    const after = {
+      address_line1: resolved.address.line1,
+      address_line2: resolved.address.line2,
+      city: resolved.address.city,
+      state: resolved.address.state,
+      zip: resolved.address.zip,
+      latitude: resolved.location.lat,
+      longitude: resolved.location.lng,
+    };
+    await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
+    provisioned = {
+      ...freshCustRow,
+      address_line1: resolved.address.line1, address_line2: resolved.address.line2,
+      city: resolved.address.city, state: resolved.address.state, zip: resolved.address.zip,
+      latitude: resolved.location.lat, longitude: resolved.location.lng,
+    };
+  }
+  // else resolved.source === 'customer': the pre-lock resolution WAS
+  // this row's own stored address. Its text needs no write-back, but
+  // coordinates it lacked are persisted (local audit P1) —
+  // createSelfBooking reloads the row for its commit-time travel check,
+  // which must never run locationless.
+  else if (freshCustRow.latitude == null || freshCustRow.longitude == null) {
+    const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
+    await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
+    provisioned = { ...freshCustRow, ...after };
+  }
+  return { custRow: provisioned, location };
+}
+
 // Phase 1 of the commit (split out of the handler, Codex #4737 r1 P2): under
 // the per-lead advisory lock, re-read the lead + customer, re-run
 // eligibility, and provision/link the customer. Returns { eligibility } for a
@@ -1224,58 +1325,10 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
         await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
       }
     } else {
-      // Compare the fresh row's stored-address fields against the
-      // PRE-LOCK custRow snapshot `resolved` was actually computed
-      // against (Codex pre-push P1, 2026-09-24) — never re-resolve here,
-      // which would mean a geocode/county network call while holding the
-      // lock. Identical → the pre-lock resolution still describes this
-      // exact row, safe to reuse outright, no new work needed.
-      const addressUnchanged = STORED_ADDRESS_FIELDS.every(
-        (f) => (freshCustRow[f] ?? null) === (custRow?.[f] ?? null)
-      );
-      if (!addressUnchanged) {
-        // Another commit changed this row's stored address between the
-        // pre-lock read and the lock, or the lead linked to a customer
-        // in that same window — the pre-lock resolution may no longer
-        // describe this row, and re-resolving here is exactly the
-        // network call under the lock this rule forbids. Fail closed
-        // and recoverable; the client retries.
-        return { locationFailure: 'address_unresolved' };
-      }
-      provisioned = freshCustRow;
-      if (resolved.source !== 'customer') {
-        // The pre-lock resolution did NOT come from this row's own
-        // stored address (it was empty, or the stored one failed to
-        // geocode and a lead/supplied fallback won) — write the
-        // validated resolution back so a missing/bad address isn't
-        // asked for again (this file's own contract — see the header).
-        const after = {
-          address_line1: resolved.address.line1,
-          address_line2: resolved.address.line2,
-          city: resolved.address.city,
-          state: resolved.address.state,
-          zip: resolved.address.zip,
-          latitude: resolved.location.lat,
-          longitude: resolved.location.lng,
-        };
-        await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
-        provisioned = {
-          ...freshCustRow,
-          address_line1: resolved.address.line1, address_line2: resolved.address.line2,
-          city: resolved.address.city, state: resolved.address.state, zip: resolved.address.zip,
-          latitude: resolved.location.lat, longitude: resolved.location.lng,
-        };
-      }
-      // else resolved.source === 'customer': the pre-lock resolution WAS
-      // this row's own stored address. Its text needs no write-back, but
-      // coordinates it lacked are persisted (local audit P1) —
-      // createSelfBooking reloads the row for its commit-time travel check,
-      // which must never run locationless.
-      else if (freshCustRow.latitude == null || freshCustRow.longitude == null) {
-        const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
-        await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
-        provisioned = { ...freshCustRow, ...after };
-      }
+      const linked = await provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, resolved });
+      if (!linked.custRow) return linked;
+      provisioned = linked.custRow;
+      location = linked.location;
     }
 
     return { custRow: provisioned, location };
@@ -1545,7 +1598,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // availability rebuild below checks slots, not county eligibility.
     const locationMoved = !sameLocation(bookingLocation, resolved.location);
     if (locationMoved) {
-      const areaFailure = await serviceAreaFailure(bookingLocation);
+      const areaFailure = await serviceAreaFailure(bookingLocation, custRow);
       if (areaFailure) return sendLocationFailure(res, areaFailure.failure, areaFailure.county);
     }
 

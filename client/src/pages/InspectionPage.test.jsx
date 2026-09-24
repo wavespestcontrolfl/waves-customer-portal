@@ -248,6 +248,9 @@ describe('InspectionPage address-first gate', () => {
       const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/availability'));
       expect(JSON.parse(call[1].body)).toEqual({ address: '2 Corrected Ave, Bradenton, FL 34209' });
     });
+    // Codex #4737 r6 P2: the hero shows the address being booked.
+    expect(await screen.findByText('2 Corrected Ave, Bradenton, FL 34209')).toBeInTheDocument();
+    expect(screen.queryByText('1 First Try Rd, Bradenton')).not.toBeInTheDocument();
   });
 
   it('needs_address + out of area: stops on the waitlist card instead of the picker', async () => {
