@@ -10307,7 +10307,12 @@ const CallRecordingProcessor = {
                 // after a relink the settlement refuses a card filed against
                 // another account until a reprocess refreshes it — this is
                 // that refresh (pre-push audit P1 after r27).
-                payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_dispute_cleared_at: new Date().toISOString(), cleared_on_file_street: onFileAddress?.address_line1 || null, dispute_customer_id: customerId ? String(customerId) : null })]),
+                // …WITH the current customer's on-file premise: rebinding
+                // the identity while keeping the previous customer's
+                // on_file_address would let an Accept file the old
+                // customer's appointment under the new account (codex r29
+                // P1).
+                payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_dispute_cleared_at: new Date().toISOString(), cleared_on_file_street: onFileAddress?.address_line1 || null, dispute_customer_id: customerId ? String(customerId) : null, on_file_address: require('./call-routing-gates').onFileAddressSnapshot(onFileAddress) })]),
                 updated_at: new Date(),
               });
           }
