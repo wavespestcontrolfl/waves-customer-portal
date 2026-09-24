@@ -58,7 +58,7 @@ function isRealCalendarDate(value) {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
-const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // A date-only end_date (e.g. "2026-06-30") parses as midnight UTC, so an
@@ -1317,6 +1317,11 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
       return res.status(400).json({ error: 'A valid date and time are required' });
     }
     const callbackAt = parseETDateTime(`${date}T${time}`);
+    const callbackParts = etParts(callbackAt);
+    const [hour, minute] = time.split(':').map(Number);
+    if (etDateString(callbackAt) !== date || callbackParts.hour !== hour || callbackParts.minute !== minute) {
+      return res.status(400).json({ error: 'The selected time does not exist in Eastern time' });
+    }
     const saved = await db.transaction(async (trx) => {
       const changed = await trx('leads').where('id', req.params.id).whereNull('deleted_at').update({
         next_follow_up_at: callbackAt,

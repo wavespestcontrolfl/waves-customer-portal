@@ -56,6 +56,19 @@ test('callback rolls back when history fails', async () => {
   expect((await request('post', '/:id/schedule-callback', { date: '2030-09-24', time: '10:00' })).error.message).toBe('activity unavailable');
   expect(lead.next_follow_up_at).toBeUndefined();
 });
+test('callback rejects the missing spring-forward hour without writing', async () => {
+  const { res, error } = await request('post', '/:id/schedule-callback', { date: '2027-03-14', time: '02:30' });
+  expect(error).toBeUndefined();
+  expect(res.status).toHaveBeenCalledWith(400);
+  expect(db.transaction).not.toHaveBeenCalled();
+  expect(lead.next_follow_up_at).toBeUndefined();
+  expect(activities).toHaveLength(0);
+});
+test.each([['01:30', '2027-03-14T06:30:00.000Z'], ['03:30', '2027-03-14T07:30:00.000Z']])('callback accepts valid DST-boundary time %s', async (time, expected) => {
+  const { error } = await request('post', '/:id/schedule-callback', { date: '2027-03-14', time });
+  expect(error).toBeUndefined();
+  expect(lead.next_follow_up_at.toISOString()).toBe(expected);
+});
 test('manual win preserves first win and response, records operator and before/after', async () => {
   const { data, error } = await request('put', '/:id', { status: 'won' });
   expect(error).toBeUndefined();
