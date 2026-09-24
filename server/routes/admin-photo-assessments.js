@@ -160,14 +160,24 @@ async function loadMessagePhoto(entry) {
 // convention the rest of this file uses for defaulting.
 async function resolveMessagePhotos(entries) {
   const photos = [];
-  let customerId = null;
+  // Every distinct NON-NULL customer a selected message's conversation
+  // resolves to. A phone-keyed thread on the client can mix messages from
+  // more than one customer (a shared/reassigned number) — the client
+  // already refuses to submit a mixed selection, but this is the
+  // authoritative check: message_photos spanning more than one customer is
+  // refused outright rather than silently attributed to whichever entry
+  // happened to resolve first.
+  const customerIds = new Set();
   for (const entry of entries) {
     const result = await loadMessagePhoto(entry);
     if (result.error) return { error: result.error, status: result.status };
     photos.push(result.photo);
-    if (!customerId && result.customerId) customerId = result.customerId;
+    if (result.customerId) customerIds.add(result.customerId);
   }
-  return { photos, customerId };
+  if (customerIds.size > 1) {
+    return { error: 'Selected photos belong to different customers — pick photos from one customer.', status: 400 };
+  }
+  return { photos, customerId: customerIds.size === 1 ? [...customerIds][0] : null };
 }
 
 const TYPES = {
@@ -805,7 +815,14 @@ router.post('/:type', async (req, res, next) => {
     }
     // Explicit customer_id wins; otherwise default from the inbound
     // message's thread. Same existence check either way, so a stale/deleted
-    // customer id never links.
+    // customer id never links. An explicit customer_id that CONTRADICTS the
+    // selected messages' own (non-null) customer is refused rather than
+    // silently overriding it — the client only ever sends an explicit
+    // customer_id from the Customer 360-embedded composer, where it should
+    // always agree with the thread it pulled photos from.
+    if (body.customer_id && messageCustomerId && String(body.customer_id) !== String(messageCustomerId)) {
+      return res.status(400).json({ error: 'customer_id does not match the selected photos’ customer' });
+    }
     const requestedCustomerId = body.customer_id || messageCustomerId;
     if (requestedCustomerId) {
       if (body.customer_id && !UUID_RE.test(String(body.customer_id))) {

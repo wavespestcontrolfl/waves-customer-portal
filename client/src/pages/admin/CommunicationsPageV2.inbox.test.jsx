@@ -513,3 +513,41 @@ it.each([null, { id: "another-approval", draftResponse: "Earlier approval", reci
   expect(stored.loadedMessageDraft).toEqual(loadedMessageDraft);
   expect(stored.replyContext.messageId).toBe("original-reply");
 });
+
+it("shows Analyze photos for an admin operator", async () => {
+  setupWithOwner("admin-analyze-photos"); await tick();
+  expect(screen.getByRole("button", { name: "Analyze photos" })).toBeInTheDocument();
+});
+
+it("hides Analyze photos for a technician — the endpoint is admin-only (403 otherwise)", async () => {
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  expect(screen.queryByRole("button", { name: "Analyze photos" })).not.toBeInTheDocument();
+});
+
+it("blocks submit when the selected photos belong to different customers", async () => {
+  const photoPhone = "+19415550300";
+  messages = [
+    {
+      id: "photo-a", from: photoPhone, to: line, direction: "inbound", body: "First customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:00:00Z", customerId: "customer-aaa",
+      media: [{ key: "sms-media/inbound/aaa", url: "https://signed.example/aaa", contentType: "image/jpeg" }],
+    },
+    {
+      id: "photo-b", from: photoPhone, to: line, direction: "inbound", body: "Second customer's photo",
+      isRead: true, createdAt: "2024-07-01T12:05:00Z", customerId: "customer-bbb",
+      media: [{ key: "sms-media/inbound/bbb", url: "https://signed.example/bbb", contentType: "image/jpeg" }],
+    },
+  ];
+  setupWithOwner("mixed-customer-owner"); await tick();
+  fireEvent.click(screen.getByText(photoPhone));
+  fireEvent.click(screen.getByRole("button", { name: "Analyze photos" }));
+  // photo-b (newest) starts pre-checked; check photo-a too so the selection
+  // spans both customer-aaa and customer-bbb.
+  const checkboxes = screen.getAllByRole("checkbox");
+  expect(checkboxes).toHaveLength(2);
+  fireEvent.click(checkboxes[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+  expect(screen.getByText("Selected photos belong to different customers — pick photos from one customer.")).toBeInTheDocument();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/photo-assessments/"))).toBe(false);
+});

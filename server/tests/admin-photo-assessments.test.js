@@ -757,19 +757,62 @@ describe('POST /:type (admin create) — message_photos (inbound MMS)', () => {
     });
   });
 
-  test('an explicit customer_id wins over the message thread default', async () => {
-    const EXPLICIT_CUSTOMER = 'aaaaaaaa-1111-4222-8333-444444444444';
+  test('an explicit customer_id that MATCHES the message thread succeeds', async () => {
     mockMessagesById[MESSAGE_ID] = inboundMessageRow();
     mockConversationsById[CONVERSATION_ID] = { id: CONVERSATION_ID, customer_id: CUSTOMER_ID };
-    mockCustomerRow = { id: EXPLICIT_CUSTOMER };
+    mockCustomerRow = { id: CUSTOMER_ID };
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }], customer_id: EXPLICIT_CUSTOMER }),
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }], customer_id: CUSTOMER_ID }),
       });
       expect(res.status).toBe(201);
-      expect(inserts.pest_identifications[0].customer_id).toBe(EXPLICIT_CUSTOMER);
+      expect(inserts.pest_identifications[0].customer_id).toBe(CUSTOMER_ID);
+    });
+  });
+
+  test('an explicit customer_id that CONTRADICTS the message thread is refused (400, no row) — defense in depth against a client-side mixup', async () => {
+    const OTHER_CUSTOMER = 'aaaaaaaa-1111-4222-8333-444444444444';
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    mockConversationsById[CONVERSATION_ID] = { id: CONVERSATION_ID, customer_id: CUSTOMER_ID };
+    mockCustomerRow = { id: OTHER_CUSTOMER };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_photos: [{ message_id: MESSAGE_ID, key: INBOUND_KEY }], customer_id: OTHER_CUSTOMER }),
+      });
+      expect(res.status).toBe(400);
+      expect(inserts.pest_identifications).toBeUndefined();
+    });
+  });
+
+  test('message_photos spanning two different customers is refused (400, no S3 fetch on the conflicting entry, no row)', async () => {
+    const OTHER_MESSAGE_ID = 'dddddddd-eeee-4fff-8000-999999999999';
+    const OTHER_CONVERSATION_ID = 'eeeeeeee-ffff-4000-8111-999999999999';
+    const OTHER_CUSTOMER = 'aaaaaaaa-1111-4222-8333-444444444444';
+    const OTHER_KEY = 'sms-media/inbound/other456';
+    mockMessagesById[MESSAGE_ID] = inboundMessageRow();
+    mockMessagesById[OTHER_MESSAGE_ID] = inboundMessageRow({
+      id: OTHER_MESSAGE_ID, conversation_id: OTHER_CONVERSATION_ID,
+      media: JSON.stringify([{ key: OTHER_KEY, contentType: 'image/jpeg' }]),
+    });
+    mockConversationsById[CONVERSATION_ID] = { id: CONVERSATION_ID, customer_id: CUSTOMER_ID };
+    mockConversationsById[OTHER_CONVERSATION_ID] = { id: OTHER_CONVERSATION_ID, customer_id: OTHER_CUSTOMER };
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/api/admin/photo-assessments/pest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message_photos: [
+            { message_id: MESSAGE_ID, key: INBOUND_KEY },
+            { message_id: OTHER_MESSAGE_ID, key: OTHER_KEY },
+          ],
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(inserts.pest_identifications).toBeUndefined();
     });
   });
 

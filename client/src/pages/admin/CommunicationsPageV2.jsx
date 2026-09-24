@@ -809,14 +809,21 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
 }
 
 const ANALYZE_PHOTOS_MAX = 5;
+// Mirrors MESSAGE_PHOTO_ALLOWED_MIME in server/routes/admin-photo-assessments.js
+// — only these get resized+analyzed server-side; a non-image MMS (video,
+// audio, vcard) must never appear in the picker or count toward "has photos".
+const ANALYZE_PHOTOS_ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
 // "Analyze photos" — pulls inbound MMS photos from the open thread straight
 // into the photo-assessment pipeline (POST /admin/photo-assessments/:type
 // with message_photos, same server-side analysis lawn/pest funnel rows use).
-// `photos` is a flat, newest-first list of { messageId, key, url } built
-// from the active thread's inbound messages — one entry per media item, not
-// per message, since one MMS can carry several photos.
-function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, onCreated }) {
+// `photos` is a flat, newest-first list of { messageId, key, url, customerId }
+// built from the active thread's inbound messages — one entry per media
+// item, not per message, since one MMS can carry several photos.
+// `fixedCustomerId`/`fixedCustomerName` are set ONLY for the Customer 360-
+// embedded composer, where the customer is the mount's own prop, not a
+// thread-derived guess — see the general-inbox note on analyzablePhotos.
+function AnalyzePhotosDialog({ open, onClose, photos, fixedCustomerId, fixedCustomerName, onCreated, layer }) {
   const [type, setType] = useState("lawn");
   // Selections are keyed by the photo's own S3 key (globally unique), NOT
   // array index — the inbox polls every ~30s and can replace `photos` with a
@@ -861,6 +868,20 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
       setError("Select at least one photo.");
       return;
     }
+    // General inbox: thread membership is keyed by phone, and a shared or
+    // reassigned number can hold messages from more than one customer — the
+    // open thread's own customerId is not trustworthy enough to attribute a
+    // submission. Derive it from the SELECTED photos' own messages instead,
+    // and refuse to guess when they disagree. The Customer 360-embedded
+    // composer is exempt: fixedCustomerId there is the mount's own prop, not
+    // a thread guess.
+    if (!fixedCustomerId) {
+      const distinctCustomerIds = new Set(selected.map((p) => p.customerId).filter(Boolean));
+      if (distinctCustomerIds.size > 1) {
+        setError("Selected photos belong to different customers — pick photos from one customer.");
+        return;
+      }
+    }
     setBusy(true);
     setError("");
     try {
@@ -868,7 +889,11 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
         method: "POST",
         body: JSON.stringify({
           message_photos: selected.map((p) => ({ message_id: p.messageId, key: p.key })),
-          customer_id: customerId || undefined,
+          // Only the Customer 360-embedded mode passes customer_id — general
+          // inbox submissions let the server default it from the selected
+          // messages' own conversation (same "first rung wins" rule the
+          // admin-created path already uses), never a thread-level guess.
+          customer_id: fixedCustomerId || undefined,
           note: note.trim() || undefined,
         }),
       });
@@ -881,30 +906,30 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
   };
 
   return (
-    <Dialog open={open} onClose={busy ? undefined : onClose} aria-label="Analyze photos from this thread">
+    <Dialog open={open} onClose={busy ? undefined : onClose} aria-label="Analyze photos from this thread" layer={layer}>
       <DialogHeader>
         <DialogTitle>Analyze photos from this thread</DialogTitle>
       </DialogHeader>
       <DialogBody className="space-y-3">
         <div>
-          <label className="block text-[13px] text-zinc-500 mb-1">Type</label>
+          <label className="block text-14 text-zinc-500 mb-1">Type</label>
           <Select value={type} onChange={(e) => setType(e.target.value)} disabled={busy}>
             <option value="lawn">Lawn assessment</option>
             <option value="pest">Pest identification</option>
           </Select>
         </div>
-        {customerId ? (
+        {fixedCustomerId ? (
           <div>
-            <label className="block text-[13px] text-zinc-500 mb-1">Customer</label>
-            <div className="text-[14px] text-zinc-900">{customerName || "Linked customer"}</div>
+            <label className="block text-14 text-zinc-500 mb-1">Customer</label>
+            <div className="text-14 text-zinc-900">{fixedCustomerName || "Linked customer"}</div>
           </div>
         ) : null}
         <div>
-          <label className="block text-[13px] text-zinc-500 mb-1">
+          <label className="block text-14 text-zinc-500 mb-1">
             Photos ({selectedKeys.size}/{ANALYZE_PHOTOS_MAX} selected)
           </label>
           {photos.length === 0 ? (
-            <div className="text-[14px] text-zinc-500">No inbound photos in this thread.</div>
+            <div className="text-14 text-zinc-500">No inbound photos in this thread.</div>
           ) : (
             <div className="grid grid-cols-3 gap-2">
               {photos.map((p) => {
@@ -939,10 +964,10 @@ function AnalyzePhotosDialog({ open, onClose, photos, customerId, customerName, 
           )}
         </div>
         <div>
-          <label className="block text-[13px] text-zinc-500 mb-1">Note (optional)</label>
+          <label className="block text-14 text-zinc-500 mb-1">Note (optional)</label>
           <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} disabled={busy} />
         </div>
-        {error ? <div className="text-[14px] text-alert-fg">{error}</div> : null}
+        {error ? <div className="text-14 text-alert-fg">{error}</div> : null}
       </DialogBody>
       <DialogFooter>
         <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
@@ -1059,12 +1084,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // Threading
   const [smsView, setSmsView] = useState("threads");
   const [activeThread, setActiveThread] = useState(null);
-  // Flat, newest-first list of every inbound MMS photo in the OPEN thread —
-  // one entry per media item (a single MMS can carry several) — for the
-  // Analyze photos dialog. Sourced from activeThread.messages in the general
-  // inbox view; a customer-profile mount (Customer360) never populates
-  // activeThread, so it reads customerMessages instead — same message shape,
-  // just not guaranteed pre-sorted, hence the explicit sort here.
+  // Flat, newest-first list of every inbound MMS PHOTO in the OPEN thread —
+  // one entry per media item (a single MMS can carry several), filtered to
+  // the same image MIME allowlist the endpoint accepts so a non-image MMS
+  // (video, audio, vcard) never appears in the picker or counts toward "has
+  // photos". Sourced from activeThread.messages in the general inbox view; a
+  // customer-profile mount (Customer360) never populates activeThread, so it
+  // reads customerMessages instead — same message shape, just not
+  // guaranteed pre-sorted, hence the explicit sort here. Each entry keeps
+  // the message's own customerId — the general inbox never trusts the
+  // thread-level one (see the AnalyzePhotosDialog submit guard).
   const analyzablePhotos = useMemo(() => {
     const source = customer ? customerMessages : activeThread?.messages;
     if (!Array.isArray(source)) return [];
@@ -1073,7 +1102,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       if (m.direction !== "inbound" || !Array.isArray(m.media)) continue;
       for (const media of m.media) {
         if (!media?.url || !media?.key) continue;
-        items.push({ messageId: m.id, key: media.key, url: media.url, createdAt: m.createdAt });
+        const mime = String(media.contentType || media.mimeType || "").toLowerCase();
+        if (!ANALYZE_PHOTOS_ALLOWED_MIME.has(mime)) continue;
+        items.push({ messageId: m.id, key: media.key, url: media.url, createdAt: m.createdAt, customerId: m.customerId || null });
       }
     }
     items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -3078,19 +3109,24 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               )}
             </Button>{" "}
             {/* Analyze photos — run the inbound MMS photos in this thread
-                through the lawn/pest photo-assessment pipeline. */}
-            <Button
-              variant="secondary"
-              onClick={() => setShowAnalyzeDialog(true)}
-              disabled={!analyzablePhotos.length}
-              title="Run a lawn or pest assessment on photos from this thread"
-              aria-label="Analyze photos"
-              className="sms-writing-tool ui-icon-action"
-              aria-haspopup="dialog"
-              aria-expanded={showAnalyzeDialog}
-            >
-              <ScanSearch size={16} strokeWidth={2.2} aria-hidden />
-            </Button>{" "}
+                through the lawn/pest photo-assessment pipeline. Admin-only:
+                the endpoint is requireAdmin (admin-photo-assessments.js), so
+                a technician gets a 403 — hide the affordance rather than
+                show a button that always fails for them. */}
+            {smsIsAdminRole && (
+              <Button
+                variant="secondary"
+                onClick={() => setShowAnalyzeDialog(true)}
+                disabled={!analyzablePhotos.length}
+                title="Run a lawn or pest assessment on photos from this thread"
+                aria-label="Analyze photos"
+                className="sms-writing-tool ui-icon-action"
+                aria-haspopup="dialog"
+                aria-expanded={showAnalyzeDialog}
+              >
+                <ScanSearch size={16} strokeWidth={2.2} aria-hidden />
+              </Button>
+            )}{" "}
             {/* Plus — attachment menu */}
             <div className="relative">
               {" "}
@@ -3328,8 +3364,18 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           open={active && showAnalyzeDialog}
           onClose={() => setShowAnalyzeDialog(false)}
           photos={analyzablePhotos}
-          customerId={customer?.id || activeThread?.customerId || null}
-          customerName={customer ? getCustomerOptionName(customer) : activeThread?.customerName || null}
+          // Only the Customer 360-embedded mount has a trustworthy fixed
+          // customer (its own prop) — the general inbox's activeThread is
+          // keyed by phone, which a shared/reassigned number can hold
+          // messages from more than one customer under, so it is never
+          // passed here (the dialog derives it per-selection instead).
+          fixedCustomerId={customer?.id || null}
+          fixedCustomerName={customer ? getCustomerOptionName(customer) : null}
+          // This composer opens inside Customer 360's own z-[1000] overlay
+          // (CustomerOverlayPresentation) — Dialog's default layer (120)
+          // would paint beneath it, same reason CancelPlanDialog etc. raise
+          // theirs to 1120 from that surface.
+          layer={customer ? 1120 : undefined}
           onCreated={(type, id) => navigate(`/admin/lawn-assessments?open=${type}:${id}`)}
         />
         {sendResult && (
