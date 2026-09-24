@@ -1279,6 +1279,15 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
       const changed = await db.transaction(async (locked) => {
         await boundLockWait(locked);
         if (row.customer_id) await lockCustomerRow(locked, row.customer_id);
+        // The outcome re-read UNDER the lock (Codex #4710 r11 pre-push P1): a
+        // customer merge after the batch SELECT repoints the outcome and its
+        // evidence to the survivor — judging it against the retired customer
+        // would clear a valid win. Changed owner or no longer won → leave it
+        // unstamped; the next tick picks it up against its current customer.
+        const current = await locked('consultation_outcomes').where({ id: row.id })
+          .first('customer_id', 'outcome', 'won_at', 'won_via', 'won_evidence_booking_id', 'pre_win_outcome');
+        if (!current || current.outcome !== 'won' || String(current.customer_id || '') !== String(row.customer_id || '')) return 0;
+        Object.assign(row, current);
         // Every write here is one of three shapes (Codex #4710 r9 P2 —
         // unified): stamp only, re-point to surviving evidence, or clear the
         // win back to an open (or no-show) outcome.

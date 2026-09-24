@@ -2294,6 +2294,38 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
 
   // Codex #4710 r10 pre-push P1: a won consultation moved AFTER its sale is
   // re-judged against its current schedule and cleared.
+  // Codex #4710 r11 pre-push P1: a merge repointing the outcome after the
+  // batch SELECT must not clear the win against the retired customer.
+  test('an outcome repointed to a surviving customer mid-sweep is left won, not cleared', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-old' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-20', customer_id: 'cust-old', created_at: new Date('2026-09-12T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-old', outcome: 'won', won_via: 'office_booking', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: 'sale-1', pre_win_outcome: 'warm' },
+      ],
+    });
+    // The merge lands the moment the sweep takes the (old) customer lock.
+    let merged = false;
+    const spyDb = (name) => {
+      if (name === 'customers' && !merged) {
+        merged = true;
+        fakeDb.__store.consultation_outcomes[0].customer_id = 'cust-new';
+        for (const r of fakeDb.__store.scheduled_services) r.customer_id = 'cust-new';
+      }
+      return fakeDb(name);
+    };
+    spyDb.raw = fakeDb.raw;
+    spyDb.transaction = async (fn) => fn(spyDb);
+    db.mockImplementation(spyDb);
+    db.transaction = spyDb.transaction;
+
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'won', won_evidence_booking_id: 'sale-1' });
+  });
+
   test('a won consultation moved later than its sale loses the win', async () => {
     const fakeDb = install({
       scheduled_services: [
