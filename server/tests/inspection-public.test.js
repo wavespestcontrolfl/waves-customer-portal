@@ -1352,6 +1352,15 @@ describe('matchExistingAccountProfile unit coverage (P1 :585, round 11 tightenin
     expect(await matchExistingAccountProfile(db, account, { line1: '99 Nowhere Ave', zip: '34209' }, null)).toBe(null);
   });
 
+  test('local audit P1: same street + zip but a DIFFERENT unit → not that profile', async () => {
+    const unit4 = { id: 'cust-2', is_primary_profile: false, address_line1: '2 Main St', address_line2: 'Apt 4', zip: '34209' };
+    listResults.customers = [unit4];
+    const account = { accountId: 'acct-1', existingCustomer: { id: 'cust-1' } };
+    expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', line2: 'Apt 7', zip: '34209' }, null)).toBe(null);
+    expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St Apt 4', zip: '34209' }, null)).toEqual(unit4);
+    expect(await matchExistingAccountProfile(db, account, { line1: '2 Main St', zip: '34209' }, null)).toBe(null);
+  });
+
   test('no live profiles come back from the query → falls back to the existingCustomer row itself', async () => {
     const existingCustomer = { id: 'cust-1', address_line1: '5 Palm Ave', zip: '34209' };
     listResults.customers = [];
@@ -1431,8 +1440,16 @@ describe('structural: finalizeBookingLocation is the sole producer of a booking 
     expect(callSitesOutside('resolveServiceAddress\\(', 'finalizeBookingLocation')).toEqual([]);
   });
 
-  test('checkServiceArea( is called only from finalizeBookingLocation', () => {
-    expect(callSitesOutside('checkServiceArea\\(', 'finalizeBookingLocation')).toEqual([]);
+  test('checkServiceArea( is called only from serviceAreaFailure', () => {
+    expect(callSitesOutside('checkServiceArea\\(', 'serviceAreaFailure')).toEqual([]);
+  });
+
+  // The only location not produced by finalizeBookingLocation is a verified
+  // lead's adopted property (local audit P1); it is area-checked through the
+  // same helper, never a bare checkServiceArea call.
+  test('serviceAreaFailure( is called from finalizeBookingLocation and the commit route only', () => {
+    const sites = callSitesOutside('serviceAreaFailure\\(', 'finalizeBookingLocation');
+    expect(sites).toHaveLength(1);
   });
 });
 

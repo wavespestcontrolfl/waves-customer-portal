@@ -485,10 +485,20 @@ async function finalizeBookingLocation(lead, custRow, suppliedAddress) {
   if (!resolved.location) {
     return { location: null, failure: resolved.unresolved ? 'address_unresolved' : 'address_required' };
   }
-  const area = await checkServiceArea(resolved.location);
-  if (area.unavailable) return { location: null, failure: 'service_area_unavailable' };
-  if (!area.ok) return { location: null, failure: 'out_of_area', county: area.county || null };
+  const areaFailure = await serviceAreaFailure(resolved.location);
+  if (areaFailure) return { location: null, ...areaFailure };
   return resolved;
+}
+
+// The ONE caller of checkServiceArea, mapped to finalizeBookingLocation's
+// failure shape (null when the location is in the area). Shared with the
+// commit's adopted-property recheck — the only location that does not come
+// out of finalizeBookingLocation (local audit P1).
+async function serviceAreaFailure(location) {
+  const area = await checkServiceArea(location);
+  if (area.unavailable) return { failure: 'service_area_unavailable' };
+  if (!area.ok) return { failure: 'out_of_area', county: area.county || null };
+  return null;
 }
 
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay }) {
@@ -727,7 +737,11 @@ function coordsClose(a, b) {
 // caller rather than reused.
 async function matchExistingAccountProfile(dbConn, account, address, location) {
   if (!account?.existingCustomer) return null;
-  const { streetKey, normalizeZip } = require('../services/customer-properties');
+  const { streetKey, normalizeZip, unitKey, streetEmbeddedUnitKey } = require('../services/customer-properties');
+  // Units must agree too (local audit P1): streetKey strips apartment/suite
+  // designators, so two units at one street + zip would otherwise match the
+  // first profile and book the wrong unit.
+  const unitOf = (line1, line2) => unitKey(line2 || '') || streetEmbeddedUnitKey(line1);
   const profiles = await dbConn('customers')
     .where({ account_id: account.accountId })
     .whereNull('deleted_at')
@@ -739,8 +753,10 @@ async function matchExistingAccountProfile(dbConn, account, address, location) {
   const key = streetKey(addressLine1);
   if (!key) return null;
   const zip = normalizeZip(address?.zip);
+  const unit = unitOf(addressLine1, address?.line2);
   return rows.find((row) => {
     if (streetKey(row.address_line1) !== key) return false;
+    if (unitOf(row.address_line1, row.address_line2) !== unit) return false;
     if (zip && normalizeZip(row.zip) === zip) return true;
     return coordsClose({ lat: row.latitude, lng: row.longitude }, location);
   }) || null;
@@ -1161,6 +1177,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
     custRow = phase1.custRow;
     const bookingLocation = phase1.location;
+
+    // A verified lead reusing an existing property adopts THAT property's
+    // stored coordinates, which the pre-lock area check never saw (local
+    // audit P1). Area-check it now, after the lock is released — the
+    // availability rebuild below checks slots, not county eligibility.
+    if (bookingLocation.lat !== resolved.location.lat || bookingLocation.lng !== resolved.location.lng) {
+      const areaFailure = await serviceAreaFailure(bookingLocation);
+      if (areaFailure?.failure === 'service_area_unavailable') return res.status(503).json({ error: 'service_area_unavailable' });
+      if (areaFailure) return res.status(422).json({ error: 'out_of_area', county: areaFailure.county || null });
+    }
 
     // Re-validate the chosen slot when the final location differs from
     // what it was checked against pre-lock — a verified unlinked lead's
