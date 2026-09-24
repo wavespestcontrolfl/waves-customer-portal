@@ -16688,6 +16688,10 @@ const CallRecordingProcessor = {
                 skipped_reason: 'house_number_dispute_card_unfiled',
                 preferred_date_time: extracted.preferred_date_time || null,
                 service: extracted.matched_service || extracted.requested_service || null,
+                // Same re-binding on the shadow-mode fallback (codex r38 P1).
+                dispute_customer_id: customerId ? String(customerId) : null,
+                retained_service_id: null,
+                retained_scheduled_date: null,
               },
             }))
             // A standing task (open OR claimed) is REFRESHED with the current
@@ -16737,6 +16741,13 @@ const CallRecordingProcessor = {
                   existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
                   preferred_date_time: extracted.preferred_date_time || null,
                   service: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
+                  // A refresh re-binds the task to the call's CURRENT customer
+                  // and drops customer-specific retained-visit evidence, so a
+                  // relink → reprocess → verdict sequence completes instead of
+                  // 409ing forever (codex r38 P1).
+                  dispute_customer_id: customerId ? String(customerId) : null,
+                  retained_service_id: null,
+                  retained_scheduled_date: null,
                 },
               }))
               .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
