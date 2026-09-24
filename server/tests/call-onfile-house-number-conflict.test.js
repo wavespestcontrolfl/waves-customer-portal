@@ -307,8 +307,13 @@ describe('heldConflictTaskDecision (verdict route)', () => {
     const moved = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '9 Other Road', address_line2: null, city: 'Parrish', zip: '34219' } });
     expect(moved.approvedWindow.requested_address.street_line_1).toBe('1260 Example St');
     expect(moved.approvedPayload.on_file_address.address_line1).toBe('1260 Example St');
-    const retyped = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: 'Apt 2', city: 'Parrish', zip: '34219' } });
-    expect(retyped.approvedWindow.requested_address.street_line_2).toBe('Apt 2');
+    // Same street line but a different unit or town is not a reviewed premise either.
+    const otherUnit = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: 'Apt 2', city: 'Parrish', zip: '34219' } });
+    expect(otherUnit.approvedWindow.requested_address.street_line_2).toBeNull();
+    const otherTown = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: 'Elsewhere', zip: '34220' } });
+    expect(otherTown.approvedWindow.requested_address.city).toBe('Parrish');
+    const retyped = heldConflictTaskDecision({ verdict: 'accept', heldConflictPayload: held, liveOnFile: { address_line1: '1260 Example Street', address_line2: null, city: 'Parrish', zip: '34219' } });
+    expect(retyped.approvedWindow.requested_address.street_line_1).toBe('1260 Example Street');
   });
 
   test('an unconfirmed card still files the reassignment task for a held booking', () => {

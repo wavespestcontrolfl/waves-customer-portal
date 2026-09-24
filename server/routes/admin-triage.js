@@ -649,11 +649,19 @@ function heldConflictTaskDecision({ verdict, wrongFields = [], heldConflictPaylo
   // number, or the on-file line was retyped): a customer moved to a third
   // property, or a call relinked to another customer, must not retarget
   // the confirmed ask to an address nobody reviewed (codex r16 P1).
+  // …the WHOLE premise: street line, unit and locality (codex r17 P1).
   const { sameHouseNumberStreet } = require('../services/call-triage-flags');
+  const { unitKey } = require('../services/customer-properties');
+  const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+  const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
   const liveLine = String(liveOnFile?.address_line1 || '').trim();
+  const samePremise = (line1, unit, city, zip) => sameHouseNumberStreet(liveLine, line1)
+    && unitKey(liveOnFile?.address_line2) === unitKey(unit)
+    && (!zip5(zip) || !zip5(liveOnFile?.zip) || zip5(zip) === zip5(liveOnFile?.zip))
+    && (!cityKey(city) || !cityKey(liveOnFile?.city) || cityKey(city) === cityKey(liveOnFile?.city));
   const liveIsReviewedPremise = !!liveLine && (
-    sameHouseNumberStreet(liveLine, payload?.stated_street)
-    || sameHouseNumberStreet(liveLine, payload?.on_file_address?.address_line1)
+    samePremise(payload?.stated_street, payload?.stated_unit, payload?.stated_city, payload?.stated_zip)
+    || samePremise(payload?.on_file_address?.address_line1, payload?.on_file_address?.address_line2, payload?.on_file_address?.city, payload?.on_file_address?.zip)
     || (!payload?.stated_street && !payload?.on_file_address?.address_line1));
   const onFile = liveIsReviewedPremise ? liveOnFile : (payload?.on_file_address || null);
   const approvedAddress = onFile
@@ -747,14 +755,21 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
   const heldIds = Array.isArray(heldConflictPayload.held_unassigned_booking_ids) ? heldConflictPayload.held_unassigned_booking_ids.map(String) : [];
   // EVERY held visit (parent + AI follow-ups) rides on the task, not
   // only the earliest (codex r12 P1).
+  // A held visit a dispatcher already reassigned STAYS on the task: its
+  // skipped confirmation / reminder repairs are not re-armed by an
+  // ordinary assignment (codex r17 P1). Only a visit no longer live drops.
   const heldUnassignedRows = heldIds.length
     ? await trx('scheduled_services')
       .whereIn('id', heldIds)
       .whereIn('status', ['pending', 'confirmed'])
-      .whereNull('technician_id')
       .orderBy('scheduled_date', 'asc')
       .select('id')
     : [];
+  // The reminder hold the dispute placed on those visits is released with
+  // the settlement (the task re-arms what the hold quieted).
+  if (heldIds.length) {
+    await trx('appointment_reminders').whereIn('scheduled_service_id', heldIds).update({ move_hold_until: null });
+  }
   const decision = heldConflictTaskDecision({
     verdict, wrongFields, heldConflictPayload, liveOnFile, bookingCovered: evidence.get(item.id)?.booking_after_card === true,
     heldUnassignedBookingIds: heldUnassignedRows.map((row) => String(row.id)),

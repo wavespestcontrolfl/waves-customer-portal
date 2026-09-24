@@ -1216,8 +1216,17 @@ function summarizeKnownCaller(customer) {
 // (payload.held_unassigned_booking_ids) so the verdict route names EXACTLY
 // those rows for reassignment, not any unassigned row of the call
 // (codex r11 P1). Best-effort; the card may not exist yet.
+// A pulled visit's reminders are HELD too (the reminder cron's existing
+// move_hold_until quiet period): a customer must not get the 72h/24h
+// reminder for an appointment whose address is in dispute and whose
+// technician was just removed. Released by the conflict settlement
+// (admin-triage settleHeldConflictCard) — codex r17 P1.
+const DISPUTE_REMINDER_HOLD_MS = 45 * 24 * 60 * 60 * 1000;
 async function noteDisputeHeldBooking(conn, callLogId, scheduledServiceId) {
   try {
+    await conn('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .update({ move_hold_until: new Date(Date.now() + DISPUTE_REMINDER_HOLD_MS) });
     await conn('triage_items')
       .where({ call_log_id: callLogId, reason_code: 'on_file_house_number_conflict' })
       .whereIn('status', ['open', 'in_progress'])
@@ -9901,6 +9910,39 @@ const CallRecordingProcessor = {
       // release the booking (pre-push audit P1). Cleared only when an
       // independently saved property positively resolves it.
       if (houseConflict) houseNumberDisputed = true;
+      // The booking authority snapshot is built HERE, before the property
+      // lookup below can throw: the shadow-mode fallback that a thrown
+      // lookup triggers must see the confirmed legacy ask, not fall back to
+      // a V2 blob that may say "none" (codex r17 P1).
+      {
+        disputeSchedulingAuthority = CALL_EXTRACTION_V2_DRIVES_ROUTING
+          ? v2CanonicalExtraction
+          : {
+            meta: v2CanonicalExtraction?.meta || null,
+            service_request: {
+              primary_service_category: extracted?.matched_service || extracted?.requested_service || null,
+              specific_service_name: extracted?.specific_service_name || extracted?.requested_service || null,
+              // The legacy record carries no structured intent — its cadence
+              // lives in the service NAME the catalog resolves — so the
+              // snapshot takes the intent that admits EITHER cadence; the
+              // service-category, window and hour checks still bind
+              // (pre-push audit P1: a null intent rejected every booking).
+              service_intent: 'active_infestation_treatment',
+            },
+            property: {
+              service_address: {
+                street_line_1: extracted?.address_line1 || null,
+                street_line_2: extracted?.address_line2 || null,
+                city: extracted?.city || null,
+                postal_code: extracted?.zip || null,
+              },
+            },
+            scheduling: {
+              status: extracted?.appointment_confirmed ? 'confirmed' : (extracted?.preferred_date_time ? 'requested' : 'none'),
+              confirmed_start_at: extracted?.appointment_confirmed ? (extracted?.preferred_date_time || null) : null,
+            },
+          };
+      }
       // A second property the account already holds on the same street
       // (a duplex, a rental two doors down) is a known address, not a typo
       // — the same recognition the second-address check applies (pre-push
@@ -9952,33 +9994,7 @@ const CallRecordingProcessor = {
         // property) comes from the booking authority — in shadow mode the
         // legacy record, never a V2 blob with only its scheduling swapped
         // (askSnapshot reads service_request and property too; codex r8 P2).
-        const schedulingAuthority = disputeSchedulingAuthority = CALL_EXTRACTION_V2_DRIVES_ROUTING
-          ? v2CanonicalExtraction
-          : {
-            meta: v2CanonicalExtraction?.meta || null,
-            service_request: {
-              primary_service_category: extracted?.matched_service || extracted?.requested_service || null,
-              specific_service_name: extracted?.specific_service_name || extracted?.requested_service || null,
-              // The legacy record carries no structured intent — its cadence
-              // lives in the service NAME the catalog resolves — so the
-              // snapshot takes the intent that admits EITHER cadence; the
-              // service-category, window and hour checks still bind
-              // (pre-push audit P1: a null intent rejected every booking).
-              service_intent: 'active_infestation_treatment',
-            },
-            property: {
-              service_address: {
-                street_line_1: extracted?.address_line1 || null,
-                street_line_2: extracted?.address_line2 || null,
-                city: extracted?.city || null,
-                postal_code: extracted?.zip || null,
-              },
-            },
-            scheduling: {
-              status: extracted?.appointment_confirmed ? 'confirmed' : (extracted?.preferred_date_time ? 'requested' : 'none'),
-              confirmed_start_at: extracted?.appointment_confirmed ? (extracted?.preferred_date_time || null) : null,
-            },
-          };
+        const schedulingAuthority = disputeSchedulingAuthority;
         const conflictCard = houseConflict
           ? buildTriageItem({
             callLogId: call.id,
@@ -10024,6 +10040,10 @@ const CallRecordingProcessor = {
             const newlyConfirmed = parsedCard.scheduling_window?.status === 'confirmed' || parsedCard.scheduling_status === 'confirmed';
             const addressEvidence = Object.fromEntries(Object.entries(parsedCard)
               .filter(([key]) => newlyConfirmed || !['scheduling_window', 'scheduling_status'].includes(key)));
+            // A unit the caller no longer states is CLEARED on refresh — the
+            // additive merge would otherwise keep the old door on the card
+            // and make the resolver wait for it (codex r17 P2).
+            if (addressEvidence.stated_unit === undefined) addressEvidence.stated_unit = null;
             const landed = await trx('triage_items')
               .insert(conflictCard)
               .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
@@ -10040,16 +10060,19 @@ const CallRecordingProcessor = {
             // "unfiled" so the approved-but-unbooked fallback files it
             // (pre-push audit P1). An unchanged, already-recorded ask on a
             // claimed card still counts as filed.
-            if (!landed.length && newlyConfirmed) {
-              // A claimed card that ALREADY records this same confirmed ask
-              // (a reprocess that stays confirmed) counts as filed — a
-              // second booking task beside it would be a duplicate
-              // (codex r15 P1). Only a confirmed ask the card never
-              // recorded (or a different start) is unrecorded.
+            if (!landed.length) {
+              // A claimed card counts as filed only when it records THIS
+              // dispute: the same stated street, and — for a confirmed ask —
+              // the same start (codex r15 + r17 P1). A claimed card about a
+              // different street, or one that never recorded a newly
+              // confirmed ask, leaves this pass's dispute unrecorded.
               const claimed = await trx('triage_items')
                 .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'in_progress' })
                 .first('payload');
               const claimedPayload = typeof claimed?.payload === 'string' ? (() => { try { return JSON.parse(claimed.payload); } catch { return null; } })() : claimed?.payload;
+              const sameStreet = sameHouseNumberStreet(claimedPayload?.stated_street, parsedCard.stated_street);
+              if (!sameStreet) return 'claimed_unrecorded';
+              if (!newlyConfirmed) return 'filed';
               const claimedConfirmed = claimedPayload?.scheduling_window?.status === 'confirmed' || claimedPayload?.scheduling_status === 'confirmed';
               const sameStart = String(claimedPayload?.scheduling_window?.confirmed_start_at || '') === String(parsedCard.scheduling_window?.confirmed_start_at || '');
               if (claimedConfirmed && sameStart) return 'filed';
@@ -10065,6 +10088,10 @@ const CallRecordingProcessor = {
           const retired = await trx('triage_items')
             .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
             .whereRaw("COALESCE(payload->'scheduling_window'->>'status', payload->>'scheduling_status') IS DISTINCT FROM 'confirmed'")
+            // A card whose dispute pulled technicians off visits is settled
+            // by STAFF (the verdict files the reassignment task) — the same
+            // rule the nightly resolver applies (codex r17 P1).
+            .whereRaw("COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(payload->'held_unassigned_booking_ids') = 'array' THEN payload->'held_unassigned_booking_ids' ELSE '[]'::jsonb END), 0) = 0")
             .update({
               status: 'resolved',
               resolution_note: customerId
@@ -10097,16 +10124,18 @@ const CallRecordingProcessor = {
             }
           }
           if (retired) return 'retired';
-          // A confirmed card deliberately kept open (its scheduling ask):
-          // report it so the standing-card recovery keeps the OBLIGATION
-          // without the address hold (codex r16 P1).
-          const confirmedKept = await trx('triage_items')
-            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'open' })
-            .whereRaw("COALESCE(payload->'scheduling_window'->>'status', payload->>'scheduling_status') = 'confirmed'")
+          // A card deliberately kept (a confirmed scheduling ask, pulled
+          // visits awaiting staff) or CLAIMED by a reviewer: report it so
+          // the standing-card recovery keeps the OBLIGATION without the
+          // address hold — this pass positively established no conflict
+          // (codex r16 + r17 P1).
+          const kept = await trx('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict' })
+            .whereIn('status', ['open', 'in_progress'])
             .first('id');
-          return confirmedKept ? 'confirmed_kept' : 'nothing';
+          return kept ? 'kept' : 'nothing';
         });
-        if (outcome === 'retired' || outcome === 'confirmed_kept') disputePositivelyResolved = true;
+        if (outcome === 'retired' || outcome === 'kept') disputePositivelyResolved = true;
         if (outcome === 'filed') {
           // Only a landed write may suppress the second-address fallback
           // and mark the call for review — a thrown or fenced-out write
