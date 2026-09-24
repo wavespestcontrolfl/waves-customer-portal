@@ -37,12 +37,13 @@ const mockConsultationStats = jest.fn();
 jest.mock('../services/consultation-outcomes', () => ({
   recordOutcome: (...args) => mockRecordOutcome(...args),
   consultationStats: (...args) => mockConsultationStats(...args),
+  WON_WINDOW_DAYS: 90,
 }));
 
 // Table-aware db mock: the route's ownership guard reads scheduled_services
 // (technician_id), separately from the outcome row it reads from
 // consultation_outcomes for GET.
-let mockVisitRow = { id: 'visit-1', technician_id: ACTING_TECHNICIAN_ID };
+let mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: ACTING_TECHNICIAN_ID };
 let mockOutcomeRow = null;
 jest.mock('../models/db', () => {
   const fn = jest.fn((table) => ({
@@ -87,7 +88,7 @@ async function call(method, path, body) {
 
 beforeEach(() => {
   mockCurrentRole = 'admin';
-  mockVisitRow = { id: 'visit-1', technician_id: ACTING_TECHNICIAN_ID };
+  mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: ACTING_TECHNICIAN_ID };
   mockOutcomeRow = null;
   jest.clearAllMocks();
 });
@@ -95,36 +96,36 @@ beforeEach(() => {
 describe('POST /:scheduledServiceId/outcome — a technician records their own consultation', () => {
   test('technician role is allowed on their OWN assigned visit', async () => {
     mockCurrentRole = 'technician';
-    mockVisitRow = { id: 'visit-1', technician_id: ACTING_TECHNICIAN_ID };
+    mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: ACTING_TECHNICIAN_ID };
     mockRecordOutcome.mockResolvedValue({ id: 'co-1', outcome: 'warm' });
-    const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'warm' });
+    const res = await call('post', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome', { outcome: 'warm' });
     expect(res.status).toBe(200);
     expect(res.body.outcome).toEqual({ id: 'co-1', outcome: 'warm' });
     expect(mockRecordOutcome).toHaveBeenCalledWith(
-      expect.objectContaining({ scheduledServiceId: 'visit-1', outcome: 'warm' }),
+      expect.objectContaining({ scheduledServiceId: '11111111-1111-4111-8111-111111111111', outcome: 'warm' }),
       expect.objectContaining({ trx: expect.any(Function) }),
     );
   });
 
   test('admin role is also allowed', async () => {
     mockRecordOutcome.mockResolvedValue({ id: 'co-1', outcome: 'cold' });
-    const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'cold' });
+    const res = await call('post', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome', { outcome: 'cold' });
     expect(res.status).toBe(200);
   });
 
   test('P0: a technician CANNOT record an outcome for another technician\'s consultation (403, service never called)', async () => {
     mockCurrentRole = 'technician';
-    mockVisitRow = { id: 'visit-1', technician_id: 'someone-else' };
-    const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'warm' });
+    mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: 'someone-else' };
+    const res = await call('post', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome', { outcome: 'warm' });
     expect(res.status).toBe(403);
     expect(mockRecordOutcome).not.toHaveBeenCalled();
   });
 
   test('P0: admin CAN record an outcome for ANY technician\'s consultation', async () => {
     mockCurrentRole = 'admin';
-    mockVisitRow = { id: 'visit-1', technician_id: 'someone-else' };
+    mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: 'someone-else' };
     mockRecordOutcome.mockResolvedValue({ id: 'co-1', outcome: 'cold' });
-    const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'cold' });
+    const res = await call('post', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome', { outcome: 'cold' });
     expect(res.status).toBe(200);
     expect(mockRecordOutcome).toHaveBeenCalled();
   });
@@ -147,7 +148,7 @@ describe('POST /:scheduledServiceId/outcome — a technician records their own c
     err.isOperational = true;
     err.code = code;
     mockRecordOutcome.mockRejectedValue(err);
-    const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'won' });
+    const res = await call('post', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome', { outcome: 'won' });
     expect(res.status).toBe(statusCode);
     expect(res.body).toMatchObject({ error: message, code });
   });
@@ -156,33 +157,33 @@ describe('POST /:scheduledServiceId/outcome — a technician records their own c
 describe('GET /:scheduledServiceId/outcome', () => {
   test('404s when no outcome is recorded for that visit', async () => {
     mockOutcomeRow = null;
-    const res = await call('get', '/api/admin/consultations/visit-1/outcome');
+    const res = await call('get', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome');
     expect(res.status).toBe(404);
   });
 
   test('returns the row when one exists (technician allowed on their own visit)', async () => {
     mockCurrentRole = 'technician';
-    mockVisitRow = { id: 'visit-1', technician_id: ACTING_TECHNICIAN_ID };
-    mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: 'visit-1' };
-    const res = await call('get', '/api/admin/consultations/visit-1/outcome');
+    mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: ACTING_TECHNICIAN_ID };
+    mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: '11111111-1111-4111-8111-111111111111' };
+    const res = await call('get', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome');
     expect(res.status).toBe(200);
     expect(res.body.outcome).toEqual(mockOutcomeRow);
   });
 
   test('P0: a technician CANNOT read another technician\'s consultation outcome (403, quote_notes never leaves the server)', async () => {
     mockCurrentRole = 'technician';
-    mockVisitRow = { id: 'visit-1', technician_id: 'someone-else' };
-    mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: 'visit-1', quote_notes: 'internal pricing notes' };
-    const res = await call('get', '/api/admin/consultations/visit-1/outcome');
+    mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: 'someone-else' };
+    mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: '11111111-1111-4111-8111-111111111111', quote_notes: 'internal pricing notes' };
+    const res = await call('get', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome');
     expect(res.status).toBe(403);
     expect(res.body.outcome).toBeUndefined();
   });
 
   test('P0: admin CAN read ANY technician\'s consultation outcome', async () => {
     mockCurrentRole = 'admin';
-    mockVisitRow = { id: 'visit-1', technician_id: 'someone-else' };
-    mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: 'visit-1' };
-    const res = await call('get', '/api/admin/consultations/visit-1/outcome');
+    mockVisitRow = { id: '11111111-1111-4111-8111-111111111111', technician_id: 'someone-else' };
+    mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: '11111111-1111-4111-8111-111111111111' };
+    const res = await call('get', '/api/admin/consultations/11111111-1111-4111-8111-111111111111/outcome');
     expect(res.status).toBe(200);
     expect(res.body.outcome).toEqual(mockOutcomeRow);
   });
@@ -224,6 +225,9 @@ describe('GET /stats — admin only', () => {
     ['?from=2026-02-31', /from must be a real/],
     ['?to=2026-13-01', /to must be a real/],
     ['?from=2026-03-01&to=2026-02-01', /on or before/],
+    // Codex #4710 r4 P2: reversed against the DEFAULTED endpoint too.
+    ['?from=2099-01-01', /on or before/],
+    ['?to=2020-01-01', /on or before/],
   ])('rejects %s with 400 before querying', async (qs, message) => {
     mockConsultationStats.mockClear();
     const res = await call('get', `/api/admin/consultations/stats${qs}`);

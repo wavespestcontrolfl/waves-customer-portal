@@ -95,6 +95,10 @@ function groupPredicate(fn) {
     whereNotNull(col) { cur().push((r) => resolveField(r, col) != null); return ctx; },
     whereRaw(sql) { cur().push(rawPredicate(sql)); return ctx; },
     orWhereRaw(sql) { groups.push([rawPredicate(sql)]); return ctx; },
+    // SQL `<>`: a NULL column never matches either way.
+    whereNot(col, val) { cur().push((r) => resolveField(r, col) != null && resolveField(r, col) !== val); return ctx; },
+    orWhereNot(col, val) { groups.push([(r) => resolveField(r, col) != null && resolveField(r, col) !== val]); return ctx; },
+    orWhereNull(col) { groups.push([(r) => resolveField(r, col) == null]); return ctx; },
   };
   fn.call(ctx);
   return (r) => groups.some((g) => g.length > 0 && g.every((pred) => pred(r)));
@@ -854,7 +858,7 @@ describe('markWonForCustomer', () => {
         { id: 'visit-old', scheduled_date: etDateString(addETDays(NOW, -200)) },
         // Within window, linked through a LEAD rather than customer_id directly.
         { id: 'visit-lead', scheduled_date: etDateString(addETDays(NOW, -5)) },
-        // Within window, but already resolved lost — must not be re-touched.
+        // Within window, lost as a no-show — must not be re-touched.
         { id: 'visit-already-lost', scheduled_date: etDateString(addETDays(NOW, -3)) },
         // P1-2: scheduled NEXT WEEK — a booking landing today must not win it.
         { id: 'visit-future', scheduled_date: etDateString(addETDays(NOW, 7)) },
@@ -864,7 +868,8 @@ describe('markWonForCustomer', () => {
         { id: 'co-recent', scheduled_service_id: 'visit-recent', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
         { id: 'co-old', scheduled_service_id: 'visit-old', customer_id: 'cust-1', lead_id: null, outcome: 'cold' },
         { id: 'co-lead', scheduled_service_id: 'visit-lead', customer_id: null, lead_id: 'lead-9', outcome: 'warm' },
-        { id: 'co-already-lost', scheduled_service_id: 'visit-already-lost', customer_id: 'cust-1', lead_id: null, outcome: 'lost' },
+        // A no-show loss never converts (Codex #4710 r4 P2 — other lost rows do).
+        { id: 'co-already-lost', scheduled_service_id: 'visit-already-lost', customer_id: 'cust-1', lead_id: null, outcome: 'lost', lost_reason: 'no_show' },
         { id: 'co-future', scheduled_service_id: 'visit-future', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
       ],
     });
@@ -919,7 +924,7 @@ describe('markWonForCustomer', () => {
       .resolves.toBe(0);
   });
 
-  test('atomic guard: one guarded UPDATE carries the outcome + window checks — no read-then-write', async () => {
+  test('Codex #4710 r4 P2: lock, then one candidate SELECT, then a guarded UPDATE per open row — a no-show loss is never touched', async () => {
     const fakeDb = seededDb();
     const tableCalls = [];
     const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
@@ -927,14 +932,40 @@ describe('markWonForCustomer', () => {
 
     const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
     expect(count).toBe(2);
-    // 'customers' first (P1-A round 5's row lock), then leads, then two
-    // guarded UPDATEs (warm, then cold — so pre_win_outcome is a literal),
-    // each holding the outcome guard and the visit-window subquery in its
-    // own WHERE. No candidate SELECT precedes them.
-    expect(tableCalls).toEqual(['customers', 'leads', 'consultation_outcomes', 'consultation_outcomes']);
+    // 'customers' first (P1-A round 5's row lock), then leads, then the one
+    // candidate SELECT; every write after it is a guarded UPDATE keyed on
+    // the row's still-current outcome.
+    expect(tableCalls.slice(0, 3)).toEqual(['customers', 'leads', 'consultation_outcomes as co']);
+    expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(2);
 
     const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
     expect(byId['co-already-lost'].outcome).toBe('lost');
+  });
+
+  test('Codex #4710 r4 P2: the direct hook wins with the EARLIEST evidence (an earlier accepted estimate), not its own booking/now', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [
+        { id: 'visit-1', status: 'completed', service_type: 'Waves Assessment', scheduled_date: etDateString(addETDays(NOW, -10)), customer_id: 'cust-1' },
+        { id: 'sale-1', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: etDateString(addETDays(NOW, 5)), customer_id: 'cust-1', created_at: NOW },
+      ],
+      estimates: [{ id: 'est-1', customer_id: 'cust-1', status: 'accepted', accepted_at: addETDays(NOW, -4) }],
+      leads: [],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', lead_id: null, outcome: 'warm' },
+      ],
+    });
+    await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: NOW, evidenceBookingId: 'sale-1' });
+    const row = fakeDb.__store.consultation_outcomes[0];
+    expect(row).toMatchObject({ outcome: 'won', won_via: 'estimate_accept', won_evidence_booking_id: null });
+    expect(new Date(row.won_at).getTime()).toBe(addETDays(NOW, -4).getTime());
+  });
+
+  test('Codex #4710 r4 P2: a lost outcome with a real reason converts when the customer buys, keeping lost as its prior outcome', async () => {
+    const fakeDb = seededDb();
+    Object.assign(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-already-lost'), { lost_reason: 'price' });
+    const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: NOW });
+    expect(count).toBe(3);
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-already-lost')).toMatchObject({ outcome: 'won', pre_win_outcome: 'lost' });
   });
 
   test('P1-A (round 5): locks the `customers` row FOR NO KEY UPDATE FIRST — inside the savepoint, no advisory key', async () => {
@@ -1549,7 +1580,7 @@ describe('reconcileOpenConsultationOutcomes — no-show outcome repair (round 12
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-ns')).toMatchObject({ outcome: 'lost', lost_reason: 'no_show' });
   });
 
-  test('leaves a won outcome and a non-consultation no-show alone', async () => {
+  test('a non-consultation no-show is left alone; a won outcome on a no-showed consultation is cleared to lost/no_show', async () => {
     const fakeDb = install({
       scheduled_services: [
         { id: 'visit-won', status: 'no_show', service_type: 'Waves Assessment', scheduled_date: '2026-09-20', customer_id: null },
@@ -1562,7 +1593,9 @@ describe('reconcileOpenConsultationOutcomes — no-show outcome repair (round 12
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
     expect(result.no_show_repaired).toBe(0);
     expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
-    expect(fakeDb.__store.consultation_outcomes[0].outcome).toBe('won');
+    // Codex #4710 r4 P2: a win on a consultation that was no-showed
+    // afterwards is cleared by the reopen pass, to markNoShow's own shape.
+    expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'lost', lost_reason: 'no_show', won_at: null });
   });
 });
 
@@ -1644,6 +1677,20 @@ describe('reconcileOpenConsultationOutcomes — a win whose evidence booking die
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
     expect(result.reopened).toBe(1);
     expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'warm', won_evidence_booking_id: null });
+  });
+
+  test('Codex #4710 r4 P2: an ESTIMATE win (no booking behind it) on a consultation cancelled afterwards is cleared back to its prior outcome', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-1', status: 'cancelled', service_type: 'Waves Assessment', scheduled_date: '2026-09-10', customer_id: 'cust-1' },
+      ],
+      consultation_outcomes: [
+        { id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'won', won_via: 'estimate_accept', won_at: new Date('2026-09-12T15:00:00Z'), won_evidence_booking_id: null, pre_win_outcome: 'cold' },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.reopened).toBe(1);
+    expect(fakeDb.__store.consultation_outcomes[0]).toMatchObject({ outcome: 'cold', won_via: null, won_at: null });
   });
 
   test('a live evidence booking, or a win with no recorded evidence, is left won', async () => {

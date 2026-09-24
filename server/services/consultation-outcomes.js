@@ -52,6 +52,25 @@ const WON_WINDOW_DAYS = 90;
 // one (local audit P1). One list shared by every win path — the evidence
 // win, markWonForCustomer and the sweep's selection — so they cannot drift.
 const DEAD_CONSULTATION_STATUSES = ['no_show', 'cancelled', 'skipped'];
+
+// Outcomes a later sale converts to won (Codex #4710 r4 P2): warm and cold,
+// and `lost` too — a customer who declined at the door and bought within
+// the 90-day window is a win. Never a no-show loss (the visit never
+// happened). The prior outcome is kept in pre_win_outcome so a win whose
+// sale dies returns to it.
+const CONVERTIBLE_OUTCOMES = ['warm', 'cold', 'lost'];
+
+// Adds the "this prior outcome can convert" guard for one prior value to a
+// consultation_outcomes query (column names unprefixed).
+function whereConvertible(q, prior) {
+  q.where('outcome', prior);
+  if (prior === 'lost') {
+    q.where(function notNoShowLoss() {
+      this.whereNull('lost_reason').orWhereNot('lost_reason', 'no_show');
+    });
+  }
+  return q;
+}
 // P1 :924 (round 12): the sweep's OWN row-SELECTION cutoff only — never
 // the EVIDENCE bound findSaleEvidenceForConsultation applies (that stays
 // exactly WON_WINDOW_DAYS from the visit's scheduled_date; see its own
@@ -585,11 +604,9 @@ async function attemptEvidenceBasedWin(database, {
     // One guarded UPDATE per prior outcome so pre_win_outcome is a plain
     // literal (no raw column reference) — at most one of the two can match.
     let wonRow = null;
-    for (const prior of ['warm', 'cold']) {
+    for (const prior of CONVERTIBLE_OUTCOMES) {
        
-      const [row] = await sp('consultation_outcomes')
-        .where({ id: outcomeRowId })
-        .where('outcome', prior)
+      const [row] = await whereConvertible(sp('consultation_outcomes').where({ id: outcomeRowId }), prior)
         // A consultation that never happened is never won, even when
         // re-recorded warm/cold afterwards (local audit P1) — same exclusion
         // as markWonForCustomer and the sweep.
@@ -771,7 +788,7 @@ async function recordOutcome(params = {}, { trx } = {}) {
     // path — this call site inlines the customer-row lock above because it
     // ALSO has the insert/merge to run under it first; the sweep has no
     // insert, so it locks + attempts in one step via reconcileOneOpenOutcome.
-    if (['warm', 'cold'].includes(saved.outcome)) {
+    if (CONVERTIBLE_OUTCOMES.includes(saved.outcome) && !(saved.outcome === 'lost' && saved.lost_reason === 'no_show')) {
       try {
         const won = await attemptEvidenceBasedWin(locked, {
           outcomeRowId: saved.id,
@@ -868,36 +885,44 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date(), evid
       // median_days_to_close negative. Bounds the window on BOTH sides.
       const nowDateStr = etDateString(now);
 
-      // Atomic guarded UPDATEs — one per prior outcome, so pre_win_outcome
-      // is a plain literal (Codex #4710 r3 P1) with no read in between: the
-      // outcome guard (only an open warm/cold row can win) and the
-      // [90-day-ago, today] window (a subquery against scheduled_services,
-      // not a prior SELECT) both live in each statement's WHERE, so nothing
-      // can flip a row's outcome between "read" and "write". The win count
-      // is the rows these UPDATEs actually touched.
-      for (const prior of ['warm', 'cold']) {
+      // Per open outcome, the EARLIEST qualifying evidence wins (Codex
+      // #4710 r4 P2) — the same findSaleEvidenceForConsultation search the
+      // sweep and recordOutcome use, so provenance and median_days_to_close
+      // never depend on which hook ran first. The booking/acceptance this
+      // caller just wrote is visible on this transaction and is one of the
+      // candidates; when the search finds nothing (it should not), the
+      // caller's own evidence is used as before. Each write is a guarded
+      // UPDATE on the row's still-current outcome, under the customer lock,
+      // so a row resolved meanwhile is never overwritten.
+      const candidates = await sp('consultation_outcomes as co')
+        .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
+        .whereIn('co.outcome', CONVERTIBLE_OUTCOMES)
+        .where(function matchCustomerOrItsLeads() {
+          this.where('co.customer_id', customerId);
+          if (leadIds.length) this.orWhereIn('co.lead_id', leadIds);
+        })
+        .where('ss.scheduled_date', '>=', cutoff)
+        .where('ss.scheduled_date', '<=', nowDateStr)
+        // A consultation that never happened (no-show, cancelled, skipped)
+        // is never won — even if its best-effort no-show write failed and
+        // the row is still open.
+        .whereNotIn('ss.status', DEAD_CONSULTATION_STATUSES)
+        .select('co.id as outcome_id', 'co.outcome', 'co.lost_reason', 'ss.scheduled_date');
+
+      for (const row of candidates) {
+        if (row.outcome === 'lost' && row.lost_reason === 'no_show') continue;
          
-        const updated = await sp('consultation_outcomes')
-          .where('outcome', prior)
-          .where(function matchCustomerOrItsLeads() {
-            this.where('customer_id', customerId);
-            if (leadIds.length) this.orWhereIn('lead_id', leadIds);
-          })
-          .whereIn('scheduled_service_id', function liveVisits() {
-            this.select('id').from('scheduled_services')
-              .where('scheduled_date', '>=', cutoff)
-              .where('scheduled_date', '<=', nowDateStr)
-              // A consultation that never happened (no-show, cancelled,
-              // skipped) is never won — even if its best-effort no-show
-              // write failed and the row is still open.
-              .whereNotIn('status', DEAD_CONSULTATION_STATUSES);
-          })
+        const evidence = await findSaleEvidenceForConsultation(sp, {
+          customerId, scheduledDateStr: toDateOnlyString(row.scheduled_date), now,
+        }) || { won_via: via, won_at: now, booking_id: evidenceBookingId };
+         
+        const updated = await whereConvertible(sp('consultation_outcomes').where({ id: row.outcome_id }), row.outcome)
           .update({
             outcome: 'won',
-            won_at: now,
-            won_via: via,
-            won_evidence_booking_id: evidenceBookingId,
-            pre_win_outcome: prior,
+            won_at: evidence.won_at,
+            won_via: evidence.won_via,
+            won_evidence_booking_id: evidence.booking_id || null,
+            pre_win_outcome: row.outcome,
             updated_at: now,
           })
           .returning('id');
@@ -979,7 +1004,10 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
     // findSaleEvidenceForConsultation, not here.
     rows = await db('consultation_outcomes as co')
       .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
-      .whereIn('co.outcome', ['warm', 'cold'])
+      .whereIn('co.outcome', CONVERTIBLE_OUTCOMES)
+      .where(function notNoShowLoss() {
+        this.whereNot('co.outcome', 'lost').orWhereNull('co.lost_reason').orWhereNot('co.lost_reason', 'no_show');
+      })
       .whereNotNull('co.customer_id')
       .whereNotIn('ss.status', DEAD_CONSULTATION_STATUSES) // never won; no-shows are repaired to lost above
       .where('ss.scheduled_date', '>=', cutoff)
@@ -1029,9 +1057,10 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
     // examined first (last_reconciled_at NULLS FIRST, the same fairness
     // cursor the win pass uses), so a batch LIMIT can never starve an older
     // win (local audit P1).
+    // ALL wins, not only booking-backed ones (Codex #4710 r4 P2): the
+    // consultation itself can die after the win too, estimate wins included.
     rows = await db('consultation_outcomes as co')
       .where('co.outcome', 'won')
-      .whereNotNull('co.won_evidence_booking_id')
       .orderBy([{ column: 'co.last_reconciled_at', order: 'asc', nulls: 'first' }, { column: 'co.won_at', order: 'asc' }])
       .limit(limit)
       .select('co.id', 'co.customer_id', 'co.scheduled_service_id', 'co.won_evidence_booking_id', 'co.pre_win_outcome');
@@ -1045,6 +1074,31 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
        
       const changed = await db.transaction(async (locked) => {
         if (row.customer_id) await lockCustomerRow(locked, row.customer_id);
+        // The CONSULTATION must still have happened (Codex #4710 r4 P2):
+        // every initial win path excludes a no-show/cancelled/skipped visit,
+        // so a win on one that died afterwards is cleared — a no-show to
+        // lost/no_show (markNoShow's own shape), anything else back to its
+        // prior outcome.
+        const consultation = await locked('scheduled_services').where({ id: row.scheduled_service_id }).first('status');
+        if (!consultation || DEAD_CONSULTATION_STATUSES.includes(consultation.status)) {
+          const noShow = consultation && consultation.status === 'no_show';
+          return locked('consultation_outcomes').where({ id: row.id, outcome: 'won' }).update({
+            outcome: noShow ? 'lost' : (CONVERTIBLE_OUTCOMES.includes(row.pre_win_outcome) ? row.pre_win_outcome : 'warm'),
+            ...(noShow ? { lost_reason: 'no_show' } : {}),
+            won_at: null,
+            won_via: null,
+            won_evidence_booking_id: null,
+            pre_win_outcome: null,
+            last_reconciled_at: now,
+            updated_at: now,
+          });
+        }
+        // An estimate win (no booking behind it) on a live consultation
+        // stands; nothing else to re-judge.
+        if (!row.won_evidence_booking_id) {
+          await locked('consultation_outcomes').where({ id: row.id }).update({ last_reconciled_at: now });
+          return 0;
+        }
         // The win's booking still has to be a real sale by the SAME rule the
         // win pass applies (local audit P1) — not merely uncancelled: an
         // office edit can turn a priced booking into a free re-service
@@ -1084,7 +1138,7 @@ async function reopenWinsWithDeadEvidence({ now, limit, result }) {
           });
         }
         return locked('consultation_outcomes').where(guard).update({
-          outcome: ['warm', 'cold'].includes(row.pre_win_outcome) ? row.pre_win_outcome : 'warm',
+          outcome: CONVERTIBLE_OUTCOMES.includes(row.pre_win_outcome) ? row.pre_win_outcome : 'warm',
           won_at: null,
           won_via: null,
           won_evidence_booking_id: null,

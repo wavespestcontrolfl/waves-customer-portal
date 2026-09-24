@@ -19,12 +19,22 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const {
   recordOutcome,
   consultationStats,
+  WON_WINDOW_DAYS,
 } = require('../services/consultation-outcomes');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // Live assignment, not the consultation_outcomes snapshot — so a tech
 // reassigned off (or onto) a visit sees access change immediately, matching
 // tech-track.js's own ownership checks (svc.technician_id !== req.technicianId).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function loadOwnedVisitOr403(req, res, scheduledServiceId) {
+  // A malformed id is a plain 404 (Codex #4710 r4 P2) — never a
+  // uuid-syntax error from Postgres surfacing as a 500.
+  if (!UUID_RE.test(String(scheduledServiceId || ''))) {
+    res.status(404).json({ error: 'Scheduled service not found' });
+    return null;
+  }
   const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'technician_id');
   if (!visit) {
     res.status(404).json({ error: 'Scheduled service not found' });
@@ -101,7 +111,11 @@ router.get('/stats', adminAuthenticate, requireAdmin, async (req, res, next) => 
         return res.status(400).json({ error: `${name} must be a real YYYY-MM-DD date` });
       }
     }
-    if (from && to && from > to) return res.status(400).json({ error: 'from must be on or before to' });
+    // Ordered AFTER the service's own defaults are applied (Codex #4710 r4
+    // P2): a lone future `from` or past `to` is just as reversed.
+    const effectiveFrom = from || etDateString(addETDays(new Date(), -WON_WINDOW_DAYS));
+    const effectiveTo = to || etDateString(new Date());
+    if (effectiveFrom > effectiveTo) return res.status(400).json({ error: 'from must be on or before to' });
     const stats = await consultationStats({ from: from || undefined, to: to || undefined });
     res.json(stats);
   } catch (err) {
