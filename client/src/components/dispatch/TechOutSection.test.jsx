@@ -261,3 +261,38 @@ describe('cross-tech mutation race (Codex P1)', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('gate closed mid-drawer (Codex r7 P2 on PR #4678)', () => {
+  it('a 404 on confirm hides the section instead of showing an error', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true, absence: null }) });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Availability');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark out today' }));
+    await screen.findByRole('button', { name: 'Confirm' });
+
+    fetch.mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({ enabled: false }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => expect(screen.queryByText('Availability')).toBeNull());
+    expect(screen.queryByText(/Failed to mark out|HTTP 404/)).toBeNull();
+  });
+
+  it('a 404 on "Tech is back" hides the section', async () => {
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        enabled: true,
+        absence: { id: 'abs-1', technician_id: 'tech-1', absence_date: '2026-09-23', reason: 'sick', note: null, redistribution: { total: 0, parked: [] } },
+      }),
+    });
+    render(<TechOutSection techId="tech-1" techName="Tech One" />);
+    await screen.findByText('Out today · Sick');
+
+    fetch.mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({ enabled: false }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Tech is back' }));
+
+    await waitFor(() => expect(screen.queryByText('Out today · Sick')).toBeNull());
+    expect(screen.queryByText('Availability')).toBeNull();
+    expect(screen.queryByText(/Failed to clear|HTTP 404/)).toBeNull();
+  });
+});

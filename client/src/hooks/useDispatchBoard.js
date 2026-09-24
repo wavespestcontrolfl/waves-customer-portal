@@ -135,30 +135,10 @@ export function useDispatchBoard() {
     // the matching <TechCard> sees a new prop reference.
     setTechsMap((prev) => {
       const existing = prev.get(payload.tech_id);
-      if (!existing) {
-        if (!hasFreshDispatchLocation(payload)) return prev;
-        // First broadcast for a tech we didn't see at hydration
-        // (e.g. tech started a shift after page load). Add a stub
-        // row; the next /board fetch on remount will fill in name /
-        // avatar / today_total.
-        const next = new Map(prev);
-        next.set(payload.tech_id, {
-          id: payload.tech_id,
-          name: '(unknown)',
-          avatar_url: null,
-          role: 'technician',
-          status: payload.status,
-          lat: payload.lat == null ? null : Number(payload.lat),
-          lng: payload.lng == null ? null : Number(payload.lng),
-          current_job_id: payload.current_job_id || null,
-          eta_minutes: payload.eta_minutes ?? null,
-          updated_at: payload.updated_at,
-          location_updated_at: payload.location_updated_at || null,
-          today_total: 0,
-          today_completed: 0,
-        });
-        return next;
-      }
+      // A tech the roster does not carry is never synthesized from this
+      // stream: it has no out_today (Codex r7 P2 on #4678), so the live
+      // handler re-reads /board instead (handleTechStatus below).
+      if (!existing) return prev;
       const next = new Map(prev);
       next.set(payload.tech_id, {
         ...existing,
@@ -340,6 +320,17 @@ export function useDispatchBoard() {
     // Buffer while a refresh is pending (see refreshTechs) AND apply
     // live — the replay after the refresh re-applies the same payload.
     function handleTechStatus(payload) {
+      if (!payload || !payload.tech_id) return;
+      // First broadcast for a tech the board did not load (started a shift
+      // after page load, or was omitted as location-stale): the stream
+      // carries no out_today, so the roster is re-read from the server
+      // rather than a stub row advertising a drop target the server would
+      // refuse. Only a fresh location warrants it — a stale ping for an
+      // unknown tech is ignored exactly as before.
+      if (!techsMapRef.current.has(payload.tech_id)) {
+        if (hasFreshDispatchLocation(payload)) refreshTechs();
+        return;
+      }
       if (latestRefreshPendingRef.current) pendingSocketRef.current.push({ type: 'tech_status', payload });
       applyTechStatus(payload);
     }

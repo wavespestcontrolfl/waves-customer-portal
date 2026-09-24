@@ -269,7 +269,7 @@ async function sweepAbsentTechDays({ now } = {}) {
   const absences = await db('technician_absences')
     .whereNull('cleared_at')
     .where('absence_date', '>=', today)
-    .select('id', 'technician_id', 'absence_date', 'reason');
+    .select('id', 'technician_id', 'absence_date', 'reason', 'redistribution');
 
   let parked = 0;
   for (const absence of absences) {
@@ -290,7 +290,7 @@ async function sweepAbsentTechDays({ now } = {}) {
       const stillOut = await trx('technician_absences')
         .where({ id: absence.id })
         .whereNull('cleared_at')
-        .first('id');
+        .first('id', 'redistribution');
       if (!stillOut) return { total: 0, units: 0, skipped: 'cleared' };
 
       const stops = await openStopsForTechDay(trx, { technicianId, date });
@@ -324,7 +324,7 @@ async function sweepAbsentTechDays({ now } = {}) {
       if (uncovered.length === 0) return { total: 0, units: 0 };
 
       const tech = await trx('technicians').where({ id: technicianId }).first('id', 'name');
-      return parkStops(trx, {
+      const swept = await parkStops(trx, {
         technicianId,
         date,
         reason: absence.reason,
@@ -333,6 +333,21 @@ async function sweepAbsentTechDays({ now } = {}) {
         absenceId: absence.id,
         extraPayload: { late_arrival: true },
       });
+      // Fold the swept stops into the absence's stored summary on the same
+      // trx (Codex r7 P2): the drawer reads absence.redistribution.parked,
+      // so a late arrival parked here must count there too, not only in
+      // the Action Queue. Read under the fence (stillOut), never from the
+      // unlocked listing.
+      const stored = (typeof stillOut.redistribution === 'string' ? JSON.parse(stillOut.redistribution) : stillOut.redistribution)
+        || { total: 0, units: 0, parked: [], moved: [], failed: [], status: 'complete' };
+      const merged = {
+        ...stored,
+        total: (stored.total || 0) + swept.total,
+        units: (stored.units || 0) + swept.units,
+        parked: [...(stored.parked || []), ...swept.parked],
+      };
+      await trx('technician_absences').where({ id: absence.id }).update({ redistribution: JSON.stringify(merged) }).returning('id');
+      return swept;
     });
 
     parked += summary.total;

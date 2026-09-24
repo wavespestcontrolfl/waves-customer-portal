@@ -422,3 +422,37 @@ describe('a refresh is the whole roster (Codex r5 P2 on PR #4678)', () => {
     expect(result.current.techs.map((t) => t.id)).toEqual(['tech-1']);
   });
 });
+
+describe('a tech_status for a tech the roster does not carry re-reads the board (Codex r7 P2 on PR #4678)', () => {
+  it('re-fetches /board (which carries out_today) instead of synthesizing a row; a stale ping is ignored', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => initialBoard });
+    const { result } = renderHook(() => useDispatchBoard());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // Stale location for an unknown tech: nothing happens.
+    await act(async () => {
+      socketHandlers['dispatch:tech_status']({ tech_id: 'tech-2', status: 'idle', lat: null, lng: null, updated_at: 't1' });
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.current.techs.map((t) => t.id)).toEqual(['tech-1']);
+
+    // Fresh location for an unknown tech who is marked out today.
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        techs: [
+          { id: 'tech-1', name: 'Tech One', status: 'idle', out_today: false, updated_at: 't1' },
+          { id: 'tech-2', name: 'Tech Two', status: 'en_route', out_today: true, updated_at: 't1' },
+        ],
+        jobs: [],
+      }),
+    });
+    await act(async () => {
+      socketHandlers['dispatch:tech_status']({ tech_id: 'tech-2', status: 'en_route', lat: 27.3, lng: -82.5, updated_at: new Date().toISOString(), location_updated_at: new Date().toISOString() });
+    });
+    await waitFor(() => expect(result.current.techs).toHaveLength(2));
+    const added = result.current.techs.find((t) => t.id === 'tech-2');
+    expect(added.name).toBe('Tech Two');
+    expect(added.out_today).toBe(true);
+  });
+});

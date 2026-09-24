@@ -298,7 +298,6 @@ function TechOutOverflowBody({ alert }) {
     alert.window_start || payload.window_start,
     alert.window_end || payload.window_end
   );
-  const nearMisses = payload.near_misses || [];
   const detailLine = [customer, serviceType].filter(Boolean).join(' · ')
     + (windowLabel ? ` (${windowLabel})` : '');
   return (
@@ -317,11 +316,6 @@ function TechOutOverflowBody({ alert }) {
       {detailLine && <div className="text-ink-secondary">{detailLine}</div>}
       {payload.bump_reason && (
         <p className="text-ink-secondary">{payload.bump_reason}</p>
-      )}
-      {nearMisses.length > 0 && (
-        <p className="text-ink-tertiary text-12">
-          Closest fits: {nearMisses.map((n) => `${n.technician_name} (${n.conflict_reason})`).join(', ')}
-        </p>
       )}
     </div>
   );

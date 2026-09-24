@@ -160,6 +160,14 @@ export default function TechOutSection({ techId, techName, onChanged }) {
         discarded = true;
         return;
       }
+      if (res.status === 404) {
+        // The gate closed between this drawer's status GET and the
+        // confirm: the server answers its documented 404 {enabled:false}.
+        // Same transition the GET takes — hide the controls (Codex r7 P2).
+        setPhase('off');
+        setAbsence(null);
+        return;
+      }
       if (res.status === 409 || res.status === 400) {
         setSubmitError(postErrorMessage(data.error) || data.error || 'Failed to mark out');
         return;
@@ -205,6 +213,12 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       if (res.ok) onChangedRef.current?.(requestTechId);
       if (fetchSeqRef.current !== seq || techIdRef.current !== requestTechId) {
         discarded = true;
+        return;
+      }
+      if (res.status === 404) {
+        // Gate closed mid-drawer — see handleConfirmMarkOut.
+        setPhase('off');
+        setAbsence(null);
         return;
       }
       if (!res.ok) {

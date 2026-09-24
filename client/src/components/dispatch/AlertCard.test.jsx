@@ -109,7 +109,6 @@ describe('tech_out_overflow alert', () => {
         customer_name: 'Test Customer', service_type: 'General pest',
         window_start: '09:00:00', window_end: '11:00:00',
         bump_order: 2, bump_total: 5, bump_reason: 'Recurring service, unconfirmed window',
-        near_misses: [{ technician_id: 'tech-x', technician_name: 'Tech X', conflict_reason: 'already at capacity' }],
       },
     }} />);
     expect(screen.getByText('Needs a decision')).toBeTruthy();
@@ -119,7 +118,8 @@ describe('tech_out_overflow alert', () => {
     expect(screen.getByText(/Test C\./)).toBeTruthy();
     expect(screen.getByText(/General pest/)).toBeTruthy();
     expect(screen.getByText(/9:00–11:00/)).toBeTruthy();
-    expect(screen.getByText(/Closest fits: Tech X \(already at capacity\)/)).toBeTruthy();
+    // No "closest fits" line: the park-only foundation never emits near_misses.
+    expect(screen.queryByText(/Closest fits/)).toBeNull();
   });
 
   it('falls back to payload identity fields on a bare live-socket row', () => {

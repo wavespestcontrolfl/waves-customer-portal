@@ -552,6 +552,26 @@ describe('sweepAbsentTechDays', () => {
     expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(createAlert.mock.invocationCallOrder[0]);
   });
 
+  test('a swept late arrival is folded into the absence\'s stored redistribution on the same trx (Codex r7 P2)', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'orig' })]));
+    const { absence } = await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    expect(absence.redistribution).toMatchObject({ total: 1, units: 1 });
+    db.__state.alerts.push({ id: 'alert-orig', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'orig', resolved_at: null, payload: { date: DATE, absence_id: absence.id } });
+    createAlert.mockClear();
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'orig' }), stop({ id: 'late-1' })]));
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 1 });
+    const stored = db.__state.absences[absence.id].redistribution;
+    expect(stored).toMatchObject({ total: 2, units: 2 });
+    expect(stored.parked.map((p) => p.job_id)).toEqual(['orig', 'late-1']);
+    // Written on the sweep's transaction, not a plain connection.
+    const trx = db.__lastTrx;
+    expect(trx.__chains.some((x) => x.table === 'technician_absences' && x.c.update.mock.calls.length > 0)).toBe(true);
+  });
+
   test('an absence cleared while the sweep waited on the fence parks nothing (re-read under the fence)', async () => {
     process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
     db.__state.absences['absence-1'] = {
