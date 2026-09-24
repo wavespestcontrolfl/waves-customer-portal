@@ -272,7 +272,7 @@ describe('lead-funnel-bridge call sites', () => {
     expect(src).toMatch(/leadAttribution\.settleWonFunnelRow\(req\.params\.id, customerId\)/);
     expect(src).not.toMatch(/bridgeLeadFunnelStage\(req\.params\.id, 'won'\)/);
     // ...and so is the PUT status editor's won (codex #3834 r34 P1).
-    expect(src).toMatch(/if \(updates\.status === 'won'\) await leadAttribution\.settleWonFunnelRow\(req\.params\.id, lead\.customer_id \|\| null\)/);
+    expect(src).toMatch(/if \(updates\.status === 'won'\) await leadAttribution\.settleWonFunnelRow\(req\.params\.id, responseLead\.customer_id \|\| null\)/);
   });
 
   test('lead-response agent contacted transition bridges inside its transaction', () => {

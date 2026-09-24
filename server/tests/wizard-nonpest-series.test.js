@@ -389,7 +389,16 @@ describe('booking route wiring (source contracts)', () => {
 
   test('a reschedule-pending visit keeps a fixed series ACTIVE in the duplicate guard (r15)', () => {
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
-    expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'\]\)[\s\S]{0,900}this\.where\('scheduled_date', '>=', etDateString\(\)\)\s*\n\s*\.orWhere\('status', 'rescheduled'\)/);
+    // The upcoming-row probe routes through the lifecycle guard's shared
+    // tracker-aware clause (GitHub Codex #4684 r8); the r15/r21/r25 status
+    // set and date exemptions are pinned there.
+    const lifecycleGuard = fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-lifecycle-guard.js'), 'utf8');
+    expect(seeder).toMatch(/\.where\(function activeRow\(\) \{\s*\n\s*require\('\.\/customer-lifecycle-guard'\)\.whereVisitRowLive\(this, etDateString\(\)/);
+    expect(lifecycleGuard).toMatch(/const IN_PROGRESS_STATUSES = \['en_route', 'on_site'\];/);
+    expect(lifecycleGuard).toMatch(/const CANCELLABLE_STATUSES = \['pending', 'confirmed', 'rescheduled'\];|CANCELLABLE_STATUSES \} = require\('\.\/cancellation-eligibility'\)/);
+    expect(lifecycleGuard).toMatch(/const dateExemptStatuses = \['rescheduled', \.\.\.IN_PROGRESS_STATUSES\];/);
+    expect(lifecycleGuard).toMatch(/for \(const status of \[\.\.\.CANCELLABLE_STATUSES, \.\.\.IN_PROGRESS_STATUSES\]\) this\.orWhere\('status', status\);/);
+    expect(lifecycleGuard).toMatch(/this\.where\('scheduled_date', '>=', today\);\s*\n\s*for \(const status of dateExemptStatuses\) this\.orWhere\('status', status\);/);
     // r16: a rescheduled PARENT stays in the candidate set too — only a
     // cancelled parent is excluded; the probe/ongoing flag decide activity.
     expect(seeder).toMatch(/\.whereNull\('recurring_parent_id'\)[\s\S]{0,700}\.whereNotIn\('status', \['cancelled'\]\)\s*\n\s*\.select\('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status'\)/);
@@ -804,8 +813,16 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/in_flight: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : BILLING_UNTOUCHED_PATCH\)\(/);
     expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : BILLING_UNTOUCHED_PATCH\)\(/);
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
-    expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'\]\)/);
-    expect(seeder).toMatch(/\.orWhere\('status', 'rescheduled'\)\s*\n\s*\.orWhere\('status', 'en_route'\)\s*\n\s*\.orWhere\('status', 'on_site'\);/);
+    // The upcoming-row probe routes through the lifecycle guard's shared
+    // tracker-aware clause (GitHub Codex #4684 r8); the r15/r21/r25 status
+    // set and date exemptions are pinned there.
+    const lifecycleGuard = fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-lifecycle-guard.js'), 'utf8');
+    expect(seeder).toMatch(/\.where\(function activeRow\(\) \{\s*\n\s*require\('\.\/customer-lifecycle-guard'\)\.whereVisitRowLive\(this, etDateString\(\)/);
+    expect(lifecycleGuard).toMatch(/const IN_PROGRESS_STATUSES = \['en_route', 'on_site'\];/);
+    expect(lifecycleGuard).toMatch(/const CANCELLABLE_STATUSES = \['pending', 'confirmed', 'rescheduled'\];|CANCELLABLE_STATUSES \} = require\('\.\/cancellation-eligibility'\)/);
+    expect(lifecycleGuard).toMatch(/const dateExemptStatuses = \['rescheduled', \.\.\.IN_PROGRESS_STATUSES\];/);
+    expect(lifecycleGuard).toMatch(/for \(const status of \[\.\.\.CANCELLABLE_STATUSES, \.\.\.IN_PROGRESS_STATUSES\]\) this\.orWhere\('status', status\);/);
+    expect(lifecycleGuard).toMatch(/this\.where\('scheduled_date', '>=', today\);\s*\n\s*for \(const status of dateExemptStatuses\) this\.orWhere\('status', status\);/);
     expect(booking).toMatch(/const draftGenerationMatches = !lockedParent\?\.source_estimate_generation\s*\n\s*\|\| \(!!lockedDraft\?\.updated_at\s*\n\s*&& new Date\(lockedDraft\.updated_at\)\.getTime\(\) === new Date\(lockedParent\.source_estimate_generation\)\.getTime\(\)\);/);
     expect(booking).toMatch(/\|\| !quotedPropertyIsBooked\s*\n\s*\|\| !draftGenerationMatches/);
   });
@@ -847,7 +864,16 @@ describe('booking route wiring (source contracts)', () => {
 
   test('r21: overdue reschedule placeholders stay active; extended reservation is echoed on the response', () => {
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
-    expect(seeder).toMatch(/\.where\(function activeBound\(\) \{\s*\n\s*this\.where\('scheduled_date', '>=', etDateString\(\)\)\s*\n\s*\.orWhere\('status', 'rescheduled'\)/);
+    // The upcoming-row probe routes through the lifecycle guard's shared
+    // tracker-aware clause (GitHub Codex #4684 r8); the r15/r21/r25 status
+    // set and date exemptions are pinned there.
+    const lifecycleGuard = fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-lifecycle-guard.js'), 'utf8');
+    expect(seeder).toMatch(/\.where\(function activeRow\(\) \{\s*\n\s*require\('\.\/customer-lifecycle-guard'\)\.whereVisitRowLive\(this, etDateString\(\)/);
+    expect(lifecycleGuard).toMatch(/const IN_PROGRESS_STATUSES = \['en_route', 'on_site'\];/);
+    expect(lifecycleGuard).toMatch(/const CANCELLABLE_STATUSES = \['pending', 'confirmed', 'rescheduled'\];|CANCELLABLE_STATUSES \} = require\('\.\/cancellation-eligibility'\)/);
+    expect(lifecycleGuard).toMatch(/const dateExemptStatuses = \['rescheduled', \.\.\.IN_PROGRESS_STATUSES\];/);
+    expect(lifecycleGuard).toMatch(/for \(const status of \[\.\.\.CANCELLABLE_STATUSES, \.\.\.IN_PROGRESS_STATUSES\]\) this\.orWhere\('status', status\);/);
+    expect(lifecycleGuard).toMatch(/this\.where\('scheduled_date', '>=', today\);\s*\n\s*for \(const status of dateExemptStatuses\) this\.orWhere\('status', status\);/);
     expect(booking).toMatch(/parentExtension = \{ end_time: extendedEnd, duration_minutes: seededChildDuration \};/);
     expect(booking).toMatch(/return \{ seedResult, parentExtension \};/);
     expect(booking).toMatch(/if \(seriesOutcome\?\.parentExtension\) Object\.assign\(booking, seriesOutcome\.parentExtension\);/);

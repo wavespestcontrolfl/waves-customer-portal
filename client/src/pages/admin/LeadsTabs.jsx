@@ -513,12 +513,14 @@ function LeadField({
   placeholder,
   className,
   options,
+  required = false,
 }) {
   const control = options ? (
     <Select
       value={value || ""}
       onChange={(event) => onChange(event.target.value)}
       className={className}
+      required={required}
     >
       <option value="">-- Select --</option>
       {options.map((option) => (
@@ -534,10 +536,11 @@ function LeadField({
       onChange={(event) => onChange(event.target.value)}
       placeholder={placeholder}
       className={className}
+      required={required}
     />
   );
   return label ? (
-    <Field label={label} className="mb-3">
+    <Field label={label} required={required} className="mb-3">
       {control}
     </Field>
   ) : (
@@ -730,13 +733,14 @@ const LEAD_FILTER_KEYS = {
 function leadFiltersFromParams(params) {
   const drill = readSourceDrillParams(params);
   const status = params.get("leadStatus");
+  const hasLinkedLead = params.has("lead") || params.has("leadId");
   return {
     status:
       status === "all"
         ? ""
         : ["open", ...STATUSES].includes(status)
           ? status
-          : params.has("lead")
+          : hasLinkedLead
             ? ""
             : (drill?.status ?? "open"),
     search: params.get("leadSearch") || "",
@@ -807,6 +811,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
   const [leadCalls, setLeadCalls] = useState([]);
+  const openedLinkedLeadRef = useRef(null);
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
   const [contactMatches, setContactMatches] = useState(null);
@@ -839,7 +844,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     () => leadFiltersFromParams(searchParams),
     [searchParams],
   );
-  const linkedLeadId = searchParams.get("lead");
+  const legacyLinkedLeadId = searchParams.get("leadId");
+  const linkedLeadId = searchParams.get("lead") || legacyLinkedLeadId;
   const setFilters = useCallback(
     (updater) => {
       setSearchParams(
@@ -848,7 +854,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           const next =
             typeof updater === "function" ? updater(current) : updater;
           const updated = new URLSearchParams(params);
-          ["from", "to", "status", "lead"].forEach((key) =>
+          ["from", "to", "status", "lead", "leadId"].forEach((key) =>
             updated.delete(key),
           );
           if (!next.source_name) updated.delete("period_label");
@@ -898,6 +904,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const [draggingLeadId, setDraggingLeadId] = useState(null);
   const [deletingLeadId, setDeletingLeadId] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [pipelineLoadState, setPipelineLoadState] = useState("loading");
+  const [pipelineLoadError, setPipelineLoadError] = useState(null);
+  const hasLoadedLeadsRef = useRef(false);
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
   // Consultation link (lead-inspection-link-scope.md §4), dark behind
@@ -966,7 +975,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       // request commits.
       const requestId = ++leadsRequestRef.current;
       try {
-        if (!silent) setLoadError(null);
+        if (!silent) {
+          setPipelineLoadError(null);
+          setPipelineLoadState("loading");
+        }
         const params = new URLSearchParams();
         if (linkedLeadId) params.set("id", linkedLeadId);
         // List and board apply the same server-side filters and pagination.
@@ -988,10 +1000,15 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         setLeads(data.leads || []);
         setLeadsTotal(data.total || 0);
         setConsultationGate(data.consultationLinksEnabled === true);
+        hasLoadedLeadsRef.current = true;
+        setPipelineLoadState("success");
       } catch (e) {
         if (requestId !== leadsRequestRef.current) return; // superseded
         console.error("loadLeads", e);
-        if (!silent) setLoadError(e);
+        if (!silent || !hasLoadedLeadsRef.current) {
+          setPipelineLoadError(e);
+          setPipelineLoadState("error");
+        }
       }
     },
     [
@@ -1154,14 +1171,43 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // Notifications and duplicate matches use the same exact-record filter,
   // including records outside the first page. Ordinary filters clear it.
   useEffect(() => {
-    if (!linkedLeadId) return;
+    if (!legacyLinkedLeadId) return;
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (!next.get("lead")) next.set("lead", legacyLinkedLeadId);
+        next.delete("leadId");
+        next.delete("leadView");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [legacyLinkedLeadId, setSearchParams]);
+  useEffect(() => {
+    if (!linkedLeadId) {
+      openedLinkedLeadRef.current = null;
+      return;
+    }
+    // URL writes (for example switching List -> Board) can replace the
+    // searchParams setter. Do not treat those writes as a fresh deep link and
+    // snap the operator back to List or refetch the same activity timeline.
+    if (openedLinkedLeadRef.current === linkedLeadId) return;
+    openedLinkedLeadRef.current = linkedLeadId;
     setTab("pipeline");
-    setPipelineView("table");
+    if (!legacyLinkedLeadId) {
+      setPipelineView("table");
+    }
     setActiveLead(linkedLeadId);
     loadLeadActivities(linkedLeadId);
     // The consultation probe for this deep-linked row runs from the
     // gate-aware effect below once the list response says the gate is on.
-  }, [linkedLeadId, setActiveLead, loadLeadActivities, setPipelineView]);
+  }, [
+    linkedLeadId,
+    legacyLinkedLeadId,
+    setActiveLead,
+    loadLeadActivities,
+    setPipelineView,
+  ]);
 
   // Probe the expanded lead once the page-level gate is known to be on —
   // covers the ?lead= deep link (which expands before the list loads) and
@@ -1195,7 +1241,15 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     loadLeadActivities(lead.id);
     if (consultationGate === true && !consultationLinks[lead.id]) loadConsultationLink(lead.id);
   };
+  const openLostModal = useCallback((leadId) => {
+    setFormData({ leadId });
+    setShowModal("lost");
+  }, []);
   const updateLeadStatus = async (leadId, status) => {
+    if (status === "lost") {
+      openLostModal(leadId);
+      return;
+    }
     try {
       await adminFetch(`/admin/leads/${leadId}`, {
         method: "PUT",
@@ -1237,17 +1291,21 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     }
   };
   const retryCurrentTab = () => {
-    setLoadError(null);
     if (tab === "pipeline") {
+      setPipelineLoadError(null);
       loadLeads();
       loadAnalytics();
       loadSources();
     }
     if (tab === "sources") {
+      setLoadError(null);
       loadSources();
       loadSourceROI();
     }
-    if (tab === "analytics") loadAnalytics();
+    if (tab === "analytics") {
+      setLoadError(null);
+      loadAnalytics();
+    }
   };
   const submitForm = async () => {
     setLoading(true);
@@ -1502,13 +1560,26 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             aria-live="polite"
             className="mt-[12px] text-ink-secondary text-ui-body"
           >
-            {leadsTotal === 0
-              ? "No matching leads"
-              : `${(filters.page - 1) * 50 + 1}–${Math.min(filters.page * 50, leadsTotal)} of ${leadsTotal} matching leads`}
+            {pipelineLoadState === "loading"
+              ? "Loading leads…"
+              : pipelineLoadState === "error"
+                ? "Lead results unavailable"
+                : leadsTotal === 0
+                  ? "No matching leads"
+                  : `${(filters.page - 1) * 50 + 1}–${Math.min(filters.page * 50, leadsTotal)} of ${leadsTotal} matching leads`}
             {pipelineView === "board" ? " · column counts show this page" : ""}
           </div>
         </div>
-        {pipelineView === "table" && (
+        {pipelineLoadState === "loading" && (
+          <Card
+            role="status"
+            aria-live="polite"
+            className="p-[40px] text-center text-ink-secondary"
+          >
+            Loading leads…
+          </Card>
+        )}
+        {pipelineLoadState === "success" && pipelineView === "table" && (
           <>
             {/* Leads Table */}
             <Card className="p-[0px]">
@@ -2301,12 +2372,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       </Button>{" "}
                                       <Button
                                         variant={"danger"}
-                                        onClick={() => {
-                                          setFormData({
-                                            leadId: lead.id,
-                                          });
-                                          setShowModal("lost");
-                                        }}
+                                        onClick={() => openLostModal(lead.id)}
                                       >
                                         Mark Lost
                                       </Button>{" "}
@@ -2746,7 +2812,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           </>
         )}
 
-        {pipelineView === "board" && (
+        {pipelineLoadState === "success" && pipelineView === "board" && (
           <div
             role="region"
             aria-label="Lead board"
@@ -2891,7 +2957,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           </div>
         )}
         {/* Pagination */}
-        {leadsTotal > 50 && (
+        {pipelineLoadState === "success" && leadsTotal > 50 && (
           <div className="flex justify-center gap-[8px] mt-[16px]">
             {" "}
             <Button
@@ -4026,6 +4092,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               }))
             }
             options={LOST_REASONS}
+            required
           />
           {formData.reason === "competitor" && (
             <LeadField
@@ -4053,7 +4120,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               className="w-full min-h-[80px] resize-y box-border"
             />
           </Field>{" "}
-          <Button onClick={submitForm} disabled={loading} variant={"danger"}>
+          <Button
+            onClick={submitForm}
+            disabled={loading || !formData.reason}
+            variant={"danger"}
+          >
             {loading ? "Saving..." : "Mark Lost"}
           </Button>{" "}
         </LeadDialog>
@@ -4275,9 +4346,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           analytics: bySource.length || byChannel.length,
         }}
       />
-      {loadError && (
+      {(tab === "pipeline" ? pipelineLoadError : loadError) && (
         <ActionFeedback error className="mb-4">
-          Pipeline data failed to load: {loadError.message || String(loadError)}
+          Pipeline data failed to load:{" "}
+          {(tab === "pipeline" ? pipelineLoadError : loadError).message ||
+            String(tab === "pipeline" ? pipelineLoadError : loadError)}
           <Button
             type="button"
             onClick={retryCurrentTab}
