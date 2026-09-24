@@ -1609,6 +1609,70 @@ function isEmptyValue(v) {
     || normName(v) === '';
 }
 
+// Serializes the merge against the 'recurring-series-create' advisory locks
+// the three series creators (estimate-converter, booking.js self-book,
+// admin POST /admin/schedule) take via checkActiveSeriesLocked/
+// acquireSeriesCreateLocks before they insert a new parent (GitHub Codex
+// round-4 P1 #4684). Those creators hold their locks to their OWN outer
+// commit and only take a customer row lock afterward; this merge takes its
+// customer row lock (below) and then repoints the loser's series onto the
+// winner. Without this, a creator for the winner's identity can pass its
+// own duplicate-series guard while the loser still owns the matching
+// series, block on this merge's customer row lock, and then insert a
+// second live series right after the merge moves the loser's series onto
+// the winner — landing two live parents in the same family.
+//
+// Both customer ids are keyed for EVERY identity either party anchors,
+// not just their own: the winner must be locked for every family the
+// loser carries, because that is exactly the family the merge is about to
+// move onto the winner, and a creator racing the winner's OWN identity
+// needs to be blocked too. Any status is read (not just active/live) —
+// a cancelled parent's family can still be "live" via cancelledParentStillLive
+// (see liveFamilyMatches), so a creator's guard can still match it; the lock
+// namespace is about serializing WHICH creators may run, not about deciding
+// liveness.
+//
+// Locks are collected as a deduped, sorted union and acquired directly on
+// the merge's own transaction (never a savepoint) BEFORE the `customers`
+// row lock, matching this file's rule that every advisory lock this
+// function takes (collections_case, property-preferences,
+// invoice-issued-closeout, pay.combined.customer) precedes the row lock.
+// The sorted-union discipline mirrors acquireSeriesCreateLocks' own
+// deadlock-avoidance reasoning: any two callers taking a set of these keys
+// in the same total order can never hold-and-wait on each other.
+async function lockSeriesCreateForMerge(trx, winnerId, loserId) {
+  const { seriesCreateLockKeys } = require('./recurring-appointment-seeder');
+  const parentRowsRaw = await trx('scheduled_services')
+    .whereIn('customer_id', [winnerId, loserId])
+    .where({ is_recurring: true })
+    .whereNull('recurring_parent_id')
+    .select('customer_id', 'service_id', 'service_type');
+  const parentRows = Array.isArray(parentRowsRaw) ? parentRowsRaw : [];
+  const seenIdentity = new Set();
+  const identities = [];
+  for (const row of parentRows) {
+    const identityKey = `${row.service_id || ''}::${row.service_type || ''}`;
+    if (seenIdentity.has(identityKey)) continue;
+    seenIdentity.add(identityKey);
+    identities.push({ serviceId: row.service_id || null, serviceType: row.service_type || null });
+  }
+  const keys = [...new Set(
+    identities.flatMap(({ serviceId, serviceType }) => {
+      if (serviceId == null && !serviceType) return [];
+      return [winnerId, loserId].flatMap(
+        (customerId) => seriesCreateLockKeys({ customerId, serviceId, serviceType }),
+      );
+    }),
+  )].sort();
+  for (const lockKey of keys) {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['recurring-series-create', lockKey],
+    );
+  }
+  return keys;
+}
+
 /**
  * Merge `loserId` into `winnerId`. Everything runs in one transaction; any
  * conflict aborts the whole merge (the pair stays in the review queue).
@@ -1678,6 +1742,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // PostgreSQL can't see. Two advisory locks per merge is cheap;
     // sorted ids for deterministic order.
     await require('./pay-combined').lockCombinedCustomers(trx, [winnerId, loserId].map(String).sort());
+    // The recurring-series-create advisory locks, BEFORE the customer row
+    // lock below (GitHub Codex round-4 P1 #4684): see lockSeriesCreateForMerge
+    // for the race this closes (a series creator can pass its own
+    // duplicate-series guard for the winner while the loser still owns the
+    // matching series, then insert right after this merge moves the
+    // loser's series onto the winner).
+    await lockSeriesCreateForMerge(trx, winnerId, loserId);
     // A collection call mid-flight defers the merge (codex gh-r10): the
     // dial claim also takes these case locks, so this check is
     // authoritative — a 'dialing' case means a live call is using policy
@@ -5550,6 +5621,7 @@ module.exports = {
   findDuplicateGroups,
   duplicatePairEligibility,
   executeMerge,
+  lockSeriesCreateForMerge,
   runAutoMergeSweep,
   runRedPairAutoDismissSweep,
   revertMerge,
