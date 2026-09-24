@@ -13,11 +13,13 @@ jest.mock('../../packages/editorial-evidence/index.cjs', () => ({
 const gh = require('../services/content-astro/github-client');
 const editorial = require('../services/content/editorial-evidence');
 const contract = require('../../packages/editorial-evidence/index.cjs');
+const validateFixedBlogFile = require('../services/content/codex-remediation').validateFixedBlogFile;
 const { reviewPr, retryReview, refreshStale } = require('../scripts/review-editorial-pr');
 const path = 'src/content/blog/test.md';
-const pr = { number: 1, state: 'open', head: { sha: 'reviewed-sha', ref: 'content/test', repo: { full_name: 'waves/astro' } }, base: { ref: 'main' } };
+const pr = { number: 1, state: 'open', head: { sha: 'reviewed-sha', ref: 'content/test', repo: { full_name: 'waves/astro' } }, base: { ref: 'main', sha: 'base-sha' } };
 beforeEach(() => {
   jest.clearAllMocks();
+  validateFixedBlogFile.mockReset().mockResolvedValue({ ok: true, requiresHumanReview: false });
   gh.getPr.mockResolvedValue(pr);
   gh.ghFetchPaginated.mockResolvedValue([{ filename: path, status: 'modified' }]);
   gh.getFile.mockImplementation(async (name) => ({ content: name.endsWith('.json') ? '{}' : '---\ntitle: Test\n---\nTest body' }));
@@ -30,13 +32,43 @@ test('only trusted same-repository PRs may receive evidence', async () => {
   await expect(reviewPr(1)).rejects.toThrow('same-repository');
   expect(editorial.filesForDocument).not.toHaveBeenCalled();
 });
-test('pins evidence commit to reviewed head and never repairs managed article bytes', async () => {
+test('pins evidence commit to reviewed head, validates managed bytes, and never repairs them', async () => {
   expect(await reviewPr(1)).toMatchObject({ pass: true, requiresFreshBuild: true });
   expect(gh.commitFiles).toHaveBeenCalledWith(expect.objectContaining({ expectedHeadSha: 'reviewed-sha' }));
   expect(editorial.prepareDraft).not.toHaveBeenCalled();
+  expect(validateFixedBlogFile).toHaveBeenCalledWith(expect.any(String), {
+    originalMetaDescription: '',
+    requireFactCheck: true,
+  });
+  expect(gh.getFile).toHaveBeenCalledWith(path, 'base-sha');
+});
+test('freshly signed managed bytes need no repeat validation or base read', async () => {
+  contract.verifyManifest.mockReturnValue({ pass: true });
+  await expect(reviewPr(1)).resolves.toEqual({ pass: true, unchanged: true });
+  expect(editorial.prepareDraft).not.toHaveBeenCalled();
+  expect(validateFixedBlogFile).not.toHaveBeenCalled();
+  expect(gh.getFile).not.toHaveBeenCalledWith(path, 'base-sha');
+  expect(gh.commitFiles).not.toHaveBeenCalled();
+});
+test('a content-prefixed same-repository branch cannot bypass publishing policy', async () => {
+  validateFixedBlogFile.mockResolvedValue({ ok: false, requiresHumanReview: false, reason: 'guardrails BLOG_META_SALESY' });
+
+  await expect(reviewPr(1)).resolves.toEqual(expect.objectContaining({
+    pass: false,
+    deferred: true,
+    failures: [expect.objectContaining({ reason: expect.stringContaining('BLOG_META_SALESY') })],
+  }));
+  expect(editorial.prepareDraft).not.toHaveBeenCalled();
+  expect(editorial.filesForDocument).not.toHaveBeenCalled();
+  expect(gh.commitFiles).not.toHaveBeenCalled();
 });
 test('head movement prevents any evidence commit', async () => {
   gh.getPr.mockResolvedValueOnce(pr).mockResolvedValueOnce({ ...pr, head: { ...pr.head, sha: 'new-sha' } });
+  await expect(reviewPr(1)).rejects.toThrow('changed during review');
+  expect(gh.commitFiles).not.toHaveBeenCalled();
+});
+test('base movement prevents evidence committed from an obsolete metadata grandfather', async () => {
+  gh.getPr.mockResolvedValueOnce(pr).mockResolvedValueOnce({ ...pr, base: { ...pr.base, sha: 'new-base-sha' } });
   await expect(reviewPr(1)).rejects.toThrow('changed during review');
   expect(gh.commitFiles).not.toHaveBeenCalled();
 });
@@ -67,6 +99,73 @@ test('hand-authored repairs cannot waive policies that require human review', as
   validate.mockResolvedValue({ ok: true, requiresHumanReview: true });
   expect(await reviewPr(1)).toMatchObject({ pass: false, deferred: true });
   expect(validate).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ requireFactCheck: true }));
+  expect(gh.commitFiles).not.toHaveBeenCalled();
+});
+
+test('hand-authored metadata changes are validated against the exact immutable base value', async () => {
+  gh.getPr.mockResolvedValue({ ...pr, head: { ...pr.head, ref: 'article/test' } });
+  const previousPath = 'src/content/blog/previous-test.md';
+  gh.ghFetchPaginated.mockResolvedValue([{ filename: path, previous_filename: previousPath, status: 'renamed' }]);
+  gh.getFile.mockImplementation(async (name, sha) => {
+    if (name.endsWith('.json')) return { content: '{}' };
+    if (sha === 'base-sha') return { content: '---\ntitle: Test\nmetaDescription: Exact camel base value\nmeta_description: Lower-priority snake value\n---\nBase body' };
+    return { content: '---\ntitle: Test\nmetaDescription: Call now for a special offer\n---\nTest body' };
+  });
+  editorial.prepareDraft.mockResolvedValue({ body: 'Test body' });
+  validateFixedBlogFile.mockResolvedValue({ ok: true, requiresHumanReview: false });
+
+  expect(await reviewPr(1)).toMatchObject({ pass: true, requiresFreshBuild: true });
+  expect(gh.getFile).toHaveBeenCalledWith(previousPath, 'base-sha');
+  expect(validateFixedBlogFile).toHaveBeenCalledWith(expect.any(String), {
+    originalMetaDescription: 'Exact camel base value',
+    requireFactCheck: true,
+  });
+});
+
+test('a newly added hand-authored article explicitly disables metadata grandfathering without a base read', async () => {
+  gh.getPr.mockResolvedValue({ ...pr, head: { ...pr.head, ref: 'article/new' } });
+  gh.ghFetchPaginated.mockResolvedValue([{ filename: path, status: 'added' }]);
+  gh.getFile.mockImplementation(async (name) => ({ content: name.endsWith('.json')
+    ? '{}'
+    : '---\ntitle: Test\nmeta_description: Call now for a special offer\n---\nTest body' }));
+  editorial.prepareDraft.mockResolvedValue({ body: 'Test body' });
+  validateFixedBlogFile.mockResolvedValue({ ok: true, requiresHumanReview: false });
+
+  expect(await reviewPr(1)).toMatchObject({ pass: true, requiresFreshBuild: true });
+  expect(validateFixedBlogFile).toHaveBeenCalledWith(expect.any(String), {
+    originalMetaDescription: '',
+    requireFactCheck: true,
+  });
+  expect(gh.getFile).not.toHaveBeenCalledWith(path, 'base-sha');
+});
+
+test('a hand-authored PR without an immutable base SHA fails closed', async () => {
+  gh.getPr.mockResolvedValue({
+    ...pr,
+    head: { ...pr.head, ref: 'article/test' },
+    base: { ref: 'main' },
+  });
+
+  await expect(reviewPr(1)).rejects.toThrow(/base.sha/);
+  expect(editorial.prepareDraft).not.toHaveBeenCalled();
+  expect(validateFixedBlogFile).not.toHaveBeenCalled();
+  expect(gh.commitFiles).not.toHaveBeenCalled();
+});
+
+test('a missing modified-file base revision fails closed before validation', async () => {
+  gh.getPr.mockResolvedValue({ ...pr, head: { ...pr.head, ref: 'article/test' } });
+  gh.getFile.mockImplementation(async (name, sha) => {
+    if (name.endsWith('.json')) return { content: '{}' };
+    if (sha === 'base-sha') return null;
+    return { content: '---\ntitle: Test\nmeta_description: Proposed metadata\n---\nTest body' };
+  });
+
+  await expect(reviewPr(1)).resolves.toEqual(expect.objectContaining({
+    pass: false,
+    deferred: true,
+    failures: [expect.objectContaining({ reason: expect.stringContaining('reviewed base') })],
+  }));
+  expect(validateFixedBlogFile).not.toHaveBeenCalled();
   expect(gh.commitFiles).not.toHaveBeenCalled();
 });
 

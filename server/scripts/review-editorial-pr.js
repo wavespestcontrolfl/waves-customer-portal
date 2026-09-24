@@ -24,7 +24,8 @@ async function readArticles(pr) {
     try { manifest = JSON.parse(evidence?.content); } catch { /* fresh review required */ }
     const input = { document: original.content, path: file.filename, domain: 'wavespestcontrol.com', manifest,
       publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY };
-    files.push({ path: file.filename, document: original.content,
+    files.push({ path: file.filename, previousPath: file.previous_filename || null,
+      status: file.status, document: original.content,
       fresh: contract.verifyManifest(input).pass });
   }
   return files;
@@ -39,7 +40,8 @@ async function reviewPr(number) {
     head: Joi.object({ sha: Joi.string().required(), ref: Joi.string().required(),
       repo: Joi.object({ full_name: Joi.valid(`${owner}/${repo}`).required() }).unknown().required(),
     }).unknown().required(),
-    base: Joi.object({ ref: Joi.valid(gh.env().defaultBranch).required() }).unknown().required(),
+    base: Joi.object({ ref: Joi.valid(gh.env().defaultBranch).required(),
+      sha: Joi.string().required() }).unknown().required(),
   }).unknown().required(), 'Only open, same-repository PRs against the default branch are supported');
   const files = await readArticles(pr);
   const commits = [];
@@ -47,21 +49,35 @@ async function reviewPr(number) {
   for (const file of files.filter((item) => !item.fresh)) {
     try {
       let document = file.document;
-      // Portal-owned PRs retain their existing remediation/mirror authority.
-      // Hand-authored content can be repaired here before the same content gates.
+      // Grade metadata changes against the immutable base revision on every
+      // stale article. A branch name is not proof of portal ownership and can
+      // never waive the publishing policy.
+      let originalMetaDescription = '';
+      if (file.status !== 'added') {
+        const basePath = file.previousPath || file.path;
+        const baseFile = await gh.getFile(basePath, pr.base.sha);
+        if (!baseFile?.content) throw new Error(`Cannot read ${basePath} at the reviewed base`);
+        let baseParsed;
+        try { baseParsed = fm.parse(baseFile.content); }
+        catch (err) { throw new Error(`Cannot parse ${basePath} at the reviewed base: ${err.message}`); }
+        const baseMeta = baseParsed.data?.metaDescription ?? baseParsed.data?.meta_description;
+        originalMetaDescription = typeof baseMeta === 'string' ? baseMeta : '';
+      }
+      const parsed = fm.parse(document);
+      // Reserve content/* body repairs for the portal's mirror workflow to
+      // avoid changing article bytes without updating its DB-backed state.
       if (!pr.head.ref.startsWith('content/')) {
-        const parsed = fm.parse(document);
         const draft = await editorial.prepareDraft({ frontmatter: parsed.data, body: parsed.content }, { page_type: 'supporting-blog' });
         if (draft.body.trim() !== parsed.content.trim()) {
           document = fm.stringify(parsed.data, draft.body);
           commits.push({ path: file.path, content: document });
         }
-        const check = await require('../services/content/codex-remediation').validateFixedBlogFile(document, {
-          originalMetaDescription: parsed.data.meta_description, requireFactCheck: true,
-        });
-        if (check.requiresHumanReview) throw new Error('Document is outside the autonomous publishing policy; leave unpublished');
-        if (!check.ok) throw new Error(`Document failed existing publishing checks: ${check.reason}`);
       }
+      const check = await require('../services/content/codex-remediation').validateFixedBlogFile(document, {
+        originalMetaDescription, requireFactCheck: true,
+      });
+      if (check.requiresHumanReview) throw new Error('Document is outside the autonomous publishing policy; leave unpublished');
+      if (!check.ok) throw new Error(`Document failed existing publishing checks: ${check.reason}`);
       commits.push(...await editorial.filesForDocument({ document, path: file.path }));
     } catch (err) {
       failures.push({ path: file.path, reason: err.message });
@@ -71,7 +87,8 @@ async function reviewPr(number) {
   if (failures.length) return { pass: false, deferred: true, failures };
   if (!commits.length) return { pass: true, unchanged: true };
   const current = await gh.getPr(number);
-  if (current?.state !== 'open' || current.head?.sha !== pr.head.sha || current.head?.ref !== pr.head.ref) throw new Error('PR changed during review; retry on the new head');
+  if (current?.state !== 'open' || current.head?.sha !== pr.head.sha || current.head?.ref !== pr.head.ref
+      || current.base?.sha !== pr.base.sha) throw new Error('PR changed during review; retry on the new head or base');
   const result = await gh.commitFiles({ branch: pr.head.ref, expectedHeadSha: pr.head.sha,
     message: 'chore(content): attach verified editorial evidence', files: commits });
   return { pass: true, commit: result.commit.sha, requiresFreshBuild: true };
