@@ -139,6 +139,18 @@ router.get('/rates', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// A JSON number, or a string that is ENTIRELY digits/decimal point (never
+// "6%" or "0.06oops" — parseFloat would silently truncate either to a wrong
+// number instead of rejecting it, codex round-1 P1) — then bounded to the
+// decimal-fraction convention every rate in this table already uses (0.07 =
+// 7%, never a whole percent).
+const RATE_STRING_RE = /^\d+(\.\d+)?$/;
+function parseRateField(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && RATE_STRING_RE.test(value.trim())) return parseFloat(value.trim());
+  return null;
+}
+
 router.post('/rates', async (req, res, next) => {
   try {
     const { county, stateRate, countySurtax, effectiveDate, serviceZone, notes } = req.body;
@@ -148,10 +160,13 @@ router.post('/rates', async (req, res, next) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(effectiveDate || ''))) {
       return res.status(400).json({ error: 'effectiveDate must be a YYYY-MM-DD date' });
     }
-    const parsedStateRate = parseFloat(stateRate);
-    const parsedCountySurtax = parseFloat(countySurtax);
-    if (!Number.isFinite(parsedStateRate) || !Number.isFinite(parsedCountySurtax)) {
-      return res.status(400).json({ error: 'stateRate and countySurtax must be numbers' });
+    const parsedStateRate = parseRateField(stateRate);
+    const parsedCountySurtax = parseRateField(countySurtax);
+    if (parsedStateRate == null || parsedCountySurtax == null) {
+      return res.status(400).json({ error: 'stateRate and countySurtax must be numbers (e.g. 0.06 for 6%, not "6%")' });
+    }
+    if (parsedStateRate < 0 || parsedStateRate >= 1 || parsedCountySurtax < 0 || parsedCountySurtax >= 1) {
+      return res.status(400).json({ error: 'stateRate and countySurtax must each be a decimal fraction between 0 and 1' });
     }
     // Normalize casing so a re-post of the same county always matches the
     // existing active row (audit r1-billing-1 judge note: 'sarasota' vs
@@ -162,34 +177,39 @@ router.post('/rates', async (req, res, next) => {
     // A future effective date is staged, not activated: the current row
     // stays in force (untouched) until its effective_date arrives, and both
     // readers (calculateTax, tax-advisor.getCurrentTaxRates) select by
-    // effective_date <= today. Only a same-day-or-past post retires the
-    // previous row immediately (audit r1-billing-1 — a future post used to
-    // retire the current rate and activate the new one on insert).
+    // effective_date <= today. Only a same-day-or-past post retires a row
+    // immediately (audit r1-billing-1 — a future post used to retire the
+    // current rate and activate the new one on insert).
     const nowET = etDateString();
     const isImmediate = effectiveDate <= nowET;
     await db.transaction(async (trx) => {
-      if (isImmediate) {
-        // Bounded the same way calculateTax reads "current": only the row
-        // presently in force is retired. Without this bound, a same-day
-        // correction posted while a LATER rate is already staged would
-        // deactivate that staged future row too (codex P0) — it must
-        // survive untouched until its own effective_date arrives.
-        await trx('tax_rates')
-          .where({ county: countyKey, active: true })
-          .andWhere('effective_date', '<=', nowET)
-          .andWhere(function () {
-            this.whereNull('expiry_date').orWhere('expiry_date', '>', nowET);
-          })
-          .update({ active: false, expiry_date: effectiveDate });
-      }
-      // Correcting an already-staged rate (posting the same county +
-      // effective_date again, e.g. to fix a typo before it goes live) must
-      // replace that row, not sit beside it as a second active row for the
-      // same date (codex P0, round 2): once that date arrives, both readers
-      // order only by effective_date and could pick either one.
+      // Correcting an already-posted/staged rate for the SAME effective
+      // date must replace it, not sit beside it as a duplicate for that
+      // date (codex P0, round 2) — applies regardless of past/present/future.
       await trx('tax_rates')
         .where({ county: countyKey, active: true, effective_date: effectiveDate })
         .update({ active: false });
+
+      if (isImmediate) {
+        // Retire ONLY the rate that was actually in force AT THE SUBMITTED
+        // DATE — its nearest active predecessor — never a rate posted for a
+        // LATER date, whether that later rate is already in force or still
+        // staged (codex round-4 P1: a backdated backfill previously matched
+        // every active row through today, retiring a rate posted for a
+        // later effective date too — e.g. a March correction wiping out a
+        // July rate that was already live). A future-dated post (staging)
+        // skips this branch entirely and leaves the current rate completely
+        // untouched until its own effective_date arrives.
+        const predecessor = await trx('tax_rates')
+          .where({ county: countyKey, active: true })
+          .andWhere('effective_date', '<', effectiveDate)
+          .orderBy('effective_date', 'desc')
+          .first();
+        if (predecessor && (predecessor.expiry_date == null || predecessor.expiry_date > effectiveDate)) {
+          await trx('tax_rates').where({ id: predecessor.id }).update({ active: false, expiry_date: effectiveDate });
+        }
+      }
+
       await trx('tax_rates').insert({
         county: countyKey, state: 'FL', state_rate: parsedStateRate, county_surtax: parsedCountySurtax,
         combined_rate: parsedStateRate + parsedCountySurtax,

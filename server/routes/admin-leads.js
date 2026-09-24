@@ -58,7 +58,7 @@ function isRealCalendarDate(value) {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
-const { startOfETMonth, etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { startOfETMonth, etDateString, parseETDateTime, etParts } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
 
 // A date-only end_date (e.g. "2026-06-30") parses as midnight UTC, so an
@@ -1315,6 +1315,18 @@ router.post('/:id/schedule-callback', async (req, res, next) => {
     const callbackAt = parseETDateTime(`${date}T${time}`);
     if (Number.isNaN(callbackAt.getTime())) {
       return res.status(400).json({ error: 'Invalid date or time' });
+    }
+    // A wall time inside the spring-forward gap (e.g. 2:30 AM on the DST
+    // change date) does not exist — parseETDateTime normalizes it forward
+    // (2:30 -> 3:30) rather than erroring, so round-trip the stored instant
+    // back through ET and reject if it doesn't land on what was submitted
+    // (codex round-1 P2).
+    const roundTrip = etParts(callbackAt);
+    const roundTripDate = `${roundTrip.year}-${String(roundTrip.month).padStart(2, '0')}-${String(roundTrip.day).padStart(2, '0')}`;
+    const roundTripTime = `${String(roundTrip.hour).padStart(2, '0')}:${String(roundTrip.minute).padStart(2, '0')}`;
+    const submittedTime = String(time).slice(0, 5);
+    if (roundTripDate !== date || roundTripTime !== submittedTime) {
+      return res.status(400).json({ error: 'That date and time do not exist in Eastern Time (likely the spring-forward daylight saving change) — pick a different time' });
     }
 
     await db('lead_activities').insert({

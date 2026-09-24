@@ -7,8 +7,8 @@
 import React from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { CompletionPanel } from '../pages/admin/SchedulePage';
-import { refetchFlags } from '../../src/hooks/useFeatureFlag';
+import { CompletionPanel } from './SchedulePage.jsx';
+import { refetchFlags } from '../../hooks/useFeatureFlag';
 
 const service = {
   id: 'termite-visit',

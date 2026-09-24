@@ -15749,18 +15749,27 @@ export function CompletionPanel({
                 return;
               }
               const moved = stationMoves[station.id];
+              // `touched` distinguishes an explicit tap from the zero-tap
+              // 'ok' default so an inspection_only closeout (the tech DID
+              // service the property but skipped some stations) can persist
+              // only what was actually checked (codex round-4 P1) — moving
+              // a pin is itself an explicit action regardless of status.
+              const explicitlyTapped = Object.prototype.hasOwnProperty.call(stationStatuses, station.id);
               const status = stationStatuses[station.id] || "ok";
-              if (moved && ref) entries.push({ id: station.id, shape: { ...moved, ref }, status });
+              const touched = { ...(moved || explicitlyTapped ? { touched: true } : {}) };
+              if (moved && ref) entries.push({ id: station.id, shape: { ...moved, ref }, status, ...touched });
               // A drift-hidden pin that was never re-placed submits NOTHING:
               // a status would mint a check row for a station the visit's
               // map cannot show (mirrors the auto-count exclusion above).
-              else if (station.shape) entries.push({ id: station.id, status });
+              else if (station.shape) entries.push({ id: station.id, status, ...touched });
             });
             if (ref) {
               stationNew.forEach((station) => {
                 entries.push({
                   shape: { ...station.shape, ref },
                   status: stationStatuses[station.key] || "ok",
+                  // A newly placed pin is inherently an explicit action.
+                  touched: true,
                 });
               });
             }

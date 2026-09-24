@@ -15,48 +15,48 @@
  *   DATABASE_URL=postgres://wavespestcontrol@localhost:5432/waves_audit_<slug>
  * Wiring copied from tests/audit-repro/r2-completion-live-money-tail-2.test.js.
  */
-jest.mock('../../models/marker-db', () => () => require('../../models/db'));
-jest.mock('../../models/db', () => {
+jest.mock('../models/marker-db', () => () => require('../models/db'));
+jest.mock('../models/db', () => {
   const db = (table, ...args) => mockPg(table, ...args);
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
 });
-jest.mock('../../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../../services/weather-forecast', () => ({
-  ...jest.requireActual('../../services/weather-forecast'), getDailyRainOutlookBounded: jest.fn(async () => null),
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/weather-forecast', () => ({
+  ...jest.requireActual('../services/weather-forecast'), getDailyRainOutlookBounded: jest.fn(async () => null),
 }));
-jest.mock('../../sockets', () => ({ getIo: jest.fn(() => null) }));
-jest.mock('../../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
-jest.mock('../../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
-jest.mock('../../services/messaging/send-customer-message', () => ({
+jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
+jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
+jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
+jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: false, blocked: true, code: 'test' })),
 }));
-jest.mock('../../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
+jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
   savedCardChargeSuppressesAlternateCollection: jest.fn(() => false),
   assertNoInvoiceChargeReconciliationPending: jest.fn(async () => {}),
   retrievePaymentIntent: jest.fn(async () => null),
   cancelPaymentIntent: jest.fn(async () => null),
 }));
-jest.mock('../../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
-jest.mock('../../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ suppressed: true })) }));
-jest.mock('../../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async () => ({ sent: 0 })) }));
-jest.mock('../../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })) }));
-jest.mock('../../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => {}) }));
-jest.mock('../../services/tree-shrub-assessment', () => ({
-  ...jest.requireActual('../../services/tree-shrub-assessment'),
+jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ suppressed: true })) }));
+jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async () => ({ sent: 0 })) }));
+jest.mock('../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })) }));
+jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => {}) }));
+jest.mock('../services/tree-shrub-assessment', () => ({
+  ...jest.requireActual('../services/tree-shrub-assessment'),
   scoreAndStoreTreeShrubAssessment: jest.fn(async () => null),
 }));
-jest.mock('../../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
-jest.mock('../../services/new-recurring-welcome-sms', () => ({
+jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
+jest.mock('../services/new-recurring-welcome-sms', () => ({
   isNewRecurringSignupCandidate: jest.fn(async () => false), sendNewRecurringWelcome: jest.fn(async () => {}),
 }));
-jest.mock('../../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn(async () => {}), sendMembershipRenewalReminder: jest.fn(async () => {}) }));
-jest.mock('../../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn(async () => {}) }));
-jest.mock('../../services/email-template-library', () => ({
+jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn(async () => {}), sendMembershipRenewalReminder: jest.fn(async () => {}) }));
+jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn(async () => {}) }));
+jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(), loadTemplateByKey: jest.fn(async () => null), activeSuppressionFor: jest.fn(async () => null),
 }));
-jest.mock('../../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
+jest.mock('../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -67,7 +67,7 @@ let mockPg;
 jest.setTimeout(90000);
 
 async function seedTermiteVisit() {
-  const { etDateString } = require('../../utils/datetime-et');
+  const { etDateString } = require('../utils/datetime-et');
   const today = etDateString();
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(),
     serviceKey: `fixture_termite_${randomUUID().slice(0, 8)}`, stationIds: [randomUUID(), randomUUID()] };
@@ -124,7 +124,7 @@ function body(f, visitOutcome) {
 }
 
 async function complete(f, visitOutcome) {
-  const { completeScheduledService } = require('../../services/complete-scheduled-service');
+  const { completeScheduledService } = require('../services/complete-scheduled-service');
   return completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
     actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body: body(f, visitOutcome) });
 }
@@ -175,4 +175,41 @@ postgres('r2-completion-panel-client-contract-1: declined / inspection-only clos
       } finally { await cleanup(f); }
     },
   );
+
+  test('inspection_only with one explicit tap and one untouched default persists only the tapped station (codex round-1 P1)', async () => {
+    // A blanket skip for every not-performed outcome also discarded a REAL
+    // inspection where the tech explicitly tapped some stations —
+    // inspection_only must keep those, dropping only the zero-tap defaults
+    // (customer_declined stays fully blanket-skipped, unlike inspection_only).
+    const f = await seedTermiteVisit();
+    try {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const explicitBody = {
+        customerRecap: 'Visit closed out.',
+        visitOutcome: 'inspection_only',
+        products: [],
+        areasServiced: [],
+        sendCompletionSms: false,
+        requestReview: false,
+        structuredFindings: { type: 'termite_bait_station', values: { stations_checked: '1', termite_activity: 'Active termites present', bait_consumption: 'Light feeding' } },
+        nextStepChips: ['Return when access available'],
+        // Exactly what CompletionPanel now serializes (SchedulePage.jsx):
+        // an explicit tap carries `touched: true`; an untouched pin still
+        // ships the zero-tap 'ok' default with no touched marker.
+        termiteStations: [
+          { id: f.stationIds[0], status: 'activity', touched: true },
+          { id: f.stationIds[1], status: 'ok' },
+        ],
+      };
+      const out = await completeScheduledService({
+        serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body: explicitBody,
+      });
+      expect(out).toMatchObject({ status: 200 });
+      const checks = await checksFor(f);
+      expect(checks).toHaveLength(1);
+      expect(checks[0].station_id).toBe(f.stationIds[0]);
+      expect(checks[0].status).toBe('activity');
+    } finally { await cleanup(f); }
+  });
 });

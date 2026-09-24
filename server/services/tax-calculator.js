@@ -96,7 +96,7 @@ const TaxCalculator = {
     // its start date) never applies before it takes effect, and by
     // expiry_date so a retired rate never resurfaces (audit r1-billing-1).
     const nowET = todayET();
-    const taxRate = await conn('tax_rates')
+    let taxRate = await conn('tax_rates')
       .where({ county, active: true })
       .andWhere('effective_date', '<=', nowET)
       .andWhere(function () {
@@ -104,6 +104,24 @@ const TaxCalculator = {
       })
       .orderBy('effective_date', 'desc')
       .first();
+
+    if (!taxRate) {
+      // Compatibility: a rate staged by the OLD route (before the
+      // effective-date fix) marked its predecessor active=false with
+      // expiry_date on the future effective date, while the successor sat
+      // active=true but not yet effective. The query above requires
+      // active=true, so during that gap it found neither row and fell back
+      // to the hardcoded default even though the predecessor is still
+      // genuinely in force (codex round-1 P1). Honor that old shape for its
+      // remaining window: an inactive row is still current if today falls
+      // inside [effective_date, expiry_date).
+      taxRate = await conn('tax_rates')
+        .where({ county, active: false })
+        .andWhere('effective_date', '<=', nowET)
+        .andWhere('expiry_date', '>', nowET)
+        .orderBy('effective_date', 'desc')
+        .first();
+    }
 
     const rate = taxRate ? parseFloat(taxRate.combined_rate) : 0.07;
     const amount = Math.round(subtotal * rate * 100) / 100;

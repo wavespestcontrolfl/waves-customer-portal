@@ -7894,39 +7894,52 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // presentation data and must never abort a committed completion.
     // AUTHORIZATION: the server-resolved profile must carry the
     // termite_bait_station flow (primary or companion) — a stale/crafted
-    // non-termite body must not mutate the registry. Any visit the server
-    // itself classifies as not performed (incomplete, customer_declined,
-    // inspection_only — see `visitPerformed` above) skips the sync entirely:
-    // recording the zero-tap default "ok" checks for a visit that didn't
-    // happen would corrupt the station history future reports and trends
-    // read (audit ADMIN-BUG-R31 — a declined closeout used to mint a full
-    // "all stations OK" check row per pin the tech never touched).
+    // non-termite body must not mutate the registry. A visit the tech
+    // never performed at all (incomplete, customer_declined) skips the
+    // sync entirely: recording the zero-tap default "ok" checks for a
+    // visit that didn't happen would corrupt the station history future
+    // reports and trends read (audit ADMIN-BUG-R31 — a declined closeout
+    // used to mint a full "all stations OK" check row per pin the tech
+    // never touched). inspection_only DID happen, though, so it is NOT
+    // blanket-skipped (codex round-4 P1 — that discarded a real
+    // inspection where the tech explicitly tapped, moved, or retired
+    // stations); it only drops the zero-tap defaults, keeping entries the
+    // client marked `touched` (an explicit status tap or a move) or
+    // `retire` (always an explicit action, and never writes a check row).
+    const stationBlanketSkip = isIncompleteVisit || visitOutcome === 'customer_declined';
     if (Array.isArray(termiteStations) && termiteStations.length) {
-      if (isIncompleteVisit || !visitPerformed || !stationProgram) {
+      if (stationBlanketSkip || !stationProgram) {
         logger.warn('[completion] station payload skipped', {
           serviceId: svc.id,
           incomplete: isIncompleteVisit,
-          visitPerformed,
+          visitOutcome,
           findingsType: completionProfile?.findingsType || null,
         });
       } else {
-        try {
-          const stationSync = await TermiteStations.syncStationsForCompletion(db, {
-            customerId: svc.customer_id,
-            serviceRecordId: record.id,
-            entries: termiteStations,
-            program: stationProgram,
-          });
-          if (stationSync.skipped.length) {
-            // post-commit skips (cap race / foreign id) can't 400 a
-            // committed completion — surface them loudly for the operator
-            logger.warn('[completion] termite station entries skipped', { serviceId: svc.id, ...stationSync });
-          } else if (stationSync.created || stationSync.moved || stationSync.retired
-            || stationSync.checksApplied || stationSync.deduped) {
-            logger.info('[completion] termite stations synced', { serviceId: svc.id, ...stationSync });
+        const syncEntries = visitOutcome === 'inspection_only'
+          ? termiteStations.filter((entry) => entry && (entry.retire === true || entry.touched === true))
+          : termiteStations;
+        if (!syncEntries.length) {
+          logger.warn('[completion] station payload skipped (inspection_only with no explicit taps)', { serviceId: svc.id });
+        } else {
+          try {
+            const stationSync = await TermiteStations.syncStationsForCompletion(db, {
+              customerId: svc.customer_id,
+              serviceRecordId: record.id,
+              entries: syncEntries,
+              program: stationProgram,
+            });
+            if (stationSync.skipped.length) {
+              // post-commit skips (cap race / foreign id) can't 400 a
+              // committed completion — surface them loudly for the operator
+              logger.warn('[completion] termite station entries skipped', { serviceId: svc.id, ...stationSync });
+            } else if (stationSync.created || stationSync.moved || stationSync.retired
+              || stationSync.checksApplied || stationSync.deduped) {
+              logger.info('[completion] termite stations synced', { serviceId: svc.id, ...stationSync });
+            }
+          } catch (stationErr) {
+            logger.warn(`[completion] termite station sync failed (non-blocking): ${stationErr.message}`);
           }
-        } catch (stationErr) {
-          logger.warn(`[completion] termite station sync failed (non-blocking): ${stationErr.message}`);
         }
       }
     }

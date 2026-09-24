@@ -3,8 +3,8 @@
 // Production runs on a UTC box, so the test pins TZ=UTC before any Date work.
 process.env.TZ = 'UTC';
 
-jest.mock('../../models/db', () => jest.fn());
-jest.mock('../../middleware/admin-auth', () => ({
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technician = { first_name: 'Ava', last_name: 'Admin' };
     req.technicianId = 'admin-1';
@@ -13,12 +13,12 @@ jest.mock('../../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
   requireAdmin: (_req, _res, next) => next(),
 }));
-jest.mock('../../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const express = require('express');
-const db = require('../../models/db');
-const leadsRouter = require('../../routes/admin-leads');
-const { parseETDateTime } = require('../../utils/datetime-et');
+const db = require('../models/db');
+const leadsRouter = require('../routes/admin-leads');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 function appServer() {
   const app = express();
@@ -64,5 +64,35 @@ describe('schedule-callback parses the operator date+time as ET', () => {
 
     // The activity line should echo the promised wall-clock time.
     expect(inserts[0].description).toMatch(/2:00:00 PM/);
+  });
+
+  it('rejects a spring-forward wall time that does not exist in Eastern Time (codex round-1 P2)', async () => {
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        whereNull: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'leads' ? { id: 'lead-1' } : undefined)),
+        insert: jest.fn(async () => [1]),
+        update: jest.fn(async (row) => { updates.push(row); return 1; }),
+      };
+      return q;
+    });
+
+    const { server, baseUrl } = appServer();
+    let res;
+    try {
+      // 2026-03-08 is the US spring-forward date: clocks jump 2:00 AM ->
+      // 3:00 AM ET, so 2:30 AM never happens that day.
+      res = await fetch(`${baseUrl}/admin/leads/lead-1/schedule-callback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: '2026-03-08', time: '02:30' }),
+      });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+    expect(res.status).toBe(400);
+    expect(updates).toHaveLength(0);
   });
 });
