@@ -129,7 +129,6 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
     .select('id', 'service_type', 'service_id', 'created_at');
   for (const booking of bookings) {
     if (!inRange(etDateString(new Date(booking.created_at)))) continue;
-     
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale
     return { won_via: 'office_booking', won_at: new Date(booking.created_at) };
   }
