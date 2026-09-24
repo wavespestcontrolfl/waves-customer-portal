@@ -9960,9 +9960,16 @@ const CallRecordingProcessor = {
       // V2's in enforce mode (V1 only as a fallback), V1's in shadow /
       // kill-switch mode — never a hybrid of one's street and the other's
       // unit (codex r14 P1).
-      const statedUnit = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
+      const statedUnitExplicit = CALL_EXTRACTION_V2_DRIVES_ROUTING && v2CanonicalExtraction
         ? (v2CanonicalExtraction?.property?.service_address?.street_line_2 || extracted?.address_line2 || null)
         : (extracted?.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null);
+      // …or the unit riding INSIDE the authoritative street line ("1250 Main
+      // St Apt 2" with no line 2): the resolver enforces a unit only when
+      // the card records one (codex r19 P1).
+      const { splitStreetLineUnit: splitAuthorityUnit } = require('../utils/address-normalizer');
+      const statedUnit = statedUnitExplicit
+        || String(splitAuthorityUnit(String(avNormalized.street_line_1 || corroboratingStreet || '')).unit || '').trim()
+        || null;
       let knownIndependentProperty = false;
       if (houseConflict && process.env.GATE_CUSTOMER_PROPERTIES === 'true') {
         const statedKey = propertyKey({ address_line1: avNormalized.street_line_1, address_line2: statedUnit, city: avNormalized.city, zip: avNormalized.postal_code });

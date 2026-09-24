@@ -96,6 +96,18 @@ describe('promised reschedule link review', () => {
 // secondary_contact_captured review items carry the second person named on
 // the call (a realtor's buyer, a landlord's tenant) — the card must show the
 // operator WHO to confirm, in both payload shapes the server produces.
+describe('ConfirmEvidence — dispute recovery task', () => {
+  it('names the held visits to reassign', () => {
+    render(<ConfirmEvidence payload={{
+      flag: 'auto_booking_skipped_after_approval',
+      existing_scheduled_service_ids: ['aaaaaaaa-1111'],
+      held_visits: [{ id: 'aaaaaaaa-1111', scheduled_date: '2026-09-25', window_start: '10:00:00', service_type: 'pest_control' }],
+    }} />);
+    expect(screen.getByText('Visits to reassign:')).toBeInTheDocument();
+    expect(screen.getByText(/Sep 25 · 10:00 · pest_control · #aaaaaaaa/)).toBeInTheDocument();
+  });
+});
+
 describe('ConfirmEvidence — house-number conflict', () => {
   it('shows both whole doors: the stated unit and the on-file unit', () => {
     render(<ConfirmEvidence payload={{

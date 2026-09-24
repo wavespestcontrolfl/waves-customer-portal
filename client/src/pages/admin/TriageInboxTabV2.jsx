@@ -199,6 +199,17 @@ export function ConfirmEvidence({ payload }) {
     p.stated_street && { label: "To resolve", value: (p.scheduling_window?.status === "confirmed" || p.scheduling_status === "confirmed")
       ? "Accept = the address on file is correct (a booking task is then filed for the confirmed appointment). Accept judges the WHOLE call — every other open card on it resolves too, so review those first. If the caller's number is right, edit the customer's address to it and book the appointment; the card closes once both are done."
       : "Accept = the address on file is correct. Accept judges the WHOLE call — every other open card on it resolves too, so review those first. If the caller's number is right, edit the customer's address to it; the card closes once the record matches." },
+    // A recovery task for visits a house-number dispute left unassigned:
+    // the reviewer reassigns and re-arms THESE, never books a replacement.
+    Array.isArray(p.held_visits) && p.held_visits.length > 0 && {
+      label: "Visits to reassign",
+      value: p.held_visits.map((v) => [
+        v.scheduled_date ? new Date(`${String(v.scheduled_date).slice(0, 10)}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "date TBD",
+        v.window_start ? String(v.window_start).slice(0, 5) : null,
+        v.service_type || null,
+        `#${String(v.id).slice(0, 8)}`,
+      ].filter(Boolean).join(" · ")).join(" — ") + ". Assign a technician and re-arm the confirmation; do not book a new visit.",
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

@@ -2856,7 +2856,9 @@ const AppointmentReminders = {
             .where('ti.reason_code', 'on_file_house_number_conflict')
             .whereIn('ti.status', ['open', 'in_progress'])
             .whereRaw("jsonb_typeof(ti.payload->'held_unassigned_booking_ids') = 'array'")
-            .whereRaw("ti.payload->'held_unassigned_booking_ids' ? ss.id::text");
+            // jsonb_exists, never the bare `?` operator: knex reads `?` as a
+            // binding placeholder (codex r19 P1).
+            .whereRaw("jsonb_exists(ti.payload->'held_unassigned_booking_ids', ss.id::text)");
         })
         .orderBy('ss.scheduled_date', 'asc')
         .limit(SELF_HEAL_REGISTRATION_LIMIT)
