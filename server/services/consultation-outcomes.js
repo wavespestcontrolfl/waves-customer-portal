@@ -119,17 +119,6 @@ async function recordOutcome(params = {}, { trx } = {}) {
     throw makeError('That visit is not a Waves Assessment consultation', 409, 'NOT_CONSULTATION');
   }
 
-  // A consultation that already converted is closed history — re-recording
-  // warm/cold/lost over a 'won' row would erase the win evidence
-  // markWonForCustomer stamped. Not settled by the scope doc; treated as a
-  // conflict rather than silently allowed.
-  const existing = await database('consultation_outcomes')
-    .where({ scheduled_service_id: scheduledServiceId })
-    .first('outcome');
-  if (existing && existing.outcome === 'won') {
-    throw makeError('This consultation already converted — its outcome cannot be edited', 409, 'ALREADY_WON');
-  }
-
   const { customerId, technicianId, leadId } = await deriveLinkage(svcRow, database);
   const now = new Date();
   const row = {
@@ -149,6 +138,12 @@ async function recordOutcome(params = {}, { trx } = {}) {
     updated_at: now,
   };
 
+  // Atomic upsert guard (waves-db-adjacent — no read-then-write TOCTOU
+  // against markWonForCustomer's concurrent reconciliation): the conflict
+  // UPDATE only fires while the existing row's outcome is NOT 'won'. A
+  // genuine insert (no conflicting row) is unaffected by this WHERE — it
+  // only gates the UPDATE branch — so `saved` is undefined in exactly one
+  // case: a conflicting row exists AND it is already 'won'.
   const [saved] = await database('consultation_outcomes')
     .insert(row)
     .onConflict('scheduled_service_id')
@@ -167,8 +162,12 @@ async function recordOutcome(params = {}, { trx } = {}) {
       recorded_at: row.recorded_at,
       updated_at: row.updated_at,
     })
+    .where('consultation_outcomes.outcome', '<>', 'won')
     .returning('*');
 
+  if (!saved) {
+    throw makeError('This consultation already converted — its outcome cannot be edited', 409, 'ALREADY_WON');
+  }
   return saved;
 }
 
@@ -190,32 +189,26 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
     await trx.transaction(async (sp) => {
       const leadRows = await sp('leads').where({ customer_id: customerId }).select('id');
       const leadIds = leadRows.map((r) => r.id);
+      const cutoff = etDateString(addETDays(now, -WON_WINDOW_DAYS));
 
-      const candidates = await sp('consultation_outcomes')
+      // One atomic UPDATE: the outcome guard (only an open warm/cold row can
+      // win) and the 90-day window (a subquery against scheduled_services,
+      // not a prior SELECT) both live in the same statement's WHERE, so
+      // nothing can flip a row's outcome between "read" and "write" — there
+      // is no read. The win count is the rows this UPDATE actually touched,
+      // never a pre-computed candidate list.
+      const updated = await sp('consultation_outcomes')
         .whereIn('outcome', ['warm', 'cold'])
         .where(function matchCustomerOrItsLeads() {
           this.where('customer_id', customerId);
           if (leadIds.length) this.orWhereIn('lead_id', leadIds);
         })
-        .select('id', 'scheduled_service_id');
-      if (!candidates.length) return;
-
-      const cutoff = etDateString(addETDays(now, -WON_WINDOW_DAYS));
-      const visitIds = candidates.map((c) => c.scheduled_service_id);
-      const liveVisits = await sp('scheduled_services')
-        .whereIn('id', visitIds)
-        .where('scheduled_date', '>=', cutoff)
-        .select('id');
-      const liveVisitIds = new Set(liveVisits.map((v) => v.id));
-      const idsToWin = candidates
-        .filter((c) => liveVisitIds.has(c.scheduled_service_id))
-        .map((c) => c.id);
-      if (!idsToWin.length) return;
-
-      await sp('consultation_outcomes')
-        .whereIn('id', idsToWin)
-        .update({ outcome: 'won', won_at: now, won_via: via, updated_at: now });
-      winCount = idsToWin.length;
+        .whereIn('scheduled_service_id', function liveVisits() {
+          this.select('id').from('scheduled_services').where('scheduled_date', '>=', cutoff);
+        })
+        .update({ outcome: 'won', won_at: now, won_via: via, updated_at: now })
+        .returning('id');
+      winCount = updated.length;
     });
     return winCount;
   } catch (err) {
@@ -237,19 +230,29 @@ async function markNoShow(scheduledServiceId, { trx } = {}) {
   if (!svcRow) return null;
   if (!(await isAssessmentBooking(svcRow, database))) return null;
 
+  const now = new Date();
+
+  // Atomic conditional UPDATE — no read-then-write TOCTOU against a
+  // concurrent recordOutcome or markWonForCustomer: the WHERE outcome IN
+  // (warm, cold) guard lives on the UPDATE itself, so a row that has
+  // already resolved lost/won in the meantime is provably untouched by
+  // this statement (not by a JS check on a stale read).
+  const updated = await database('consultation_outcomes')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .whereIn('outcome', ['warm', 'cold'])
+    .update({ outcome: 'lost', lost_reason: 'no_show', won_via: null, won_at: null, updated_at: now })
+    .returning('*');
+  if (updated.length) return updated[0];
+
+  // Nothing updated: either no row exists yet, or one exists but is already
+  // lost/won (left untouched by design — this read is only to return the
+  // current state, not a guard). Insert-if-missing races a concurrent
+  // writer via onConflict().ignore(); losing that race reads back whichever
+  // row won.
   const existing = await database('consultation_outcomes')
     .where({ scheduled_service_id: scheduledServiceId })
     .first();
-  const now = new Date();
-
-  if (existing) {
-    if (!['warm', 'cold'].includes(existing.outcome)) return existing;
-    const [updated] = await database('consultation_outcomes')
-      .where({ id: existing.id })
-      .update({ outcome: 'lost', lost_reason: 'no_show', won_via: null, won_at: null, updated_at: now })
-      .returning('*');
-    return updated;
-  }
+  if (existing) return existing;
 
   const { customerId, technicianId, leadId } = await deriveLinkage(svcRow, database);
   const [created] = await database('consultation_outcomes')
@@ -268,7 +271,8 @@ async function markNoShow(scheduledServiceId, { trx } = {}) {
     .onConflict('scheduled_service_id')
     .ignore()
     .returning('*');
-  return created || null;
+  if (created) return created;
+  return database('consultation_outcomes').where({ scheduled_service_id: scheduledServiceId }).first();
 }
 
 function medianOf(sortedNumbers) {

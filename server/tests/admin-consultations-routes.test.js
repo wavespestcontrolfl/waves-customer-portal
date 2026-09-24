@@ -1,7 +1,10 @@
 /**
- * admin-consultations routes — role gating (a technician records the outcome
- * of their own consultation; only admin reads the cross-technician stats
- * panel) and the service-error → HTTP status mapping (400/404/409).
+ * admin-consultations routes — role gating (a technician records/reads the
+ * outcome of THEIR OWN consultation only; only admin reads the
+ * cross-technician stats panel — quote_notes is internal, so any
+ * technician reading/overwriting any other tech's consultation by
+ * guessing/enumerating a scheduledServiceId would be a real leak/tamper
+ * path — P0 fix), and the service-error → HTTP status mapping (400/404/409).
  *
  * Pattern mirrors admin-ads-route-guards.test.js: real requireAdmin /
  * requireTechOrAdmin run; only adminAuthenticate is stubbed to inject a
@@ -13,6 +16,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
 
 let mockCurrentRole = 'admin';
+const ACTING_TECHNICIAN_ID = 'staff-1';
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => {
@@ -20,8 +24,8 @@ jest.mock('../middleware/admin-auth', () => {
   return {
     ...actual,
     adminAuthenticate: (req, _res, next) => {
-      req.technician = { id: 'staff-1', name: 'Adam', role: mockCurrentRole };
-      req.technicianId = 'staff-1';
+      req.technician = { id: ACTING_TECHNICIAN_ID, name: 'Adam', role: mockCurrentRole };
+      req.technicianId = ACTING_TECHNICIAN_ID;
       req.techRole = mockCurrentRole;
       return next();
     },
@@ -35,10 +39,20 @@ jest.mock('../services/consultation-outcomes', () => ({
   consultationStats: (...args) => mockConsultationStats(...args),
 }));
 
+// Table-aware db mock: the route's ownership guard reads scheduled_services
+// (technician_id), separately from the outcome row it reads from
+// consultation_outcomes for GET.
+let mockVisitRow = { id: 'visit-1', technician_id: ACTING_TECHNICIAN_ID };
 let mockOutcomeRow = null;
 jest.mock('../models/db', () => {
-  const fn = jest.fn(() => ({
-    where: () => ({ first: () => Promise.resolve(mockOutcomeRow) }),
+  const fn = jest.fn((table) => ({
+    where: () => ({
+      first: () => {
+        if (table === 'scheduled_services') return Promise.resolve(mockVisitRow);
+        if (table === 'consultation_outcomes') return Promise.resolve(mockOutcomeRow);
+        return Promise.resolve(null);
+      },
+    }),
   }));
   return fn;
 });
@@ -73,13 +87,15 @@ async function call(method, path, body) {
 
 beforeEach(() => {
   mockCurrentRole = 'admin';
+  mockVisitRow = { id: 'visit-1', technician_id: ACTING_TECHNICIAN_ID };
   mockOutcomeRow = null;
   jest.clearAllMocks();
 });
 
 describe('POST /:scheduledServiceId/outcome — a technician records their own consultation', () => {
-  test('technician role is allowed', async () => {
+  test('technician role is allowed on their OWN assigned visit', async () => {
     mockCurrentRole = 'technician';
+    mockVisitRow = { id: 'visit-1', technician_id: ACTING_TECHNICIAN_ID };
     mockRecordOutcome.mockResolvedValue({ id: 'co-1', outcome: 'warm' });
     const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'warm' });
     expect(res.status).toBe(200);
@@ -94,6 +110,31 @@ describe('POST /:scheduledServiceId/outcome — a technician records their own c
     mockRecordOutcome.mockResolvedValue({ id: 'co-1', outcome: 'cold' });
     const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'cold' });
     expect(res.status).toBe(200);
+  });
+
+  test('P0: a technician CANNOT record an outcome for another technician\'s consultation (403, service never called)', async () => {
+    mockCurrentRole = 'technician';
+    mockVisitRow = { id: 'visit-1', technician_id: 'someone-else' };
+    const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'warm' });
+    expect(res.status).toBe(403);
+    expect(mockRecordOutcome).not.toHaveBeenCalled();
+  });
+
+  test('P0: admin CAN record an outcome for ANY technician\'s consultation', async () => {
+    mockCurrentRole = 'admin';
+    mockVisitRow = { id: 'visit-1', technician_id: 'someone-else' };
+    mockRecordOutcome.mockResolvedValue({ id: 'co-1', outcome: 'cold' });
+    const res = await call('post', '/api/admin/consultations/visit-1/outcome', { outcome: 'cold' });
+    expect(res.status).toBe(200);
+    expect(mockRecordOutcome).toHaveBeenCalled();
+  });
+
+  test('404s a technician on an unknown visit (before the service is ever called)', async () => {
+    mockCurrentRole = 'technician';
+    mockVisitRow = null;
+    const res = await call('post', '/api/admin/consultations/nope/outcome', { outcome: 'warm' });
+    expect(res.status).toBe(404);
+    expect(mockRecordOutcome).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -119,12 +160,38 @@ describe('GET /:scheduledServiceId/outcome', () => {
     expect(res.status).toBe(404);
   });
 
-  test('returns the row when one exists (technician allowed)', async () => {
+  test('returns the row when one exists (technician allowed on their own visit)', async () => {
     mockCurrentRole = 'technician';
+    mockVisitRow = { id: 'visit-1', technician_id: ACTING_TECHNICIAN_ID };
     mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: 'visit-1' };
     const res = await call('get', '/api/admin/consultations/visit-1/outcome');
     expect(res.status).toBe(200);
     expect(res.body.outcome).toEqual(mockOutcomeRow);
+  });
+
+  test('P0: a technician CANNOT read another technician\'s consultation outcome (403, quote_notes never leaves the server)', async () => {
+    mockCurrentRole = 'technician';
+    mockVisitRow = { id: 'visit-1', technician_id: 'someone-else' };
+    mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: 'visit-1', quote_notes: 'internal pricing notes' };
+    const res = await call('get', '/api/admin/consultations/visit-1/outcome');
+    expect(res.status).toBe(403);
+    expect(res.body.outcome).toBeUndefined();
+  });
+
+  test('P0: admin CAN read ANY technician\'s consultation outcome', async () => {
+    mockCurrentRole = 'admin';
+    mockVisitRow = { id: 'visit-1', technician_id: 'someone-else' };
+    mockOutcomeRow = { id: 'co-1', outcome: 'warm', scheduled_service_id: 'visit-1' };
+    const res = await call('get', '/api/admin/consultations/visit-1/outcome');
+    expect(res.status).toBe(200);
+    expect(res.body.outcome).toEqual(mockOutcomeRow);
+  });
+
+  test('404s a technician on an unknown visit', async () => {
+    mockCurrentRole = 'technician';
+    mockVisitRow = null;
+    const res = await call('get', '/api/admin/consultations/nope/outcome');
+    expect(res.status).toBe(404);
   });
 });
 

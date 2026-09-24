@@ -23,11 +23,55 @@ const {
 } = require('../services/consultation-outcomes');
 
 // ---- tiny in-memory knex-shim -------------------------------------------
+// Real enough to prove the ATOMIC guards (waves-db P1 fix): the ON
+// CONFLICT ... WHERE and the UPDATE ... WHERE predicates are evaluated
+// against the row at write time, in the same call, exactly like Postgres —
+// there is no separate JS read-then-check step to race.
 function pick(row, cols) {
   if (!cols.length) return row;
   const out = {};
   cols.forEach((c) => { out[c] = row[c]; });
   return out;
+}
+
+// Strip a "table." qualifier so `'consultation_outcomes.outcome'` reads the
+// same field as `'outcome'` — real Postgres needs the qualifier only to
+// disambiguate from `excluded.*`; our flat row objects don't have that
+// ambiguity.
+function resolveField(row, col) {
+  const key = col.includes('.') ? col.split('.').pop() : col;
+  return row[key];
+}
+
+function compare(rv, op, val) {
+  if (op === '>=') return rv >= val;
+  if (op === '<=') return rv <= val;
+  if (op === '<>') return rv !== val;
+  return rv === val;
+}
+
+function applyWhereArgs(rows, args) {
+  if (args.length === 1 && typeof args[0] === 'function') {
+    const clauses = { eq: [], orIn: [] };
+    args[0].call({
+      where(col, val) { clauses.eq.push([col, val]); return this; },
+      orWhereIn(col, arr) { clauses.orIn.push([col, arr]); return this; },
+    });
+    return rows.filter((r) => {
+      const eqMatch = clauses.eq.every(([c, v]) => resolveField(r, c) === v);
+      if (eqMatch) return true;
+      return clauses.orIn.some(([c, arr]) => arr.includes(resolveField(r, c)));
+    });
+  }
+  if (args.length === 1 && typeof args[0] === 'object') {
+    return rows.filter((r) => Object.entries(args[0]).every(([k, v]) => resolveField(r, k) === v));
+  }
+  if (args.length === 2) return rows.filter((r) => resolveField(r, args[0]) === args[1]);
+  if (args.length === 3) {
+    const [col, op, val] = args;
+    return rows.filter((r) => compare(resolveField(r, col), op, val));
+  }
+  return rows;
 }
 
 function makeFakeDb(seed = {}) {
@@ -39,49 +83,42 @@ function makeFakeDb(seed = {}) {
   };
   let nextId = 1;
 
+  // Evaluates a whereIn(...) subquery callback (e.g. `.whereIn('x', function () { this.select('id').from('t').where(...) })`)
+  // against the SAME store, synchronously — real knex defers this to
+  // Postgres; a JS shim can just resolve it immediately since nothing else
+  // in these tests mutates the source table mid-query.
+  function runSubquery(fn) {
+    let subRows = [];
+    let subCol = 'id';
+    const subCtx = {
+      select(...cols) { subCol = cols[0] || 'id'; return subCtx; },
+      from(tbl) { subRows = store[tbl] ? [...store[tbl]] : []; return subCtx; },
+      where(...args) { subRows = applyWhereArgs(subRows, args); return subCtx; },
+      whereIn(col, arr) { subRows = subRows.filter((r) => arr.includes(resolveField(r, col))); return subCtx; },
+    };
+    fn.call(subCtx);
+    return subRows.map((r) => resolveField(r, subCol));
+  }
+
   function table(name) {
     const rows = store[name] || (store[name] = []);
     let filtered = rows;
     let insertPayload = null;
 
-    function applyObjectWhere(cond) {
-      filtered = filtered.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
-    }
-    function applyFnWhere(fn) {
-      const clauses = { eq: [], orIn: [] };
-      fn.call({
-        where(col, val) { clauses.eq.push([col, val]); return this; },
-        orWhereIn(col, arr) { clauses.orIn.push([col, arr]); return this; },
-      });
-      filtered = filtered.filter((r) => {
-        const eqMatch = clauses.eq.every(([c, v]) => r[c] === v);
-        if (eqMatch) return true;
-        return clauses.orIn.some(([c, arr]) => arr.includes(r[c]));
-      });
-    }
-
     const api = {
-      where(...args) {
-        if (args.length === 1 && typeof args[0] === 'function') applyFnWhere(args[0]);
-        else if (args.length === 1 && typeof args[0] === 'object') applyObjectWhere(args[0]);
-        else if (args.length === 2) filtered = filtered.filter((r) => r[args[0]] === args[1]);
-        else if (args.length === 3) {
-          const [col, op, val] = args;
-          filtered = filtered.filter((r) => {
-            const rv = r[col];
-            if (op === '>=') return rv >= val;
-            if (op === '<=') return rv <= val;
-            return rv === val;
-          });
-        }
+      where(...args) { filtered = applyWhereArgs(filtered, args); return api; },
+      whereNull(col) { filtered = filtered.filter((r) => resolveField(r, col) == null); return api; },
+      whereIn(col, valueOrFn) {
+        const values = typeof valueOrFn === 'function' ? runSubquery(valueOrFn) : valueOrFn;
+        filtered = filtered.filter((r) => values.includes(resolveField(r, col)));
         return api;
       },
-      whereNull(col) { filtered = filtered.filter((r) => r[col] == null); return api; },
-      whereIn(col, arr) { filtered = filtered.filter((r) => arr.includes(r[col])); return api; },
       orderBy(col, dir = 'asc') {
         filtered = [...filtered].sort((a, b) => {
-          if (a[col] === b[col]) return 0;
-          const gt = a[col] > b[col];
+          const av = resolveField(a, col);
+          const bv = resolveField(b, col);
+          if (av === bv) return 0;
+          const gt = av > bv;
           return dir === 'desc' ? (gt ? -1 : 1) : (gt ? 1 : -1);
         });
         return api;
@@ -90,15 +127,29 @@ function makeFakeDb(seed = {}) {
       first: (...cols) => Promise.resolve(filtered[0] ? pick(filtered[0], cols) : undefined),
       insert(payload) { insertPayload = { ...payload }; return api; },
       onConflict() { return api; },
+      // ON CONFLICT ... DO UPDATE SET ... [WHERE ...] — matches real Postgres:
+      // no conflicting row -> insert always applies, the WHERE never runs;
+      // a conflicting row -> the WHERE (if any) gates whether the UPDATE
+      // fires, and a blocked update returns zero rows (never throws).
       merge(fields) {
-        const idx = rows.findIndex((r) => r.scheduled_service_id === insertPayload.scheduled_service_id);
-        if (idx >= 0) {
-          rows[idx] = { ...rows[idx], ...fields };
-          return { returning: () => Promise.resolve([rows[idx]]) };
-        }
-        const row = { id: `gen-${nextId++}`, ...insertPayload };
-        rows.push(row);
-        return { returning: () => Promise.resolve([row]) };
+        let extraWhere = null;
+        const mergeApi = {
+          where(...args) { extraWhere = args; return mergeApi; },
+          returning: () => {
+            const idx = rows.findIndex((r) => r.scheduled_service_id === insertPayload.scheduled_service_id);
+            if (idx < 0) {
+              const row = { id: `gen-${nextId++}`, ...insertPayload };
+              rows.push(row);
+              return Promise.resolve([row]);
+            }
+            if (extraWhere && !applyWhereArgs([rows[idx]], extraWhere).length) {
+              return Promise.resolve([]); // WHERE blocked the conflict UPDATE
+            }
+            rows[idx] = { ...rows[idx], ...fields };
+            return Promise.resolve([rows[idx]]);
+          },
+        };
+        return mergeApi;
       },
       ignore() {
         const idx = rows.findIndex((r) => r.scheduled_service_id === insertPayload.scheduled_service_id);
@@ -114,8 +165,9 @@ function makeFakeDb(seed = {}) {
       },
       update(fields) {
         filtered.forEach((r) => Object.assign(r, fields));
-        const result = Promise.resolve(filtered.length);
-        result.returning = () => Promise.resolve(filtered.slice());
+        const snapshot = filtered.slice();
+        const result = Promise.resolve(snapshot.length);
+        result.returning = () => Promise.resolve(snapshot);
         return result;
       },
     };
@@ -238,6 +290,23 @@ describe('recordOutcome — success + upsert', () => {
     await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb }))
       .rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_WON' });
   });
+
+  test('atomic guard (P1 fix): the ALREADY_WON guard is the ON CONFLICT ... WHERE itself, not a prior SELECT', async () => {
+    const fakeDb = seededDb();
+    fakeDb.__store.consultation_outcomes.push({
+      id: 'co-1', scheduled_service_id: 'visit-1', outcome: 'won', won_via: 'closeout_booking', won_at: new Date(),
+    });
+    const tableCalls = [];
+    const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
+
+    await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: spyDb }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_WON' });
+    // The pre-fix version did `consultation_outcomes.where(...).first('outcome')`
+    // BEFORE the insert/merge — a TOCTOU window a concurrent markWonForCustomer
+    // could land in. Exactly one touch of consultation_outcomes now: the
+    // insert/onConflict/merge/where/returning statement itself.
+    expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(1);
+  });
 });
 
 // ---- markWonForCustomer ----------------------------------------------------
@@ -303,6 +372,32 @@ describe('markWonForCustomer', () => {
     await expect(markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: NOW }))
       .resolves.toBe(0);
   });
+
+  test('atomic guard (P1 fix): the outcome + 90-day window are one UPDATE statement, not a SELECT-candidates-then-update TOCTOU', async () => {
+    const fakeDb = seededDb();
+    const tableCalls = [];
+    const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
+    spyDb.transaction = async (fn) => fn(spyDb);
+
+    const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: spyDb, now: NOW });
+    expect(count).toBe(2);
+    // Exactly one touch of consultation_outcomes (the atomic UPDATE) — the
+    // pre-fix version made a SEPARATE `select('id','scheduled_service_id')`
+    // read of consultation_outcomes before ever writing, which is the
+    // TOCTOU window a concurrent recordOutcome/markNoShow could land in.
+    // scheduled_services is never queried as a standalone step either — its
+    // 90-day check rides inside the UPDATE's WHERE as a subquery.
+    expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(1);
+    expect(tableCalls.filter((n) => n === 'scheduled_services')).toHaveLength(0);
+    expect(tableCalls).toEqual(['leads', 'consultation_outcomes']);
+
+    // And the guard is real, not just "fewer calls": a row whose outcome is
+    // NOT warm/cold at UPDATE time is provably excluded by the same
+    // statement (see the 'leaves older/lost rows alone' case above) —
+    // there is no separate JS branch that could diverge from the WHERE.
+    const byId = Object.fromEntries(fakeDb.__store.consultation_outcomes.map((r) => [r.id, r]));
+    expect(byId['co-already-lost'].outcome).toBe('lost');
+  });
 });
 
 // ---- markNoShow -------------------------------------------------------------
@@ -360,5 +455,37 @@ describe('markNoShow', () => {
     const result = await markNoShow('visit-1', { trx: fakeDb });
     expect(result.outcome).toBe('won');
     expect(result.won_via).toBe('closeout_booking');
+  });
+
+  test('atomic guard (P1 fix): overwriting an open row is one UPDATE ... WHERE outcome IN (warm, cold), not a read-then-write', async () => {
+    const fakeDb = seededDb([{ id: 'co-1', scheduled_service_id: 'visit-1', outcome: 'warm', won_via: null }]);
+    const tableCalls = [];
+    const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
+
+    const result = await markNoShow('visit-1', { trx: spyDb });
+    expect(result.outcome).toBe('lost');
+    // The pre-fix version read the existing row first, branched in JS, THEN
+    // issued a plain `.where({id}).update(...)` with no outcome re-check —
+    // a TOCTOU window a concurrent markWonForCustomer could win. Now: one
+    // scheduled_services read (ownership/consultation check) + exactly ONE
+    // consultation_outcomes touch (the atomic conditional UPDATE that both
+    // applies the change AND returns the updated row — no separate read).
+    expect(tableCalls.filter((n) => n === 'scheduled_services')).toHaveLength(1);
+    expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(1);
+  });
+
+  test('atomic guard: an already-won row is left alone by the same single UPDATE (no separate read decides it)', async () => {
+    const fakeDb = seededDb([{ id: 'co-1', scheduled_service_id: 'visit-1', outcome: 'won', won_via: 'closeout_booking' }]);
+    const tableCalls = [];
+    const spyDb = (name) => { tableCalls.push(name); return fakeDb(name); };
+
+    const result = await markNoShow('visit-1', { trx: spyDb });
+    expect(result.outcome).toBe('won');
+    // Two consultation_outcomes touches here IS expected and correct: the
+    // conditional UPDATE (0 rows — outcome isn't warm/cold) plus the
+    // documented read-only fallback that returns the current state. That
+    // fallback is not a guard (the UPDATE's WHERE already decided nothing
+    // should change) — it only supplies the return value.
+    expect(tableCalls.filter((n) => n === 'consultation_outcomes')).toHaveLength(2);
   });
 });

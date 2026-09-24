@@ -3,9 +3,13 @@
 // is the backend for /admin/consultations.
 //
 // Mixed-role router (badges.js pattern, CLAUDE.md rule 15): a technician
-// records the outcome of their own consultation, but only admin reads the
+// records/reads the outcome of THEIR OWN consultation only (tech-track.js
+// "Not assigned to this service" convention — 404 for an unknown visit,
+// 403 for one that exists but isn't theirs); only admin reads the
 // cross-technician stats panel. adminAuthenticate/requireAdmin per handler,
-// not router-wide.
+// not router-wide. quote_notes is internal-only, which is exactly why this
+// ownership check exists — any technician could otherwise read or overwrite
+// any other tech's consultation by guessing/enumerating a scheduledServiceId.
 const express = require('express');
 const router = express.Router();
 
@@ -17,10 +21,28 @@ const {
   consultationStats,
 } = require('../services/consultation-outcomes');
 
+// Live assignment, not the consultation_outcomes snapshot — so a tech
+// reassigned off (or onto) a visit sees access change immediately, matching
+// tech-track.js's own ownership checks (svc.technician_id !== req.technicianId).
+async function loadOwnedVisitOr403(req, res, scheduledServiceId) {
+  const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'technician_id');
+  if (!visit) {
+    res.status(404).json({ error: 'Scheduled service not found' });
+    return null;
+  }
+  if (req.techRole !== 'admin' && visit.technician_id !== req.technicianId) {
+    res.status(403).json({ error: 'Not assigned to this consultation' });
+    return null;
+  }
+  return visit;
+}
+
 // POST /api/admin/consultations/:scheduledServiceId/outcome
 router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
     const { scheduledServiceId } = req.params;
+    if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
+
     const {
       outcome, lostReason, interests, quotedAmount, quotedCadence,
       quoteNotes, followUpAt,
@@ -51,6 +73,8 @@ router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmi
 router.get('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
     const { scheduledServiceId } = req.params;
+    if (!(await loadOwnedVisitOr403(req, res, scheduledServiceId))) return;
+
     const row = await db('consultation_outcomes')
       .where({ scheduled_service_id: scheduledServiceId })
       .first();
