@@ -153,15 +153,37 @@ async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {
       .orderBy('created_at', 'desc').first('id', 'input_snapshot', 'created_at');
     const priorSnapshot = parseSnapshot(prior?.input_snapshot);
     if (priorSnapshot?.state === 'running') {
-      const created = new Date(prior.created_at).getTime();
-      if (!Number.isFinite(created) || Date.now() - created <= RUN_STALE_MS) {
-        const error = new Error('a gratitude qualification run is already in progress');
+      const executionToken = priorSnapshot.executionToken;
+      const hasExecutionClaim = executionToken != null;
+      const progressAt = new Date(hasExecutionClaim
+        ? priorSnapshot.executionStartedAt : prior.created_at).getTime();
+      const runInProgress = (message = 'a gratitude qualification run is already in progress') => {
+        const error = new Error(message);
         error.code = 'RUN_IN_PROGRESS';
         error.runId = prior.id;
-        throw error;
+        return error;
+      };
+      if (!Number.isFinite(progressAt) || Date.now() - progressAt <= RUN_STALE_MS) {
+        throw runInProgress();
       }
-      const recovered = await trx('agent_decisions').where({ id: prior.id, workflow: WORKFLOW })
-        .whereRaw("input_snapshot->>'state' = 'running'").update({
+      if (hasExecutionClaim) {
+        let leaseHeld = null;
+        try {
+          const { lockHeldByAnySession } = require('../utils/cron-lock');
+          leaseHeld = await lockHeldByAnySession(`sms-gratitude-qualification:${prior.id}`, trx);
+        } catch { /* an unknown lease state must fail closed */ }
+        if (leaseHeld !== false) throw runInProgress();
+      }
+      let recoveryQuery = trx('agent_decisions').where({ id: prior.id, workflow: WORKFLOW })
+        .whereRaw("input_snapshot->>'state' = 'running'");
+      if (hasExecutionClaim) {
+        recoveryQuery = recoveryQuery
+          .whereRaw("input_snapshot->>'executionToken' = ?", [executionToken])
+          .whereRaw("input_snapshot->>'executionStartedAt' = ?", [priorSnapshot.executionStartedAt]);
+      } else {
+        recoveryQuery = recoveryQuery.whereRaw("input_snapshot->>'executionToken' IS NULL");
+      }
+      const recovered = await recoveryQuery.update({
         input_snapshot: JSON.stringify({
           ...priorSnapshot,
           state: 'failed',
@@ -175,9 +197,7 @@ async function createGratitudeQualification({ dbi = db, triggeredBy = null } = {
       if (recovered !== 1) {
         const latest = await trx('agent_decisions').where({ id: prior.id, workflow: WORKFLOW })
           .first('id', 'input_snapshot');
-        const error = new Error('gratitude qualification run changed during stale recovery');
-        error.code = 'RUN_IN_PROGRESS';
-        error.runId = prior.id;
+        const error = runInProgress('gratitude qualification run changed during stale recovery');
         error.state = parseSnapshot(latest?.input_snapshot)?.state || 'missing';
         throw error;
       }
