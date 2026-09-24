@@ -1627,7 +1627,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const gh = deps.gh || ghDefault;
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
-    operatorFaqException = false, guardContext = null,
+    operatorFaqException = false, guardContext = null, editorialBrief = null,
     // Owner directive 2026-08-26: TRUE only when the caller verified
     // operator-intercept provenance AND both named-competitor gates
     // (namedCompetitorAutopublish + namedCompetitorComparison) — lets a fix
@@ -1952,6 +1952,26 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     }
   }
 
+  // The repaired bytes have passed every publisher/lane gate. Attach evidence
+  // now, using only a caller-supplied persisted brief; PR content is never a
+  // trusted source of operator allowances. A review/signing outage parks
+  // before the pre-push check, sync hold, or any branch mutation.
+  let editorialFiles;
+  try {
+    const editorial = deps.editorialEvidence || require('./editorial-evidence');
+    editorialFiles = await editorial.filesForDocument({
+      document: fixed,
+      path: targetPath,
+      brief: editorialBrief || {},
+    });
+    if (!Array.isArray(editorialFiles)) throw new Error('editorial evidence generator returned no file list');
+  } catch (e) {
+    return park(db, prNumber, `editorial evidence generation failed: ${e.message}`, onPark, headSha, PARK_PRE_PUSH);
+  }
+  if (editorialFiles.length && typeof gh.commitFiles !== 'function') {
+    return park(db, prNumber, 'editorial evidence generation failed: atomic multi-file commit unavailable', onPark, headSha, PARK_PRE_PUSH);
+  }
+
   // Last-instant pre-push guard, mirroring the merge path's: the LLM call and
   // gate re-runs above take real time, and the lane's claim (queue row /
   // publishing claim / tracked PR) can move while they run. A failed or
@@ -1968,7 +1988,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // Mark 'remediating' BEFORE the push so a later save/comment failure can't
   // strand the fix — the recovery branch keys off status='remediating'.
   // A false return means markPrTerminal won (the PR merged/closed while
-  // this round was in flight) — stop BEFORE gh.putFile so we never push
+  // this round was in flight) — stop BEFORE the branch write so we never push
   // fixes to a branch whose PR already left the open state.
   // The sync hold is taken BEFORE the push, not after it. gh.putFile returning
   // and the bookkeeping write are two steps: a process death (or a deploy) in
@@ -1996,16 +2016,30 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
   let commit;
+  let atomicCommitParent = null;
   try {
-    commit = await gh.putFile({
-      path: targetPath,
-      content: fixed,
-      message: `fix(blog): address Codex review findings (round ${round})`,
-      branch,
-      sha: file.sha,
-    });
+    const message = `fix(blog): address Codex review findings (round ${round})`;
+    if (editorialFiles.length) {
+      commit = await gh.commitFiles({
+        branch,
+        expectedHeadSha: headSha,
+        files: [{ path: targetPath, content: fixed }, ...editorialFiles],
+        message,
+      });
+      // commitFiles creates the commit directly from expectedHeadSha and its
+      // ref update is non-forced, so that immutable CAS head is its parent.
+      atomicCommitParent = headSha;
+    } else {
+      commit = await gh.putFile({
+        path: targetPath,
+        content: fixed,
+        message,
+        branch,
+        sha: file.sha,
+      });
+    }
   } catch (e) {
-    // A putFile throw is AMBIGUOUS — GitHub may have committed the write and
+    // A branch-write throw is AMBIGUOUS — GitHub may have committed the write and
     // failed the response — and a ref read taken immediately afterwards can
     // still serve the OLD head (the same read-after-write staleness the
     // post-push checks already defend against). So one unchanged-ref read is
@@ -2024,15 +2058,12 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
 
-  // Parent CAS (PR r18 P1): putFile only CAS-checks the target FILE's blob,
-  // so a foreign push touching another file in the tip-read→putFile window
-  // still becomes this commit's parent. The Contents API returns the created
-  // commit's parents — on the pinned lanes the fix commit's parent MUST be
-  // the pinned parent, or the re-pin would bless every foreign change.
-  // Missing parent info fails closed. The commit already exists on the
-  // branch, so this parks post-push for a human instead of skipping.
+  // Parent CAS (PR r18 P1): the putFile path checks the returned parent; the
+  // atomic path binds its non-forced commit to expectedHeadSha. On pinned
+  // lanes that parent MUST be the pinned parent, or the re-pin would bless
+  // every foreign change. Missing parent proof fails closed.
   if (expectedParentSha) {
-    const newParent = String(commit?.commit?.parents?.[0]?.sha || '').toLowerCase();
+    const newParent = String(atomicCommitParent || commit?.commit?.parents?.[0]?.sha || '').toLowerCase();
     if (newParent !== String(expectedParentSha).toLowerCase()) {
       return park(db, prNumber, `fix commit ${shortSha(newHead)} landed on a foreign parent (${newParent ? shortSha(newParent) : 'unknown'} != pinned ${shortSha(expectedParentSha)}) — human reconciliation required`, onPark, newHead || headSha, PARK_POST_PUSH);
     }
@@ -2426,6 +2457,9 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // refresh-grandfathered content the run-context gate allows — the preflight
   // must judge the fix with the SAME allowances or valid fixes park.
   let guardContext = null;
+  // Only the persisted, reviewed brief loaded through the autonomous runner
+  // may inform editorial source/facts context for the repaired bytes.
+  let trustedEditorialBrief = null;
   try {
     const fullRun = run && run.id ? await db('autonomous_runs').where({ id: run.id }).first() : null;
     const opp = (fullRun && fullRun.action_type === 'new_supporting_blog' && fullRun.opportunity_id)
@@ -2435,6 +2469,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
       const runner = deps.autonomousRunner || require('./autonomous-runner');
       const brief = await runner._loadReviewedBrief(fullRun);
       if (brief) {
+        trustedEditorialBrief = brief;
         const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
         operatorFaqException = !!guardOptions && guardOptions.operatorFaqException === true;
         let dp = fullRun.draft_payload;
@@ -2468,6 +2503,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // by the re-pin.
     expectedParentSha,
     guardContext,
+    editorialBrief: trustedEditorialBrief,
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
     // path comes from the findings themselves (the autonomous run has no slug
