@@ -76,9 +76,9 @@ const NATURE_DEFAULTS = {
  *      deterministic v1/v2-field check below it (steps 3-7). Guard: a
  *      reschedule can never be recorded as `cancellation_processed` — a
  *      postponing customer is not a cancellation; it is existing-customer
- *      scheduling (`existing_customer_routed`), NOT a callback obligation
- *      (the unworked-comms watcher pages every callback_task_created row —
- *      Codex #4708 r1 P2).
+ *      scheduling (`existing_customer_routed`). A model-recommended
+ *      callback on a reschedule call stands (the apply step skips when no
+ *      slot was committed, so the callback is real work — Codex #4708 r3).
  *   3. (reserved — complaint now lives in 1d)
  *   4. Cancellation / reschedule intent (same fallback tier) — same
  *      reschedule guard as step 2 applies here too, so the guarantee holds
@@ -106,9 +106,7 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
   const schedulingStatus = v2.scheduling?.status || null;
   // A postponing customer (v2 scheduling.status === 'reschedule_requested')
   // must never come out as cancellation_processed — that is a distinct,
-  // system-executed outcome — nor as callback_task_created, which the
-  // unworked-comms watcher treats as an outstanding callback even after
-  // applyCallRescheduleStep moved the visit. Shared by every path below that could
+  // system-executed outcome. Shared by every path below that could
   // otherwise reach cancellation_processed (the recommended-model path and
   // the deterministic triage_flags fallback, live and voicemail).
   const isRescheduleIntent = schedulingStatus === 'reschedule_requested';
@@ -166,11 +164,13 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
   //    step 1 (an actually-created appointment / an actual classifier
   //    verdict), never via the model's own opinion of itself.
   if (modelRecommended) {
-    // A reschedule is existing-customer scheduling: neither a cancellation
-    // nor a callback obligation (applyCallRescheduleStep may apply the move
-    // and nothing revises the disposition afterwards, so a
-    // callback_task_created row would be paged as unworked — r2 P2).
-    if (isRescheduleIntent && ['cancellation_processed', 'callback_task_created'].includes(modelRecommended)) {
+    // A reschedule is existing-customer scheduling, never a cancellation.
+    // A callback recommendation on a reschedule call is left standing: when
+    // the agent did not commit a new slot, planRescheduleFromCall skips
+    // (agent_did_not_commit / no_confirmed_start) and the callback is real
+    // outstanding work (r3 P1). Revising the disposition AFTER an applied
+    // move belongs to the apply step, not here — deferred follow-up.
+    if (isRescheduleIntent && modelRecommended === 'cancellation_processed') {
       return done('existing_customer_routed', 'reschedule_not_cancellation_model');
     }
     return done(modelRecommended, 'v2_model_recommended');

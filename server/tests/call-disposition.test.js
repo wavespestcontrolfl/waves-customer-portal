@@ -182,12 +182,12 @@ describe('v2-vs-v1 precedence (2026-09-24 call-agent audit)', () => {
     }).disposition).toBe('wrong_number_closed');
   });
 
-  test('a reschedule request recommended as callback_task_created routes as existing-customer scheduling', () => {
+  test('a reschedule request recommended as callback_task_created keeps the callback (no slot committed = work still owed)', () => {
     const { disposition } = decideDisposition({
       extraction: { scheduling: { status: 'reschedule_requested' }, recommended_disposition: 'callback_task_created' },
       outcome: { customerId: 'c-3' },
     });
-    expect(disposition).toBe('existing_customer_routed');
+    expect(disposition).toBe('callback_task_created');
   });
 
   test('a known customer\'s complaint escalates even when v2 recommends a generic disposition', () => {
