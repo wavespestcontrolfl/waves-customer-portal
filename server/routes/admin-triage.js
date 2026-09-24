@@ -737,6 +737,9 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
         extraction: { meta: { call_summary: decision.summary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
         extraPayload: {
           skipped_reason: decision.skippedReason,
+          // The promised follow-up (visit 2) the hold kept from being booked
+          // rides on the task with the primary ask (codex r20 P1).
+          ...(heldConflictPayload?.follow_up_plan ? { follow_up_plan: heldConflictPayload.follow_up_plan } : {}),
           scheduling_window: decision.approvedWindow,
           // The same live-else-snapshot choice the decision made (a
           // blank live line falls back to the snapshot).
