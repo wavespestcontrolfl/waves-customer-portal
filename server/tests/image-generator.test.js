@@ -75,6 +75,15 @@ describe('no pixel-watermarked providers (owner directive 2026-09-24)', () => {
     expect(pixelWatermarkAllowed()).toBe(true);
     expect(parseChain('gemini-image-best,gpt-image-2')).toEqual(['gemini-image-best', 'gpt-image-2']);
   });
+  test('the override alone restores the pre-09-24 fallback legs when no env chain is set (kill switch)', () => {
+    const { WATERMARK_ALLOWED_DEFAULT_CHAIN } = require('../services/content/image-generator')._internals;
+    process.env[PIXEL_WATERMARK_OVERRIDE_ENV] = 'true';
+    expect(parseChain(undefined)).toEqual(WATERMARK_ALLOWED_DEFAULT_CHAIN.split(','));
+    expect(parseChain(undefined)).toContain('gemini-image-pro');
+    expect(new ImageGenerator({ envChain: undefined, fetchFn: jest.fn() }).chain).toContain('gemini-image-pro');
+    delete process.env[PIXEL_WATERMARK_OVERRIDE_ENV];
+    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+  });
   test('a Gemini-only env chain falls back to the OpenAI default instead of reaching Gemini', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     process.env.GEMINI_API_KEY = 'gem-test';

@@ -64,6 +64,10 @@ describe('CREATIVE_FLAGS', () => {
     expect(Engine.SOCIAL_DEFAULT_CHAIN.split(',')).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
     process.env.SOCIAL_IMAGE_PROVIDER = 'gpt-image-1.5';
     expect(Engine.CREATIVE_FLAGS.chain).toBe('gpt-image-1.5');
+    delete process.env.SOCIAL_IMAGE_PROVIDER;
+    process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true';
+    expect(Engine.CREATIVE_FLAGS.chain).toBe(Engine.SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN);
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
   });
 });
 

@@ -16,7 +16,9 @@
  * ANY chain (default or env) unless ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true
  * is set on purpose. OpenAI's gpt-image line attaches C2PA metadata only.
  * When the OpenAI ladder is exhausted the call throws and the slot parks /
- * retries — it never quietly falls through to a watermarking model.
+ * retries — it never quietly falls through to a watermarking model. With the
+ * override set and no env chain, the pre-09-24 chain (Gemini legs interleaved)
+ * is the default again, so the kill switch alone restores the old fallbacks.
  *
  * Chain rationale: gpt-image-2 is the top-ranked image model overall
  * (bake-off 2026-09-05); gpt-image-1.5 and gpt-image-1 are the OpenAI
@@ -54,6 +56,11 @@ const { GEMINI_IMAGE_PRO, GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('..
 // last. The Gemini legs that used to sit between them were removed 2026-09-24
 // (SynthID pixel watermark — see the header); OpenAI-only by design.
 const DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1';
+// The pre-2026-09-24 chain (bake-off order, Gemini legs interleaved). Used as
+// the default ONLY while ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true, so the
+// documented kill switch restores the old fallback legs during an OpenAI
+// outage without also requiring a BLOG_/SOCIAL_IMAGE_PROVIDER change.
+const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
 
 const MODEL_MAP = {
   'gpt-image-2':   { api: 'openai', model: 'gpt-image-2',   quality: 'high' },
@@ -104,7 +111,7 @@ const RETRYABLE_OPENAI_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 // distinct chain string so the operator sees why a leg vanished.
 const warnedChains = new Set();
 function parseChain(envValue, { allowPixelWatermark = pixelWatermarkAllowed() } = {}) {
-  const raw = String(envValue || DEFAULT_CHAIN);
+  const raw = String(envValue || (allowPixelWatermark ? WATERMARK_ALLOWED_DEFAULT_CHAIN : DEFAULT_CHAIN));
   const known = raw
     .split(',')
     .map((s) => s.trim().toLowerCase())
@@ -503,7 +510,7 @@ class ImageGenerator {
     this._now = now;
     if (!this.chain.length) {
       logger.warn('[image-generator] no valid providers in BLOG_IMAGE_PROVIDER; falling back to defaults');
-      this.chain = parseChain(DEFAULT_CHAIN, { allowPixelWatermark });
+      this.chain = parseChain(undefined, { allowPixelWatermark });
     }
     this._fetchFn = fetchFn;
     this._capabilityChecked = false;
@@ -634,6 +641,7 @@ module.exports.planFor = planFor;
 module.exports.retryStyleFor = retryStyleFor;
 module.exports.IMAGE_CHAIN_BUDGET_MS = IMAGE_CHAIN_BUDGET_MS;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
+module.exports.pixelWatermarkAllowed = pixelWatermarkAllowed;
 module.exports._internals = {
   stylePermutation,
   retryStyleFor,
@@ -655,6 +663,7 @@ module.exports._internals = {
   parseChain,
   pixelWatermarkAllowed,
   PIXEL_WATERMARK_OVERRIDE_ENV,
+  WATERMARK_ALLOWED_DEFAULT_CHAIN,
   isFatalOpenAIError,
   sizeFor,
   buildPrompt,
