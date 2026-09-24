@@ -1239,35 +1239,33 @@ async function dbLevelMergeConflict(database, winner, loser) {
   return null;
 }
 
-// A live (not cancelled) recurring PARENT of the same service family on
+// A genuinely ACTIVE (not lapsed) recurring series of the same family on
 // both the winner and the loser — the shape a plain merge must never
-// produce. `serviceKeyFor` is the same family classifier the recurring
-// booking-duplicate guard uses (recurring-appointment-seeder.js), so a
-// merge and a booking agree on what counts as "the same series".
+// produce. Reuses findActiveRecurringSeries (recurring-appointment-seeder.js)
+// — the SAME "ongoing OR an upcoming/rescheduled/in-progress occurrence"
+// liveness rule the booking-duplicate guard applies — rather than a parallel
+// predicate: a fixed-length series that already ran its course (no
+// outstanding children, recurring_ongoing=false) is lapsed, not a live
+// duplicate, and must not block an otherwise-clean merge.
 async function duplicateSeriesMergeConflict(database, winnerId, loserId) {
-  const [winnerParents, loserParents] = await Promise.all([
-    database('scheduled_services')
-      .where({ customer_id: winnerId, is_recurring: true })
-      .whereNull('recurring_parent_id')
-      .whereNotIn('status', ['cancelled'])
-      .select('id', 'service_type'),
-    database('scheduled_services')
-      .where({ customer_id: loserId, is_recurring: true })
-      .whereNull('recurring_parent_id')
-      .whereNotIn('status', ['cancelled'])
-      .select('id', 'service_type'),
-  ]);
-  if (!Array.isArray(winnerParents) || !Array.isArray(loserParents) || !winnerParents.length || !loserParents.length) return null;
-  let familyKeyOf;
-  try {
-    ({ serviceKeyFor: familyKeyOf } = require('./recurring-appointment-seeder'));
-  } catch { familyKeyOf = null; }
-  const keyOf = (row) => (familyKeyOf
-    ? familyKeyOf({ service_type: row.service_type })
-    : String(row.service_type || '').trim().toLowerCase());
-  const winnerFamilies = new Set(winnerParents.map(keyOf));
-  const collision = loserParents.find((row) => winnerFamilies.has(keyOf(row)));
-  return collision ? { family: collision.service_type } : null;
+  const { findActiveRecurringSeries } = require('./recurring-appointment-seeder');
+  const loserParentRows = await database('scheduled_services')
+    .where({ customer_id: loserId, is_recurring: true })
+    .whereNull('recurring_parent_id')
+    .whereNotIn('status', ['cancelled'])
+    .select('service_type');
+  if (!Array.isArray(loserParentRows) || !loserParentRows.length) return null;
+  const families = [...new Set(loserParentRows.map((row) => row.service_type).filter(Boolean))];
+  for (const serviceType of families) {
+    const [loserActive, winnerActive] = await Promise.all([
+      findActiveRecurringSeries(database, { customerId: loserId, serviceType }),
+      findActiveRecurringSeries(database, { customerId: winnerId, serviceType }),
+    ]);
+    if (Array.isArray(loserActive) && loserActive.length && Array.isArray(winnerActive) && winnerActive.length) {
+      return { family: serviceType };
+    }
+  }
+  return null;
 }
 
 /**

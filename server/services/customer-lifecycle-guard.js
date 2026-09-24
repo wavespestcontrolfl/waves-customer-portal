@@ -29,23 +29,33 @@
  * click that never asked for them.
  */
 
-const LIVE_VISIT_EXCLUDED_STATUSES = ['cancelled', 'rescheduled'];
-
-// A future, not-yet-cancelled/rescheduled scheduled_services row — the same
-// "still on the board" predicate admin-schedule.js's day view applies, minus
-// the missing customers.deleted_at filter that let an archived customer's
-// visit through unmarked.
+// A future/unresolved scheduled_services row — CANCELLABLE_STATUSES is the
+// canonical "still cancellable" allowlist (cancellation-eligibility.js,
+// shared with cancellation-processor.js's own sweep and the customer
+// portal's upcoming-visits query). 'rescheduled' is date-EXEMPT: those rows
+// keep their ORIGINAL (often past) date until SmartRebooker actions them
+// back onto the calendar, so an open rebook intent counts as live
+// regardless of its stale date (codex #3504 — excluding it let a second
+// same-family series activate, and would let an archive/churn through
+// while a rebook is still owed).
 async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
+  const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
   const today = todayIso || require('../utils/datetime-et').etDateString();
-  // Built from repeated `.where()` calls only (never whereNot/whereNotIn/
-  // whereRaw): the smallest common denominator across this repo's several
-  // hand-rolled query-builder test doubles, which mock different subsets of
-  // knex's chain methods.
-  let query = dbh('scheduled_services').where({ customer_id: customerId });
-  for (const status of LIVE_VISIT_EXCLUDED_STATUSES) {
-    query = query.where('status', '!=', status);
-  }
-  return query.where('scheduled_date', '>=', today).first('id', 'scheduled_date', 'status');
+  // Built from `.where()` (incl. its function-callback OR form) only —
+  // never whereIn/whereNot/whereNotIn/whereRaw — the smallest common
+  // denominator across this repo's several hand-rolled query-builder test
+  // doubles, which mock different subsets of knex's chain methods; none of
+  // them actually invoke a callback passed to `.where()`, so this form is
+  // inert (never crashes) under every one of them and correct under real knex.
+  return dbh('scheduled_services')
+    .where({ customer_id: customerId })
+    .where(function inCancellableStatus() {
+      for (const status of CANCELLABLE_STATUSES) this.orWhere('status', status);
+    })
+    .where(function activeBound() {
+      this.where('scheduled_date', '>=', today).orWhere('status', 'rescheduled');
+    })
+    .first('id', 'scheduled_date', 'status');
 }
 
 // An active annual prepay term — coverage the customer is still paying for
