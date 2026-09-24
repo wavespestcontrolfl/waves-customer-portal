@@ -173,22 +173,22 @@ function excludeUnresolvedSendReservations(query, table = 'sms_log') {
 // a different, non-reservation row proves the same provider handoff. Prefer
 // exact SID identity. Older callers that promoted without passing a SID retain
 // a narrow fallback: the same endpoints/body, created between reservation
-// creation and promotion. A later delivery callback can move both rows to
-// failed/undelivered without changing that identity. Every candidate needs a
-// real SID.
+// creation and promotion. A later delivery callback can move both rows to a
+// terminal failed/undelivered/canceled status without changing that identity.
+// Every candidate needs a real SID.
 function preserveSoleAcceptedReplyReceipts(query) {
   const nonReservation = SEND_RESERVATION_MARKERS
     .map(marker => `COALESCE(receipt.metadata->>'${marker}', 'false') <> 'true'`)
     .join(' AND ');
   return query.whereRaw(`NOT (
-    sms_log.status IN ('sent', 'delivered', 'failed', 'undelivered')
+    sms_log.status IN ('sent', 'delivered', 'failed', 'undelivered', 'canceled')
     AND COALESCE(sms_log.metadata->>'provider_outcome', '') = 'accepted'
     AND NOT EXISTS (
       SELECT 1
       FROM sms_log receipt
       WHERE receipt.id <> sms_log.id
         AND receipt.direction = 'outbound'
-        AND receipt.status IN ('queued', 'sent', 'delivered', 'failed', 'undelivered')
+        AND receipt.status IN ('queued', 'sent', 'delivered', 'failed', 'undelivered', 'canceled')
         AND receipt.twilio_sid ~* '^(SM|MM)[a-f0-9]{32}$'
         AND ${nonReservation}
         AND (
