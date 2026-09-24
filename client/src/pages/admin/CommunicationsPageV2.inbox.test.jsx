@@ -226,7 +226,41 @@ it("restores the ordinary dataset when Log View hides the unanswered selector", 
   expect(screen.getByText("Ordinary log message")).toBeInTheDocument();
 });
 
-it("keeps an open page-two pending thread when a truncated background refresh returns page one", async () => {
+it("refreshes loaded unanswered pages without discarding a still-pending page-two thread", async () => {
+  let pageTwoPending = true;
+  let pageTwoFailure = false;
+  loadLog = (url) => {
+    const page = Number(url.searchParams.get("page"));
+    if (page === 2 && pageTwoFailure) return response({ error: "Unavailable" }, 503);
+    return response({
+      messages: page === 2 && !pageTwoPending
+        ? []
+        : [inbound(`pending-${page}`, `Pending page ${page}`, `+1941555010${page}`)],
+      hasMore: page === 1 && pageTwoPending,
+      page,
+    });
+  };
+  setup(); await tick();
+  fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
+  fireEvent.click(screen.getByText("Pending page 2"));
+  await tick(30000);
+  expect(logRequests().slice(-2).map(([url]) => new URL(String(url), "http://localhost").searchParams.get("page"))).toEqual(["1", "2"]);
+  expect(screen.getAllByText("Pending page 2").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+
+  pageTwoFailure = true;
+  await tick(30000);
+  expect(screen.getAllByText("Pending page 2").length).toBeGreaterThan(0);
+
+  pageTwoFailure = false;
+  pageTwoPending = false;
+  await tick(30000);
+  expect(screen.queryByText("Pending page 2")).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Filter conversations" })).toBeInTheDocument();
+});
+
+it("restarts an unanswered search at page one after paginating another query", async () => {
   loadLog = (url) => {
     const page = Number(url.searchParams.get("page"));
     return response({
@@ -238,11 +272,15 @@ it("keeps an open page-two pending thread when a truncated background refresh re
   setup(); await tick();
   fireEvent.change(screen.getByRole("combobox", { name: "Filter conversations" }), { target: { value: "unanswered" } }); await tick();
   fireEvent.click(screen.getByRole("button", { name: /Load older/ })); await tick();
-  fireEvent.click(screen.getByText("Pending page 2"));
-  await tick(30000);
-  expect(new URL(String(logRequests().at(-1)[0]), "http://localhost").searchParams.get("needsResponse")).toBe("true");
-  expect(screen.getAllByText("Pending page 2").length).toBeGreaterThan(0);
-  expect(screen.queryByRole("combobox", { name: "Filter conversations" })).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByPlaceholderText("Search all SMS by name, phone, or message text…"), { target: { value: "gate" } });
+  await tick();
+
+  const searched = logRequests()
+    .map(([url]) => new URL(String(url), "http://localhost"))
+    .filter((url) => url.searchParams.get("search") === "gate");
+  expect(searched).toHaveLength(1);
+  expect(searched[0].searchParams.get("page")).toBe("1");
 });
 
 it("restores each conversation's own text and attachments when switching customers", async () => {

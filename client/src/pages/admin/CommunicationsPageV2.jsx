@@ -1007,8 +1007,29 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     if (normalizedSearch) params.set("search", normalizedSearch);
     if (requestedStatusFilter === "unanswered") params.set("needsResponse", "true");
     const logUrl = `/admin/communications/log?${params.toString()}`;
+    const loadedPageCount = options.refresh
+      && requestedStatusFilter === "unanswered"
+      && smsLoadedSearchRef.current === normalizedSearch
+      && smsLoadedStatusFilterRef.current === requestedStatusFilter
+      ? Math.max(page, smsPageRef.current)
+      : page;
+    const logRequest = loadedPageCount > page
+      ? Promise.all(Array.from({ length: loadedPageCount }, (_, index) => {
+        const pageParams = new URLSearchParams(params);
+        pageParams.set("page", String(index + 1));
+        return adminFetch(`/admin/communications/log?${pageParams.toString()}`, { signal: controller.signal });
+      })).then((pages) => {
+        const hasInvalidPage = pages.some((pageData) => !Array.isArray(pageData?.messages) || pageData.error);
+        if (hasInvalidPage) return { error: "One or more message pages could not be refreshed." };
+        return {
+          messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
+          hasMore: !!pages.at(-1)?.hasMore,
+          page: pages.at(-1)?.page || loadedPageCount,
+        };
+      })
+      : adminFetch(logUrl, { signal: controller.signal });
     return Promise.allSettled([
-      adminFetch(logUrl, { signal: controller.signal }),
+      logRequest,
       options.background ? null : adminFetch("/admin/communications/stats", { signal: controller.signal }),
       options.background ? null : adminFetch("/admin/communications/blocked-numbers", { signal: controller.signal }),
     ]).then(([logResult, statsResult, blockedResult]) => {
