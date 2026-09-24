@@ -831,8 +831,15 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
         extraction: { meta: { call_summary: 'House-number dispute settled — the follow-up visit promised on the call is still unbooked' }, scheduling: pre.approvedWindow || { status: 'confirmed' } },
         extraPayload: { follow_up_plan: heldConflictPayload.follow_up_plan, skipped_reason: 'house_number_dispute_settled_follow_up_unbooked' },
       }))
+      // A standing (open or claimed) follow-up card takes the CURRENT
+      // promised plan — payload merged, status and assignee kept — as the
+      // processor's follow-up path does (pre-push audit P1 after r28).
       .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-      .ignore();
+      .merge({
+        payload: trx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+        summary: trx.raw('EXCLUDED.summary'),
+        updated_at: new Date(),
+      });
   }
 }
 
