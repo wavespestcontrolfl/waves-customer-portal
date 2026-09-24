@@ -4,7 +4,7 @@ const { LIMITS } = require('./editorial-review-contracts');
 
 const TEMPLATE_TOKEN_RE = /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g;
 const DECORATIVE_HEADING_RE = /^(?:table of contents|contents|related (?:articles|guides|posts)|more (?:articles|guides|resources)|resources|sources|references|share this|about the author|get help|contact|ready to (?:start|book)|next steps?)\b/i;
-const CTA_PARAGRAPH_RE = /^(?:call|contact|book|schedule|request|get (?:a |your )?(?:quote|estimate)|learn more|read more|share this|subscribe)\b/i;
+const CTA_PARAGRAPH_RE = /^(?:(?:call|contact)\s+(?:us|today|now|for|to)\b|(?:book|schedule)\s+(?:now|today|an?|your|online|service)\b|request\s+(?:an?|your)\b|get (?:a |your )?(?:quote|estimate)\b|learn more\b|read more\b|share this\b|subscribe\b)/i;
 const NAV_PARAGRAPH_RE = /^(?:[-*+]\s*)?(?:\[[^\]]+\]\([^)]+\)(?:\s*[|·,]\s*)?){1,}$/;
 
 function splitFrontmatter(document) {
@@ -129,7 +129,7 @@ function structuralArtifacts(body) {
   const collect = (regex) => [...String(body || '').matchAll(regex)].map((match) => match[0]).sort();
   return {
     imports: importExportBlocks(body),
-    mdxTags: collect(/<[A-Z][A-Za-z0-9_.]*(?:\s[^<>]*?)?\/?>|<\/[A-Z][A-Za-z0-9_.]*\s*>/gs),
+    mdxTags: [...String(body || '').matchAll(/<[A-Z][A-Za-z0-9_.]*(?:\s[^<>]*?)?\/?>|<\/[A-Z][A-Za-z0-9_.]*\s*>/gs)].map((match) => match[0]),
     images: collect(/!\[[^\]\n]*\]\([^\n)]+\)|<img\b[^>]*>/gi),
     anchors: collect(/\{#[A-Za-z][\w:.-]*\}|<a\b[^>]*(?:id|name)=["'][^"']+["'][^>]*>/gi),
     tokens: collect(/\{\{\s*[A-Za-z][A-Za-z0-9_]*\s*\}\}/g),
@@ -173,4 +173,3 @@ module.exports = {
   splitFrontmatter,
   structuralArtifacts,
 };
-

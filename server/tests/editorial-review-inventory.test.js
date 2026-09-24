@@ -1,6 +1,6 @@
 'use strict';
 
-const { analyzeDocument } = require('../services/content/editorial-review-inventory');
+const { analyzeDocument, repairViolation } = require('../services/content/editorial-review-inventory');
 
 describe('editorial review document inventory', () => {
   test('exempts CTA, navigation, and decorative sections from semantic coverage inventories', () => {
@@ -37,3 +37,11 @@ describe('editorial review document inventory', () => {
    expect(analysis.claims.map((claim) => claim.passage)).toEqual(passages);
  });
 
+test('keeps factual prose that begins with a word also used in calls to action', () => {
+  const passage = 'Contact with treated surfaces kills 90% of ants.';
+  expect(analyzeDocument(`# Guide\n\n${passage}`, 'Guide').passages).toEqual([expect.objectContaining({ text: passage })]);
+});
+
+test('rejects repairs that change MDX tag nesting', () => {
+  expect(repairViolation('<Callout><Note>Text</Note></Callout>', '<Callout><Note>Text</Callout></Note>')).toBe('mdxTags_changed');
+});

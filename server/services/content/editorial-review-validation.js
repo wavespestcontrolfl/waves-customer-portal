@@ -8,7 +8,8 @@ function exactPassage(document, title, passage) {
 }
 
 function uniqueCoverage(items, key, expected) {
-  if (!Array.isArray(items) || items.length !== expected.length) return false;
+  if (!Array.isArray(items) || items.length !== expected.length
+    || items.some((item) => !['pass', 'fail'].includes(item?.status))) return false;
   const got = items.map((item) => item && item[key]);
   return new Set(got).size === got.length && expected.every((id) => got.includes(id));
 }
@@ -62,7 +63,7 @@ function validateClaimEvidence(claim, sources) {
   if (!kinds.includes(claim.claimKind)) return `claim_kind:${claim.claimId}`;
   if (!suitability.includes(claim.sourceSuitability)) return `claim_suitability:${claim.claimId}`;
   const deterministicKind = deterministicClaimKind(claim.passage);
-  if (deterministicKind && claim.claimKind !== deterministicKind) return `claim_kind_mismatch:${claim.claimId}`;
+  if (claim.verdict !== 'non_external' && deterministicKind && claim.claimKind !== deterministicKind) return `claim_kind_mismatch:${claim.claimId}`;
   if (claim.verdict === 'supported') {
     if (!validSourceReference(claim.sourceIndex, claim.sourceQuote, sources)) return `claim_quote:${claim.claimId}`;
     if (claim.sourceSuitability === 'unsuitable' || claim.sourceSuitability === 'not_applicable') return `claim_unsuitable:${claim.claimId}`;
@@ -135,4 +136,3 @@ function validatePlanJson(json, sections) {
 }
 
 module.exports = { validatePlanJson, validateReviewJson };
-
