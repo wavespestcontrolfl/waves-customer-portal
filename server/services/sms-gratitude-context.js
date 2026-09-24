@@ -81,7 +81,7 @@ function mediaCountFromMetadata(value) {
   return metadata && Array.isArray(metadata.media) ? metadata.media.length : null;
 }
 
-async function pendingGratitudeWork(dbh, { customerId, threadKey }) {
+async function pendingGratitudeWork(dbh, { customerId, threadKey, excludeDecisionId = null }) {
   const openRequest = await dbh('service_requests').where({ customer_id: customerId })
     .whereNotIn(dbh.raw("COALESCE(status, 'new')"), ['resolved', 'closed', 'cancelled']).first('id');
   if (openRequest) return true;
@@ -151,6 +151,10 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey }) {
   const decision = dbh('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
     .whereIn('ad.status', ['pending_review', 'pending', 'scheduled', 'sending', 'initiated', 'active']);
+  // The final provider-boundary recheck runs after this executor has inserted
+  // its own `sending` claim. Exclude only that server-owned id; every other
+  // pending decision on the customer/thread still blocks the courtesy reply.
+  if (excludeDecisionId) decision.whereNot('ad.id', excludeDecisionId);
   if (threadKey) {
     decision.where(function pendingForCustomerOrThread() {
       this.where('ad.customer_id', customerId)

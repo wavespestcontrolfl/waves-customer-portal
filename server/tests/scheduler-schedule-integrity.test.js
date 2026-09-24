@@ -19,6 +19,13 @@ jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons:
 jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 
 jest.mock('../services/schedule-integrity-watchdog', () => ({ runScheduleIntegrityWatchdog: jest.fn() }));
+jest.mock('../services/sms-auto-send', () => ({
+  processGratitudeAutoSendCandidates: jest.fn().mockResolvedValue({ sent: 0 }),
+  reconcileAutoSendClaims: jest.fn().mockResolvedValue({ failed: 0 }),
+}));
+jest.mock('../services/sms-suggest-mode', () => ({
+  recoverSuggestionHoldingStates: jest.fn().mockResolvedValue({ recovered: 0 }),
+}));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
@@ -46,4 +53,27 @@ test.each([
   await registration[1]();
   expect(runScheduleIntegrityWatchdog).toHaveBeenCalledTimes(1);
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(message));
+});
+
+test('gratitude gets its deadline-bound turn before scheduled-send recovery can stall', async () => {
+  const db = require('../models/db');
+  const { processGratitudeAutoSendCandidates } = require('../services/sms-auto-send');
+  initScheduledJobs();
+  const registration = cron.schedule.mock.calls.find(([expression, callback]) =>
+    expression === '*/5 * * * *' && callback.toString().includes('processGratitudeAutoSendCandidates'));
+  expect(registration[2]).toEqual({ timezone: 'America/New_York' });
+
+  let releaseRecovery;
+  let reachedRecovery;
+  const recoveryStarted = new Promise(resolve => { reachedRecovery = resolve; });
+  const recoveryWait = new Promise(resolve => { releaseRecovery = resolve; });
+  db.raw.mockImplementationOnce(() => { reachedRecovery(); return recoveryWait; });
+  const tick = registration[1]();
+  try {
+    await recoveryStarted;
+    expect(processGratitudeAutoSendCandidates).toHaveBeenCalledTimes(1);
+  } finally {
+    releaseRecovery({ rows: [], rowCount: 0 });
+    await tick;
+  }
 });

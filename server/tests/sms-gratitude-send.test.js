@@ -455,6 +455,60 @@ test.each([
   }
 });
 
+test.each([
+  ['service request', () => { mockState.openRequest = true; }, 'service_requests'],
+  ['call commitment', () => { mockState.openCallCommitment = true; }, 'call_commitments as cc'],
+  ['SMS commitment', () => { mockState.openSmsCommitment = true; }, 'call_commitments as cc_sms'],
+  ['triage item', () => { mockState.openTriage = true; }, 'triage_items as ti'],
+  ['operator inbox item', () => { mockState.openOperatorItem = true; }, 'operator_inbox_items as oi'],
+  ['review decision', () => { mockState.pendingDecision = true; }, 'agent_decisions as ad'],
+])('a %s opened during provider preparation blocks the final handoff', async (_label, openWork, table) => {
+  const provider = jest.fn();
+  const heldDbi = jest.fn((...args) => db(...args));
+  heldDbi.raw = (...args) => db.raw(...args);
+  sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
+    openWork();
+    const verdict = await providerPreSendCheck({ dbi: heldDbi });
+    if (!verdict.ok) return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code };
+    provider();
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'c'.repeat(32)}` };
+  });
+
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'pending_work' });
+  expect(provider).not.toHaveBeenCalled();
+  expect(heldDbi.mock.calls.some(([queriedTable]) => queriedTable === table)).toBe(true);
+  expect(suggest.settleReplyHoldingReservation).toHaveBeenLastCalledWith({ reservationId: 'reservation-1' });
+});
+
+test.each([
+  ['thread activity', () => { mockState.threadAdvanced = true; }, 'thread_advanced'],
+  ['gate disable', () => { mockState.gratitudeGate = false; }, 'gate_off'],
+])('%s landing during the pending-work await is caught by the later final checks', async (_label, change, reason) => {
+  const provider = jest.fn();
+  const heldDbi = jest.fn((...args) => {
+    const query = db(...args);
+    if (args[0] === 'service_requests') {
+      const first = query.first;
+      query.first = jest.fn(async (...firstArgs) => {
+        const result = await first(...firstArgs);
+        change();
+        return result;
+      });
+    }
+    return query;
+  });
+  heldDbi.raw = (...args) => db.raw(...args);
+  sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
+    const verdict = await providerPreSendCheck({ dbi: heldDbi });
+    if (!verdict.ok) return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code };
+    provider();
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'d'.repeat(32)}` };
+  });
+
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason });
+  expect(provider).not.toHaveBeenCalled();
+});
+
 test('a boundary query failure before provider entry clears the armed reservation', async () => {
   suggest.settleReplyHoldingReservation.mockImplementationOnce(async () => {
     mockState.threadAdvanced = false;

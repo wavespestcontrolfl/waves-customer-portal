@@ -49,6 +49,7 @@ const {
 const {
   jsonObject,
   gratitudeActivation,
+  pendingGratitudeWork,
   readGratitudeContext,
   gratitudeThreadAdvanced,
 } = require('./sms-gratitude-context');
@@ -372,6 +373,7 @@ async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Dat
       inboundId: inbound.id,
       inboundFromPhone: inbound.from_phone,
       inboundToPhone: inbound.to_phone,
+      threadKey: checked.threadKey,
       parkedIds: [],
       reservationId,
     };
@@ -590,6 +592,11 @@ async function maybeAutoSend(params = {}) {
     // Recheck after Twilio's final awaited guard, using its held connection
     // when present. Earlier provider preparation cannot stale this read.
     const checkGratitudeHandoff = gratitudeLane ? async ({ dbi = db } = {}) => {
+      const pendingWork = await pendingGratitudeWork(dbi, {
+        customerId: claim.customerId,
+        threadKey: claim.threadKey,
+        excludeDecisionId: claim.decisionId,
+      });
       const advanced = await gratitudeThreadAdvanced(dbi, {
         inboundId: claim.inboundId,
         fromPhone: claim.inboundFromPhone,
@@ -601,7 +608,8 @@ async function maybeAutoSend(params = {}) {
         now: new Date(),
         activatedAt: gratitudeActivation(),
       });
-      const reason = advanced ? 'thread_advanced'
+      const reason = pendingWork ? 'pending_work'
+        : advanced ? 'thread_advanced'
         : timing || (!isEnabled('smsGratitudeReplies') ? 'gate_off' : null);
       return reason ? { ok: false, code: reason, reason } : { ok: true };
     } : undefined;
