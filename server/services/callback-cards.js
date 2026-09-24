@@ -14,7 +14,7 @@ const error = (message, status = 409) => Object.assign(new Error(message), { sta
 async function loadCalendar(conn, from) {
   const config = await conn('booking_config').first('day_start', 'day_end');
   const start = String(config?.day_start || '08:00').slice(0, 5);
-  const end = String(config?.day_end || '17:00').slice(0, 5);
+  const end = String(config?.day_end || '18:00').slice(0, 5);
   if (!/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end) || start >= end) {
     throw error('Office hours need review');
   }

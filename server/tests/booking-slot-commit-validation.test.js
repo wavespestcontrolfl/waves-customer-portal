@@ -42,11 +42,16 @@ const min = (hhmm) => { const [h, m] = hhmm.split(':').map(Number); return h * 6
 // ---------------------------------------------------------------------------
 
 describe('bookingSlotWindow — one config derivation for builder + commit', () => {
-  test('defaults match the availability builder (08:00–17:00, 12–13 lunch, cap 3, hourly grid)', () => {
+  test('defaults match the availability builder (08:00–18:00, 12–13 lunch bounds, cap 3, hourly grid)', () => {
+    // Day end is 18:00 since PR 2 (2026-09-23, scheduling/customer-windows.js
+    // CUSTOMER_DAY_END_MINUTES) — a 17:00 start + the standard 60-minute
+    // visit ends at 18:00. Lunch bounds are still derived unconditionally;
+    // GATE_BOOKING_LUNCH_BLOCK (unset by default) governs whether callers
+    // (addCandidate, validateBookingSlotGeometry) actually enforce them.
     expect(bookingSlotWindow({})).toEqual({
       slotGridMinutes: 60,
       dayStartMin: 480,
-      dayEndMin: 1020,
+      dayEndMin: 1080,
       lunchStartMin: 720,
       lunchEndMin: 780,
       maxPerDay: 3,
@@ -77,16 +82,30 @@ describe('validateBookingSlotGeometry — forged-slot rejection', () => {
   const ok = (startHHMM, duration = 60, config = {}) =>
     validateBookingSlotGeometry({ startMin: min(startHHMM), duration, config });
 
-  test('accepts every slot the builder offers (whole hours, in-hours, off-lunch)', () => {
-    for (const t of ['08:00', '09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00']) {
-      expect(ok(t)).toBeNull();
+  // GATE_BOOKING_LUNCH_BLOCK is unset in this whole file's process — restore
+  // it around any test that flips it so later tests see the default again.
+  const withLunchGate = (value, fn) => {
+    const previous = process.env.GATE_BOOKING_LUNCH_BLOCK;
+    if (value === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+    else process.env.GATE_BOOKING_LUNCH_BLOCK = value;
+    try { return fn(); } finally {
+      if (previous === undefined) delete process.env.GATE_BOOKING_LUNCH_BLOCK;
+      else process.env.GATE_BOOKING_LUNCH_BLOCK = previous;
     }
+  };
+
+  test('accepts every slot the builder offers (whole hours, in-hours, including noon and the 17:00 close with the lunch gate unset)', () => {
+    withLunchGate(undefined, () => {
+      for (const t of ['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00']) {
+        expect(ok(t)).toBeNull();
+      }
+    });
   });
 
-  test('rejects out-of-hours starts (before day_start / ending after day_end)', () => {
+  test('rejects out-of-hours starts (before day_start / ending after the 18:00 day_end)', () => {
     expect(ok('07:00')).toMatch(/working hours/i);
-    expect(ok('17:00')).toMatch(/working hours/i); // ends 18:00 > 17:00
-    expect(ok('16:00', 90)).toMatch(/working hours/i); // 90-min ends 17:30
+    expect(ok('18:00')).toMatch(/working hours/i); // ends 19:00 > 18:00
+    expect(ok('17:00', 90)).toMatch(/working hours/i); // 90-min ends 18:30
     expect(ok('23:00')).toMatch(/working hours/i);
   });
 
@@ -96,11 +115,20 @@ describe('validateBookingSlotGeometry — forged-slot rejection', () => {
     expect(ok('10:01')).toMatch(/bookable slots/i);
   });
 
-  test('rejects the lunch block, including overlap-by-duration', () => {
-    expect(ok('12:00')).toMatch(/isn.t available/i);
-    expect(ok('11:00', 90)).toMatch(/isn.t available/i); // ends 12:30, inside lunch
-    expect(ok('11:00', 60)).toBeNull(); // ends exactly at lunch start
-    expect(ok('13:00', 60)).toBeNull(); // starts exactly at lunch end
+  test('noon is a normal bookable hour with GATE_BOOKING_LUNCH_BLOCK unset (owner ruling 2026-09-23, default)', () => {
+    withLunchGate(undefined, () => {
+      expect(ok('12:00')).toBeNull();
+      expect(ok('11:00', 90)).toBeNull(); // would have overlapped the old lunch block
+    });
+  });
+
+  test('GATE_BOOKING_LUNCH_BLOCK=true restores the lunch block, including overlap-by-duration', () => {
+    withLunchGate('true', () => {
+      expect(ok('12:00')).toMatch(/isn.t available/i);
+      expect(ok('11:00', 90)).toMatch(/isn.t available/i); // ends 12:30, inside lunch
+      expect(ok('11:00', 60)).toBeNull(); // ends exactly at lunch start
+      expect(ok('13:00', 60)).toBeNull(); // starts exactly at lunch end
+    });
   });
 
   test('respects a configured day window', () => {
@@ -405,7 +433,9 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // is identical for both.
     // 760: the probe call grew by one option line (`includeInterviews: true`,
     // PR #4623) — the SLOT_TAKEN shape still sits directly after it.
-    const probeBlock = src.slice(probeIdx, probeIdx + 760);
+    // 1000: grew again by the travel probe's expected-minutes credit
+    // (#4664, offer/commit parity).
+    const probeBlock = src.slice(probeIdx, probeIdx + 1000);
     expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
     expect(probeBlock).toMatch(/statusCode: 409/);
     // Shared module import rides the same lazy require as the lock helper.
@@ -518,6 +548,14 @@ describe('AvailabilityEngine.confirmBooking — shared global day cap (source gu
 
   test('the old PER-ZONE cap count is gone (it let cross-zone writers exceed the global cap)', () => {
     expect(availSrc).not.toMatch(/const existingBookings = await trx\('self_booked_appointments'\)/);
+  });
+
+  test('confirmBooking replaces the old same-day-only "already passed" floor with the shared notice-window helper', () => {
+    expect(availSrc).toMatch(/const \{ violatesSelfServeNotice \} = require\('\.\/scheduling\/self-serve-notice'\);/);
+    const idx = availSrc.indexOf('violatesSelfServeNotice({ date: dateStr, startTime })');
+    expect(idx).toBeGreaterThan(-1);
+    expect(availSrc.slice(idx, idx + 200)).toMatch(/'SLOT_TAKEN'/);
+    expect(availSrc).not.toMatch(/already passed today/);
   });
 
   test('getAvailableSlots filters full days by the GLOBAL count (shared helper), matching what confirm enforces', () => {
@@ -709,5 +747,60 @@ describe('/status/:code PII trim', () => {
     expect(route).toMatch(/'customers\.first_name', 'customers\.city'/);
     expect(route).not.toMatch(/customers\.last_name/);
     expect(route).not.toMatch(/customers\.address_line1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Self-serve notice window (owner ruling 2026-09-23) — offer/commit parity
+// ---------------------------------------------------------------------------
+//
+// Both the offer (buildBookingAvailability's addCandidate) and the commit
+// (createSelfBooking) call the SAME shared helper on the SAME (date,
+// startTime) shape, so a slot the picker shows is always one the commit
+// gate accepts, and vice versa. Full end-to-end execution of createSelfBooking
+// needs the whole transaction's mock surface (see slot-reservation.test.js /
+// booking-availability-occupancy.test.js for the functional coverage of each
+// half); this locks the shared-helper wiring itself, the same style the
+// day-cap tests above use for this file's other cross-writer invariants.
+describe('self-serve notice window — offer/commit parity (source guards)', () => {
+  test('both the offer and the commit import the SAME shared helper', () => {
+    expect(src).toMatch(/const \{ violatesSelfServeNotice \} = require\('\.\.\/services\/scheduling\/self-serve-notice'\);/);
+    // Exactly one import — a private second copy could drift from the offer.
+    expect(src.split("require('../services/scheduling/self-serve-notice')")).toHaveLength(2);
+  });
+
+  test('createSelfBooking refuses a slot inside the notice window INSIDE the transaction, after the idempotent replay', () => {
+    const idx = src.indexOf('violatesSelfServeNotice({ date: slotDateStr, startTime: slot_start })');
+    expect(idx).toBeGreaterThan(-1);
+    // After the replay lookup (a booking that landed just outside the boundary
+    // whose response was lost must still replay as success when the retry
+    // crosses it), before the day-cap / slot-conflict re-checks.
+    const replayIdx = src.indexOf('if (existing) return { existing };');
+    const dayCapIdx = src.indexOf('if (selfBookDayCapEnabled()) {', replayIdx);
+    expect(replayIdx).toBeGreaterThan(-1);
+    expect(idx).toBeGreaterThan(replayIdx);
+    expect(idx).toBeLessThan(dayCapIdx);
+    // Customer-facing call-us copy, thrown as an operational 409 the route's
+    // error mapping already renders (same shape as DAY_FULL / ALREADY_BOOKED).
+    const block = src.slice(idx, idx + 400);
+    expect(block).toMatch(/941\)\s*297-5749/);
+    expect(block).toMatch(/statusCode: 409/);
+    expect(block).toMatch(/code: 'SELF_SERVE_NOTICE'/);
+  });
+
+  test("buildBookingAvailability's offer filter is self-serve opt-in only — the voice agent's calls never set it", () => {
+    const fnIdx = src.indexOf('async function buildBookingAvailability(');
+    expect(fnIdx).toBeGreaterThan(-1);
+    expect(src.slice(fnIdx, fnIdx + 400)).toMatch(/selfServeNotice = false/);
+    const candidateIdx = src.indexOf('violatesSelfServeNotice({ date: slot.date, startTime: fmt(startMin) }, today)');
+    expect(candidateIdx).toBeGreaterThan(fnIdx);
+    // Gated on the opt-in flag, not called unconditionally.
+    expect(src.slice(candidateIdx - 80, candidateIdx)).toMatch(/selfServeNotice &&/);
+  });
+
+  test('every self-serve caller in this file opts in with selfServeNotice: true', () => {
+    const occurrences = src.split('selfServeNotice: true,').length - 1;
+    // GET /availability, POST /find-slots, and the capture-intent revalidation.
+    expect(occurrences).toBe(3);
   });
 });

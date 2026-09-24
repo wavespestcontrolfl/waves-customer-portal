@@ -88,7 +88,10 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       const moving = await findAvailableSlots({ ...OPTIONS, arrivalWindow: undefined });
       expect(moving.slots.length).toBeGreaterThan(0);
       expect(moving.slots.every(slot => slot.route_arrivals.every(row => row.id !== TARGET))).toBe(true);
-      expect(offers.slots.every(slot => /^\d{2}:00$/.test(slot.start_time) && slot.start_time <= '16:00')).toBe(true);
+      // 17:00 is now a legitimate capacity-mode start (Codex r1 P1 on
+      // #4663) — the shared customer grid's day close moved to 18:00, so a
+      // 60-minute job at 17:00 fits.
+      expect(offers.slots.every(slot => /^\d{2}:00$/.test(slot.start_time) && slot.start_time <= '17:00')).toBe(true);
       expect(offers.slots.every(slot => slot.travel_source === 'conservative_model')).toBe(true);
       const optimizer = require('../services/route-optimizer');
       const createTravel = optimizer.createSchedulingTravel;
@@ -117,6 +120,58 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       expect((await findAvailableSlots({ ...OPTIONS, includeBlackoutDates: false })).slots).toEqual([]);
     } finally {
       trafficSpy?.mockRestore();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  }, 30000);
+
+  // Codex r1 P1 on #4663: capacity mode's own candidate generator (find-time.js)
+  // and its commit-side admission (placementFitsShift, scheduling/policy.js)
+  // used to stop admitting starts after 16:00 — a leftover 2-hour headroom
+  // floor that disagreed with the shared customer grid's 17:00 offer. Proves
+  // both sides now agree: the offer includes 17:00 AND the commit-side proof
+  // (prepareArrivalCapacity/verifyArrivalCapacity, the same functions
+  // slot-reservation.js and booking.js use) accepts exactly that slot.
+  test('offer and commit agree on a 17:00 capacity-mode start (Codex r1 P1 on #4663)', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      for (const table of ['tech_schedule_blocks', 'technician_capabilities', 'system_settings', 'schedule_blackout_dates', 'audit_log']) {
+        await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
+      }
+      // Codex push-audit P1: OPTIONS' arrivalWindow.serviceId mode evaluates
+      // TARGET's own STORED estimated_duration_minutes (60, from the base
+      // fixture), not just the opts.durationMinutes passed to
+      // findAvailableSlots — a 17:00 start + 60 min of on-site work already
+      // reaches the 18:00 close with zero minutes left for the mandatory
+      // return-to-HQ leg the real evaluator requires. Shorten BOTH the
+      // stored row and the requested duration to 15 minutes so the round
+      // trip has real slack.
+      //
+      // Codex r4 root cause on this same test (#4663): the previous fix
+      // shortened estimated_duration_minutes but left the base fixture's
+      // window_start/window_end at their original 09:00-10:00 (a 60-minute
+      // span). route-reorder-window-fit.js's workDuration() charges
+      // Math.max(windowSpan, estimated_duration_minutes) — a promised
+      // window floors the work even when the stored estimate shrinks — so
+      // the stale 60-minute span silently reintroduced the exact
+      // 60-minute-at-17:00 infeasibility this fix thought it had already
+      // removed (60 min work + the ~20-23 min return leg overruns the
+      // 18:00 close by ~17-20 min). Shorten the window span too so both
+      // inputs agree at 15 minutes.
+      await mockConn('scheduled_services').where({ id: TARGET })
+        .update({ estimated_duration_minutes: 15, window_start: '09:00', window_end: '09:15' });
+      const offers = await findAvailableSlots({ ...OPTIONS, earliestStartMin: 1020, durationMinutes: 15 });
+      expect(offers.slots).toEqual(expect.arrayContaining([
+        expect.objectContaining({ start_time: '17:00', technician: expect.objectContaining({ id: TECH }) }),
+      ]));
+      const capacity = require('../services/scheduling/arrival-route');
+      const prepared = await capacity.prepareArrivalCapacity({
+        serviceId: TARGET, date: DAY, technicianId: TECH, windowStart: '17:00', windowEnd: '17:15', durationMinutes: 15,
+      });
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).resolves.toMatchObject({ feasible: true });
+    } finally {
       if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = gate;
     }

@@ -1667,6 +1667,7 @@ export default function EstimateToolViewV2({
   const [memberLinkageWarning, setMemberLinkageWarning] = useState(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
+  const [customerSearchStatus, setCustomerSearchStatus] = useState("idle");
   const [customers, setCustomers] = useState([]);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2141,29 +2142,38 @@ export default function EstimateToolViewV2({
     }
   }, [form.homeSqFt, form.stories, form.svcTermiteBait]);
 
-  const searchCustomers = useCallback(async (q) => {
-    if (!q || q.length < 2) {
-      setCustomers([]);
+  useEffect(() => {
+    const q = customerSearch.trim();
+    setCustomers([]);
+    if (q.length < 2) {
+      setCustomerSearchStatus("idle");
       return;
     }
-    try {
-      const r = await fetch(
-        `/api/admin/customers?search=${encodeURIComponent(q)}`,
-        { headers: authHeaders },
-      );
-      if (r.ok) {
-        const d = await r.json();
-        setCustomers(d.customers || d || []);
+    let active = true;
+    const controller = new AbortController();
+    setCustomerSearchStatus("loading");
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `/api/admin/customers?search=${encodeURIComponent(q)}`,
+          { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
+        );
+        if (!response.ok) throw new Error("Customer search failed");
+        const data = await response.json();
+        if (active) {
+          setCustomers(data.customers || data || []);
+          setCustomerSearchStatus("done");
+        }
+      } catch {
+        if (active) setCustomerSearchStatus("error");
       }
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
-    const t = setTimeout(() => searchCustomers(customerSearch), 300);
-    return () => clearTimeout(t);
-  }, [customerSearch]);
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [customerSearch, token]);
 
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
@@ -4455,9 +4465,16 @@ export default function EstimateToolViewV2({
                   value={customerSearch}
                   onChange={(e) => setCustomerSearch(e.target.value)}
                   placeholder="Name, phone, email, or address..."
-
+                  aria-label="Search customers by first name, last name, or full name"
+                  aria-describedby="customer-search-help"
                 />
               </Field>
+              <p id="customer-search-help" className="text-14 text-ink-secondary mb-3">
+                Search by first name, last name, or full name. Phone, email, and address also work.
+              </p>
+              {customerSearchStatus === "loading" && <p role="status" className="text-14 text-ink-secondary mb-3">Searching customers…</p>}
+              {customerSearchStatus === "error" && <p role="alert" className="text-14 text-alert-fg mb-3">Customer search failed. Edit your search to try again.</p>}
+              {customerSearchStatus === "done" && customers.length === 0 && <p role="status" className="text-14 text-ink-secondary mb-3">No customers found. Try a first name, last name, or full name.</p>}
               {customers.length > 0 && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {

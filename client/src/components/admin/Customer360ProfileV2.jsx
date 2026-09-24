@@ -7222,10 +7222,18 @@ function CustomerProfileEditor({
   reloadCustomer,
 }) {
   const density = useUiDensity();
-  return (
-    editOpen && (
+  if (!editOpen) return null;
+  // Portaled to <body> like every other dialog in this file. Rendered in
+  // place, the embedded workspace mounts it inside the .admin-main scroller;
+  // iOS Safari composites position:fixed descendants of a scroll container
+  // within that scroller, so the sheet sat between the fixed top bar and the
+  // mobile tab bar (both painted over it) and the Save/Cancel footer landed
+  // under the tab bar — the form could not be saved on a phone.
+  return createPortal(
+    (
       <div
-        className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
+        data-ui-density={density}
+        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
         onClick={(e) => {
           e.stopPropagation();
           if (!savingEdit) setEditOpen(false);
@@ -7494,7 +7502,8 @@ function CustomerProfileEditor({
           </div>{" "}
         </div>{" "}
       </div>
-    )
+    ),
+    document.body,
   );
 }
 

@@ -73,6 +73,7 @@
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
+ *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
@@ -100,6 +101,8 @@
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
+ *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking or reschedule of a visit starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
+ *   GATE_SELF_BOOK_DAY_CAP=true (owner ruling 2026-09-23: the old "max 3 self-bookings per calendar day" cap — retired in favor of the self-serve notice window, server/services/scheduling/self-serve-notice.js. Unset (default) = no per-day cap anywhere: the offer-time date filtering in routes/booking.js buildBookingAvailability, the commit-time re-checks in routes/booking.js createSelfBooking and services/availability.js confirmBooking, and the offer-time day-loop skip in services/availability.js getAvailableSlots all skip their countActiveSelfBookingsForDay / acquireSelfBookingDayCapLock calls. 'true' = today's cap behavior byte-for-byte. Read at call time via selfBookDayCapEnabled() below — a flip needs no redeploy. The lock/count primitives themselves are unaffected and stay available to every self-booking writer.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -2125,6 +2128,22 @@ const gates = {
   // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
   slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
 
+  // Booking lunch block (owner ruling 2026-09-23) — restores the
+  // 12:00-13:00 reserved window on every customer-facing offer + commit
+  // surface (routes/booking.js, routes/reschedule-public.js and
+  // routes/reservice-public.js via its shared builder, services/availability.js's
+  // legacy zone engine). Off (default): noon is a normal offerable and
+  // reservable hour everywhere. This entry is for logGateStatus only —
+  // every consumer reads gateEnvValue at CALL time through the single
+  // lunchBlockEnabled() helper in services/scheduling/customer-windows.js.
+  bookingLunchBlock: gateEnvValue('GATE_BOOKING_LUNCH_BLOCK'),
+
+  // Self-booking day cap (owner ruling 2026-09-23) — retired in favor of the
+  // self-serve notice window; see selfBookDayCapEnabled() below, the one
+  // canonical reader every day-cap call site uses. Registered here for
+  // logGateStatus only.
+  selfBookDayCap: gateEnvValue('GATE_SELF_BOOK_DAY_CAP'),
+
   // JOB CARD tab in the Service Protocol drawer (Tech Resource Drawer PR 2):
   // one GET assembles the customer strip, a 1–3 sentence paragraph written
   // from portal fields (FAST tier, deterministic template fallback, cached
@@ -2746,6 +2765,18 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// Self-booking day cap (owner ruling 2026-09-23) — the canonical reader
+// every day-cap call site uses (routes/booking.js buildBookingAvailability
+// + createSelfBooking, services/availability.js getAvailableSlots +
+// confirmBooking). Read at CALL time via gateEnvValue so a flip needs no
+// redeploy. Unset (default) = no per-day cap anywhere; 'true'/'1'/'on' =
+// today's behavior byte-for-byte. The lock/count primitives
+// (acquireSelfBookingDayCapLock / countActiveSelfBookingsForDay) stay in
+// place either way — call sites just skip invoking them while this is off.
+function selfBookDayCapEnabled() {
+  return gateEnvValue('GATE_SELF_BOOK_DAY_CAP');
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -2793,5 +2824,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, termiteAnnualPlanSelectionEnabled };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled };
 // gates 1775330914

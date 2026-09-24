@@ -10,9 +10,77 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
-const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
+const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
+const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
+const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
+
+// Funnel key -> catalog identity for the expected-minutes credit lookup
+// below (Codex r3 P2). An ordinary /book funnel key only ever carries a
+// broad display label ('Pest Control', 'Lawn Care') — catalog rows are
+// cadence-specific ('Quarterly Pest Control Service', 'Bi-Monthly Lawn Care
+// Service'), so looking the label up as services.name (or as a service_key)
+// never matched and every /book credit silently degraded to the full
+// window (zero padding). services.category is a real catalog key field
+// whose CHECK-constrained vocabulary (server/models/migrations/
+// 20260401000105_service_library.js) is exactly this funnel's vocabulary —
+// pest_control / lawn_care / mosquito / termite / rodent / tree_shrub — so
+// it resolves a family-level credit (expected-service-minutes.js averages
+// every catalog row in that category) without string-matching a display
+// label. bora_care is the one funnel key with its OWN exact catalog
+// service_key ('bora_care', 20260808080000_estimate_gap_catalog_rows.js) —
+// an exact key match wins over the coarser category average.
+const BOOKING_FUNNEL_SERVICE_CATALOG_KEYS = { bora_care: 'bora_care' };
+const BOOKING_FUNNEL_SERVICE_CATEGORIES = {
+  pest_control: 'pest_control',
+  lawn_care: 'lawn_care',
+  mosquito: 'mosquito',
+  tree_shrub: 'tree_shrub',
+  termite: 'termite',
+  rodent: 'rodent',
+  bora_care: 'termite', // catalog service_key 'bora_care' carries category 'termite'
+};
+
+// The booking's own expected-minutes credit (owner ruling 2026-09-23) for
+// a funnel serviceKey ('pest_control', 'pest_control+lawn_care', …): every
+// member's catalog credit summed, clamped to the advertised window. Resolved
+// ONCE per request and threaded through the finder, the offer-side mirror
+// and the commit probe so all three measure the same gap (Codex r2 P2).
+// Gate off → the window length (zero padding, legacy gap).
+// `serviceIdentity` (Codex r5 P2 #5): an EXISTING scheduled_services row's
+// own catalog identity ({ catalogServiceKey: service_key_snapshot,
+// serviceType: service_type }) for a caller that has a real visit to
+// revalidate against (reschedule-public.js, voice-agent revalidateSlot) but
+// no funnel selection to normalize — a cadence-specific catalog name/key
+// ('Quarterly Pest Control Service') never matches the 7-key funnel
+// vocabulary normalizeBookingServiceKeys checks, so passing it AS serviceKey
+// silently degrades to the no-credit legacy gap. Tried only when serviceKey
+// resolves to no funnel key, so every existing funnel caller is unaffected.
+async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, serviceIdentity = null) {
+  if (!travelGapEnabled()) return durationMinutes;
+  const keys = normalizeBookingServiceKeys(serviceKey);
+  if (keys.length) {
+    const services = keys.map((key) => ({
+      catalogServiceKey: BOOKING_FUNNEL_SERVICE_CATALOG_KEYS[key] || null,
+      category: BOOKING_FUNNEL_SERVICE_CATEGORIES[key] || null,
+      label: BOOKING_FUNNEL_SERVICE_LABELS[key] || key,
+    }));
+    return expectedMinutesForServices(conn, services, durationMinutes);
+  }
+  if (serviceIdentity && (serviceIdentity.catalogServiceKey || serviceIdentity.serviceType)) {
+    return expectedMinutesForServices(conn, [{
+      catalogServiceKey: serviceIdentity.catalogServiceKey || null,
+      label: serviceIdentity.serviceType || null,
+    }], durationMinutes);
+  }
+  return durationMinutes;
+}
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
-const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const {
+  CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
+} = require('../services/scheduling/customer-windows');
+const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
+const { selfBookDayCapEnabled } = require('../config/feature-gates');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
@@ -98,6 +166,13 @@ function compareRankedSlots(a, b) {
   if (scoreA !== scoreB) return scoreA - scoreB;
   const dateCmp = String(a.date).localeCompare(String(b.date));
   if (dateCmp !== 0) return dateCmp;
+  // Idle minutes created by placing THIS candidate here (0 for a packed
+  // position — see addCandidate) before start_time, so a score tie between
+  // a packed candidate and a hole-making one never lets the earlier clock
+  // time win on that basis alone (owner bug report 2026-09-23).
+  const idleA = a.idle_minutes ?? 0;
+  const idleB = b.idle_minutes ?? 0;
+  if (idleA !== idleB) return idleA - idleB;
   return String(a.start_time).localeCompare(String(b.start_time));
 }
 
@@ -522,7 +597,7 @@ router.get('/config', async (req, res, next) => {
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
       day_start: config.day_start || '08:00',
-      day_end: config.day_end || '17:00',
+      day_end: config.day_end || '18:00',
     });
   } catch (err) { next(err); }
 });
@@ -577,8 +652,10 @@ const NEARBY_DETOUR_MINUTES = 15;
 
 // Whole-hour windows offered on a day with no existing stops, so a customer
 // who picks/searches an otherwise-empty day gets real choice across the open
-// block instead of just the 8 AM gap start. Skips noon (lunch is reserved).
-const OPEN_DAY_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
+// block instead of just the 8 AM gap start. Shared grid
+// (scheduling/customer-windows.js); addCandidate's lunchBlockEnabled() check
+// below still strips noon when GATE_BOOKING_LUNCH_BLOCK is on.
+const OPEN_DAY_WINDOWS = CUSTOMER_HOUR_GRID;
 
 // Rain chips (GATE_BOOKING_RAIN_CHIPS): office point for the NWS daily rain
 // outlook. Rain is a DAILY value on these surfaces, and SWFL storm systems
@@ -649,7 +726,7 @@ async function loadBookingConfig() {
   return (await db('booking_config').first()) || {
     advance_days_min: 1, advance_days_max: 14,
     slot_duration_minutes: 60,
-    day_start: '08:00', day_end: '17:00',
+    day_start: '08:00', day_end: '18:00',
     max_self_books_per_day: 3,
   };
 }
@@ -663,7 +740,10 @@ function bookingSlotWindow(config = {}) {
   return {
     slotGridMinutes: 60,
     dayStartMin: timeToMin(config.day_start || '08:00'),
-    dayEndMin: timeToMin(config.day_end || '17:00'),
+    dayEndMin: timeToMin(config.day_end || '18:00'),
+    // Lunch bounds are still derived unconditionally — callers gate their USE
+    // with lunchBlockEnabled() (addCandidate, validateBookingSlotGeometry) so
+    // GATE_BOOKING_LUNCH_BLOCK is the single point of control.
     lunchStartMin: timeToMin(config.lunch_start || '12:00'),
     lunchEndMin: timeToMin(config.lunch_end || '13:00'),
     maxPerDay: config.max_self_books_per_day ?? 3,
@@ -831,8 +911,10 @@ function validateBookingSlotGeometry({ startMin, duration, config }) {
     || (capacityEnabled() && !placementFitsShift(startMin, endMin))) {
     return 'That time is outside our working hours — please pick another slot.';
   }
-  // Lunch windows are reserved for route health and are never self-bookable.
-  if (startMin < lunchEndMin && endMin > lunchStartMin) {
+  // Lunch windows are reserved for route health and never self-bookable —
+  // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
+  // unset by default). Off, noon is a normal bookable hour like any other.
+  if (lunchBlockEnabled() && startMin < lunchEndMin && endMin > lunchStartMin) {
     return 'That time isn\'t available — please pick another slot.';
   }
   return null;
@@ -882,12 +964,76 @@ function roundPublicCoord(value) {
 // confirmation_code — this route AND services/availability.js's zone-engine
 // confirmBooking — mints the same ≈50-bit codes; /status/:code serves both.
 
+// Idle minutes a candidate would leave next to its nearest committed
+// neighbours (owner bug report 2026-09-23) — 0 when it sits right against
+// the required drive+buffer gap on a side, which every packed candidate
+// does on at least one side by construction. Used only to break a
+// compareRankedSlots score tie toward the less hole-making option; degrades
+// to 0 (no occupancy map, or no neighbour on a side). `candidate`
+// ({ lat, lng, durationMinutes, expectedMinutes }, Codex r7 P2) is the SAME
+// entity the violatesTravelGap mirror beside this call already builds —
+// omitting it previously silently degraded requiredGapMinutes to the legacy
+// full-buffer formula (no credit) for this ranking metric alone, so a slot
+// the mirror validated with credit could still rank as more hole-making
+// than it really is and lose a tie to a genuinely worse option. Extracted
+// to a top-level function (was a buildBookingAvailability closure) so it is
+// independently testable.
+function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
+  if (!Array.isArray(dayOccupied) || !dayOccupied.length) return 0;
+  let idle = 0;
+  const ownWindow = Number.isFinite(candidate.durationMinutes) ? candidate.durationMinutes : (endMin - startMin);
+  const candidateEntity = {
+    startMin, endMin, lat: candidate.lat ?? null, lng: candidate.lng ?? null, windowMinutes: ownWindow,
+    expectedMinutes: Number.isFinite(candidate.expectedMinutes) ? Math.min(candidate.expectedMinutes, ownWindow) : ownWindow,
+  };
+  // The candidate's own EFFECTIVE end (start + its expected minutes, never
+  // past its real end) — the "after" gap is real idle time only once the
+  // candidate's actual work is done, not its full nominal window; a
+  // credited candidate that finishes early leaves less idle time before the
+  // next stop than its raw endMin would suggest.
+  const effectiveEnd = startMin + candidateEntity.expectedMinutes;
+  const before = dayOccupied.filter((b) => b.endMin <= startMin).sort((a, b) => b.endMin - a.endMin)[0];
+  const after = dayOccupied.filter((b) => b.startMin >= endMin).sort((a, b) => a.startMin - b.startMin)[0];
+  // The BEFORE stop's own effective end too (Codex r8 P2) — requiredGapMinutes
+  // already credits the earlier side's padding into the required buffer (see
+  // its header), so measuring free time from the stop's RAW endMin double-
+  // counted that credit as extra idle: a 09:00-10:00 stop expected to
+  // finish at 09:45 with a co-located 11:00 candidate has 75 real idle
+  // minutes (11:00 - 09:45), not 60 (11:00 - 10:00, the raw end the OLD
+  // code subtracted). Mirrors the AFTER side's own effectiveEnd treatment
+  // for the candidate, via the SAME travel-gap.js helper.
+  const beforeEffectiveEnd = before ? effectiveEndMinutes(before) : null;
+  if (before) idle += Math.max(0, startMin - beforeEffectiveEnd - requiredGapMinutes(candidateEntity, before));
+  if (after) idle += Math.max(0, after.startMin - effectiveEnd - requiredGapMinutes(candidateEntity, after));
+  return idle;
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '' }) {
+// `selfServeNotice`: opt-in (default false) — set true by every SELF-SERVE
+// caller (this file's /availability, /find-slots and capture-intent
+// revalidation; reschedule-public.js; reservice-public.js) so a candidate
+// starting within the self-serve notice window (owner ruling 2026-09-23,
+// server/services/scheduling/self-serve-notice.js) is never offered. The
+// voice-agent callers (relay-tools.js, relay-booking.js) deliberately leave
+// this false — the call agent is unaffected by the notice rule.
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false }) {
   config = applySchedulingPolicy(config);
+  // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
+  // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
+  // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
+  // estimate-slot-availability.js and slot-reservation.js (which both
+  // explicitly warm it before relying on it), this file never had to before
+  // customerWindowAdmits existed — its own day-end/lunch bounds always came
+  // straight from the freshly-loaded `config` above. Warm it here too, so a
+  // reconfigured booking_config.day_end/lunch_start/_end can't leave this
+  // offer generator on a stale or never-initialized cached value while
+  // validateBookingSlotGeometry (the commit-side check in this same file)
+  // reads a fresh config row on every request — the exact offer/commit
+  // parity break this predicate exists to prevent (push-audit P1 on #4663).
+  await refreshCustomerBookingWindowConfig();
   // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
   // daily outlook so it overlaps the slot computation; stamped onto days/slots
   // just before the return. Bounded + cached + fail-open in the service (null
@@ -900,11 +1046,19 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       .catch(() => null)
     : null;
 
+  const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
   const result = await findAvailableSlots({
     lat,
     lng,
     durationMinutes: duration,
     serviceTypes: normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]),
+    // This booking's own expected-minutes credit — the same number the
+    // mirror below and the commit probe use (offer/commit parity).
+    expectedMinutes: candidateExpectedMinutes,
+    // Packed ends (owner bug report 2026-09-23): capacity-mode results are
+    // packed inside find-time (no `insertion` to key off here), and
+    // unassigned committed visits anchor the route (push-audit P1).
+    packEnds: true,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
@@ -915,7 +1069,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // out of. Default [] = identical behavior for every other caller.
     excludeServiceIds,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
-    dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
+    dayEndHour: parseInt((config.day_end || '18:00').split(':')[0]),
+    // Capacity mode's shared shift starts at 08:00 for every caller; only
+    // the self-serve HTTP surfaces (this file's /availability, /find-slots
+    // and capture-intent revalidation; reschedule-public.js; reservice-public.js
+    // — the exact set that sets selfServeNotice) are bound to the documented
+    // customer grid (09:00-17:00, docs/public-route-contracts.md). The
+    // voice-agent callers (relay-tools.js, relay-booking.js) leave
+    // selfServeNotice unset, same as they leave the notice window unset —
+    // phone bookings follow the full 8am-6pm business-hours shift, matching
+    // call-recording-processor.js's own sanity bound (Codex r3 P0 on #4663).
+    customerFacing: selfServeNotice,
     // Waves works weekends (Sat AND Sun) — the estimate slot flow already
     // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
     // find-time's legacy default drops Sundays, which silently hid every Sunday
@@ -928,77 +1092,84 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     topN: Number.MAX_SAFE_INTEGER,
   });
 
-  // Enforce max_self_books_per_day — filter out dates already at cap.
   // Slot rules come from the shared bookingSlotWindow derivation so the
   // /confirm commit path enforces exactly what is offered here.
   const {
-    maxPerDay, slotGridMinutes, dayStartMin, dayEndMin,
+    slotGridMinutes, dayStartMin, dayEndMin,
     lunchStartMin: lunchStart, lunchEndMin: lunchEnd,
   } = bookingSlotWindow(config);
-  // Count each booking on its EFFECTIVE date (the linked live visit's date;
-  // the copy's own date only when unlinked) — the same expression the
-  // commit-time gate keys on. A booking whose live visit was moved off its
-  // original day must release that day's cap here AND consume the new
-  // day's, or the offer keeps a phantom slot the commit would refuse (or
-  // offers one the commit would grant).
-  const {
-    SELF_BOOKING_EFFECTIVE_DATE_SQL: effectiveDateSql,
-    SELF_BOOKING_INACTIVE_STATUSES: inactiveStatuses,
-  } = require('../services/availability');
-  // The expression is bound ONCE, in a subquery, and the outer query
-  // filters/groups its plain column — PostgreSQL matches GROUP BY to SELECT
-  // by expression identity, and two separately-bound copies of the CASE
-  // ($1..$3 vs $4..$6) are not the same expression to it.
-  const bookingCounts = await db(function effectiveDates() {
-    this.select('id', db.raw(`${effectiveDateSql} AS effective_date`, inactiveStatuses))
-      .from('self_booked_appointments')
-      .whereNot('status', 'cancelled');
-    if (excludeSelfBookingId) this.whereNot('id', excludeSelfBookingId);
-    this.as('sb');
-  })
-    .whereBetween('effective_date', [rangeFrom, rangeTo])
-    .select('effective_date as date')
-    .count('* as count')
-    .groupBy('effective_date');
-  // ⭐ THE OFFER MUST COUNT WHAT THE COMMIT COUNTS. Voice-agent bookings write
-  // only `scheduled_services` (the office-review pending lifecycle), and
-  // countActiveSelfBookingsForDay — the commit-time gate — now includes them.
-  // Counting only self_booked_appointments HERE would keep offering a day the
-  // commit refuses, so every pick on a voice-filled day would come back
-  // day_full: the offer surface promising what the gate declines, which is the
-  // exact divergence this filter exists to prevent.
-  const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-  const voiceCountQuery = db('scheduled_services')
-    .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
-    // Same inactive set the commit-time counter uses — a skipped (office-
-    // rejected) AI request releases its slot instead of holding the day full.
-    .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
-    .whereBetween('scheduled_date', [rangeFrom, rangeTo])
-    .select('scheduled_date')
-    .count('* as count')
-    .groupBy('scheduled_date');
-  if (excludeServiceIds.length) voiceCountQuery.whereNotIn('id', excludeServiceIds);
-  const voiceCounts = await voiceCountQuery;
-  // Never throws on a missing/unparseable date: an availability BUILDER that
-  // dies mid-count would take the whole offer surface down with it.
-  const dayKey = (d) => {
-    if (!d) return null;
-    if (typeof d === 'string') return d.split('T')[0] || null;
-    const t = new Date(d);
-    return Number.isNaN(t.getTime()) ? null : t.toISOString().split('T')[0];
-  };
-  const perDay = new Map();
-  for (const r of bookingCounts) {
-    const k = dayKey(r.date);
-    if (k) perDay.set(k, parseInt(r.count, 10) || 0);
+  // Enforce max_self_books_per_day — filter out dates already at cap.
+  // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor of
+  // the self-serve notice window below. Unset (default) = no per-day cap
+  // (fullDays stays empty, no day-cap queries run at all).
+  let fullDays = new Set();
+  if (selfBookDayCapEnabled()) {
+    const { maxPerDay } = bookingSlotWindow(config);
+    // Count each booking on its EFFECTIVE date (the linked live visit's date;
+    // the copy's own date only when unlinked) — the same expression the
+    // commit-time gate keys on. A booking whose live visit was moved off its
+    // original day must release that day's cap here AND consume the new
+    // day's, or the offer keeps a phantom slot the commit would refuse (or
+    // offers one the commit would grant).
+    const {
+      SELF_BOOKING_EFFECTIVE_DATE_SQL: effectiveDateSql,
+      SELF_BOOKING_INACTIVE_STATUSES: inactiveStatuses,
+    } = require('../services/availability');
+    // The expression is bound ONCE, in a subquery, and the outer query
+    // filters/groups its plain column — PostgreSQL matches GROUP BY to SELECT
+    // by expression identity, and two separately-bound copies of the CASE
+    // ($1..$3 vs $4..$6) are not the same expression to it.
+    const bookingCounts = await db(function effectiveDates() {
+      this.select('id', db.raw(`${effectiveDateSql} AS effective_date`, inactiveStatuses))
+        .from('self_booked_appointments')
+        .whereNot('status', 'cancelled');
+      if (excludeSelfBookingId) this.whereNot('id', excludeSelfBookingId);
+      this.as('sb');
+    })
+      .whereBetween('effective_date', [rangeFrom, rangeTo])
+      .select('effective_date as date')
+      .count('* as count')
+      .groupBy('effective_date');
+    // ⭐ THE OFFER MUST COUNT WHAT THE COMMIT COUNTS. Voice-agent bookings write
+    // only `scheduled_services` (the office-review pending lifecycle), and
+    // countActiveSelfBookingsForDay — the commit-time gate — now includes them.
+    // Counting only self_booked_appointments HERE would keep offering a day the
+    // commit refuses, so every pick on a voice-filled day would come back
+    // day_full: the offer surface promising what the gate declines, which is the
+    // exact divergence this filter exists to prevent.
+    const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+    const voiceCountQuery = db('scheduled_services')
+      .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
+      // Same inactive set the commit-time counter uses — a skipped (office-
+      // rejected) AI request releases its slot instead of holding the day full.
+      .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
+      .whereBetween('scheduled_date', [rangeFrom, rangeTo])
+      .select('scheduled_date')
+      .count('* as count')
+      .groupBy('scheduled_date');
+    if (excludeServiceIds.length) voiceCountQuery.whereNotIn('id', excludeServiceIds);
+    const voiceCounts = await voiceCountQuery;
+    // Never throws on a missing/unparseable date: an availability BUILDER that
+    // dies mid-count would take the whole offer surface down with it.
+    const dayKey = (d) => {
+      if (!d) return null;
+      if (typeof d === 'string') return d.split('T')[0] || null;
+      const t = new Date(d);
+      return Number.isNaN(t.getTime()) ? null : t.toISOString().split('T')[0];
+    };
+    const perDay = new Map();
+    for (const r of bookingCounts) {
+      const k = dayKey(r.date);
+      if (k) perDay.set(k, parseInt(r.count, 10) || 0);
+    }
+    for (const r of voiceCounts) {
+      const k = dayKey(r.scheduled_date);
+      if (k) perDay.set(k, (perDay.get(k) || 0) + (parseInt(r.count, 10) || 0));
+    }
+    fullDays = new Set(
+      [...perDay.entries()].filter(([, count]) => count >= maxPerDay).map(([date]) => date)
+    );
   }
-  for (const r of voiceCounts) {
-    const k = dayKey(r.scheduled_date);
-    if (k) perDay.set(k, (perDay.get(k) || 0) + (parseInt(r.count, 10) || 0));
-  }
-  const fullDays = new Set(
-    [...perDay.entries()].filter(([, count]) => count >= maxPerDay).map(([date]) => date)
-  );
 
   // Offer must mirror the /confirm commit gate (the #2704 estimate-surface
   // rule, filterCollidingSlots' dead-end-loop incident): createSelfBooking
@@ -1014,20 +1185,35 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // owns correctness.
   let occupiedByDate = null;
   try {
-    const { listOccupiedWindows } = require('../services/scheduling/occupancy');
-    const occupiedRows = await listOccupiedWindows({
-      dateFrom: rangeFrom,
-      dateTo: rangeTo,
-      // Public self-reschedule: the moving row must not block the slot it
-      // is vacating — same exclusion findAvailableSlots already applies.
-      excludeServiceIds,
-      // Guarded lat/lng for the travel-gap mirror below — only while the
-      // gate is on, so the dark query stays the legacy scan (no customers
-      // join) (GH codex #3803 r2 P2).
-      withCoords: travelGapEnabled(),
-    });
+    // Same shared anchor set find-time.js and availability.js now read
+    // (packing-geometry.js, Codex r5 structural fix) — always loaded WITH
+    // coords/allocation-expanded spans, gate-independent, so this mirror
+    // never drifts from what the two pickers already anchored their own
+    // packed bounds against. Only the travel-gap PREDICATE below stays
+    // gated (violatesTravelGap itself returns false when the gate is off);
+    // the anchor load is no longer where that gate lives (GH codex #3803
+    // r2 P2's dark-scan optimization is superseded by the shared loader).
+    const anchors = await loadPackingAnchors({ dateFrom: rangeFrom, dateTo: rangeTo, excludeServiceIds });
     occupiedByDate = new Map();
-    for (const row of occupiedRows) {
+    for (const anchor of anchors) {
+      const row = {
+        technician_id: anchor.technician_id,
+        customer_id: anchor.customer_id,
+        date: anchor.date,
+        startMin: anchor.rawStartMin,
+        endMin: anchor.rawEndMin,
+        windowMinutes: anchor.rawEndMin - anchor.rawStartMin,
+        expectedMinutes: anchor.expectedEndMin - anchor.rawStartMin,
+        lat: anchor.lat,
+        lng: anchor.lng,
+        // A live hold never shadows a committed neighbour (travel-gap.js's
+        // isHoldStop/travelGapConflicts) — without this, isHoldStop's
+        // `stop.hold != null` check sees undefined (not explicitly false)
+        // and falls through to a reservation_expires_at heuristic this row
+        // never carries, so every anchor here (Codex push-audit P1 on r6)
+        // silently read as a full committed block instead.
+        hold: anchor.hold,
+      };
       if (!occupiedByDate.has(row.date)) occupiedByDate.set(row.date, []);
       occupiedByDate.get(row.date).push(row);
     }
@@ -1045,16 +1231,35 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // /confirm gate, which re-derives a non-empty funnel key.
   const offerLocationKey = bookingOfferLocationKey(lat, lng);
   const candidateMap = new Map();
+
   const addCandidate = (slot, startMin) => {
     const endMin = startMin + duration;
     if (!isWholeHour(startMin)) return;
     if (startMin < dayStartMin || endMin > dayEndMin) return;
-    // Lunch windows are reserved for route health and should never be self-booked.
-    if (startMin < lunchEnd && endMin > lunchStart) return;
+    // The documented public grid (09:00-17:00) is narrower than dayStartMin
+    // (08:00, this file's own day-start default — matched to the voice
+    // agent's 8am-6pm business-hours bound, call-recording-processor.js) —
+    // self-serve callers only (selfServeNotice, same split as the notice
+    // window and the lunch gate below): an idle route's earliest-feasible
+    // 08:00 candidate must not reach a self-serve surface just because it
+    // clears dayStartMin. Voice-agent callers keep the full shift (Codex r4
+    // P0 on #4663 — capacity mode's own generator already applies this via
+    // customerFacing; this closes the identical gate-off leak).
+    if (selfServeNotice && !customerWindowAdmits({ startMin, endMin })) return;
+    // Lunch windows are reserved for route health and never self-booked —
+    // but ONLY while GATE_BOOKING_LUNCH_BLOCK is on (owner ruling 2026-09-23,
+    // unset by default). Off, noon is a normal offerable hour.
+    if (lunchBlockEnabled() && startMin < lunchEnd && endMin > lunchStart) return;
+    // Self-serve notice window (owner ruling 2026-09-23) — self-serve
+    // callers only (selfServeNotice opt-in; the voice agent never sets it).
+    // Offer/commit parity: createSelfBooking's commit gate runs the same
+    // check on this exact (date, startTime) tuple.
+    if (selfServeNotice && violatesSelfServeNotice({ date: slot.date, startTime: fmt(startMin) }, today)) return;
     // Commit-gate occupancy mirror (see the fetch above). Overlap semantics
     // match the gate's SQL predicate (half-open: back-to-back windows touch
     // without clashing). Also covers cleanBookingStart snaps that would land
     // a candidate on a window find-time validated around.
+    let idleMinutes = 0;
     if (occupiedByDate) {
       const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !capacityEnabled()
         || row.technician_id == null || row.technician_id === slot.technician.id);
@@ -1063,7 +1268,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // findConflictingVisits `travel` probe rejects a window that merely
       // touches a stop across a real drive; drop it here so it is never
       // offered. Same soft-degrade as the overlap mirror (no map → skip).
-      if (dayOccupied && violatesTravelGap({ startMin, endMin, lat, lng }, dayOccupied)) return;
+      if (dayOccupied && violatesTravelGap({
+        startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
+      }, dayOccupied)) return;
+      idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin, {
+        lat, lng, durationMinutes: duration, expectedMinutes: candidateExpectedMinutes,
+      });
     }
     const startTime = fmt(startMin);
     if (!inTimeOfDay(startTime, timeOfDay)) return;
@@ -1100,6 +1310,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       technician_id: slot.technician.id,
       rank: slot.rank,
       score: slot.score,
+      idle_minutes: idleMinutes,
       startTime24: startTime,
       endTime24: fmt(endMin),
       start: minToTime12(startMin),
@@ -1123,27 +1334,46 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // Route scoring returns minute-level travel offsets; customers see clean windows.
       const rawStartMin = timeToMin(slot.start_time);
       const firstStartMin = cleanBookingStart(rawStartMin, slot, dayStartMin, slotGridMinutes);
-      // Fan out every grid-aligned start the gap can hold, not just the
-      // earliest: find-time emits ONE earliest-feasible-minute candidate per
-      // route gap, and when its hour-snap landed in the lunch block or on an
-      // occupied hour, addCandidate's rejection silently discarded the gap's
-      // genuinely free later hours — whole near-term days with real capacity
-      // vanished from /book, the reschedule page, and /reservice (2026-08-05
-      // field report). latest_start_min bounds the fan-out to starts whose
-      // end still clears the drive to the next stop (the unbounded snap
-      // could previously overshoot that); addCandidate still owns the
-      // whole-hour / lunch / occupancy / day-end rules for every start.
-      // When the snap overshoots the bound (a gap too tight to hold any
-      // grid-aligned start), the loop body never runs and the gap offers
-      // nothing — the correct outcome; the old single-candidate path could
-      // offer that overshot start and leave the tech a slot the route can't
-      // reach. Fallback to the single snapped start only when the bound is
-      // absent (defensive: a caller-mocked or cached slot without the field).
+      // latest_start_min bounds the fan-out to starts whose end still clears
+      // the drive to the next stop. Fallback to the single snapped start
+      // only when the bound is absent (defensive: a caller-mocked or cached
+      // slot without the field).
       const lastStartMin = Number.isFinite(slot.latest_start_min)
         ? slot.latest_start_min
         : firstStartMin;
-      for (let startMin = firstStartMin; startMin <= lastStartMin; startMin += slotGridMinutes) {
-        addCandidate(slot, startMin);
+      if ((slot.stops_that_day || 0) > 0) {
+        // Packed-ends only (owner bug report 2026-09-23): a gap bordered by
+        // a real stop offers ONLY the packed position(s) against that stop
+        // — earliest (right after the previous stop) when insertion.after
+        // is a real stop, latest (right before the next stop, snapped DOWN
+        // to the grid) when insertion.before is a real stop — instead of
+        // every grid-aligned hour in between. That full fan-out is exactly
+        // the hole-making mid-gap offer the report describes: a 9 AM pick
+        // on a day whose first stop is noon leaves a 2-3 hour hole while
+        // the packed 11 AM sits lower in score-only ranking. A middle gap
+        // (both sides real stops) offers both ends, one candidate when they
+        // coincide. No fallback fan-out when the packed position collides
+        // with lunch/occupancy — that gap simply offers nothing, same as
+        // find-time's own packEnds rule (scheduling/find-time.js).
+        const wantEarliest = !!slot.insertion?.after_stop_id;
+        const wantLatest = !!slot.insertion?.before_stop_id;
+        const latestGridStart = Math.floor(lastStartMin / slotGridMinutes) * slotGridMinutes;
+        const starts = new Set();
+        if (wantEarliest && firstStartMin <= lastStartMin) starts.add(firstStartMin);
+        if (wantLatest && latestGridStart >= firstStartMin) starts.add(latestGridStart);
+        if (!wantEarliest && !wantLatest && firstStartMin <= lastStartMin) starts.add(firstStartMin);
+        for (const startMin of [...starts].sort((a, b) => a - b)) addCandidate(slot, startMin);
+      } else {
+        // Open day (no committed stops at all): fan out every grid-aligned
+        // start the gap can hold, not just the earliest — find-time's
+        // single-candidate-per-gap legacy shape combined with an hour-snap
+        // landing in the lunch block or on an occupied hour otherwise
+        // silently discarded the gap's genuinely free later hours (2026-08-05
+        // field report). No neighbouring stop exists to create a hole
+        // against, so every hour is an equally valid pick.
+        for (let startMin = firstStartMin; startMin <= lastStartMin; startMin += slotGridMinutes) {
+          addCandidate(slot, startMin);
+        }
       }
     }
   }
@@ -1236,7 +1466,7 @@ router.get('/availability', async (req, res, next) => {
     const config = (await db('booking_config').first()) || {
       advance_days_min: 1, advance_days_max: 14,
       slot_duration_minutes: 60,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       max_self_books_per_day: 3,
     };
 
@@ -1276,6 +1506,8 @@ router.get('/availability', async (req, res, next) => {
       // when the customer browses a specific date / "Find more dates".
       expandOpenDays: req.query.expand === 'open',
       serviceKey,
+      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
+      selfServeNotice: true,
     });
 
     // Coords the caller didn't already hold (estimate_id → customer record,
@@ -1341,7 +1573,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const config = (await db('booking_config').first()) || {
       advance_days_min: 1, advance_days_max: 14,
       slot_duration_minutes: 60,
-      day_start: '08:00', day_end: '17:00',
+      day_start: '08:00', day_end: '18:00',
       max_self_books_per_day: 3,
     };
 
@@ -1370,6 +1602,8 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       timeOfDay: when.timeOfDay,
       expandOpenDays: true,
       serviceKey,
+      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
+      selfServeNotice: true,
     });
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -1469,12 +1703,6 @@ async function createSelfBooking(payload = {}) {
     const todayEtStr = etDateString();
     if (slotDateStr < todayEtStr) {
       return { ok: false, status: 400, error: 'That date has already passed — please pick another day.' };
-    }
-    if (slotDateStr === todayEtStr) {
-      const nowEt = etParts(new Date());
-      if (timeToMin(slot_start) <= nowEt.hour * 60 + nowEt.minute) {
-        return { ok: false, status: 409, error: 'That time has already passed today — please pick another slot.' };
-      }
     }
 
     // Redemption re-check for owner blackout days: a signed slot offered
@@ -2459,7 +2687,10 @@ async function createSelfBooking(payload = {}) {
       // Taken last, keeping the acquisition order fixed
       // (date → customer → tech → zone → day-cap — the global order in
       // scheduling/occupancy.js) so concurrent confirms can't deadlock.
-      await acquireSelfBookingDayCapLock(trx, slotDateStr);
+      // GATE_SELF_BOOK_DAY_CAP (owner ruling 2026-09-23): retired in favor
+      // of the self-serve notice window — unset (default) skips the lock
+      // AND the re-check below; the primitives themselves are unchanged.
+      if (selfBookDayCapEnabled()) await acquireSelfBookingDayCapLock(trx, slotDateStr);
       // Rung 6 (occupancy.js ORDERING CONTRACT): the appointment insert
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
@@ -2531,6 +2762,23 @@ async function createSelfBooking(payload = {}) {
       const existing = await replayQuery.first();
       if (existing) return { existing };
 
+      // Self-serve notice window (owner ruling 2026-09-23), replacing the old
+      // same-day-only "already passed" floor: a customer can't self-book a
+      // visit starting within the notice window (default 24h), whether that
+      // falls later today or early tomorrow. Offer/commit parity: this is the
+      // same (date, startTime) check buildBookingAvailability's addCandidate
+      // runs with selfServeNotice: true. Placed AFTER the idempotent replay
+      // above, under the locks: a booking that landed just outside the
+      // boundary whose response was lost still replays as success when the
+      // retry crosses it, and the clock is read inside the transaction.
+      if (violatesSelfServeNotice({ date: slotDateStr, startTime: slot_start })) {
+        throw Object.assign(new Error('That time is too soon to book online — call (941) 297-5749 and our team can get you on the schedule.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SELF_SERVE_NOTICE',
+        });
+      }
+
       if (callbackVisit) {
         const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
         const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
@@ -2547,15 +2795,19 @@ async function createSelfBooking(payload = {}) {
       // availability builder uses to drop full days, via the shared helper) —
       // the builder's cap is advisory-only without this, since a direct POST
       // never saw it. Runs AFTER the replay lookup so a double-submit on a
-      // now-full day still returns its original booking.
-      const { maxPerDay } = bookingSlotWindow(config);
-      const dayCount = await countActiveSelfBookingsForDay(trx, slotDateStr);
-      if (dayCount >= maxPerDay) {
-        throw Object.assign(new Error('That day is fully booked — please pick another day.'), {
-          statusCode: 409,
-          isOperational: true,
-          code: 'DAY_FULL',
-        });
+      // now-full day still returns its original booking. Gated off by
+      // default (GATE_SELF_BOOK_DAY_CAP, owner ruling 2026-09-23) — see the
+      // lock acquisition above.
+      if (selfBookDayCapEnabled()) {
+        const { maxPerDay } = bookingSlotWindow(config);
+        const dayCount = await countActiveSelfBookingsForDay(trx, slotDateStr);
+        if (dayCount >= maxPerDay) {
+          throw Object.assign(new Error('That day is fully booked — please pick another day.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'DAY_FULL',
+          });
+        }
       }
 
       // Re-verify the slot is still available (race condition guard).
@@ -2635,6 +2887,8 @@ async function createSelfBooking(payload = {}) {
         travel: {
           lat: Number.isFinite(offerLat) ? offerLat : null,
           lng: Number.isFinite(offerLng) ? offerLng : null,
+          // Same credit buildBookingAvailability offered this window under.
+          expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration),
         },
       });
       if (globalClash.length) {
@@ -2856,7 +3110,11 @@ async function createSelfBooking(payload = {}) {
       // path: both are "pick another slot" outcomes, and both must roll back
       // a just-created profile so the retry doesn't strand on the
       // phone-already-on-file 409.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED') {
+      // SELF_SERVE_NOTICE rides it too (Codex r1 P1): the offered slot
+      // crossed the notice boundary while this request waited — another
+      // "pick another slot" outcome that must not strand a just-created
+      // profile.
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -4928,11 +5186,24 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
         return res.json({ ok: true, skipped: 'unverified_slot' });
       }
       const cfg = (await db('booking_config').first()) || {};
+      // Codex r5 P2 #5 — thread the same funnel identity /availability
+      // resolved (same fallback order as row.service_type's own
+      // canonicalBookingServiceLabel chain just above), so the revalidation's
+      // expected-minutes credit (packedBounds' padding term) and travel-gap
+      // predicate match what was actually offered instead of degrading to
+      // the no-credit legacy gap for every capture-intent revalidation.
+      const serviceKey = normalizeBookingServiceKey(b.service_id)
+        || normalizeBookingServiceKey(b.service_type)
+        || normalizeBookingServiceKey(b.quoted_service_label);
       const avail = await buildBookingAvailability({
         lat, lng,
         duration: cfg.slot_duration_minutes || 60,
         rangeFrom: row.slot_date, rangeTo: row.slot_date,
         config: cfg, today: new Date(), expandOpenDays: true,
+        serviceKey,
+        // Self-serve surface — a slot the notice window would now refuse
+        // must not be treated as still offered (offer/commit parity).
+        selfServeNotice: true,
       });
       const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
       const offered = !!day && Array.isArray(day.slots)
@@ -5140,6 +5411,7 @@ module.exports._internals = {
   // the web /book funnel (no duplicated scheduling logic).
   resolveBookingCoords,
   buildBookingAvailability,
+  bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,
   MAX_BOOKING_HORIZON_DAYS,
@@ -5153,6 +5425,7 @@ module.exports._internals = {
   resolveCallbackDuration,
   normalizeBookingServiceKey,
   bookingOfferLocationKey,
+  idleMinutesAgainst,
   BOOKING_FUNNEL_SERVICE_DURATIONS,
   validateBookingSlotGeometry,
   validateBookingSlotDate,

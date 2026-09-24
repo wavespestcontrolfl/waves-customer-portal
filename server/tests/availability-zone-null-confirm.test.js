@@ -128,6 +128,46 @@ function wireConfirm({ zones = [], replacedRow = undefined } = {}) {
   return { trx, scheduledQueries };
 }
 
+describe('confirmBooking — lunch block commit mirror (GATE_BOOKING_LUNCH_BLOCK, owner ruling 2026-09-23)', () => {
+  const ENV_KEY = 'GATE_BOOKING_LUNCH_BLOCK';
+  let previous;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    findConflictingVisits.mockResolvedValue([]);
+    previous = process.env[ENV_KEY];
+  });
+  afterEach(() => {
+    if (previous === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = previous;
+  });
+
+  test('gate on: a noon option (quoted before the flip) is refused SLOT_TAKEN before any insert', async () => {
+    process.env[ENV_KEY] = 'true';
+    const { scheduledQueries } = wireConfirm({ zones: [] });
+    await expect(
+      Availability.confirmBooking(null, 'cust-1', DATE, '12:00', null),
+    ).rejects.toMatchObject({ code: 'SLOT_TAKEN', statusCode: 409, message: expect.stringMatching(/lunch/i) });
+    expect(scheduledQueries.every((q) => !q.insert.mock.calls.length)).toBe(true);
+    // Rejected before the occupancy probe ran — the lunch mirror sits with
+    // the other pre-transaction sanity checks.
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a window that only TOUCHES the block (11:00–12:00) still commits', async () => {
+    process.env[ENV_KEY] = 'true';
+    wireConfirm({ zones: [] });
+    const result = await Availability.confirmBooking(null, 'cust-1', DATE, '11:00', null);
+    expect(result.confirmationCode).toBeTruthy();
+  });
+
+  test('gate unset (default): the same noon option commits — noon is an ordinary hour', async () => {
+    delete process.env[ENV_KEY];
+    wireConfirm({ zones: [] });
+    const result = await Availability.confirmBooking(null, 'cust-1', DATE, '12:00', null);
+    expect(result.confirmationCode).toBeTruthy();
+  });
+});
+
 describe('confirmBooking — zone-null occupancy fallback', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -265,6 +305,27 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
   // any other order could deadlock against createSelfBooking, which shares
   // all three.
   describe('lock ordering', () => {
+    // The day-cap rung only exists while GATE_SELF_BOOK_DAY_CAP is set
+    // (owner ruling 2026-09-23 retired the cap for the notice window).
+    let prevCap;
+    beforeEach(() => { prevCap = process.env.GATE_SELF_BOOK_DAY_CAP; process.env.GATE_SELF_BOOK_DAY_CAP = 'true'; });
+    afterEach(() => {
+      if (prevCap === undefined) delete process.env.GATE_SELF_BOOK_DAY_CAP;
+      else process.env.GATE_SELF_BOOK_DAY_CAP = prevCap;
+    });
+
+    test('GATE_SELF_BOOK_DAY_CAP unset (default): no day-cap lock and no day count — the commit mirrors the offer side', async () => {
+      delete process.env.GATE_SELF_BOOK_DAY_CAP;
+      const { trx } = wireConfirm({ zones: [] });
+      const result = await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+      expect(result.confirmationCode).toBeTruthy();
+      expect(lockKeys(trx)).not.toContain(DATE);
+      expect(advisoryLocks(trx).some(([ns]) => ns === 'self-booking-day-cap')).toBe(false);
+      // The self_booked_appointments table was only touched for the INSERT
+      // (call #1), never for a day count.
+      expect(trx.selfBookCalls).toBe(1);
+    });
+
     test.each([
       ['zone-null', []],
       ['zone-resolved', [{ id: 'zone-1', zone_name: 'Sarasota / South', cities: ['Offgridville'] }]],
@@ -296,5 +357,71 @@ describe('confirmBooking — zone-null occupancy fallback', () => {
       expect(locks[1]).toEqual(['slot-reserve', `zone:unknown:${DATE}`]);
       expect(locks[2]).toEqual(['self-booking-day-cap', DATE]);
     });
+  });
+});
+
+describe('confirmBooking — candidate expected-minutes credit (Codex #4664 r3 P2)', () => {
+  // Offer/commit parity (owner ruling 2026-09-23): confirmBooking previously
+  // passed findConflictingVisits only {lat, lng} for the candidate, so its
+  // own padding always read zero regardless of the estimate's service. The
+  // commit probe must resolve and thread the SAME credit
+  // getAvailableSlots' offer-side mirror resolves.
+  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP'];
+  const saved = {};
+  beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
+  afterAll(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  const CATALOG = [
+    { service_key: 'general_pest', name: 'General Pest Control', min_duration_minutes: 30, max_duration_minutes: 50 },
+  ];
+
+  function wireConfirmWithCatalog(catalog) {
+    const wired = wireConfirm({ zones: [] });
+    const baseImpl = wired.trx.getMockImplementation();
+    wired.trx.mockImplementation((table) => {
+      if (table === 'services') return chain({ select: jest.fn().mockResolvedValue(catalog) });
+      return baseImpl(table);
+    });
+    return wired;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    findConflictingVisits.mockResolvedValue([]);
+    delete process.env.GATE_SLOT_TRAVEL_GAP;
+    require('../services/scheduling/expected-service-minutes').clearExpectedServiceMinutesCache();
+  });
+
+  test('gate on: resolves the estimate-less "General Pest Control" default against the catalog and threads it through', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    wireConfirmWithCatalog(CATALOG);
+    await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+    // midpoint(30, 50) = 40, well under the 60-minute default slot window —
+    // a real credit, not the window length the bug always fell back to.
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      travel: { lat: null, lng: null, expectedMinutes: 40 },
+    }));
+  });
+
+  test('gate on, no catalog match: falls back to the window length (zero padding), same shape as the gate-off pin', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    wireConfirmWithCatalog([]);
+    await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      travel: { lat: null, lng: null, expectedMinutes: 60 },
+    }));
+  });
+
+  test('gate off: travel stays the plain {lat, lng} pin — byte-identical, no catalog read', async () => {
+    wireConfirmWithCatalog(CATALOG);
+    await Availability.confirmBooking(null, 'cust-1', DATE, '09:00', null);
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      travel: { lat: null, lng: null },
+    }));
   });
 });

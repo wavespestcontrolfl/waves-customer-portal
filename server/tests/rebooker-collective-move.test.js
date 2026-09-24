@@ -1492,7 +1492,10 @@ describe('caller wiring (source)', () => {
     // Quick Move's series behavior is owned by its own gate + effects path:
     // its single call always opts out of the collective choke point.
     expect(read('../services/rain-out.js')).toMatch(/excludeServiceIds: \[job\.id\],[\s\S]{0,900}seriesPolicy: 'single',/);
-    expect(read('../routes/reschedule-public.js')).toContain("{ technicianId: slot.technician_id, seriesPolicy: 'single', travelGap: true }");
+    // The customer web single branch carries its expect fence + notice
+    // re-check (self-serve notice window) on the same options object — the
+    // guard is that it still opts out via seriesPolicy: 'single'.
+    expect(read('../routes/reschedule-public.js')).toMatch(/technicianId: slot\.technician_id,\s*seriesPolicy: 'single',\s*travelGap: true,/);
     const sched = read('../routes/admin-schedule.js');
     const handler = sched.indexOf("router.put('/:id/update-details'");
     // Disclosure: without seriesAck the planner refuses up front (nothing saved) with the preview.
