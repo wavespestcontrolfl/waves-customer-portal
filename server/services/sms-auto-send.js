@@ -836,7 +836,7 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
   try {
     reservationsCleared = await db('sms_log')
       .where({ direction: 'outbound' })
-      .whereIn('status', ['sending', 'sent', 'delivered'])
+      .whereIn('status', ['sending', 'sent', 'delivered', 'failed', 'undelivered'])
       .where(function replyReservation() {
         this.whereRaw("metadata->>'manual_send_reservation' = 'true'")
           .orWhereRaw("metadata->>'auto_send_reservation' = 'true'");
