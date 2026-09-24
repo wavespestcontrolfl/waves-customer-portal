@@ -139,6 +139,47 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
       .toMatchObject({ status: 'sent' });
   });
 
+  test.each(['failed', 'undelivered'])(
+    'a sole accepted reservation updated to %s by a callback survives explicit cleanup and reconciliation',
+    async (status) => {
+      const reservationId = await acceptedReservation({
+        kind: 'manual', providerMessageId: `SM${'e'.repeat(32)}`, body: `Sole terminal receipt ${status}`,
+      });
+      await trx('sms_log').where({ id: reservationId }).update({ status, created_at: old() });
+
+      await suggest.settleReplyHoldingReservation({ reservationId });
+      expect(await trx('sms_log').where({ id: reservationId }).first('status'))
+        .toMatchObject({ status });
+      expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30 }))
+        .toMatchObject({ reservationsCleared: 0 });
+      expect(await trx('sms_log').where({ id: reservationId }).first('status'))
+        .toMatchObject({ status });
+    }
+  );
+
+  test.each(['failed', 'undelivered'])(
+    'reconciliation removes a %s reservation when a matching terminal provider row exists',
+    async (status) => {
+      const providerSid = `SM${(status === 'failed' ? 'f' : 'd').repeat(32)}`;
+      const reservationId = await acceptedReservation({
+        kind: 'manual', providerMessageId: providerSid, body: `Duplicate terminal receipt ${status}`,
+      });
+      const providerId = randomUUID();
+      await trx('sms_log').insert({
+        id: providerId, direction: 'outbound', from_phone: '+19413529161', to_phone: '+12025550101',
+        message_body: `Duplicate terminal receipt ${status}`, twilio_sid: providerSid,
+        status, message_type: 'manual', metadata: {},
+      });
+      await trx('sms_log').where({ id: reservationId }).update({ status, created_at: old() });
+
+      expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30 }))
+        .toMatchObject({ reservationsCleared: 1 });
+      expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
+      expect(await trx('sms_log').where({ id: providerId }).first('status'))
+        .toMatchObject({ status });
+    }
+  );
+
   test.each([
     ['exact provider SID despite normalized provider body', 'auto', `SM${'b'.repeat(32)}`, 'On my way… https://wavespestcontrol.com/pay', 'On my way... wavespestcontrol.com/pay'],
     ['exact MMS provider SID', 'auto', `MM${'c'.repeat(32)}`, 'Ordinary provider receipt auto', 'Ordinary provider receipt auto'],
