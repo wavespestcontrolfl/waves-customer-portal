@@ -62,7 +62,10 @@ function bumpModified(text) {
   const today = etDateString(new Date());
   if (/^updated:.*$/m.test(text)) return text.replace(/^updated:.*$/m, `updated: "${today}"`);
   if (/^modified:.*$/m.test(text)) return text.replace(/^modified:.*$/m, `modified: "${today}"`);
-  return text;
+  // Neither key: insert `updated:` right after `published:` (v2 schema) or as
+  // the last frontmatter line, so no swapped image ships with a stale lastmod.
+  if (/^published:.*$/m.test(text)) return text.replace(/^(published:.*)$/m, `$1\nupdated: "${today}"`);
+  return text.replace(/^---\n([\s\S]*?)\n---/, (_, fm) => `---\n${fm}\nupdated: "${today}"\n---`);
 }
 // The H2 heading + first prose paragraph of the section that holds the image.
 function sectionFor(text, imagePath) {
