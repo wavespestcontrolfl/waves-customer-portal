@@ -15136,11 +15136,17 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // (customer-stages.js — the one churned/former vocabulary every KPI/
 // eligibility surface shares) — read with FOR UPDATE, the same row lock
 // PUT /:id/stage takes, so a concurrent stage save serializes against this
-// run instead of racing it. The series itself must not touch annual prepay
-// at all (topupSeriesSkipReason/isAnnualPrepaySeries — v1 scope cut, see
-// that function's own comment) and its window_start, once floored to the
-// hour, must not push its duration-derived end past 24:00
-// (normalizeTopUpWindow — 'window_unplaceable').
+// run instead of racing it. A TRY-lock on the same per-customer namespace
+// annual-prepay term CREATION serializes on must also succeed
+// ('annual_prepay_busy' on a miss — a term is being created for this
+// customer right now, retried next run) before the series itself is
+// checked to not touch annual prepay at all (topupSeriesSkipReason/
+// isAnnualPrepaySeries — v1 scope cut, see that function's own comment,
+// and the try-lock's own comment above its call site for why a term-
+// creation race needs this and why it's a try-lock, not a blocking one).
+// Its window_start, once floored to the hour, must not push its
+// duration-derived end past 24:00 (normalizeTopUpWindow —
+// 'window_unplaceable').
 //
 // Hard-capped at TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN inserts per call — a
 // runaway pattern or a horizon misconfiguration can never seed an unbounded
@@ -15239,6 +15245,20 @@ async function topupSeriesSkipReason(conn, parent, parentId, cols) {
   return null;
 }
 
+// Reads a pg_try_advisory_xact_lock(...)::AS locked result the same way
+// customer-comms-lock.js's own tryLockCustomerComms does (knex's raw()
+// result shape differs by driver/version — `{ rows: [...] }` vs a bare
+// array — and Postgres can hand back either JS `true`/`false` or the
+// literal driver strings 't'/'f'). Pulled out as its own function rather
+// than inlined so this shape-unwrapping doesn't count against
+// topUpRecurringSeriesLocked's own complexity.
+function advisoryTryLockAcquired(rawResult) {
+  const row = rawResult && rawResult.rows
+    ? rawResult.rows[0]
+    : (Array.isArray(rawResult) ? rawResult[0] : null);
+  return !!(row && (row.locked === true || row.locked === 't'));
+}
+
 async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } = {}) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
@@ -15271,6 +15291,48 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
   const customerSkip = topupCustomerSkipReason(customer);
   if (customerSkip) return { spawnedVisits: [], skipped: customerSkip };
+
+  // TRY-lock the SAME per-customer annual-prepay advisory namespace term
+  // CREATION serializes on (admin-customers.js's lockAndAssertNoAnnualPrepayOverlap
+  // and admin-invoices.js's coverage-enable path — both take it as the FIRST
+  // lock of their transaction, before any row lock) — Codex GitHub r4 P1.
+  // Without this, the prepay-exclusion check below only ever reflects
+  // whatever was true the instant it ran: a payment_pending term can commit
+  // for this exact customer moments later, mid-loop, and this run would
+  // never notice and keep inserting visits a fresh term now covers.
+  //
+  // Lock-order analysis (why a TRY-lock, not a blocking one): every known
+  // acquirer of this namespace (both call sites above, verified by grep —
+  // there are no others) takes it as the very first thing in its own
+  // transaction, before any row lock, and NEVER while already holding the
+  // maintenance lock, the customer-comms lock, or a customers-row FOR
+  // UPDATE — none of those three are things a term-creation transaction
+  // touches at all. So a BLOCKING acquire here, even after this function's
+  // own maintenance/comms/customer-row locks, could only ever wait on a
+  // term-creation transaction that is itself never waiting on any of THIS
+  // transaction's locks — no cycle exists among the paths that exist
+  // today. But proving that stays true for every future caller of this
+  // namespace is a standing burden this function shouldn't own, and the
+  // seeder right next to lockAndAssertNoAnnualPrepayOverlap
+  // (tryLockCustomerComms, customer-comms-lock.js) already answers the
+  // identical question the same way: use a non-blocking try instead of
+  // relitigating full-codebase lock order on every future change. A
+  // try-lock can never be the "waiting" side of a deadlock — it succeeds
+  // or fails immediately — so this choice is safe regardless of what any
+  // future acquirer of this namespace does.
+  //
+  // A miss means a term-creation transaction is genuinely in flight for
+  // this exact customer right now; skip rather than race it — the next
+  // night's run (or the next cron tick) retries. A hit holds the SAME
+  // namespace for the rest of THIS transaction, so no new term can commit
+  // underneath this series while it's being topped up, and the
+  // prepay-exclusion check right below now runs under that guarantee.
+  const { ANNUAL_PREPAY_LOCK_NS } = require('./admin-customers')._private;
+  const prepayLockResult = await conn.raw(
+    'SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked',
+    [ANNUAL_PREPAY_LOCK_NS, String(parent.customer_id)],
+  );
+  if (!advisoryTryLockAcquired(prepayLockResult)) return { spawnedVisits: [], skipped: 'annual_prepay_busy' };
 
   const seriesSkip = await topupSeriesSkipReason(conn, parent, parentId, cols);
   if (seriesSkip) return { spawnedVisits: [], skipped: seriesSkip };
@@ -15352,13 +15414,25 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
 // The writing wrapper — same shape as runRecurringSeriesMaintenance: takes
 // the per-parent advisory lock + the customer-comms lock, runs the horizon
 // loop, and (matching the completion path's convention) registers a
-// reminder for every spawned visit once it's visible to a fresh connection
-// — either the caller's own already-open transaction (conn.isTransaction) or
-// the transaction this function opens and commits itself. Exported for the
-// nightly cron (services/recurring-series-topup.js) and the one-shot ops
-// script's --apply mode. For a dry run / the gate-off shadow pass, call
-// topUpRecurringSeriesLocked directly inside a transaction the caller rolls
-// back — see that function's header for why reminders can't ride along.
+// reminder for every spawned visit once it's visible to a fresh connection.
+// ALWAYS opens and commits its OWN transaction (Codex GitHub r4 P2) —
+// never runs inside a transaction the caller already has open. A caller-
+// supplied open transaction used to be accepted (`conn.isTransaction`) and
+// would self-deadlock: registerSpawnedVisitReminder below inserts through
+// a FRESH connection with a foreign key to the just-inserted
+// scheduled_services row, and Postgres blocks that insert until the
+// referencing row's own transaction commits — but that transaction is
+// THIS caller's, and the caller is synchronously awaiting this very call
+// before it can commit, so neither side could ever finish. Nothing in
+// this codebase ever exercised that path (verified: the sweep and the ops
+// script both call this with the plain `db` handle, never an open
+// transaction), so it's removed rather than fixed — reminders are
+// registered only after this function's own commit, unconditionally.
+// Exported for the nightly cron (services/recurring-series-topup.js) and
+// the one-shot ops script's --apply mode. For a dry run / the gate-off
+// shadow pass, call topUpRecurringSeriesLocked directly inside a
+// transaction the caller rolls back — see that function's header for why
+// reminders can't ride along.
 // Takes the same per-parent maintenance lock + customer-comms fence as the
 // completion path, then runs the top-up loop. Shared by the committing
 // wrapper below and the sweep's rollback-only dry run, so a shadow/preview
@@ -15390,8 +15464,7 @@ async function topUpRecurringSeriesWithLocks(trx, parentId, opts = {}) {
 }
 
 async function topUpRecurringSeries(conn, parentId, opts = {}) {
-  const runLocked = (trx) => topUpRecurringSeriesWithLocks(trx, parentId, opts);
-  const result = conn.isTransaction ? await runLocked(conn) : await conn.transaction(runLocked);
+  const result = await conn.transaction((trx) => topUpRecurringSeriesWithLocks(trx, parentId, opts));
   for (const spawnedVisit of result.spawnedVisits) {
     // No confirmation SMS (sendConfirmation:false, matching every other
     // spawned/extended child) and no other customer comms — this only

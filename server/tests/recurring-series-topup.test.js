@@ -114,7 +114,13 @@ function makeConn(handler, opts = {}) {
   const build = (isTransaction) => {
     const fn = (table) => buildTable(table);
     fn.isTransaction = isTransaction;
-    fn.raw = () => Promise.resolve();
+    // Answers the maintenance/comms advisory-lock SELECTs (ignored, no
+    // return value needed) AND the annual-prepay try-lock probe
+    // (pg_try_advisory_xact_lock) — a real Postgres always "gets" an
+    // uncontended lock, so every scenario in this suite defaults to a
+    // successful try-lock unless a test overrides `conn.raw` itself (see
+    // the dedicated 'annual_prepay_busy' tests below).
+    fn.raw = () => Promise.resolve({ rows: [{ locked: true }] });
     fn.fn = { now: () => new Date() };
     fn.transaction = (cb) => {
       const exec = () => Promise.resolve().then(() => cb(build(true)));
@@ -413,6 +419,66 @@ describe('topUpRecurringSeriesLocked — annual-prepay scope cut v1 (Codex GitHu
   });
 });
 
+describe('topUpRecurringSeriesLocked — annual-prepay term-creation race (Codex GitHub r4 P1)', () => {
+  // Term CREATION serializes on ANNUAL_PREPAY_LOCK_NS (admin-customers.js /
+  // admin-invoices.js) — a payment_pending term can otherwise commit for
+  // this exact customer mid-loop, after the prepay-exclusion check already
+  // ran and found nothing. A TRY-lock (never blocking — see the lock's own
+  // call-site comment for the full lock-order analysis) on that SAME
+  // namespace closes the race: a hit guarantees no new term commits for
+  // the rest of this transaction; a miss defers the whole series rather
+  // than risk it.
+  const { ANNUAL_PREPAY_LOCK_NS } = require('../routes/admin-customers')._private;
+
+  test('takes a TRY-lock (never blocking) on the exact ANNUAL_PREPAY_LOCK_NS namespace, keyed by customer id', async () => {
+    const rawCalls = [];
+    const { conn } = topupScenario();
+    conn.raw = jest.fn((sql, bindings) => {
+      rawCalls.push([sql, bindings]);
+      return Promise.resolve({ rows: [{ locked: true }] });
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    const prepayLockCall = rawCalls.find(([sql]) => sql.includes('pg_try_advisory_xact_lock'));
+    expect(prepayLockCall).toBeDefined();
+    expect(prepayLockCall[1]).toEqual([ANNUAL_PREPAY_LOCK_NS, String(5)]); // topupScenario's customer_id
+  });
+
+  test('skips with annual_prepay_busy on a miss — never races a term creation genuinely in flight', async () => {
+    const { conn, inserted } = topupScenario();
+    conn.raw = jest.fn(() => Promise.resolve({ rows: [{ locked: false }] }));
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('annual_prepay_busy');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('the prepay-exclusion check runs AFTER the lock, not before — a miss never even queries it', async () => {
+    const prepayTermQueries = [];
+    const { customer, parent } = topupScenario();
+    const conn = makeConn(({ table, calls, op }) => {
+      if (table === 'scheduled_services' && op === 'columnInfo') return BASE_COLS;
+      if (table === 'scheduled_services' && op === 'first') {
+        const firstCall = calls.find((c) => c[0] === 'first');
+        return firstCall[1] ? null : parent;
+      }
+      if (table === 'customers' && op === 'first') return customer;
+      if (table === 'annual_prepay_terms' && op === 'first') { prepayTermQueries.push(calls); return undefined; }
+      return null;
+    });
+    conn.raw = jest.fn(() => Promise.resolve({ rows: [{ locked: false }] }));
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBe('annual_prepay_busy');
+    expect(prepayTermQueries).toHaveLength(0);
+  });
+
+  test('a lock hit proceeds to the (passing) prepay-exclusion check and on to a normal top-up', async () => {
+    const { conn, inserted } = topupScenario();
+    conn.raw = jest.fn(() => Promise.resolve({ rows: [{ locked: true }] }));
+    const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    expect(result.skipped).toBeNull();
+    expect(inserted.length).toBeGreaterThan(0);
+  });
+});
+
 describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
   // Same shared verdict every OFFICE series writer consults
   // (seriesExtensionUnbillable) — the completion-time single-visit
@@ -592,7 +658,10 @@ describe('topUpRecurringSeriesWithLocks — shared by apply and dry run', () => 
       seriesDates: [daysOut(0)],
     });
     const rawCalls = [];
-    conn.raw = jest.fn((sql, bindings) => { rawCalls.push([sql, bindings]); return Promise.resolve(); });
+    // Records every raw() call (the two advisory locks this test asserts on)
+    // while still answering the annual-prepay try-lock probe as "acquired",
+    // same default as every other scenario in this suite.
+    conn.raw = jest.fn((sql, bindings) => { rawCalls.push([sql, bindings]); return Promise.resolve({ rows: [{ locked: true }] }); });
     const result = await topUpRecurringSeriesWithLocks(conn, 10, { horizonDays: 14 });
     const flat = rawCalls.map(([sql, b]) => `${sql} ${JSON.stringify(b || [])}`);
     expect(flat.some((x) => x.includes('pg_advisory_xact_lock') && x.includes('recurring-series-maintenance'))).toBe(true);
@@ -627,6 +696,31 @@ describe('topUpRecurringSeries — the writing wrapper', () => {
     expect(result.skipped).toBe('customer_churned');
     expect(inserted).toHaveLength(0);
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+
+  test('always opens its OWN transaction, even when handed a conn that claims to already be one (Codex GitHub r4 P2)', async () => {
+    // A caller-supplied open transaction used to be run on directly
+    // (conn.isTransaction) and could self-deadlock: the reminder registered
+    // below inserts through a FRESH connection with a foreign key to the
+    // just-inserted scheduled_services row, which blocks until the
+    // referencing row's own transaction commits — but that transaction is
+    // the caller's, and the caller would be synchronously awaiting this
+    // very call. Fixed by never special-casing conn.isTransaction: this
+    // always calls conn.transaction(...) to open its own, so it always
+    // commits before the loop below runs, regardless of what `conn` claims
+    // to be.
+    const { conn, inserted } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly' },
+      seriesDates: [daysOut(0)],
+    });
+    const transactionCalls = [];
+    const originalTransaction = conn.transaction;
+    conn.isTransaction = true; // what a caller's own open transaction would report
+    conn.transaction = (...args) => { transactionCalls.push(args); return originalTransaction(...args); };
+    const result = await topUpRecurringSeries(conn, 10, { horizonDays: 14 });
+    expect(transactionCalls).toHaveLength(1);
+    expect(inserted.length).toBeGreaterThan(0);
+    expect(result.spawnedVisits).toHaveLength(inserted.length);
   });
 
   test('defers to the next tick when a merge-undo repoints the parent to a new customer TWICE under the comms fence', async () => {

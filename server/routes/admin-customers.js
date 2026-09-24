@@ -5942,6 +5942,12 @@ router._private = {
   deliverySettledLiveCredit,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
+  // Namespace constant for the per-customer annual-prepay term-creation
+  // advisory lock (Codex GitHub r4 P1) — exported so a consumer needing to
+  // serialize against it (recurring-series-topup's own try-lock in
+  // admin-schedule.js) uses the SAME namespace value rather than a second
+  // hardcoded 0x4150 that could silently drift from this one.
+  ANNUAL_PREPAY_LOCK_NS,
 };
 
 router.ensureCustomerAccount = ensureCustomerAccount;

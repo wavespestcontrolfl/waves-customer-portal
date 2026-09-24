@@ -31,9 +31,24 @@ const db = require('../models/db');
 
 const DEFAULT_HORIZON_DAYS = 365;
 
+// Same range as the ops script's --horizon-days flag (scripts/recurring-
+// series-topup.js) — a positive integer, capped at 730 (two years; no
+// legitimate recurring plan needs a longer look-ahead, and it keeps a
+// fat-fingered env value from asking the sweep to walk years of candidate
+// dates per series). Unlike the script (which can exit nonzero before any
+// DB work on a bad --horizon-days), the cron reads this env var on every
+// run and must never crash over it (Codex GitHub r4 P2) — an invalid or
+// unset value falls back to DEFAULT_HORIZON_DAYS with a warning instead,
+// same fail-safe posture as every other env-sourced tunable here.
 function horizonDaysFromEnv() {
-  const raw = Number(process.env.RECURRING_TOPUP_HORIZON_DAYS);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_HORIZON_DAYS;
+  const raw = process.env.RECURRING_TOPUP_HORIZON_DAYS;
+  if (raw === undefined || raw === '') return DEFAULT_HORIZON_DAYS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 730) {
+    logger.warn(`[recurring-series-topup] RECURRING_TOPUP_HORIZON_DAYS="${raw}" is invalid (must be an integer from 1 to 730) — using the default of ${DEFAULT_HORIZON_DAYS} days`);
+    return DEFAULT_HORIZON_DAYS;
+  }
+  return parsed;
 }
 
 // Root rows of every recurring series currently marked ongoing — a coarse,
@@ -80,17 +95,24 @@ async function eligibleSeriesParentIds(conn) {
 // cross-series "sees earlier simulated inserts" accuracy improvement is
 // not implemented; a dry-run preview across two series for the same
 // customer can therefore differ slightly from what an --apply run (which
-// commits each series before the next starts) would actually do. `conn`
-// is accepted for a caller that already has its OWN transaction for a
-// single series (e.g. a future targeted re-run), never for fanning many
-// series out under one shared transaction.
-async function topUpOneSeries(parentId, { horizonDays, dryRun, conn = null }) {
+// commits each series before the next starts) would actually do.
+//
+// A later version of the SAME revert briefly kept an optional `conn` for
+// a caller that already had its own transaction. Removed (Codex GitHub r4
+// P2): nothing in this codebase ever called it that way (the sweep and
+// the ops script both call this with no conn at all), and the apply
+// branch specifically would have self-deadlocked — registering a
+// reminder through a fresh connection with a foreign key to a
+// scheduled_services row this function's own caller's transaction had
+// inserted but not yet committed, while that caller was itself
+// synchronously waiting on this call to return before it could commit.
+// topUpRecurringSeries (admin-schedule.js) now also refuses to run inside
+// a caller-supplied open transaction at all, as defense in depth, but the
+// simplest fix is not exposing the capability here in the first place.
+async function topUpOneSeries(parentId, { horizonDays, dryRun }) {
   const { topUpRecurringSeries, topUpRecurringSeriesWithLocks } = require('../routes/admin-schedule');
   if (!dryRun) {
-    return topUpRecurringSeries(conn || db, parentId, { horizonDays });
-  }
-  if (conn) {
-    return topUpRecurringSeriesWithLocks(conn, parentId, { horizonDays });
+    return topUpRecurringSeries(db, parentId, { horizonDays });
   }
   const trx = await db.transaction();
   // Knex's default doNotRejectOnRollback RESOLVES trx.executionPromise on a

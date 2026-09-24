@@ -35,6 +35,7 @@ jest.mock('../routes/admin-schedule', () => ({
 }));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
 const {
   topUpOneSeries, runRecurringSeriesTopUpSweep, eligibleSeriesParentIds, horizonDaysFromEnv, DEFAULT_HORIZON_DAYS,
 } = require('../services/recurring-series-topup');
@@ -74,24 +75,17 @@ describe('topUpOneSeries — dry run never reaches the committing wrapper', () =
     expect(mockTopUpRecurringSeriesWithLocks).not.toHaveBeenCalled();
   });
 
-  test('given an outer `conn` (a caller with its own single-series transaction), runs directly on it instead of opening a new one', async () => {
-    // Deliberately NOT used by runRecurringSeriesTopUpSweep — see
-    // topUpOneSeries' own comment on why the sweep never shares one
-    // transaction across series (pg_advisory_xact_lock's transaction,
-    // not savepoint, scope). This param exists for a single-series caller
-    // that already owns a transaction.
-    mockTopUpRecurringSeriesWithLocks.mockResolvedValue({ spawnedVisits: [{ scheduledDate: '2027-01-01' }], skipped: null });
-    const result = await topUpOneSeries('parent-1', { horizonDays: 90, dryRun: true, conn: mockTrx });
-    expect(db.transaction).not.toHaveBeenCalled();
-    expect(mockTopUpRecurringSeriesWithLocks).toHaveBeenCalledWith(mockTrx, 'parent-1', { horizonDays: 90 });
-    expect(mockTrx.rollback).not.toHaveBeenCalled(); // that transaction's lifecycle is the CALLER's responsibility, not this series'
-    expect(result.spawnedVisits).toHaveLength(1);
-  });
-
-  test('apply mode with an outer `conn` still routes through the committing wrapper, using that conn', async () => {
+  test('an outer `conn` is not accepted any more — apply mode always calls the committing wrapper with plain db (Codex GitHub r4 P2)', async () => {
+    // A `conn` passthrough briefly existed here and was removed: nothing in
+    // this codebase ever called it, and the apply branch specifically would
+    // have self-deadlocked (registerSpawnedVisitReminder inserts through a
+    // FRESH connection with a foreign key to a scheduled_services row the
+    // caller's own still-open transaction had inserted but not committed,
+    // while that caller synchronously awaited this call before committing).
+    // A stray `conn` in the options object is simply ignored now.
     mockTopUpRecurringSeries.mockResolvedValue({ spawnedVisits: [], skipped: null });
     await topUpOneSeries('parent-1', { horizonDays: 90, dryRun: false, conn: mockTrx });
-    expect(mockTopUpRecurringSeries).toHaveBeenCalledWith(mockTrx, 'parent-1', { horizonDays: 90 });
+    expect(mockTopUpRecurringSeries).toHaveBeenCalledWith(db, 'parent-1', { horizonDays: 90 });
   });
 });
 
@@ -156,20 +150,45 @@ describe('eligibleSeriesParentIds', () => {
 
 describe('horizonDaysFromEnv', () => {
   const ORIGINAL = process.env.RECURRING_TOPUP_HORIZON_DAYS;
+  beforeEach(() => jest.clearAllMocks());
   afterEach(() => { process.env.RECURRING_TOPUP_HORIZON_DAYS = ORIGINAL; });
 
-  test('defaults to 365 when unset or invalid', () => {
+  test('defaults to 365 when unset', () => {
     delete process.env.RECURRING_TOPUP_HORIZON_DAYS;
     expect(horizonDaysFromEnv()).toBe(DEFAULT_HORIZON_DAYS);
     expect(DEFAULT_HORIZON_DAYS).toBe(365);
-    process.env.RECURRING_TOPUP_HORIZON_DAYS = 'not-a-number';
-    expect(horizonDaysFromEnv()).toBe(365);
-    process.env.RECURRING_TOPUP_HORIZON_DAYS = '-5';
-    expect(horizonDaysFromEnv()).toBe(365);
+    expect(logger.warn).not.toHaveBeenCalled(); // unset is not an invalid value — nothing to warn about
   });
 
-  test('honors a valid positive override', () => {
+  // Codex GitHub r4 P2: an invalid value falls back to the default with a
+  // logger.warn (the cron reads this on every run and must never crash
+  // over a bad env value), never a silent Math.floor of something that was
+  // never a clean integer in the first place.
+  test.each([
+    ['not-a-number'],
+    ['-5'],
+    ['0'],
+    ['1.5'], // a fractional value is invalid outright now, never floored
+    ['731'], // one past the 730 ceiling
+    ['99999'],
+  ])('falls back to 365 and warns on an invalid value %s', (value) => {
+    process.env.RECURRING_TOPUP_HORIZON_DAYS = value;
+    expect(horizonDaysFromEnv()).toBe(365);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toContain(value);
+  });
+
+  test('honors a valid positive integer override', () => {
     process.env.RECURRING_TOPUP_HORIZON_DAYS = '180';
     expect(horizonDaysFromEnv()).toBe(180);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('honors the boundary values 1 and 730', () => {
+    process.env.RECURRING_TOPUP_HORIZON_DAYS = '1';
+    expect(horizonDaysFromEnv()).toBe(1);
+    process.env.RECURRING_TOPUP_HORIZON_DAYS = '730';
+    expect(horizonDaysFromEnv()).toBe(730);
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 });
