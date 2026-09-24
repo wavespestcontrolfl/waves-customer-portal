@@ -525,18 +525,11 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
       );
     } catch (err) {
       if (err && STALE_CODES.has(err.code)) return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
-      // A plain 409 is the expect CAS missing: re-read the stop. If it has
-      // left the absent tech's day (a racing manual reassignment, a status
-      // change) the card is stale — close it instead of trying more techs.
-      if (err && (err.statusCode === 409 || err.status === 409) && !err.code) {
-        const now = await readStop(stop.id);
-        const refusal = stopMoveRefusal(now, absentTechId, date);
-        if (refusal && refusal.stale) {
-          await resolveStaleAlert(alertId);
-          return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
-        }
-      }
       lastErr = err;
+      // A plain 409 is the expect CAS missing — the stop itself changed, so
+      // no other candidate can succeed; the caller's refuseOrClose re-reads
+      // it and closes a now-stale card (a racing manual reassignment).
+      if (err && (err.statusCode === 409 || err.status === 409) && !err.code) break;
       // Same answer for every candidate: stop and let the next run re-read.
       if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED') break;
       continue;
@@ -589,23 +582,31 @@ async function autoAssignParkedAlert({ alertId, actorId, qualityDates = null } =
   // any other live stop overlaps stays parked for a human.
   const window = { start: stop.window_start, end: stop.window_end };
   const conflicts = await SmartRebooker.previewMoveConflicts(stop.id, date, window);
-  if (conflicts.length) {
-    await annotateAttempt(alertId, 'window_occupied');
-    return { moved: false, alert_id: alertId, reason: 'window_occupied' };
-  }
+  if (conflicts.length) return refuseOrClose(alertId, 'window_occupied', stop.id, absentTechId, date);
 
   const ranked = await eligibleRankedCandidates(stop, absentTechId, date);
-  if (!ranked.length) {
-    await annotateAttempt(alertId, 'no_eligible_candidate');
-    return { moved: false, alert_id: alertId, reason: 'no_eligible_candidate' };
-  }
+  if (!ranked.length) return refuseOrClose(alertId, 'no_eligible_candidate', stop.id, absentTechId, date);
 
   const outcome = await attemptMoves({
     alertId, actorId, stop, date, absentTechId, window, qualityDates,
     candidates: ranked.slice(0, MAX_MOVE_ATTEMPTS),
   });
   if (outcome.moved || outcome.skipped) return outcome;
-  const { reason } = outcome;
+  return refuseOrClose(alertId, outcome.reason, stop.id, absentTechId, date);
+}
+
+/**
+ * The ONE exit for a refusal after the stop was loaded. The stop may have
+ * left the absent tech's day while this run ranked / probed / attempted (a
+ * racing manual reassignment, a status change) — re-read it first: a stale
+ * card is closed, never annotated and left open as a phantom.
+ */
+async function refuseOrClose(alertId, reason, stopId, absentTechId, date) {
+  const refusal = stopMoveRefusal(await readStop(stopId), absentTechId, date);
+  if (refusal && refusal.stale) {
+    await resolveStaleAlert(alertId);
+    return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
+  }
   await annotateAttempt(alertId, reason);
   return { moved: false, alert_id: alertId, reason };
 }
