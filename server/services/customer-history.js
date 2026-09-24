@@ -1,5 +1,5 @@
 const { phoneIdentityKey } = require('../utils/phone');
-const { phoneIdentitySql } = require('./sms-response-policy');
+const { draftIdSql, phoneIdentitySql } = require('./sms-response-policy');
 
 const TIMELINE_TYPES = new Set([
   'all', 'interaction', 'sms', 'call', 'service', 'invoice', 'estimate',
@@ -387,6 +387,7 @@ async function listCustomerComms(db, customer, query = {}) {
   const currentEndpoint = phoneIdentitySql("COALESCE(c.our_endpoint_id, '')");
   const priorPeer = phoneIdentitySql("COALESCE(NULLIF(prior_conversation.contact_phone, ''), prior_customer.phone, '')");
   const priorEndpoint = phoneIdentitySql("COALESCE(prior_conversation.our_endpoint_id, '')");
+  const responseDraftId = draftIdSql("COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', m.metadata->>'draft_id')");
   const selectCommsColumns = queryBuilder => queryBuilder
     .leftJoin('customers as customer_scope', 'c.customer_id', 'customer_scope.id')
     .joinRaw(`LEFT JOIN LATERAL (
@@ -404,7 +405,7 @@ async function listCustomerComms(db, customer, query = {}) {
     .joinRaw(`LEFT JOIN LATERAL (
       SELECT EXISTS (
         SELECT 1 FROM message_drafts mdx
-        WHERE mdx.id::text = COALESCE(sms_audit.metadata->>'draft_id', sms_response.metadata->>'draft_id', m.metadata->>'draft_id')
+        WHERE mdx.id = ${responseDraftId}
           AND mdx.intent = 'click_followup'
       ) AS is_click_followup
     ) sms_answer ON true`)
