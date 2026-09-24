@@ -17,12 +17,14 @@ const router = require('../routes/admin-leads');
 const handler = router.stack.find((layer) => layer.route?.path === '/:id' && layer.route.methods.get).route.stack.at(-1).handle;
 const lead = { id: 'lead-1', status: 'new', first_contact_at: '2026-09-01T12:00:00.000Z' };
 const activities = [{ id: 'activity-1', activity_type: 'note' }];
-let failCalls, calls;
+let failCalls, calls, callCount, callQueries;
 knex.client.runner = (builder) => ({ run: async () => {
   const compiled = builder.toSQL();
+  if (compiled.sql.includes('from "call_log"')) callQueries.push(compiled);
   if (compiled.sql.includes('from "leads"')) return lead;
   if (compiled.sql.includes('from "lead_activities"')) return activities;
   if (compiled.sql.includes('from "call_log"') && failCalls) throw new Error('synthetic call lookup failure');
+  if (compiled.sql.includes('from "call_log"') && compiled.sql.includes('count(*)')) return { count: callCount };
   if (compiled.sql.includes('from "call_log"')) return calls;
   return [];
 } });
@@ -34,7 +36,7 @@ async function request(query = {}) {
 }
 beforeEach(() => {
   jest.clearAllMocks();
-  failCalls = false; calls = [];
+  failCalls = false; calls = []; callCount = 0; callQueries = [];
   db.mockImplementation((table) => knex(table));
   db.raw = knex.raw.bind(knex);
   getLeadStatusReconciliation.mockResolvedValue({
@@ -47,6 +49,7 @@ test('leaves the existing detail response unchanged unless leadReview is explici
   expect(error).toBeUndefined();
   expect(body).toEqual({ lead, activities, calls: [] });
   expect(getLeadStatusReconciliation).not.toHaveBeenCalled();
+  expect(callQueries.some(({ sql }) => sql.includes('count(*)'))).toBe(false);
 });
 test('adds a read-only reconciliation preview when leadReview=1', async () => {
   const { body, error } = await request({ leadReview: '1' });
@@ -77,8 +80,14 @@ test('keeps detail usable with an unavailable preview if reconciliation fails', 
     { leadId: lead.id },
   );
 });
-test('counts only calls from the current lead lifecycle in the preview', async () => {
-  calls = [{ id: 'old', created_at: '2026-08-01T12:00:00.000Z', transcription: 'old' }, { id: 'new', created_at: '2026-09-02T12:00:00.000Z', transcription: 'new' }];
+test('counts lifecycle-associated calls independently of displayable call rows', async () => {
+  callCount = 4;
   await request({ leadReview: '1' });
-  expect(getLeadStatusReconciliation).toHaveBeenCalledWith(expect.objectContaining({ associatedCallCount: 1 }));
+  expect(getLeadStatusReconciliation).toHaveBeenCalledWith(expect.objectContaining({ associatedCallCount: 4 }));
+  const countQuery = callQueries.find(({ sql }) => sql.includes('count(*)'));
+  expect(countQuery.sql).toContain('"created_at" >= ?');
+  expect(countQuery.bindings).toContainEqual(new Date(lead.first_contact_at));
+  expect(countQuery.sql).not.toMatch(/"(?:transcription|recording_url)" is not null/);
+  expect(countQuery.sql).toContain("metadata->>'lead_id' = ?");
+  expect(countQuery.bindings).toContain(lead.id);
 });

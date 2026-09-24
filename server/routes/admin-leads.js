@@ -931,6 +931,7 @@ router.get('/:id', async (req, res, next) => {
     // a call_log failure must never break the lead fetch.
     let calls = [];
     let associatedCallsAvailable = true;
+    let associatedCallCount = 0;
     try {
       const digits = String(lead.phone || '').replace(/\D/g, '');
       let ten = digits.length >= 10 ? digits.slice(-10) : null;
@@ -978,7 +979,7 @@ router.get('/:id', async (req, res, next) => {
         };
         // The phone arms below would match a sandbox bake-off from a lead's
         // number and surface its transcript as lead history (codex r15 P2).
-        const rows = await require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
+        const associatedCallsQuery = require('../services/voice-agent/relay-protocol').whereNotSandboxCall(db('call_log'))
           .where(function () {
             if (lead.twilio_call_sid) {
               this.orWhere(function sidArm() {
@@ -1014,7 +1015,18 @@ router.get('/:id', async (req, res, next) => {
                   .whereNot(settledDissentingStamp);
               });
             }
-          })
+          });
+        if (req.query.leadReview === '1') {
+          const lifecycleStartMs = new Date(lead.first_contact_at || lead.created_at).getTime();
+          if (Number.isFinite(lifecycleStartMs)) {
+            const countRow = await associatedCallsQuery.clone()
+              .where('created_at', '>=', new Date(lifecycleStartMs))
+              .count({ count: '*' })
+              .first();
+            associatedCallCount = Number(countRow?.count) || 0;
+          }
+        }
+        const rows = await associatedCallsQuery
           .where(function () {
             this.whereNotNull('transcription').orWhereNotNull('recording_url');
           })
@@ -1045,16 +1057,11 @@ router.get('/:id', async (req, res, next) => {
     const response = { lead, activities, calls };
     if (req.query.leadReview === '1') {
       try {
-        const lifecycleStartMs = new Date(lead.first_contact_at || lead.created_at).getTime();
-        const lifecycleCallCount = calls.filter((call) => {
-          const callAt = new Date(call.created_at).getTime();
-          return Number.isFinite(lifecycleStartMs) && Number.isFinite(callAt) && callAt >= lifecycleStartMs;
-        }).length;
         response.reconciliation = await getLeadStatusReconciliation({
           database: db,
           lead,
           activities,
-          associatedCallCount: lifecycleCallCount,
+          associatedCallCount,
           associatedCallsAvailable,
         });
       } catch {

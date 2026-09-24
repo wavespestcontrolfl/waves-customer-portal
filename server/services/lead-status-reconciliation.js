@@ -2,7 +2,6 @@ const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { isContactEvidenceType } = require('./lead-estimate-link');
 const { scopeToAssessmentBookings } = require('./assessment-booking');
 const ASSESSMENT_RESULT_LIMIT = 6;
-const IGNORED_APPOINTMENT_STATUSES = ['cancelled', 'skipped'];
 function metadataOf(activity) {
   if (!activity?.metadata) return {};
   if (typeof activity.metadata === 'object') return activity.metadata || {};
@@ -33,15 +32,16 @@ function assessmentQuery(database, lead, association) {
   const query = database('scheduled_services as ss')
     .leftJoin('services as svc', 'ss.service_id', 'svc.id')
     .where((builder) => builder
-      .whereNotIn('ss.status', IGNORED_APPOINTMENT_STATUSES)
-      .orWhereNull('ss.status'))
-    .where('ss.created_at', '>=', lifecycleFloor(lead))
+      .where('ss.created_at', '>=', lifecycleFloor(lead))
+      .orWhere((completed) => completed
+        .where('ss.status', 'completed')
+        .where('ss.completed_at', '>=', lifecycleFloor(lead))))
     .whereNull('ss.reservation_expires_at')
     .modify((builder) => scopeToAssessmentBookings(builder, 'ss', 'svc'))
-    .orderBy('ss.created_at', 'desc')
+    .orderByRaw("CASE WHEN ss.status = 'completed' THEN COALESCE(ss.completed_at, ss.created_at) ELSE ss.created_at END DESC")
     .limit(ASSESSMENT_RESULT_LIMIT + 1)
     .select(
-      'ss.id', 'ss.status', 'ss.created_at', 'ss.scheduled_date',
+      'ss.id', 'ss.status', 'ss.created_at', 'ss.completed_at', 'ss.scheduled_date',
       'ss.source_estimate_id', 'ss.customer_id',
     );
   if (association === 'exact_estimate') {
@@ -56,12 +56,14 @@ async function resolveAssessmentEvidence(database, lead) {
   if (lead.estimate_id) {
     const rows = await assessmentQuery(database, lead, 'exact_estimate');
     const candidates = rows.filter((row) => String(row.customer_id ?? '') === String(lead.customer_id ?? ''));
-    return {
-      association: 'exact_estimate',
-      candidates: candidates.slice(0, ASSESSMENT_RESULT_LIMIT),
-      conflicts: rows.filter((row) => String(row.customer_id ?? '') !== String(lead.customer_id ?? '')),
-      truncated: rows.length > ASSESSMENT_RESULT_LIMIT,
-    };
+    if (rows.length) {
+      return {
+        association: 'exact_estimate',
+        candidates: candidates.slice(0, ASSESSMENT_RESULT_LIMIT),
+        conflicts: rows.filter((row) => String(row.customer_id ?? '') !== String(lead.customer_id ?? '')),
+        truncated: rows.length > ASSESSMENT_RESULT_LIMIT,
+      };
+    }
   }
   if (!lead.customer_id) return { association: 'unavailable', candidates: [], reason: 'missing_customer_identity' };
   const [openLeads, rows] = await Promise.all([
@@ -138,11 +140,13 @@ function buildLeadStatusReconciliation({
         .forEach((candidate) => findings.push({
           code: 'assessment_contact_candidate',
           confidence: assessmentResolution.association === 'exact_estimate' ? 'exact' : 'bounded',
-          message: 'A qualifying assessment was booked after this lead arrived, but no verified contact transition is recorded for it. Review before changing the status.',
+          message: 'A qualifying assessment was booked or completed after this lead arrived, but no verified contact transition is recorded for it. Review before changing the status.',
           evidence: {
             type: candidate.status === 'completed' ? 'assessment_completed' : 'assessment_booked',
             id: String(candidate.id),
-            occurred_at: candidate.created_at || null,
+            occurred_at: candidate.status === 'completed'
+              ? candidate.completed_at || candidate.created_at || null
+              : candidate.created_at || null,
             appointment_status: candidate.status || null,
             association: assessmentResolution.association,
           },

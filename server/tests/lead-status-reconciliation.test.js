@@ -13,12 +13,13 @@ function contactActivity(overrides = {}) {
     ...overrides,
   };
 }
-function databaseResults({ openLeads = [], assessments = [] } = {}) {
+function databaseResults({ openLeads = [], assessments = [], assessmentBatches } = {}) {
   const queries = [];
+  let assessmentIndex = 0;
   knex.client.runner = (builder) => ({ run: async () => {
     const compiled = builder.toSQL();
     queries.push(compiled);
-    return compiled.sql.includes('from "leads"') ? openLeads : assessments;
+    return compiled.sql.includes('from "leads"') ? openLeads : assessmentBatches?.[assessmentIndex++] ?? assessments;
   } });
   return { database: (table) => knex(table), queries };
 }
@@ -55,10 +56,10 @@ test('treats closed and advanced statuses as review-only history, not an automat
   }
   expect(database).not.toHaveBeenCalled();
 });
-test('matches a non-cancelled assessment by exact source estimate after first contact', async () => {
+test('matches committed assessment history by exact source estimate after first contact', async () => {
   const rows = Array.from({ length: 7 }, (_, index) => ({
     id: `assessment-${index}`,
-    status: index === 0 ? null : 'scheduled',
+    status: [null, 'cancelled', 'skipped', 'confirmed'][index % 4],
     created_at: '2026-09-02T12:00:00.000Z',
     customer_id: lead.customer_id,
   }));
@@ -68,7 +69,9 @@ test('matches a non-cancelled assessment by exact source estimate after first co
   expect(result.candidates).toHaveLength(6);
   expect(queries[0].sql).toContain('"ss"."source_estimate_id" = ?');
   expect(queries[0].sql).toContain('"ss"."created_at" >= ?');
-  expect(queries[0].sql).toContain('"ss"."status" is null');
+  expect(queries[0].sql).toContain('"ss"."completed_at" >= ?');
+  expect(queries[0].bindings).not.toContain('cancelled');
+  expect(queries[0].bindings).not.toContain('skipped');
   expect(queries[0].sql).toContain('"ss"."reservation_expires_at" is null');
   expect(queries[0].sql.toLowerCase()).toContain('lower(trim("ss"."service_type"))');
   expect(queries[0].sql.toLowerCase()).toContain('lower(trim("svc"."name"))');
@@ -90,6 +93,12 @@ test('uses exact customer evidence only when this is the unique open lead', asyn
     code: 'ambiguous_customer_assessment',
     confidence: 'ambiguous',
   })]);
+});
+test('falls back from an empty estimate query to a uniquely owned customer assessment', async () => {
+  const assessment = { id: 'assessment-1', status: 'completed', created_at: '2026-08-01T12:00:00.000Z', completed_at: '2026-09-02T12:00:00.000Z' };
+  const result = databaseResults({ openLeads: [{ id: lead.id }], assessmentBatches: [[], [assessment]] });
+  const review = await getLeadStatusReconciliation({ database: result.database, lead: { ...lead, estimate_id: 'estimate-1' } });
+  expect(review.findings[0]).toMatchObject({ code: 'assessment_contact_candidate', evidence: { association: 'unique_customer', occurred_at: assessment.completed_at } });
 });
 test('surfaces estimate and customer association conflicts without treating them as exact evidence', async () => {
   const estimateConflict = databaseResults({ assessments: [{
