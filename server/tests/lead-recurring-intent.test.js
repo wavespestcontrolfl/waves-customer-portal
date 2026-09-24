@@ -43,3 +43,12 @@ describe('leadWantsRecurringPlan', () => {
     expect(leadWantsRecurringPlan({ service_interest: 'Consultation' })).toBe(false);
   });
 });
+
+describe('leadWantsRecurringPlan — composed call labels (GH Codex #4702 r1 P2)', () => {
+  test('recurring primary segment plus an appended service is recurring', () => {
+    expect(leadWantsRecurringPlan({ service_interest: 'Quarterly Pest Control Service + Lawn Care Service' })).toBe(true);
+  });
+  test('one-time primary segment plus an appended recurring service is not', () => {
+    expect(leadWantsRecurringPlan({ service_interest: 'Wasp Nest Removal + Quarterly Pest Control Service' })).toBe(false);
+  });
+});

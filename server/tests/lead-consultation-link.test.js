@@ -8,7 +8,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.wavespestcontrol.com' }));
 jest.mock('../services/short-url', () => ({
-  shortenOrPassthrough: jest.fn(async (longUrl) => longUrl),
+  createShortCode: jest.fn(async () => ({ code: 'abc123', shortUrl: 'https://waves.link/l/abc123' })),
 }));
 
 let mockBuilders = {};
@@ -23,7 +23,7 @@ function chainBuilder({ firstRow = null } = {}) {
   return b;
 }
 
-const { shortenOrPassthrough } = require('../services/short-url');
+const { createShortCode } = require('../services/short-url');
 const {
   buildLeadConsultationLink,
   consultationUrlForLead,
@@ -72,13 +72,24 @@ describe('buildLeadConsultationLink — gate on', () => {
   test('mints a short-wrapped consultation link with the composer line shape', async () => {
     mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
     const result = await buildLeadConsultationLink(LEAD_ID);
-    expect(result.url).toContain(`/inspection/${LEAD_ID}.`);
+    expect(result.url).toBe('https://waves.link/l/abc123');
+    // The bearer-token long URL never rides the line itself.
+    expect(result.line).not.toContain('/inspection/');
     expect(result.line).toBe(`Pick a time for us to stop by for a free consultation: ${result.url}\n\n`);
     expect(result.line.endsWith('\n\n')).toBe(true);
-    expect(shortenOrPassthrough).toHaveBeenCalledWith(
+    expect(createShortCode).toHaveBeenCalledWith(
       expect.stringContaining(`/inspection/${LEAD_ID}.`),
       expect.objectContaining({ kind: 'consultation', leadId: LEAD_ID, expiresAt: expect.any(Date) })
     );
+  });
+
+  test('fails closed when the short code cannot be minted (never passes the token URL through)', async () => {
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    createShortCode.mockRejectedValueOnce(new Error('short_codes insert failed'));
+    const result = await buildLeadConsultationLink(LEAD_ID);
+    expect(result.url).toBeNull();
+    expect(result.line).toBe('');
+    expect(result.reason).toBeTruthy();
   });
 
   test('accepts a lead object and re-resolves it from the DB (never trusts the passed-in row)', async () => {

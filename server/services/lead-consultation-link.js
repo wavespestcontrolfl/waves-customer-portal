@@ -19,7 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { shortenOrPassthrough } = require('./short-url');
+const { createShortCode } = require('./short-url');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { mintLeadConsultationToken, TTL_SECONDS } = require('../utils/lead-consultation-token');
 
@@ -55,7 +55,11 @@ async function buildLeadConsultationLink(leadOrId) {
     if (!longUrl) return { url: null, line: '', reason: 'Could not build a consultation link (no signing secret configured)' };
 
     const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);
-    const url = await shortenOrPassthrough(longUrl, {
+    // FAIL CLOSED (GH Codex #4702 r1 P1): the long URL carries the bearer
+    // token, so it must never ride an SMS or email raw. createShortCode
+    // throws when the short_codes insert fails; the catch below turns that
+    // into the no-link result instead of passing the credential through.
+    const { shortUrl } = await createShortCode(longUrl, {
       kind: 'consultation',
       entityType: 'leads',
       entityId: lead.id,
@@ -64,7 +68,7 @@ async function buildLeadConsultationLink(leadOrId) {
       // would just redirect to a long URL the page rejects as expired.
       expiresAt,
     });
-    return { url, line: consultationSmsLineFor(url) };
+    return { url: shortUrl, line: consultationSmsLineFor(shortUrl) };
   } catch (err) {
     logger.warn(`[lead-consultation-link] build failed: ${err.message}`);
     return { url: null, line: '', reason: 'Could not build a consultation link' };

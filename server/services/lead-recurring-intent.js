@@ -28,7 +28,12 @@ function leadWantsRecurringPlan(lead) {
   const trimmed = raw.trim();
   if (!trimmed) return false;
   if (/^recurring\b/i.test(trimmed)) return true;
-  return RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(trimmed));
+  // Call leads with more than one service persist a composed label
+  // ("Quarterly Pest Control Service + Lawn Care Service", recurring match
+  // first — composeServiceInterest in call-recording-processor.js). Classify
+  // the primary segment (GH Codex #4702 r1 P2).
+  const primary = trimmed.split(/\s+\+\s+/)[0];
+  return RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(primary));
 }
 
 module.exports = { leadWantsRecurringPlan };
