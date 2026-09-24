@@ -167,6 +167,7 @@ function makeQueryBuilder(rows = []) {
   const builder = {
     calls,
     leftJoin: jest.fn(() => builder),
+    joinRaw: jest.fn(() => builder),
     whereNull: jest.fn(() => builder),
     whereRaw: jest.fn(() => builder),
     where: jest.fn((arg) => {
@@ -1894,7 +1895,13 @@ describe('admin communications SMS route', () => {
   });
 
   test('bounds the SMS log by default and returns pagination metadata', async () => {
-    const builder = makeQueryBuilder([smsMessageRow()]);
+    const builder = makeQueryBuilder([smsMessageRow({
+      body: 'Thanks!',
+      metadata: { courtesyOnly: true, privateClassifierDetail: 'not-for-client' },
+      response_metadata: { spam_verdict: { enforced: true, privateScore: 0.99 } },
+      response_message_type: 'opt_out',
+      response_status: 'received',
+    })]);
     db.mockReturnValue(builder);
 
     await withServer(async (baseUrl) => {
@@ -1905,6 +1912,12 @@ describe('admin communications SMS route', () => {
 
       expect(res.status).toBe(200);
       expect(body.messages).toHaveLength(1);
+      expect(body.messages[0]).toMatchObject({
+        courtesyOnly: true, spamEnforced: true,
+        responseMessageType: 'opt_out', responseStatus: 'received',
+        responseIsAnswer: false,
+      });
+      expect(body.messages[0]).not.toHaveProperty('metadata');
       expect(body).toMatchObject({
         page: 1,
         limit: 500,
@@ -1913,6 +1926,28 @@ describe('admin communications SMS route', () => {
       });
       expect(builder.calls.limit).toEqual([501]);
       expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test('serializes exact audit-linked proactive sends as non-answers', async () => {
+    const builder = makeQueryBuilder([smsMessageRow({
+      direction: 'outbound',
+      message_type: 'ai_approved',
+      status: 'sent',
+      response_message_type: 'ai_approved',
+      response_status: 'sent',
+      response_is_click_followup: true,
+      response_audit_metadata: { draft_id: 'private-draft-id' },
+    })]);
+    db.mockReturnValue(builder);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log`, { headers: { Authorization: 'Bearer admin' } });
+      const body = await res.json();
+      expect(body.messages[0]).toMatchObject({
+        responseMessageType: 'ai_approved', responseStatus: 'sent', responseIsAnswer: false,
+      });
+      expect(body.messages[0]).not.toHaveProperty('metadata');
+      expect(body.messages[0]).not.toHaveProperty('responseAuditMetadata');
     });
   });
 
