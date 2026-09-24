@@ -138,19 +138,46 @@ async function assertPrEvidence(pr) {
   if (!enabled()) return;
   const gh = require('../content-astro/github-client');
   const { owner, repo } = gh.env();
+  if (!pr?.number || !pr.head?.sha) throw reviewError(null);
+  // Evidence authenticates the PR head bytes, but GitHub's clean merge may
+  // also carry non-overlapping edits made to the same article on the base.
+  // Refresh the PR here (poller snapshots can be minutes old), derive its
+  // merge base, and require every touched article's base blob to be unchanged
+  // since that fork. Unrelated base movement remains mergeable.
+  const current = await gh.getPr(pr.number);
+  const headSha = String(pr.head.sha);
+  const currentHeadSha = String(current?.head?.sha || '');
+  const baseSha = String(current?.base?.sha || '');
+  const baseRef = String(current?.base?.ref || '');
+  if (current?.state !== 'open' || currentHeadSha !== headSha || !baseSha || !baseRef) throw reviewError(null);
   const files = await gh.ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${pr.number}/files`);
+  const compared = await gh.compareFiles(headSha, baseSha);
+  const mergeBaseSha = String(compared?.mergeBaseSha || '');
+  if (!mergeBaseSha) throw reviewError(null);
   const contract = require('../../../packages/editorial-evidence/index.cjs');
   for (const file of files) {
     if (file.status === 'removed' || !applicable(file.filename)) continue;
-    if (!pr.head?.sha) throw reviewError(null);
-    const document = await gh.getFile(file.filename, pr.head.sha);
-    const evidence = await gh.getFile(contract.evidencePath(file.filename), pr.head.sha);
+    const basePaths = [file.filename];
+    if (file.status === 'renamed' && file.previous_filename) basePaths.push(file.previous_filename);
+    for (const articlePath of basePaths) {
+      const [atFork, atBase] = await Promise.all([
+        gh.getFile(articlePath, mergeBaseSha),
+        gh.getFile(articlePath, baseSha),
+      ]);
+      const absentAtBoth = atFork === null && atBase === null;
+      const sameBlob = typeof atFork?.sha === 'string' && atFork.sha
+        && typeof atBase?.sha === 'string' && atFork.sha === atBase.sha;
+      if (!absentAtBoth && !sameBlob) throw reviewError(null);
+    }
+    const document = await gh.getFile(file.filename, headSha);
+    const evidence = await gh.getFile(contract.evidencePath(file.filename), headSha);
     let manifest;
     try { manifest = JSON.parse(evidence?.content); } catch { throw reviewError(null); }
     const result = contract.verifyManifest({ document: document?.content, path: file.filename,
       domain: DOMAIN, manifest, publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY });
     if (!document || !result.pass) throw reviewError(null);
   }
+  return { baseSha, baseRef };
 }
 
 // A signing-only follow-up commit may advance an autonomous PR after the

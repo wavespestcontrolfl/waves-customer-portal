@@ -664,6 +664,11 @@ class AutonomousRunner {
       try {
         result = await this._handleMetadataRewriteAction(opp, brief, draft, run);
       } catch (err) {
+        if (['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
+          return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+            claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
+          });
+        }
         if (isDeterministicPublishError(err)) {
           const finalized = await finalize(run, t0, {
             outcome: 'completed_pending_review',

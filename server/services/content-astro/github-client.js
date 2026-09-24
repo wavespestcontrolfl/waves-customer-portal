@@ -263,8 +263,25 @@ async function listPrReviewComments(number) {
   return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/comments`);
 }
 
-async function mergePr(number, { method = 'squash', title, message, sha } = {}) {
-  const { owner, repo } = env();
+async function mergePr(number, { method = 'squash', title, message, sha, expectBaseSha, expectBaseRef } = {}) {
+  const { owner, repo, defaultBranch } = env();
+  // GitHub's merge endpoint can pin the PR head but has no equivalent base
+  // precondition. Keep the base check in this helper so it is the final
+  // network read before the merge request rather than an earlier caller gate.
+  // Re-read the PR instead of only its old base branch: a retargeted PR must
+  // not pass because that previous branch happened to remain unchanged.
+  if (expectBaseSha) {
+    const baseRef = expectBaseRef || defaultBranch;
+    const current = await getPr(number);
+    const currentBaseSha = String(current?.base?.sha || '');
+    const currentBaseRef = String(current?.base?.ref || '');
+    if (current?.state !== 'open' || currentBaseRef !== baseRef
+        || !currentBaseSha || currentBaseSha.toLowerCase() !== String(expectBaseSha).toLowerCase()) {
+      const moved = new Error(`PR #${number}: base ${baseRef} moved or is unavailable; re-verify before merge`);
+      moved.code = 'BLOG_BASE_MOVED';
+      throw moved;
+    }
+  }
   const body = { merge_method: method, commit_title: title, commit_message: message };
   // GitHub rejects the merge with 409 when the head no longer matches `sha`,
   // so gated checks (build/review) performed against a specific head commit

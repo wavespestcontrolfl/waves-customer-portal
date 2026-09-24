@@ -1627,8 +1627,9 @@ async function maybeAutoMerge(run, pr) {
   //    another push while the merge call was in flight, so an unbuilt/
   //    unreviewed commit can never ride through the gate. The fresh head
   //    re-runs the full gate next tick.
+  let editorialBaseProof;
   try {
-    await require('./editorial-evidence').assertPrEvidence(pr);
+    editorialBaseProof = await require('./editorial-evidence').assertPrEvidence(pr);
   } catch (err) {
     return { pending: true, reason: 'editorial_evidence_invalid', error: err.message };
   }
@@ -1637,6 +1638,8 @@ async function maybeAutoMerge(run, pr) {
     method: 'squash',
     title: String(pr.title || '').slice(0, 72),
     sha: pr.head?.sha,
+    expectBaseSha: editorialBaseProof?.baseSha,
+    expectBaseRef: editorialBaseProof?.baseRef,
   });
   let mergeRes;
   try {

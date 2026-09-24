@@ -87,6 +87,7 @@ function fakeTrx(locked) {
 }
 
 const CANONICAL = 'https://www.wavespestcontrol.com/blog/test-post/';
+const EDITORIAL_BASE_PROOF = { baseSha: 'editorial-base-sha', baseRef: 'main' };
 
 function makeRun(overrides = {}) {
   return {
@@ -276,7 +277,7 @@ beforeEach(() => {
   // Default: the PR head's blog file is readable and the topic recheck is
   // clean (the recheck fails closed on an unreadable file).
   gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\nBody.\n' });
-  editorialEvidence.assertPrEvidence.mockResolvedValue(undefined);
+  editorialEvidence.assertPrEvidence.mockResolvedValue(EDITORIAL_BASE_PROOF);
   editorialEvidence.verifyEvidenceOnlyAdvance.mockResolvedValue(false);
   topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: true, findings: [] }));
   // Default: merged targets respond live (production deploy already done).
@@ -2095,7 +2096,10 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(publisher.assertCodexReviewClear).toHaveBeenCalledWith(42, { headSha: 'headsha1' });
     // sha pins the merge to the exact head the build/Codex gates checked
-    expect(gh.mergePr).toHaveBeenCalledWith(42, { method: 'squash', title: 'Blog: Test Post', sha: 'headsha1' });
+    expect(gh.mergePr).toHaveBeenCalledWith(42, {
+      method: 'squash', title: 'Blog: Test Post', sha: 'headsha1',
+      expectBaseSha: EDITORIAL_BASE_PROOF.baseSha, expectBaseRef: EDITORIAL_BASE_PROOF.baseRef,
+    });
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
     expect(res.autoMerges).toBe(1);
     expect(runUpdates(updates)[0].updates).toMatchObject({ outcome: 'completed_published', published_url: CANONICAL });

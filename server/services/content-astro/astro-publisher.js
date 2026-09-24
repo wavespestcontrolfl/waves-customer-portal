@@ -3971,8 +3971,9 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
         && String(expectHeadSha).trim().toLowerCase() !== String(pr.head.sha).trim().toLowerCase()) {
       throw new Error(`PR #${pr.number} head ${String(pr.head.sha).slice(0, 7)} no longer matches the verified build commit ${String(expectHeadSha).slice(0, 7)}; re-verify before merge`);
     }
+    let editorialBaseProof = null;
     if (!isUnpublish) {
-      await editorialEvidence.assertPrEvidence(pr);
+      editorialBaseProof = await editorialEvidence.assertPrEvidence(pr);
       await assertOpenPublishPrIsHubOnly(post, pr);
     }
     // A remediation push whose blog_posts.content mirror never completed must not
@@ -3996,6 +3997,11 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
       // (mergePr supports this; the autonomous poller already pins, this
       // manual/scheduler path did not).
       sha: pr.head?.sha,
+      // When editorial evidence is enabled, bind its same-article base proof
+      // to the final network read inside mergePr. Gate-off callers retain the
+      // older body-image base pin when one was supplied.
+      expectBaseSha: editorialBaseProof?.baseSha || expectBaseSha || undefined,
+      expectBaseRef: editorialBaseProof?.baseRef || gh.env().defaultBranch,
     });
     // Publish PRs: the ownership recheck and the merge run under one
     // advisory lock so two PRs claiming the same entity cannot both pass
@@ -4006,7 +4012,7 @@ async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null }
         await assertTopicTargetingStillClear(post, pr);
         if (expectBaseSha) {
           const tip = await gh.getBranchSha(gh.env().defaultBranch);
-          if (tip && tip !== expectBaseSha) {
+          if (!tip || tip !== expectBaseSha) {
             const moved = new Error(`PR #${pr.number}: default branch moved during gating (${String(expectBaseSha).slice(0, 9)} → ${String(tip).slice(0, 9)}); re-verify body images before merge`);
             moved.code = 'BLOG_BASE_MOVED';
             throw moved;

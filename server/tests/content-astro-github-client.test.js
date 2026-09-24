@@ -75,6 +75,36 @@ describe('content-astro github-client pagination', () => {
       expect.any(Object)
     );
   });
+
+  test('mergePr verifies the current PR base immediately before the pinned merge request', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(jsonResponse({ state: 'open', base: { ref: 'main', sha: 'base-sha' } }))
+      .mockResolvedValueOnce(jsonResponse({ merged: true, sha: 'merge-sha' }));
+
+    await expect(gh.mergePr(42, {
+      sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main',
+    })).resolves.toMatchObject({ merged: true });
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch.mock.calls[0][0]).toContain('/pulls/42');
+    expect(global.fetch.mock.calls[1][0]).toContain('/pulls/42/merge');
+    expect(JSON.parse(global.fetch.mock.calls[1][1].body)).toMatchObject({ sha: 'head-sha' });
+  });
+
+  test.each([
+    ['moved', { state: 'open', base: { ref: 'main', sha: 'different-base' } }],
+    ['retargeted', { state: 'open', base: { ref: 'release', sha: 'base-sha' } }],
+    ['unavailable', null],
+  ])('mergePr fails closed when the expected base is %s', async (_label, current) => {
+    global.fetch = jest.fn().mockResolvedValueOnce(current === null
+      ? { ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => '' }
+      : jsonResponse(current));
+
+    await expect(gh.mergePr(42, {
+      sha: 'head-sha', expectBaseSha: 'base-sha', expectBaseRef: 'main',
+    })).rejects.toMatchObject({ code: 'BLOG_BASE_MOVED' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('commitFiles — atomic multi-file commit via the git data API', () => {

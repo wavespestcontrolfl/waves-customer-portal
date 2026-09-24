@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 jest.mock('../services/content/editorial-review', () => ({ review: jest.fn(), repair: jest.fn() }));
-jest.mock('../services/content-astro/github-client', () => ({ env: jest.fn(() => ({ owner: 'waves', repo: 'astro' })), ghFetchPaginated: jest.fn(), getFile: jest.fn(), compareFiles: jest.fn() }));
+jest.mock('../services/content-astro/github-client', () => ({ env: jest.fn(() => ({ owner: 'waves', repo: 'astro' })), getPr: jest.fn(), ghFetchPaginated: jest.fn(), getFile: jest.fn(), compareFiles: jest.fn() }));
 jest.mock('../services/content-astro/astro-publisher', () => ({ resolveExistingAstroFileForTarget: jest.fn() }));
 const reviewer = require('../services/content/editorial-review');
 const gh = require('../services/content-astro/github-client');
@@ -34,15 +34,108 @@ test('dark gate makes no model calls or evidence writes', async () => {
   expect(await evidence.prepareDraft(draft, { page_type: 'refresh', action_type: 'refresh_existing_page' })).toBe(draft);
   expect(publisher.resolveExistingAstroFileForTarget).not.toHaveBeenCalled();
   expect(reviewer.review).not.toHaveBeenCalled();
+  await expect(evidence.assertPrEvidence({ number: 7, head: { sha: 'exact-sha' } })).resolves.toBeUndefined();
+  expect(gh.getPr).not.toHaveBeenCalled();
 });
 test('signs exact final bytes and rejects a later edit at immutable PR head', async () => {
   const [file] = await evidence.filesForDocument({ document, path });
   expect(file.path).toBe(contract.evidencePath(path));
   expect(contract.verifyManifest({ document, path, domain: 'wavespestcontrol.com', manifest: JSON.parse(file.content), publicKey: process.env.EDITORIAL_REVIEW_PUBLIC_KEY }).pass).toBe(true);
+  gh.getPr.mockResolvedValue({ state: 'open', head: { sha: 'exact-sha' }, base: { sha: 'base-sha', ref: 'main' } });
   gh.ghFetchPaginated.mockResolvedValue([{ filename: path, status: 'modified' }]);
-  gh.getFile.mockImplementation(async (name) => name === path ? { content: document + 'Unreviewed claim.' } : file);
+  gh.compareFiles.mockResolvedValue({ mergeBaseSha: 'fork-sha', files: [path, file.path] });
+  gh.getFile.mockImplementation(async (name, ref) => {
+    if (ref === 'fork-sha' || ref === 'base-sha') return { sha: 'unchanged-article' };
+    return name === path ? { content: document + 'Unreviewed claim.' } : file;
+  });
   await expect(evidence.assertPrEvidence({ number: 7, head: { sha: 'exact-sha' } })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
   expect(gh.getFile).toHaveBeenCalledWith(path, 'exact-sha');
+});
+describe('merge-output evidence proof', () => {
+  const headSha = '1'.repeat(40);
+  const baseSha = '2'.repeat(40);
+  const mergeBaseSha = '3'.repeat(40);
+
+  async function arrangeSignedArticle() {
+    const sidecar = (await evidence.filesForDocument({ document, path }))[0];
+    gh.getPr.mockResolvedValue({ state: 'open', head: { sha: headSha }, base: { sha: baseSha, ref: 'main' } });
+    gh.ghFetchPaginated.mockResolvedValue([{ filename: path, status: 'modified' }]);
+    gh.compareFiles.mockResolvedValue({ mergeBaseSha, files: [path, sidecar.path] });
+    return sidecar;
+  }
+
+  test('allows an unrelated base advance when the article blob is unchanged', async () => {
+    const sidecar = await arrangeSignedArticle();
+    gh.getFile.mockImplementation(async (name, ref) => {
+      if (ref === mergeBaseSha || ref === baseSha) return { sha: 'same-article-blob' };
+      return name === path ? { content: document } : sidecar;
+    });
+
+    await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
+      .resolves.toEqual({ baseSha, baseRef: 'main' });
+    expect(gh.compareFiles).toHaveBeenCalledWith(headSha, baseSha);
+  });
+
+  test('allows a new article when its path is absent from both fork and current base', async () => {
+    const sidecar = await arrangeSignedArticle();
+    gh.ghFetchPaginated.mockResolvedValue([{ filename: path, status: 'added' }]);
+    gh.getFile.mockImplementation(async (name, ref) => {
+      if ((ref === mergeBaseSha || ref === baseSha) && name === path) return null;
+      return name === path ? { content: document } : sidecar;
+    });
+
+    await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
+      .resolves.toEqual({ baseSha, baseRef: 'main' });
+  });
+
+  test('rejects a clean non-overlapping base edit to the reviewed article', async () => {
+    const sidecar = await arrangeSignedArticle();
+    gh.getFile.mockImplementation(async (name, ref) => {
+      if (ref === mergeBaseSha) return { sha: 'fork-article-blob' };
+      if (ref === baseSha) return { sha: 'edited-base-article-blob' };
+      return name === path ? { content: document } : sidecar;
+    });
+
+    await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
+      .rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+    expect(gh.getFile).not.toHaveBeenCalledWith(path, headSha);
+  });
+
+  test('rejects a base edit to the source of a renamed article', async () => {
+    const oldPath = 'src/content/blog/old-door.mdx';
+    await arrangeSignedArticle();
+    gh.ghFetchPaginated.mockResolvedValue([{
+      filename: path, previous_filename: oldPath, status: 'renamed',
+    }]);
+    gh.getFile.mockImplementation(async (name, ref) => {
+      if (name === path && (ref === mergeBaseSha || ref === baseSha)) return null;
+      if (name === oldPath && ref === mergeBaseSha) return { sha: 'old-fork-blob' };
+      if (name === oldPath && ref === baseSha) return { sha: 'old-base-edit' };
+      throw new Error(`unexpected read ${name}@${ref}`);
+    });
+
+    await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
+      .rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+    expect(gh.getFile).not.toHaveBeenCalledWith(path, headSha);
+  });
+
+  test.each([
+    ['the current PR base is unavailable', { current: { state: 'open', head: { sha: headSha } } }],
+    ['the merge base is unavailable', { compared: { files: [path] } }],
+    ['either base blob lacks an authenticated SHA', { missingBlobSha: true }],
+  ])('fails closed when %s', async (_label, options) => {
+    const sidecar = await arrangeSignedArticle();
+    if (options.current) gh.getPr.mockResolvedValue(options.current);
+    if (options.compared) gh.compareFiles.mockResolvedValue(options.compared);
+    gh.getFile.mockImplementation(async (name, ref) => {
+      if (ref === mergeBaseSha) return options.missingBlobSha ? { content: document } : { sha: 'same-article-blob' };
+      if (ref === baseSha) return { sha: 'same-article-blob' };
+      return name === path ? { content: document } : sidecar;
+    });
+
+    await expect(evidence.assertPrEvidence({ number: 7, head: { sha: headSha } }))
+      .rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+  });
 });
 describe('publisher-pin evidence-only descendants', () => {
   const pinnedSha = '1'.repeat(40);

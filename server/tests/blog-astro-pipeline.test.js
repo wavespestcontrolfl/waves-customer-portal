@@ -3200,6 +3200,38 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
     expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: HEAD_SHA }));
   });
 
+  test('threads the editorial base proof into the final merge request', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
+    const queries = [read];
+    db.mockImplementation(() => queries.shift() || chain());
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'open', merged: false,
+      head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA },
+    });
+    mockHubOnlyBranchFile();
+    gh.listIssueComments.mockResolvedValue([{
+      user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z',
+    }]);
+    gh.listPrReviews.mockResolvedValue([{
+      user: { login: 'chatgpt-codex-connector' }, body: "Codex Review: Didn't find any major issues.",
+      state: 'COMMENTED', commit_id: HEAD_SHA, submitted_at: '2026-07-02T12:05:00Z',
+    }]);
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha' });
+    const editorial = require('../services/content/editorial-evidence');
+    const proof = { baseSha: 'reviewed-base-sha', baseRef: 'main' };
+    const evidenceSpy = jest.spyOn(editorial, 'assertPrEvidence').mockResolvedValueOnce(proof);
+
+    try {
+      await AstroPublisher.mergeAstro('post-pin-1');
+    } finally {
+      evidenceSpy.mockRestore();
+    }
+
+    expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({
+      sha: HEAD_SHA, expectBaseSha: proof.baseSha, expectBaseRef: proof.baseRef,
+    }));
+  });
+
   test('expectHeadSha mismatch (green build of an older commit) refuses to merge', async () => {
     const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
     const queries = [read];
