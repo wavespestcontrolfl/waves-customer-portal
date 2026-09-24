@@ -72,6 +72,28 @@ describe('migration-derived state keys and audit tags', () => {
     expect(stale).toEqual([]);
   });
 
+  // One collision already LANDED before this guard could catch it: #4760 and
+  // #4762 merged the same morning (2026-09-24), both stamped 20260924000020,
+  // and both ran in production in the 11:19Z deploy. Neither file may be
+  // renamed or edited now (knex tracks by filename; an edit is a no-op where
+  // it already ran). The practical damage is bounded and already done: the
+  // misting migration's recordState() union dropped the lawn file's {flipped}
+  // list, whose only reader is that file's own idempotent re-run, and the
+  // lawn file's down() is a documented no-op — so nothing is left to restore.
+  // The exemption is EXACT: a third file on this key, or either file gone,
+  // fails the test again.
+  const LANDED_COLLISIONS = new Map([
+    ['migration.20260924000020.state', ['20260924000020_bimonthly_lawn_service_not_offered.js', '20260924000020_mosquito_misting_catalog_row.js']],
+  ]);
+
+  test('the landed collision is still exactly the documented pair', () => {
+    for (const [literal, files] of LANDED_COLLISIONS) {
+      for (const file of files) {
+        expect(byFile.get(file)?.map((k) => k.literal)).toContain(literal);
+      }
+    }
+  });
+
   test('no two migration files derive the same key', () => {
     const owners = new Map();
     for (const [file, keys] of byFile) {
@@ -80,7 +102,9 @@ describe('migration-derived state keys and audit tags', () => {
         owners.get(literal).push(file);
       }
     }
-    const shared = [...owners].filter(([, files]) => files.length > 1).map(([literal, files]) => `${literal}: ${files.join(', ')}`);
+    const shared = [...owners]
+      .filter(([literal, files]) => files.length > 1 && JSON.stringify([...files].sort()) !== JSON.stringify(LANDED_COLLISIONS.get(literal) || null))
+      .map(([literal, files]) => `${literal}: ${files.join(', ')}`);
     expect(shared).toEqual([]);
   });
 });
