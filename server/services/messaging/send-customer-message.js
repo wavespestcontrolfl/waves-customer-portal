@@ -50,7 +50,7 @@ const { countSegments } = require('./segment-counter');
 const { normalizeGsmPunctuation } = require('./gsm-normalize');
 const { stripSmsUrlScheme } = require('./sms-link-policy');
 const { persistAudit } = require('./audit');
-const { sendViaTwilio, mediaUrlsAllowed } = require('./providers/twilio-sms');
+const { sendViaTwilio, mediaUrlsAllowed, mapPurposeToMessageType } = require('./providers/twilio-sms');
 const { isEnabled } = require('../../config/feature-gates');
 
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
@@ -295,6 +295,7 @@ async function sendCustomerMessage(input) {
 
 async function sendCustomerMessageCore(input) {
   let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
+  let providerHandoffReservation = null;
   try {
   // 1. Contract validation
   const contractCheck = validateContract(input);
@@ -351,7 +352,15 @@ async function sendCustomerMessageCore(input) {
     // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js
     // lockedRecruitingHandoff — Codex #4623 r19 P1) alike.
     || (input.audience === 'applicant'
-      && /^job_/.test(String(input.metadata?.original_message_type || '')));
+      && /^job_/.test(String(input.metadata?.original_message_type || '')))
+    // Gratitude owns an existing auto-send reservation and holds the shared
+    // thread lock through its final predicate and provider request. This is
+    // the one customer-conversational lane allowed to supply that handoff.
+    || (input.audience === 'customer' && input.purpose === 'conversational'
+      && input.entryPoint === 'sms_auto_send_executor'
+      && input.metadata?.original_message_type === 'ai_gratitude'
+      && Boolean(input.metadata?.agentDecisionId)
+      && typeof providerPreSendCheck === 'function');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
@@ -743,8 +752,50 @@ async function sendCustomerMessageCore(input) {
   // re-check the window without another opaque caller await or a DB lock.
   providerPreparationCheck.isStillValid = () => checkSendWindow(sendInput, policy, contactState)?.ok === true;
 
-  providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
-  const dispatchProvider = () => dispatchToProvider(sendInput, {
+  const providerCoordination = require('./provider-handoff-reservation');
+  let providerCoordinationBlock = null;
+  if (providerCoordination.canonicalCoordinationApplies(input, { providerPreSendCheck, withSmsHandoff })) {
+    try {
+      const TwilioService = require('../twilio');
+      const frozenFromNumber = sendInput.metadata?.fromNumber || await TwilioService.deriveOutboundNumber({
+        customerLocationId: sendInput.metadata?.customerLocationId,
+        customerId: sendInput.customerId,
+      });
+      const prepared = await providerCoordination.prepareProviderHandoffReservation({
+        to: sendInput.to,
+        customerId: sendInput.customerId,
+        fromNumber: frozenFromNumber,
+        body: sendInput.body,
+        messageType: sendInput.metadata?.original_message_type || mapPurposeToMessageType(sendInput.purpose),
+      });
+      if (prepared.blocked) {
+        providerCoordinationBlock = {
+          sent: false,
+          blocked: true,
+          deliveryOutcome: 'not_sent',
+          retryable: true,
+          code: prepared.code,
+          error: prepared.reason,
+          validator: 'provider_handoff_reservation',
+        };
+      } else {
+        providerHandoffReservation = prepared.handle;
+      }
+    } catch {
+      providerCoordinationBlock = {
+        sent: false,
+        blocked: true,
+        deliveryOutcome: 'not_sent',
+        retryable: true,
+        code: 'PROVIDER_HANDOFF_PREPARATION_FAILED',
+        error: 'Provider coordination could not be established',
+        validator: 'provider_handoff_reservation',
+      };
+    }
+  }
+  const dispatchProvider = () => {
+    providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+    return dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
     // immediately before the provider request, after the rechecks below, so a
     // caller can tell a failed recheck (nothing sent) from a failed request.
@@ -782,10 +833,20 @@ async function sendCustomerMessageCore(input) {
     // preSendCheck avoids invoking existing opaque preparation callbacks a
     // second time at the provider boundary.
     providerPreSendCheck,
+    providerHandoffReservation,
   });
-  providerOutcome = withProviderHandoff
+  };
+  providerOutcome = providerCoordinationBlock || (withProviderHandoff
     ? await withProviderHandoff(dispatchProvider)
-    : await dispatchProvider();
+    : await dispatchProvider());
+  if (providerHandoffReservation) {
+    providerCoordination.recordProviderOutcome(providerHandoffReservation, {
+      deliveryOutcome: providerOutcome.deliveryOutcome,
+      providerMessageId: providerOutcome.providerMessageId,
+      channel: providerOutcome.provider === 'push' ? 'push' : 'sms',
+    });
+    await providerCoordination.settleProviderHandoffReservation(providerHandoffReservation);
+  }
 
   // Push fan-out normalizes a provider-hook refusal to false and therefore
   // loses its code. Restore that boundary refusal only when the provider
@@ -924,6 +985,11 @@ async function sendCustomerMessageCore(input) {
       : {}),
   };
   } catch (err) {
+    if (providerHandoffReservation) {
+      const providerCoordination = require('./provider-handoff-reservation');
+      providerCoordination.recordProviderOutcome(providerHandoffReservation, err?.providerOutcome || providerOutcome);
+      await providerCoordination.settleProviderHandoffReservation(providerHandoffReservation);
+    }
     // A recursive fallback may already carry its more specific outcome.
     if (!err.providerOutcome) err.providerOutcome = providerOutcome;
     throw err;

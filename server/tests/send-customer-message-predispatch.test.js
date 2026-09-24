@@ -38,6 +38,7 @@ jest.mock('../services/messaging/audit', () => ({
 }));
 jest.mock('../services/messaging/providers/twilio-sms', () => ({
   sendViaTwilio: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' })),
+  mapPurposeToMessageType: jest.fn(() => 'manual'),
 }));
 jest.mock('../services/estimate-annual-guard', () => ({
   annualHandoffGuard: jest.fn(() => async () => ({ blocked: false, reason: null, estimateId: null })),

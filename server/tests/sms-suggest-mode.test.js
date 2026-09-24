@@ -269,6 +269,7 @@ describe('threadHasLiveAnswer — the inbound must never count as its own "newer
           if (a === 'created_at' && op === '>') state.boundIsRaw = Boolean(v && v.__raw);
           return b;
         },
+        orWhere(...args) { return b.where(...args); },
         whereRaw() { return b; },
         whereIn() { return b; },
         whereNot(col, v) { if (col === 'id') state.excludedIds.push(v); return b; },

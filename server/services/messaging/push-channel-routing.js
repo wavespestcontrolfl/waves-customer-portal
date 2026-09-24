@@ -472,7 +472,11 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       return { delivered: false, deliveryOutcome: 'not_sent' };
     }
     deliveryOutcome = 'accepted';
-    if (appNotification?.push?.deduped) return { delivered: true, deliveryOutcome, sid: `push:${appNotification.id}`, notificationId: String(appNotification.id) };
+    const acceptedAt = new Date();
+    if (appNotification?.push?.deduped) return {
+      delivered: true, deliveryOutcome, sid: `push:${appNotification.id}`,
+      notificationId: String(appNotification.id), acceptedAt,
+    };
     // PROOF FIRST, bell second: this sms_log row is what
     // recoverStaleScheduledSmsClaims reads as durable proof-of-send — a
     // crash inside the bell insert before the proof exists would let the
@@ -491,6 +495,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         message_body: body,
         twilio_sid: null,
         status: 'sent',
+        created_at: acceptedAt,
         message_type: messageType,
         metadata: JSON.stringify({
           channel: 'push',
@@ -548,7 +553,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     const notificationId = appNotification?.id ? String(appNotification.id) : await recordBell(customerId, messageType, body, notificationEventKey, appointmentId);
     const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
-    acceptedResult = { delivered: true, deliveryOutcome: 'accepted', sid, notificationId };
+    acceptedResult = { delivered: true, deliveryOutcome: 'accepted', sid, notificationId, acceptedAt };
     if (proofRowId && notificationId) {
       await db('sms_log')
         .where({ id: proofRowId })

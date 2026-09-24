@@ -76,6 +76,8 @@ async function prepareProviderHandoffReservation({
     deliveryOutcome: 'not_sent',
     providerMessageId: null,
     finalized: false,
+    acceptedPromoted: false,
+    settlementPromise: null,
   };
   handles.add(handle);
   return { handle };
@@ -108,30 +110,46 @@ function recordProviderOutcome(handle, outcome = {}) {
   }
 }
 
-async function settleProviderHandoffReservation(handle) {
-  if (!isProviderHandoffHandle(handle) || handle.finalized) return true;
-  handle.finalized = true;
-  const suggest = require('../sms-suggest-mode');
-  if (handle.deliveryOutcome === 'accepted') {
-    const promoted = await suggest.settleReplyHoldingReservation({
-      reservationId: handle.reservationId,
-      acceptedResult: {
-        sent: true,
-        deliveryOutcome: 'accepted',
-        providerMessageId: handle.providerMessageId,
-        reservationContext: handle.context,
-      },
-    });
-    if (!promoted) {
-      logger.warn(`[provider-handoff] accepted reservation promotion failed (${handle.reservationId})`);
-      return false;
+function settleProviderHandoffReservation(handle) {
+  if (!isProviderHandoffHandle(handle) || handle.finalized) return Promise.resolve(true);
+  if (handle.settlementPromise) return handle.settlementPromise;
+
+  const pending = (async () => {
+    try {
+      const suggest = require('../sms-suggest-mode');
+      let settled;
+      if (handle.deliveryOutcome === 'accepted') {
+        if (!handle.acceptedPromoted) {
+          const promoted = await suggest.settleReplyHoldingReservation({
+            reservationId: handle.reservationId,
+            acceptedResult: {
+              sent: true,
+              deliveryOutcome: 'accepted',
+              providerMessageId: handle.providerMessageId,
+              reservationContext: handle.context,
+            },
+          });
+          if (!promoted) {
+            logger.warn(`[provider-handoff] accepted reservation promotion failed (${handle.reservationId})`);
+            return false;
+          }
+          handle.acceptedPromoted = true;
+        }
+        settled = await suggest.settleReplyHoldingReservation({ reservationId: handle.reservationId });
+      } else {
+        settled = await suggest.settleReplyHoldingReservation({
+          reservationId: handle.reservationId,
+          uncertain: handle.deliveryOutcome === 'uncertain',
+        });
+      }
+      if (settled) handle.finalized = true;
+      return settled;
+    } finally {
+      handle.settlementPromise = null;
     }
-    return suggest.settleReplyHoldingReservation({ reservationId: handle.reservationId });
-  }
-  return suggest.settleReplyHoldingReservation({
-    reservationId: handle.reservationId,
-    uncertain: handle.deliveryOutcome === 'uncertain',
-  });
+  })();
+  handle.settlementPromise = pending;
+  return pending;
 }
 
 module.exports = {

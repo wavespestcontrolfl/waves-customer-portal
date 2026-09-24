@@ -98,6 +98,16 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     return id;
   }
 
+  async function acceptedProviderHandle(body) {
+    const prepared = await providerCoordination.prepareProviderHandoffReservation({
+      to: '+12025550101', fromNumber: '+19413529161', body, messageType: 'manual',
+    });
+    providerCoordination.recordProviderOutcome(prepared.handle, {
+      deliveryOutcome: 'accepted', providerMessageId: `SM${'c'.repeat(32)}`, channel: 'sms',
+    });
+    return prepared.handle;
+  }
+
   test('provider coordination preserves exact accepted SMS evidence when the ordinary provider row is missing', async () => {
     const prepared = await providerCoordination.prepareProviderHandoffReservation({
       to: '(202) 555-0101', fromNumber: '+19413529161', body: 'Draft body',
@@ -130,6 +140,76 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
       provider_handoff_reservation: true, provider_outcome: 'accepted',
       provider_channel: 'sms', pre_handoff_stamp: true,
     });
+  });
+
+  test('a failed accepted promotion remains retryable and succeeds on the next settlement', async () => {
+    const handle = await acceptedProviderHandle('Retry accepted promotion');
+    const realSettle = suggest.settleReplyHoldingReservation;
+    const settleSpy = jest.spyOn(suggest, 'settleReplyHoldingReservation');
+    let failPromotion = true;
+    settleSpy.mockImplementation((input) => {
+      if (input.acceptedResult && failPromotion) {
+        failPromotion = false;
+        return Promise.resolve(false);
+      }
+      return realSettle(input);
+    });
+    try {
+      expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(false);
+      expect(await trx('sms_log').where({ id: handle.reservationId }).first('status')).toMatchObject({ status: 'sending' });
+      expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(true);
+      expect(await trx('sms_log').where({ id: handle.reservationId }).first('status')).toMatchObject({ status: 'sent' });
+    } finally {
+      settleSpy.mockRestore();
+    }
+  });
+
+  test('concurrent settlement callers share one promotion and cleanup attempt', async () => {
+    const handle = await acceptedProviderHandle('Concurrent settlement');
+    const realSettle = suggest.settleReplyHoldingReservation;
+    let releasePromotion;
+    const settleSpy = jest.spyOn(suggest, 'settleReplyHoldingReservation')
+      .mockImplementationOnce(input => new Promise((resolve) => {
+        releasePromotion = () => realSettle(input).then(resolve);
+      }))
+      .mockImplementation(input => realSettle(input));
+    try {
+      const first = providerCoordination.settleProviderHandoffReservation(handle);
+      const second = providerCoordination.settleProviderHandoffReservation(handle);
+      expect(second).toBe(first);
+      expect(settleSpy).toHaveBeenCalledTimes(1);
+      releasePromotion();
+      await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+      expect(settleSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      settleSpy.mockRestore();
+    }
+  });
+
+  test('a cleanup failure retries cleanup without re-promoting the accepted reservation', async () => {
+    const handle = await acceptedProviderHandle('Retry accepted cleanup');
+    const realSettle = suggest.settleReplyHoldingReservation;
+    let failCleanup = true;
+    let promotionCalls = 0;
+    const settleSpy = jest.spyOn(suggest, 'settleReplyHoldingReservation').mockImplementation((input) => {
+      if (input.acceptedResult) {
+        promotionCalls += 1;
+        return realSettle(input);
+      }
+      if (failCleanup) {
+        failCleanup = false;
+        return Promise.resolve(false);
+      }
+      return realSettle(input);
+    });
+    try {
+      expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(false);
+      expect(await trx('sms_log').where({ id: handle.reservationId }).first('status')).toMatchObject({ status: 'sent' });
+      expect(await providerCoordination.settleProviderHandoffReservation(handle)).toBe(true);
+      expect(promotionCalls).toBe(1);
+    } finally {
+      settleSpy.mockRestore();
+    }
   });
 
   test('provider coordination removes only a duplicate accepted SMS reservation', async () => {

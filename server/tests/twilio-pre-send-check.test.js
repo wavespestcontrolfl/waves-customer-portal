@@ -19,7 +19,7 @@ jest.mock('../config', () => ({
   },
 }));
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn(() => true),
+  isEnabled: jest.fn(gate => gate !== 'smsGratitudeReplies'),
   // Push channel routing reads this at send time; false keeps routing inert
   // so these tests keep asserting the legacy SMS path.
   gateEnvValue: jest.fn(() => false),
