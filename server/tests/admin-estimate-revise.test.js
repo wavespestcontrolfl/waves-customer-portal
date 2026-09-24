@@ -398,6 +398,16 @@ describe('reviseAdminEstimate', () => {
     expect(JSON.parse(copied.updates[0].estimate_data).addressUnverified).toBe(true);
   });
 
+  test('a completed locality on a flagged estimate is a correction; a unit-only or spelling edit is not (codex #4667 r27 P1)', () => {
+    const { premiseChanged } = require('../services/admin-estimate-persistence');
+    expect(premiseChanged('1260 Example St', '1260 Example St, Parrish, FL 34219')).toBe(true);
+    expect(premiseChanged('1260 Example St, Parrish', '1260 Example St, Parrish, FL 34219')).toBe(true);
+    expect(premiseChanged('1260 Example St, Parrish, FL 34219', '1250 Example St, Parrish, FL 34219')).toBe(true);
+    expect(premiseChanged('1260 Example St, Parrish, FL 34219', '1260 Example St Apt 4, Parrish, FL 34219')).toBe(false);
+    expect(premiseChanged('1260 Example St, Parrish, FL 34219', '1260 EXAMPLE STREET, Parrish, FL 34219')).toBe(false);
+    expect(premiseChanged('1260 Example St, Parrish, FL 34219', undefined)).toBe(false);
+  });
+
   test('retains the wizard address-verification marker across an ordinary revision', async () => {
     const priorData = JSON.parse(sentEstimate.estimate_data);
     const flagged = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, addressUnverified: true }) };

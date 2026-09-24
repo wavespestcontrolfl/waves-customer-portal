@@ -1336,6 +1336,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // lead-level recovery above could not see it) — the handoff is then
     // withheld exactly as for a fresh flag (pre-push audit P1).
     let draftAddressBlockCarried = false;
+    // The draft upsert is where an existing draft's block is carried and
+    // reconciled; if that transaction fails (a deadlock, a setup-fee
+    // write) the carry never ran, and the draft may be the ONLY carrier
+    // of a block — the handoff is withheld rather than minted against an
+    // unreconciled verdict (codex r27 P1).
+    let draftReconcileFailed = false;
     // The structured audit carried with it, to land on the CURRENT lead
     // (a repeat lookup's new row was saved without it).
     let carriedAddressFlag = null;
@@ -3310,7 +3316,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         });
       }
     } catch (e) {
-      logger.error(`[public-quote] Estimate upsert failed: ${e.message}`);
+      draftReconcileFailed = true;
+      logger.error(`[public-quote] Estimate upsert failed — self-book handoff withheld: ${e.message}`);
     }
     // A carried draft block puts its structured audit back on the CURRENT
     // lead (own row, this run's insert/update above) so the lead card shows
@@ -3410,7 +3417,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
       }
     }
-    const selfBookBlockedByAddress = !!addressUnverified || draftAddressBlockCarried;
+    const selfBookBlockedByAddress = !!addressUnverified || draftAddressBlockCarried || draftReconcileFailed;
     if (selfBookBlockedByAddress) {
       logger.info('[public-quote] self-book link withheld — address flagged by the county-roll audit; office confirms on the callback');
       // A website estimate an EARLIER run already published for this lead

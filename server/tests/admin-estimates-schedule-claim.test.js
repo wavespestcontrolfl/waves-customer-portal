@@ -190,6 +190,8 @@ describe('schedule-send atomic claim', () => {
       // P2 on #3804): a hold landing after the pre-read 409s instead of
       // reporting "scheduled" for a row the cron will refuse.
       expect(builder.whereRaw).toHaveBeenCalledWith(require('../utils/estimate-claim-sql').REPRICE_PENDING_ABSENT_SQL);
+      // …and the county-roll address block (codex #4667 r27 P1).
+      expect(builder.whereRaw).toHaveBeenCalledWith(require('../utils/estimate-claim-sql').ADDRESS_UNVERIFIED_ABSENT_SQL);
       expect(builder.update).toHaveBeenCalledWith(expect.objectContaining({
         status: 'scheduled',
         scheduled_send_attempts: 0,

@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey, cleanVerdictCovers, cachedAuditSuperseded, auditEvidenceAt } = require('../services/lead-address-unverified');
+const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey, cleanVerdictCovers, cachedAuditSuperseded, auditEvidenceAt, samePremiseDisplay, countyRollAnswered } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
@@ -579,6 +579,35 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           await withdrawFlaggedPublications(trx, {
             leadId: lead.id, contactEmail: email, contactPhone: normPhone, fullAddress: normalizedAddress.fullAddress || lookupAddress, flag: addressUnverified,
           });
+        } else if (cachedAuditStale || countyRollAnswered(result?.enriched)) {
+          // The CLEAN counterpart (codex r27 P1): legacy quote-wizard rows an
+          // earlier flagged lookup blocked without archiving keep refusing
+          // every staff send with ADDRESS_UNVERIFIED if the visitor abandons
+          // before /calculate lifts them — so a clean county answer (or a
+          // staff verdict that superseded the cached audit) lifts the block
+          // here, under the same lock, for this contact pair's rows at the
+          // same complete premise. Mirrors the /calculate supersession.
+          const fullAddress = normalizedAddress.fullAddress || lookupAddress;
+          const blocked = await trx('estimates')
+            .where({ source: 'quote_wizard' })
+            .whereNull('archived_at')
+            .whereRaw('LOWER(customer_email) = ?', [String(email).toLowerCase().trim()])
+            .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(normPhone).replace(/\D/g, '').slice(-10)])
+            .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+            .select('id', 'address');
+          const unblocked = blocked
+            .filter((row) => samePremiseDisplay(row.address, fullAddress, { requireLocality: true }))
+            .map((row) => row.id);
+          if (unblocked.length) {
+            await trx('estimates')
+              .whereIn('id', unblocked)
+              .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
+              .update({
+                estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: false, addressUnverifiedFlag: null, addressUnverifiedSupersededAt: new Date().toISOString() })]),
+                updated_at: new Date(),
+              });
+            logger.info(`[public-property-lookup] clean verdict lifted the address block on ${unblocked.length} legacy estimate(s)`);
+          }
         }
         await trx('leads').where({ id: lead.id }).update({
           extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({

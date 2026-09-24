@@ -2588,11 +2588,18 @@ const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'schedul
 // unit-insensitive — the roll's verdict is about the house number): a
 // unit-only edit keeps the block and needs the explicit confirmation
 // (codex #4667 r11 P1).
+// A locality the flagged estimate LACKED and the edit supplies (a city, a
+// ZIP) is a correction too — the premise comparison treats an absent
+// value as a wildcard, which must not leave the completed address blocked
+// and unsendable (codex #4667 r27 P1).
 function premiseChanged(priorAddress, nextAddress) {
   if (nextAddress === undefined) return false;
-  const { samePremiseDisplay } = require('./lead-address-unverified');
+  const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
   if (!String(priorAddress || '').trim() || !String(nextAddress || '').trim()) return String(priorAddress || '') !== String(nextAddress || '');
-  return !samePremiseDisplay(priorAddress, nextAddress);
+  if (!samePremiseDisplay(priorAddress, nextAddress)) return true;
+  const prior = parseDisplayAddress(priorAddress);
+  const next = parseDisplayAddress(nextAddress);
+  return (!prior.city && !!next.city) || (!prior.zip && !!next.zip);
 }
 // `explicitConfirm` comes from the REQUEST (body.confirmAddress === true),
 // never from a copied `addressUnverified: false` in the client's data
@@ -3239,6 +3246,48 @@ async function reviseAdminEstimate({
     const parseJson = (v) => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return null; } })() : v);
     const writtenData = parseJson(row.estimate_data);
     const priorLockedData = parseJson(lockedPrior?.estimate_data);
+    // A blocked LEGACY row with no lead link (a contact-matched
+    // quote-wizard estimate the lookup-stage withdrawal stamped): the
+    // staff verdict still has to reach the lead(s) that carry the flag
+    // for this contact pair and premise, or the next /calculate recovers
+    // the old warning and re-blocks the row (codex #4667 r27 P1). Under
+    // the contact-pair lock taken at the top of this transaction.
+    if (writtenData?.addressUnverifiedClearedBy && priorLockedData?.addressUnverified === true && !writtenData.lead_id
+      && row.customer_email && row.customer_phone) {
+      try {
+        const { parseDisplayAddress, recoverAddressUnverified: recoverLeadFlag, flagCoversAddress } = require('./lead-address-unverified');
+        const parsedRow = parseDisplayAddress(row.address);
+        const premise = { line1: parsedRow.line1, city: parsedRow.city, state: parsedRow.state, zip: parsedRow.zip };
+        const verdict = {
+          status: 'clean',
+          address_line1: parsedRow.streetLine || null,
+          city: parsedRow.city || null,
+          state: parsedRow.state || 'FL',
+          zip: parsedRow.zip || null,
+          at: new Date().toISOString(),
+          source: `staff:${writtenData.addressUnverifiedClearedBy}`,
+        };
+        const flaggedLeads = await trx('leads')
+          .whereNull('deleted_at')
+          .whereRaw('LOWER(email) = ?', [String(row.customer_email).toLowerCase().trim()])
+          .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(row.customer_phone).replace(/\D/g, '').slice(-10)])
+          .whereRaw("extracted_data->'address_unverified' IS NOT NULL")
+          .forUpdate()
+          .select('id', 'extracted_data');
+        const targets = flaggedLeads.filter((lead) => {
+          const flag = recoverLeadFlag(parseJson(lead.extracted_data));
+          return flag && (!flag.address_line1 || flagCoversAddress(flag, premise));
+        }).map((lead) => lead.id);
+        if (targets.length) {
+          await trx('leads').whereIn('id', targets).update({
+            extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ address_unverified: null, address_verdict: verdict })]),
+            updated_at: now(),
+          });
+        }
+      } catch (leadErr) {
+        logger.warn(`[admin-estimate-persistence] contact-matched lead verdict not stamped: ${leadErr.code || leadErr.name || 'error'}`);
+      }
+    }
     if (writtenData?.addressUnverifiedClearedBy && priorLockedData?.addressUnverified === true && writtenData.lead_id) {
       const { parseDisplayAddress } = require('./lead-address-unverified');
       const parsed = parseDisplayAddress(row.address);
@@ -3444,6 +3493,7 @@ module.exports = {
   preserveClickMintMarkersAcrossRevise,
 };
 module.exports.stripClientProposal = stripClientProposal;
+module.exports.premiseChanged = premiseChanged;
 module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisionInScheduledGroup;
 module.exports.lockScheduledGroupGuardGroups = lockScheduledGroupGuardGroups;
 module.exports.lockEstimateGroupAddressRevision = lockEstimateGroupAddressRevision;

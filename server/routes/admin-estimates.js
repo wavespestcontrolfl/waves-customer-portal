@@ -1410,6 +1410,10 @@ router.post('/:id/send', async (req, res, next) => {
           // would only refuse it later, with nothing unscheduling it if the
           // reply's own unschedule ran while the row was still a draft.
           .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+          // …and the county-roll address block (codex #4667 r27 P1): a
+          // warning stamped between the pre-read and this claim must not
+          // move the row to 'scheduled' for the cron to refuse later.
+          .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
           // Same pricing-authority re-assertion as the immediate-send claim
           // (pre-push codex P1): a revision stamping CLIENT_FALLBACK between
           // the pre-read check and this UPDATE must lose the race with a 409
@@ -1441,7 +1445,7 @@ router.post('/:id/send', async (req, res, next) => {
       const scheduledClaim = scheduleOutcome.claimed;
       if (!scheduledClaim) {
         return res.status(409).json({
-          error: 'This estimate is mid-send, already accepted, locked, or held for a re-price — refresh and retry.',
+          error: 'This estimate is mid-send, already accepted, locked, held for a re-price, or its address is unconfirmed — refresh and retry.',
         });
       }
       return res.json(scheduleResult);
