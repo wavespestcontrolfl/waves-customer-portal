@@ -691,6 +691,21 @@ describe('recordOutcome — P1-1 post-record reconciliation (the sale closed bef
       .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_IN_FUTURE' });
   });
 
+  test('Codex #4710 r8 P2: an outcome before today\'s arrival window opens is refused', async () => {
+    const fakeDb = makeFakeDb({
+      scheduled_services: [{ id: 'visit-1', status: 'confirmed', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: etDateString(new Date()), window_start: '23:59' }],
+      leads: [],
+    });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(parseETDateTime(`${etDateString(new Date())}T08:00`));
+    try {
+      await expect(recordOutcome({ scheduledServiceId: 'visit-1', outcome: 'warm' }, { trx: fakeDb }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'CONSULTATION_IN_FUTURE' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('Codex #4710 P2: a technician reassigned off the visit cannot write its outcome (checked under the lock); an admin can', async () => {
     const fakeDb = makeFakeDb({
       scheduled_services: [
@@ -1481,10 +1496,12 @@ describe('markNoShow', () => {
     expect(fakeDb.__store.consultation_outcomes).toHaveLength(1);
   });
 
-  test('leaves an already-lost outcome untouched', async () => {
+  // Codex #4710 r8 P2: a visit that never happened cannot keep a
+  // price/competitor loss beside its no-show — normalized to lost/no_show.
+  test('normalizes an existing lost outcome with another reason to lost/no_show', async () => {
     const fakeDb = seededDb([{ id: 'co-1', scheduled_service_id: 'visit-1', outcome: 'lost', lost_reason: 'price' }]);
     const result = await markNoShow('visit-1', { trx: fakeDb });
-    expect(result.lost_reason).toBe('price'); // unchanged, not re-stamped 'no_show'
+    expect(result).toMatchObject({ outcome: 'lost', lost_reason: 'no_show' });
   });
 
   test('leaves an already-won outcome untouched', async () => {

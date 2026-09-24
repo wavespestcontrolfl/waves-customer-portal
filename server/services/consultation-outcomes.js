@@ -809,7 +809,7 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     const liveVisit = await locked('scheduled_services')
       .where({ id: scheduledServiceId })
       .forNoKeyUpdate()
-      .first('status', 'technician_id', 'customer_id', 'scheduled_date');
+      .first('status', 'technician_id', 'customer_id', 'scheduled_date', 'window_start');
     // A customer merge that repointed the visit between the first read and
     // this lock would otherwise write the retired customer_id (Codex #4710
     // r6 P2) — retried once from the top against the surviving customer.
@@ -824,6 +824,14 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     // lifecycle actions on future visits.
     if (liveVisit?.scheduled_date && toDateOnlyString(liveVisit.scheduled_date) > etDateString(new Date())) {
       throw makeError('That consultation has not happened yet — record its outcome on or after the visit day', 409, 'CONSULTATION_IN_FUTURE');
+    }
+    // ...nor before today's arrival window opens (Codex #4710 r8 P2) — the
+    // same instant dispatch's lifecycle guard uses.
+    if (liveVisit?.scheduled_date && liveVisit.window_start) {
+      const windowOpens = parseETDateTime(`${toDateOnlyString(liveVisit.scheduled_date)}T${String(liveVisit.window_start).slice(0, 5)}`);
+      if (windowOpens instanceof Date && !Number.isNaN(windowOpens.getTime()) && Date.now() < windowOpens.getTime()) {
+        throw makeError('That consultation has not started yet — record its outcome once the visit window opens', 409, 'CONSULTATION_IN_FUTURE');
+      }
     }
     if (actingTechnicianId && !actingIsAdmin && String(liveVisit?.technician_id || '') !== String(actingTechnicianId)) {
       throw makeError('Not assigned to this consultation', 403, 'NOT_ASSIGNED');
@@ -1272,7 +1280,13 @@ async function repairMissedNoShowOutcomes({ now, limit, result }) {
           .orWhereRaw("lower(trim(svc.name)) = 'waves assessment'");
       })
       .where(function missingOrOpen() {
-        this.whereNull('co.id').orWhereIn('co.outcome', ['warm', 'cold']);
+        this.whereNull('co.id').orWhereIn('co.outcome', ['warm', 'cold'])
+          // ...or lost for another reason (Codex #4710 r8 P2).
+          .orWhere(function lostNotNoShow() {
+            this.where('co.outcome', 'lost').where(function reasonNotNoShow() {
+              this.whereNull('co.lost_reason').orWhereNot('co.lost_reason', 'no_show');
+            });
+          });
       })
       .orderBy('ss.scheduled_date', 'asc')
       .limit(limit)
@@ -1318,9 +1332,19 @@ async function markNoShow(scheduledServiceId, { trx } = {}) {
   // (warm, cold) guard lives on the UPDATE itself, so a row that has
   // already resolved lost/won in the meantime is provably untouched by
   // this statement (not by a JS check on a stale read).
+  // A lost outcome with any OTHER reason is normalized too (Codex #4710 r8
+  // P2): the visit never happened, so a price/competitor loss recorded while
+  // it was active must not stand beside the no-show.
   const updated = await database('consultation_outcomes')
     .where({ scheduled_service_id: scheduledServiceId })
-    .whereIn('outcome', ['warm', 'cold'])
+    .where(function openOrOtherLoss() {
+      this.whereIn('outcome', ['warm', 'cold'])
+        .orWhere(function lostNotNoShow() {
+          this.where('outcome', 'lost').where(function reasonNotNoShow() {
+            this.whereNull('lost_reason').orWhereNot('lost_reason', 'no_show');
+          });
+        });
+    })
     .update({ outcome: 'lost', lost_reason: 'no_show', won_via: null, won_at: null, updated_at: now })
     .returning('*');
   if (updated.length) return updated[0];
