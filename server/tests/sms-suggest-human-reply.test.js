@@ -116,6 +116,22 @@ test('a gratitude claim outlives its disabled gate while the activation stamp is
   expect(chains.agent_decisions).toBeUndefined();
 });
 
+test('after activation, a gate-off reply with no card still publishes its reservation for a racing claim', async () => {
+  // Rolling disable: an older gate-on instance may claim after this check, so
+  // the reservation it observes must be published, not skipped with the gate.
+  const { gateEnvTimestamp } = require('../config/feature-gates');
+  gateEnvTimestamp.mockReturnValue(new Date('2026-09-24T12:00:00Z'));
+  try {
+    const { inserted } = trxWith();
+    const out = await suggest.reserveHumanReply({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi' });
+    expect(hasActiveAutoSendClaim).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ autoSendInFlight: false, reservationId: 'resv-1', parkedDecisionIds: [] });
+    expect(inserted).toHaveLength(1);
+  } finally {
+    gateEnvTimestamp.mockReturnValue(null);
+  }
+});
+
 test('wrapper opt-in reserves an empty thread while both autonomous gates are off', async () => {
   const { inserted, reservationFirst } = trxWith();
 

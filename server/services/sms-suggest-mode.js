@@ -855,8 +855,10 @@ async function reserveHumanReply({
     // Either autonomous lane can own the shared thread claim. Gratitude is
     // intentionally independent of the general gate, and its claims outlive
     // a later kill-switch flip while the activation stamp is set.
-    const autoSendEnabled = isEnabled('smsAutoSend') || isEnabled('smsGratitudeReplies');
-    if (autoSendEnabled || require('./sms-gratitude-context').gratitudeClaimsPossible()) {
+    // The same predicate publishes the reservation below, so a claim made by an
+    // older instance during a rolling disable always observes this reply.
+    const autoSendEnabled = isEnabled('smsAutoSend') || require('./sms-gratitude-context').gratitudeClaimsPossible();
+    if (autoSendEnabled) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
         return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true };
       }

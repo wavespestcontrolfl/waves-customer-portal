@@ -531,7 +531,10 @@ router.post('/sms', async (req, res, next) => {
     // Provider coordination must publish the same From endpoint the SDK will
     // use. Resolve it before any thread-lock transaction, then freeze it into
     // both an existing caller-owned reservation and canonical delivery.
-    const providerCoordinationEnabled = isEnabled('smsGratitudeReplies');
+    // Coordination follows claim possibility, not the live gate: during a
+    // rolling disable an older instance can still claim until the activation
+    // stamp is cleared.
+    const providerCoordinationEnabled = gratitudeClaimsPossible();
     let providerCoordinationFromNumber = null;
     let providerCoordinationCustomerId = trustedCustomerId || null;
     if (providerCoordinationEnabled) {
@@ -619,11 +622,12 @@ router.post('/sms', async (req, res, next) => {
     // after 30 minutes but retains an explicitly uncertain provider outcome.
     let autoSendInFlight = false;
     let staleAtClaim = false;
-    // The autonomous-claim lookup matters while either autonomous lane is
-    // enabled, and while a gratitude claim can outlive its disabled gate. The
-    // recovery reservation below is separate: it is also required gate-off
-    // whenever this send claims or parks a suggestion.
-    const autoSendInterlock = isEnabled('smsAutoSend') || isEnabled('smsGratitudeReplies');
+    // The autonomous-claim lookup AND reservation publication matter while
+    // either autonomous lane is enabled, and while a gratitude claim can still
+    // be made or retained after its gate is disabled (activation stamp set).
+    // The recovery reservation below is also required whenever this send
+    // claims or parks a suggestion.
+    const autoSendInterlock = isEnabled('smsAutoSend') || gratitudeClaimsPossible();
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
       if (parkPhoneLast10) {
@@ -639,7 +643,7 @@ router.post('/sms', async (req, res, next) => {
               return [];
             }
           }
-          if (autoSendInterlock || gratitudeClaimsPossible()) {
+          if (autoSendInterlock) {
             // An autonomous house-voice reply (Phase E) may be mid-send to this
             // thread — it claimed under THIS same lock. Don't let a manual send
             // race its provider window; both would reach the customer. Under

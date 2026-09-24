@@ -326,7 +326,7 @@ async function sendCustomerMessageCore(input) {
     ...inputRest
   } = input;
   const providerCoordination = require('./provider-handoff-reservation');
-  if (isEnabled('smsGratitudeReplies')
+  if (require('../sms-gratitude-context').gratitudeClaimsPossible()
     && providerCoordination.isProviderHandoffHandle(suppliedProviderHandoffReservation)) {
     providerHandoffReservation = suppliedProviderHandoffReservation;
   }

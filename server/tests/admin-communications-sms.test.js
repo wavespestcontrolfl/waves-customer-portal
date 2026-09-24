@@ -1759,6 +1759,26 @@ describe('admin communications SMS route', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('after activation, a gate-off immediate send publishes its reservation for a racing claim', async () => {
+    mockGates.gratitudeActivatedAt = new Date('2026-09-24T12:00:00Z');
+    db.mockImplementation(() => makeUniversalBuilder());
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SM-after' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand', messageType: 'manual' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(hasActiveAutoSendClaim).toHaveBeenCalledTimes(1);
+    expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      providerHandoffReservation: expect.anything(),
+    }));
+  });
+
   test('a never-activated dark lane does not consult autonomous claims', async () => {
     db.mockImplementation(() => makeUniversalBuilder());
     sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-dark' });
