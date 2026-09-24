@@ -5,8 +5,11 @@ const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 const MAX_ENCODED_PHOTO_CHARS = 8 * 1024 * 1024;
 
 // Prefix-only match: matching the entire multi-megabyte data URL can exhaust
-// V8's regular-expression stack under load.
-const DATA_URL_PREFIX_RE = /^data:image\/(?:jpeg|jpg|png|webp|heic|heif);base64,/;
+// V8's regular-expression stack under load. Case-insensitive (codex GH P2 on
+// PR #4752, server/routes/photo-id.js:64): a MIME subtype is case-insensitive
+// per RFC 2045/2397 — a client-generated `data:image/JPEG;base64,...` is a
+// valid image data URL and must not be rejected on casing alone.
+const DATA_URL_PREFIX_RE = /^data:image\/(?:jpeg|jpg|png|webp|heic|heif);base64,/i;
 
 function decodedBase64Bytes(base64) {
   const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
