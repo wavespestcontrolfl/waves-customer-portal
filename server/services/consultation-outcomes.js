@@ -47,6 +47,11 @@ const OUTCOME_VALUES = ['warm', 'cold', 'lost'];
 const LOST_REASON_VALUES = ['price', 'competitor', 'diy', 'not_ready', 'no_show', 'other'];
 const CADENCE_VALUES = ['month', 'quarter', 'visit', 'year'];
 const WON_WINDOW_DAYS = 90;
+
+// Consultation visits that never happened: a sale is never attributed to
+// one (local audit P1). One list shared by every win path — the evidence
+// win, markWonForCustomer and the sweep's selection — so they cannot drift.
+const DEAD_CONSULTATION_STATUSES = ['no_show', 'cancelled', 'skipped'];
 // P1 :924 (round 12): the sweep's OWN row-SELECTION cutoff only — never
 // the EVIDENCE bound findSaleEvidenceForConsultation applies (that stays
 // exactly WON_WINDOW_DAYS from the visit's scheduled_date; see its own
@@ -568,11 +573,11 @@ async function attemptEvidenceBasedWin(database, {
     const [wonRow] = await sp('consultation_outcomes')
       .where({ id: outcomeRowId })
       .whereIn('outcome', ['warm', 'cold'])
-      // A no-showed consultation is never won, even when re-recorded
-      // warm/cold after the no-show (local audit P1) — same exclusion as
-      // markWonForCustomer and the sweep.
+      // A consultation that never happened is never won, even when
+      // re-recorded warm/cold afterwards (local audit P1) — same exclusion
+      // as markWonForCustomer and the sweep.
       .whereIn('scheduled_service_id', function notNoShow() {
-        this.select('id').from('scheduled_services').whereNot('status', 'no_show');
+        this.select('id').from('scheduled_services').whereNotIn('status', DEAD_CONSULTATION_STATUSES);
       })
       .update({ outcome: 'won', won_at: evidence.won_at, won_via: evidence.won_via, updated_at: new Date() })
       .returning('*');
@@ -847,9 +852,10 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
           this.select('id').from('scheduled_services')
             .where('scheduled_date', '>=', cutoff)
             .where('scheduled_date', '<=', nowDateStr)
-            // A no-showed consultation is lost/no_show, never won — even if
-            // its best-effort no-show write failed and the row is still open.
-            .whereNot('status', 'no_show');
+            // A consultation that never happened (no-show, cancelled,
+            // skipped) is never won — even if its best-effort no-show write
+            // failed and the row is still open.
+            .whereNotIn('status', DEAD_CONSULTATION_STATUSES);
         })
         .update({ outcome: 'won', won_at: now, won_via: via, updated_at: now })
         .returning('id');
@@ -928,7 +934,7 @@ async function reconcileOpenConsultationOutcomes({ now = new Date(), limit = 200
       .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
       .whereIn('co.outcome', ['warm', 'cold'])
       .whereNotNull('co.customer_id')
-      .whereNot('ss.status', 'no_show') // repaired to lost/no_show above, never won
+      .whereNotIn('ss.status', DEAD_CONSULTATION_STATUSES) // never won; no-shows are repaired to lost above
       .where('ss.scheduled_date', '>=', cutoff)
       .where('ss.scheduled_date', '<=', nowDateStr)
       .orderBy([{ column: 'co.last_reconciled_at', order: 'asc', nulls: 'first' }, { column: 'co.recorded_at', order: 'asc' }])

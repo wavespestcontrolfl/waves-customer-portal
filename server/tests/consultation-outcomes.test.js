@@ -145,6 +145,7 @@ function makeFakeDb(seed = {}) {
       where(...args) { subRows = applyWhereArgs(subRows, args); return subCtx; },
       whereIn(col, arr) { subRows = subRows.filter((r) => arr.includes(resolveField(r, col))); return subCtx; },
       whereNot(col, val) { subRows = subRows.filter((r) => resolveField(r, col) !== val); return subCtx; },
+      whereNotIn(col, arr) { subRows = subRows.filter((r) => !arr.includes(resolveField(r, col))); return subCtx; },
     };
     fn.call(subCtx);
     return subRows.map((r) => resolveField(r, subCol));
@@ -180,6 +181,7 @@ function makeFakeDb(seed = {}) {
       whereNull(col) { filtered = filtered.filter((r) => resolveField(r, col) == null); return api; },
       whereNotNull(col) { filtered = filtered.filter((r) => resolveField(r, col) != null); return api; },
       whereNot(col, val) { filtered = filtered.filter((r) => resolveField(r, col) !== val); return api; },
+      whereNotIn(col, arr) { filtered = filtered.filter((r) => !arr.includes(resolveField(r, col))); return api; },
       whereIn(col, valueOrFn) {
         const values = typeof valueOrFn === 'function' ? runSubquery(valueOrFn) : valueOrFn;
         filtered = filtered.filter((r) => values.includes(resolveField(r, col)));
@@ -981,6 +983,14 @@ describe('markWonForCustomer — won_via provenance (round 12, P2 :411)', () => 
     }
   });
 
+  test.each(['cancelled', 'skipped', 'no_show'])('local audit P1: a %s consultation is never won by a later booking', async (status) => {
+    const fakeDb = seededDb();
+    fakeDb.__store.scheduled_services.find((r) => r.id === 'visit-today').status = status;
+    const count = await markWonForCustomer('cust-1', { via: 'office_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
+    expect(count).toBe(1); // only last week's live visit
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-today').outcome).toBe('warm');
+  });
+
   test('an explicit via closeout_booking (the PR1b tech-closeout caller) is written as passed', async () => {
     const fakeDb = seededDb();
     await markWonForCustomer('cust-1', { via: 'closeout_booking', trx: fakeDb, now: new Date('2026-09-10T20:00:00Z') });
@@ -1453,6 +1463,21 @@ describe('reconcileOpenConsultationOutcomes — no-show outcome repair (round 12
     const result = await reconcileOpenConsultationOutcomes({ now: NOW });
     expect(result.no_show_repaired).toBe(1);
     expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-ns')).toMatchObject({ outcome: 'lost', lost_reason: 'no_show' });
+  });
+
+  test('local audit P1: the sweep never wins a cancelled consultation, even with sale evidence', async () => {
+    const fakeDb = install({
+      scheduled_services: [
+        { id: 'visit-c', status: 'cancelled', service_type: 'Waves Assessment', scheduled_date: '2026-09-20', customer_id: 'cust-1' },
+        { id: 'sale', status: 'confirmed', service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-25', customer_id: 'cust-1', created_at: new Date('2026-09-21T15:00:00Z') },
+      ],
+      consultation_outcomes: [
+        { id: 'co-c', scheduled_service_id: 'visit-c', customer_id: 'cust-1', outcome: 'warm', recorded_at: new Date('2026-09-20T15:00:00Z') },
+      ],
+    });
+    const result = await reconcileOpenConsultationOutcomes({ now: NOW });
+    expect(result.won).toBe(0);
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-c').outcome).toBe('warm');
   });
 
   test('local audit P1: a customer-linked warm no-show WITH sale evidence closes lost/no_show — the win pass never takes it', async () => {
