@@ -996,13 +996,22 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     expect(out3.droppedUngrounded).toBe(0);
     expect(out3.items).toHaveLength(1);
     expect(out3.items[0].evidence.map((e) => e.quote)).toEqual(['I will call you back tomorrow morning with the price']);
-    const many = { commitments: Array.from({ length: 13 }, () => item()) };
-    expect(normalizeModelOutput(many).commitments).toHaveLength(12);
-    // The commitment cap keeps grounded commitments ahead of ungrounded ones (r5 P2).
-    const ungrounded = Array.from({ length: 12 }, (_, i) => item({ description: `phantom ${i}`, evidence: [{ quote: `nothing like this was said ${i}`, speaker: 'agent' }] }));
-    const capped = normalizeModelOutput({ commitments: [...ungrounded, item()] }, transcript).commitments;
-    expect(capped).toHaveLength(12);
-    expect(capped[0].description).toBe('Call back with the price');
+    // The twelve-commitment cap applies to ACCEPTED results: thirteen
+    // grounded commitments keep twelve, and twelve items grounding would
+    // drop anyway (ungrounded, low-confidence, party/kind mismatch) never
+    // crowd out the one real promise listed after them (r5/r6 P2).
+    const thirteen = Array.from({ length: 13 }, (_, i) => item({ description: `Call back with the price ${i}` }));
+    const create13 = jest.fn(async () => reply(thirteen));
+    expect((await extractCommitmentsWithModel(transcript, { client: { messages: { create: create13 } } })).items).toHaveLength(12);
+    const junk = [
+      ...Array.from({ length: 5 }, (_, i) => item({ description: `phantom ${i}`, evidence: [{ quote: `nothing like this was said ${i}`, speaker: 'agent' }] })),
+      ...Array.from({ length: 4 }, (_, i) => item({ description: `hedged ${i}`, confidence: 0.2 })),
+      ...Array.from({ length: 3 }, (_, i) => item({ description: `mismatch ${i}`, party: 'customer', kind: 'send_estimate' })),
+    ];
+    const createJunk = jest.fn(async () => reply([...junk, item()]));
+    const outJunk = await extractCommitmentsWithModel(transcript, { client: { messages: { create: createJunk } } });
+    expect(outJunk.skipped).toBeUndefined();
+    expect(outJunk.items.map((i) => i.description)).toEqual(['Call back with the price']);
     expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most three quotes per commitment/);
     expect(buildCommitmentsPrompt({ transcript, callStartedAt: '2026-09-01T14:00:00Z' })).toMatch(/at most twelve commitments/);
   });

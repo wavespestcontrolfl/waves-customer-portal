@@ -148,21 +148,20 @@ function normalizeModelOutput(parsed, transcript = '') {
       item.evidence = preferred.concat(rest).slice(0, 3);
     }
   }
-  // Same rule for the twelve-commitment cap: commitments with at least one
-  // grounded quote come first, so the trim drops ungrounded ones (r5 P2).
-  if (parsed.commitments.length > 12) {
-    const hasGrounded = (item) => !!item && typeof item === 'object'
-      && Array.isArray(item.evidence) && item.evidence.some((e) => grounded(e, item));
-    const preferred = parsed.commitments.filter(hasGrounded);
-    const rest = parsed.commitments.filter((item) => !preferred.includes(item));
-    parsed.commitments = preferred.concat(rest).slice(0, 12);
-  }
+  // Over-long lists are trimmed to the schema ceiling here only so the
+  // response validates; the twelve-commitment cap is applied to the
+  // accepted results in extractCommitmentsWithModel.
+  if (parsed.commitments.length > 40) parsed.commitments = parsed.commitments.slice(0, 40);
   return parsed;
 }
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
 const EXTRACTOR_VERSION = 'commitments-v9';
+// The prompt asks for at most twelve, most consequential first; the cap is
+// enforced on the grounded, confidence-filtered results so that ordering
+// is what decides which twelve survive.
+const MAX_COMMITMENTS = 12;
 const IDENTITY_UNRESOLVED_INCOMPLETE = 'incomplete_extraction';
 const IDENTITY_UNRESOLVED_AMBIGUOUS = 'reconciliation_ambiguity';
 
@@ -455,7 +454,11 @@ const MODEL_OUTPUT_SCHEMA = {
   properties: {
     commitments: {
       type: 'array',
-      maxItems: 12,
+      // Sanity ceiling only. The twelve-commitment cap (MAX_COMMITMENTS) is
+      // applied to the ACCEPTED results after grounding, so a long list
+      // never fails validation and no grounded promise is crowded out by
+      // items grounding would drop anyway (Codex #4704 r5/r6).
+      maxItems: 40,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -718,7 +721,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
   const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
-  return { items: grounded.kept, droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
+  return { items: grounded.kept.slice(0, MAX_COMMITMENTS), droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────
