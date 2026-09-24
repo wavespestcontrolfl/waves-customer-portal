@@ -8894,12 +8894,12 @@ function LawnAssessmentCompletionBlock({
                       display: "block",
                       width: "100%",
                       marginTop: 4,
-                      height: 30,
+                      height: 34,
                       borderRadius: 6,
                       border: `1px solid ${D.border}`,
                       background: D.white,
                       color: D.heading,
-                      fontSize: 11,
+                      fontSize: 14,
                       padding: "0 2px",
                     }}
                   >
