@@ -158,11 +158,15 @@ function ActionButton({ children, onClick, disabled, tone }) {
   );
 }
 
-function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
+function DraftCard({ draft, busy, onApprove, onRevise, onReject, onRevisionStateChange }) {
   const [revising, setRevising] = useState(false);
   const [revisedText, setRevisedText] = useState("");
   const lane = laneOf(draft);
   const toPhone = draft.recipientPhone || draft.customerPhone;
+
+  useEffect(() => () => {
+    onRevisionStateChange(draft.id, false);
+  }, [draft.id, onRevisionStateChange]);
 
   return (
     <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
@@ -206,7 +210,11 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
             <ActionButton tone="primary" disabled={busy || !revisedText.trim()} onClick={() => onRevise(draft, revisedText.trim())}>
               Send revised
             </ActionButton>
-            <ActionButton disabled={busy} onClick={() => { setRevising(false); setRevisedText(""); }}>
+            <ActionButton disabled={busy} onClick={() => {
+              onRevisionStateChange(draft.id, false);
+              setRevising(false);
+              setRevisedText("");
+            }}>
               Cancel
             </ActionButton>
           </div>
@@ -216,7 +224,11 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
           <ActionButton tone="primary" disabled={busy} onClick={() => onApprove(draft)}>
             Approve &amp; send
           </ActionButton>
-          <ActionButton disabled={busy} onClick={() => { setRevising(true); setRevisedText(draft.draftResponse || ""); }}>
+          <ActionButton disabled={busy} onClick={() => {
+            onRevisionStateChange(draft.id, true);
+            setRevising(true);
+            setRevisedText(draft.draftResponse || "");
+          }}>
             Revise
           </ActionButton>
           <ActionButton tone="danger" disabled={busy} onClick={() => onReject(draft)}>
@@ -249,8 +261,25 @@ export default function PendingDraftsTab({ embedded = false }) {
   // flight across an approve could resolve late and restore the actioned
   // card (already sent/rejected) to the list.
   const loadSeq = useRef(0);
+  const revisionEditRef = useRef({ epoch: 0, openIds: new Set() });
+  const [openRevisionIds, setOpenRevisionIds] = useState(() => new Set());
+
+  const setRevisionOpen = useCallback((draftId, open) => {
+    const current = revisionEditRef.current;
+    if (current.openIds.has(draftId) === open) return;
+    const openIds = new Set(current.openIds);
+    if (open) openIds.add(draftId);
+    else openIds.delete(draftId);
+    revisionEditRef.current = { epoch: current.epoch + 1, openIds };
+    setOpenRevisionIds(openIds);
+  }, []);
 
   const load = useCallback(async ({ background = false, visibleCount = 0 } = {}) => {
+    const editEpoch = revisionEditRef.current.epoch;
+    const revisionBlocksRefresh = () => background && (
+      editEpoch !== revisionEditRef.current.epoch || revisionEditRef.current.openIds.size > 0
+    );
+    if (revisionBlocksRefresh()) return;
     const seq = ++loadSeq.current;
     if (!background) setLoading(true);
     setError(null);
@@ -259,7 +288,7 @@ export default function PendingDraftsTab({ embedded = false }) {
       const refreshed = [...(Array.isArray(data?.drafts) ? data.drafts : [])];
       const seen = new Set(refreshed.map((draft) => draft.id));
       while (background && refreshed.length < visibleCount && data?.nextCursor) {
-        if (seq !== loadSeq.current) return;
+        if (seq !== loadSeq.current || revisionBlocksRefresh()) return;
         const cursor = data.nextCursor;
         const next = await adminFetch(`/admin/drafts?status=pending&before=${encodeURIComponent(cursor)}`);
         const older = Array.isArray(next?.drafts) ? next.drafts : [];
@@ -272,12 +301,14 @@ export default function PendingDraftsTab({ embedded = false }) {
         data = next;
         if (next?.nextCursor === cursor || older.length === 0) break;
       }
-      if (seq !== loadSeq.current) return; // superseded by a mutation
+      if (seq !== loadSeq.current || revisionBlocksRefresh()) return;
       setDrafts(refreshed);
       setPendingCount(Number(data?.pendingCount) || 0);
       setNextCursor(data?.nextCursor || null);
     } catch (err) {
-      if (seq === loadSeq.current) setError(err.message || "Failed to load drafts");
+      if (seq === loadSeq.current && !revisionBlocksRefresh()) {
+        setError(err.message || "Failed to load drafts");
+      }
     } finally {
       if (!background && seq === loadSeq.current) setLoading(false);
     }
@@ -312,8 +343,10 @@ export default function PendingDraftsTab({ embedded = false }) {
     load();
   }, [load]);
 
+  const hasOpenRevision = drafts.some((draft) => openRevisionIds.has(draft.id));
   useVisiblePageRefresh(() => load({ background: true, visibleCount: drafts.length }), {
-    intervalMs: 30_000, enabled: !loading && !loadingMore && busyId === null,
+    intervalMs: 30_000,
+    enabled: !loading && !loadingMore && busyId === null && !hasOpenRevision,
   });
 
   const lanes = useMemo(() => {
@@ -448,6 +481,7 @@ export default function PendingDraftsTab({ embedded = false }) {
           onApprove={approve}
           onRevise={revise}
           onReject={reject}
+          onRevisionStateChange={setRevisionOpen}
         />
       ))}
 
