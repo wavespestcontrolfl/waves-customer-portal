@@ -579,6 +579,21 @@ describe('Codex #4737 r9: lead-scoped dedupe, trusted-customer change to null, c
   });
 
   // Codex #4737 r11 pre-push P1: the in-booking check row-locks the lead.
+  // Codex #4737 r12 pre-push P1: the open-assessment scans filter the
+  // assessment identity in SQL and never LIMIT before it.
+  test('findOpenVisit and the assessment lane scope in SQL with no LIMIT', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const page = fs.readFileSync(path.join(__dirname, '../routes/inspection-public.js'), 'utf8');
+    const fov = page.slice(page.indexOf('async function findOpenVisit('), page.indexOf('\n}\n', page.indexOf('async function findOpenVisit(')));
+    expect(fov).toContain('scopeToAssessmentBookings(qq)');
+    expect(fov).not.toMatch(/\.limit\(/);
+    const lane = fs.readFileSync(path.join(__dirname, '../services/reservice-scheduler.js'), 'utf8');
+    const block = lane.slice(lane.indexOf("if (lane === 'assessment') {"), lane.indexOf('return false;\n  }', lane.indexOf("if (lane === 'assessment') {")));
+    expect(block).toContain('scopeToAssessmentBookings(q)');
+    expect(block).not.toMatch(/\.limit\(/);
+  });
+
   test('commitVerdict reads the lead FOR UPDATE (held through the booking transaction)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/inspection-public.js'), 'utf8');
     const start = src.indexOf('async function commitVerdict(');

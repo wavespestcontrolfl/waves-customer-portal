@@ -215,7 +215,7 @@ describe('buildLeadConsultationLink — gate on', () => {
   // claim, the exact form the booking route's verifier accepts.
   test('{ channel: "sms" } mints the phone-bound claim for the fresh row\'s phone', async () => {
     const { verifyLeadConsultationToken, smsChannelFor } = require('../utils/lead-consultation-token');
-    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100' } }) };
+    mockBuilders = { leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }) };
     await buildLeadConsultationLink(LEAD_ID, { channel: 'sms' });
     const longUrl = createShortCode.mock.calls[0][0];
     const verified = verifyLeadConsultationToken(longUrl.split('/inspection/')[1]);
