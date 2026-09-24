@@ -273,3 +273,13 @@ describe('pre-push audit after r45: linked-draft reuse keeps the county hold', (
     expect(confirmed.addressUnverified).toBe(false);
   });
 });
+
+describe('codex r46: a corrected commercial proposal is judged on its customer-facing premise', () => {
+  test('withdrawal and the clean-verdict lift read proposal.propertyAddress over the immutable base address', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/website-quote-withdrawal'), 'utf8');
+    expect(src).toContain("const customerFacingPremise = (row) => (String(row?.proposal_address || '').trim() ? row.proposal_address : row?.address);");
+    expect(src.split("estimate_data->'proposal'->>'propertyAddress' as proposal_address").length - 1).toBe(2);
+    expect(src).toContain('samePremiseDisplay(customerFacingPremise(row), fullAddress, { requireLocality: true })');
+    expect(src).not.toContain('samePremiseDisplay(row.address, fullAddress');
+  });
+});
