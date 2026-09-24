@@ -49,7 +49,7 @@ const { DEFAULT_EXCLUDE_STATUSES, windowsOverlap } = require('./scheduling/occup
 const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
 const { resolveGeo, driveMin, HQ } = require('./auto-dispatch/geo');
 const { resolveAlert, emitAlert } = require('./dispatch-alerts');
-const { emitDispatchJobUpdate } = require('./dispatch-assignment');
+const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('./dispatch-assignment');
 const { ALERT_TYPE } = require('./tech-out');
 
 // Up to this many fitting candidates get a real move attempt (best detour
@@ -496,7 +496,7 @@ function refusalReason(lastErr) {
  * alert resolves inside the successful move's own transaction (beforeMove),
  * so anything thrown here means nothing committed for that candidate.
  */
-async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window, excludeServiceIds, candidates }) {
+async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window, excludeServiceIds, candidates, qualityDates }) {
   let lastErr = null;
   for (const candidate of candidates) {
     try {
@@ -519,6 +519,9 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
           // not enough.
           visitPolicy: 'single',
           actorId: actorId || null,
+          // Schedule-quality refresh is collected, not run per move — the
+          // caller flushes every touched date once (qualityDates contract).
+          qualityDates,
           // Atomic re-assertion, inside the mover's own move transaction, of
           // exactly what was read: a concurrent change (manual reassignment,
           // a second run, a status edit) misses this CAS as a plain 409.
@@ -550,7 +553,7 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
     }
     // Committed (stop + alert). The board broadcast is best-effort.
     try {
-      await emitDispatchJobUpdate({ jobId: stop.id, actorId: actorId || null });
+      await emitDispatchJobUpdate({ jobId: stop.id, actorId: actorId || null, qualityDates });
     } catch (broadcastErr) {
       logger.warn(`[tech-out-auto-move] board broadcast failed for ${stop.id}: ${broadcastErr.message}`);
     }
@@ -570,9 +573,18 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
  * whose stop no longer sits on the absent tech for that date is a no-op —
  * never thrown away, never double-moved.
  */
-async function autoAssignParkedAlert({ alertId, actorId } = {}) {
+async function autoAssignParkedAlert({ alertId, actorId, qualityDates = null } = {}) {
   if (!autoMoveEnabled()) return { moved: false, alert_id: alertId, skipped: 'gate_off' };
   if (!alertId) throw Object.assign(new Error('alertId is required'), { status: 400, code: 'VALIDATION' });
+  // A batch passes its own Set and flushes once; a lone call owns its flush.
+  if (!qualityDates) {
+    const own = new Set();
+    try {
+      return await autoAssignParkedAlert({ alertId, actorId, qualityDates: own });
+    } finally {
+      await flushDispatchQualityDates(own);
+    }
+  }
 
   const loaded = await loadMovableStop(alertId);
   if (loaded.done) return loaded.done;
@@ -600,7 +612,8 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
   }
 
   const outcome = await attemptMoves({
-    alertId, actorId, stop, date, absentTechId, window, excludeServiceIds, candidates: ranked.slice(0, MAX_MOVE_ATTEMPTS),
+    alertId, actorId, stop, date, absentTechId, window, excludeServiceIds, qualityDates,
+    candidates: ranked.slice(0, MAX_MOVE_ATTEMPTS),
   });
   if (outcome.moved || outcome.skipped) return outcome;
   const { reason } = outcome;
@@ -630,19 +643,24 @@ async function autoAssignTechDay({ technicianId, date, actorId } = {}) {
 
   const moved = [];
   const left_parked = [];
-  for (const { id } of alerts) {
-    let result;
-    try {
-      result = await autoAssignParkedAlert({ alertId: id, actorId });
-    } catch (err) {
-      logger.error(`[tech-out-auto-move] alert ${id} threw during batch auto-assign: ${err.message}`);
-      left_parked.push({ alert_id: id, reason: `error: ${err.message}` });
-      continue;
+  // One schedule-quality refresh for the whole run, after every move.
+  const qualityDates = new Set();
+  try {
+    for (const { id } of alerts) {
+      let result;
+      try {
+        result = await autoAssignParkedAlert({ alertId: id, actorId, qualityDates });
+      } catch (err) {
+        logger.error(`[tech-out-auto-move] alert ${id} threw during batch auto-assign: ${err.message}`);
+        left_parked.push({ alert_id: id, reason: `error: ${err.message}` });
+        continue;
+      }
+      if (result.moved) moved.push(result);
+      else if (!result.skipped) left_parked.push({ alert_id: id, reason: result.reason });
     }
-    if (result.moved) moved.push(result);
-    else if (!result.skipped) left_parked.push({ alert_id: id, reason: result.reason });
+  } finally {
+    await flushDispatchQualityDates(qualityDates);
   }
-
   return { moved, left_parked };
 }
 

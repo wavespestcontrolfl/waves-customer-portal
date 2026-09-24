@@ -12,7 +12,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn(), previewMoveConflicts: jest.fn() }));
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn(), emitAlert: jest.fn() }));
-jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn().mockResolvedValue(null) }));
+jest.mock('../services/dispatch-assignment', () => ({
+  emitDispatchJobUpdate: jest.fn().mockResolvedValue(null),
+  flushDispatchQualityDates: jest.fn().mockResolvedValue(null),
+}));
 jest.mock('../services/technician-capabilities', () => ({
   assertCapabilitiesActive: jest.fn().mockResolvedValue(undefined),
   inactiveCapabilitiesForServices: jest.fn().mockResolvedValue([]),
@@ -36,7 +39,7 @@ jest.mock('../services/estimate-slot-availability', () => ({ invalidateAllEstima
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { resolveAlert, emitAlert } = require('../services/dispatch-alerts');
-const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../services/technician-eligibility');
 const { inactiveCapabilitiesForServices } = require('../services/technician-capabilities');
 const { ALERT_TYPE } = require('../services/tech-out');
@@ -296,7 +299,9 @@ describe('autoAssignParkedAlert', () => {
     // never in a second transaction after the move commits.
     expect(resolveAlert).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
-    expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: JOB_ID, actorId: 'staff-1' });
+    expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: JOB_ID, actorId: 'staff-1', qualityDates: expect.any(Set) });
+    // A lone call owns its flush: one refresh after the move, not two.
+    expect(flushDispatchQualityDates).toHaveBeenCalledTimes(1);
   });
 
   test('the mover refuses every attempt: alert stays open, annotated, no resolve', async () => {
@@ -544,5 +549,12 @@ describe('autoAssignTechDay', () => {
     expect(res.moved[0]).toMatchObject({ alert_id: 'alert-a', job_id: 'job-a' });
     expect(res.left_parked).toHaveLength(1);
     expect(res.left_parked[0]).toMatchObject({ alert_id: 'alert-b', reason: 'no_eligible_candidate' });
+
+    // One schedule-quality Set shared by every move, flushed ONCE after the run.
+    const passed = SmartRebooker.reschedule.mock.calls[0][5].qualityDates;
+    expect(passed).toBeInstanceOf(Set);
+    expect(emitDispatchJobUpdate).toHaveBeenCalledWith(expect.objectContaining({ qualityDates: passed }));
+    expect(flushDispatchQualityDates).toHaveBeenCalledTimes(1);
+    expect(flushDispatchQualityDates).toHaveBeenCalledWith(passed);
   });
 });
