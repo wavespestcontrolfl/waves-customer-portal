@@ -1036,6 +1036,20 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     const outOfState = await trustValidatedNewLeadAddress(lead({ state: 'GA' }), { validate: ga });
     expect(ga).not.toHaveBeenCalled();
     expect(outOfState).toMatchObject({ addressTrusted: false, onFileAddressVerdict: { status: 'stored_state_outside_service_area', inServiceArea: false } });
+    // "Florida" spelled out is Florida (r3 P2); an unrecognisable state fails closed.
+    const spelled = jest.fn(async () => ({ status: 'validated_accept', inServiceArea: true }));
+    expect((await trustValidatedNewLeadAddress(lead({ state: 'Florida' }), { validate: spelled })).addressTrusted).toBe(true);
+    expect(spelled).toHaveBeenCalledWith({ addressLines: ['1234 Sample Palm Dr', 'Unit 2', 'Venice, FL 34292'], administrativeArea: 'FL' });
+    const junk = jest.fn();
+    expect((await trustValidatedNewLeadAddress(lead({ state: 'ZZ' }), { validate: junk })).onFileAddressVerdict.status).toBe('stored_state_outside_service_area');
+    expect(junk).not.toHaveBeenCalled();
+    // A confirmed booking with fail-open booking OFF keeps its flags for review whatever the verdict: no lookup (r3 P2).
+    const confirmedOff = jest.fn();
+    const confirmed = { scheduling: { status: 'confirmed', confirmed_start_at: '2026-10-01T13:00:00-04:00' }, property: { service_address: {} } };
+    expect((await trustValidatedNewLeadAddress(lead(), { validate: confirmedOff, extraction: confirmed, failOpen: false })).addressTrusted).toBe(false);
+    expect(confirmedOff).not.toHaveBeenCalled();
+    const confirmedOn = jest.fn(async () => ({ status: 'validated_accept', inServiceArea: true }));
+    expect((await trustValidatedNewLeadAddress(lead(), { validate: confirmedOn, extraction: confirmed, failOpen: true })).addressTrusted).toBe(true);
     // A call that states its own address takes the normal validation path: no on-file lookup (r2 P2).
     const untouchedByNewAddress = jest.fn();
     const stated = await trustValidatedNewLeadAddress(lead(), { validate: untouchedByNewAddress, extraction: { property: { service_address: { street_line_1: '99 Other Rd', city: 'Sarasota', postal_code: '34231' } } } });

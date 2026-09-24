@@ -100,6 +100,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
+const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
@@ -1257,15 +1258,22 @@ function applyOnFileAddressVerdict(knownCaller, verdict) {
 // stored — a non-Florida state fails closed rather than being rewritten to
 // FL, or Google would accept a synthesized Florida address the proof
 // snapshot never carried (codex #4685 r2 P1).
-async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress, extraction = null } = {}) {
+async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress, extraction = null, failOpen = true } = {}) {
   if (!knownCaller || knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
   if (knownCaller.onFileAddressVerdict !== undefined) return knownCaller;   // already judged this pass
   const line1 = String(knownCaller.addressLine1 || '').trim();
   const zip = String(knownCaller.addressZip || '').trim();
   if (!line1 || !zip) return knownCaller;
   if (extraction && statesNewAddress(extraction, knownCaller)) return knownCaller;
-  const storedState = String(knownCaller.addressState || '').trim().toUpperCase();
-  if (storedState && storedState !== SERVICE_STATE) {
+  // A CONFIRMED booking keeps its address flags for review unless fail-open
+  // booking is on (see canAutoRouteDecision); with that gate off the
+  // verdict could not change anything, so the lookup is skipped (r3 P2).
+  if (extraction?.scheduling?.status === 'confirmed' && !failOpen) return knownCaller;
+  // The stored state as the shared normalizer reads it ("Florida" -> FL); an
+  // unrecognisable or non-Florida value fails closed (r2 P1, r3 P2).
+  const rawState = String(knownCaller.addressState || '').trim();
+  const storedState = rawState ? normalizeState(rawState) : '';
+  if (rawState && storedState !== SERVICE_STATE) {
     return applyOnFileAddressVerdict(knownCaller, { status: 'stored_state_outside_service_area', inServiceArea: false });
   }
   const lines = [line1];
@@ -8705,7 +8713,7 @@ const CallRecordingProcessor = {
           const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
           // A new lead's on-file address is validated HERE, once, and only
           // when this call does not state its own (codex #4685 r2 P2).
-          knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2Extraction });
+          knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2Extraction, failOpen: failOpenBooking });
           const knownCustomerForFailOpen = failOpenKnownCustomer(knownCaller);
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
@@ -16443,7 +16451,7 @@ const CallRecordingProcessor = {
           canonicalRecord: extracted,
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit });
+        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call) });
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
