@@ -163,6 +163,33 @@ describe('v2-vs-v1 precedence (2026-09-24 call-agent audit)', () => {
     expect(disposition).toBe('cancellation_processed');
   });
 
+  test('a v1 wrong_number guess yields to a valid v2 recommendation (shadow/rollback config)', () => {
+    const { disposition, reason } = decideDisposition({
+      extraction: { call_nature: 'new_lead', recommended_disposition: 'estimate_send' },
+      legacy: { call_type: 'wrong_number' },
+      outcome: {},
+    });
+    expect(disposition).toBe('estimate_send');
+    expect(reason).toBe('v2_model_recommended');
+  });
+
+  test('a v1 wrong_number guess stands when v2 offers no usable recommendation; v2 wrong_number is decisive', () => {
+    expect(decideDisposition({ extraction: null, legacy: { call_type: 'wrong_number' }, outcome: {} }).disposition).toBe('wrong_number_closed');
+    expect(decideDisposition({
+      extraction: { call_nature: 'wrong_number', recommended_disposition: 'estimate_send' },
+      legacy: {},
+      outcome: {},
+    }).disposition).toBe('wrong_number_closed');
+  });
+
+  test('a reschedule request recommended as callback_task_created routes as existing-customer scheduling', () => {
+    const { disposition } = decideDisposition({
+      extraction: { scheduling: { status: 'reschedule_requested' }, recommended_disposition: 'callback_task_created' },
+      outcome: { customerId: 'c-3' },
+    });
+    expect(disposition).toBe('existing_customer_routed');
+  });
+
   test('a known customer\'s complaint escalates even when v2 recommends a generic disposition', () => {
     const { disposition, reason } = decideDisposition({
       extraction: {

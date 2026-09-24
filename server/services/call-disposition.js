@@ -112,6 +112,12 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
   // otherwise reach cancellation_processed (the recommended-model path and
   // the deterministic triage_flags fallback, live and voicemail).
   const isRescheduleIntent = schedulingStatus === 'reschedule_requested';
+  // The usable model recommendation: v2 validated (callers pass null
+  // otherwise) and the value is in the enum. `booked` and `spam_discarded`
+  // may only be reached via the hard facts in step 1, never via the model's
+  // own opinion of itself.
+  const modelRecommended = recommended && TERMINAL_DISPOSITIONS.includes(recommended)
+    && !['spam_discarded', 'booked'].includes(recommended) ? recommended : null;
 
   // 1a. Reality first: if an appointment was actually created, the call is booked.
   if (outcome.appointmentCreated) return done('booked', 'appointment_created');
@@ -123,7 +129,13 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
   //     be swallowed by a quote/complaint keyword match on the rest of a
   //     short, off-topic call (the 2026-09-23 audit's vendor-call miss was
   //     one keystroke away from this same trap).
-  if (nature === 'wrong_number' || v1.call_type === 'wrong_number') {
+  //     v2's own call_nature is decisive. The v1 call_type is a legacy
+  //     guess: in V2 shadow/rollback configurations a valid v2 extraction
+  //     still arrives beside an unmodified v1, so a v1 wrong_number only
+  //     stands when no usable v2 recommendation contradicts it (r2 P1 —
+  //     wrong_number_closed is final for call-intelligence and excluded by
+  //     the promised-estimate watcher, so a real lead would vanish).
+  if (nature === 'wrong_number' || (v1.call_type === 'wrong_number' && !modelRecommended)) {
     return done('wrong_number_closed', 'wrong_number');
   }
 
@@ -153,12 +165,15 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
   //    excluded here because they may only be reached via the hard facts in
   //    step 1 (an actually-created appointment / an actual classifier
   //    verdict), never via the model's own opinion of itself.
-  if (recommended && TERMINAL_DISPOSITIONS.includes(recommended)
-      && !['spam_discarded', 'booked'].includes(recommended)) {
-    if (recommended === 'cancellation_processed' && isRescheduleIntent) {
+  if (modelRecommended) {
+    // A reschedule is existing-customer scheduling: neither a cancellation
+    // nor a callback obligation (applyCallRescheduleStep may apply the move
+    // and nothing revises the disposition afterwards, so a
+    // callback_task_created row would be paged as unworked — r2 P2).
+    if (isRescheduleIntent && ['cancellation_processed', 'callback_task_created'].includes(modelRecommended)) {
       return done('existing_customer_routed', 'reschedule_not_cancellation_model');
     }
-    return done(recommended, 'v2_model_recommended');
+    return done(modelRecommended, 'v2_model_recommended');
   }
 
   // 4. Cancellation / reschedule intent. Same reschedule guard as step 2: a
