@@ -17,7 +17,7 @@
  *                       servicesPerformed, city }         // source: account
  *     provenance: { <fact>: 'review' | 'account' }
  *     allow: { names: [...], cities: [...], digits: [...],
- *              serviceWords: [...] }                     // verifier allowlist
+ *              servicePhrases: [...] }                   // verifier allowlist
  *   }
  */
 
@@ -25,6 +25,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
+const { normalizeServiceType } = require('../../utils/service-normalizer');
 
 const GROUNDING_VERSION = 'grounding-v1';
 
@@ -164,26 +165,45 @@ function titleCase(s) {
 
 // One completed service_type → a public-safe display name, or null when it
 // carries no safe public name (too short, or names a product/brand).
+//
+// Runs the raw label through the repo's canonical normalizer FIRST
+// (server/utils/service-normalizer.js) rather than a hand-rolled strip: that
+// is the one place price/duration suffixes ("Pest Control Service - 1 hour -
+// $117"), legacy free-text labels, and real catalog identities are already
+// reconciled, and it is what every other display surface uses — a local
+// re-implementation here would silently diverge and re-leak raw labels
+// (2026-09-25 P1 fix). Only after that do we drop the "no service matched"
+// fallback value and anything still naming a product/brand, then apply the
+// same trailing-suffix / parenthetical cleanup as before.
 function normalizeServiceName(serviceType) {
-  let s = String(serviceType || '').trim();
-  if (!s) return null;
+  const raw = String(serviceType || '').trim();
+  if (!raw) return null;
+  const normalized = normalizeServiceType(raw);
+  if (!normalized || normalized === 'General Service') return null;
+  if (SERVICE_PRODUCT_WORD_RE.test(normalized)) return null;
   // Strip a trailing generic suffix ("… Service", "… Visit", "… Appointment
   // Service") before a trailing parenthesised qualifier ("(Quarterly)").
-  s = s.replace(/\s+(?:Appointment\s+Service|Visit|Service)$/i, '').trim();
+  let s = normalized.replace(/\s+(?:Appointment\s+Service|Visit|Service)$/i, '').trim();
   s = s.replace(/\s*\([^)]*\)\s*$/, '').trim();
   s = s.replace(/\s+/g, ' ').trim();
   if (!s) return null;
   s = titleCase(s);
   if (s.length < 4) return null;
-  if (SERVICE_PRODUCT_WORD_RE.test(s)) return null;
   return s;
 }
 
 // Most-recent-first, deduped case-insensitively, capped at 4 — a short,
-// public-safe list of WHAT we have done, never when or how many times.
+// public-safe list of WHAT we have done, never when or how many times. A
+// normalized-name tiebreak (localeCompare) after the date-desc key keeps the
+// cap-at-4 selection deterministic when two rows share a scheduled_date,
+// regardless of the order the DB happens to return them in.
 function servicesPerformedFrom(visits) {
   const dateKey = (v) => String(v.scheduled_date == null ? '' : (v.scheduled_date instanceof Date ? v.scheduled_date.toISOString() : v.scheduled_date)).slice(0, 10);
-  const sorted = [...visits].sort((a, b) => dateKey(b).localeCompare(dateKey(a)));
+  const nameKey = (v) => normalizeServiceName(v.service_type) || '';
+  const sorted = [...visits].sort((a, b) => {
+    const byDate = dateKey(b).localeCompare(dateKey(a));
+    return byDate !== 0 ? byDate : nameKey(a).localeCompare(nameKey(b));
+  });
   const seen = new Set();
   const out = [];
   for (const v of sorted) {
@@ -348,10 +368,14 @@ async function buildReplyGrounding(review, { conn = db, techFirstNames = null } 
       cities: [...new Set([...locationWords, ...(account?.city ? [account.city] : [])])],
       // Digit strings the reply may contain: only what the reviewer typed.
       digits: (text.match(/\d+/g) || []),
-      // Lowercased, normalized words of the account's servicesPerformed
-      // names — sourced vocabulary for the verifier's service/experience
-      // claim checks (e.g. "cockroach" from "Cockroach Treatment").
-      serviceWords: [...new Set((account?.servicesPerformed || []).flatMap((s) => normalizeWords(s)))],
+      // Lowercased, normalized WHOLE-PHRASE names of the account's
+      // servicesPerformed ("cockroach treatment", "quarterly pest control")
+      // — sourced vocabulary for the verifier's service/experience claim
+      // checks, but only as a complete phrase (2026-09-25 P1 fix): the
+      // account having "Cockroach Treatment" does not license composing
+      // "treatment" with an unrelated pest the reviewer named ("ant
+      // treatment" must still need its own provenance).
+      servicePhrases: [...new Set((account?.servicesPerformed || []).map((s) => normalizeWords(s).join(' ')).filter(Boolean))],
     },
   };
 }

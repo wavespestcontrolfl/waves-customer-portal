@@ -123,9 +123,11 @@ describe('buildReplyGrounding', () => {
     expect(g.allow.forbiddenNames).toEqual(['Bob']);
     expect(g.allow.cities).toEqual(expect.arrayContaining(['Sarasota', 'Venice', 'Florida']));
     expect(g.allow.digits).toEqual(['2']);
-    // Normalized, lowercased words of servicesPerformed — the verifier's
-    // service/experience-claim allowlist.
-    expect(g.allow.serviceWords).toEqual(expect.arrayContaining(['lawn', 'care', 'pest', 'control']));
+    // Normalized, lowercased WHOLE-PHRASE names of servicesPerformed — the
+    // verifier's service/experience-claim allowlist (2026-09-25: phrases,
+    // not bare words, so an account service cannot lend an unrelated pest
+    // word its provenance).
+    expect(g.allow.servicePhrases).toEqual(['lawn care', 'pest control']);
     // Nothing private is present anywhere in the pack.
     const json = JSON.stringify(g);
     for (const k of ['transcript', 'sms', 'call_summary', 'feedback', 'notes', 'phone', 'address', 'invoice']) {
@@ -203,7 +205,7 @@ describe('buildReplyGrounding', () => {
   });
 });
 
-describe('servicesPerformedFrom — public-safe service names (2026-09-24 fix)', () => {
+describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fixes)', () => {
   test('strips generic suffixes and parenthetical qualifiers, drops product/brand names, dedupes case-insensitively, most-recent first, capped at 4', () => {
     const visits = [
       { service_type: 'Cockroach Treatment', scheduled_date: '2026-08-01' },
@@ -215,13 +217,30 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24 fix)',
       { service_type: 'General Pest Control (Quarterly)', scheduled_date: '2026-02-01' },
       { service_type: 'cockroach treatment', scheduled_date: '2026-01-01' },
     ];
-    // Cap at 4 stops before WDO Inspection / the product row / the parenthetical
-    // row are ever reached — they are not merely filtered, they are not needed.
-    expect(G.servicesPerformedFrom(visits)).toEqual(['Cockroach Treatment', 'Quarterly Pest Control', 'Monthly Pest Control', 'Rodent Trapping']);
+    // Cap at 4 stops before WDO Inspection is ever reached. "Quarterly Pest
+    // Control Service" and "Monthly Pest Control" both collapse to the
+    // canonical normalizer's family label "Pest Control" (2026-09-25: routed
+    // through the repo's shared normalizeServiceType, which trades cadence
+    // detail for never leaking a raw/legacy label) and so dedupe together —
+    // "Monthly Pest Control" never gets its own slot.
+    expect(G.servicesPerformedFrom(visits)).toEqual(['Cockroach Treatment', 'Pest Control', 'Rodent Trapping', 'WDO Inspection']);
   });
-  test('a product/brand name alone, or with only short/blank entries, yields nothing', () => {
+  test('a legacy label with price/duration never leaks a digit or a dollar sign (2026-09-25 P1 fix)', () => {
+    const visits = [{ service_type: 'Pest Control Service - 1 hour - $117', scheduled_date: '2026-01-01' }];
+    const out = G.servicesPerformedFrom(visits);
+    expect(out).toEqual(['Pest Control']);
+    for (const name of out) {
+      expect(name).not.toMatch(/\d/);
+      expect(name).not.toContain('$');
+      expect(name.toLowerCase()).not.toContain('hour');
+    }
+  });
+  test('a product/brand name the canonical normalizer cannot rescue, or only short/blank entries, yields nothing', () => {
     const visits = [
-      { service_type: 'Pre-Slab Termidor', scheduled_date: '2026-01-01' },
+      // Unlike "Pre-Slab Termidor" (below), nothing in service-normalizer's
+      // SERVICE_TYPE_MAP recognizes "Taurus" — it falls through unmapped and
+      // the product-word backstop drops it.
+      { service_type: 'Taurus SC Treatment', scheduled_date: '2026-01-01' },
       { service_type: 'Talstar Application', scheduled_date: '2026-01-02' },
       { service_type: 'AC', scheduled_date: '2026-01-03' },
       { service_type: '', scheduled_date: '2026-01-04' },
@@ -229,13 +248,33 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24 fix)',
     ];
     expect(G.servicesPerformedFrom(visits)).toEqual([]);
   });
-  test('normalizeServiceName: suffix strip, parenthetical strip, product drop', () => {
-    expect(G.normalizeServiceName('Quarterly Pest Control Service')).toBe('Quarterly Pest Control');
+  test('two rows scheduled the same date sort deterministically by normalized name, regardless of input order', () => {
+    const a = { service_type: 'Rodent Trapping Service', scheduled_date: '2026-01-01' };
+    const b = { service_type: 'WDO Inspection Service', scheduled_date: '2026-01-01' };
+    expect(G.servicesPerformedFrom([a, b])).toEqual(G.servicesPerformedFrom([b, a]));
+    expect(G.servicesPerformedFrom([a, b])).toEqual(['Rodent Trapping', 'WDO Inspection']);
+  });
+  test('normalizeServiceName: canonical normalizer first, then suffix/parenthetical strip and the product backstop', () => {
+    // The canonical normalizer's family-label mapping wins over the local
+    // cadence-preserving strip that used to run alone (2026-09-25 P1 fix):
+    // "Quarterly Pest Control Service" collapses through its own
+    // "pest control.*service" mapping to "Pest Control Service", then the
+    // trailing " Service" is stripped as before.
+    expect(G.normalizeServiceName('Quarterly Pest Control Service')).toBe('Pest Control');
     expect(G.normalizeServiceName('Rodent Trapping Service')).toBe('Rodent Trapping');
     expect(G.normalizeServiceName('WDO Inspection Service')).toBe('WDO Inspection');
-    expect(G.normalizeServiceName('General Pest Control (Quarterly)')).toBe('General Pest Control');
+    // "pest control … quarterly" (in that order) is its own, earlier
+    // SERVICE_TYPE_MAP entry, so this one keeps its cadence.
+    expect(G.normalizeServiceName('General Pest Control (Quarterly)')).toBe('Quarterly Pest Control');
     expect(G.normalizeServiceName('Cockroach Treatment')).toBe('Cockroach Treatment');
-    expect(G.normalizeServiceName('Pre-Slab Termidor')).toBeNull();
+    expect(G.normalizeServiceName('Pest Control Service - 1 hour - $117')).toBe('Pest Control');
+    // "Pre-Slab Termidor" now genericizes through the canonical normalizer's
+    // own termidor→"Termite Treatment" mapping rather than being dropped —
+    // the brand name itself never survives either way.
+    expect(G.normalizeServiceName('Pre-Slab Termidor')).toBe('Termite Treatment');
+    // A brand word the normalizer does not recognize at all is still dropped
+    // by the product-word backstop.
+    expect(G.normalizeServiceName('Taurus SC Treatment')).toBeNull();
     expect(G.normalizeServiceName('')).toBeNull();
   });
 });

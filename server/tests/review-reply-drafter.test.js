@@ -470,12 +470,14 @@ describe('verifyReplyText — public-surface safety net', () => {
       'Treatment is glad Marcus handled the ants.',
       'Communication matters, and we are glad Marcus could help.',
     ]) expect(verify(good(`Hi Dana,\n\n${body}`))).toBe('unlisted_name');
-    // 2026-09-24 fix: "Moles" is no longer a name-only rejection — the wider
-    // sentence-initial pass condition (item 5) lets the WORD "Moles" itself
-    // through (not a common first name, not known, followed by ordinary
-    // syntax), but the reply is still rejected: "moles" is also an unsourced
-    // wildlife/pest claim (SERVICE_CLAIM_RE), so nothing false actually posts.
-    expect(verify(good('Hi Dana,\n\nMoles are no match for Marcus.'))).toBe('unlisted_service_claim');
+    // 2026-09-25 fix: the sentence-initial pass condition is now restricted
+    // to gerund/participle/adverb morphology (ends in ing/ed/ly) — "Moles"
+    // does not, so it is back to a plain unlisted_name rejection (pre-push
+    // P1: the earlier, unrestricted version of this pass also let
+    // "Sentricon"/"Jenkins around your property…" through).
+    expect(verify(good('Hi Dana,\n\nMoles are no match for Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nSentricon around your property can help with ants.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nJenkins around your property can help with ants.'))).toBe('unlisted_name');
     // Openers are sentence-start only — never a lowercase name slot (codex r1).
     expect(verify(good('Hi Dana, we will pass this along to roaches, who handled the kitchen with Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hello there, we are glad our technician roaches could help with your ants.'), grounding({ firstName: null, mentionedTechNames: [] }))).toBe('unlisted_name');
@@ -668,13 +670,15 @@ describe('2026-09-24 fix: sentence-initial gerunds pass, servicesPerformed words
     const text = overText ?? 'We had a cockroach problem in our kitchen from the previous owners. Adam was able to quickly find their nest and explain how he was going to take care of them.';
     const g = grounding({ firstName: 'Tyler', text, mentionedTechNames: ['Adam'], topics: ['technician', 'pest'], forbiddenNames: ['Bob'] });
     g.allow.names = ['Tyler', 'Adam'];
-    g.allow.serviceWords = ['cockroach', 'treatment'];
+    // Whole-phrase provenance (2026-09-25 P1 fix): the account's own public
+    // name for the completed service, not the bare component words.
+    g.allow.servicePhrases = ['cockroach treatment'];
     return g;
   }
   test('"Working around your schedule…" and sentence-initial "Inheriting…" pass', () => {
     const g = tylerGrounding();
     expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
-    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad the treatment handled it and the visit went well.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad the cockroach treatment handled it and the visit went well.'), g)).toBeNull();
   });
   test('a common first name (Kevin) sentence-initial still rejects', () => {
     const g = tylerGrounding();
@@ -689,7 +693,16 @@ describe('2026-09-24 fix: sentence-initial gerunds pass, servicesPerformed words
   });
   test('an on-time claim the reviewer did not make is still rejected', () => {
     const g = tylerGrounding('Adam fixed our cockroach problem quickly.');
-    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nGlad Adam was on time with the treatment.'), g)).toBe('unlisted_experience_claim');
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nGlad Adam was on time.'), g)).toBe('unlisted_experience_claim');
+  });
+  test('service words are sourced only as a WHOLE PHRASE, never freely composed (2026-09-25 P1 fix)', () => {
+    // Review mentions "ants"; the account only has "Cockroach Treatment".
+    // "ant" + "treatment" must not compose into a sourced "ant treatment".
+    const g = grounding({ text: 'We had ants in the kitchen.', mentionedTechNames: [], topics: [] });
+    g.allow.servicePhrases = ['cockroach treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for the note about the ant treatment.'), g)).toBe('unlisted_service_claim');
+    // The full phrase, used as written, passes.
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the cockroach treatment did its job.'), g)).toBeNull();
   });
 });
 
@@ -713,9 +726,36 @@ describe('2026-09-24 P1 fix: worked/handled negation restored, compliment adject
   test('sentence-initial gerunds from the earlier fix still pass (regression guard)', () => {
     const g = grounding({ firstName: 'Tyler', text: 'We had a cockroach problem in our kitchen from the previous owners. Adam was able to quickly find their nest and explain how he was going to take care of them.', mentionedTechNames: ['Adam'], topics: ['technician', 'pest'], forbiddenNames: ['Bob'] });
     g.allow.names = ['Tyler', 'Adam'];
-    g.allow.serviceWords = ['cockroach', 'treatment'];
+    g.allow.servicePhrases = ['cockroach treatment'];
     expect(Drafter.verifyReplyText(good("Hi Tyler,\n\nGood to hear Adam found the source and explained the plan. Working around your schedule is part of the job, and we'll pass your note along."), g)).toBeNull();
-    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad the treatment handled it and the visit went well.'), g)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Tyler,\n\nInheriting a cockroach problem is no fun. Glad the cockroach treatment handled it and the visit went well.'), g)).toBeNull();
+  });
+});
+
+describe('2026-09-25 pre-push round: legacy labels / greedy exemption / composable service words / greeting strip / invented interactions', () => {
+  test('worked/handled still need review provenance: generic praise does not license them (confirms head a3af06c106)', () => {
+    const g = grounding({ text: 'Marcus was very nice and professional.', mentionedTechNames: ['Marcus'], topics: ['technician'] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad everything worked and the issue was handled.'), g)).toBe('unlisted_service_claim');
+  });
+  test('the greeting strip only removes a recognized greeting word, not the body\'s first comma (2026-09-25 P2 fix)', () => {
+    // A manual prior reply with no greeting word at all: its real opening
+    // must survive untouched for the comparison, not get truncated at its
+    // first (mid-sentence) comma as if that were a greeting boundary.
+    const manual = 'Thanks for choosing us for pest control, we always try to help fast.';
+    const draft = good('Hi Dana,\n\nThanks for choosing us for pest control, glad the ants are finally gone from your kitchen.');
+    expect(Drafter.verifyReplyText(draft, grounding(), { recentReplies: [manual] })).toBe('repetitive_opening');
+  });
+  test('a no-text, no-account review invents no interaction: "visit went smoothly" is rejected', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(Drafter.verifyReplyText(good('Hello there,\n\nGlad the visit went smoothly.'), g)).toBe('unlisted_experience_claim');
+  });
+  test('the same no-text body passes once account facts exist (something DOES prove a relationship)', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hello there,\n\nGlad the visit went smoothly.'), g)).toBeNull();
+  });
+  test('a text review still licenses ordinary visit language even with no account facts', () => {
+    const g = grounding({ text: 'Adam explained everything.', mentionedTechNames: ['Adam'], topics: ['technician'], account: null });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the visit went well.'), g)).toBeNull();
   });
 });
 

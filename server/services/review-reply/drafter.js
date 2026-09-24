@@ -331,6 +331,13 @@ const CREDENTIAL_CLAIM_RE = /\b(?:certified|licen[cs]ed|insured|bonded|backgroun
 // Visit-experience claims (timeliness, speed, communication) — only the
 // reviewer can vouch for these.
 const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|kept (?:you|them) (?:informed|updated|posted)|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
+// A narrow companion to EXPERIENCE_CLAIM_RE — NOT restored there globally
+// (codex pre-push P1 2026-09-25: "helpful"/"thorough" etc. stay checked
+// against the review, but "visit"/"explain"/"walked … through"/"answered"/
+// "communicat*" describe an INTERACTION happening at all, not a quality of
+// it). Checked only for a no-text, no-account review below, where nothing —
+// not the review, not an account fact — proves any interaction took place.
+const INTERACTION_TERM_RE = /\b(?:visit(?:ed|s|ing)?|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*)\b/gi;
 // A duration with a number is a specific fact; tenure buckets prove only a
 // floor. "10 years" needs the whole phrase in the review.
 const QUANTIFIED_TENURE_RE = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|many|several|couple of|few|multiple|decades?)\s+(?:\+\s*)?(?:years?|months?|seasons?|decades?)\b/gi;
@@ -453,6 +460,14 @@ function rootSupported(reviewLower, reviewWords, stem, term, windows) {
 // "Hi Dana," / "Hello there," → the greeted first name (null for "there").
 // (?!…) instead of \b: JS word boundaries are ASCII-only and would split "José".
 const GREETING_RE = /^\s*(?:hi|hello|hey|dear)\s+(\p{L}[\p{L}'-]{1,20})(?![\p{L}'-])/iu;
+// Same greeting-word list as GREETING_RE, but strips the WHOLE recognized
+// greeting clause (through its trailing comma and following whitespace) —
+// used only where the greeting needs to be dropped from a body before
+// comparing what follows it. Anchored and word-list-gated on purpose
+// (2026-09-25 P2 fix): the body's first comma alone is not a greeting
+// boundary — a manual reply opening "Thanks for choosing us for pest
+// control, we…" has no greeting word at all and must keep its full text.
+const GREETING_PREFIX_RE = /^(?:hi|hello|hey|dear)\b[^\n,]*,\s*/i;
 function greetingName(text) {
   const m = String(text || '').match(GREETING_RE);
   if (!m) return null;
@@ -595,10 +610,24 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   // brand word. A hallucinated "Kevin" (or a former tech, a date, a product)
   // has no provenance and is rejected. Served cities are judged above.
   const reviewWords = new Set(normalizeWords(grounding.review.text));
-  // Words from the account's public-safe servicesPerformed names ("cockroach",
-  // "treatment" from "Cockroach Treatment") — sourced vocabulary for the
-  // proper-noun, service-claim, and experience-claim provenance checks below.
-  const serviceWords = new Set((grounding.allow?.serviceWords || []).map((w) => String(w).toLowerCase()));
+  // WHOLE-PHRASE spans in the body where one of the account's
+  // servicesPerformed names appears verbatim (case-insensitive, a trailing
+  // "s" allowed on the last word) — 2026-09-25 P1 fix: a claim term or
+  // capitalized word is sourced by the account ONLY when it falls inside one
+  // of these spans, never by a bare word alone. Without this, a review word
+  // ("ant") and an unrelated account-phrase word ("treatment" from
+  // "Cockroach Treatment") could compose into "ant treatment" — a claim
+  // neither the review nor the account actually supports.
+  const servicePhraseSpans = [];
+  for (const phrase of grounding.allow?.servicePhrases || []) {
+    const words = String(phrase).trim().split(/\s+/).filter(Boolean);
+    if (!words.length) continue;
+    const parts = words.map((w, i) => escapeRe(w) + (i === words.length - 1 ? 's?' : ''));
+    const phraseRe = new RegExp(`\\b${parts.join('\\s+')}\\b`, 'gi');
+    let pm;
+    while ((pm = phraseRe.exec(body)) !== null) servicePhraseSpans.push([pm.index, pm.index + pm[0].length]);
+  }
+  const inServicePhraseSpan = (idx) => servicePhraseSpans.some(([a, b]) => idx >= a && idx < b);
   // Only THIS location's area words (and the account city) are sourced;
   // fragments of unrelated served cities are not ("Charlotte" from "Port
   // Charlotte" must not launder a name).
@@ -660,7 +689,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     const sentenceInitial = /(?:^|[.!?]|\n)\s*$/.test(before);
     // "Adam's" is the allowed name in the possessive.
     const w = pn[2].toLowerCase().replace(/'s?$/, '');
-    if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w) || serviceWords.has(w)) continue;
+    if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w) || inServicePhraseSpan(pn.index + pn[1].length)) continue;
     // A sentence-initial inflection of the reviewer's own word ("Ants are"
     // for "ant problems") is sourced when an ordinary-word follower proves
     // the syntax — "Fields did a great job" is a surname even if the review
@@ -674,14 +703,17 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
     if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
-    // 2026-09-24 fix: a sentence-initial word that is not a common first name
-    // and not a known (forbidden tech / recent-greeting) name, followed by
-    // ordinary syntax, is not a hallucinated staff name — "Working around
-    // your schedule…", "Inheriting a cockroach problem…". This is a wider
-    // pass than the inflection check above (no requirement that the word
-    // stem from the review), so an unenumerated ordinary gerund or plural
-    // does not cost the drafter a retry just for opening a sentence.
-    if (sentenceInitial && !COMMON_FIRST_NAMES.has(w) && !knownNames.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
+    // 2026-09-24/25 fix: a sentence-initial GERUND/PARTICIPLE/ADVERB (ends in
+    // "ing"/"ed"/"ly", 5+ letters — a morphology no surname or invented
+    // product name takes) that is not a common first name and not a known
+    // (forbidden tech / recent-greeting) name, followed by ordinary syntax,
+    // is not a hallucinated staff name — "Working around your schedule…",
+    // "Inheriting a cockroach problem…". Narrower than a bare "any word"
+    // pass (pre-push P1: "Sentricon around your property…" / "Jenkins
+    // around your property…" — neither ends in ing/ed/ly — must still
+    // reject): this is a wider pass than the inflection check above only in
+    // that it needs no stem match to a review word.
+    if (sentenceInitial && w.length >= 5 && /(?:ing|ed|ly)$/.test(w) && !COMMON_FIRST_NAMES.has(w) && !knownNames.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
     return reject('unlisted_name', pn[2]);
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
@@ -707,9 +739,11 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   // Provenance for service / treatment claims: the reviewer's own words, or
   // one of the account's public-safe service categories ("lawn care" →
   // lawn, care). Generic identity words (pest, lawn, bugs, home) are fine.
-  // The account's servicesPerformed words ("cockroach", "treatment") are
-  // sourced the same way.
-  const categoryWords = new Set([...(grounding.account?.serviceCategories || []).flatMap((c) => normalizeWords(c)), ...serviceWords]);
+  // A servicesPerformed word alone is deliberately NOT merged in here
+  // (2026-09-25 P1 fix) — see servicePhraseSpans / inServicePhraseSpan
+  // above: a bare account word could otherwise compose with an unrelated
+  // review word into a claim neither one supports.
+  const categoryWords = new Set((grounding.account?.serviceCategories || []).flatMap((c) => normalizeWords(c)));
   const canonReview = canonPhrase(normalizeWords(grounding.review.text).join(' '));
   // Negation-aware provenance (codex r26): "they did not get rid of the
   // ants" must not license "glad we got rid of the ants". A phrase counts
@@ -741,7 +775,9 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     }
     return reviewResolved;
   };
-  for (const term of body.match(SERVICE_CLAIM_RE) || []) {
+  for (const claimMatch of body.matchAll(SERVICE_CLAIM_RE)) {
+    const term = claimMatch[0];
+    const termIdx = claimMatch.index;
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     if (RESOLUTION_PARAPHRASE_RE.test(t) && !bodyNegates(t)) {
       const support = reviewSupports(t, canonPhrase(t));
@@ -760,7 +796,7 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     if (support === 'negated' && outcome && !bodyNegates(t)) return reject('negated_review_claim', t);
     if (support === 'negated') continue;
     const stem = stemOf(t);
-    if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem)) continue;
+    if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
     // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
     // "infestation" ↔ "infested") — an un-negated occurrence of that root.
     const rooted = reviewWords.has(t) || reviewWords.has(stem)
@@ -805,7 +841,9 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     return reject('unlisted_credential_claim', t);
   }
   // Visit-experience claims: the reviewer's words only (root-matched).
-  for (const term of body.match(EXPERIENCE_CLAIM_RE) || []) {
+  for (const experienceMatch of body.matchAll(EXPERIENCE_CLAIM_RE)) {
+    const term = experienceMatch[0];
+    const termIdx = experienceMatch.index;
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     const stem = stemOf(t.replace(/[- ]/g, ' '));
     const flat = t.replace(/[- ]+/g, ' ');
@@ -819,9 +857,10 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     if (support === true) continue;
     if (support === 'negated' && !bodyNegates(flat)) return reject('negated_review_claim', t);
     if (support === 'negated') continue;
-    // The account's servicesPerformed / service-category words source an
-    // experience claim too (e.g. "treatment" from "Cockroach Treatment").
-    if (categoryWords.has(t) || categoryWords.has(flat) || categoryWords.has(stem)) continue;
+    // An account service-category word sources an experience claim too; a
+    // servicesPerformed name sources it only inside its own whole-phrase
+    // span (e.g. "treatment" from "Cockroach Treatment" — 2026-09-25 P1 fix).
+    if (categoryWords.has(t) || categoryWords.has(flat) || categoryWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
     if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) {
       const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
       if (rootSupport === true) continue;
@@ -829,6 +868,14 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
       continue;
     }
     return reject('unlisted_experience_claim', t);
+  }
+  // A no-text, no-account review has NOTHING — not the review, not an
+  // account fact — proving any interaction happened at all: "the visit went
+  // smoothly" / "we explained everything" / "we answered your questions"
+  // would invent one (2026-09-24/25 P1 fix).
+  if (!grounding.review.hasText && !grounding.account) {
+    const interactionMatch = body.match(INTERACTION_TERM_RE);
+    if (interactionMatch) return reject('unlisted_experience_claim', interactionMatch[0]);
   }
 
   // The mandated greeting, deterministically: "Hi <reviewer first name>,"
@@ -841,11 +888,11 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   // five-word comparison runs AFTER the greeting line: "Hi Tyler," / "Hi
   // Dana," ate two of the five slots and left too few content words to tell
   // two genuinely different replies apart (2026-09-24 fix).
-  const bodyAfterGreeting = body.replace(/^[^\n,]*,/, '').trim();
+  const bodyAfterGreeting = body.replace(GREETING_PREFIX_RE, '').trim();
   const opening = normalizeWords(bodyAfterGreeting).slice(0, 5).join(' ');
   for (const prior of recentReplies) {
     const priorBody = splitReply(prior, locationName).body;
-    const priorAfterGreeting = priorBody.replace(/^[^\n,]*,/, '').trim();
+    const priorAfterGreeting = priorBody.replace(GREETING_PREFIX_RE, '').trim();
     const pw = normalizeWords(priorBody);
     const priorOpening = normalizeWords(priorAfterGreeting).slice(0, 5).join(' ');
     if (priorOpening && priorOpening === opening) return reject('repetitive_opening', opening);
@@ -912,7 +959,7 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
     if (a.relationship) lines.push(`Relationship: ${a.relationship === 'recurring' ? 'recurring customer' : 'first visit'}`);
     if (a.tenure) lines.push(`Tenure: ${a.tenure.replace('_', ' ')}`);
     if (a.serviceCategories?.length) lines.push(`Service categories: ${a.serviceCategories.join(', ')}`);
-    if (a.servicesPerformed?.length) lines.push(`Services we have completed for them (public names; you may refer to the service by this name as context, never dates, visit counts, products or prices): ${a.servicesPerformed.join(', ')}`);
+    if (a.servicesPerformed?.length) lines.push(`Services we have completed for them (public names; you may refer to the service by this name as context, never dates, visit counts, products or prices — refer to a service by its full name exactly as listed): ${a.servicesPerformed.join(', ')}`);
     if (a.city) lines.push(`City: ${a.city}`);
   } else {
     lines.push('', 'ACCOUNT FACTS: none available. Use only the review.');
