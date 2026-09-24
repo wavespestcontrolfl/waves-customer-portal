@@ -154,6 +154,12 @@ describe('codex r44', () => {
   test('never-published expired siblings are outside both link-visible selectors', () => {
     const adm = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
     expect(adm.split("COALESCE(disposition, '') <> 'expired_unsent'").length - 1).toBeGreaterThanOrEqual(2);
+    const ext = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+    const claim = ext.slice(ext.indexOf('const deliveryClaimToken = '), ext.indexOf('let smsResult = '));
+    expect(claim).toContain("COALESCE(disposition, '') <> 'expired_unsent'");
+    const ppl = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
+    expect(ppl).toContain('const evidenceAt = auditEvidenceAt(result) || null;');
+    expect(ppl).not.toContain("const evidenceAt = result?.meta?.cache === 'hit' ? auditEvidenceAt(result) : null;");
   });
   test('one shared contact-pair verdict read and precedence decision', () => {
     const svc = require('../services/lead-address-unverified');

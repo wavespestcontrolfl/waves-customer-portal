@@ -593,7 +593,11 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
                 // audit's own time, never this request's: a revisit of an
                 // older spelling must not out-date a newer flag on an
                 // equivalent premise (codex #4667 r16 P1).
-                const evidenceAt = result?.meta?.cache === 'hit' ? auditEvidenceAt(result) : null;
+                // …and a LIVE clean audit keeps its own auditedAt too (pre-push
+                // audit P1 after r45): with overlapping lookups a clean audit
+                // obtained BEFORE a rejection could otherwise persist later
+                // with the write's timestamp and falsely supersede it.
+                const evidenceAt = auditEvidenceAt(result) || null;
                 if (verdict.status === 'clean' && evidenceAt) verdict.at = evidenceAt;
                 // An UNANSWERED lookup (a county outage) that reattached to a
                 // lead the reconciliation found clean for this premise must

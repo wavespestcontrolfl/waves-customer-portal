@@ -507,6 +507,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
             .whereNot({ id: estimate.id })
             .whereNull('archived_at')
             .whereIn('status', ['sent', 'viewed', 'expired'])
+            // …published ones only — the renderer's rule, as the admin send
+            // selector applies it (pre-push audit P1 after r45): a
+            // never-delivered expired_unsent sibling is not on the link.
+            .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")
             .orderBy('id')
             .forUpdate()
             .select('id', 'estimate_data');
