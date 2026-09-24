@@ -1098,7 +1098,7 @@ async function views(page, server, state, report, device) {
     ["Assets", null, "assets"],
     ["Maintenance", null, "maintenance"],
     ["Maintenance", "Calibrations", "calibrations"],
-    ["Tank Mixes", null, "tank-mixes"],
+    ["Mixes", null, "tank-mixes"],
     ["Costs", null, "job-costs"],
     ["Costs", "Analytics", "analytics"],
   ]) {
@@ -1341,7 +1341,7 @@ async function writes(page, server, state, report, device) {
   await dialog.waitFor({ state: "hidden" });
   await toast(page, "Equipment updated");
 
-  await section(page, "Tank Mixes", null, "tank-mixes");
+  await section(page, "Mixes", null, "tank-mixes");
   const recalculated = await retryWrite(
     page,
     state,

@@ -104,32 +104,32 @@ function postStatusTone(value) {
 const SOCIAL_TABS = [
   {
     key: "campaigns",
-    label: "Campaign Builder",
+    label: "Campaigns",
     Icon: Sparkles,
   },
   {
     key: "audit",
-    label: "Run Audit",
+    label: "Audit",
     Icon: Activity,
   },
   {
     key: "reviews",
-    label: "Review Graphics",
+    label: "Graphics",
     Icon: Star,
   },
   {
     key: "competitors",
-    label: "Competitor Swipe",
+    label: "Competitors",
     Icon: TrendingUp,
   },
   {
     key: "compose",
-    label: "Compose & Publish",
+    label: "Publish",
     Icon: PenSquare,
   },
   {
     key: "rss",
-    label: "RSS Feed",
+    label: "RSS",
     Icon: Rss,
   },
   {
@@ -149,7 +149,7 @@ const SOCIAL_TABS = [
   },
   {
     key: "history",
-    label: "Post History",
+    label: "History",
     Icon: History,
   },
 ];
@@ -178,7 +178,7 @@ const SOCIAL_TAB_GROUPS = [
   },
   {
     key: "reviews",
-    label: "Review Graphics",
+    label: "Graphics",
     Icon: Star,
     tabs: ["reviews"],
   },

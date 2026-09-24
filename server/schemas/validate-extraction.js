@@ -42,7 +42,26 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // additional_properties[].is_primary_residence. All optional/nullable: older
 // payloads still validate. Consumed by property-role-proposals (gated,
 // GATE_CALL_PROPERTY_ROLE) — fill-or-park, never a silent primary flip.
-const SCHEMA_VERSION = '1.11.0';
+// 1.12.0: additive — service_request.price object (call-agent audit
+// 2026-09-23: quoted_price_usd's accepted-total-only rule left every
+// unaccepted, ranged, unit-bearing, or prepay/tier price null). Captures
+// amount_usd/amount_max_usd (ranges), unit, accepted, stated_by,
+// prepay_term, tier_mentioned, evidence_quote. quoted_price_usd keeps its
+// existing semantics and consumers unchanged. Optional/nullable: older
+// payloads still validate.
+// 1.13.0: additive, two owner-approved #4707 follow-ups (codex r5 P2s).
+// (1) service_request.price.caller_response — an explicit
+// accepted/declined/no_response/not_at_issue enum that replaces the old
+// boolean-only `accepted`, which conflated "caller declined" with "caller
+// never responded". `accepted` stays for backward compatibility, derived
+// from caller_response (true iff 'accepted'; false for
+// declined/no_response; null for not_at_issue/null). (2) service_request.
+// prices[] (maxItems 6) — every distinct price stated on a call that quotes
+// more than one (e.g. a one-time price AND a monthly price); `price` stays
+// the single PRIMARY entry (the accepted one if any, else the first
+// stated) so every existing reader of `price` keeps working unchanged.
+// Both additive/optional: older payloads still validate.
+const SCHEMA_VERSION = '1.13.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

@@ -381,7 +381,7 @@ describe("Email draft and navigation preservation", () => {
   it("opens a newly linked message from Blocked senders without losing its prior reply", async () => {
     mount();
     fireEvent.change(await open(a), { target: { value: "Retained reply for A" } });
-    fireEvent.click(screen.getByRole("button", { name: "Blocked senders" }));
+    fireEvent.click(screen.getByRole("button", { name: "Blocked" }));
     expect(screen.queryByRole("textbox", { name: "Reply" })).not.toBeInTheDocument();
     act(() => {
       window.history.pushState({}, "", `/admin/communications?id=${b.id}#tab=email`);
@@ -495,7 +495,7 @@ describe("Email draft and navigation preservation", () => {
     const pending = [];
     loadResponses[dataset] = () => new Promise((resolve) => pending.push(resolve));
     const view = mount();
-    if (dataset === "blocked") fireEvent.click(await screen.findByRole("button", { name: "Blocked senders" }));
+    if (dataset === "blocked") fireEvent.click(await screen.findByRole("button", { name: "Blocked" }));
     await waitFor(() => expect(pending).toHaveLength(1));
     view.rerender(emailRoute(false));
     view.rerender(emailRoute());

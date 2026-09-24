@@ -294,7 +294,13 @@ describe('start-only edit derives its end from the stored span, else estimated_d
     const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
     const rung1 = ud.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);');
     const stopLock = ud.indexOf("lockStopForRow(trx, req.params.id)");
-    const firstRowLock = ud.indexOf('.forUpdate()', rung1);
+    // Search for the visit's own row lock FROM the stop lock, not from rung1
+    // (Codex #4716 r2 P1): the customer row is now also FOR UPDATE-locked
+    // between rung1 and the stop lock (comms → customer row → stop locks —
+    // see the comms-lock section), which is a different lock this
+    // assertion isn't about; what matters here is the stop lock still
+    // precedes every VISIT (scheduled_services) row lock after it.
+    const firstRowLock = ud.indexOf('.forUpdate()', stopLock);
     const recount = ud.indexOf("openMembers(trx, occRow.visit_id)");
     const slotCas = ud.indexOf("String(occRow.visit_id || '') !== String(preReadVisitId || '')");
     expect(rung1).toBeGreaterThan(-1);

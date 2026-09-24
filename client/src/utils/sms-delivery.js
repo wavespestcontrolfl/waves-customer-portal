@@ -11,8 +11,8 @@ const HUMAN_REPLY_TYPES = new Set([
   "ai_revised",
   "ai_assistant",
   "ai_assistant_reply",
-  "follow_up",
 ]);
+const DRAFT_REPLY_TYPES = new Set(["ai_approved", "ai_revised"]);
 
 // Keep this aligned with loadUnansweredThreads. `queued` means the provider
 // accepted an immediate send; delayed inbox sends use the distinct `scheduled`
@@ -44,9 +44,13 @@ function messageTime(message) {
   return new Date(message?.createdAt).getTime();
 }
 
+function responseTime(message) {
+  return new Date(message?.responseCreatedAt || message?.createdAt).getTime();
+}
+
 function isActionableInbound(message) {
   if (message?.direction !== "inbound") return false;
-  const messageType = message.messageType || "";
+  const messageType = message.responseMessageType || message.messageType || "";
   return !NON_ACTIONABLE_INBOUND_TYPES.has(messageType) && !messageType.startsWith("job_");
 }
 
@@ -59,7 +63,7 @@ export function unansweredSmsReply(messages) {
   messages.forEach((message) => {
     const createdAt = messageTime(message);
     if (Number.isNaN(createdAt)) return;
-    if (message?.direction === "inbound" && message.messageType === "opt_out") {
+    if (message?.direction === "inbound" && (message.responseMessageType || message.messageType) === "opt_out") {
       latestOptOutAt = Math.max(latestOptOutAt, createdAt);
     }
     if (!isActionableInbound(message)) return;
@@ -77,12 +81,25 @@ export function unansweredSmsReply(messages) {
   latestInboundByLine.forEach(({ createdAt: latestInboundAt, businessLine, message: inbound }, line) => {
     // STOP applies to the contact, not one endpoint, and closes any older ask.
     if (latestOptOutAt > latestInboundAt) return;
+    // The server classifies historical and new courtesy messages with the
+    // same policy used by the badge. Apply AFTER latest-inbound selection:
+    // a closer retires the older question instead of exposing it again.
+    if (!inbound.media?.length && (inbound.courtesyOnly === true || inbound.spamEnforced === true)) return;
     const answered = messages.some((message) => {
       if (message?.direction !== "outbound") return false;
       if (businessLineKey(message) !== line) return false;
-      if (!HUMAN_REPLY_TYPES.has(message.messageType)) return false;
-      if (!ANSWERED_STATUSES.has(message.status)) return false;
-      const createdAt = messageTime(message);
+      // Proactive draft nudges can carry a human-approved message type.
+      // Only the server can resolve their exact draft intent.
+      if (message.responseIsAnswer === false) return false;
+      const messageType = message.responseMessageType || message.messageType;
+      if (!HUMAN_REPLY_TYPES.has(messageType)) return false;
+      if (DRAFT_REPLY_TYPES.has(messageType) && (
+        !inbound.id
+        || !message.responseReplyToMessageId
+        || String(message.responseReplyToMessageId) !== String(inbound.id)
+      )) return false;
+      if (!ANSWERED_STATUSES.has(message.responseStatus || message.status)) return false;
+      const createdAt = responseTime(message);
       return !Number.isNaN(createdAt) && createdAt > latestInboundAt;
     });
     if (!answered && latestInboundAt > (latestUnanswered?.createdAt ?? -Infinity)) {

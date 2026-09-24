@@ -35,12 +35,12 @@ const REVIEWS_LEAF_SECTIONS = [
   },
   {
     key: "gbp",
-    label: "GBP Management",
+    label: "GBP",
     Icon: Building2,
   },
   {
     key: "outreach",
-    label: "Review Outreach",
+    label: "Requests",
     Icon: Send,
   },
   {

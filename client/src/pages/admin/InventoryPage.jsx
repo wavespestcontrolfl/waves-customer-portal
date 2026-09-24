@@ -110,7 +110,7 @@ const TAB_GROUPS = [
   },
   {
     key: "vendors",
-    label: "Vendors & Pricing",
+    label: "Sourcing",
     Icon: Store,
     tabs: ["price-sync", "approvals", "vendors", "scrape"],
   },
@@ -139,7 +139,7 @@ const LEAF_META = {
     Icon: Package,
   },
   "price-sync": {
-    label: "Price Sync",
+    label: "Prices",
     Icon: Store,
   },
   approvals: {
@@ -151,7 +151,7 @@ const LEAF_META = {
     Icon: Store,
   },
   scrape: {
-    label: "Scrape Health",
+    label: "Scraping",
     Icon: ShieldCheck,
   },
   forecast: {
@@ -159,7 +159,7 @@ const LEAF_META = {
     Icon: ShoppingCart,
   },
   "unit-review": {
-    label: "Unit Review",
+    label: "Units",
     Icon: ClipboardList,
   },
   restock: {
@@ -171,11 +171,11 @@ const LEAF_META = {
     Icon: ClipboardList,
   },
   lawnFacts: {
-    label: "Lawn Facts",
+    label: "Facts",
     Icon: ShieldCheck,
   },
   lawnContent: {
-    label: "Lawn Content",
+    label: "Lawn",
     Icon: FileText,
   },
   protocols: {
@@ -183,7 +183,7 @@ const LEAF_META = {
     Icon: FileText,
   },
   margins: {
-    label: "Service Margins",
+    label: "Margins",
     Icon: Percent,
   },
 };
@@ -1291,23 +1291,23 @@ function PriceSyncTab({ showToast }) {
         {[
           {
             key: "vendors",
-            label: "Vendor Sync Status",
+            label: "Status",
           },
           {
             key: "mapping",
-            label: "Needs Mapping",
+            label: "Mapping",
           },
           {
             key: "login",
-            label: "Login Discovery",
+            label: "Logins",
           },
           {
             key: "csv",
-            label: "CSV Import / Export",
+            label: "CSV",
           },
           {
             key: "review",
-            label: "Price Review Queue",
+            label: "Review",
           },
         ].map((tab) => (
           <Button

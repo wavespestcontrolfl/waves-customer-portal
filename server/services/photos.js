@@ -76,18 +76,33 @@ const PhotoService = {
   },
 
   /**
-   * Fetch a photo's raw bytes from S3 as base64 (for vision/OCR input).
-   * Returns { data, mimeType } or throws.
+   * Fetch a photo's raw bytes from S3. This is THE reader for a private
+   * photo object's bytes — every consumer that needs the actual pixels
+   * (vision/OCR input, an admin-side resize) goes through this, not its
+   * own S3Client, so there is one place that knows how to read this bucket.
+   * Returns { buffer, contentType } or throws.
    */
-  async getPhotoBase64(s3Key) {
+  async getPhotoBuffer(s3Key) {
     const res = await s3Client.send(new GetObjectCommand({
       Bucket: config.s3.bucket,
       Key: s3Key,
     }));
     const bytes = await res.Body.transformToByteArray();
     return {
-      data: Buffer.from(bytes).toString('base64'),
-      mimeType: res.ContentType || 'image/jpeg',
+      buffer: Buffer.from(bytes),
+      contentType: res.ContentType || 'image/jpeg',
+    };
+  },
+
+  /**
+   * Fetch a photo's raw bytes from S3 as base64 (for vision/OCR input).
+   * Returns { data, mimeType } or throws.
+   */
+  async getPhotoBase64(s3Key) {
+    const { buffer, contentType } = await PhotoService.getPhotoBuffer(s3Key);
+    return {
+      data: buffer.toString('base64'),
+      mimeType: contentType,
     };
   },
 

@@ -3,7 +3,18 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 
 // v7: ordinal street recovery changes routing outcomes even when extraction
 // text is unchanged. Keep pre-ordinal calls outside this persisted cohort.
-const PROMPT_VERSION = 'v7';
+// v8: service_request.price capture (call-agent audit 2026-09-23) — the
+// model is now instructed to record ANY price it states, accepted or not,
+// a range, a unit, a tier, or a prepay term. Changes what the model
+// returns even though quoted_price_usd's own rule is unchanged, so this
+// is a new cohort.
+// v9: owner-approved #4707 follow-ups (codex r5 P2s) — service_request.
+// price.caller_response (explicit accepted/declined/no_response/
+// not_at_issue, replacing the boolean-only accepted, which is now derived
+// from it) and service_request.prices[] (every distinct price on a call
+// that states more than one; price stays the single primary entry). New
+// instructions the model must follow, so this is a new cohort.
+const PROMPT_VERSION = 'v9';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -180,6 +191,17 @@ SERVICE REQUEST:
 - STATED INTENT OUTRANKS SPECIES MENTIONS: choose primary_service_category and specific_service_name from what the caller ASKS FOR (starting/stopping/changing service, one-time vs recurring, scope), never from which pest species happens to be named. A named pest is evidence, not a request — a caller mentioning roaches or ants while asking to start a recurring/quarterly plan is requesting general pest control, NOT a one-time species treatment. Map to a species-specific service ONLY when the caller asks for that treatment itself (an active infestation cleanout, "I need the roaches treated"). When stated intent and a species mention pull different directions, follow the stated intent and note the species in call_summary.
 - specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Treatment"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.
 - quoted_price_usd: The total price in US dollars that the agent quoted AND the caller accepted for the service being booked (e.g. agent says "that runs around 350 total" and the caller agrees -> 350). Use the TOTAL package price when quoted as a total across multiple treatments. null when no price was quoted, the caller did not accept, or the amount is uncertain/a range. Never estimate or invent a price.
+- price: The PRIMARY price stated on the call — a copy of prices[0] below (see the prices rule for how the primary is chosen and ordered). Capture ANY price stated on the call by EITHER party — the agent's quote, or a number the CALLER speaks (a competitor's quote, a price seen online; record who said it in stated_by) — whether or not the caller accepted it — this is broader than quoted_price_usd above, which stays accepted-total-only and unaffected by this field. Never invent a number; leave a subfield null when the call did not say it.
+  - amount_usd / amount_max_usd: the stated number. A single price -> amount_usd only, amount_max_usd null. A RANGE ("$90 to 100 per quarter") -> amount_usd is the LOW end (90), amount_max_usd is the HIGH end (100). A muddled or corrected number ("300... no wait, 75, or was it 76") -> use the LAST clearly stated value per the corrections rule below; if it truly never resolves, null rather than guess.
+  - unit: the billing unit AS SPOKEN — one_time, per_application, per_month, per_quarter, per_year. "unknown" when a price was stated but no unit was said (e.g. a bare "$300" with no "per" anything). null only when no price was stated at all.
+  - caller_response: the CALLER's explicit response to this price — "accepted" when the caller agreed to it, "declined" when the caller said no or pushed back and it was not resolved to yes, "no_response" when the agent stated it and the call moved on (hung up, changed subject) before the caller reacted either way, "not_at_issue" when acceptance was never in play (e.g. caller only asked "what's the price for X" as a general question, or it's a competitor's price the caller is just quoting back), null when the call did not address the question at all.
+  - accepted: DERIVED from caller_response — set it consistently, do not decide it independently. true when caller_response is "accepted". false when caller_response is "declined" or "no_response". null when caller_response is "not_at_issue" or null.
+  - stated_by: "agent" (the normal case) or "caller" when the CALLER is the one who spoke the number (quoting a competitor, or repeating a price they saw online).
+  - prepay_term: "annual" when paying for the year up front is discussed ("pay the year", "annual prepay", "pay it all at once for the year"); "none" when the caller/agent explicitly rules prepay out; null when prepay is never discussed.
+  - tier_mentioned: bronze/silver/gold/platinum when a WaveGuard package tier name is discussed IN CONNECTION WITH this price, by either the agent or the caller — set this even when the caller did not name it first (unlike the caller-only waveguard_tier_mentioned field below).
+  - evidence_quote: the verbatim transcript line the price came from.
+  - Leave price entirely absent (or every field null) when no price was discussed at all.
+- prices: When the call states MORE THAN ONE distinct price (e.g. the agent quotes both a one-time treatment price and a monthly plan price), list EVERY distinct price here, using the same fields as price above for each entry, in this exact order: the PRIMARY entry FIRST — the accepted one if any (caller_response "accepted"), else the first price stated on the call — followed by the remaining distinct prices in the order they were stated. price above is always a copy of prices[0] under this ordering; do not order by any other notion of "consequential". Leave prices empty/absent when only one price was discussed; price alone still carries it.
 - If caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, or treatment before a concrete pour: use "termite" as primary_service_category.
 - ASSESSMENT vs FORMAL INSPECTION: a caller who SUSPECTS a pest problem or wants someone to come look, diagnose, or check ("I think I have termites", "something is eating my lawn", "can someone come take a look") maps to the "Waves Assessment" catalog service — NOT a formal inspection. "WDO Inspection Service" is ONLY for an explicitly requested wood-destroying-organism REPORT: real-estate sale/closing/refinance, lender or VA requirement, "termite letter"/"clearance letter", or the caller literally asking for a WDO inspection. The pre-slab/soil-treatment rule above still wins for pre-construction requests.
 - quote_requested: true when getting a QUOTE/estimate/pricing is a reason for the call — "can I get a quote", "what would it cost for...", "send me an estimate". A caller who only booked without asking for a quote: false.
@@ -243,6 +265,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
+- service_request.price / service_request.prices[] (when amount_usd or amount_max_usd is set — each entry's own evidence_quote field above already carries this; no separate top-level evidence entry is required)
 Each evidence entry: field_path (JSON pointer), quote (verbatim transcript), speaker (caller/agent), transcript_offset_ms (approximate, or null).
 
 CONFIDENCE SCORES — Per-section scores in [0, 1]. Score FIDELITY, not completeness: how sure you are that the values you DID return match what was said.

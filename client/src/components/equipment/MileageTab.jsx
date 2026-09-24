@@ -131,7 +131,7 @@ export default function MileageTab() {
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'trips', label: 'Trips' },
     { key: 'monthly', label: 'Monthly' },
-    { key: 'irs', label: 'IRS Report' },
+    { key: 'irs', label: 'IRS' },
   ];
 
   const navStyle = { display: 'flex', gap: 4, marginBottom: 16, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', flexWrap: 'nowrap' };

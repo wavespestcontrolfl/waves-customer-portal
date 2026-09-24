@@ -195,17 +195,19 @@ describe('release paths re-arm from the shifted anchor when one exists', () => {
     expect(patch.next_touch_at.toISOString()).toBe('2026-08-03T14:00:00.000Z');
   });
 
-  it('resumeSequence keeps the due-date re-arm when no anchor was ever shifted', async () => {
+  it('resumeSequence re-arms from the send anchor when no anchor was ever shifted', async () => {
+    // No shifted anchor_at, so re-arming falls back to the same send anchor
+    // every other arming path uses (scheduleForInvoice, the unvoid re-arm,
+    // skipStaleTouches, rescheduleForInvoiceEdit) — NOT the due date, which
+    // can sit weeks past send and fork the timeline (Codex #3493 r4).
     const { seqUpdate } = setupDb({
       seq: { id: 'seq-1', status: 'paused', step_index: 0, anchor_at: null },
       invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-07-01T15:00:00Z', due_date: '2026-07-15', created_at: '2026-07-01T15:00:00Z' },
     });
     await resumeSequence('inv-1');
     const patch = seqUpdate.mock.calls[0][0];
-    // Pre-existing release formula: date-only due_date parses as UTC
-    // midnight, which is the PRIOR evening in NY — so '2026-07-15' anchors
-    // the NY calendar day Jul 14, and d3 lands Jul 17, 10 AM EDT.
-    expect(patch.next_touch_at.toISOString()).toBe('2026-07-17T14:00:00.000Z');
+    // Sent Jul 1 + 3 days → Jul 4, 10 AM EDT.
+    expect(patch.next_touch_at.toISOString()).toBe('2026-07-04T14:00:00.000Z');
   });
 
   it('every sequence mutation stamps updated_at — the touched-since signal', async () => {

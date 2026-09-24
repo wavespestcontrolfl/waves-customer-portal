@@ -1822,12 +1822,16 @@ class GoogleBusinessService {
           .whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) > ?::timestamptz", [observedAt])
           .first('id');
         if (newer) return { stale: true };
-        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        // Dedupe against ANY unresolved same-title marker, not just rows
+        // younger than 24h: the old dayAgo bound let the same signature ring
+        // a fresh 'review' marker every day the sync stayed broken, in
+        // addition to the ops_digest bell. retireIfClean's alsoRetire marks
+        // these rows resolved on the clean run, so a genuinely new episode
+        // (after a clean run) still finds no unresolved row and rings.
         const recent = await trx('notifications')
           .where({ recipient_type: 'admin', category: 'review', title })
           .whereRaw("metadata->>'source' IS NULL")
           .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-          .where('created_at', '>', dayAgo)
           .first();
         if (recent) {
           // Same-signature failures are still NEW observations. Advance both
@@ -1841,6 +1845,28 @@ class GoogleBusinessService {
             .whereRaw("metadata->>'source' IS NULL")
             .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
             .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ observedAt })]) });
+          // Findings A -> B -> A without a clean run in between: A's marker
+          // is still unresolved (so no re-bell), but the standing digest
+          // describes B. Rewrite the digest to the CURRENT findings when its
+          // text differs, surfacing it unread again (pre-push audit P1).
+          // Only the NEWEST unresolved digest is the standing row: older
+          // unresolved duplicates (the pre-fix production state) must not all
+          // flip back to unread on every detail change (codex r1 P2).
+          const digestTitle = subject.slice(0, 200);
+          const standingDigest = trx('notifications').select('id')
+            .where({ recipient_type: 'admin', category: 'ops_digest' })
+            .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
+            .whereRaw("metadata->>'source' IS NULL")
+            .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+            .orderBy('created_at', 'desc').limit(1);
+          await trx('notifications').whereIn('id', standingDigest)
+            .where((q) => q.whereNot('title', digestTitle).orWhereNot('body', body).orWhereNull('body'))
+            .update({
+              title: digestTitle,
+              body,
+              read_at: null,
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ subject, observedAt })]),
+            });
           return { deduped: true };
         }
 
@@ -1874,6 +1900,10 @@ class GoogleBusinessService {
               link: '/admin/reviews',
               metadata: { observedAt },
               trx: savepoint,
+              // No rolling window (see promised-estimate-watcher): the clean
+              // run's retireIfClean drops the key, so a new episode rings.
+              dedupeKey: 'ops-digest:gbp-sync-health',
+              refreshOnDedupe: true,
               sendEmail: async () => ({ ok: true }),
             });
             if (sent.channel !== 'in_app') throw new Error('Review sync health email deferred');

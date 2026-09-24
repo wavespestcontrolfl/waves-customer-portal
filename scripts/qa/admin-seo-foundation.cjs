@@ -186,19 +186,19 @@ async function main() {
     await desktop.getByText('Provider Visibility', { exact: true }).waitFor();
     const primaryNav = desktop.getByRole('navigation', { name: 'SEO section' });
     const workspaces = [
-      { label: 'Command', views: ['Dashboard', 'SEO Advisor'] },
-      { label: 'Strategy', views: ['Actions', 'Content QA', 'Refresh Audit'] },
+      { label: 'Command', views: ['Dashboard', 'Advisor'] },
+      { label: 'Strategy', views: ['Actions', 'Quality', 'Refresh'] },
       { label: 'Rankings', views: ['Rankings', 'Monitor', 'Funnel', 'Geo-Grid'] },
-      { label: 'Authority', views: ['Backlinks & Citations', 'AI Overview'] },
-      { label: 'Technical', views: ['URL Intel', 'Indexation', 'Site Health'] },
-      { label: 'Measurement', views: ['Analytics', 'By Site'] },
+      { label: 'Authority', views: ['Links', 'AI'] },
+      { label: 'Technical', views: ['URLs', 'Indexation', 'Health'] },
+      { label: 'Measurement', views: ['Analytics', 'Sites'] },
     ];
     const childViews = {
       'Command / Dashboard': ['AI Visibility', 'Organic Rankings'],
-      'Strategy / Actions': ['Queue', 'AI Drafts', 'In Progress', 'Experiments'],
-      'Authority / Backlinks & Citations': ['Overview', 'Citations', 'Competitor Gaps', 'LLM Mentions', 'Link Building', 'Agent'],
-      'Technical / URL Intel': ['Overview', 'By Diagnosis', 'Priority Queue', 'Duplicates', 'Intent Routing'],
-      'Technical / Indexation': ['Indexation Gap', 'Canonical Conflicts', 'Not Indexed', 'Sitemap Issues', 'URL Inspector'],
+      'Strategy / Actions': ['Queue', 'Drafts', 'Progress', 'Experiments'],
+      'Authority / Links': ['Overview', 'Citations', 'Gaps', 'Mentions', 'Outreach', 'Agent'],
+      'Technical / URLs': ['Overview', 'Diagnosis', 'Priority', 'Duplicates', 'Intent'],
+      'Technical / Indexation': ['Gap', 'Conflicts', 'Unindexed', 'Sitemap', 'Inspector'],
     };
     for (const workspace of workspaces) {
       const { label } = workspace;
@@ -236,7 +236,7 @@ async function main() {
     await mobile.goto(`${server.baseUrl}/admin/seo`);
     await mobile.getByRole('heading', { name: 'SEO', level: 1 }).waitFor();
     await mobile.getByRole('navigation', { name: 'SEO section' }).getByRole('button', { name: 'Authority', exact: true }).click();
-    await mobile.getByRole('button', { name: 'Link Building', exact: true }).click();
+    await mobile.getByRole('button', { name: 'Outreach', exact: true }).click();
     await mobile.getByText('publisher.example', { exact: true }).waitFor();
     await mobile.getByRole('button', { name: 'Edit draft', exact: true }).click();
     const dialog = mobile.getByRole('dialog', { name: /Outreach draft/ });

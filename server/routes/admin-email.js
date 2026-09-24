@@ -174,7 +174,7 @@ router.get('/inbox', async (req, res) => {
       .offset(offset)
       .limit(parsedLimit)
       .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'to_address',
-        'subject', 'snippet', 'has_attachments', 'received_at', 'is_read', 'is_starred',
+        'reply_to', 'subject', 'snippet', 'has_attachments', 'received_at', 'is_read', 'is_starred',
         'is_archived', 'classification', 'extracted_data', 'customer_id');
 
     res.json({ emails, total: parseInt(count), page: parsedPage, limit: parsedLimit });

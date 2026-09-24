@@ -1,7 +1,7 @@
 /**
- * Hermes watchdog liveness — the reciprocal check: one bell per ET day when
- * the external watchdog stops polling; nothing when it is fresh or the lane
- * is dark.
+ * Hermes watchdog liveness — the reciprocal check: one standing bell per
+ * silence EPISODE (keyed to the last successful poll) when the external
+ * watchdog stops polling; nothing when it is fresh or the lane is dark.
  */
 let lastRow = null;
 const mockDb = jest.fn(() => {
@@ -55,8 +55,9 @@ test('a fresh observed row → no bell', async () => {
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
 });
 
-test('a stale observed row → one alert bell keyed to the ET day', async () => {
-  lastRow = { at: new Date(NOW.getTime() - 90 * 60000) };
+test('a stale observed row → one alert bell keyed to the silence episode (last successful poll)', async () => {
+  const last = new Date(NOW.getTime() - 90 * 60000);
+  lastRow = { at: last };
   const r = await runWatchdogLivenessCheck({ now: NOW });
   expect(r).toEqual({ skipped: false, alerted: 1, ageMinutes: 90, limit: DEFAULT_STALE_MINUTES });
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -64,8 +65,21 @@ test('a stale observed row → one alert bell keyed to the ET day', async () => 
   expect(category).toBe('alert');
   expect(title).toBe('FIX: Hermes watchdog silent');
   expect(body).toContain('90 min ago');
-  expect(opts).toMatchObject({ bell: true, dedupeKey: 'hermes-watchdog-silent:2026-09-03', link: '/admin/agents?tab=queue' });
+  // Keyed to the last successful poll, NOT the calendar day: a watchdog
+  // that stays silent across midnight must keep ringing the SAME row
+  // instead of a fresh one every ET day.
+  expect(opts).toMatchObject({ bell: true, dedupeKey: `hermes-watchdog-silent:${last.toISOString()}`, link: '/admin/agents?tab=queue' });
   expect(opts.metadata).toMatchObject({ age_minutes: 90, limit_minutes: DEFAULT_STALE_MINUTES });
+});
+
+test('a stale observed row on a later day with the SAME last poll → the SAME dedupeKey (one episode, not one bell per day)', async () => {
+  const last = new Date(NOW.getTime() - 90 * 60000);
+  lastRow = { at: last };
+  const laterSameDayNext = new Date(NOW.getTime() + 24 * 60 * 60000); // next ET day, watchdog still silent
+  const r = await runWatchdogLivenessCheck({ now: laterSameDayNext });
+  expect(r.alerted).toBe(1);
+  const opts = NotificationService.notifyAdmin.mock.calls[0][3];
+  expect(opts.dedupeKey).toBe(`hermes-watchdog-silent:${last.toISOString()}`);
 });
 
 test('never polled → bell says so; env override sets the limit; a failed persist THROWS so job_health marks the job failing', async () => {

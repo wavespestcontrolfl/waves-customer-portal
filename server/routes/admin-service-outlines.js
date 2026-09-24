@@ -1,8 +1,9 @@
 const express = require('express');
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
+const EmailTemplateLibrary = require('../services/email-template-library');
 const { wrapServiceEmail, ctaButton, colors } = require('../services/email-template');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -19,7 +20,26 @@ const {
 
 const router = express.Router();
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// Admin-only: the router's mutations text/email the lawn program overview to
+// customers and leads under the Waves name and approve/rewrite the approved
+// safety/product wording every packet is built from. No technician client
+// surface ever reaches this router (AdminLoginPage routes a technician login
+// straight to /tech; the composer at EstimatesPageV2.jsx and the
+// content-module editor at InventoryPage.jsx are admin-shell-only), and its
+// own design doc calls for "Admin approves packet" / "Admin sends by
+// SMS/email" (ADMIN-BUG-R37).
+router.use(adminAuthenticate, requireAdmin);
+
+// Mirror service-report/email-delivery.js's direct-sendOne fallback: a
+// synthetic template shape so activeSuppressionFor() can apply the same
+// email_suppressions semantics (global bounce/spam/do_not_email + the
+// service group) to a raw sendgrid.sendOne call that has no real template
+// row of its own.
+const LAWN_SERVICE_OUTLINE_GROUP_KEY = 'service_operational';
+const LAWN_SERVICE_OUTLINE_SUPPRESSION_TEMPLATE = {
+  send_stream: 'service_operational',
+  suppression_group_key: 'service_operational',
+};
 
 function publicUrlForToken(token) {
   return `${publicPortalUrl()}/service-outlines/${encodeURIComponent(token)}`;
@@ -489,6 +509,37 @@ router.post('/:id/send', async (req, res, next) => {
     }
     const outcomes = {};
 
+    // Resolve the email suppression/portal-opt-out preflight BEFORE
+    // dispatching EITHER channel (Codex round-3 follow-up): this lookup
+    // used to run only after the SMS leg had already dispatched via
+    // sendCustomerMessage, so a transient DB error here surfaced as a bare
+    // 500 to the operator AFTER Twilio had already accepted the SMS — a
+    // retry (the operator's only recourse to a 500) sent the same SMS
+    // again. Running it first means a transient failure here is returned
+    // before anything is dispatched, so a retry cannot double-send.
+    let emailPreflight = null;
+    if (sendEmail) {
+      try {
+        const emailSuppression = estimate.customer_email
+          ? await EmailTemplateLibrary.activeSuppressionFor(
+            LAWN_SERVICE_OUTLINE_SUPPRESSION_TEMPLATE,
+            estimate.customer_email,
+            LAWN_SERVICE_OUTLINE_GROUP_KEY,
+          )
+          : null;
+        const emailPrefs = !emailSuppression && estimate.customer_id
+          ? await db('notification_prefs').where({ customer_id: estimate.customer_id }).first()
+          : null;
+        emailPreflight = { emailSuppression, emailOptedOut: emailPrefs?.email_enabled === false };
+      } catch (err) {
+        logger.warn(`[service-outlines] email preflight (suppression/prefs) failed for packet ${packet.id}: ${err.message}`);
+        return res.status(503).json({
+          error: 'Could not verify email suppression/preferences — nothing was sent. Try again.',
+          code: 'EMAIL_PREFLIGHT_UNAVAILABLE',
+        });
+      }
+    }
+
     if (sendSms) {
       if (!estimate.customer_phone) {
         outcomes.sms = { ok: false, error: 'No phone on estimate' };
@@ -525,10 +576,30 @@ router.post('/:id/send', async (req, res, next) => {
     }
 
     if (sendEmail) {
+      // Honor the same email_suppressions rows and portal opt-out every
+      // other customer email path does — this route previously called
+      // sendgrid.sendOne directly with neither check, so a do-not-email /
+      // unsubscribed / bounced address, or a customer who turned off
+      // "Email Messages" in the portal, still received the packet email
+      // (and the packet was stamped 'sent' regardless). Resolved above,
+      // before either channel dispatched.
+      const { emailSuppression, emailOptedOut } = emailPreflight;
+
       if (!estimate.customer_email) {
         outcomes.email = { ok: false, error: 'No email on estimate' };
       } else if (!sendgrid.isConfigured()) {
         outcomes.email = { ok: false, error: 'SendGrid is not configured' };
+      } else if (emailSuppression) {
+        // Both `reason` (the structured field every other blocked-send
+        // outcome in this route/codebase uses) and `error` — the composer
+        // modal (ServiceOutlineComposerModal.jsx) reads outcomes.email.error
+        // for every OTHER blocked shape here ("No email on estimate",
+        // "SendGrid is not configured"), so without `error` too the operator
+        // saw "Email failed: unknown" instead of the actual reason.
+        const reason = `Suppressed: ${emailSuppression.suppression_type}${emailSuppression.group_key ? ` (${emailSuppression.group_key})` : ''}`;
+        outcomes.email = { ok: false, sent: false, blocked: true, reason, error: reason };
+      } else if (emailOptedOut) {
+        outcomes.email = { ok: false, sent: false, blocked: true, reason: 'email_opted_out', error: 'email_opted_out' };
       } else {
         await persistGeneratedTokenBeforeDelivery();
         const title = packet.title || 'Your Waves Lawn Care Program Overview';
@@ -557,7 +628,8 @@ router.post('/:id/send', async (req, res, next) => {
       }
     }
 
-    const hasSuccess = (outcomes.sms?.sent === true) || !!outcomes.email?.messageId;
+    const emailDelivered = !!outcomes.email?.messageId;
+    const hasSuccess = (outcomes.sms?.sent === true) || emailDelivered;
     const [updated] = await db.transaction(async (trx) => {
       const packetUpdate = {
         status: hasSuccess ? 'sent' : packet.status,
@@ -570,7 +642,12 @@ router.post('/:id/send', async (req, res, next) => {
         .update(packetUpdate)
         .returning('*');
       if (sendSms) await logEvent(trx, row, 'sent_sms', req, outcomes.sms || {});
-      if (sendEmail) await logEvent(trx, row, 'sent_email', req, outcomes.email || {});
+      if (sendEmail) {
+        // 'sent_email' must mean the provider actually accepted it — logging
+        // it unconditionally (as before) told packet history "Email sent"
+        // for a suppressed/opted-out address the send never reached.
+        await logEvent(trx, row, emailDelivered ? 'sent_email' : 'email_blocked', req, outcomes.email || {});
+      }
       if (!hasSuccess) await logEvent(trx, row, 'failed', req, outcomes);
       return [row];
     });

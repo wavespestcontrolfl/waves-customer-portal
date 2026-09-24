@@ -288,9 +288,13 @@ describe('customer contact recipient routing', () => {
     expect(getAppointmentContacts(customer, PREFS_UNAVAILABLE)).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
     ]);
-    expect(getServiceReportEmailRecipients(customer, PREFS_UNAVAILABLE)).toEqual([
-      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
-    ]);
+    // Audit r2-completion-live-money-tail-1 P1 follow-up: getServiceReportEmailRecipients
+    // now enforces the account-wide email_enabled/service_completed switches
+    // up front, so an unreadable prefs row must fail closed to NO recipients
+    // at all — previously this only suppressed the primary, so the service
+    // contact below still got the report + PDF during a transient DB
+    // failure even though the account might be fully opted out.
+    expect(getServiceReportEmailRecipients(customer, PREFS_UNAVAILABLE)).toEqual([]);
     // Every OTHER field still reads exactly like the `{}` callers passed before,
     // so nothing beyond the notify-primary decision changes.
     expect(PREFS_UNAVAILABLE.sms_enabled).toBeUndefined();

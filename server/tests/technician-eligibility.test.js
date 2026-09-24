@@ -12,6 +12,7 @@ const {
   applyAssignable,
   assertAssignableTechnician,
   employmentPatch,
+  absentTechDays,
 } = require('../services/technician-eligibility');
 
 function connReturning(row, { transaction = false } = {}) {
@@ -23,6 +24,20 @@ function connReturning(row, { transaction = false } = {}) {
   const conn = jest.fn(() => chain);
   if (transaction) conn.isTransaction = true;
   return { conn, chain };
+}
+
+// A conn that routes 'technicians' to the given row and 'technician_absences'
+// to an uncleared-absence lookup, for the date-scoped branch.
+function connWithAbsence(techRow, absenceRow, { transaction = false } = {}) {
+  const techChain = {
+    where: jest.fn(() => techChain), forShare: jest.fn(() => techChain), first: jest.fn(async () => techRow),
+  };
+  const absenceChain = {
+    where: jest.fn(() => absenceChain), whereNull: jest.fn(() => absenceChain), first: jest.fn(async () => absenceRow),
+  };
+  const conn = jest.fn((table) => (table === 'technicians' ? techChain : absenceChain));
+  if (transaction) conn.isTransaction = true;
+  return { conn, techChain, absenceChain };
 }
 
 describe('technician eligibility', () => {
@@ -118,6 +133,97 @@ describe('technician eligibility', () => {
       db.mockReturnValue(chain);
       await expect(assertAssignableTechnician('t1')).resolves.toMatchObject({ id: 't1' });
       expect(db).toHaveBeenCalledWith('technicians');
+    });
+
+    describe('date-scoped technician_absences check (tech-out redistribution, codex #4678 r1 finding B)', () => {
+      const ROW = { id: 't1', name: 'Tech One', employment_status: 'active', field_dispatchable: true };
+
+      test('no date ⇒ byte-identical: technician_absences is never queried', async () => {
+        const { conn, absenceChain } = connWithAbsence(ROW, { id: 'abs-1' });
+        await expect(assertAssignableTechnician('t1', { conn })).resolves.toBe(ROW);
+        expect(absenceChain.where).not.toHaveBeenCalled();
+      });
+
+      test('a date with no uncleared absence row is unaffected', async () => {
+        const { conn } = connWithAbsence(ROW, undefined);
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-01' })).resolves.toBe(ROW);
+      });
+
+      test('an uncleared absence on that date throws 422 TECH_NOT_ASSIGNABLE, "marked out on <date>"', async () => {
+        const { conn, absenceChain } = connWithAbsence(ROW, { id: 'abs-1' });
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-01' })).rejects.toMatchObject({
+          status: 422,
+          statusCode: 422,
+          isOperational: true,
+          code: NOT_ASSIGNABLE,
+          technicianId: 't1',
+          message: expect.stringMatching(/Tech One is marked out on 2026-10-01 and cannot be assigned work/),
+        });
+        expect(absenceChain.where).toHaveBeenCalledWith({ technician_id: 't1', absence_date: '2026-10-01' });
+      });
+
+      test('a technician already ineligible for another reason short-circuits before the absence read', async () => {
+        const inactiveRow = { id: 't1', name: 'Tech One', employment_status: 'inactive', field_dispatchable: true };
+        const { conn, absenceChain } = connWithAbsence(inactiveRow, { id: 'abs-1' });
+        await expect(assertAssignableTechnician('t1', { conn, date: '2026-10-01' })).rejects.toMatchObject({
+          code: NOT_ASSIGNABLE,
+          message: expect.stringMatching(/no longer active/),
+        });
+        expect(absenceChain.where).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('absentTechDays (slot-discovery counterpart to the date-scoped assert, codex #4678 pre-push auditor P1)', () => {
+    function connAbsenceRows(rows) {
+      const chain = {
+        whereBetween: jest.fn(() => chain),
+        whereNull: jest.fn(() => chain),
+        whereIn: jest.fn(() => chain),
+        select: jest.fn(async () => rows),
+      };
+      const conn = jest.fn(() => chain);
+      return { conn, chain };
+    }
+
+    test('returns technicianId:date keys, one Set entry per uncleared row in range', async () => {
+      const { conn } = connAbsenceRows([
+        { technician_id: 't1', absence_date: '2026-10-01' },
+        { technician_id: 't2', absence_date: '2026-10-02' },
+      ]);
+      const days = await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07' });
+      expect(days).toEqual(new Set(['t1:2026-10-01', 't2:2026-10-02']));
+    });
+
+    test('normalizes a Postgres DATE column (JS Date at UTC midnight) to YYYY-MM-DD', async () => {
+      const { conn } = connAbsenceRows([
+        { technician_id: 't1', absence_date: new Date('2026-10-01T00:00:00.000Z') },
+      ]);
+      const days = await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07' });
+      expect(days).toEqual(new Set(['t1:2026-10-01']));
+    });
+
+    test('no absences in range returns an empty Set', async () => {
+      const { conn } = connAbsenceRows([]);
+      const days = await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07' });
+      expect(days).toEqual(new Set());
+    });
+
+    test('queries only the given date range and, when technicianIds is passed, narrows to it', async () => {
+      const { conn, chain } = connAbsenceRows([]);
+      await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07', technicianIds: ['t1', 't2'] });
+      expect(chain.whereBetween).toHaveBeenCalledWith('absence_date', ['2026-10-01', '2026-10-07']);
+      expect(chain.whereNull).toHaveBeenCalledWith('cleared_at');
+      expect(chain.whereIn).toHaveBeenCalledWith('technician_id', ['t1', 't2']);
+    });
+
+    test('omitting technicianIds (or passing an empty array) reads every absence in range, no whereIn', async () => {
+      const { conn, chain } = connAbsenceRows([]);
+      await absentTechDays(conn, { dateFrom: '2026-10-01', dateTo: '2026-10-07' });
+      expect(chain.whereIn).not.toHaveBeenCalled();
+      const { conn: conn2, chain: chain2 } = connAbsenceRows([]);
+      await absentTechDays(conn2, { dateFrom: '2026-10-01', dateTo: '2026-10-07', technicianIds: [] });
+      expect(chain2.whereIn).not.toHaveBeenCalled();
     });
   });
 });

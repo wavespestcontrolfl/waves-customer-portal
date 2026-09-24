@@ -1,6 +1,7 @@
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
 }));
 
 jest.mock('../models/db', () => {
@@ -38,14 +39,21 @@ const sendgrid = require('../services/sendgrid-mail');
 const adminServiceOutlines = require('../routes/admin-service-outlines');
 
 function chain(overrides = {}) {
-  return {
+  const c = {
     where: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     first: jest.fn(),
     update: jest.fn().mockReturnThis(),
     returning: jest.fn(),
     insert: jest.fn().mockResolvedValue(1),
+    // The unstubbed default (email_suppressions/notification_prefs in most
+    // of these tests) is also awaited directly as a query result — the real
+    // EmailTemplateLibrary.activeSuppressionFor() reads email_suppressions
+    // as an array. Resolve to [] so that read is "no active suppression".
+    then: (resolve) => resolve([]),
     ...overrides,
   };
+  return c;
 }
 
 function appServer() {

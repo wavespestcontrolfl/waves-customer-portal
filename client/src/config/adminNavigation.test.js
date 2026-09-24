@@ -15,7 +15,7 @@ import {
 describe("grouped workspaces", () => {
   it('finds renamed pages by old names and workspace terms without widening access', () => {
     const admin = getAdminWorkspaceGroups('admin');
-    for (const [query, id] of [['Recovery', 'recovery'], ['Payers', 'payers'], ['Taxes', 'taxes'], ['Tool Health', 'toolHealth'], ['dispatch', 'schedule'], ['Reports', 'jobs']]) {
+    for (const [query, id] of [['Recovery', 'recovery'], ['Payers', 'payers'], ['Taxes', 'taxes'], ['Health', 'toolHealth'], ['dispatch', 'schedule'], ['Reports', 'jobs']]) {
       expect(searchAdminWorkspacePages(admin, query).map((item) => item.id)).toContain(id);
     }
     expect(searchAdminWorkspacePages(admin, 'accounting').map((item) => item.id)).toEqual(['banking', 'taxes']);
@@ -65,10 +65,10 @@ describe("admin navigation registry", () => {
   it("uses the consolidated admin taxonomy", () => {
     expect(compactSections(ADMIN_DESKTOP_NAV_SECTIONS)).toEqual([
       { section: "Overview", itemIds: ["dashboard"] },
-      { section: "Service operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-      { section: "Customers & Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
+      { section: "Operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
+      { section: "Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
       { section: "Communications", itemIds: ["communications"] },
-      { section: "Billing & Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
+      { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
       { section: "People", itemIds: ["staff", "recruiting"] },
       { section: "Marketing", itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"] },
       { section: "System", itemIds: ["agents", "toolHealth", "settings"] },

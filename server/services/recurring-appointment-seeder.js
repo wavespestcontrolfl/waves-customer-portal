@@ -9,7 +9,7 @@ const {
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
-const { isAssignable } = require('./technician-eligibility');
+const { isAssignable, absentTechDays } = require('./technician-eligibility');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -852,26 +852,17 @@ async function findActiveRecurringSeries(conn, {
         this.where({ recurring_parent_id: parent.id }).orWhere({ id: parent.id });
       })
       .where('is_recurring', true)
-      // 'rescheduled' is a LIVE visit awaiting re-placement (the customer
-      // reschedule path leaves it on the books with that status when the
-      // streamline gates are off) — a fixed-length series whose last
-      // outstanding visit sits in that state is not lapsed, and reading
-      // it as lapsed let a second same-family billable series activate
-      // (codex #3504 r15).
-      // en_route / on_site are IN-PROGRESS (codex #3504 r25): a fixed
-      // series on its final occurrence is not lapsed while that visit is
-      // being served — only completion/cancellation ends it.
-      .whereIn('status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
-      // A 'rescheduled' placeholder stays active PAST its original date
-      // (codex #3504 r21): it is awaiting re-placement, and its date is
-      // the slot it left, not one it will be served on. In-progress rows
-      // likewise stay active across a midnight boundary. The date bound
-      // applies to pending/confirmed rows only.
-      .where(function activeBound() {
-        this.where('scheduled_date', '>=', etDateString())
-          .orWhere('status', 'rescheduled')
-          .orWhere('status', 'en_route')
-          .orWhere('status', 'on_site');
+      // Live = the lifecycle guard's shared tracker-aware clause
+      // (customer-lifecycle-guard.js whereVisitRowLive): pending/confirmed
+      // on or after today, plus 'rescheduled' (a live visit awaiting
+      // re-placement, codex #3504 r15/r21 — its date is the slot it left)
+      // and en_route/on_site (in progress, codex #3504 r25) regardless of
+      // date. track_state can lead a best-effort status sync both ways, so
+      // a tracker-live row counts even on a stale status and a
+      // tracker-finished row does not keep a lapsed series alive (GitHub
+      // Codex #4684 r8 / pre-push on 9c802b806a).
+      .where(function activeRow() {
+        require('./customer-lifecycle-guard').whereVisitRowLive(this, etDateString(), { trackState: !!columns.track_state });
       })
       .orderBy('scheduled_date', 'asc')
       .first('id', 'scheduled_date');
@@ -1336,6 +1327,29 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
         rows = rows.map((r) => (r.technician_id === inheritedTechId ? { ...r, technician_id: null } : r));
       }
     }
+    // Tech-out (GATE_TECH_OUT_REDISTRIBUTE, Codex r7 P1 on #4678): a
+    // follow-up whose own date is a day the inherited tech is marked out
+    // (uncleared technician_absences row) is seeded UNASSIGNED so
+    // auto-dispatch places it — the same per-date rule the recurring-series
+    // maintenance seeder applies — instead of landing on the absent tech
+    // for the sweep to park later. One read over the seeded date range.
+    const inheritedDates = rows
+      .filter((r) => inheritedTechId && r.technician_id === inheritedTechId)
+      .map((r) => dateOnly(r.scheduled_date))
+      .filter(Boolean)
+      .sort();
+    if (inheritedDates.length) {
+      const absentDays = await absentTechDays(conn, {
+        dateFrom: inheritedDates[0], dateTo: inheritedDates[inheritedDates.length - 1], technicianIds: [inheritedTechId],
+      });
+      if (absentDays.size) {
+        rows = rows.map((r) => (
+          r.technician_id === inheritedTechId && absentDays.has(`${inheritedTechId}:${dateOnly(r.scheduled_date)}`)
+            ? { ...r, technician_id: null }
+            : r
+        ));
+      }
+    }
   }
 
   if (!rows.length) {
@@ -1428,6 +1442,8 @@ module.exports = {
   preferenceRowBlocksWeekends,
   etDateDiffDays,
   findActiveRecurringSeries,
+  duplicateGuardFamilyKey,
+  scheduledServiceColumns,
   seriesCreateLockKeys,
   inferRecurringPattern,
   SEASONAL_FEB_OCT,

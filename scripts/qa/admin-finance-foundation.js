@@ -660,7 +660,7 @@ async function views(page, server, state, report, device) {
     .getByRole("button", { name: "Payout payout-example", exact: true })
     .waitFor();
   await waitForFonts(page);
-  for (const section of ["Payouts", "Cash Flow", "Reconciliation", "Exports"]) {
+  for (const section of ["Payouts", "Cashflow", "Reconciliation", "Exports"]) {
     await bankSection(page, section);
     await widths(page, state, `Banking ${section}`);
     await shot(
@@ -734,19 +734,19 @@ async function views(page, server, state, report, device) {
   await waitForFonts(page);
   for (const [group, leaf, key] of [
     ["Overview", null, "overview"],
-    ["Tax Setup", "Tax Rates", "rates"],
-    ["Tax Setup", "Taxability", "services"],
-    ["Tax Setup", "Exemptions", "exemptions"],
+    ["Setup", "Rates", "rates"],
+    ["Setup", "Taxability", "services"],
+    ["Setup", "Exemptions", "exemptions"],
     ["Expenses", null, "expenses"],
-    ["Expenses", "Bank Import", "bank-import"],
+    ["Expenses", "Import", "bank-import"],
     ["Revenue", null, "revenue"],
     ["Assets", null, "equipment"],
     ["Assets", "Mileage", "mileage"],
     ["Reports", null, "pnl"],
-    ["Reports", "Filing Calendar", "filings"],
-    ["Reports", "AI Advisor", "advisor"],
-    ["Exports & A/R", null, "exports"],
-    ["Exports & A/R", "A/R", "receivables"],
+    ["Reports", "Filings", "filings"],
+    ["Reports", "Advisor", "advisor"],
+    ["Compliance", null, "exports"],
+    ["Compliance", "A/R", "receivables"],
   ]) {
     await taxSection(page, group, leaf);
     await widths(page, state, `Taxes ${key}`);
@@ -942,7 +942,7 @@ async function workflows(page, server, state, report, device) {
         true,
       ),
   );
-  await taxSection(page, "Reports", "Filing Calendar");
+  await taxSection(page, "Reports", "Filings");
   await retryWrite(
     page,
     state,
@@ -950,7 +950,7 @@ async function workflows(page, server, state, report, device) {
     () =>
       page.getByLabel("Filing status", { exact: true }).selectOption("paid"),
   );
-  await taxSection(page, "Expenses", "Bank Import");
+  await taxSection(page, "Expenses", "Import");
   await page
     .getByLabel("Account label", { exact: true })
     .fill("example-checking");

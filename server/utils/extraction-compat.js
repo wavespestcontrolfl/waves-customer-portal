@@ -13,6 +13,31 @@ function isV2Extraction(extraction) {
   return !!(extraction && extraction.meta && extraction.meta.schema_version);
 }
 
+// prices_signature (schema 1.13.0, codex #4722 r1 P1, extended r2
+// push-gate P1): price_count alone collapses two extractors that both
+// return 2 prices but disagree on the SECONDARY entry's contents — the
+// count matches while the actual prices differ. This builds a
+// deterministic per-entry signature so replay variance can see that
+// disagreement. Order-sensitive by design (prices[0] is always the
+// canonical primary, so a reorder is itself a meaningful change).
+// Includes stated_by and accepted (a v9 extractor that silently swaps a
+// competitor's price from caller to agent, or a legacy accepted-only
+// entry's acceptance, must not read as unchanged) and evidence PRESENCE
+// only — never the verbatim evidence_quote text itself, which is free
+// text and never diffed (matching price_has_evidence's own convention).
+function priceEntrySignature(entry) {
+  const e = entry || {};
+  const fields = ['amount_usd', 'amount_max_usd', 'unit', 'caller_response', 'accepted', 'stated_by', 'prepay_term', 'tier_mentioned']
+    .map((key) => (e[key] === null || e[key] === undefined ? '' : String(e[key])));
+  const hasEvidence = typeof e.evidence_quote === 'string' && e.evidence_quote.trim() ? '1' : '0';
+  return [...fields, hasEvidence].join('|');
+}
+
+function pricesSignature(prices) {
+  if (!Array.isArray(prices)) return null;
+  return prices.map(priceEntrySignature).join(';');
+}
+
 function flatView(extraction) {
   if (!extraction) return {};
   if (!isV2Extraction(extraction)) return extraction;
@@ -21,6 +46,7 @@ function flatView(extraction) {
   const property = extraction.property || {};
   const addr = property.service_address || {};
   const svc = extraction.service_request || {};
+  const price = svc.price || {};
   const sched = extraction.scheduling || {};
   const meta = extraction.meta || {};
   const sentiment = extraction.sentiment_and_lead || {};
@@ -44,6 +70,38 @@ function flatView(extraction) {
     quoted_price: typeof svc.quoted_price_usd === 'number' ? svc.quoted_price_usd : null,
     quote_requested: svc.quote_requested === true,
     quote_promised: svc.quote_promised === true,
+    // service_request.price (schema 1.12.0) — ANY price the agent/caller
+    // stated on the call, accepted or not; a range, unit, tier, or prepay
+    // term. Broader than quoted_price above, which stays accepted-total-only
+    // and is unaffected by this. Replay variance watches these (FIELD_GROUPS
+    // medium in replay-call-extraction-variance.js) so a v8 extractor that
+    // drops or changes an unaccepted/ranged/tiered price cannot go unnoticed
+    // by the weekly replay/bake-off (codex #4707 P1).
+    price_amount_usd: typeof price.amount_usd === 'number' ? price.amount_usd : null,
+    price_amount_max_usd: typeof price.amount_max_usd === 'number' ? price.amount_max_usd : null,
+    price_unit: price.unit || null,
+    price_accepted: typeof price.accepted === 'boolean' ? price.accepted : null,
+    // caller_response (schema 1.13.0, #4707 follow-up) — the explicit signal
+    // accepted is now derived from (accepted/declined/no_response/
+    // not_at_issue). Watched by replay variance (FIELD_GROUPS medium).
+    price_caller_response: price.caller_response || null,
+    price_prepay_term: price.prepay_term || null,
+    price_tier_mentioned: price.tier_mentioned || null,
+    price_stated_by: price.stated_by || null,
+    // Presence only: the quote is verbatim free text (never diffed), but a
+    // later extractor that keeps the numbers and drops the quote must show
+    // up in replay variance (codex #4707 r3).
+    price_has_evidence: typeof price.evidence_quote === 'string' && price.evidence_quote.trim() ? true : (price.amount_usd != null ? false : null),
+    // prices[] (schema 1.13.0, #4707 follow-up) — one call can state more
+    // than one distinct price (a one-time price AND a monthly price); price
+    // above stays the single PRIMARY entry so every existing reader keeps
+    // working. Only the COUNT is flattened here — each array entry is not
+    // flattened individually, per the #4707 follow-up scope.
+    price_count: Array.isArray(svc.prices) ? svc.prices.length : null,
+    // Content signature (codex #4722 r1 P1) — price_count alone can't tell
+    // two 2-price extractions with a differing secondary entry apart.
+    // Watched by replay variance (FIELD_GROUPS medium).
+    prices_signature: pricesSignature(svc.prices),
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
     service_address_occupancy: property.service_address_occupancy || null,
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'
