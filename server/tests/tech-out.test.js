@@ -253,7 +253,7 @@ describe('markTechOut', () => {
     expect(createAlert).not.toHaveBeenCalled();
   });
 
-  test('runs in ONE transaction: tech row FOR UPDATE, tech-day fence, absence insert, alerts on the trx, summary persisted', async () => {
+  test('runs in ONE transaction under the tech-day fence ONLY (technician row read, never locked), absence insert, alerts on the trx, summary persisted', async () => {
     const early = stop({ id: 'early', window_start: '08:00:00', is_recurring: true, status: 'pending' });
     const late = stop({ id: 'late', window_start: '13:00:00', is_recurring: false, status: 'confirmed', first_name: 'Sam', last_name: 'Ortiz' });
     dayStopsQuery.mockImplementation(() => fakeQuery([early, late]));
@@ -263,12 +263,14 @@ describe('markTechOut', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     const trx = db.__lastTrx;
     const techRead = trx.__chains.find((x) => x.table === 'technicians').c;
-    expect(techRead.forUpdate).toHaveBeenCalled();
+    // The technician row is read, NEVER locked: a FOR UPDATE here is one
+    // half of a lock-order cycle with every writer's FOR SHARE taken outside
+    // its fence (auditor rounds on #4678); the fence is the only lock and
+    // the sweep covers a check that ran outside it.
+    expect(techRead.forUpdate).not.toHaveBeenCalled();
     expect(lockTechDays).toHaveBeenCalledWith(trx, [{ techId: TECH.id, date: DATE }]);
-    // Lock ORDER matches every assignment writer: the tech-day fence first,
-    // then the technician row — a concurrent assignment queues on the fence
-    // instead of deadlocking against a row lock taken in the other order.
-    expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(techRead.forUpdate.mock.invocationCallOrder[0]);
+    // Fence before the row read, same as every fence-first assignment writer.
+    expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(techRead.first.mock.invocationCallOrder[0]);
     // dayStopsQuery ran on the transaction, scoped to the absent tech, on_site excluded / en_route kept.
     expect(dayStopsQuery).toHaveBeenCalledWith(trx, expect.objectContaining({
       dateStr: DATE, technicianId: TECH.id,

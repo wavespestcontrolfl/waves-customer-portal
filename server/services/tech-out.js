@@ -14,11 +14,19 @@
  * <date>": `assertAssignableTechnician(techId, { conn, date })` reads it, so
  * every assignment writer that threads the destination date (board drag,
  * schedule edit, rebooker date moves, lead/booking/IB creation) refuses the
- * absent tech for that day. Mark-out runs in ONE transaction that first
- * takes the tech-day fence and then the technician row FOR UPDATE (the
- * same order assignment writers use), so an in-flight assignment finishes
- * before the day is snapshotted — nothing can land on the day between the
- * snapshot and the absence becoming visible.
+ * absent tech for that day. Mark-out runs in ONE transaction under the
+ * tech-day fence — the ONLY lock it takes. It deliberately does NOT lock
+ * the technician row: every assignment writer reads that row FOR SHARE
+ * (assertAssignableTechnician), and they do so at different points
+ * relative to their own fences (series rebooker, recurring creation /
+ * extension, grouping, call follow-ups …), so a FOR UPDATE here was one
+ * half of a lock-order cycle with each of them in turn (auditor rounds on
+ * #4678). With the fence alone: a writer that fences BEFORE its check is
+ * strictly serialized (its stop is in the snapshot, or its check sees the
+ * absence); a writer whose check ran outside this fence may land a stop
+ * on the day after the absence commits — that is exactly the bounded
+ * window sweepAbsentTechDays (5 min, late_arrival) exists for. Deadlocks
+ * become late arrivals, never 500s.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -355,13 +363,12 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
   }
 
   const result = await db.transaction(async (trx) => {
-    // Serialize with assignment writers: they take the tech-day fence FIRST
-    // and then read this row FOR SHARE inside the transaction
-    // (dispatch-assignment.js applyAssignment, rebooker.js, the IB movers).
-    // Same order here — fence, then the row FOR UPDATE — so a concurrent
-    // mark-out and assignment queue on the fence instead of deadlocking.
+    // The tech-day fence is the only lock (header comment): assignment
+    // writers that fence first queue here; the technician row is READ, not
+    // locked — a FOR UPDATE would cycle with every writer's FOR SHARE taken
+    // outside its fence, and the sweep already covers a stale check.
     await lockTechDays(trx, [{ techId: technicianId, date }]);
-    const tech = await trx('technicians').where({ id: technicianId }).forUpdate().first('id', 'name');
+    const tech = await trx('technicians').where({ id: technicianId }).first('id', 'name');
     if (!tech) throw serviceError(400, 'VALIDATION', 'Technician not found');
 
     let absence;
