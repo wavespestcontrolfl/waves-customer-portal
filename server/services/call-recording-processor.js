@@ -998,6 +998,13 @@ function phoneNearMissOfAni(extracted, ani) {
 function resolveCallContactPhone(call = {}, extractedPhone = null) {
   const extracted = String(extractedPhone || '').trim();
   if (isOutboundCall(call)) {
+    // The form callback's parent leg dials staff, not the prospect. Its
+    // server-written bridge metadata holds the actual customer destination.
+    let metadata = call.metadata || {};
+    try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+    if (call.source === 'lead-webhook-auto-bridge') {
+      return firstExternalPhone(metadata?.type === 'lead_auto_bridge' ? metadata.leadPhone : null, extracted);
+    }
     if (extracted && !samePhone(extracted, call.from_phone)) {
       if (phoneNearMissOfAni(extracted, call.to_phone)) {
         logger.warn(`[call-proc] Extracted callback ${maskPhone(extracted)} is a near-miss of dialed ${maskPhone(call.to_phone)} — keeping the dialed number (likely mistranscribed digits)`);
@@ -1020,6 +1027,14 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
     return firstExternalPhone(extracted, call.from_phone, call.to_phone);
   }
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
+}
+
+function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
+  return !!leadId && finalStatus === 'processed' && !nonLeadCall && !voicemailLeadPath
+    && call?.status === 'completed' && call.call_outcome !== 'voicemail'
+    && extracted?.is_voicemail === false && !extracted.is_spam
+    && extracted.call_summary !== EXTRACTION_INVALID_JSON_SUMMARY
+    && !!String(transcription || '').trim();
 }
 
 // Name normalization + nickname-aware first-name matching live in
@@ -3913,7 +3928,6 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
       // sent/worked. The customer is deliberately NOT promoted to 'won'
       // either — their pipeline_stage keeps mirroring the open lead.
       if (keepOpenForQuote || keepOpenForAssessment) {
-        const keepOpenReason = keepOpenForQuote ? 'quote promised' : 'assessment booked';
         const ownedOrUnclaimedOpen = (q) =>
           q.whereNull('customer_id').orWhere('customer_id', customerId);
         // The reused lead can carry a CLOSED status (lost / unresponsive /
@@ -3929,7 +3943,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         if (!currentLead) return false;
         const OPEN_LEAD_STATUSES = new Set(['new', 'contacted', 'estimate_sent', 'estimate_viewed']);
         const claimUpdates = { customer_id: customerId, updated_at: new Date() };
-        if (!OPEN_LEAD_STATUSES.has(String(currentLead.status || '').toLowerCase())) {
+        if (!keepOpenForAssessment && !OPEN_LEAD_STATUSES.has(String(currentLead.status || '').toLowerCase())) {
           claimUpdates.status = 'new';
         }
         const claimed = await inner('leads')
@@ -3938,12 +3952,19 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
           .where(ownedOrUnclaimedOpen)
           .update(claimUpdates);
         if (claimed) {
+          if (keepOpenForAssessment) {
+            await require('./lead-estimate-link').markLeadContactedFromEvidence({
+              database: inner, leadId, customerId,
+              evidenceType: 'assessment_booked', evidenceId: scheduledServiceId,
+              performedBy: 'AI Call Processor',
+            });
+          }
           await inner('lead_activities').insert({
             lead_id: leadId,
             activity_type: 'appointment_booked',
             description: keepOpenForQuote
               ? 'Appointment booked by phone — lead kept OPEN: agent promised to send a quote after the call'
-              : 'Appointment booked by phone — lead kept OPEN: an assessment is not a win',
+              : 'Appointment booked by phone — assessment contact recorded without marking a win',
             performed_by: 'system',
             metadata: JSON.stringify({
               customerId,
@@ -3953,7 +3974,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
             }),
           });
         }
-        logger.info(`[call-proc] Lead ${leadId} kept open (${keepOpenReason}) despite phone booking for ${callSid}`);
+        logger.info(`[call-proc] Lead ${leadId}: ${keepOpenForAssessment ? 'assessment contact recorded; no win' : 'kept open (quote promised)'} for ${callSid}`);
         return false;
       }
       // Customer 360 and lead mutations lock customer before lead. Acquire
@@ -13808,7 +13829,7 @@ const CallRecordingProcessor = {
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = defaultTechnicianId;
                     try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx });
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day });
                     } catch (eligErr) {
                       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                       logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
@@ -14327,7 +14348,7 @@ const CallRecordingProcessor = {
                 // triage note already says who was auto-assigned (or nobody).
                 if (insertData.technician_id) {
                   try {
-                    await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10) });
                   } catch (eligErr) {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
@@ -16548,7 +16569,13 @@ const CallRecordingProcessor = {
       createdCustomerFromCall,
     });
 
+    const liveLeadConversation = isLiveLeadConversation({
+      call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription,
+    });
     const finalized = await db.transaction(async (trx) => {
+      // Keep the established leads -> call_log lock order. The transition
+      // below must commit only with this processing token's final verdict.
+      if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
       const written = await trx('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)
@@ -16852,6 +16879,15 @@ const CallRecordingProcessor = {
               );
             })(),
           });
+      }
+      if (written > 0 && liveLeadConversation) {
+        const { markLeadContactedFromEvidence } = require('./lead-estimate-link');
+        await markLeadContactedFromEvidence({
+          database: trx, leadId, customerId: customerId || null,
+          evidenceType: 'live_conversation', evidenceId: call.id,
+          performedBy: 'AI Call Processor',
+          respondedAt: new Date(new Date(call.created_at).getTime() + Math.max(0, Number(call.duration_seconds) || 0) * 1000),
+        });
       }
       return written;
     });
@@ -17636,6 +17672,7 @@ CallRecordingProcessor._test = {
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
   resolveCallContactPhone,
+  isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   maskPhone,

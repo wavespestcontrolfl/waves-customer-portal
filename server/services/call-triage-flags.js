@@ -1232,8 +1232,14 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
       && commitStartOnTheHour
       && extraction.scheduling?.agent_committed_booking === true
       && hasAgentCommittedEvidence(extraction, opts.transcript, opts.callStartedAt)) {
+    // Owner ruling 2026-09-24: a commercial/HOA call is NEVER auto-booked on
+    // an agreed price alone — only Waves personnel dictating the booking on
+    // the recording (this same grounded agent commitment) clears
+    // commercial_requires_quote. The flag rides in failedOpenFlags so the
+    // office still gets the advisory card. Live miss (2026-09-23 audit): a
+    // confirmed $100 commercial booking fell to the lead-response flow.
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
-      if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
+      if (f === 'caller_not_authorized' || f === 'commercial_requires_quote') { failedOpenFlags.push(f); return false; }
       return true;
     });
   }

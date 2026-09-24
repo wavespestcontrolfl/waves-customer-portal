@@ -89,6 +89,8 @@ beforeEach(() => jest.clearAllMocks());
 
 describe('convertCallLeadOnPhoneBooking', () => {
   test('an assessment booking row: claims the lead, keeps it open, never promotes the customer (an assessment is not a win)', async () => {
+    const contact = jest.spyOn(require('../services/lead-estimate-link'), 'markLeadContactedFromEvidence')
+      .mockResolvedValue({ contacted: true });
     const inner = makeInner({ convertible: { id: 'lead-1', status: 'new' } });
     const trx = makeTrx(inner);
 
@@ -103,7 +105,12 @@ describe('convertCallLeadOnPhoneBooking', () => {
     const activity = inner._writes.inserts.find((w) => w.table === 'lead_activities');
     expect(activity.payload).toMatchObject({ activity_type: 'appointment_booked' });
     expect(JSON.parse(activity.payload.metadata)).toMatchObject({ triggerSource: 'appointment_booked_assessment' });
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('kept open (assessment booked)'));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('assessment contact recorded; no win'));
+    expect(contact).toHaveBeenCalledWith(expect.objectContaining({
+      database: inner, leadId: 'lead-1', customerId: 'cust-1',
+      evidenceType: 'assessment_booked', evidenceId: 'svc-1',
+    }));
+    contact.mockRestore();
   });
 
   test('converts an open lead: won + converted_at + is_qualified + activity row, in the nested txn', async () => {
