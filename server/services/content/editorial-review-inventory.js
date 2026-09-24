@@ -6,6 +6,7 @@ const TEMPLATE_TOKEN_RE = /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g;
 const DECORATIVE_HEADING_RE = /^(?:table of contents|contents|related (?:articles|guides|posts)|more (?:articles|guides|resources)|resources|sources|references|share this|about the author|get help|contact(?: us)?|ready to (?:start|book)|next steps?)(?:\s*[:!?])?$/i;
 const CTA_PARAGRAPH_RE = /^(?:(?:call|contact)\s+(?:us|today|now|for|to)\b|(?:book|schedule)\s+(?:now|today|an?|your|online|service)\b|request\s+(?:an?|your)\b|get (?:a |your )?(?:quote|estimate)\b|learn more\b|read more\b|share this\b|subscribe\b)/i;
 const NAV_PARAGRAPH_RE = /^(?:[-*+]\s*)?(?:\[[^\]]+\]\([^)]+\)(?:\s*[|·,]\s*)?){1,}$/;
+const FACTUAL_QUESTION_RE = /(?:\$|%|\b\d+(?:[.,]\d+)?\b|["“][^"”]{3,}["”]|\baccording to\b)/i;
 
 function splitFrontmatter(document) {
   const text = String(document || '');
@@ -25,19 +26,26 @@ function isNavigationParagraph(text) {
   return lines.length > 0 && lines.every((line) => /^(?:[-*+]\s*)?\[[^\]]+\]\([^)]+\)\s*$/.test(line));
 }
 
-function mdxInnerProse(raw) {
-  let text = String(raw || '').trim();
-  if (/^<[A-Z][A-Za-z0-9_.]*(?:\s[^<>]*?)?\/?>$/.test(text)) return '';
+function mdxInnerProse(raw, startingFence = null) {
+  let fenceMarker = startingFence;
+  const visible = [];
+  for (const line of String(raw || '').match(/[^\r\n]*(?:\r?\n|$)/g) || []) {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.[0];
+    if (marker) { fenceMarker = fenceMarker === marker ? null : (fenceMarker || marker); continue; }
+    if (!fenceMarker) visible.push(line);
+  }
+  let text = visible.join('').trim();
+  if (/^<[A-Z][A-Za-z0-9_.]*(?:\s[^<>]*?)?\/?>$/.test(text)) return { text: '', fenceMarker };
   text = text.replace(/^<[A-Z][A-Za-z0-9_.]*(?:\s[^<>]*?)?>\s*/, '');
   text = text.replace(/\s*<\/[A-Z][A-Za-z0-9_.]*\s*>$/, '');
-  return text.trim();
+  return { text: text.trim(), fenceMarker };
 }
 
 function proseParagraphs(body) {
   const chunks = [];
   const ranges = decorativeRanges(body);
   let offset = 0;
-  let fenced = false;
+  let fenceMarker = null;
   for (const match of String(body || '').matchAll(/[^\r\n](?:[\s\S]*?[^\r\n])?(?=(?:\r?\n){2,}|$)/g)) {
     const raw = match[0];
     offset = match.index || offset;
@@ -49,13 +57,16 @@ function proseParagraphs(body) {
     }
     if (segmentStart < raw.length) segments.push({ raw: raw.slice(segmentStart), offset: offset + segmentStart });
     for (const segment of segments) {
-      const fenceCount = (segment.raw.match(/^\s*```/gm) || []).length + (segment.raw.match(/^\s*~~~/gm) || []).length;
-      const insideFence = fenced || fenceCount > 1 || /^\s*```|^\s*~~~/.test(segment.raw);
-      if (fenceCount % 2 === 1) fenced = !fenced;
-      const text = mdxInnerProse(segment.raw);
-      if (!insideFence && text && !/^(?:import|export)\s/.test(text) && !/^<!--/.test(text)) {
+      const prose = mdxInnerProse(segment.raw, fenceMarker);
+      let { text } = prose;
+      fenceMarker = prose.fenceMarker;
+      while (text && CTA_PARAGRAPH_RE.test(text)) {
+        const firstSentence = /^[\s\S]*?(?:[.!?](?:\s+|$)|\r?\n)/.exec(text);
+        text = firstSentence ? text.slice(firstSentence[0].length).trim() : '';
+      }
+      if (text && !/^(?:import|export)\s/.test(text) && !/^<!--/.test(text)) {
         const inDecorativeSection = ranges.some((range) => range.decorative && segment.offset > range.start && segment.offset < range.end);
-        if (!inDecorativeSection && !CTA_PARAGRAPH_RE.test(text) && !isNavigationParagraph(text)) chunks.push({ id: `P${chunks.length + 1}`, text, offset: segment.offset });
+        if (!inDecorativeSection && !isNavigationParagraph(text)) chunks.push({ id: `P${chunks.length + 1}`, text, offset: segment.offset });
       }
     }
     offset += raw.length;
@@ -94,7 +105,7 @@ function sentenceCandidates(paragraphs) {
     for (const raw of sentences) {
       const passage = raw.trim();
       const words = passage.match(/[A-Za-z0-9][A-Za-z0-9'’-]*/g) || [];
-      if (words.length < 2 || passage.endsWith('?') || CTA_PARAGRAPH_RE.test(passage)) continue;
+      if (words.length < 2 || (passage.endsWith('?') && !FACTUAL_QUESTION_RE.test(passage)) || CTA_PARAGRAPH_RE.test(passage)) continue;
       candidates.push({ id: `C${candidates.length + 1}`, passage, paragraphId: paragraph.id });
     }
   }

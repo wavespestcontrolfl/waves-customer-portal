@@ -16,7 +16,8 @@ function uniqueCoverage(items, key, expected) {
 
 function validSourceReference(sourceIndex, sourceQuote, sources) {
   return Number.isInteger(sourceIndex) && sourceIndex >= 0 && sourceIndex < sources.length
-    && typeof sourceQuote === 'string' && sourceQuote.length > 0
+    && typeof sourceQuote === 'string' && sourceQuote.trim().length >= 8
+    && (sourceQuote.match(/[A-Za-z0-9]+/g) || []).length >= 2
     && sources[sourceIndex].excerpt.includes(sourceQuote);
 }
 
@@ -57,13 +58,19 @@ function exactQuotedPhrases(passage) {
   return phrases;
 }
 
+function isTrivialNumericInstruction(passage) {
+  return /^(?:check|empty|inspect|look|remove|walk)\b/i.test(String(passage || '').trim());
+}
+
 function validateClaimEvidence(claim, sources) {
   const kinds = ['quantitative', 'expert_quote', 'named_example', 'general', 'non_external'];
   const suitability = ['primary_authoritative', 'suitable_secondary', 'unsuitable', 'not_applicable'];
   if (!kinds.includes(claim.claimKind)) return `claim_kind:${claim.claimId}`;
   if (!suitability.includes(claim.sourceSuitability)) return `claim_suitability:${claim.claimId}`;
   const deterministicKind = deterministicClaimKind(claim.passage);
-  if (claim.verdict !== 'non_external' && deterministicKind && claim.claimKind !== deterministicKind) return `claim_kind_mismatch:${claim.claimId}`;
+  const allowedInstruction = `${claim.verdict}:${deterministicKind}` === 'non_external:quantitative'
+    && isTrivialNumericInstruction(claim.passage);
+  if (deterministicKind && !allowedInstruction && claim.claimKind !== deterministicKind) return `claim_kind_mismatch:${claim.claimId}`;
   if (claim.verdict === 'supported') {
     if (!validSourceReference(claim.sourceIndex, claim.sourceQuote, sources)) return `claim_quote:${claim.claimId}`;
     if (claim.sourceSuitability === 'unsuitable' || claim.sourceSuitability === 'not_applicable') return `claim_unsuitable:${claim.claimId}`;
