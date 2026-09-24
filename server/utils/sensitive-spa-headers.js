@@ -106,8 +106,13 @@ function isReservicePath(reqPath = '') {
 // token.js) carrying the lead id, and the page renders the lead's first
 // name and open slots around their address. Same contract as the reservice
 // shell: never indexed/archived, token never leaks via Referer, no caching.
+// Matched on the DECODED path and without requiring the token's dot shape
+// (Codex #4737 r16 P2): a percent-encoded token (%2E for the dots) still
+// reaches the page, so every /inspection/<segment> gets the headers.
 function isInspectionPath(reqPath = '') {
-  return /^\/inspection\/[^/]+\.[^/]+\.[^/]+\/?$/.test(String(reqPath || ''));
+  let p = String(reqPath || '');
+  try { p = decodeURIComponent(p); } catch { /* malformed escape — match the raw path */ }
+  return /^\/inspection\/[^/]+\/?$/i.test(p);
 }
 
 // Public interview self-scheduling page — 64-hex bearer token

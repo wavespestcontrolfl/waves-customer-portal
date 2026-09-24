@@ -675,6 +675,30 @@ describe('Codex #4737 r11 P2s: availability eligibility; race refresh never at a
   });
 });
 
+describe('Codex #4737 r16 P2: read-side eligibility spans every trusted profile', () => {
+  test('an older trusted (flow-created) profile holding the open assessment → GET already_booked, no slots offered', async () => {
+    firstResults.leads = { ...LEAD_ROW, customer_id: null };
+    // Newest provenance: the current prospect; an older outright prospect
+    // (cust-old) holds the open assessment.
+    firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-new' }) };
+    listResults.lead_activities = [
+      { metadata: JSON.stringify({ customer_id: 'cust-old' }) },
+      { metadata: JSON.stringify({ customer_id: 'cust-new' }) },
+    ];
+    const rows = {
+      'cust-new': { id: 'cust-new', phone: '9415550101', address_line1: '2 New St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 },
+      'cust-old': { id: 'cust-old', phone: '9415550101', address_line1: '1 Old St', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.45, longitude: -82.55 },
+    };
+    firstResults.customers = (q) => rows[q.conds.id] || null;
+    listResults.scheduled_services = (q) => (q.conds.customer_id === 'cust-old'
+      ? [{ id: 'ss-old', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '09:30', service_type: 'Waves Assessment', reschedule_token: 'old-tok' }]
+      : []);
+    const res = await callGet(mintLeadConsultationToken(LEAD_ID));
+    expect(res.body.state).toBe('already_booked');
+    expect(mockBuildAvailability).not.toHaveBeenCalled();
+  });
+});
+
 describe('Codex #4737 r12 pre-push: closed leads stop; untrusted sibling properties are never reused', () => {
   // Codex #4737 r13 P0: checked BEFORE any visit is read — a closed lead
   // whose customer has an open assessment reveals nothing.

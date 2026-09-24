@@ -1304,7 +1304,7 @@ router.get('/:token', async (req, res, next) => {
     const custRow = await loadTrustedCustomer(db, lead, verified);
     const leadPayload = buildLeadPayload(lead, custRow);
 
-    const eligibility = await resolveEligibility(db, lead, custRow);
+    const eligibility = await readEligibility(lead, custRow, verified);
     if (eligibility.state !== 'ok') {
       return res.json(eligibilityResponse(eligibility, leadPayload));
     }
@@ -1380,7 +1380,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     // Same eligibility predicate as GET / find-slots / commit (Codex #4737
     // r11 P2): a converted or already-booked lead gets the terminal shape
     // before any geocoding or availability work.
-    const eligibility = await resolveEligibility(db, lead, custRow);
+    const eligibility = await readEligibility(lead, custRow, verified);
     if (eligibility.state !== 'ok') {
       return res.json(eligibilityResponse(eligibility, buildLeadPayload(lead, custRow)));
     }
@@ -1441,7 +1441,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     // (round-10 P2) — a converted or already-booked lead must stop here,
     // BEFORE the paid parseWhen LLM call and a geocode/availability build,
     // not just be refused by the commit at the end.
-    const eligibility = await resolveEligibility(db, lead, custRow);
+    const eligibility = await readEligibility(lead, custRow, verified);
     if (eligibility.state !== 'ok') {
       return res.json(eligibilityResponse(eligibility, buildLeadPayload(lead, custRow)));
     }
@@ -1829,6 +1829,24 @@ async function commitVerdict(conn, leadId, token, customerId) {
 
 // The first non-ok eligibility across the booked profile and the lead's
 // other profiles, else the booked profile's own.
+// Read-side eligibility across EVERY trusted profile of the lead (Codex
+// #4737 r16 P2): the booking dedupes lead-wide, so GET / availability /
+// find-slots must show another trusted profile's open assessment BEFORE
+// offering times the commit would refuse. Only trusted profiles are read,
+// so nothing about an untrusted one is revealed.
+async function readEligibility(lead, custRow, token) {
+  const own = await resolveEligibility(db, lead, custRow);
+  if (own.state !== 'ok') return own;
+  const ids = await trustedLeadProfileIds(db, lead.id, token, custRow?.id || null);
+  for (const id of ids) {
+    if (custRow && String(id) === String(custRow.id)) continue;
+    const profile = await loadCustomer(db, id);
+    const other = profile ? await resolveEligibility(db, lead, profile) : null;
+    if (other && other.state !== 'ok') return other;
+  }
+  return own;
+}
+
 // The ALREADY_BOOKED answer from FRESH state only: the lead reloaded, its
 // trusted customer re-resolved with the token, and the profile set built
 // without any caller-supplied seed — so nothing is revealed about a
@@ -2004,7 +2022,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // geocode, check the service area, or take the lock at all. NOT
     // authoritative on its own — the lock-protected re-checks in phase 1/2
     // below are what actually closes the concurrent-commit race.
-    const preCheck = await resolveEligibility(db, lead, custRow);
+    const preCheck = await readEligibility(lead, custRow, verified);
     if (preCheck.state !== 'ok') {
       return res.json(eligibilityResponse(preCheck, leadPayload));
     }

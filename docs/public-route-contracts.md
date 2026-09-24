@@ -1669,7 +1669,8 @@ same shape as already_booked); `gone` (lead deleted/missing); `out_of_area`
 (a resolved address — commonly the linked customer's own stored one — sits
 outside the service area; 200, not an error, since the page still has to
 render the out-of-area stop card with the waitlist prompt: `{ state:
-'out_of_area', county, lead }`, no `availability` key at all). Availability
+'out_of_area', county, lead, waitlist_ticket }`, no `availability` key at
+all). Availability
 needs coordinates (the linked customer's stored coords, else a geocode of
 whichever address is on file); with none resolvable, `availability: null`
 and `needs_address: true` — the page asks for an address via `POST
@@ -1694,7 +1695,7 @@ an empty one. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
 a raw `resolveServiceAddress` — a directly supplied out-of-area address
-422s `{ error: 'out_of_area', county }` or 503s
+422s `{ error: 'out_of_area', county, waitlist_ticket }` or 503s
 `{ error: 'service_area_unavailable' }` instead of returning slot
 availability for a location that could never survive the commit handler's
 own area check. `resolveServiceAddress` and `checkServiceArea` have no
@@ -1716,7 +1717,7 @@ resolved location including a customer's stored coordinates: county via
 configured (a null county is NOT permission — 503
 `{ error: 'service_area_unavailable' }`, recoverable), else the box test
 `services/service-area.js` enforces explicitly. Out of area 422s
-`{ error: 'out_of_area', county }` and books nothing; an unresolvable
+`{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
 address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
 The slot is re-validated against a fresh single-day
 availability build (same anti-forgery model as reservice-public) before
@@ -1758,7 +1759,14 @@ reservice-public's shape (fresh `availability` attached). Office alert:
 `createSelfBooking`'s internal Twilio alert with `alertLabel` swapped to
 "🔁 Free consultation self-booked:" — no customer comms beyond
 `createSelfBooking`'s own standard confirmation. `POST /:token/waitlist`
-(the out-of-area stop's one-field ask): body `{ email, county? }`, inserts
+(the out-of-area stop's one-field ask): body `{ email, waitlist_ticket }`.
+`waitlist_ticket` is the short-lived (1h) HMAC ticket minted ONLY with a
+server-verified out-of-area answer (GET `out_of_area`, or the
+`/availability`, `/find-slots` and commit 422s above), binding this lead
+and the region the server found; a caller-supplied `county` is ignored.
+No/invalid/expired ticket, another lead's ticket, or a lead no longer
+eligible (closed, converted, already booked) → the generic 404 and nothing
+is written. With a valid ticket it inserts
 (idempotent on email, `onConflict('email').ignore()`) a
 `newsletter_subscribers` row tagged `expansion_waitlist:<county>` at status
 `waitlist` (deliberately not `active` — buildSubscriberQuery selects
