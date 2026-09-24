@@ -630,6 +630,14 @@ router.post('/dismiss', async (req, res) => {
     // and a merge there cannot interleave (customer-dedupe.js).
     await db.transaction(async (trx) => {
       await acquirePairAdjudicationLock(trx, a, b);
+      // MERGE, not ignore (Codex round 1 P1): revertMerge stamps this same
+      // row with the UNDO_MERGE_DISMISSAL_REASON sentinel, which
+      // findDuplicateGroups treats as non-hiding by default specifically so
+      // the pair stays reviewable here. An .ignore() would leave that
+      // sentinel in place forever — the operator's explicit "not a
+      // duplicate" verdict must replace it (and any prior verdict's stale
+      // reason/timestamp) so the pair is actually excluded from the queue
+      // going forward, the ordinary dismissal contract.
       await trx('customer_duplicate_dismissals')
         .insert({
           customer_id_a: a,
@@ -638,7 +646,7 @@ router.post('/dismiss', async (req, res) => {
           created_by: performedBy(req),
         })
         .onConflict(['customer_id_a', 'customer_id_b'])
-        .ignore();
+        .merge(['reason', 'created_by']);
     });
     res.json({ ok: true });
   } catch (err) {

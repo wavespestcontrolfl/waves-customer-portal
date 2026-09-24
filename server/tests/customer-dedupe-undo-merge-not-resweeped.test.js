@@ -109,4 +109,41 @@ jest.setTimeout(60000);
     expect(journals).toHaveLength(1);
     expect(after.active).toBe(true);
   });
+
+  // Codex round 1 P1: a later EXPLICIT "not a duplicate" verdict on the same
+  // pair (the operator manually deciding, from the still-reviewable queue,
+  // that these really are two different people) must REPLACE the
+  // undo-merge sentinel, not be silently ignored by it — otherwise the pair
+  // would stay visible/mergeable forever despite the operator's real
+  // dismissal. Continues from the previous test's end state (undone,
+  // sentinel-dismissed, not re-merged).
+  test('an explicit dismiss after undo replaces the sentinel and the pair leaves the review queue', async () => {
+    const before = await db('customer_duplicate_dismissals')
+      .where((q) => q.where({ customer_id_a: winnerId, customer_id_b: loserId }).orWhere({ customer_id_a: loserId, customer_id_b: winnerId }))
+      .first();
+    expect(before?.reason).toBe(dedupe.UNDO_MERGE_DISMISSAL_REASON);
+
+    // Same write shape as POST /dismiss (admin-customer-duplicates.js):
+    // insert-or-merge on the ordered pair, under the pair's adjudication lock.
+    const [a, b] = winnerId < loserId ? [winnerId, loserId] : [loserId, winnerId];
+    await db.transaction(async (trx) => {
+      await dedupe.acquirePairAdjudicationLock(trx, a, b);
+      await trx('customer_duplicate_dismissals')
+        .insert({ customer_id_a: a, customer_id_b: b, reason: 'confirmed two different people', created_by: 'test:owner-dismiss' })
+        .onConflict(['customer_id_a', 'customer_id_b'])
+        .merge(['reason', 'created_by']);
+    });
+
+    const after = await db('customer_duplicate_dismissals')
+      .where((q) => q.where({ customer_id_a: winnerId, customer_id_b: loserId }).orWhere({ customer_id_a: loserId, customer_id_b: winnerId }))
+      .first();
+    expect(after.reason).toBe('confirmed two different people');
+
+    // The sentinel is gone — the pair now leaves the review queue like any
+    // ordinary dismissal.
+    const visibleGroups = await dedupe.findDuplicateGroups(db);
+    const stillVisible = visibleGroups.some((g) => String(g.winner.id) === String(winnerId)
+      && g.candidates.some((c) => String(c.loser.id) === String(loserId)));
+    expect(stillVisible).toBe(false);
+  });
 });
