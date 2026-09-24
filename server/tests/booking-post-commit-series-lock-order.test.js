@@ -235,3 +235,64 @@ describe('other checkActiveSeriesLocked / acquireSeriesCreateLocks callers audit
     expect(prePassAt).toBeGreaterThan(callerRowLockAt);
   });
 });
+
+describe('admin-schedule.js PUT /:id/update-details — combined-payment lock before the customer row lock (#4716 pre-push)', () => {
+  // executeMerge (customer-dedupe.js) takes pay.combined.customer
+  // UNCONDITIONALLY before its `customers` FOR UPDATE, and the customer
+  // editors (admin-customers.js) follow the same order for a payer change.
+  // The r2 commit moved this route's customer row lock into the comms-lock
+  // section, but left the combined-payment lock (taken only when the save
+  // touches payer_id/self_pay_override) AFTER it — the exact inversion this
+  // pin guards against.
+  test('the payer/self_pay_override combined-payment lock precedes the customers FOR UPDATE row lock', () => {
+    const txnStartAt = adminSchedule.indexOf("const commsPeek = await trx('scheduled_services')");
+    expect(txnStartAt).toBeGreaterThan(-1);
+    const commsLockAt = adminSchedule.indexOf('if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);', txnStartAt);
+    expect(commsLockAt).toBeGreaterThan(txnStartAt);
+    const combinedLockAt = adminSchedule.indexOf(
+      "await require('../services/pay-combined').lockCombinedCustomers(trx, [String(provCust.customer_id)]);",
+      commsLockAt,
+    );
+    expect(combinedLockAt).toBeGreaterThan(commsLockAt);
+    const rowLockAt = adminSchedule.indexOf(
+      "if (commsPeek) await trx('customers').where({ id: commsPeek.customer_id }).forUpdate().first('id');",
+      combinedLockAt,
+    );
+    expect(rowLockAt).toBeGreaterThan(combinedLockAt);
+  });
+
+  test('regression: the combined-payment lock block sits strictly between the comms lock and the customer row lock, with no scheduled_services lock/write in between', () => {
+    const txnStartAt = adminSchedule.indexOf("const commsPeek = await trx('scheduled_services')");
+    const commsLockAt = adminSchedule.indexOf('if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);', txnStartAt);
+    const rowLockAt = adminSchedule.indexOf(
+      "if (commsPeek) await trx('customers').where({ id: commsPeek.customer_id }).forUpdate().first('id');",
+      commsLockAt,
+    );
+    const gap = adminSchedule.slice(commsLockAt, rowLockAt);
+    expect(gap).toMatch(/lockCombinedCustomers\(trx, \[String\(provCust\.customer_id\)\]\)/);
+    expect(gap).not.toMatch(/scheduled_services'\)[^;]*\.forUpdate\(/s);
+    expect(gap).not.toMatch(/scheduled_services'\)[^;]*\.update\(/s);
+  });
+});
+
+describe('booking.js activateWizardSeries — no combined-payment lock in this transaction (#4716 pre-push, confirmed no-op)', () => {
+  // activateWizardSeries never requires pay-combined or calls
+  // lockCombinedCustomers, and never writes payer_id/self_pay_override — it
+  // only creates/activates a recurring series. There is no combined-payment
+  // advisory lock in this function for the customer-row lock (added in r2)
+  // to invert against.
+  test('activateWizardSeries never references pay-combined or lockCombinedCustomers', () => {
+    const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
+    expect(fnAt).toBeGreaterThan(-1);
+    // Bound the search to this function's body by the next top-level const
+    // definition that follows it in the file (replayActivation's call site
+    // sits well after the function's closing brace).
+    const nextAnchorAt = booking.indexOf('const replayActivation = await activateWizardSeries(replayParent);', fnAt);
+    expect(nextAnchorAt).toBeGreaterThan(fnAt);
+    const fnBody = booking.slice(fnAt, nextAnchorAt);
+    expect(fnBody).not.toMatch(/pay-combined/);
+    expect(fnBody).not.toMatch(/lockCombinedCustomers/);
+    expect(fnBody).not.toMatch(/payer_id/);
+    expect(fnBody).not.toMatch(/self_pay_override/);
+  });
+});
