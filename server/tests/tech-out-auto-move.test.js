@@ -242,9 +242,10 @@ describe('autoAssignParkedAlert', () => {
     expect(options.notifyCustomer).toBeUndefined();
     expect(options.notifyRequested).toBeUndefined();
 
-    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, resolvedBy: 'staff-1', auto: true }));
-    const rawCall = db.raw.mock.calls.find(([sql, bindings]) => /COALESCE\(payload/.test(sql) && /auto_moved/.test(bindings[0]));
-    expect(JSON.parse(rawCall[1][0])).toMatchObject({ auto_moved: { to_technician_id: CANDIDATE.id } });
+    // The alert resolves inside the move's own transaction (beforeMove) —
+    // never in a second transaction after the move commits.
+    expect(resolveAlert).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
     expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: JOB_ID, actorId: 'staff-1' });
   });
 
@@ -306,6 +307,22 @@ describe('selection matches the commit policy', () => {
     expect(SmartRebooker.reschedule.mock.calls[0][5].excludeServiceIds).toEqual([JOB_ID]);
   });
 
+  test('a lapsed estimate hold on the candidate\'s day does not count as a conflict', async () => {
+    const { _test: { fitsWindow } } = require('../services/tech-out-auto-move');
+    const others = query([]);
+    const queue = [others, query([])];
+    db.mockImplementation(() => queue.shift());
+
+    const fit = await fitsWindow(baseStop(), CANDIDATE, DATE);
+
+    expect(fit).toEqual({ fits: true });
+    const predicate = others.where.mock.calls.find(([arg]) => typeof arg === 'function')[0];
+    const q = { whereNull: jest.fn(() => q), orWhereRaw: jest.fn(() => q) };
+    predicate(q);
+    expect(q.whereNull).toHaveBeenCalledWith('reservation_expires_at');
+    expect(q.orWhereRaw).toHaveBeenCalledWith('reservation_expires_at > NOW()');
+  });
+
   test('schedule blocks refuse a candidate on the arrival-routing path too', async () => {
     const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('../services/scheduling/arrival-route');
     arrivalWindowRoutingEnabled.mockReturnValue(true);
@@ -328,9 +345,13 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
     await autoAssignParkedAlert({ alertId: ALERT_ID });
     return SmartRebooker.reschedule.mock.calls[0][5].beforeMove;
   }
+  function asTrx(fn) {
+    fn.raw = db.raw;
+    return fn;
+  }
   function trxReturning(absence, alert) {
-    const rows = [absence, alert];
-    return jest.fn(() => query(rows.shift()));
+    const rows = [absence, alert, {}];
+    return asTrx(jest.fn(() => query(rows.shift())));
   }
 
   async function capturedGuardWithSiblings() {
@@ -344,14 +365,15 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
   test('an excluded sibling left the absent day before the move: refuses as stale', async () => {
     const guard = await capturedGuardWithSiblings();
     const rows = [[], { id: 'abs-1' }, { id: ALERT_ID }];
-    await expect(guard(jest.fn(() => query(rows.shift())))).rejects.toMatchObject({ code: 'TECH_OUT_EXCLUSION_STALE' });
+    await expect(guard(asTrx(jest.fn(() => query(rows.shift()))))).rejects.toMatchObject({ code: 'TECH_OUT_EXCLUSION_STALE' });
+    expect(resolveAlert).not.toHaveBeenCalled();
   });
 
   test('excluded siblings still on the absent day: locked FOR SHARE and the move proceeds', async () => {
     const guard = await capturedGuardWithSiblings();
     const siblingRead = query([{ id: 'job-sib' }]);
-    const rows = [siblingRead, query({ id: 'abs-1' }), query({ id: ALERT_ID })];
-    await expect(guard(jest.fn(() => rows.shift()))).resolves.toBeUndefined();
+    const rows = [siblingRead, query({ id: 'abs-1' }), query({ id: ALERT_ID }), query({})];
+    await expect(guard(asTrx(jest.fn(() => rows.shift())))).resolves.toBeUndefined();
     expect(siblingRead.whereIn).toHaveBeenCalledWith('id', ['job-sib']);
     expect(siblingRead.forShare).toHaveBeenCalled();
   });
@@ -366,9 +388,13 @@ describe('in-transaction still-parked recheck (beforeMove)', () => {
     await expect(guard(trxReturning({ id: 'abs-1' }, null))).rejects.toMatchObject({ code: 'TECH_OUT_ALERT_RESOLVED' });
   });
 
-  test('absence still active and alert still open: the move proceeds', async () => {
+  test('absence still active and alert still open: the move proceeds and the alert resolves on the SAME transaction', async () => {
     const guard = await capturedGuard();
-    await expect(guard(trxReturning({ id: 'abs-1' }, { id: ALERT_ID }))).resolves.toBeUndefined();
+    const trx = trxReturning({ id: 'abs-1' }, { id: ALERT_ID });
+    await expect(guard(trx)).resolves.toBeUndefined();
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: ALERT_ID, trx, auto: true }));
+    const rawCall = db.raw.mock.calls.find(([sql, bindings]) => /COALESCE\(payload/.test(sql) && /auto_moved/.test(bindings[0]));
+    expect(JSON.parse(rawCall[1][0])).toMatchObject({ auto_moved: { to_technician_id: CANDIDATE.id } });
   });
 
   test('a stale refusal from the mover is a quiet no-op: no further candidates, no annotation', async () => {

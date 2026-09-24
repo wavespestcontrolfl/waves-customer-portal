@@ -125,6 +125,9 @@ async function fitsWindow(stop, tech, date) {
       .where({ scheduled_date: date, technician_id: tech.id })
       .whereNot('id', stop.id)
       .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+      // A lapsed estimate hold occupies nothing — same predicate as the
+      // rebooker's kept-tech check and scheduling/occupancy.js.
+      .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
       .select('window_start', 'window_end', 'estimated_duration_minutes');
     const conflict = others.some((row) => {
       const oStart = timeToMinutes(row.window_start);
@@ -260,7 +263,7 @@ const EXCLUSION_STALE = 'TECH_OUT_EXCLUSION_STALE';
  * only other lock is the ABSENT tech-day fence, which the mover does not
  * take), so the wait cannot cycle.
  */
-function makeStillParkedGuard({ alertId, absentTechId, date, stopId, excludeServiceIds }) {
+function makeStillParkedGuard({ alertId, absentTechId, date, stopId, excludeServiceIds, toTechId, actorId }) {
   return async (trx) => {
     // The commit probe skips excludeServiceIds; that is only sound while
     // each of them still sits open on the absent tech's day. Re-read them
@@ -296,6 +299,13 @@ function makeStillParkedGuard({ alertId, absentTechId, date, stopId, excludeServ
     if (!alert) {
       throw Object.assign(new Error('Overflow alert was already resolved'), { statusCode: 409, code: 'TECH_OUT_ALERT_RESOLVED' });
     }
+    // Resolve the card on the MOVE's own transaction: the stop moving and
+    // its alert closing commit (or roll back) together, so a crash between
+    // them can never leave a moved stop with an open card. resolveAlert
+    // broadcasts only after the outer commit. auto:true — a systemic
+    // resolution, not a manual dismiss (same convention as clearTechOut).
+    await mergePayload(trx, alertId, { auto_moved: { to_technician_id: toTechId, at: new Date().toISOString() } });
+    await resolveAlert({ id: alertId, resolvedBy: actorId || null, trx, auto: true });
   };
 }
 
@@ -412,6 +422,75 @@ async function eligibleRankedCandidates(stop, absentTechId, date) {
   return rankCandidates(stop, eligible, date);
 }
 
+/** Refusal reason for the last mover error once every attempt is spent. */
+function refusalReason(lastErr) {
+  if (!lastErr) return 'no_eligible_candidate';
+  // Grouped into a visit between our read and the move: the same
+  // manual-decision rule as the up-front visit_id check.
+  if (lastErr.code === 'VISIT_MEMBERSHIP_CHANGED') return 'grouped_visit_manual';
+  if (lastErr.code === EXCLUSION_STALE) return 'schedule_changed';
+  return `move_failed: ${lastErr.message}`;
+}
+
+/**
+ * Try the ranked candidates in order through the canonical mover. The
+ * alert resolves inside the successful move's own transaction (beforeMove),
+ * so anything thrown here means nothing committed for that candidate.
+ */
+async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window, excludeServiceIds, candidates }) {
+  let lastErr = null;
+  for (const candidate of candidates) {
+    try {
+      await SmartRebooker.reschedule(
+        stop.id, date, window, 'tech_out_auto_move', 'system',
+        {
+          technicianId: candidate.tech.id,
+          excludeServiceIds,
+          keepStatus: true,
+          seriesPolicy: 'single',
+          // Never the whole-visit mover: with visitPolicy 'single' the unit
+          // branch is skipped and the single-row CAS carries expect.visit_id
+          // IS NULL, so a stop grouped after our read refuses (409) instead
+          // of widening into a move of every member. The unit mover honors
+          // `expect` only on its no-op branch, so pinning expect alone is
+          // not enough.
+          visitPolicy: 'single',
+          actorId: actorId || null,
+          // Atomic re-assertion, inside the mover's own move transaction, of
+          // exactly what was read: a concurrent change (manual reassignment,
+          // a second run, a status edit) misses this CAS as a plain 409.
+          expect: {
+            visit_id: null,
+            technician_id: absentTechId,
+            scheduled_date: date,
+            window_start: stop.window_start,
+            window_end: stop.window_end,
+            status: stop.status,
+          },
+          moveGuard: makeCapabilityGuard(),
+          beforeMove: makeStillParkedGuard({
+            alertId, absentTechId, date, stopId: stop.id, excludeServiceIds, toTechId: candidate.tech.id, actorId,
+          }),
+        },
+      );
+    } catch (err) {
+      if (err && STALE_CODES.has(err.code)) return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
+      lastErr = err;
+      // Same answer for every candidate: stop and let the next run re-read.
+      if (err && (err.code === EXCLUSION_STALE || err.code === 'VISIT_MEMBERSHIP_CHANGED')) break;
+      continue;
+    }
+    // Committed (stop + alert). The board broadcast is best-effort.
+    try {
+      await emitDispatchJobUpdate({ jobId: stop.id, actorId: actorId || null });
+    } catch (broadcastErr) {
+      logger.warn(`[tech-out-auto-move] board broadcast failed for ${stop.id}: ${broadcastErr.message}`);
+    }
+    return { moved: true, alert_id: alertId, job_id: stop.id, to_technician_id: candidate.tech.id };
+  }
+  return { moved: false, alert_id: alertId, reason: refusalReason(lastErr) };
+}
+
 /**
  * Take ONE open `tech_out_overflow` alert and try to move its stop to
  * another eligible technician at the same date + window. Returns:
@@ -452,75 +531,11 @@ async function autoAssignParkedAlert({ alertId, actorId } = {}) {
     return { moved: false, alert_id: alertId, reason: 'no_eligible_candidate' };
   }
 
-  let lastErr = null;
-  for (const candidate of ranked.slice(0, MAX_MOVE_ATTEMPTS)) {
-    try {
-      await SmartRebooker.reschedule(
-        stop.id, date, window, 'tech_out_auto_move', 'system',
-        {
-          technicianId: candidate.tech.id,
-          excludeServiceIds,
-          keepStatus: true,
-          seriesPolicy: 'single',
-          // Never the whole-visit mover: with visitPolicy 'single' the unit
-          // branch is skipped and the single-row CAS carries expect.visit_id
-          // IS NULL, so a stop grouped after our read refuses (409) instead
-          // of widening into a move of every member. The unit mover honors
-          // `expect` only on its no-op branch, so pinning expect alone is
-          // not enough.
-          visitPolicy: 'single',
-          actorId: actorId || null,
-          // Atomic re-assertion, inside the mover's own move transaction, of
-          // exactly what this function read above: a concurrent change
-          // (manual reassignment, a second auto-move run, a status edit)
-          // misses this CAS and surfaces as a plain 409 here, caught below
-          // and left as a parked, annotated, no-op — never a stale overwrite.
-          expect: {
-            // Pinned ungrouped (see visitPolicy above) — grouped visits stay manual.
-            visit_id: null,
-            technician_id: absentTechId,
-            scheduled_date: date,
-            window_start: stop.window_start,
-            window_end: stop.window_end,
-            status: stop.status,
-          },
-          moveGuard: makeCapabilityGuard(),
-          beforeMove: makeStillParkedGuard({ alertId, absentTechId, date, stopId: stop.id, excludeServiceIds }),
-        },
-      );
-      await db.transaction(async (trx) => {
-        await mergePayload(trx, alertId, {
-          auto_moved: { to_technician_id: candidate.tech.id, at: new Date().toISOString() },
-        });
-        // auto:true — a systemic (batch) resolution, not a per-card manual
-        // dismiss, same convention clearTechOut uses (see tech-out.js).
-        await resolveAlert({ id: alertId, resolvedBy: actorId || null, trx, auto: true });
-      });
-      try {
-        await emitDispatchJobUpdate({ jobId: stop.id, actorId: actorId || null });
-      } catch (broadcastErr) {
-        logger.warn(`[tech-out-auto-move] board broadcast failed for ${stop.id}: ${broadcastErr.message}`);
-      }
-      return { moved: true, alert_id: alertId, job_id: stop.id, to_technician_id: candidate.tech.id };
-    } catch (err) {
-      if (err && STALE_CODES.has(err.code)) {
-        return { moved: false, alert_id: alertId, skipped: 'already_resolved' };
-      }
-      lastErr = err;
-      // Same answer for every candidate: stop and let the next run re-read.
-      if (err && err.code === EXCLUSION_STALE) break;
-      // Membership changed: no other candidate can make it ungrouped again.
-      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED') break;
-    }
-  }
-
-  // A membership-change CAS miss means the stop got grouped into a visit
-  // between our pre-read and the move — the same manual-decision rule as
-  // the up-front visit_id check, not a candidate-availability failure.
-  let reason = 'no_eligible_candidate';
-  if (lastErr && lastErr.code === 'VISIT_MEMBERSHIP_CHANGED') reason = 'grouped_visit_manual';
-  else if (lastErr && lastErr.code === EXCLUSION_STALE) reason = 'schedule_changed';
-  else if (lastErr) reason = `move_failed: ${lastErr.message}`;
+  const outcome = await attemptMoves({
+    alertId, actorId, stop, date, absentTechId, window, excludeServiceIds, candidates: ranked.slice(0, MAX_MOVE_ATTEMPTS),
+  });
+  if (outcome.moved || outcome.skipped) return outcome;
+  const { reason } = outcome;
   await annotateAttempt(alertId, reason);
   return { moved: false, alert_id: alertId, reason };
 }
