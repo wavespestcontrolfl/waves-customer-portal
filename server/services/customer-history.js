@@ -423,6 +423,7 @@ async function listCustomerComms(db, customer, query = {}) {
         AND prior.direction = 'outbound'
         AND COALESCE(prior_legacy.status, prior.delivery_status, '') IN ('queued', 'sent', 'delivered')
         AND COALESCE(prior_legacy.message_type, prior.message_type, '') <> 'internal_alert'
+        AND prior_conversation.customer_id = c.customer_id
         AND ${currentPeer} <> '' AND ${currentEndpoint} <> ''
         AND ${priorPeer} = ${currentPeer} AND ${priorEndpoint} = ${currentEndpoint}
         AND prior.created_at < m.created_at
