@@ -153,7 +153,9 @@ function legacyStressIsFixed(assessment, adjustedScores) {
   const aiRead = legacyAiRead(assessment);
   const ai = aiRead ? aiRead.stress_damage : assessment.stress_damage;
   const typedStress = adjustedScores?.stress_damage;
-  const earlierEntry = aiRead && assessment.stress_damage != null && assessment.stress_damage !== '';
+  const stressCleared = adjustedScores != null && Object.prototype.hasOwnProperty.call(adjustedScores, 'stress_damage')
+    && !(typedStress != null && typedStress !== '' && Number.isFinite(Number(typedStress)));
+  const earlierEntry = aiRead && !stressCleared && assessment.stress_damage != null && assessment.stress_damage !== '';
   return (ai != null && ai !== '') || earlierEntry
     || (typedStress != null && typedStress !== '' && Number.isFinite(Number(typedStress)));
 }
@@ -171,7 +173,9 @@ function legacyConfirmFinalScores(assessment, adjustedScores) {
   // scoreValue's 0 default.
   const typed = (key) => adjustedScores?.[key] != null && adjustedScores[key] !== ''
     && Number.isFinite(Number(adjustedScores[key]));
-  const saved = (key) => (assessment[key] != null ? scoreValue(assessment[key]) : null);
+  // A key posted as null/blank clears an earlier fill; an omitted key keeps it.
+  const cleared = (key) => adjustedScores != null && Object.prototype.hasOwnProperty.call(adjustedScores, key) && !typed(key);
+  const saved = (key) => (!cleared(key) && assessment[key] != null ? scoreValue(assessment[key]) : null);
   const finalScores = Object.fromEntries(
     ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
       .map((key) => [key, aiKnown(key) ? scoreValue(aiValue(key)) : (typed(key) ? scoreValue(adjustedScores[key]) : saved(key))]),
@@ -187,7 +191,7 @@ function legacyConfirmFinalScores(assessment, adjustedScores) {
   // A pending save stores Stress only when it is real (AI-read or typed —
   // legacyStressIsFixed), so a stored Stress the AI didn't read is the
   // technician's earlier entry: keep it.
-  if (assessment.stress_damage != null && assessment.stress_damage !== '' && !assessment.confirmed_by_tech) {
+  if (!cleared('stress_damage') && assessment.stress_damage != null && assessment.stress_damage !== '' && !assessment.confirmed_by_tech) {
     finalScores.stress_damage = scoreValue(assessment.stress_damage);
     return finalScores;
   }

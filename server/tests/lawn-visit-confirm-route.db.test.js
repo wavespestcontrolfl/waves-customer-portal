@@ -318,6 +318,14 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, fungus_control: 40, color_health: 70, stress_damage: 40 });
   });
 
+  test('clearing an earlier legacy fill (posted as null) removes it', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
+    await request(assessment.id, { adjustedScores: { fungus_control: 60 } });
+    const cleared = await request(assessment.id, { adjustedScores: { fungus_control: null, color_health: 70 } });
+    expect(cleared.body).toMatchObject({ confirmed: false, missingScores: ['fungus_control'] });
+    expect(cleared.body.assessment.fungus_control).toBeNull();
+  });
+
   test('legacy reload sends the server AI read, so a partial fill stays editable', async () => {
     const { assessment, visit } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false, service: true });
     await request(assessment.id, { adjustedScores: { fungus_control: 60 } });

@@ -129,6 +129,7 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
   const adjusted = adjustedScores && typeof adjustedScores === 'object' ? adjustedScores : {};
   const ai = aiScores && typeof aiScores === 'object' ? aiScores : null;
   const present = (value) => value != null && value !== '';
+  const cleared = (key) => Object.prototype.hasOwnProperty.call(adjusted, key) && !numericOverride(adjusted[key]);
   // An override counts only when it is a finite number (or a non-blank string
   // that parses to one) — a blank, whitespace or malformed value falls back to
   // the stored score exactly as the legacy path does, never to 0.
@@ -142,7 +143,11 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
     } else if (present(assessment[key])) {
       return scoreValue(assessment[key]);
     }
-    return numericOverride(adjusted[key]) ? scoreValue(adjusted[key]) : (present(assessment[key]) ? scoreValue(assessment[key]) : null);
+    if (numericOverride(adjusted[key])) return scoreValue(adjusted[key]);
+    // A key posted as null/blank is an explicit clear of an earlier fill;
+    // only an omitted key keeps the saved fill.
+    if (cleared(key)) return null;
+    return present(assessment[key]) ? scoreValue(assessment[key]) : null;
   };
   const final = {
     turf_density: pick('turf_density'),
@@ -217,9 +222,11 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
   const previousExplicit = known(markerExplicit)
     ? markerExplicit
     : parseJsonObject(run?.reconciliation)?.stress_damage_override;
+  // Posting stress_damage as null/blank clears an earlier explicit entry.
+  const stressCleared = Object.prototype.hasOwnProperty.call(adjusted, 'stress_damage') && !numericOverride(adjusted.stress_damage);
   const stressExplicit = numericOverride(adjusted.stress_damage)
     ? scoreValue(adjusted.stress_damage)
-    : (known(previousExplicit) ? previousExplicit : null);
+    : (!stressCleared && known(previousExplicit) ? previousExplicit : null);
   const finalScores = resolveConfirmScores(assessment, adjusted, scoreValue, {
     ...(run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {}),
     aiScores,

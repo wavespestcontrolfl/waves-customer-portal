@@ -198,6 +198,17 @@ describe('confirm scores are read-only from the AI; a blank AI read is the one f
       expect(fourth.finalScores.stress_damage).toBe(65);
     });
 
+    test('posting a fill as null clears it; omitting it keeps it', () => {
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      const blank = { turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null };
+      const run = { status: 'complete', scores_adjusted: JSON.stringify(blank) };
+      const saved = { ...blank, fungus_control: 60, stress_damage: 40, adjusted_scores: JSON.stringify({ stress_damage_explicit: 40 }) };
+      expect(visit.confirmScores(saved, run, {}, options).finalScores).toMatchObject({ fungus_control: 60, stress_damage: 40 });
+      const clearedFill = visit.confirmScores(saved, run, { fungus_control: null, stress_damage: null }, options);
+      expect(clearedFill.finalScores.fungus_control).toBeNull();
+      expect(clearedFill.stressExplicit).toBeNull();
+    });
+
     test('a Stress entry saved before this change (run.reconciliation.stress_damage_override) still sticks', () => {
       const options = { scoreValue, calculateOverallScore: () => 77 };
       const blank = { turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null };
