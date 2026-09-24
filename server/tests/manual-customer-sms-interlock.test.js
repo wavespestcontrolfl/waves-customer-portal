@@ -114,6 +114,7 @@ test('the durable reservation and actual derived endpoint precede canonical deli
   }));
   expect(mockSettleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
     reservationId: 'reservation-1', sent: true, reviewedBy: 'admin-1',
+    acceptedResult: expect.objectContaining({ providerMessageId: 'SM-accepted' }),
   }));
 });
 
@@ -135,7 +136,9 @@ test('an accepted provider outcome on a thrown audit error finalizes as accepted
     acceptedAfterError: true,
   });
   expect(manualSmsDeliveryState(result)).toBe('accepted');
-  expect(mockSettleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: true }));
+  expect(mockSettleHumanReply).toHaveBeenCalledWith(expect.objectContaining({
+    sent: true, acceptedResult: expect.objectContaining({ providerMessageId: 'SM-after-audit-error' }),
+  }));
 });
 
 test.each([

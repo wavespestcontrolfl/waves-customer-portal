@@ -53,7 +53,7 @@ function uncertainResult(code, reason) {
   }, 'uncertain');
 }
 
-async function settle(reply, { state, reviewedBy, reason }) {
+async function settle(reply, { state, reviewedBy, reason, acceptedResult = null }) {
   const ambiguous = state === 'uncertain';
   try {
     await settleHumanReply({
@@ -63,6 +63,7 @@ async function settle(reply, { state, reviewedBy, reason }) {
       // here would reopen them and invite a duplicate manual/automatic reply.
       ...(ambiguous ? { parkedDecisionIds: [], ambiguous: true } : {}),
       sent: state === 'accepted',
+      ...(state === 'accepted' ? { acceptedResult } : {}),
       reviewedBy,
       reason,
     });
@@ -106,7 +107,7 @@ async function dispatchReserved(input, { fromNumber, reply, reviewedBy }) {
   try {
     const result = await sendCustomerMessage(sendInput);
     const state = deliveryState(result);
-    await settle(reply, { state, reviewedBy, reason: result?.reason });
+    await settle(reply, { state, reviewedBy, reason: result?.reason, acceptedResult: result });
     return markOutcome(result, state);
   } catch (err) {
     const providerOutcome = err?.providerOutcome;
@@ -119,7 +120,7 @@ async function dispatchReserved(input, { fromNumber, reply, reviewedBy }) {
     const state = classifiedState === 'uncertain' && legacyAccepted
       ? 'accepted'
       : classifiedState;
-    await settle(reply, { state, reviewedBy, reason: err?.message });
+    await settle(reply, { state, reviewedBy, reason: err?.message, acceptedResult: providerOutcome });
     if (state !== 'accepted') throw markOutcome(err, state);
     logger.error(`[manual-sms] provider accepted but canonical send bookkeeping failed (${String(err?.code || err?.name || 'error')})`);
     return markOutcome({
