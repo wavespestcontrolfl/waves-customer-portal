@@ -4406,6 +4406,27 @@ router.put('/:id/proposal', async (req, res, next) => {
       if (Object.hasOwn(lockedData, key)) nextData[key] = lockedData[key];
       else delete nextData[key];
     }
+    // …but the proposal editor IS the commercial row's only correction
+    // path (the residential revise refuses COMMERCIAL rows and the editor
+    // has no confirm control), so a save that moves the proposal's
+    // editable premise off the flagged one — or an explicit
+    // confirmAddress — lifts the block here, as reviseAdminEstimate does
+    // for residential rows (codex #4667 r42 P1). Judged on the LOCKED
+    // row's marker against the proposal address this save writes; a
+    // same-premise edit keeps the hold.
+    if (lockedData.addressUnverified === true || lockedData.addressUnverifiedFlag) {
+      const { premiseChanged } = require('../services/admin-estimate-persistence');
+      const priorProposalAddress = existingData?.proposal?.propertyAddress || locked.address || null;
+      const addressCorrected = !!normalized?.propertyAddress
+        && premiseChanged(priorProposalAddress, normalized.propertyAddress);
+      const explicitConfirm = req.body?.confirmAddress === true;
+      if (addressCorrected || explicitConfirm) {
+        nextData.addressUnverified = false;
+        nextData.addressUnverifiedFlag = null;
+        nextData.addressUnverifiedClearedBy = addressCorrected ? 'address_corrected' : 'staff_confirmed';
+        delete nextData.addressUnverifiedSupersededAt;
+      }
+    }
     // A pending send is judged at the first scheduler tick it can reach,
     // exactly as scheduling judged it (pre-push codex P1 on #4309): a 23:58
     // ET send whose hold is shortened to that day would otherwise save, then
@@ -5583,3 +5604,4 @@ module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
 module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;
 module.exports.clearEstimateDeliveryClaim = clearEstimateDeliveryClaim;
+module.exports.clearGroupSiblingDeliveryClaims = clearGroupSiblingDeliveryClaims;

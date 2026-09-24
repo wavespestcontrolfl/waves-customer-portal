@@ -482,13 +482,30 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           .forUpdate()
           .first('id');
         if (!row) return false;
+        const claimedAt = new Date().toISOString();
+        const CLAIM_STAMP_SQL = "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)";
         await trx('estimates').where({ id: estimate.id }).update({
-          estimate_data: trx.raw(
-            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text), true)",
-            [new Date().toISOString(), deliveryClaimToken],
-          ),
+          estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, deliveryClaimToken]),
           updated_at: trx.fn.now(),
         });
+        // …and every other LINK-VISIBLE group member (codex #4667 r42 P1):
+        // the extended token renders the group's published siblings, so a
+        // county hold landing on one of them before the provider call would
+        // make it vanish from the link the text and email carry. Same
+        // token; released with the anchor. A sibling under another send's
+        // fresh claim keeps that one.
+        if (estimate.estimate_group_id) {
+          await trx('estimates')
+            .where({ estimate_group_id: estimate.estimate_group_id })
+            .whereNot({ id: estimate.id })
+            .whereNull('archived_at')
+            .whereIn('status', ['sent', 'viewed', 'expired'])
+            .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+            .update({
+              estimate_data: trx.raw(CLAIM_STAMP_SQL, [claimedAt, deliveryClaimToken]),
+              updated_at: trx.fn.now(),
+            });
+        }
         return true;
       });
     } catch (err) {
@@ -616,7 +633,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   logger.info(`[estimate-extension] Extended estimate ${estimate.id} by ${parsedDays}d to ${newExpiry.toISOString()} via ${entryPoint} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'}, email=${emailResult.sent ? 'sent' : emailResult.reason || 'skipped'})`);
   if (claimHeld) {
     try {
-      await require('../routes/admin-estimates').clearEstimateDeliveryClaim(estimate.id, deliveryClaimToken);
+      const adminEstimates = require('../routes/admin-estimates');
+      await adminEstimates.clearEstimateDeliveryClaim(estimate.id, deliveryClaimToken);
+      await adminEstimates.clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken);
     } catch (err) {
       logger.warn(`[estimate-extension] delivery claim release failed for estimate ${estimate.id} (ages out by TTL): ${err.code || err.name || 'db_error'}`);
     }

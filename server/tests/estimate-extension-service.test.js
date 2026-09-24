@@ -407,7 +407,7 @@ describe('extendEstimate post-write notifications: delivery claim (codex #4667 r
     expect(claim).toContain('.whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)');
     expect(claim).toContain(".forUpdate()");
     expect(claim).toContain("jsonb_build_object('delivering_at', ?::text, 'delivering_token', ?::text)");
-    expect(src).toContain("require('../routes/admin-estimates').clearEstimateDeliveryClaim(estimate.id, deliveryClaimToken)");
+    expect(src).toContain('adminEstimates.clearEstimateDeliveryClaim(estimate.id, deliveryClaimToken)');
     expect(src.indexOf('clearEstimateDeliveryClaim(estimate.id')).toBeGreaterThan(src.indexOf('let emailResult = '));
   });
 });

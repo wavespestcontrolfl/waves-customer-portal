@@ -564,7 +564,8 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     // revive, and the notification-leg delivery claim (codex #4667 r41).
     const guarded = ext.slice(ext.indexOf('const updated = await trx(\'estimates\')'), ext.indexOf('.update(updates);'));
     expect(guarded).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
-    const siblings = ext.slice(ext.lastIndexOf('.whereNot({ id: estimate.id })'), ext.indexOf('followup_expiring_sent: true,'));
+    const siblingRevive = ext.indexOf(".whereIn('status', ['sent', 'viewed', 'expired', 'send_failed'])", ext.indexOf('const updated = await trx(\'estimates\')'));
+    const siblings = ext.slice(siblingRevive, ext.indexOf('followup_expiring_sent: true,', siblingRevive));
     expect(siblings).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
     const notifyClaim = ext.slice(ext.indexOf('const deliveryClaimToken = '), ext.indexOf('let smsResult = '));
     expect(notifyClaim).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');

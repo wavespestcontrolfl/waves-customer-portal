@@ -58,3 +58,22 @@ describe('booking: address-verdict pair locks before the customer-comms fence (p
     expect(src.indexOf("const lockedDraft = await trx('estimates')")).toBeGreaterThan(comms);
   });
 });
+
+describe('codex r42: the proposal editor lifts the hold it is the only path to clear; grouped extensions claim visible siblings', () => {
+  test('proposal save clears the locked block on a corrected premise or an explicit confirmAddress, keeps it otherwise', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    const start = src.indexOf("if (lockedData.addressUnverified === true || lockedData.addressUnverifiedFlag) {");
+    expect(start).toBeGreaterThan(0);
+    const block = src.slice(start, src.indexOf('// A pending send is judged at the first scheduler tick', start));
+    expect(block).toContain('premiseChanged(priorProposalAddress, normalized.propertyAddress)');
+    expect(block).toContain("req.body?.confirmAddress === true");
+    expect(block).toContain("nextData.addressUnverifiedClearedBy = addressCorrected ? 'address_corrected' : 'staff_confirmed';");
+  });
+  test('the extension claim stamps link-visible siblings with the same token and releases them with the anchor', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+    const claim = src.slice(src.indexOf('const deliveryClaimToken = '), src.indexOf('let smsResult = '));
+    expect(claim).toContain(".whereIn('status', ['sent', 'viewed', 'expired'])");
+    expect(claim).toContain('.whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)\n            .update({');
+    expect(src).toContain('adminEstimates.clearGroupSiblingDeliveryClaims(estimate, deliveryClaimToken)');
+  });
+});
