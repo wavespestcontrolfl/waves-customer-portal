@@ -504,7 +504,9 @@ async function maybeAutoSend(params = {}) {
         // The reservation itself becomes accepted evidence before any later
         // bookkeeping. If Twilio's sms_log insert and these writes both fail,
         // recovery still has one durable sent row linking used + parked ids.
-        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, acceptedResult: result });
+        if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, acceptedResult: result })) {
+          throw new Error('accepted reservation was not promoted');
+        }
         if (!await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId })) {
           throw new Error('auto-send claim was not resolved');
         }

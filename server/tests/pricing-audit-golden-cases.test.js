@@ -24,11 +24,24 @@ const path = require('path');
 
 const constants = require('../services/pricing-engine/constants');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+const { priceLawnCare } = require('../services/pricing-engine/service-pricing');
 const audit = require(path.join(__dirname, '..', '..', 'scripts', 'audit-estimator-pricing.js'));
 
 const BASE = { homeSqFt: 2000, stories: 1, lotSqFt: 8000, lawnSqFt: 4500, propertyType: 'single_family' };
 const line = (result, service) => result.lineItems.find((l) => l.service === service);
 const close = (a, b, tol = 0.005) => Math.abs(a - b) <= tol;
+// The lawn formula-parity/frozen-price checks below read priceLawnCare
+// DIRECTLY with includeHiddenTiers: true rather than through
+// generateEstimate: this describe block proves the bracket/formula math
+// (the internal price anchor invariant 1 protects) independent of which
+// tiers generateEstimate currently offers a NEW customer. standard/6x is
+// hidden from generateEstimate's customer-facing ladder (owner directive
+// 2026-09-24 — bi-monthly lawn care retired for new sales) but its bracket
+// cells are unchanged; includeHiddenTiers bypasses the exposure filter
+// without touching the bracket lookup. Verified byte-identical to the
+// generateEstimate path for enhanced/premium (still sold, unaffected) and
+// against the FROZEN literals below for standard (still the anchor).
+const lawnLine = (lawnSqFt, track, tier) => priceLawnCare({ lawnSqFt }, { track, tier, includeHiddenTiers: true });
 
 describe('pricing audit — pest control golden + boundary cases', () => {
   const boundaries = constants.PEST.footprintBrackets.map((b) => b.sqft);
@@ -82,7 +95,7 @@ describe('pricing audit — lawn care golden + boundary cases', () => {
     '%s %s sf %s: bracket interpolation + cadence caps reproduce the engine',
     (track, sqft, tier) => {
       const exp = audit.expectLawn({ track, lawnSqFt: sqft, tier });
-      const li = line(generateEstimate({ ...BASE, lawnSqFt: sqft, services: { lawn: { track, tier } } }), 'lawn_care');
+      const li = lawnLine(sqft, track, tier);
       expect(li.perApp).toBe(exp.perApp);
       expect(li.annual).toBe(exp.annual);
       expect(li.monthly).toBe(exp.monthly);
@@ -100,7 +113,7 @@ describe('pricing audit — lawn care golden + boundary cases', () => {
   test('cadence ladder: per-application price never rises with more visits inside the table', () => {
     for (const track of tracks) {
       for (const sqft of [2000, 4500, 8000, 12000, 20000]) {
-        const pa = ['standard', 'enhanced', 'premium'].map((tier) => line(generateEstimate({ ...BASE, lawnSqFt: sqft, services: { lawn: { track, tier } } }), 'lawn_care').perApp);
+        const pa = ['standard', 'enhanced', 'premium'].map((tier) => lawnLine(sqft, track, tier).perApp);
         expect(pa[1]).toBeLessThanOrEqual(pa[0] + 0.005);
         expect(pa[2]).toBeLessThanOrEqual(pa[1] + 0.005);
       }
@@ -381,10 +394,12 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     ["pest quarterly 5,000 sf", { ...BASE, homeSqFt: 5000, services: { pest: { frequency: "quarterly" } } }, "pest_control", { perApp: 126, annual: 504, monthly: 42, visitsPerYear: 4 }],
     ["pest bimonthly 2,000 sf", { ...BASE, services: { pest: { frequency: "bimonthly" } } }, "pest_control", { perApp: 98.56, annual: 591.36, monthly: 49.28, visitsPerYear: 6 }],
     ["pest monthly 2,000 sf", { ...BASE, services: { pest: { frequency: "monthly" } } }, "pest_control", { perApp: 87.36, annual: 1048.32, monthly: 87.36, visitsPerYear: 12 }],
-    ["lawn St. Augustine standard 4,250 sf", { ...BASE, lawnSqFt: 4250, services: { lawn: { track: "st_augustine", tier: "standard" } } }, "lawn_care", { perApp: 76, annual: 456, monthly: 38 }],
-    ["lawn St. Augustine standard 8,000 sf", { ...BASE, lawnSqFt: 8000, services: { lawn: { track: "st_augustine", tier: "standard" } } }, "lawn_care", { perApp: 94, annual: 564, monthly: 47 }],
+    // standard/6x lawn cases moved to their own test.each below (through
+    // lawnLine/includeHiddenTiers, not generateEstimate) — standard/6x is
+    // hidden from generateEstimate's customer-facing ladder (owner
+    // directive 2026-09-24), so a bare generateEstimate({tier:'standard'})
+    // call now returns the enhanced fallback here, not the frozen anchor.
     ["lawn St. Augustine premium 4,500 sf", { ...BASE, services: { lawn: { track: "st_augustine", tier: "premium" } } }, "lawn_care", { perApp: 64, annual: 768, monthly: 64 }],
-    ["lawn zoysia standard 4,500 sf", { ...BASE, services: { lawn: { track: "zoysia", tier: "standard" } } }, "lawn_care", { perApp: 84, annual: 504, monthly: 42 }],
     ["mosquito seasonal9 8,000 sf lot", { ...BASE, lawnSqFt: undefined, services: { mosquito: { tier: "seasonal9" } } }, "mosquito", { perVisit: 77, annual: 693, monthly: 57.75 }],
     ["mosquito monthly12 15,000 sf lot", { ...BASE, lotSqFt: 15000, lawnSqFt: undefined, services: { mosquito: { tier: "monthly12" } } }, "mosquito", { perVisit: 72, annual: 864, monthly: 72 }],
     ["rodent bait 2,000 sf", { ...BASE, services: { rodentBait: {} } }, "rodent_bait", { perVisit: 89, annual: 356, monthly: 29.67, visitsPerYear: 4 }],
@@ -406,6 +421,20 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
   test.each(FROZEN)("%s prices exactly as frozen", (_name, input, service, expected) => {
     const li = line(generateEstimate(input), service);
     expect(li).toBeDefined();
+    for (const [k, v] of Object.entries(expected)) expect(li[k]).toBe(v);
+  });
+
+  // standard/6x lawn — the internal price anchor (invariant: unchanged by
+  // the 2026-09-24 retirement). Read via lawnLine (priceLawnCare direct,
+  // includeHiddenTiers: true), which bypasses ONLY the customer-facing
+  // exposure filter the hidden flag adds — never the bracket lookup itself.
+  const FROZEN_LAWN_STANDARD_ANCHOR = [
+    ['lawn St. Augustine standard 4,250 sf', 4250, 'st_augustine', { perApp: 76, annual: 456, monthly: 38 }],
+    ['lawn St. Augustine standard 8,000 sf', 8000, 'st_augustine', { perApp: 94, annual: 564, monthly: 47 }],
+    ['lawn zoysia standard 4,500 sf', 4500, 'zoysia', { perApp: 84, annual: 504, monthly: 42 }],
+  ];
+  test.each(FROZEN_LAWN_STANDARD_ANCHOR)('%s prices exactly as frozen (hidden anchor, not sold)', (_name, sqft, track, expected) => {
+    const li = lawnLine(sqft, track, 'standard');
     for (const [k, v] of Object.entries(expected)) expect(li[k]).toBe(v);
   });
 });

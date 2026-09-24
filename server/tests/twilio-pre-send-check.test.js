@@ -496,6 +496,125 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(result.success).toBe(true);
   });
 
+  test.each([
+    ['bare', false],
+    ['locked handoff', true],
+  ])('a late final predicate blocks the %s path after the suspended annual guard, before the SDK', async (_label, locked) => {
+    const events = [];
+    let finishGuard;
+    let announceGuard;
+    let lateCondition = false;
+    const guardStarted = new Promise(resolve => { announceGuard = resolve; });
+    const guardSuspended = new Promise(resolve => { finishGuard = resolve; });
+    annualHandoffGuard.mockReturnValueOnce(async () => {
+      events.push('guard:start');
+      announceGuard();
+      await guardSuspended;
+      events.push('guard:end');
+      return { blocked: false, reason: null, estimateId: null };
+    });
+    const providerPreSendCheck = jest.fn(async () => {
+      events.push('final');
+      return lateCondition
+        ? { ok: false, code: 'GRATITUDE_THREAD_CHANGED', reason: 'thread changed', retryable: false }
+        : { ok: true };
+    });
+    const trx = { __isTrx: true };
+
+    const resultPromise = TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual',
+      fromNumber: FROM,
+      providerPreSendCheck,
+      ...(locked ? {
+        withSmsHandoff: async dispatch => {
+          events.push('locked');
+          await dispatch(trx);
+          return { ok: true };
+        },
+      } : {}),
+    });
+    await guardStarted;
+    expect(providerPreSendCheck).not.toHaveBeenCalled();
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    lateCondition = true;
+    finishGuard();
+
+    const result = await resultPromise;
+    expect(events).toEqual(locked
+      ? ['locked', 'guard:start', 'guard:end', 'final']
+      : ['guard:start', 'guard:end', 'final']);
+    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
+    expect(providerPreSendCheck).toHaveBeenCalledWith({
+      channel: 'sms',
+      dbi: locked ? trx : require('../models/db'),
+    });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false,
+      preSendBlocked: true,
+      code: 'GRATITUDE_THREAD_CHANGED',
+      error: 'thread changed',
+      retryable: false,
+      validator: 'provider_pre_send_check_boundary',
+      deliveryOutcome: 'not_sent',
+    });
+  });
+
+  test.each([
+    ['bare', false],
+    ['locked handoff', true],
+  ])('a throwing final predicate fails the %s path closed as a definite retryable non-send', async (_label, locked) => {
+    const providerPreSendCheck = jest.fn(async () => {
+      throw Object.assign(new Error('fresh thread unavailable'), {
+        code: 'GRATITUDE_CONTEXT_UNAVAILABLE',
+        retryable: true,
+      });
+    });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual',
+      fromNumber: FROM,
+      providerPreSendCheck,
+      ...(locked ? {
+        withSmsHandoff: async dispatch => { await dispatch(); return { ok: true }; },
+      } : {}),
+    });
+
+    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false,
+      preSendBlocked: true,
+      code: 'GRATITUDE_CONTEXT_UNAVAILABLE',
+      error: 'fresh thread unavailable',
+      retryable: true,
+      validator: 'provider_pre_send_check_boundary',
+      deliveryOutcome: 'not_sent',
+    });
+    expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
+  });
+
+  test('a passing final predicate runs once after the annual guard and before the sync check and SDK', async () => {
+    const events = [];
+    annualHandoffGuard.mockReturnValueOnce(async () => {
+      events.push('annual');
+      return { blocked: false, reason: null, estimateId: null };
+    });
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    preSendCheck.isStillValid = jest.fn(() => { events.push('sync'); return true; });
+    const providerPreSendCheck = jest.fn(async () => { events.push('final'); return { ok: true }; });
+    mockTwilioCreate.mockImplementationOnce(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, preSendCheck, providerPreSendCheck,
+    });
+
+    expect(result).toMatchObject({ success: true, deliveryOutcome: 'accepted' });
+    expect(preSendCheck).toHaveBeenCalledTimes(1);
+    expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(['annual', 'final', 'sync', 'sdk']);
+  });
+
   test('round 8 P1: withheldLinkPolicy "rewrite" strips a withheld estimate link from the body BEFORE the guard check and the SDK call, and the provider is called with the rewritten text', async () => {
     const originalBody = 'Hello! We received your deposit. https://portal.wavespestcontrol.com/estimate/withheld-token-abc';
     const rewrittenBody = 'Hello! We received your deposit. https://portal.wavespestcontrol.com';

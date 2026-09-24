@@ -71,28 +71,33 @@ const QUARTERLY = { key: 'quarterly', label: 'Quarterly' };
 const MONTHLY = { key: 'monthly', label: 'Monthly' };
 
 describe('nonPestTierBaseMap — per-service tier price lookup from result rows', () => {
-  test('maps lawn tier keys to their pre-discount base prices/visits, dropping the retired Basic', () => {
-    // basic/Quarterly retired for new sales (owner directive 2026-07-09) —
-    // stored rows still carry it, but it is no longer a selectable combo axis.
+  test('maps lawn tier keys to their pre-discount base prices/visits, dropping the retired Basic and Standard', () => {
+    // basic/Quarterly retired for new sales (owner directive 2026-07-09) and
+    // standard/Bi-monthly retired for new sales (owner directive 2026-09-24)
+    // — stored rows still carry either, but neither is a selectable combo
+    // axis any more.
     const map = nonPestTierBaseMap(LAWN_RESULT_STATS);
     expect(Object.keys(map)).toEqual(['lawn_care']);
     expect(map.lawn_care.basic).toBeUndefined();
-    expect(Object.keys(map.lawn_care).sort()).toEqual(['enhanced', 'premium', 'standard']);
+    expect(map.lawn_care.standard).toBeUndefined();
+    expect(Object.keys(map.lawn_care).sort()).toEqual(['enhanced', 'premium']);
     expect(map.lawn_care.enhanced).toMatchObject({ mo: 66.75, v: 9, recommended: true });
     expect(map.lawn_care.premium).toMatchObject({ mo: 89, v: 12 });
   });
 
   test('below-$50 stored lawn rows enter the combo math UNCLAMPED (floors disarmed, owner ruling 2026-07-17)', () => {
-    // programMinimumMonthly is 0 (disarm value) — a $38/mo Standard row is a
-    // valid sold price and flows into the combo math as stored.
+    // programMinimumMonthly is 0 (disarm value) — a $38/mo Enhanced row is a
+    // valid sold price and flows into the combo math as stored. (Standard/6x
+    // is retired 2026-09-24 and dropped from the combo axis regardless of
+    // price — moved the low-price example to Enhanced.)
     const map = nonPestTierBaseMap({
       lawn: [
-        { name: 'Standard', v: 6, mo: 38, ann: 456, pa: 76 },
-        { name: 'Enhanced', v: 9, mo: 52, ann: 624, pa: 69.33, recommended: true },
+        { name: 'Enhanced', v: 9, mo: 38, ann: 456, pa: 50.67 },
+        { name: 'Premium', v: 12, mo: 52, ann: 624, pa: 52, recommended: true },
       ],
     });
-    expect(map.lawn_care.standard).toMatchObject({ mo: 38, ann: 456, pa: 76, v: 6 });
-    expect(map.lawn_care.enhanced).toMatchObject({ mo: 52, ann: 624, v: 9 });
+    expect(map.lawn_care.enhanced).toMatchObject({ mo: 38, ann: 456, pa: 50.67, v: 9 });
+    expect(map.lawn_care.premium).toMatchObject({ mo: 52, ann: 624, v: 12 });
   });
 
   describe('re-armed at $50 (clamp machinery kept for potential re-arm)', () => {
@@ -107,14 +112,15 @@ describe('nonPestTierBaseMap — per-service tier price lookup from result rows'
     });
 
     test('clamps below-floor stored lawn rows to the $50/mo program minimum', () => {
+      // Standard/6x moved to Enhanced/9x (retired 2026-09-24) — see note above.
       const map = nonPestTierBaseMap({
         lawn: [
-          { name: 'Standard', v: 6, mo: 38, ann: 456, pa: 76 },
-          { name: 'Enhanced', v: 9, mo: 52, ann: 624, pa: 69.33, recommended: true },
+          { name: 'Enhanced', v: 9, mo: 38, ann: 456, pa: 50.67 },
+          { name: 'Premium', v: 12, mo: 52, ann: 624, pa: 52, recommended: true },
         ],
       });
-      expect(map.lawn_care.standard).toMatchObject({ mo: 50, ann: 600, pa: 100, v: 6 });
-      expect(map.lawn_care.enhanced).toMatchObject({ mo: 52, ann: 624, v: 9 });
+      expect(map.lawn_care.enhanced).toMatchObject({ mo: 50, ann: 600, pa: 66.67, v: 9 });
+      expect(map.lawn_care.premium).toMatchObject({ mo: 52, ann: 624, v: 12 });
     });
   });
 
@@ -139,15 +145,17 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
     expect(entry.monthly).toBe(expected);
   });
 
-  test('pest Monthly + lawn Standard recomputes both contributions at 10% off — no lawn floor (owner ruling 2026-07-17)', () => {
+  test('pest Monthly + lawn Enhanced recomputes both contributions at 10% off — no lawn floor (owner ruling 2026-07-17)', () => {
+    // (Was pest Monthly + lawn Standard; standard/6x retired for new sales
+    // 2026-09-24 and no longer a combo axis.)
     const entry = comboPricingEntry(v1, MONTHLY, v1.pestTiers[2], {}, tierBaseMap, {
       pest_control: 'monthly',
-      lawn_care: 'standard',
+      lawn_care: 'enhanced',
     });
-    // pest 120*0.9 = 108 ; lawn 45.5*0.9 = 40.95 (unclamped — floors
-    // disarmed) → 148.95
-    expect(entry.monthly).toBe(148.95);
-    expect(entry.annual).toBe(Math.round(148.95 * 12 * 100) / 100);
+    // pest 120*0.9 = 108 ; lawn 66.75*0.9 = 60.075 (unclamped — floors
+    // disarmed) → 168.075 → 168.08
+    expect(entry.monthly).toBe(168.08);
+    expect(entry.annual).toBe(Math.round(168.08 * 12 * 100) / 100);
   });
 
   test('pest Quarterly + lawn Premium', () => {
@@ -164,29 +172,31 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
     // quote; with the estimate's arm resolution ARMED the selected tier's
     // own floor joins the post-discount clamp (never above the authored
     // base — same rule as generateEstimate's guards).
+    // (Sold tiers only — standard/6x retired for new sales 2026-09-24: the
+    // below-base floor example rides Enhanced, the above-base one Premium.)
     const stats = {
       lawn: [
-        { name: 'Standard', v: 6, mo: 60, ann: 720, pa: 120, costFloorAnnual: 700 },
-        { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 810 },
+        { name: 'Enhanced', v: 9, mo: 60, ann: 720, pa: 80, recommended: true, costFloorAnnual: 700 },
+        { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89, costFloorAnnual: 1080 },
       ],
     };
     const map = nonPestTierBaseMap(stats);
     const armed = comboPricingEntry(v1, QUARTERLY, v1.pestTiers[0], {}, map, {
       pest_control: 'quarterly',
-      lawn_care: 'standard',
+      lawn_care: 'enhanced',
     }, { lawnCostFloorArmed: true });
     // pest 60*0.9 = 54 ; lawn 60*0.9 = 54 → clamped at ceil(700/12) = 58.34
     // (cent-ceiled so 12× never lands under the floor) → 112.34
     expect(armed.monthly).toBe(112.34);
 
     // A floor ABOVE the authored base never raises the price — the line is
-    // merely undiscountable (Enhanced: base 66.75, floor 810/12 = 67.5).
+    // merely undiscountable (Premium: base 89, floor 1080/12 = 90).
     const aboveBase = comboPricingEntry(v1, QUARTERLY, v1.pestTiers[0], {}, map, {
       pest_control: 'quarterly',
-      lawn_care: 'enhanced',
+      lawn_care: 'premium',
     }, { lawnCostFloorArmed: true });
-    // pest 54 ; lawn held at its base 66.75 → 120.75
-    expect(aboveBase.monthly).toBe(120.75);
+    // pest 54 ; lawn held at its base 89 → 143
+    expect(aboveBase.monthly).toBe(143);
     // …and the per-treatment DISPLAY (drives the first-application invoice)
     // is capped the same way — never lifted to a floor above the authored
     // line (codex P2 round 10 on #2827).
@@ -199,21 +209,21 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
     // Disarmed (default): the same reporting field moves nothing.
     const disarmed = comboPricingEntry(v1, QUARTERLY, v1.pestTiers[0], {}, map, {
       pest_control: 'quarterly',
-      lawn_care: 'standard',
+      lawn_care: 'enhanced',
     });
     expect(disarmed.monthly).toBe(108);
   });
 
   test('a bundle manual discount applies IN FULL — no lawn floor caps the headroom (owner ruling 2026-07-17)', () => {
-    // No WaveGuard %; floors disarmed so the lawn Standard base stays $45.50.
+    // No WaveGuard %; floors disarmed so the lawn Enhanced base stays $66.75.
     // The $65/mo ($780/yr) manual discount spends against the whole bundle:
-    // pest 60 + lawn 45.5 = 105.5 gross − 65 = 40.5, uncapped.
+    // pest 60 + lawn 66.75 = 126.75 gross − 65 = 61.75, uncapped.
     const manualV1 = { ...pestLawnV1(), discount: 0, manualDiscount: { type: 'FIXED', value: 780 } };
     const entry = comboPricingEntry(manualV1, QUARTERLY, manualV1.pestTiers[0], {}, tierBaseMap, {
       pest_control: 'quarterly',
-      lawn_care: 'standard',
+      lawn_care: 'enhanced',
     });
-    expect(entry.monthly).toBe(40.5);
+    expect(entry.monthly).toBe(61.75);
     expect(entry.manualDiscount).toMatchObject({ capped: false, capReason: null });
     expect(entry.manualDiscount.monthlyAmount).toBe(65);
   });
@@ -229,13 +239,15 @@ describe('serviceCadenceComboKey — stable composite key', () => {
 });
 
 describe('buildServiceCadenceCombos — full combination ladder', () => {
-  test('pest(3) × lawn(3, Basic retired) = 9 priced combinations, all keyed + summed', () => {
+  test('pest(3) × lawn(2, Basic + Standard retired) = 6 priced combinations, all keyed + summed', () => {
     const combos = buildServiceCadenceCombos(pestLawnV1(), {}, LAWN_RESULT_STATS);
-    expect(combos).toHaveLength(9);
+    expect(combos).toHaveLength(6);
     expect(combos.some((c) => c.selection.lawn_care === 'basic')).toBe(false);
+    // standard/6x retired for new sales (owner directive 2026-09-24).
+    expect(combos.some((c) => c.selection.lawn_care === 'standard')).toBe(false);
     // Spot-check combos against the hand math (no floor — owner ruling 2026-07-17).
-    const monthlyStandard = combos.find((c) => c.key === 'lawn_care:standard|pest_control:monthly');
-    expect(monthlyStandard.monthly).toBe(148.95); // pest 108 + lawn 45.5*0.9
+    const monthlyEnhanced = combos.find((c) => c.key === 'lawn_care:enhanced|pest_control:monthly');
+    expect(monthlyEnhanced.monthly).toBe(168.08); // pest 108 + lawn 66.75*0.9 = 168.075
     const quarterlyEnhanced = combos.find((c) => c.key === 'lawn_care:enhanced|pest_control:quarterly');
     expect(quarterlyEnhanced.monthly).toBe(Math.round((60 * 0.9 + 66.75 * 0.9) * 100) / 100);
     // Every combo carries a selection for both axes.
@@ -250,15 +262,25 @@ describe('buildServiceCadenceCombos — full combination ladder', () => {
     // combo's perServiceTreatments — so they must carry the chosen tier's
     // per-visit price, not the default tier's. (Regression for the P0 where the
     // first invoice billed the default non-pest rows.)
-    const combos = buildServiceCadenceCombos(pestLawnV1(), {}, LAWN_RESULT_STATS);
-    const monthlyStandard = combos.find((c) => c.key === 'lawn_care:standard|pest_control:monthly');
-    const lawnRow = monthlyStandard.perServiceTreatments.find((r) => /lawn/i.test(r.service || ''));
-    // standard per-app 91 * 0.9 = 81.9 — floors disarmed (owner ruling
+    // Premium per-app (85) differs from the default Enhanced per-app (89) so
+    // a combo that billed the DEFAULT tier's rows would be caught (the old
+    // Standard example retired with the 6x tier 2026-09-24).
+    const stats = {
+      lawn: [
+        { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true },
+        { name: 'Premium', v: 12, mo: 85, ann: 1020, pa: 85 },
+      ],
+    };
+    const combos = buildServiceCadenceCombos(pestLawnV1(), {}, stats);
+    const monthlyPremium = combos.find((c) => c.key === 'lawn_care:premium|pest_control:monthly');
+    const lawnRow = monthlyPremium.perServiceTreatments.find((r) => /lawn/i.test(r.service || ''));
+    // premium per-app 85 * 0.9 = 76.5 — floors disarmed (owner ruling
     // 2026-07-17), so the discounted market price bills as-is.
-    expect(lawnRow.displayPrice).toBe(81.9);
-    const quarterlyPremium = combos.find((c) => c.key === 'lawn_care:premium|pest_control:quarterly');
-    const lawnRow2 = quarterlyPremium.perServiceTreatments.find((r) => /lawn/i.test(r.service || ''));
-    expect(lawnRow2.displayPrice).toBe(80.1); // premium per-app 89 * 0.9 (above floor)
+    expect(lawnRow.displayPrice).toBe(76.5);
+    expect(lawnRow.visitsPerYear).toBe(12);
+    const quarterlyEnhanced = combos.find((c) => c.key === 'lawn_care:enhanced|pest_control:quarterly');
+    const lawnRow2 = quarterlyEnhanced.perServiceTreatments.find((r) => /lawn/i.test(r.service || ''));
+    expect(lawnRow2.displayPrice).toBe(80.1); // enhanced per-app 89 * 0.9
   });
 
   test('returns null when no non-pest service has more than one tier', () => {
@@ -295,15 +317,16 @@ describe('bundleSectionLadderForService — non-pest section own-cadence slider'
 
   test('reprices each lawn tier post-WaveGuard discount, PRE manual (manual null) — no $50 floor (owner ruling 2026-07-17)', () => {
     const ladder = bundleSectionLadderForService('lawn_care', { results: LAWN_RESULT_STATS }, lawnSvc, 0.10);
-    expect(ladder.map((e) => e.key)).toEqual(['standard', 'enhanced', 'premium']);
+    // Stored Basic (4x) and Standard (6x) rows are retired for new sales
+    // (2026-07-09 / 2026-09-24) — only the sold 9x/12x tiers are offered.
+    expect(ladder.map((e) => e.key)).toEqual(['enhanced', 'premium']);
     const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
-    expect(byKey.standard.monthly).toBe(40.95); // 45.5 * 0.9, unclamped
-    expect(byKey.enhanced.monthly).toBe(60.08); // 66.75 * 0.9
+    expect(byKey.enhanced.monthly).toBe(60.08); // 66.75 * 0.9, unclamped
     expect(byKey.premium.monthly).toBe(80.1); // 89 * 0.9
     // monthlyBase stays the PRE-discount monthly — the client derives the
     // struck-through anchor and the "You save … with WaveGuard" line from
     // the monthlyBase-vs-monthly gap on non-pest rows (no perVisit anchor).
-    expect(byKey.standard.monthlyBase).toBe(45.5);
+    expect(byKey.enhanced.monthlyBase).toBe(66.75);
     expect(byKey.premium.monthlyBase).toBe(89);
     // Manual discount is applied once at the bundle total, never per-section.
     for (const e of ladder) expect(e.manualDiscount).toBeNull();
@@ -314,33 +337,48 @@ describe('bundleSectionLadderForService — non-pest section own-cadence slider'
     // estimate ARMED (pricingMetadata stamp) the entry's own floor rides
     // the ladder (marginFloorMonthly) and the section reprice clamps at it
     // — capped at the authored base (undiscounts, never re-prices).
+    // Sold tiers only (standard/6x retired 2026-09-24), so the three floor
+    // behaviors split across two ladders.
     const estData = {
       pricingMetadata: { lawnCostFloorArmed: true },
       results: {
         lawn: [
-          { name: 'Standard', v: 6, mo: 45.5, ann: 546, pa: 91, costFloorAnnual: 516 },
-          { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 850 },
+          { name: 'Enhanced', v: 9, mo: 45.5, ann: 546, pa: 60.67, recommended: true, costFloorAnnual: 516 },
           { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89, costFloorAnnual: 516 },
         ],
       },
     };
     const ladder = bundleSectionLadderForService('lawn_care', estData, lawnSvc, 0.10);
     const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
-    // Standard: 45.5 × 0.9 = 40.95 → clamped at 516/12 = 43.
-    expect(byKey.standard.monthly).toBe(43);
-    expect(byKey.standard.flooredAtMinimum).toBe(true);
+    // Enhanced: 45.5 × 0.9 = 40.95 → clamped at 516/12 = 43.
+    expect(byKey.enhanced.monthly).toBe(43);
+    expect(byKey.enhanced.flooredAtMinimum).toBe(true);
+    // Premium: 89 × 0.9 = 80.1 sits above its 43 floor — untouched.
+    expect(byKey.premium.monthly).toBe(80.1);
+
     // Enhanced: floor ceil(850/12) = 70.84 ABOVE the 66.75 stored monthly —
     // the upstream ladder's armed re-clamp (clampLawnLadderEntry, #2795
     // save==accept semantics) already lifted the ENTRY to its floor, and
     // the section inherits that base: the card shows exactly what accept
     // collects.
-    expect(byKey.enhanced.monthly).toBe(70.84);
-    // Premium: 89 × 0.9 = 80.1 sits above its 43 floor — untouched.
-    expect(byKey.premium.monthly).toBe(80.1);
+    const liftedData = {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      results: {
+        lawn: [
+          { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 850 },
+          { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89, costFloorAnnual: 516 },
+        ],
+      },
+    };
+    const lifted = Object.fromEntries(
+      bundleSectionLadderForService('lawn_care', liftedData, lawnSvc, 0.10).map((e) => [e.key, e]),
+    );
+    expect(lifted.enhanced.monthly).toBe(70.84);
+    expect(lifted.premium.monthly).toBe(80.1);
 
     // Disarmed (no stamp): same rows reprice with the full discount.
     const disarmed = bundleSectionLadderForService('lawn_care', { results: estData.results }, lawnSvc, 0.10);
-    expect(Object.fromEntries(disarmed.map((e) => [e.key, e])).standard.monthly).toBe(40.95);
+    expect(Object.fromEntries(disarmed.map((e) => [e.key, e])).enhanced.monthly).toBe(40.95);
   });
 
   test('margin-floor monthly CEILS to the cent — 12× the clamp never lands under the annual floor (codex P2 round 12 #2827)', () => {
@@ -350,41 +388,41 @@ describe('bundleSectionLadderForService — non-pest section own-cadence slider'
       pricingMetadata: { lawnCostFloorArmed: true },
       results: {
         lawn: [
-          { name: 'Standard', v: 6, mo: 60, ann: 720, pa: 120, costFloorAnnual: 630.85 },
-          { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 630.85 },
+          { name: 'Enhanced', v: 9, mo: 60, ann: 720, pa: 80, recommended: true, costFloorAnnual: 630.85 },
+          { name: 'Premium', v: 12, mo: 66.75, ann: 801, pa: 66.75, costFloorAnnual: 630.85 },
         ],
       },
     };
     const ladder = bundleSectionLadderForService('lawn_care', estData, lawnSvc, 0.20);
     const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
-    // Standard: 60 × 0.8 = 48 → clamped at ceil(630.85/12) = 52.58.
-    expect(byKey.standard.monthly).toBe(52.58);
-    expect(byKey.standard.monthly * 12).toBeGreaterThanOrEqual(630.85);
+    // Enhanced: 60 × 0.8 = 48 → clamped at ceil(630.85/12) = 52.58.
+    expect(byKey.enhanced.monthly).toBe(52.58);
+    expect(byKey.enhanced.monthly * 12).toBeGreaterThanOrEqual(630.85);
   });
 
   test('the combo base map lifts a below-floor lawn base while armed — card == accepted combo (codex P2 round 12 #2827)', () => {
     const stats = {
       lawn: [
-        { name: 'Standard', v: 6, mo: 45.5, ann: 546, pa: 91, costFloorAnnual: 570 },
-        { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 570 },
+        { name: 'Enhanced', v: 9, mo: 45.5, ann: 546, pa: 60.67, recommended: true, costFloorAnnual: 570 },
+        { name: 'Premium', v: 12, mo: 66.75, ann: 801, pa: 66.75, costFloorAnnual: 570 },
       ],
     };
     // Armed: the 45.5 base lifts to the row's 570/12 = 47.5 floor — the
     // same armed selection lift the section ladder shows, so the backing
     // combo resolves the price the customer actually saw.
     const armed = nonPestTierBaseMap(stats, undefined, { lawnCostFloorArmed: true });
-    expect(armed.lawn_care.standard).toMatchObject({ mo: 47.5, ann: 570 });
-    // Enhanced sits above its floor — untouched.
-    expect(armed.lawn_care.enhanced).toMatchObject({ mo: 66.75, ann: 801 });
+    expect(armed.lawn_care.enhanced).toMatchObject({ mo: 47.5, ann: 570 });
+    // Premium sits above its floor — untouched.
+    expect(armed.lawn_care.premium).toMatchObject({ mo: 66.75, ann: 801 });
     // Disarmed default: reporting fields move nothing.
     const disarmed = nonPestTierBaseMap(stats);
-    expect(disarmed.lawn_care.standard).toMatchObject({ mo: 45.5, ann: 546 });
+    expect(disarmed.lawn_care.enhanced).toMatchObject({ mo: 45.5, ann: 546 });
   });
 
   test('no discount applied when the rate is 0 (Bronze / single-service)', () => {
     const ladder = bundleSectionLadderForService('lawn_care', { results: LAWN_RESULT_STATS }, lawnSvc, 0);
     const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
-    expect(byKey.standard.monthly).toBe(45.5); // stored base, unclamped (floors disarmed 2026-07-17)
+    expect(byKey.enhanced.monthly).toBe(66.75); // stored base, unclamped (floors disarmed 2026-07-17)
     expect(byKey.premium.monthly).toBe(89);
   });
 
@@ -402,14 +440,15 @@ describe('mosquito as a per-service combo axis (pest + lawn + mosquito)', () => 
     expect(map.mosquito.monthly12).toMatchObject({ mo: 79, v: 12, recommended: true });
   });
 
-  test('combos fan out pest(3) × lawn(3, Basic retired) × mosquito(2) = 18, summed at 15% off', () => {
+  test('combos fan out pest(3) × lawn(2, Basic + Standard retired) × mosquito(2) = 12, summed at 15% off', () => {
     const combos = buildServiceCadenceCombos(pestLawnMosquitoV1(), {}, LAWN_MQ_RESULT_STATS);
-    expect(combos).toHaveLength(18);
-    // pest Monthly 120*0.85 = 102 + lawn Standard 45.5*0.85 = 38.68
+    expect(combos).toHaveLength(12);
+    expect(combos.some((x) => x.selection.lawn_care === 'standard')).toBe(false);
+    // pest Monthly 120*0.85 = 102 + lawn Enhanced 66.75*0.85 = 56.7375
     // (unclamped — floors disarmed 2026-07-17) + mosquito Seasonal
-    // 65*0.85 = 55.25 → 195.93
-    const c = combos.find((x) => x.key === 'lawn_care:standard|mosquito:seasonal9|pest_control:monthly');
-    expect(c.monthly).toBe(195.93);
+    // 65*0.85 = 55.25 → 213.9875 → 213.99
+    const c = combos.find((x) => x.key === 'lawn_care:enhanced|mosquito:seasonal9|pest_control:monthly');
+    expect(c.monthly).toBe(213.99);
     for (const combo of combos) {
       expect(combo.selection.pest_control).toBeTruthy();
       expect(combo.selection.lawn_care).toBeTruthy();
@@ -537,17 +576,16 @@ describe('bundle split survives 1-cent per-service rounding drift (buildPricingB
     expect(pest.frequencies[0].perTreatment).toBeCloseTo(96.30, 2);
 
     const lawn = bundle.services[1];
-    // Floors disarmed (owner ruling 2026-07-17): the 6x tier that used to be
-    // pinned at the $50/mo program minimum and display-hidden as a decoy is
-    // now just another market-priced cadence — all three tiers are offered
-    // at the Silver 10% off their stored bases.
-    expect(lawn.frequencies.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
-    expect(lawn.frequencies.map((f) => f.visitsPerYear)).toEqual([6, 9, 12]);
-    expect(lawn.frequencies.map((f) => f.monthly)).toEqual([45, 51.98, 71.1]); // 50/57.75/79 × 0.9
+    // The stored 6x row is retired for new sales (owner directive
+    // 2026-09-24) and dropped; the two sold tiers are offered at the Silver
+    // 10% off their stored bases.
+    expect(lawn.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+    expect(lawn.frequencies.map((f) => f.visitsPerYear)).toEqual([9, 12]);
+    expect(lawn.frequencies.map((f) => f.monthly)).toEqual([51.98, 71.1]); // 57.75/79 × 0.9
 
-    // The combo ladder backs the selections; default combo equals the stored
-    // total.
-    expect(bundle.serviceCadenceCombos).toHaveLength(9);
+    // The combo ladder backs the selections (pest 3 × lawn 2); default combo
+    // equals the stored total.
+    expect(bundle.serviceCadenceCombos).toHaveLength(6);
     const defaultCombo = bundle.serviceCadenceCombos.find(
       (c) => c.key === 'lawn_care:enhanced|pest_control:quarterly',
     );
@@ -556,7 +594,11 @@ describe('bundle split survives 1-cent per-service rounding drift (buildPricingB
 });
 
 describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarmed by default (owner ruling 2026-07-17)', () => {
-  function lawnOnlyEstimate(lawnRows, { monthly = 51.98 } = {}) {
+  // storedVisits = the stored recurring lawn row's cadence (the quoted tier,
+  // protected from the floored hide). Standard/6x retired for new sales
+  // 2026-09-24, so the floored-but-hidden examples below use Enhanced as the
+  // non-quoted floored tier and Premium as the quoted one.
+  function lawnOnlyEstimate(lawnRows, { monthly = 51.98, storedVisits = 9 } = {}) {
     return {
       id: `estimate-${Math.random().toString(36).slice(2)}`,
       status: 'sent',
@@ -570,7 +612,7 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
           recurring: {
             discount: 0,
             monthlyTotal: monthly,
-            services: [{ name: 'Lawn Care', service: 'lawn_care', mo: monthly, visitsPerYear: 9 }],
+            services: [{ name: 'Lawn Care', service: 'lawn_care', mo: monthly, visitsPerYear: storedVisits }],
           },
           results: { lawn: lawnRows },
           oneTime: { items: [], total: 0 },
@@ -579,30 +621,31 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
     };
   }
 
-  function snapshotEstimate() {
+  function snapshotEstimate({ withRetiredStandard = false } = {}) {
     // Frozen pre-deploy send-snapshot shape (no floored flags on entries).
+    // The at-$50 tier is the non-quoted Enhanced; Premium is the quoted plan.
     const snapshotFrequencies = [
-      {
+      ...(withRetiredStandard ? [{
         key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care', serviceTierKey: 'standard',
         monthly: 50, monthlyBase: 50, annual: 600, perTreatment: 100, visitsPerYear: 6,
         billingFrequencyKey: 'monthly', included: [], addOns: [],
-      },
+      }] : []),
       {
         key: 'enhanced', label: '9 visits / yr', serviceCategory: 'lawn_care', serviceTierKey: 'enhanced',
-        monthly: 57.75, monthlyBase: 57.75, annual: 693, perTreatment: 77, visitsPerYear: 9,
-        billingFrequencyKey: 'monthly', included: [], addOns: [], recommended: true,
+        monthly: 50, monthlyBase: 50, annual: 600, perTreatment: 66.67, visitsPerYear: 9,
+        billingFrequencyKey: 'monthly', included: [], addOns: [],
       },
       {
         key: 'premium', label: 'Monthly', serviceCategory: 'lawn_care', serviceTierKey: 'premium',
         monthly: 79, monthlyBase: 79, annual: 948, perTreatment: 79, visitsPerYear: 12,
-        billingFrequencyKey: 'monthly', included: [], addOns: [],
+        billingFrequencyKey: 'monthly', included: [], addOns: [], recommended: true,
       },
     ];
     const estimate = lawnOnlyEstimate([
-      { name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100 },
-      { name: 'Enhanced', v: 9, mo: 57.75, ann: 693, pa: 77, recommended: true },
-      { name: 'Premium', v: 12, mo: 79, ann: 948, pa: 79 },
-    ], { monthly: 57.75 });
+      ...(withRetiredStandard ? [{ name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100 }] : []),
+      { name: 'Enhanced', v: 9, mo: 50, ann: 600, pa: 66.67 },
+      { name: 'Premium', v: 12, mo: 79, ann: 948, pa: 79, recommended: true },
+    ], { monthly: 79, storedVisits: 12 });
     estimate.estimate_data.sendSnapshot = {
       pricingBundle: {
         frequencies: snapshotFrequencies,
@@ -614,14 +657,28 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
   }
 
   describe('disarmed default (programMinimumMonthly = 0): nothing clamps, nothing hides', () => {
-    test('every stored tier renders at its stored price; no hiddenLawnFrequencies', async () => {
+    test('every sold stored tier renders at its stored price; no hiddenLawnFrequencies', async () => {
+      const bundle = await buildPricingBundle(lawnOnlyEstimate([
+        { name: 'Enhanced', v: 9, mo: 40, ann: 480, pa: 53.33 },
+        { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60, recommended: true },
+      ], { monthly: 60, storedVisits: 12 }));
+      expect(bundle.frequencies.map((f) => [f.key, f.monthly])).toEqual([
+        ['enhanced', 40],
+        ['premium', 60],
+      ]);
+      expect(bundle.hiddenLawnFrequencies).toBeUndefined();
+    });
+
+    test('a stored retired Standard (6x) row is dropped outright — not offered and not parked in hiddenLawnFrequencies', async () => {
+      // standard/6x retired for new sales (owner directive 2026-09-24): a
+      // retired tier is not "hidden for accept" like a floored one — accept
+      // refuses it (retired-cadence gate).
       const bundle = await buildPricingBundle(lawnOnlyEstimate([
         { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
         { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60, recommended: true },
         { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60 },
-      ], { monthly: 50 }));
+      ], { monthly: 45 }));
       expect(bundle.frequencies.map((f) => [f.key, f.monthly])).toEqual([
-        ['standard', 40],
         ['enhanced', 45],
         ['premium', 60],
       ]);
@@ -632,11 +689,16 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
       const bundle = await buildPricingBundle(snapshotEstimate());
       expect(bundle.snapshotHit).toBe(true); // prove the fast path served this, not a rebuild
       expect(bundle.frequencies.map((f) => [f.key, f.monthly])).toEqual([
-        ['standard', 50],
-        ['enhanced', 57.75],
+        ['enhanced', 50],
         ['premium', 79],
       ]);
       expect((bundle.hiddenLawnFrequencies || []).map((f) => f.key)).toEqual([]);
+    });
+
+    test('a send snapshot that still offers the retired Standard (6x) tier recomputes instead of fast-pathing', async () => {
+      const bundle = await buildPricingBundle(snapshotEstimate({ withRetiredStandard: true }));
+      expect(bundle.snapshotHit).not.toBe(true);
+      expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
     });
   });
 
@@ -653,15 +715,13 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
 
     test('floored non-recommended tier is hidden; recommended floored tier stays', async () => {
       const bundle = await buildPricingBundle(lawnOnlyEstimate([
-        // standard prices below the $50 floor → clamped → hidden
-        { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
-        // enhanced also floors, but it is the recommended (quoted) plan → stays
-        { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60, recommended: true },
-        { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60 },
-      ], { monthly: 50 }));
-      expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+        // enhanced prices below the $50 floor → clamped → hidden
+        { name: 'Enhanced', v: 9, mo: 40, ann: 480, pa: 53.33 },
+        // premium also floors, but it is the recommended (quoted) plan → stays
+        { name: 'Premium', v: 12, mo: 45, ann: 540, pa: 45, recommended: true },
+      ], { monthly: 50, storedVisits: 12 }));
+      expect(bundle.frequencies.map((f) => f.key)).toEqual(['premium']);
       expect(bundle.frequencies[0].monthly).toBe(50); // recommended, floor-clamped
-      expect(bundle.frequencies[1].monthly).toBe(60);
     });
 
     test('when every tier floors, the stored (quoted) tier survives', async () => {
@@ -680,32 +740,27 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
 
     test('flag-less frozen ladder: the stored at-floor tier is protected from the hide', async () => {
       // No recommended/selected flags anywhere (frozen pre-deploy shape) and the
-      // stored recurring lawn row is the at-floor 6-visit standard tier — it must
+      // stored recurring lawn row is the at-floor 9-visit enhanced tier — it must
       // stay visible (hiding it would silently re-price the quoted plan), while
-      // nothing else is dropped because the other tiers price above the floor.
+      // nothing else is dropped because the other tier prices above the floor.
       const estimate = lawnOnlyEstimate([
-        { name: 'Standard', v: 6, mo: 45, ann: 540, pa: 90 },
-        { name: 'Enhanced', v: 9, mo: 58, ann: 696, pa: 77.33 },
+        { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60 },
         { name: 'Premium', v: 12, mo: 79, ann: 948, pa: 79 },
-      ], { monthly: 50 });
-      estimate.estimate_data.result.recurring.services = [
-        { name: 'Lawn Care', service: 'lawn_care', mo: 50, visitsPerYear: 6 },
-      ];
+      ], { monthly: 50, storedVisits: 9 });
       const bundle = await buildPricingBundle(estimate);
-      expect(bundle.frequencies.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+      expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
       expect(bundle.frequencies[0].monthly).toBe(50); // clamped, quoted, visible
     });
 
     test('hidden tiers move to hiddenLawnFrequencies so accept can still resolve them', async () => {
       const bundle = await buildPricingBundle(lawnOnlyEstimate([
-        { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
-        { name: 'Enhanced', v: 9, mo: 45, ann: 540, pa: 60, recommended: true },
-        { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60 },
-      ], { monthly: 50 }));
-      expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
-      // The floored standard tier is hidden, not deleted — accept resolves a
+        { name: 'Enhanced', v: 9, mo: 40, ann: 480, pa: 53.33 },
+        { name: 'Premium', v: 12, mo: 60, ann: 720, pa: 60, recommended: true },
+      ], { monthly: 60, storedVisits: 12 }));
+      expect(bundle.frequencies.map((f) => f.key)).toEqual(['premium']);
+      // The floored enhanced tier is hidden, not deleted — accept resolves a
       // stale pre-deploy selection from hiddenLawnFrequencies at its clamped price.
-      expect(bundle.hiddenLawnFrequencies.map((f) => f.key)).toEqual(['standard']);
+      expect(bundle.hiddenLawnFrequencies.map((f) => f.key)).toEqual(['enhanced']);
       expect(bundle.hiddenLawnFrequencies[0].monthly).toBe(50);
     });
 
@@ -714,8 +769,8 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
       // flooredness from the at-floor price itself.
       const bundle = await buildPricingBundle(snapshotEstimate());
       expect(bundle.snapshotHit).toBe(true); // prove the fast path served this, not a rebuild
-      expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
-      expect((bundle.hiddenLawnFrequencies || []).map((f) => f.key)).toEqual(['standard']);
+      expect(bundle.frequencies.map((f) => f.key)).toEqual(['premium']);
+      expect((bundle.hiddenLawnFrequencies || []).map((f) => f.key)).toEqual(['enhanced']);
     });
   });
 });
@@ -747,7 +802,7 @@ describe('section ladders stamp billedPerApplication (owner 2026-07-23: billing 
     }
   });
 
-  test('lawn ladder flags every tier — the 6/9-visit tiers are where a missing flag resurrects the note', () => {
+  test('lawn ladder flags every tier — the 9-visit tier is where a missing flag resurrects the note', () => {
     const ladder = bundleSectionLadderForService(
       'lawn_care',
       { results: LAWN_RESULT_STATS },
@@ -910,7 +965,8 @@ describe('pre-ladder lawn send snapshots recompute instead of fast-pathing (prod
     expect(bundle.snapshotHit).not.toBe(true);
     const keys = bundle.frequencies.map((f) => f.key);
     expect(keys).not.toContain('quarterly');
-    expect(keys).toEqual(expect.arrayContaining(['standard', 'enhanced', 'premium']));
+    // 4x/6x stored rows are retired for new sales — only 9x/12x are offered.
+    expect(keys).toEqual(['enhanced', 'premium']);
     const enhanced = bundle.frequencies.find((f) => f.key === 'enhanced');
     expect(enhanced.serviceCategory).toBe('lawn_care');
     expect(enhanced.visitsPerYear).toBe(9);
@@ -921,13 +977,12 @@ describe('pre-ladder lawn send snapshots recompute instead of fast-pathing (prod
   test('a snapshot that DOES offer the lawn ladder still fast-paths', async () => {
     const estimate = preLadderLawnEstimate();
     estimate.estimate_data.sendSnapshot.pricingBundle.frequencies = [
-      { key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care', serviceTierKey: 'standard', monthly: 45, monthlyBase: 45, annual: 540, perTreatment: 90, visitsPerYear: 6, billingFrequencyKey: 'monthly', included: [], addOns: [] },
       { key: 'enhanced', label: 'Every 6 weeks', serviceCategory: 'lawn_care', serviceTierKey: 'enhanced', monthly: 55, monthlyBase: 55, annual: 660, perTreatment: 73.33, visitsPerYear: 9, billingFrequencyKey: 'monthly', included: [], addOns: [], recommended: true },
       { key: 'premium', label: 'Monthly', serviceCategory: 'lawn_care', serviceTierKey: 'premium', monthly: 66, monthlyBase: 66, annual: 792, perTreatment: 66, visitsPerYear: 12, billingFrequencyKey: 'monthly', included: [], addOns: [] },
     ];
     delete estimate.estimate_data.sendSnapshot.pricingBundle.services;
     const bundle = await buildPricingBundle(estimate);
     expect(bundle.snapshotHit).toBe(true);
-    expect(bundle.frequencies.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
   });
 });
