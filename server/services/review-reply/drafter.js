@@ -329,10 +329,10 @@ const SERVICE_CLAIM_RE = /\b(?:behind (?:you|us|them)|(?:a )?thing of the past|i
 // pre-push round 2) — an identity/relationship claim, not an outcome, so
 // deliberately absent from OUTCOME_TERM_RE. Bare "plan" is NOT a claim
 // ("explained the plan" stays ordinary prose) — only these account-status
-// shapes are. In the service-claim loop these are sourced by the review's
-// own root (the existing logic every term gets) OR by
-// grounding.account?.relationship === 'recurring'.
-const MEMBERSHIP_TERM_RE = /^(?:membership|members?|programs?|(?:service|membership|maintenance|protection|recurring|quarterly|monthly|bi-?monthly|annual|yearly)\s+plans?|plan\s+members?)$/i;
+// shapes are. Sourced ONLY by the review's own root, the same as every
+// other SERVICE_CLAIM_RE term (round-3 fix: two completed visits alone label
+// an account "recurring" with no plan evidence at all, so that relationship
+// fact does not license calling someone a member on its own).
 // Outcome / result phrases within SERVICE_CLAIM_RE — the ones a negation
 // in the review flips ("did not get rid of", "never eliminated", "not under
 // control"). Topic nouns (ants, treatment, lawn) are deliberately absent.
@@ -831,7 +831,12 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     if (RESOLUTION_PARAPHRASE_RE.test(t) && !bodyNegates(t)) {
       const support = reviewSupports(t, canonPhrase(t));
-      if (support === true || reviewStatesOutcome()) continue;
+      // Subject-scoped the same way the outcome-term fallback below is
+      // (2026-09-25 P1 fix): reviewStatesOutcome() alone only proves the
+      // review states SOME un-negated outcome somewhere — "Glad the
+      // Cockroach Treatment is history" must not borrow "The ants are
+      // gone"'s outcome for an account phrase the review never described.
+      if (support === true || (reviewStatesOutcome() && sentenceHasSourcedSubject(sentenceTextAt(termIdx)))) continue;
       return reject(support === 'negated' ? 'negated_review_claim' : 'unlisted_service_claim', t);
     }
     // A phrase the reviewer wrote ("took care of" ↔ "take care of", "under
@@ -847,11 +852,6 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
     if (support === 'negated') continue;
     const stem = stemOf(t);
     if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem) || inServicePhraseSpan(termIdx)) continue;
-    // A membership/plan-status claim is also sourced by the account's own
-    // relationship fact, independent of the review's words (2026-09-25 P1
-    // fix): a genuinely recurring customer may be called a member/plan
-    // holder even if the review itself never says so.
-    if (MEMBERSHIP_TERM_RE.test(t) && grounding.account?.relationship === 'recurring') continue;
     // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
     // "infestation" ↔ "infested") — an un-negated occurrence of that root.
     const rooted = reviewWords.has(t) || reviewWords.has(stem)
@@ -1038,6 +1038,7 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
     if (a.serviceCategories?.length) lines.push(`Service categories: ${a.serviceCategories.join(', ')}`);
     if (a.servicesPerformed?.length) lines.push(`Services we have completed for them (public names; you may refer to the service by this name as context, never dates, visit counts, products or prices — refer to a service by its full name exactly as listed): ${a.servicesPerformed.join(', ')}`);
     if (a.city) lines.push(`City: ${a.city}`);
+    lines.push('Do not call them a member or mention a plan, program or membership unless the reviewer used that word.');
   } else {
     lines.push('', 'ACCOUNT FACTS: none available. Use only the review.');
   }

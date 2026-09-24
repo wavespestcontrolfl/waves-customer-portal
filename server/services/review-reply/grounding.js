@@ -194,6 +194,14 @@ function normalizeServiceName(serviceType) {
   if (!s) return null;
   s = titleCase(s);
   if (s.length < 4) return null;
+  // Fail closed on anything the canonical normalizer left unmatched
+  // (2026-09-25 P1 fix): normalizeServiceType returns unrecognized free text
+  // VERBATIM, and its own suffix stripper only strips INTEGER durations/
+  // prices — "Custom Lawn Service - 1.5 hours - $117" loses the price but
+  // keeps "- 1.5 hours" (the decimal breaks the \d+ match). A digit, a "$",
+  // a duration word, or a " - " / " – " separator surviving to here means
+  // nothing recognized this label; drop it rather than surface raw text.
+  if (/\d|\$|\b(?:hours?|hrs?|mins?|minutes?|days?|weeks?)\b|\s[-–]\s/i.test(s)) return null;
   return s;
 }
 

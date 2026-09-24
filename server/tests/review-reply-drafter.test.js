@@ -785,6 +785,13 @@ describe('2026-09-25 pre-push round 2: subject-scoped outcome fallback / opener 
     const g = grounding({ text: 'Our spider issues are under control.', mentionedTechNames: [], topics: [] });
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the spiders are handled.'), g)).toBeNull();
   });
+  test('resolution paraphrases (behind you / history / thing of the past) are subject-scoped the same way (2026-09-25 round-3 P1 fix)', () => {
+    const g1 = grounding({ text: 'The ants are gone.', mentionedTechNames: [], topics: [] });
+    g1.allow.servicePhrases = ['cockroach treatment'];
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the Cockroach Treatment is history.'), g1)).toBe('unlisted_service_claim');
+    const g2 = grounding({ text: 'The ants are gone.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad the ants are history.'), g2)).toBeNull();
+  });
   test('the sentence-initial pass is now purely the ORDINARY_OPENERS allowlist: Working/Inheriting pass, surnames that happen to end in -ing do not (2026-09-25 P1 fix)', () => {
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nWorking around your schedule is part of the job.'), grounding())).toBeNull();
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nInheriting a mess is no fun, but we are glad to help.'), grounding())).toBeNull();
@@ -801,11 +808,16 @@ describe('2026-09-25 pre-push round 2: subject-scoped outcome fallback / opener 
     g2.allow.servicePhrases = ['one time pest control'];
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nGlad you chose the One-Time Pest Control for your home.'), g2)).toBeNull();
   });
-  test('membership/plan claims need the account\'s recurring relationship or the review\'s own words (2026-09-25 P1 fix)', () => {
+  test('membership/plan claims are sourced ONLY by the review\'s own words — a recurring account alone is not enough (2026-09-25 round-3 fix)', () => {
     const gNoAccount = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [], account: null });
     expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gNoAccount)).toBe('unlisted_service_claim');
+    // Two completed visits alone label an account "recurring" — no plan
+    // evidence at all — so that relationship fact must not license this.
     const gRecurring = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'established', serviceCategories: ['pest control'], city: null } });
-    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gRecurring)).toBeNull();
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gRecurring)).toBe('unlisted_service_claim');
+    // The review's own words still source it.
+    const gReviewSaysIt = grounding({ text: 'We love our membership plan with Waves.', mentionedTechNames: [], topics: [] });
+    expect(Drafter.verifyReplyText(good('Hi Dana,\n\nThanks for choosing our membership plan.'), gReviewSaysIt)).toBeNull();
   });
   test('"explained the plan" is ordinary prose — bare "plan" is not a claim', () => {
     const g = grounding({ text: 'Adam explained everything.', mentionedTechNames: ['Adam'], topics: ['technician'] });

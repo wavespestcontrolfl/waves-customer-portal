@@ -289,6 +289,18 @@ describe('servicesPerformedFrom — public-safe service names (2026-09-24/25 fix
       { service_type: 'Arborjet Treatment', scheduled_date: '2026-01-02' },
     ])).toEqual([]);
   });
+  test('fails closed on anything the canonical normalizer leaves unmatched: digits, "$", duration words, or a " - " separator (2026-09-25 round-3 P1 fix)', () => {
+    // normalizeServiceType returns unrecognized free text VERBATIM, and its
+    // own suffix stripper only strips INTEGER durations/prices — the decimal
+    // in "1.5 hours" survives, so "Custom Lawn Service - 1.5 hours - $117"
+    // would otherwise reach servicesPerformed as raw, unrecognized text.
+    expect(G.normalizeServiceName('Custom Lawn Service - 1.5 hours - $117')).toBeNull();
+    expect(G.servicesPerformedFrom([
+      { service_type: 'Custom Lawn Service - 1.5 hours - $117', scheduled_date: '2026-01-01' },
+    ])).toEqual([]);
+    // A recognized label still yields its clean public name.
+    expect(G.normalizeServiceName('Cockroach Treatment')).toBe('Cockroach Treatment');
+  });
 });
 
 describe('accountFingerprint — servicesPerformed', () => {
