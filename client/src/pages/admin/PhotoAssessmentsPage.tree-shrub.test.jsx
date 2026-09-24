@@ -107,6 +107,13 @@ it("tree & shrub detail: scores + observations, and no Get link / Send report", 
   // Linking still works for this type.
   expect(screen.getByRole("button", { name: "Link…" })).toBeInTheDocument();
 
+  // Details: no funnel timeline — the table has no claim/view/report columns.
+  fireEvent.click(screen.getByRole("tab", { name: "Details" }));
+  expect(await screen.findByText("Prospect note")).toBeInTheDocument();
+  for (const label of ["Unlocked", "First viewed", "Report sent", "Link expires"]) {
+    expect(screen.queryByText(label)).not.toBeInTheDocument();
+  }
+
   fireEvent.click(screen.getByRole("tab", { name: "Tech" }));
   expect(await screen.findByText("Leaf-spot / disease signals")).toBeInTheDocument();
   expect(screen.getByText("2 of 2")).toBeInTheDocument();
@@ -132,6 +139,11 @@ it("pest detail still offers Get link + Send report when the server says it can 
   render(<PhotoAssessmentDetailSheet open type="pest" id={PEST_ID} onClose={() => {}} onChanged={() => {}} />);
   expect(await screen.findByRole("button", { name: "Send report" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Get link" })).toBeInTheDocument();
+  // Funnel types keep their Details-tab funnel timeline.
+  fireEvent.click(screen.getByRole("tab", { name: "Details" }));
+  for (const label of ["Unlocked", "First viewed", "Report sent", "Link expires"]) {
+    expect(await screen.findByText(label)).toBeInTheDocument();
+  }
   expect(screen.queryByText(/No customer report for tree & shrub yet/)).not.toBeInTheDocument();
 });
 

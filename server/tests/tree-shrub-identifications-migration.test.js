@@ -1,5 +1,6 @@
 const migration = require('../models/migrations/20260924000120_tree_shrub_identifications');
 const pestMigration = require('../models/migrations/20260707000030_prospect_photo_assessments');
+const dropUnused = require('../models/migrations/20260924010100_tree_shrub_identifications_drop_unused');
 
 // Records every column/index a createTable callback declares so the two
 // migrations' table shapes can be compared column by column.
@@ -95,5 +96,76 @@ describe('tree_shrub_identifications migration', () => {
       'ALTER TABLE tree_shrub_identifications DROP CONSTRAINT IF EXISTS tree_shrub_identifications_status_check',
       'ALTER TABLE tree_shrub_identifications DROP CONSTRAINT IF EXISTS tree_shrub_identifications_mode_check',
     ]);
+  });
+});
+
+// Stateful fake for the superseding drop migration: the table starts with
+// exactly the columns 20260924000120 created (recorded by running its up()),
+// and alterTable applies dropColumn / column adds to that live set.
+async function tableAfterOriginal() {
+  const { knex, state } = buildKnex();
+  await migration.up(knex);
+  const original = state.created.tree_shrub_identifications.columns;
+  const columns = { ...original };
+  const alterKnex = jest.fn();
+  alterKnex.schema = {
+    hasTable: jest.fn(async (name) => name === 'tree_shrub_identifications'),
+    hasColumn: jest.fn(async (_table, column) => column in columns),
+    alterTable: jest.fn(async (_name, fn) => {
+      const rec = recordingTable();
+      const t = new Proxy(rec.t, {
+        get: (target, prop) => (prop === 'dropColumn' ? (column) => { delete columns[column]; } : target[prop]),
+      });
+      fn(t);
+      Object.assign(columns, rec.columns);
+    }),
+  };
+  return { knex: alterKnex, columns, original };
+}
+
+describe('20260924010100 — drop the unused report/claim/funnel columns (superseding migration)', () => {
+  const UNUSED = [
+    'report_token', 'report_expires_at', 'claim_token', 'claimed_at',
+    'report_first_viewed_at', 'pricing_snapshot', 'last_sent_at',
+  ];
+
+  test('drops exactly the unused columns and keeps everything the admin lane uses', async () => {
+    expect([...dropUnused.DROPPED_COLUMNS].sort()).toEqual([...UNUSED].sort());
+    const { knex, columns } = await tableAfterOriginal();
+    await dropUnused.up(knex);
+    for (const column of UNUSED) expect(columns).not.toHaveProperty(column);
+    for (const column of [
+      'id', 'mode', 'status', 'source', 'lead_id', 'customer_id', 'contact_snapshot', 'address_snapshot',
+      'created_by_technician_id', 'ai_analysis', 'report_contract', 'overall_score', 'worst_signal',
+      'ai_summary', 'archived_at', 'created_at', 'updated_at',
+    ]) {
+      expect(columns).toHaveProperty(column);
+    }
+  });
+
+  test('down re-adds every dropped column with its original definition (type + modifiers, incl. UNIQUE)', async () => {
+    const { knex, columns, original } = await tableAfterOriginal();
+    await dropUnused.up(knex);
+    await dropUnused.down(knex);
+    for (const column of UNUSED) expect(columns[column]).toEqual(original[column]);
+    expect(columns.report_token.modifiers).toContainEqual(['unique']);
+    expect(columns.claim_token.modifiers).toContainEqual(['unique']);
+  });
+
+  test('up and down are idempotent, and a missing table is a no-op', async () => {
+    const { knex, columns } = await tableAfterOriginal();
+    await dropUnused.up(knex);
+    await dropUnused.up(knex);
+    for (const column of UNUSED) expect(columns).not.toHaveProperty(column);
+    await dropUnused.down(knex);
+    const afterDown = JSON.stringify(columns);
+    await dropUnused.down(knex);
+    expect(JSON.stringify(columns)).toBe(afterDown);
+
+    const noTable = jest.fn();
+    noTable.schema = { hasTable: jest.fn(async () => false), hasColumn: jest.fn(), alterTable: jest.fn() };
+    await dropUnused.up(noTable);
+    await dropUnused.down(noTable);
+    expect(noTable.schema.alterTable).not.toHaveBeenCalled();
   });
 });

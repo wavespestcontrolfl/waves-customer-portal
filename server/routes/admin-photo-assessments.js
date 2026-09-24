@@ -5,8 +5,13 @@
  * One surface over the three assessment tables — lawn_diagnostics
  * (mode='prospect'), pest_identifications, and tree_shrub_identifications —
  * backing /admin/lawn-assessments. Tree & shrub has no public funnel and no
- * tokenized customer report page yet: its rows are admin-created only, and
- * generate-link / send-report refuse it (TYPES.tree_shrub.reportPath = null).
+ * tokenized customer report page yet: its rows are admin-created only,
+ * generate-link / send-report refuse it (TYPES.tree_shrub.reportPath = null),
+ * it is not in /funnel, and its table has no report/claim/funnel columns
+ * (report_token, report_expires_at, claim_token, claimed_at,
+ * report_first_viewed_at, pricing_snapshot, last_sent_at — dropped by
+ * 20260924010100). The shared list/detail shaping reads those columns
+ * generically, so on a tree_shrub row they are simply absent (null/false).
  *
  *   GET  /                      unified list (type/status filters, newest first)
  *   GET  /funnel                per-type funnel counts (analyzed → claimed → viewed → booked)
@@ -223,7 +228,8 @@ const TYPES = {
     photoKeyPrefix: 'treeshrub',
     // No tokenized customer report page exists for tree & shrub yet — a null
     // reportPath makes generate-link / send-report refuse (releaseRefusal)
-    // and keeps report_url null, so no dead link is ever minted or shown.
+    // BEFORE any report/claim column would be read or written (the table has
+    // none), and keeps report_url null, so no dead link is ever shown.
     reportPath: null,
     label: 'Tree & Shrub Assessment',
     scope: null,
@@ -240,6 +246,10 @@ const TYPES = {
 // uninspectable callee. The allowlist also keeps a prototype key
 // (?type=toString, /constructor/:id) from resolving to a config.
 const TYPE_KEYS = ['lawn', 'pest', 'tree_shrub'];
+// Types with a public lead-magnet funnel (teaser → claim → report). Only
+// these have the claim/view/report columns funnelCounts counts; tree_shrub
+// has neither the funnel nor the columns.
+const FUNNEL_TYPE_KEYS = ['lawn', 'pest'];
 
 function configFor(type) {
   return TYPE_KEYS.includes(String(type || '')) ? TYPES[type] : null;
@@ -415,13 +425,12 @@ async function funnelCounts(type, sinceDate) {
 }
 
 // GET /api/admin/photo-assessments/funnel?days=30 (days=0 → all time)
-// One key per type. tree_shrub has no public funnel, so its funnel counts
-// stay 0 and only admin_created moves.
+// One key per funnel type (lawn, pest) — tree_shrub has no public funnel.
 router.get('/funnel', async (req, res, next) => {
   try {
     const days = Math.min(Math.max(Number(req.query.days ?? 30), 0), 365);
     const sinceDate = days > 0 ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : null;
-    const types = TYPE_KEYS;
+    const types = FUNNEL_TYPE_KEYS;
     const counts = await Promise.all(types.map((type) => funnelCounts(type, sinceDate)));
     res.json({ days, ...Object.fromEntries(types.map((type, i) => [type, counts[i]])) });
   } catch (err) {
@@ -1157,6 +1166,7 @@ module.exports._test = {
   normalizePhotos,
   TYPES,
   TYPE_KEYS,
+  FUNNEL_TYPE_KEYS,
   configFor,
   releaseRefusal,
   runTreeShrubAnalysis,

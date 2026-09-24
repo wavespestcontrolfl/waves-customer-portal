@@ -1052,10 +1052,10 @@ describe('tree & shrub — third assessment type', () => {
       ai_analysis: JSON.stringify({ prospect_note: 'hedge by the pool', provenance: { source: 'admin' } }),
       contact_snapshot: JSON.stringify({ first_name: 'Robin', email: 'robin@example.com' }),
       created_at: '2026-09-24T14:00:00.000Z',
-      claimed_at: null,
+      // The real row shape: tree_shrub_identifications has NO report/claim/
+      // funnel columns (dropped by 20260924010100) — none appear here.
       lead_id: null,
       customer_id: null,
-      report_token: null,
       ...overrides,
     };
   }
@@ -1140,24 +1140,19 @@ describe('tree & shrub — third assessment type', () => {
     });
   });
 
-  test('GET /funnel reports a tree_shrub key alongside lawn and pest', async () => {
+  test('GET /funnel covers only the funnel types — tree_shrub (no funnel, no claim/view columns) is never queried', async () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/admin/photo-assessments/funnel?days=30`);
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(Object.keys(body).sort()).toEqual(['days', 'lawn', 'pest', 'tree_shrub']);
-      expect(body.tree_shrub).toHaveProperty('admin_created');
+      expect(Object.keys(body).sort()).toEqual(['days', 'lawn', 'pest']);
+      const tablesQueried = mockDb.mock.calls.map(([table]) => String(table).split(' ')[0]);
+      expect(tablesQueried).not.toContain('tree_shrub_identifications');
     });
   });
 
   test('GET /tree_shrub/:id: admin detail with scores + observations, no customer preview, no report link', async () => {
-    // Even a row that somehow carries a released token never surfaces a URL:
-    // there is no public page for it to open.
-    mockRows.tree_shrub_identifications = [treeShrubRow({
-      status: 'sent',
-      report_token: 'a'.repeat(32),
-      report_expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    })];
+    mockRows.tree_shrub_identifications = [treeShrubRow()];
     mockPhotoRows = [{ id: 'p1', photo_index: 0, mime_type: 'image/jpeg', s3_key: 'key1' }];
     await withServer(async (base) => {
       const res = await fetch(`${base}/api/admin/photo-assessments/tree_shrub/${ROW_ID}`);
@@ -1166,6 +1161,16 @@ describe('tree & shrub — third assessment type', () => {
       expect(body.assessment.report_available).toBe(false);
       expect(body.assessment.can_release).toBe(false);
       expect(body.assessment.report_url).toBeNull();
+      // The shared shape reads the report/claim columns generically; on a
+      // row without them they come back empty, never an error.
+      expect(body.assessment).toMatchObject({
+        has_report_token: false,
+        claimed_at: null,
+        report_first_viewed_at: null,
+        last_sent_at: null,
+        report_expires_at: null,
+        pricing_snapshot: null,
+      });
       expect(body.assessment.prospect_note).toBe('hedge by the pool');
       expect(body.customer_preview).toBeNull();
       expect(body.tech_view.scores.overallScore).toBe(75);

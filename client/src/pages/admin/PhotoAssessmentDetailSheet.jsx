@@ -436,21 +436,38 @@ function TreeShrubPhotoObservations({ entries = [] }) {
   );
 }
 
-// Report / Tech tab content per assessment type — one lookup instead of a
-// type branch per tab. Unknown types fall back to the lawn panels (the page
-// only ever opens known types).
+// Details-tab funnel timeline (unlock → first view → report sent → link
+// expiry). Only funnel types have these columns; tree & shrub has no funnel
+// and no report, so its panels render no timeline.
+function FunnelTimelineRows({ assessment }) {
+  return (
+    <>
+      <Row label="Unlocked">{dateTimeET(assessment.claimed_at)}</Row>
+      <Row label="First viewed">{dateTimeET(assessment.report_first_viewed_at)}</Row>
+      <Row label="Report sent">{dateTimeET(assessment.last_sent_at)}</Row>
+      <Row label="Link expires">{dateTimeET(assessment.report_expires_at)}</Row>
+    </>
+  );
+}
+
+// Report / Tech tab content (and the Details-tab funnel timeline) per
+// assessment type — one lookup instead of a type branch per tab. Unknown
+// types fall back to the lawn panels (the page only ever opens known types).
 const TYPE_PANELS = {
   lawn: {
     report: (data) => <CustomerPreview type="lawn" preview={data.customer_preview} />,
     tech: (data) => <LawnTechView contract={data.tech_view?.contract} />,
+    timeline: (assessment) => <FunnelTimelineRows assessment={assessment} />,
   },
   pest: {
     report: (data) => <CustomerPreview type="pest" preview={data.customer_preview} />,
     tech: (data) => <PestTechView techView={data.tech_view} />,
+    timeline: (assessment) => <FunnelTimelineRows assessment={assessment} />,
   },
   tree_shrub: {
     report: (data) => <TreeShrubReportView techView={data.tech_view} />,
     tech: (data) => <TreeShrubTechView techView={data.tech_view} />,
+    timeline: () => null,
   },
 };
 
@@ -584,10 +601,7 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
               <Row label="Prospect note">{assessment.prospect_note}</Row>
               <Row label="Source">{assessment.source}</Row>
               <Row label="Created">{dateTimeET(assessment.created_at)}</Row>
-              <Row label="Unlocked">{dateTimeET(assessment.claimed_at)}</Row>
-              <Row label="First viewed">{dateTimeET(assessment.report_first_viewed_at)}</Row>
-              <Row label="Report sent">{dateTimeET(assessment.last_sent_at)}</Row>
-              <Row label="Link expires">{dateTimeET(assessment.report_expires_at)}</Row>
+              {panels.timeline(assessment)}
               <Row label="Lead">{data.lead ? `${[data.lead.first_name, data.lead.last_name].filter(Boolean).join(" ")} (${data.lead.status})` : "—"}</Row>
               <Row label="Customer">{data.customer ? [data.customer.first_name, data.customer.last_name].filter(Boolean).join(" ") : "—"}</Row>
             </TabPanel>
