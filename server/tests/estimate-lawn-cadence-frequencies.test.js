@@ -283,8 +283,15 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     // Cadence token inside the service key, both spellings.
     expect(recurringLawnRowAtRetiredCadence(lawn({ serviceKey: 'lawn_care_bimonthly' }))).toBe(true);
     expect(recurringLawnRowAtRetiredCadence(lawn({ service_key: 'lawn_care_bimonthly' }))).toBe(true);
+    // The REAL 6x catalog key (codex #4744 r1 P1): lawn_care_recurring is the
+    // 6-visit row, so its key alone flags a row with no count/cadence…
+    expect(recurringLawnRowAtRetiredCadence(lawn({ serviceKey: 'lawn_care_recurring' }))).toBe(true);
+    expect(recurringLawnRowAtRetiredCadence(lawn({ service_key: 'lawn_care_recurring' }))).toBe(true);
+    // …while an explicit sold cadence on the same row still wins.
+    expect(recurringLawnRowAtRetiredCadence(lawn({ serviceKey: 'lawn_care_recurring', visitsPerYear: 9 }))).toBe(false);
     // Sold-cadence service keys stay clean.
     expect(recurringLawnRowAtRetiredCadence(lawn({ serviceKey: 'lawn_care_6week' }))).toBe(false);
+    expect(recurringLawnRowAtRetiredCadence(lawn({ serviceKey: 'lawn_care_monthly' }))).toBe(false);
     // Explicit cadence fields, every spelling the converter normalizes.
     for (const frequency of ['bimonthly', 'bi_monthly', 'bi-monthly']) {
       expect(recurringLawnRowAtRetiredCadence(lawn({ frequency }))).toBe(true);

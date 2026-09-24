@@ -17793,7 +17793,10 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
     const keyText = [svc?.service, svc?.serviceKey, svc?.service_key]
       .filter(Boolean).join(' ').toLowerCase();
     if (/\bquarterly\b|_quarterly\b/.test(keyText) && retiredFreqs.has(4)) return true;
-    return /\bbimonthly\b|_bimonthly\b/.test(keyText) && retiredFreqs.has(6);
+    // lawn_care_recurring IS the 6-visit catalog row (LAWN_CADENCE_RUNTIME
+    // .standard / converter LAWN_CADENCE_CATALOG_KEYS.bimonthly), so its key
+    // alone proves the retired cadence.
+    return /\bbimonthly\b|_bimonthly\b|\blawn_care_recurring\b/.test(keyText) && retiredFreqs.has(6);
   });
 }
 

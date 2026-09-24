@@ -1010,6 +1010,15 @@ describe('review fixes', () => {
     expect(validateIntent(fullPalm).valid).toBe(true);
   });
 
+  test('recurring lawn intent rejects the retired basic/standard tiers (codex #4744 r1)', () => {
+    for (const tier of ['basic', 'standard']) {
+      expect(validateIntent({ ...baseIntent(), services: { lawn: { track: 'st_augustine', tier } }, service_interest_label: 'Lawn Care' }).valid).toBe(false);
+    }
+    for (const tier of ['enhanced', 'premium']) {
+      expect(validateIntent({ ...baseIntent(), services: { lawn: { track: 'st_augustine', tier } }, service_interest_label: 'Lawn Care' }).valid).toBe(true);
+    }
+  });
+
   test('oneTimeLawn carries the caller-stated grass track without a recurring lawn key', () => {
     const tracked = {
       ...baseIntent(),

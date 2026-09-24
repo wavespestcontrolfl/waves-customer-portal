@@ -447,6 +447,8 @@ const LAWN_PRICING_V2 = {
 // advances (pre-push audit P1 on #3274 — the reset stamped retired
 // _GRID_500 under freshly _FREQ_DISCOUNT-priced fallback estimates).
 const LAWN_PRICING_V2_DEFAULT_VERSION = LAWN_PRICING_V2.pricingVersion;
+// 6x/standard retired for new sales 2026-09-24 (server LAWN_TIERS.standard.hidden).
+let lawnStandardHidden = true;
 // Live server override for the lawn program minimum. The static 0 above is
 // only the DISARMED default — a live DB re-arm (pricing_config
 // lawn_pricing_v2.programMinimumMonthly, the documented no-deploy path) must
@@ -473,7 +475,19 @@ export function applyServerLawnPricingConfig(config) {
   // the kill-value pattern.
   const version = typeof config?.pricingVersion === 'string' ? config.pricingVersion.trim() : '';
   LAWN_PRICING_V2.pricingVersion = version || LAWN_PRICING_V2_DEFAULT_VERSION;
+  // 6x/standard sellability — mirrors db-bridge: tiers.standard.hidden wins,
+  // else customerFacing is its inverse; absent restores the in-code default
+  // (hidden since 2026-09-24), so a DB re-enable reaches this engine too.
+  const standardMeta = config?.tiers?.standard;
+  if (typeof standardMeta?.hidden === 'boolean') lawnStandardHidden = standardMeta.hidden;
+  else if (typeof standardMeta?.customerFacing === 'boolean') lawnStandardHidden = !standardMeta.customerFacing;
+  else lawnStandardHidden = true;
   return LAWN_PRICING_V2.programMinimumMonthly;
+}
+
+// Is the 6x lawn tier currently sold? The estimator dropdown reads this.
+export function isLawnStandardSold() {
+  return !lawnStandardHidden;
 }
 
 // Mirrors server constants PEST enforceFloorPostDiscount (the pest_base
@@ -1632,7 +1646,7 @@ function resolveLawnFreq(freq) {
   // same way. LAWN_FREQS keeps 6 (the bracket table anchor lawnLookup still
   // reads for the 9x/12x cadence-discount caps), so this mapping is the
   // only thing stopping a NEW selection from landing on it.
-  if (parsed === 4 || parsed === 6) return 9;
+  if (parsed === 4 || (parsed === 6 && lawnStandardHidden)) return 9;
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
 }
 
@@ -2335,6 +2349,7 @@ export function calculateEstimate(inputs) {
     // customer-visible price is enhanced-vs-premium, which never reads the
     // standard/6x leg.
     const freqs = [
+      ...(lawnStandardHidden ? [] : [{ name: '6x applications/yr', v: 6 }]),
       { name: '9x applications/yr', v: 9 },
       { name: '12x applications/yr', v: 12 },
     ];

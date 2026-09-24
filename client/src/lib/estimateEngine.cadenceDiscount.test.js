@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { applyServerLawnPricingConfig, calculateEstimate } from "./estimateEngine";
+import { applyServerLawnPricingConfig, calculateEstimate, isLawnStandardSold } from "./estimateEngine";
 
 // Client mirror of the server's cadence-discount runtime guards (codex #3274
 // r3, server coverage in server/tests/lawn-cadence-discount-arming.test.js):
@@ -171,6 +171,26 @@ describe("retired lawn cadences resolve to the 9x default in the fallback engine
     expect(selected.map((t) => t.v)).toEqual([9]);
     const at9 = calculateEstimate(lawnInput({ measuredTurfSf: 5000, lawnFreq: "9" }));
     expect(est.results.lawn).toEqual(at9.results.lawn);
+  });
+
+  // codex #4744 r1 P2: the documented no-deploy re-enable
+  // (lawn_pricing_v2.tiers.standard.hidden=false) must reach the fallback
+  // engine too, mirroring db-bridge's hidden/customerFacing precedence.
+  it("a live DB re-enable of 6x restores the 6x option; absent config re-hides it", () => {
+    try {
+      applyServerLawnPricingConfig({ tiers: { standard: { hidden: false } } });
+      expect(isLawnStandardSold()).toBe(true);
+      const est = calculateEstimate(lawnInput({ measuredTurfSf: 5000, lawnFreq: "6" }));
+      expect(est.results.lawn.map((t) => t.v)).toEqual([6, 9, 12]);
+      expect(est.results.lawn.filter((t) => t.recommended).map((t) => t.v)).toEqual([6]);
+      applyServerLawnPricingConfig({ tiers: { standard: { customerFacing: true } } });
+      expect(isLawnStandardSold()).toBe(true);
+      applyServerLawnPricingConfig({ tiers: { standard: { hidden: true, customerFacing: true } } });
+      expect(isLawnStandardSold()).toBe(false);
+    } finally {
+      applyServerLawnPricingConfig(null);
+    }
+    expect(isLawnStandardSold()).toBe(false);
   });
 });
 
