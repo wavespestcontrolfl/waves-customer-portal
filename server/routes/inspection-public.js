@@ -1985,6 +1985,12 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
       error: result.error, code: 'SLOT_TAKEN', availability: null, lead: currentLeadPayload, address_changed: true,
     });
   }
+  // The county-roll address refusal (main's ADDRESS_UNVERIFIED, merged in):
+  // not a slot race — the office verifies the address first, so the page
+  // shows that message as-is with no slot refresh.
+  if (result.code === 'ADDRESS_UNVERIFIED') {
+    return res.status(409).json({ error: result.error, code: 'ADDRESS_UNVERIFIED' });
+  }
   if (result.status === 409) {
     return sendSlotTaken(res, { location: bookingLocation, range, config, catalog, leadId: lead.id, error: result.error });
   }

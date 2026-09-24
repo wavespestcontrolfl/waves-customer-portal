@@ -675,6 +675,22 @@ describe('Codex #4737 r11 P2s: availability eligibility; race refresh never at a
   });
 });
 
+describe('main merge: ADDRESS_UNVERIFIED from the shared booking', () => {
+  test('answers 409 ADDRESS_UNVERIFIED with the office message — never a slot-taken refresh', async () => {
+    firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+    firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+    listResults.scheduled_services = [];
+    mockBuildAvailability.mockResolvedValueOnce({
+      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+    });
+    mockCreateSelfBooking.mockResolvedValueOnce({ ok: false, status: 409, code: 'ADDRESS_UNVERIFIED', error: 'County records could not confirm this house number. Our office will verify the address with you before scheduling.' });
+    const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toEqual({ error: expect.stringMatching(/verify the address/), code: 'ADDRESS_UNVERIFIED' });
+    expect(mockBuildAvailability).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('Codex #4737 r17: south Hillsborough is served; the in-booking and waitlist checks are lead-wide', () => {
   test('P1: a Ruskin (south Hillsborough) address is in area; a Tampa one is not', async () => {
     firstResults.leads = LEAD_ROW;
