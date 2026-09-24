@@ -300,6 +300,7 @@ async function seedParent(customerId, { serviceId = null, serviceType = 'Monthly
       { status: 'cancelled', track_state: 'en_route', expectConflict: false }, // terminal status beats stale tracker (r9)
       { status: 'no_show', track_state: 'on_property', expectConflict: false },
       { status: 'skipped', track_state: 'en_route', expectConflict: false },
+      { status: null, track_state: 'en_route', expectConflict: true }, // NULL status: the tracker still decides (r1 P0)
     ];
     for (const c of cases) {
       const winnerId = await makeCustomer({ address_line1: '17 Palm Ct', city: 'Bradenton', zip: '34205' });

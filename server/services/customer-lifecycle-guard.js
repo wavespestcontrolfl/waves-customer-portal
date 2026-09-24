@@ -98,7 +98,7 @@ function whereVisitRowLive(qb, today, { trackState = true } = {}) {
   if (trackState) {
     const terminalStatusesSql = TERMINAL_STATUSES.map(() => '?').join(', ');
     qb.orWhereRaw(
-      `(track_state IN (${liveTrackStatesSql}) AND status NOT IN (${terminalStatusesSql}))`,
+      `(track_state IN (${liveTrackStatesSql}) AND (status IS NULL OR status NOT IN (${terminalStatusesSql})))`,
       [...LIVE_TRACK_STATES, ...TERMINAL_STATUSES],
     );
   }
