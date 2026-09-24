@@ -44,6 +44,11 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
     await trx('estimates')
       .whereIn('id', toBlock)
       .where({ source: 'quote_wizard' })
+      // The candidate query's live statuses re-asserted on the write: a
+      // decline (or any terminal transition) that commits between the
+      // SELECT and this row lock wins, so a successful decline token is
+      // never turned into the generic 404 (codex #4667 r30 P0).
+      .whereIn('status', [...WITHDRAWABLE_PUBLICATION_STATES, 'draft'])
       .whereNull('archived_at')
       .whereNull('price_locked_at')
       .update({

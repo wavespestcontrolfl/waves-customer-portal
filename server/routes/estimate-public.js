@@ -16330,6 +16330,11 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
             : { extension_requested_at: null },
         ).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
         if (err.code === 'FIXED_BID_VALIDITY') return res.status(404).json({ error: 'Estimate not found' });
+        // A hold (the county-roll address block, a linkage invalidation)
+        // that raced in between the claim and the locked anchor read is
+        // the generic 404 every off-surface token answer carries (codex
+        // #4667 r30 P0).
+        if (err.code === 'OFF_CUSTOMER_SURFACE') return res.status(404).json({ error: 'Estimate not found' });
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }

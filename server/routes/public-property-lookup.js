@@ -556,7 +556,13 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // run's clean answer when it is newer than this run's evidence.
         {
           const lockedCleanAt = await resolveStaffCleanAt(trx);
-          const evidenceAt = Date.parse(auditEvidenceAt(result) || '') || Date.parse(result?.meta?.timestamp || '') || 0;
+          // Evidence time ONLY for an actual county answer: an unanswered
+          // lookup (outage, no record) has no clean evidence, so an older
+          // matching flag on the contact pair must still win and carry the
+          // warning through the outage (codex r30 P0).
+          const evidenceAt = countyRollAnswered(result?.enriched)
+            ? (Date.parse(auditEvidenceAt(result) || '') || Date.parse(result?.meta?.timestamp || '') || 0)
+            : 0;
           const newerFlag = resolveStaffCleanAt.lastNewestFlag;
           const newerFlagAt = resolveStaffCleanAt.lastNewestFlagAt || 0;
           if (addressUnverified && result?.enriched && lockedCleanAt

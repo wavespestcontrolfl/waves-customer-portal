@@ -496,6 +496,11 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     // not from the cron parking the anchor at publication (codex r16 P2 on
     // #3804). The publish-time claim re-asserts it atomically.
     if (siblingRepricePending(sibling)) return { sibling, statusCode: 409, code: 'REPRICE_PENDING' };
+    // …and a sibling under the county-roll address block (codex #4667 r30
+    // P1): the grouped claim's assertEstimateSendable would abort the
+    // delivery later, so the refusal lands at scheduling time instead of
+    // a queued send that cannot run.
+    if (parseEstimateData(sibling.estimate_data)?.addressUnverified === true) return { sibling, statusCode: 409, code: 'ADDRESS_UNVERIFIED' };
     const authority = String(sibling.pricing_authority || '').toUpperCase();
     // Automation: the explicit SERVER stamp only. Manual sends: the ONE
     // shared row verdict — SERVER, a genuinely locked accepted price, or an
@@ -522,6 +527,9 @@ function blockingSiblingMessage(blockingSibling, beforeWhat) {
   const id = blockingSibling.sibling.id;
   if (blockingSibling.code === 'REPRICE_PENDING') {
     return `Grouped estimate ${id} is held for a re-price (a clarify answer replaces its dollars or address) — re-draft or revise it before ${beforeWhat}.`;
+  }
+  if (blockingSibling.code === 'ADDRESS_UNVERIFIED') {
+    return `Grouped estimate ${id} has a house number county records could not confirm — correct or confirm its address before ${beforeWhat}.`;
   }
   return `Grouped estimate ${id} has no engine-verified price — re-save it from the estimate tool before ${beforeWhat}.`;
 }
@@ -5454,6 +5462,7 @@ router._internals = {
   GATED_SEND_AUTHORITY_SQL,
   assertAutoSendPricingAuthority,
   findGroupSiblingBlockingSend,
+  blockingSiblingMessage,
   notifyPricingFallbackAfterCommit,
   assertEstimateManagerApprovalResolved,
   leadEstimateAutomationSummary,

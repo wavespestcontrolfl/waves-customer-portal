@@ -304,6 +304,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     if (require('../utils/estimate-claim-sql').estimateOffCustomerSurface({ estimate_data: anchor.estimate_data })) {
       const err = new Error('Estimate changed while extending — retry.');
       err.statusCode = 409;
+      // A recognizable code so the public token route answers its generic
+      // 404 (the row is off-surface for this bearer), never a 500 that
+      // tells the token apart from an unknown one (codex #4667 r30 P0).
+      err.code = 'OFF_CUSTOMER_SURFACE';
       throw err;
     }
     if (await fixedBidBlocksExtension(trx, { ...estimate, estimate_data: anchor.estimate_data })) {
