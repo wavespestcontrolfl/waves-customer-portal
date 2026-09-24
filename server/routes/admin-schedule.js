@@ -9888,6 +9888,50 @@ async function planCollectiveEditDateMove(req) {
 // member-tier requirement must see it before the tier sync stamps the
 // customer row), computed via one shared helper instead of three separate
 // inline copies.
+// Pre-push fallback audit P1 on #4657 round 24: the appointment-preset
+// eligibility check used to be two hand-copied closures, one in PUT
+// /:id/update-details and one in POST /:id/update-details/preview, with a
+// comment asking future fixes to be mirrored "by inspection". The preview's
+// whole premise is that it decides exactly what the save decides, so the
+// rule lives ONCE here. Eligibility is judged on the lines the preset can
+// actually reach — the same matching + percent-eligible filter
+// buildAppointmentPricing applies on create — so a termite-scoped preset
+// on a pest-primary visit passes on its add-on, and out-of-scope / excluded
+// lines can't satisfy a minimum subtotal (Codex #3531 r2 P1). `lines` =
+// [{ amount, serviceKey, serviceCategory }], primary first.
+// `membershipContext` is a thunk, read at CALL time, so each route's own
+// pending `updates`/scheduledDate are seen exactly as the closures saw
+// them (the EDITED state — posted values, then `updates`, then the row).
+function buildPresetEligibilityCheck({ appointmentDiscountPreset, membershipContext }) {
+  return async (lines) => {
+    if (!appointmentDiscountPreset) return;
+    const keyFilter = appointmentDiscountPreset.service_key_filter || null;
+    const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
+    const matching = (lines || []).filter((line) => (
+      (!keyFilter || keyFilter === line.serviceKey)
+      && (!categoryFilter || categoryFilter === line.serviceCategory)
+    ));
+    if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
+    const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
+      ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
+      : matching;
+    const context = eligible[0] || matching[0] || {};
+    const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
+    const serviceKey = context.serviceKey || null;
+    const serviceCategory = context.serviceCategory || null;
+    const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext(membershipContext());
+    const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
+      subtotal,
+      serviceKey,
+      serviceCategory,
+      recurringMembershipBooking,
+    });
+    if (failures.length) {
+      throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
+    }
+  };
+}
+
 async function resolveMembershipBookingContext({
   db, id, updates, isRecurring, serviceType, scheduledDate,
 }) {
@@ -11286,46 +11330,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         discountAmount = appointmentDiscountPreset.amount != null ? Number(appointmentDiscountPreset.amount) : null;
       }
     }
-    // Eligibility is judged on the lines the preset can actually reach —
-    // the same matching + percent-eligible filter buildAppointmentPricing
-    // applies on create — so a termite-scoped preset on a pest-primary
-    // visit passes on its add-on, and out-of-scope / excluded lines can't
-    // satisfy a minimum subtotal (Codex #3531 r2 P1). `lines` =
-    // [{ amount, serviceKey, serviceCategory }], primary first.
-    const presetEligibilityCheck = async (lines) => {
-      if (!appointmentDiscountPreset) return;
-      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
-      const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
-      const matching = (lines || []).filter((line) => (
-        (!keyFilter || keyFilter === line.serviceKey)
-        && (!categoryFilter || categoryFilter === line.serviceCategory)
-      ));
-      if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
-      const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
-        ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
-        : matching;
-      const context = eligible[0] || matching[0] || {};
-      const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
-      const serviceKey = context.serviceKey || null;
-      const serviceCategory = context.serviceCategory || null;
-      // Codex pre-push audit P2 (structural round 3, :9310): shared with
-      // computeUpdateDetailsFinancialPlan's own line-level resolution and
-      // this route's sibling preview copy — resolveMembershipBookingContext,
-      // above. Evaluated on the EDITED state — posted values, then the
-      // pending `updates`, then the stored row.
-      const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext({
+    // One rule for the save and its preview — buildPresetEligibilityCheck.
+    // Codex pre-push audit P2 (structural round 3, :9310): the membership
+    // context is resolveMembershipBookingContext on the EDITED state
+    // (posted values, then the pending `updates`, then the stored row),
+    // read when the check runs.
+    const presetEligibilityCheck = buildPresetEligibilityCheck({
+      appointmentDiscountPreset,
+      membershipContext: () => ({
         db, id: req.params.id, updates, isRecurring, serviceType, scheduledDate: req.body.scheduledDate,
-      });
-      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
-        subtotal,
-        serviceKey: serviceKey || null,
-        serviceCategory: serviceCategory || null,
-        recurringMembershipBooking,
-      });
-      if (failures.length) {
-        throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
-      }
-    };
+      }),
+    });
     let clearAddonDiscountsOnPriceEdit = false;
     let appointmentDiscountChanged = false;
     let appointmentDiscountCols = null;
@@ -14356,41 +14371,13 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
         || (!!cols.discount_id && appointmentDiscountIdentityChanged(existingDiscount, discountId));
     }
 
-    // Byte-identical to the save path's own presetEligibilityCheck closure
-    // (PUT /:id/update-details, above) — kept as its own copy rather than a
-    // shared extraction because it closes over req/updates/isRecurring/
-    // serviceType, which differ in shape between the two routes; any future
-    // fix to one must be mirrored to the other by inspection (they sit a
-    // few hundred lines apart in this same file).
-    const presetEligibilityCheck = async (lines) => {
-      if (!appointmentDiscountPreset) return;
-      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
-      const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
-      const matching = (lines || []).filter((line) => (
-        (!keyFilter || keyFilter === line.serviceKey)
-        && (!categoryFilter || categoryFilter === line.serviceCategory)
-      ));
-      if (isPercentDiscountType(appointmentDiscountPreset.discount_type)) assertPercentExclusionCatalogReady();
-      const eligible = isPercentDiscountType(appointmentDiscountPreset.discount_type)
-        ? matching.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
-        : matching;
-      const context = eligible[0] || matching[0] || {};
-      const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
-      const serviceKeyCtx = context.serviceKey || null;
-      const serviceCategoryCtx = context.serviceCategory || null;
-      const { customerRow, recurringMembershipBooking } = await resolveMembershipBookingContext({
-        db, id, updates, isRecurring, serviceType, scheduledDate,
-      });
-      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
-        subtotal,
-        serviceKey: serviceKeyCtx || null,
-        serviceCategory: serviceCategoryCtx || null,
-        recurringMembershipBooking,
-      });
-      if (failures.length) {
-        throw httpError(400, `${appointmentDiscountPreset.name} is not eligible: ${failures.join(', ')}`);
-      }
-    };
+    // The SAME rule the save applies — buildPresetEligibilityCheck — so a
+    // preview can never confirm a preset the PUT would then refuse (or the
+    // reverse). Only the route context differs.
+    const presetEligibilityCheck = buildPresetEligibilityCheck({
+      appointmentDiscountPreset,
+      membershipContext: () => ({ db, id, updates, isRecurring, serviceType, scheduledDate }),
+    });
 
     const plan = await computeUpdateDetailsFinancialPlan({
       db, id, updates, discountType, discountAmount, isRecurring, serviceType, scheduledDate,
@@ -21862,6 +21849,7 @@ function blackoutDateString(value) {
 
 router._test = {
   negativePricePosted,
+  buildPresetEligibilityCheck,
   addonRowIdsDrifted,
   financialStateDrifted,
   previewTotalDrifted,

@@ -1633,3 +1633,66 @@ describe('negativePricePosted — a negative primary price is refused at the rou
     expect(nextErr).toBe(DB_TOUCHED);
   });
 });
+
+// Pre-push fallback audit P1 on #4657 round 24: presetEligibilityCheck was
+// two hand-copied closures (PUT save + POST preview). One builder now; the
+// route context is a thunk read at call time. Pinned on the shared rule.
+describe('buildPresetEligibilityCheck — one eligibility rule for the save and its preview (fallback audit P1, #4657 round 24)', () => {
+  const { buildPresetEligibilityCheck } = require('../routes/admin-schedule')._test;
+  const { manualEligibilityFailures } = require('../services/discount-engine');
+  const db = require('../models/db');
+  const LINES = [
+    { amount: 100, serviceKey: 'pest_general_quarterly', serviceCategory: 'pest' },
+    { amount: 40, serviceKey: 'termite_bond', serviceCategory: 'termite' },
+  ];
+  beforeEach(() => {
+    manualEligibilityFailures.mockReset();
+    manualEligibilityFailures.mockResolvedValue([]);
+    db.mockReset();
+    // resolveMembershipBookingContext reads the customer row through db();
+    // a stub chain that resolves null is enough — the engine is mocked.
+    const chain = { where: () => chain, first: async () => null, select: async () => [] };
+    db.mockImplementation(() => chain);
+  });
+
+  test('no preset: resolves without touching the engine or the context', async () => {
+    const membershipContext = jest.fn();
+    const check = buildPresetEligibilityCheck({ appointmentDiscountPreset: null, membershipContext });
+    await expect(check(LINES)).resolves.toBeUndefined();
+    expect(manualEligibilityFailures).not.toHaveBeenCalled();
+    expect(membershipContext).not.toHaveBeenCalled();
+  });
+
+  test('a service-key-scoped fixed preset is judged on the MATCHING lines only (subtotal $40, termite context), reading the route context at call time', async () => {
+    const preset = { name: 'Termite Special', discount_type: 'fixed_amount', amount: 20, service_key_filter: 'termite_bond' };
+    const updates = {};
+    const membershipContext = jest.fn(() => ({ db, id: 'visit-1', updates, isRecurring: false, serviceType: 'Termite Bond', scheduledDate: '2040-02-01' }));
+    const check = buildPresetEligibilityCheck({ appointmentDiscountPreset: preset, membershipContext });
+    await expect(check(LINES)).resolves.toBeUndefined();
+    expect(membershipContext).toHaveBeenCalledTimes(1);
+    expect(manualEligibilityFailures).toHaveBeenCalledTimes(1);
+    const [presetArg, , ctx] = manualEligibilityFailures.mock.calls[0];
+    expect(presetArg).toBe(preset);
+    expect(ctx).toMatchObject({ subtotal: 40, serviceKey: 'termite_bond', serviceCategory: 'termite' });
+  });
+
+  test('an unscoped preset sums every line ($140) with the primary as context', async () => {
+    const preset = { name: 'Military', discount_type: 'fixed_amount', amount: 5 };
+    const check = buildPresetEligibilityCheck({ appointmentDiscountPreset: preset, membershipContext: () => ({ db, id: 'visit-1', updates: {} }) });
+    await check(LINES);
+    expect(manualEligibilityFailures.mock.calls[0][2]).toMatchObject({ subtotal: 140, serviceKey: 'pest_general_quarterly', serviceCategory: 'pest' });
+  });
+
+  test('engine failures become the same 400 the save always returned', async () => {
+    manualEligibilityFailures.mockResolvedValue(['minimum subtotal $200']);
+    const preset = { name: 'Big Spender', discount_type: 'fixed_amount', amount: 25 };
+    const check = buildPresetEligibilityCheck({ appointmentDiscountPreset: preset, membershipContext: () => ({ db, id: 'visit-1', updates: {} }) });
+    await expect(check(LINES)).rejects.toMatchObject({ status: 400, message: 'Big Spender is not eligible: minimum subtotal $200' });
+  });
+
+  test('both routes build their check from the shared builder (no second copy of the rule in the file)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    expect(src.match(/= buildPresetEligibilityCheck\(\{/g)).toHaveLength(2); // the PUT and the preview
+    expect(src.match(/const presetEligibilityCheck = async \(lines\)/g)).toBeNull();
+  });
+});
