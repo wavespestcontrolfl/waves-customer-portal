@@ -17428,8 +17428,27 @@ function seriesAddressPropertyKey(row) {
     zip: row.service_address_zip,
   }) || null;
 }
+// ALWAYS resolves to an address key, never a raw property_id — a linked
+// root's key comes from ITS property's own customer_properties.address_key
+// (the SAME canonical value customer-properties.js stamps at creation),
+// not the property's row id, so an unlinked legacy root at the identical
+// physical address (computed here directly from its own service/customer
+// address fields) resolves to the SAME key and the two are correctly
+// compared. Comparing raw `id:<uuid>` against `addr:<key>` would never
+// match two rows for the very legacy-vs-current case this rule targets —
+// exactly the scenario a linked replacement series and its unlinked
+// predecessor create.
 async function seriesPropertyKey(conn, row, cols) {
-  if (cols.property_id && row.property_id) return `id:${row.property_id}`;
+  if (cols.property_id && row.property_id) {
+    const property = await conn('customer_properties').where({ id: row.property_id }).first('address_key');
+    if (property?.address_key) return `addr:${property.address_key}`;
+    // Linked to a property row with no computed address_key (customer-
+    // properties.js always stamps one at creation, so this should not
+    // happen in practice) — fail safe with the link itself rather than
+    // silently falling through to a DIFFERENT identity than what it
+    // actually points to.
+    return `id:${row.property_id}`;
+  }
   const ownAddress = seriesAddressPropertyKey(row);
   if (ownAddress) return `addr:${ownAddress}`;
   const { addressKey } = require('../services/customer-properties');
@@ -17443,11 +17462,19 @@ async function isSupersededSeries(conn, parent, parentId, cols) {
   if (!family) return false;
   const propertyKey = await seriesPropertyKey(conn, parent, cols);
   if (propertyKey == null) return false;
-  const siblingRoots = await conn('scheduled_services')
+  const siblingRoots = (await conn('scheduled_services')
     .where({ customer_id: parent.customer_id, is_recurring: true, recurring_ongoing: true })
     .whereNull('recurring_parent_id')
     .whereNot('id', parentId)
-    .select('*');
+    .select('*'))
+    // Series-scope price/service overrides beat a root's own columns —
+    // same overlay applied to `parent` above, before it ever reaches this
+    // function. Without it, an overridden service_id/service_type on one
+    // sibling can classify to a different family than the SAME root would
+    // resolve to as `parent` on its own run, so a real duplicate is missed
+    // (or a distinct series wrongly suppressed) depending only on which of
+    // the two roots is being evaluated.
+    .map((row) => overlayRecurringTemplateOverrides(row, cols));
   if (!siblingRoots.length) return false;
   const duplicates = [];
   for (const row of siblingRoots) {

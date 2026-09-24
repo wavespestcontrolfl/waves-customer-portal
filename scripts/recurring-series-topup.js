@@ -16,12 +16,11 @@
  * like the nightly cron's live pass. No confirmation SMS, no other customer
  * communication either way.
  *
- * Each line prints the customer id (never a name by default — this
- * codebase's logs, including ops scripts, carry ids only), service type,
- * pattern, the current booked-through date, and the date(s) it
- * added/would add. `--names` prints the customer's name alongside the id
- * too, for the owner reviewing this preview directly — never the default,
- * per the PII rule.
+ * Each line prints the customer id (never a name — this codebase's logs,
+ * including ops scripts, carry ids only; AGENTS.md's PII-in-logs rule is
+ * unconditional, with no opt-in carve-out — resolve the name from the id
+ * in the admin UI), service type, pattern, the current booked-through
+ * date, and the date(s) it added/would add.
  *
  * Usage:
  *   node scripts/recurring-series-topup.js                     # dry run, every eligible ongoing series
@@ -29,7 +28,6 @@
  *   node scripts/recurring-series-topup.js --customer <uuid>    # narrow to one customer's series
  *   node scripts/recurring-series-topup.js --parent <uuid>      # narrow to one series (its root row id)
  *   node scripts/recurring-series-topup.js --horizon-days 180   # override RECURRING_TOPUP_HORIZON_DAYS
- *   node scripts/recurring-series-topup.js --names               # also print each customer's name
  *
  * Under `railway run node scripts/recurring-series-topup.js -- ...`, Railway
  * injects DATABASE_URL (and every other service var) into the process
@@ -43,7 +41,6 @@ const db = require('../server/models/db');
 
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
-const SHOW_NAMES = args.includes('--names');
 
 function argValue(flag) {
   const i = args.indexOf(flag);
@@ -113,22 +110,6 @@ async function main() {
   console.log(`${APPLY ? 'APPLYING' : 'DRY RUN'} — ${parentIds.length} candidate series, horizon ${horizonOpt.horizonDays} days\n`);
 
   const summary = { scanned: parentIds.length, toppedUp: 0, visitsInserted: 0, skipped: {}, errors: 0 };
-  // --names resolves lazily and caches by customer id (a Map, not a batch
-  // query — parentIds are series, not customers, so the id set isn't known
-  // until each series reports its own customerId) so a customer with
-  // several candidate series in one run only costs one lookup, never one
-  // per series. Never queried at all unless --names is passed.
-  const nameCache = new Map();
-  async function customerLabel(customerId) {
-    if (!customerId) return '(unknown)';
-    if (!SHOW_NAMES) return customerId;
-    if (!nameCache.has(customerId)) {
-      const row = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
-      const name = row ? `${row.first_name || ''} ${row.last_name || ''}`.trim() : '';
-      nameCache.set(customerId, name || '(no name on file)');
-    }
-    return `${customerId} (${nameCache.get(customerId)})`;
-  }
 
   for (const parentId of parentIds) {
     try {
@@ -143,14 +124,16 @@ async function main() {
         summary.toppedUp += 1;
         summary.visitsInserted += insertedDates.length;
       }
-      // Customer id (never a name, unless --names) — this codebase's logs
-      // (incl. ops scripts; see ops/agents/README.md) default to ids only.
-      // --names is the one opt-in exception, for the owner reviewing this
-      // preview directly; resolve the name from the id in the admin UI
-      // otherwise.
-      const customerField = await customerLabel(result.customerId);
+      // Customer id, not name — this codebase's logs (incl. ops scripts;
+      // see ops/agents/README.md) never carry customer names/PII, only
+      // ids, and AGENTS.md's rule here is unconditional (no opt-in
+      // carve-out — a prior version of this script tried a `--names` flag
+      // for the owner reviewing a preview directly, and Codex's local
+      // pre-push audit correctly caught that an opt-in doesn't create an
+      // exception the rule itself doesn't grant). Resolve the name from
+      // the id in the admin UI when acting on a line.
       console.log(
-        `customer=${customerField} | ${result.serviceType || '(no service type)'} | ${result.recurringPattern || '(no pattern)'} `
+        `customer=${result.customerId || '(unknown)'} | ${result.serviceType || '(no service type)'} | ${result.recurringPattern || '(no pattern)'} `
         + `| booked through ${result.priorBookedThrough || '(no live visit)'} `
         // A falsy `skipped` here (result?.skipped was already handled above)
         // with an empty insertedDates means extendSeriesOnceLocked's own

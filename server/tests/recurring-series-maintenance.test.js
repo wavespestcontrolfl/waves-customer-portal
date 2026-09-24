@@ -668,6 +668,19 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
 
+  test('isSupersededSeries classifies each sibling root through the SAME template-override overlay `parent` gets (source guard, Codex GitHub guards follow-up P1)', () => {
+    // Without this, an overridden service_id/service_type on one sibling
+    // could classify it into a DIFFERENT family than the same root
+    // resolves to as `parent` on its own run, missing a real duplicate (or
+    // wrongly suppressing a distinct series) depending only on which of
+    // the two roots is being evaluated.
+    const fnStart = src.indexOf('async function isSupersededSeries(');
+    const fnEnd = src.indexOf('\n}\n', fnStart);
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnBody = src.slice(fnStart, fnEnd);
+    expect(fnBody).toContain('.map((row) => overlayRecurringTemplateOverrides(row, cols))');
+  });
+
   test('rolls back when the series was stopped while processing (race re-check)', async () => {
     const { conn, inserted } = ongoingScenario({ upcomingCount: 1, sibling: undefined, stillOngoing: false });
     await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });

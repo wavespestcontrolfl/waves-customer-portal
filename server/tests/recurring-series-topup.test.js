@@ -735,6 +735,8 @@ function supersededScenario(roots) {
     property_id: r.propertyId, service_id: 1, created_at: r.createdAt || '2020-01-01T00:00:00Z',
     estimated_duration_minutes: 60, create_invoice_on_complete: true, estimated_price: '150.00',
     window_start: null, window_end: null,
+    // Only set for an UNLINKED root exercising the service-address fallback.
+    service_address_line1: r.serviceAddressLine1 || null,
   });
   const seriesDatesById = new Map(roots.map((r) => [r.id, new Set(r.latestDate ? [r.latestDate] : [])]));
   const conn = makeConn(({ table, calls, op, data }) => {
@@ -790,6 +792,15 @@ function supersededScenario(roots) {
     if (table === 'customers' && op === 'first') {
       return { id: 5, active: true, deleted_at: null, service_paused_at: null, pipeline_stage: 'active_customer' };
     }
+    if (table === 'customer_properties' && op === 'first') {
+      // seriesPropertyKey resolves a linked root's property through its
+      // OWN canonical address_key (Codex GitHub guards-follow-up P1 fix —
+      // never the raw property_id), so two roots' fixture propertyId
+      // strings ('prop-1' vs 'prop-2') double as their address_key here
+      // too: same string in, same canonical key out.
+      const idWhere = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'id' in c[1]);
+      return idWhere ? { address_key: idWhere[1].id } : undefined;
+    }
     if (table === 'services') return null;
     if (table === 'system_settings') return null;
     if (table === 'schedule_blackout_dates') return [];
@@ -841,6 +852,30 @@ describe('topUpRecurringSeriesLocked — superseded/duplicate ongoing series (Co
     ];
     const result = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
     expect(result.skipped).not.toBe('superseded_series');
+  });
+
+  test('a LINKED root and an UNLINKED legacy root at the identical physical address are recognized as duplicates (Codex GitHub guards follow-up P1)', async () => {
+    // seriesPropertyKey resolves a linked root through its OWN
+    // customer_properties.address_key, never a raw property_id — so it
+    // matches an unlinked sibling's directly-computed address key for the
+    // SAME physical address. Comparing `id:<uuid>` against `addr:<key>`
+    // (the pre-fix version) could never match this exact legacy-vs-current
+    // case, which is the one this whole rule exists for.
+    const roots = [
+      // Linked (has a customer_properties row) — customer_properties.address_key
+      // for this fixture's property_id, per supersededScenario's own
+      // customer_properties handler, is the property_id string itself.
+      { id: 10, propertyId: 'prop1', familyKey: 'lawn_care', latestDate: daysOut(0), createdAt: '2020-01-01T00:00:00Z' },
+      // Unlinked legacy root — no property_id at all, but its OWN service
+      // address ("Prop 1") normalizes (addressKey) to the exact same
+      // 'prop1' key the linked root's property resolves to.
+      {
+        id: 99, familyKey: 'lawn_care', latestDate: daysOut(30), createdAt: '2026-01-01T00:00:00Z',
+        serviceAddressLine1: 'Prop 1',
+      },
+    ];
+    const result = await topUpRecurringSeriesLocked(supersededScenario(roots), 10, { horizonDays: 365 });
+    expect(result.skipped).toBe('superseded_series');
   });
 });
 
