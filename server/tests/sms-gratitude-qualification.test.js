@@ -138,6 +138,7 @@ describe('sms gratitude qualification', () => {
   test('creates a durable unlinked run, exercises both live legs, and qualifies exact safe copy', async () => {
     const store = memoryDb();
     const { qualification, generateGroundedDraft, createDeepMessage, Anthropic } = loadQualification({ dbi: store });
+    const verifierFallbackModel = require('../config/models').TEXT_POLICIES.deepAnalysis.fallback.model;
 
     const created = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'admin:synthetic' });
     expect(created).toMatchObject({ id: expect.any(String), state: 'running' });
@@ -154,7 +155,7 @@ describe('sms gratitude qualification', () => {
       sourceSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sourceFiles: expect.arrayContaining(['server/services/sms-gratitude-grading.js']),
       systemPromptSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-      verifier: { enabled: true, maxRevisions: 2, model: expect.any(String), fallbackModel: expect.any(String) },
+      verifier: { enabled: true, maxRevisions: 2, model: expect.any(String), fallbackModel: verifierFallbackModel },
       voiceProfileVersion: 'synthetic-profile-v1',
     });
 
@@ -305,7 +306,7 @@ describe('sms gratitude qualification', () => {
     await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: run.id }))
       .rejects.toThrow(failure);
     expect(runExclusive).toHaveBeenCalledWith(
-      'sms-gratitude-qualification', expect.any(Function), { recordHealth: false },
+      `sms-gratitude-qualification:${run.id}`, expect.any(Function), { recordHealth: false },
     );
     expect(generateGroundedDraft).not.toHaveBeenCalled();
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'failed', results: [], failure });
@@ -345,6 +346,53 @@ describe('sms gratitude qualification', () => {
     expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
     expect(snapshot(store.rows[0])).toMatchObject({ state: 'complete' });
     expect(store.rows[0].status).toBe('shadow');
+  });
+
+  test('a replacement run does not inherit the stale owner lease', async () => {
+    const store = memoryDb();
+    let releaseStaleOwner;
+    let announceStaleOwner;
+    const held = new Set();
+    const staleOwnerPaused = new Promise(resolve => { announceStaleOwner = resolve; });
+    const staleOwnerRelease = new Promise(resolve => { releaseStaleOwner = resolve; });
+    let staleJobName;
+    const runExclusiveImpl = async (jobName, task) => {
+      if (held.has(jobName)) return { skipped: true, reason: 'lease_held' };
+      held.add(jobName);
+      try {
+        if (!staleJobName) {
+          staleJobName = jobName;
+          announceStaleOwner();
+          await staleOwnerRelease;
+        }
+        return await task();
+      } finally {
+        held.delete(jobName);
+      }
+    };
+    const { qualification, runExclusive, generateGroundedDraft } = loadQualification({
+      dbi: store, runExclusiveImpl,
+    });
+    const stale = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    const staleOwner = qualification.runGratitudeQualification({ dbi: store.dbi, runId: stale.id });
+    await staleOwnerPaused;
+
+    store.rows[0].created_at = '2000-01-01T00:00:00.000Z';
+    const replacement = await qualification.createGratitudeQualification({ dbi: store.dbi, triggeredBy: 'test' });
+    await expect(qualification.runGratitudeQualification({ dbi: store.dbi, runId: replacement.id }))
+      .resolves.toMatchObject({ id: replacement.id, state: 'complete', qualified: true });
+    expect(runExclusive.mock.calls.map(([jobName]) => jobName)).toEqual([
+      `sms-gratitude-qualification:${stale.id}`,
+      `sms-gratitude-qualification:${replacement.id}`,
+    ]);
+    expect(snapshot(store.rows[0])).toMatchObject({ state: 'failed', failure: 'stale_run_recovered' });
+    expect(snapshot(store.rows[1])).toMatchObject({ state: 'complete' });
+
+    releaseStaleOwner();
+    await expect(staleOwner).resolves.toEqual({
+      id: stale.id, state: 'failed', skipped: true, reason: 'run_not_running',
+    });
+    expect(generateGroundedDraft).toHaveBeenCalledTimes(exam.fixtures.length * 2);
   });
 
   test('a queued late acquirer rereads the durable row and skips after the owner completes', async () => {
