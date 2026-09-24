@@ -96,6 +96,18 @@ describe('promised reschedule link review', () => {
 // secondary_contact_captured review items carry the second person named on
 // the call (a realtor's buyer, a landlord's tenant) — the card must show the
 // operator WHO to confirm, in both payload shapes the server produces.
+describe('ConfirmEvidence — house-number conflict', () => {
+  it('shows both whole doors: the stated unit and the on-file unit', () => {
+    render(<ConfirmEvidence payload={{
+      flag: 'on_file_house_number_conflict',
+      stated_street: '1250 Example Street', stated_unit: 'Apt 2',
+      on_file_address: { address_line1: '1260 Example Street', address_line2: 'Apt 3' },
+    }} />);
+    expect(screen.getByText('1250 Example Street, Apt 2')).toBeInTheDocument();
+    expect(screen.getByText('1260 Example Street, Apt 3')).toBeInTheDocument();
+  });
+});
+
 describe('ConfirmEvidence — secondary contact', () => {
   it('renders the V2 nested shape (name_full / phone_e164) from the deterministic-flags insert', () => {
     render(<ConfirmEvidence payload={{

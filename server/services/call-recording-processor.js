@@ -10034,7 +10034,21 @@ const CallRecordingProcessor = {
             // "unfiled" so the approved-but-unbooked fallback files it
             // (pre-push audit P1). An unchanged, already-recorded ask on a
             // claimed card still counts as filed.
-            if (!landed.length && newlyConfirmed) return 'claimed_unrecorded';
+            if (!landed.length && newlyConfirmed) {
+              // A claimed card that ALREADY records this same confirmed ask
+              // (a reprocess that stays confirmed) counts as filed — a
+              // second booking task beside it would be a duplicate
+              // (codex r15 P1). Only a confirmed ask the card never
+              // recorded (or a different start) is unrecorded.
+              const claimed = await trx('triage_items')
+                .where({ call_log_id: call.id, reason_code: 'on_file_house_number_conflict', status: 'in_progress' })
+                .first('payload');
+              const claimedPayload = typeof claimed?.payload === 'string' ? (() => { try { return JSON.parse(claimed.payload); } catch { return null; } })() : claimed?.payload;
+              const claimedConfirmed = claimedPayload?.scheduling_window?.status === 'confirmed' || claimedPayload?.scheduling_status === 'confirmed';
+              const sameStart = String(claimedPayload?.scheduling_window?.confirmed_start_at || '') === String(parsedCard.scheduling_window?.confirmed_start_at || '');
+              if (claimedConfirmed && sameStart) return 'filed';
+              return 'claimed_unrecorded';
+            }
             return 'filed';
           }
           // A card whose call CONFIRMED an appointment carries the only
@@ -10116,17 +10130,24 @@ const CallRecordingProcessor = {
           .whereIn('status', ['open', 'in_progress'])
           .first('id', 'payload');
         if (standing) {
-          if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
-          // Does the standing card describe THIS pass's address? A
-          // reprocess that moved the call to a different street keeps the
-          // hold, but the second-address lane below must still review the
-          // new street on its own card (codex r14 P1).
+          // Does the standing card describe THIS pass's address? The hold,
+          // the reconciliation and the second-address suppression all
+          // follow the STORED ask: a reprocess that moved the call to a
+          // different street is not the dispute that card records, so its
+          // bookings are neither held nor pulled on the old card's account
+          // (codex r14 + r15 P1). A card with no stated street (backlog)
+          // is taken to cover the call.
           const standingPayload = typeof standing.payload === 'string' ? (() => { try { return JSON.parse(standing.payload); } catch { return null; } })() : standing.payload;
-          standingConflictCoversCall = !!standingPayload?.stated_street
-            && sameHouseNumberStreet(standingPayload.stated_street, corroboratingStreet || extracted?.address_line1);
-          houseNumberDisputed = true;
-          if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
-          logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
+          standingConflictCoversCall = !standingPayload?.stated_street
+            || sameHouseNumberStreet(standingPayload.stated_street, corroboratingStreet || extracted?.address_line1);
+          if (standingConflictCoversCall) {
+            if (!disputeClaimedUnrecorded) houseNumberConflictFiled = true;
+            houseNumberDisputed = true;
+            if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+            logger.info(`[call-proc] house-number conflict still open for ${maskSid(callSid)} — booking hold carried over`);
+          } else {
+            logger.info(`[call-proc] house-number card still open for ${maskSid(callSid)} but describes another street — no hold carried over`);
+          }
         }
       }
     } catch (standingErr) {

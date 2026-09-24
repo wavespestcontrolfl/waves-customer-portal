@@ -188,7 +188,12 @@ export function ConfirmEvidence({ payload }) {
     // House-number disagreement: the validated call address beside the
     // record's street so the reviewer picks a number, not just "confirm".
     p.stated_street && { label: "Caller stated", value: p.stated_unit ? `${p.stated_street}, ${p.stated_unit}` : p.stated_street },
-    p.stated_street && (p.on_file_address?.address_line1 || p.on_file_street) && { label: "On file", value: p.on_file_address?.address_line1 || p.on_file_street },
+    // …and the whole on-file door too: Accept means the entire saved
+    // address is right, so a differing saved unit must be visible.
+    p.stated_street && (p.on_file_address?.address_line1 || p.on_file_street) && {
+      label: "On file",
+      value: [p.on_file_address?.address_line1 || p.on_file_street, p.on_file_address?.address_line2].filter((v) => String(v || "").trim()).join(", "),
+    },
     // Accept here means "the address on file is right" — adopting the
     // caller's number is a record edit, after which the card closes itself.
     p.stated_street && { label: "To resolve", value: (p.scheduling_window?.status === "confirmed" || p.scheduling_status === "confirmed")
