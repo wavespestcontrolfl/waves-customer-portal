@@ -3731,14 +3731,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // would otherwise invoice and message the customer independently.
           const member = await lockTrx('scheduled_services as member')
             .leftJoin('service_visits as visit', 'visit.id', 'member.visit_id')
-            .where('member.id', svc.id).first('member.visit_id', 'visit.behavior_version', 'member.technician_id');
+            .where('member.id', svc.id).forUpdate('member')
+            .first('member.visit_id', 'visit.behavior_version', 'member.technician_id');
           // Ownership was checked on the unlocked `svc` snapshot, and nothing
           // after the claim re-reads technician_id. A reassignment (dispatch
           // drag, tech-out auto-assign) that committed in that gap would
           // otherwise complete and attribute the visit under the old tech
-          // (#4759 r12 P1). Re-checked HERE under the stop lock that every
-          // mover takes, before the claim: the former tech gets the same
-          // 403 as the unlocked check; anyone else a 409 on the stale view.
+          // (#4759 r12 P1). Re-checked HERE, before the claim: the former
+          // tech gets the same 403 as the unlocked check; anyone else a 409
+          // on the stale view. The read is a ROW lock (FOR UPDATE OF member,
+          // held until the claim commits), not just the stop advisory lock:
+          // assignDispatchJob and the Intelligence Bar schedule tools update
+          // technician_id without taking the stop lock (r13 P1), and a row
+          // lock is the one thing every such writer's UPDATE must wait on.
+          // Order stays stop lock → row lock, the same as every mover.
           if (member && String(member.technician_id ?? '') !== String(svc.technician_id ?? '')) {
             const lockedOwnershipError = completionOwnershipError({
               role: completionInput.actor.techRole,

@@ -226,7 +226,7 @@ describe('assignment is re-checked under the stop lock before the claim (#4759 r
   // that committed in between.
   const reassignUnderLock = () => {
     const memberBuilder = { ...builder, first: jest.fn(async () => ({ ...service, technician_id: OTHER_TECH })) };
-    for (const method of ['where', 'leftJoin']) memberBuilder[method] = jest.fn(() => memberBuilder);
+    for (const method of ['where', 'leftJoin', 'forUpdate']) memberBuilder[method] = jest.fn(() => memberBuilder);
     db.mockImplementation((table) => (table === 'scheduled_services as member' ? memberBuilder : builder));
     return memberBuilder;
   };
@@ -235,6 +235,9 @@ describe('assignment is re-checked under the stop lock before the claim (#4759 r
     const memberBuilder = reassignUnderLock();
     const result = await complete();
     expect(memberBuilder.first).toHaveBeenCalledWith('member.visit_id', 'visit.behavior_version', 'member.technician_id');
+    // A row lock, not only the stop advisory lock: direct technician_id
+    // writers (assignDispatchJob, IB schedule tools) never take the latter.
+    expect(memberBuilder.forUpdate).toHaveBeenCalledWith('member');
     expect(result).toMatchObject({ status: 403, body: { code: 'service_not_assigned' } });
     expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
   });
