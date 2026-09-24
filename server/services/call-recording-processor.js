@@ -6608,6 +6608,24 @@ async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) 
 }
 
 
+// The one writer for the AUTOMATED disposition passes — applyZeroTriageLayers'
+// initial decideDisposition() stamp and reviseDispositionAfterAppliedMove's
+// later correction both call this instead of writing call_log.disposition
+// directly, so there is exactly one place that persists it on this path
+// (owner follow-up from #4708 r2 P2: reuse the writer, no second write path).
+// `priorDisposition`, when passed, makes the update a compare-and-swap — it
+// only lands while the stored value is still what the caller read, so a
+// human retagging the call (PUT /calls/:id/disposition, a writer of its
+// own) or any other writer that ran in between wins and this write silently
+// no-ops instead of clobbering it.
+async function writeCallDisposition({ callId, disposition, reason, callSid, priorDisposition = undefined }) {
+  const query = db('call_log').where({ id: callId });
+  if (priorDisposition !== undefined) query.where({ disposition: priorDisposition });
+  const written = await query.update({ disposition, updated_at: new Date() });
+  if (written) logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
+  return !!written;
+}
+
 // ── Zero-triage layers (2026-07-10, all dark-gated; failures never fail the call) ──
 // Shared by the main completion path AND the spam/voicemail early exits —
 // the suspected-spam/voicemail population is exactly what the classifier's
@@ -6646,8 +6664,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
           isKnownCustomer: !!call.customer_id || !!customerId,
         },
       });
-      await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
-      logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
+      await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
     }
     if (customerId) {
       await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
@@ -6706,9 +6723,38 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
 // (services/call-reschedule-apply.js). Runs after finalization, fenced on
 // this pass's GENERATION. Sends NOTHING to the customer. Dark behind
 // GATE_CALL_RESCHEDULE_APPLY; never blocks the call.
-// The two bookkeeping passes an APPLIED move owes, in one place so the step
+// A disposition minted by decideDisposition BEFORE this move applied that
+// only made sense while the move was still outstanding — the reschedule
+// itself is real work either way, so both stay listed even though the
+// scheduling-model path leaves the callback standing on purpose (see
+// call-disposition.js step 2). Only these two are ever revised; anything
+// else (including a human's own PUT /calls/:id/disposition tag) is left
+// alone by the compare-and-swap in writeCallDisposition.
+const STALE_AFTER_APPLIED_MOVE = new Set(['callback_task_created', 'cancellation_processed']);
+
+// Owner follow-up from #4708 r2 P2: when the apply step actually lands the
+// move, a callback (or a deterministic-path cancellation read) minted for
+// the SAME call before the move landed is no longer outstanding work — left
+// alone, unworked-comms-watcher.js keeps selecting it and can page someone
+// to call a customer who is already handled. Re-reads the live value and
+// swaps it under a CAS so nothing but that exact pre-move value is ever
+// touched.
+async function reviseDispositionAfterAppliedMove({ call, callSid }) {
+  const fresh = await db('call_log').where({ id: call.id }).first('disposition');
+  if (!fresh || !STALE_AFTER_APPLIED_MOVE.has(fresh.disposition)) return;
+  await writeCallDisposition({
+    callId: call.id,
+    priorDisposition: fresh.disposition,
+    disposition: 'existing_customer_routed',
+    reason: 'reschedule_applied',
+    callSid,
+  });
+}
+
+// The three bookkeeping passes an APPLIED move owes, in one place so the step
 // above states the move and this states what follows from it (codex P2) —
-// both share the same precondition and both are non-blocking by design.
+// all three share the same precondition and all three are non-blocking by
+// design.
 async function applyRescheduleFollowUps({ call, callSid, result }) {
   if (result?.outcome !== 'applied') return;
   // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
@@ -6726,6 +6772,10 @@ async function applyRescheduleFollowUps({ call, callSid, result }) {
   // there is nothing to lose if a best-effort write fails after the call is
   // finalized — and every move applied before that feature existed reads the
   // same way (codex P1, PR #4403 rounds 8 and 10).
+  if (isEnabled('callDispositionV1')) {
+    await reviseDispositionAfterAppliedMove({ call, callSid })
+      .catch((err) => logger.warn(`[call-proc] post-reschedule disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
+  }
 }
 
 async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
@@ -17617,6 +17667,9 @@ CallRecordingProcessor._test = {
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
   applyCallRescheduleStep,
+  applyRescheduleFollowUps,
+  reviseDispositionAfterAppliedMove,
+  writeCallDisposition,
   recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,
