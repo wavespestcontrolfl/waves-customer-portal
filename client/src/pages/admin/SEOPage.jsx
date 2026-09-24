@@ -3862,6 +3862,10 @@ function dollarsToCents(raw) {
   const cents = Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0"));
   return cents > 0 ? cents : null;
 }
+const submissionUrlFromServer = (card) =>
+  ["live", "indexed"].includes(card.placement.status)
+    ? (card.placement.live_url ?? "")
+    : "";
 const compact = (n) =>
   n == null
     ? "—"
@@ -3887,13 +3891,27 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     invalidatePendingLoad();
     setBusy(key);
   };
-  const updatePlacementUrl = (id, value) => {
+  const updatePlacementUrl = (id, value, serverValue) => {
     invalidatePendingLoad();
-    setPlacementUrls((current) => ({ ...current, [id]: value }));
+    setPlacementUrls((current) => {
+      const next = { ...current };
+      if (value === serverValue) delete next[id];
+      else next[id] = value;
+      return next;
+    });
   };
-  const updateAmount = (id, value) => {
+  const updateAmount = (id, value, quoteCents) => {
     invalidatePendingLoad();
-    setAmounts((current) => ({ ...current, [id]: value }));
+    setAmounts((current) => {
+      const next = { ...current };
+      const restored =
+        quoteCents == null
+          ? String(value).trim() === ""
+          : value === (quoteCents / 100).toFixed(2) || dollarsToCents(value) === quoteCents;
+      if (restored) delete next[id];
+      else next[id] = value;
+      return next;
+    });
   };
   const updateNote = (id, value) => {
     invalidatePendingLoad();
@@ -3953,9 +3971,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   // Preserve edits (including clearing) for this held attempt; untouched verified rows use their exact stored URL.
   const displayedSubmissionUrl = (card) =>
     placementUrls[card.submission_ambiguity.id] ??
-    (["live", "indexed"].includes(card.placement.status)
-      ? (card.placement.live_url ?? "")
-      : "");
+    submissionUrlFromServer(card);
   const recordSubmissionVerdict = async (card, verdict) => {
     if (
       !window.confirm(
@@ -4228,7 +4244,11 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                     type="url"
                     value={displayedSubmissionUrl(c)}
                     onChange={(event) =>
-                      updatePlacementUrl(c.submission_ambiguity.id, event.target.value)
+                      updatePlacementUrl(
+                        c.submission_ambiguity.id,
+                        event.target.value,
+                        submissionUrlFromServer(c),
+                      )
                     }
                     placeholder="https://publisher.example/listing"
                     className="[width:100%] box-border [margin-top:4px]"
@@ -4509,7 +4529,13 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                                     step="0.01"
                                     value={displayedAmount(c, r)}
                                     disabled={rowBusy}
-                                    onChange={(e) => updateAmount(r.id, e.target.value)}
+                                    onChange={(e) =>
+                                      updateAmount(
+                                        r.id,
+                                        e.target.value,
+                                        r.quote_cents,
+                                      )
+                                    }
                                     className="[width:96px]"
                                   />
                                   {c.price_tolerance_cents > 0

@@ -1820,7 +1820,7 @@ export default function EmailTemplatesPanelV2() {
         setReadErrors((prev) => ({ ...prev, automations: null }));
       })
       .catch((e) => { if (seq === runsSequence.current) setReadErrors((prev) => ({ ...prev, automations: e.message })); })
-      .finally(() => { if (!background && seq === runsSequence.current) setAutomationRunsLoading(false); });
+      .finally(() => { if (seq === runsSequence.current) setAutomationRunsLoading(false); });
   }, [selectedRunsKey]);
 
   const refreshReadView = () => {

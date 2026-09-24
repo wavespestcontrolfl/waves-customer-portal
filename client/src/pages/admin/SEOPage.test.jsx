@@ -374,4 +374,108 @@ describe("SEOPage workspace navigation", () => {
     );
     expect(screen.getByText("Skip action failed")).toBeInTheDocument();
   });
+
+  it("resumes owner queue refreshes after draft values return to their server values", async () => {
+    const ownerQueue = {
+      gateOn: true,
+      cards: [
+        {
+          domain: {
+            id: "domain-1",
+            domain: "restored.example",
+            domain_rating: 20,
+            organic_traffic: 100,
+            spam_score: 1,
+            score: 50,
+            competitors_linked: 0,
+          },
+          placement: {
+            id: "placement-1",
+            status: "live",
+            live_url: "https://restored.example/original",
+            location_key: "-",
+            claimed_at: null,
+            follow_up_status: null,
+          },
+          submission_ambiguity: {
+            id: "attempt-1",
+            evidence_url: null,
+          },
+          path: null,
+          rows: [
+            {
+              id: "row-1",
+              dimension: "payment",
+              action: "purchase",
+              level: "owner",
+              reason: "Owner payment",
+              approvable: true,
+              approved: false,
+              quote_cents: 12500,
+            },
+          ],
+          decidable: false,
+          d30_confidence: null,
+          price_tolerance_cents: 0,
+        },
+      ],
+    };
+    let ownerQueueReads = 0;
+    fetch.mockImplementation((url) => {
+      const route = String(url);
+      if (route.endsWith("/admin/backlink-agent/owner-queue")) {
+        ownerQueueReads += 1;
+        return jsonResponse(ownerQueue);
+      }
+      if (route.endsWith("/admin/backlink-agent/stats")) {
+        return jsonResponse({ total: 0, pending: 0 });
+      }
+      if (route.endsWith("/admin/backlink-agent/profiles")) {
+        return jsonResponse({ profiles: [] });
+      }
+      if (route.endsWith("/admin/backlink-agent/targets")) {
+        return jsonResponse({ targets: [] });
+      }
+      if (route.includes("/admin/backlink-agent/queue?")) {
+        return jsonResponse({ items: [] });
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Agent" }));
+    expect(await screen.findByText("restored.example")).toBeInTheDocument();
+
+    const placementUrl = screen.getByLabelText("Confirmed publisher URL");
+    fireEvent.change(placementUrl, {
+      target: { value: "https://restored.example/edited" },
+    });
+    placementUrl.blur();
+    const readsBeforeUrlEdit = ownerQueueReads;
+    fireEvent(window, new Event("online"));
+    await act(async () => Promise.resolve());
+    expect(ownerQueueReads).toBe(readsBeforeUrlEdit);
+
+    fireEvent.change(placementUrl, {
+      target: { value: "https://restored.example/original" },
+    });
+    placementUrl.blur();
+    fireEvent(window, new Event("online"));
+    await waitFor(() => expect(ownerQueueReads).toBeGreaterThan(readsBeforeUrlEdit));
+
+    const amount = screen.getByRole("spinbutton");
+    fireEvent.change(amount, { target: { value: "130.00" } });
+    amount.blur();
+    const readsBeforeAmountEdit = ownerQueueReads;
+    fireEvent(window, new Event("online"));
+    await act(async () => Promise.resolve());
+    expect(ownerQueueReads).toBe(readsBeforeAmountEdit);
+
+    fireEvent.change(amount, { target: { value: "125" } });
+    amount.blur();
+    fireEvent(window, new Event("online"));
+    await waitFor(() =>
+      expect(ownerQueueReads).toBeGreaterThan(readsBeforeAmountEdit),
+    );
+  });
 });

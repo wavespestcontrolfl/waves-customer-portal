@@ -277,6 +277,27 @@ describe("AgentModelsTab", () => {
     expect(screen.getByText("SMS intent")).toBeInTheDocument();
   });
 
+  it.each([false, true])("clears Retry loading when focus supersedes it (failure=%s)", async (fails) => {
+    adminFetch.mockRejectedValueOnce(new Error("Registry unavailable"));
+    renderTab();
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    let finishRetry;
+    let finishRefresh;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { finishRetry = resolve; }));
+    adminFetch.mockReturnValueOnce(new Promise((resolve, reject) => {
+      finishRefresh = () => fails ? reject(new Error("Refresh unavailable")) : resolve(makeData());
+    }));
+    act(() => { retry.click(); window.dispatchEvent(new Event("focus")); });
+    expect(adminFetch).toHaveBeenCalledTimes(3);
+    await act(async () => finishRetry(makeData()));
+    await act(async () => finishRefresh());
+    if (fails) expect(screen.getByRole("alert")).toHaveTextContent("Refresh unavailable");
+    else expect(screen.getByText("SMS intent")).toBeInTheDocument();
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(adminFetch).toHaveBeenCalledTimes(4);
+    expect(screen.getByText("SMS intent")).toBeInTheDocument();
+  });
+
   it("Move a model… walks the migration set and drafts only the eligible env", async () => {
     renderTab();
     await screen.findByText("SMS intent");

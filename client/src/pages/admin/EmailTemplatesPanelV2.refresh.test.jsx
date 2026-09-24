@@ -84,3 +84,34 @@ it.each([
   expect(screen.getByText(newText)).toBeInTheDocument();
   expect(screen.queryByText(oldText)).not.toBeInTheDocument();
 });
+
+it.each([false, true])("finishes a foreground automation read superseded by focus (failure=%s)", async (fails) => {
+  const pending = [];
+  let racing = false;
+  vi.stubGlobal("fetch", vi.fn(async (url) => {
+    if (String(url).includes("/runs?")) {
+      if (racing) return new Promise((resolve) => pending.push(resolve));
+      return { ok: true, json: async () => ({ runs: [] }) };
+    }
+    return { ok: true, json: async () => ({ templates: [], groups: [], automations: [{ automation_key: "fixture", name: "Fixture automation" }] }) };
+  }));
+  render(<EmailTemplatesPanelV2 />);
+  fireEvent.click(await screen.findByRole("button", { name: "Automations", exact: true }));
+  const runs = await screen.findByRole("button", { name: "Runs", exact: true });
+  fireEvent.click(runs);
+  await screen.findByText("Automation runs");
+  await waitFor(() => expect(screen.queryByText("Loading automation runs...")).not.toBeInTheDocument());
+  racing = true;
+  act(() => { runs.click(); window.dispatchEvent(new Event("focus")); });
+  expect(pending).toHaveLength(2);
+  await act(async () => pending[0]({ ok: true, json: async () => ({ runs: [] }) }));
+  expect(screen.getByText("Loading automation runs...")).toBeInTheDocument();
+  await act(async () => pending[1](fails
+    ? { ok: false, status: 503, json: async () => ({ error: "Runs unavailable" }) }
+    : { ok: true, json: async () => ({ runs: [] }) }));
+  expect(screen.queryByText("Loading automation runs...")).not.toBeInTheDocument();
+  if (fails) expect(screen.getByRole("alert")).toHaveTextContent("Runs unavailable");
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(pending).toHaveLength(3);
+  await act(async () => pending[2]({ ok: true, json: async () => ({ runs: [] }) }));
+});

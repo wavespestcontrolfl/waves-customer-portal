@@ -71,7 +71,7 @@ export default function AgentModelsTab() {
     } catch (e) {
       if (seq === loadSeq.current) setError(e?.message || "Failed to load the model registry");
     } finally {
-      if (!background && seq === loadSeq.current) setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, []);
 
