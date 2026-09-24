@@ -3720,12 +3720,22 @@ async function coveringTermForDate(conn, termIds, coverageDate) {
 // statement leaves a PostgreSQL transaction aborted (25P02) even when
 // JavaScript catches it, so a lookup outside the savepoint would poison the
 // caller and roll back the visit that was just inserted.
-async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
+// `extraTermIds`: additional candidate term ids beyond what seriesTermIds'
+// own link discovery finds — for topUpRecurringSeriesLocked's
+// customer-wide, service-matched scan (resolveTopUpTermCap), which can
+// discover a PAID term with no scheduled_services row stamped yet (bought
+// ahead of its first linked visit). Without this, that term correctly capped
+// the top-up's horizon but the newly inserted visit itself never got
+// stamped — annualPrepayCoversVisit requires an explicit stamp, so an
+// invoice-on-complete customer would be billed again for prepaid work
+// (Codex pre-push P0). seriesTermIds already dedupes, so re-passing an
+// already-linked id here is a harmless no-op.
+async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null, extraTermIds = []) {
   const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   let resolvedTerm = null;
   const run = async (c) => {
     const termIds = await seriesTermIds(
-      c, parent?.id, svc?.annual_prepay_term_id, parent?.annual_prepay_term_id,
+      c, parent?.id, svc?.annual_prepay_term_id, parent?.annual_prepay_term_id, ...extraTermIds,
     );
     const term = await coveringTermForDate(c, termIds, coverageDate);
     if (!term) return;
@@ -14736,7 +14746,11 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // string), when set, refuses any candidate past it instead of inserting —
 // topUp's horizon/annual-prepay-term_end cap; omitted (the completion path)
 // the search is unbounded except by the existing 12-cadence-step attempt
-// budget, byte-identical to before this extraction.
+// budget, byte-identical to before this extraction. `opts.extraTermIds`
+// (array) feeds applyExtensionPrepayCoverage additional candidate term ids
+// beyond svcLike/parent's own stamped column — topUp's discovered-but-
+// not-yet-linked customer term (see resolveTopUpTermCap); omitted, coverage
+// discovery is byte-identical to before this extraction.
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
@@ -14907,7 +14921,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // The transient completion-race bell is quiet (this fires per
       // generated visit and reconciliation settles that case); the
       // cancelled-paid-slot bell still rings — nothing re-seeds it.
-      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr);
+      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr, opts.extraTermIds || []);
       // Post-insert re-check closes the remaining race: a
       // cancellation can stop the series between the pre-insert
       // read above and this insert. The row hasn't been mirrored,
@@ -15036,7 +15050,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // caller skips the series for this run rather than guessing "no cap" and
 // risking a visit that bills per-visit against a still-active prepay term.
 async function resolveTopUpTermCap(conn, parent, parentId, cols) {
-  if (!cols.annual_prepay_term_id) return { cap: null, failed: false };
+  if (!cols.annual_prepay_term_id) return { cap: null, failed: false, extraTermIds: [] };
   try {
     const linkedIds = await seriesTermIds(conn, parentId, parent?.annual_prepay_term_id);
     const { serviceMatchesCoverage, coveredTermsAsOf } = require('../services/annual-prepay-renewals');
@@ -15059,7 +15073,7 @@ async function resolveTopUpTermCap(conn, parent, parentId, cols) {
       .filter((t) => serviceMatchesCoverage({ service_type: parent.service_type }, t.coverage_service_type))
       .map((t) => t.id);
     const allIds = [...new Set([...linkedIds, ...scopedCustomerIds].map(String))];
-    if (!allIds.length) return { cap: null, failed: false };
+    if (!allIds.length) return { cap: null, failed: false, extraTermIds: [] };
     const rows = await coveredTermsAsOf(conn, null).whereIn('t.id', allIds)
       .select('t.term_end', 't.status', 't.renewal_decision');
     const todayStr = etDateString();
@@ -15086,10 +15100,20 @@ async function resolveTopUpTermCap(conn, parent, parentId, cols) {
       })
       .map((r) => r.end)
       .sort();
-    return { cap: ends.length ? ends[ends.length - 1] : null, failed: false };
+    // extraTermIds: every service-matched, customer-held candidate — fed
+    // through to extendSeriesOnceLocked's applyExtensionPrepayCoverage call
+    // (opts.extraTermIds) so a term this scan discovers (no scheduled_
+    // services row stamped yet) doesn't just cap the horizon but ALSO gets
+    // the newly inserted visit properly stamped as covered (Codex pre-push
+    // P0: capping without stamping left the new visit looking uncovered,
+    // billing prepaid work again on invoice-on-complete). coveringTermForDate
+    // still requires the candidate's own window to contain the visit's
+    // date, so passing every candidate (not just the one that produced the
+    // cap) is harmless — an out-of-window id simply never matches there.
+    return { cap: ends.length ? ends[ends.length - 1] : null, failed: false, extraTermIds: scopedCustomerIds };
   } catch (e) {
     logger.warn(`[recurring-topup] term cap lookup failed for parent=${parentId}: ${e.message}`);
-    return { cap: null, failed: true };
+    return { cap: null, failed: true, extraTermIds: [] };
   }
 }
 
@@ -15155,7 +15179,7 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const customerSkip = topupCustomerSkipReason(customer);
   if (customerSkip) return { spawnedVisits: [], skipped: customerSkip };
 
-  const { cap: termCap, failed: termCapFailed } = await resolveTopUpTermCap(conn, parent, parentId, cols);
+  const { cap: termCap, failed: termCapFailed, extraTermIds } = await resolveTopUpTermCap(conn, parent, parentId, cols);
   if (termCapFailed) return { spawnedVisits: [], skipped: 'prepay_cap_unresolved' };
 
   const todayStr = etDateString();
@@ -15192,7 +15216,7 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // "the last booked date" this horizon check needs, with no extra query.
     const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
     if (latestStr >= effectiveHorizon) break;
-    const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, { maxDate: effectiveHorizon });
+    const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, { maxDate: effectiveHorizon, extraTermIds });
     if (!spawned) break;
     spawnedVisits.push(spawned);
   }

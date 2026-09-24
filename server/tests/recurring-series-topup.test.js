@@ -451,6 +451,52 @@ describe('topUpRecurringSeriesLocked — annual-prepay term_end cap', () => {
     expect(result.skipped).toBe('prepay_cap_unresolved');
     expect(inserted).toHaveLength(0);
   });
+
+  test('a discovered-but-unlinked term is fed to coverage discovery, not just used to cap the horizon', async () => {
+    // Codex pre-push P0: resolveTopUpTermCap's customer-wide scan capped the
+    // horizon correctly, but applyExtensionPrepayCoverage (inside
+    // extendSeriesOnceLocked) only ever discovered terms via seriesTermIds
+    // (rows already stamped on THIS series) — so a term found ONLY through
+    // the customer-wide scan never reached the coverage-application step,
+    // and the newly inserted visit would look uncovered. This pins the
+    // wiring fix (opts.extraTermIds) at the one place a fake connection can
+    // observe it: the id list handed to coveredTermsAsOf when
+    // applyExtensionPrepayCoverage's coveringTermForDate probes coverage for
+    // the freshly computed candidate date (a real date, unlike
+    // resolveTopUpTermCap's own null-coverageDate call). Full end-to-end
+    // stamping (annual_prepay_term_id actually landing on the inserted row)
+    // needs the real-Postgres coverage-application machinery and is out of
+    // this fake-connection suite's reach — see
+    // recurring-prepay-coverage-inheritance.test.js's pattern for that.
+    const termEnd = daysOut(90);
+    const whereInCalls = [];
+    coveredTermsAsOf.mockImplementation((c, coverageDate) => ({
+      whereIn: (col, ids) => {
+        whereInCalls.push({ coverageDate, ids: [...ids] });
+        const matched = ids.includes('term-unlinked')
+          ? [{ id: 'term-unlinked', term_end: termEnd, status: 'active', renewal_decision: null }]
+          : [];
+        return {
+          select: async () => matched,
+          orderBy: () => ({ first: async () => matched[0] }),
+        };
+      },
+    }));
+    const { conn } = topupScenario({
+      parentOverrides: { recurring_pattern: 'weekly', service_type: 'Weekly Pest Control' },
+      seriesDates: [daysOut(0)],
+      colsOverrides: { annual_prepay_term_id: {} },
+      customerTerms: [{ id: 'term-unlinked', coverage_service_type: 'Pest Control' }],
+    });
+    await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
+    // resolveTopUpTermCap's own lookup (coverageDate === null) found it —
+    // proven by the earlier cap tests. Here: a SEPARATE call with a real
+    // coverageDate (coveringTermForDate, from inside
+    // applyExtensionPrepayCoverage) must ALSO carry it.
+    const coverageProbe = whereInCalls.find((c) => c.coverageDate);
+    expect(coverageProbe).toBeDefined();
+    expect(coverageProbe.ids).toContain('term-unlinked');
+  });
 });
 
 describe('topUpRecurringSeries — the writing wrapper', () => {
