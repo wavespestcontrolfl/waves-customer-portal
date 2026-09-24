@@ -948,11 +948,13 @@ an earlier run already PUBLISHED for the same lead — or, since a repeat
 lookup mints a new lead row, for the same typed email AND phone AND the
 complete judged premise (street with any unit stripped, and a city and ZIP
 present on both sides and equal) — is archived on the flagged run
-(expired website publications included, since the public extension
-could otherwise revive them; a legacy non-website row that already
-expired is left alone, having no revival path; and the whole withdrawal
-refuses with a retryable 503 while any matched row carries a live
-delivery claim), with
+(expired rows included when they were delivered or viewed, since the
+public extension could otherwise revive them; a never-delivered expired
+legacy row is left alone, having no revival path; the block on an
+expired row is lifted by a later clean county answer, otherwise the
+office re-quotes; and the withdrawal refuses with a retryable 503 while
+any matched row carries a live delivery claim, checked again on each
+write), with
 the sent/viewed, unarchived, not-price-locked predicates re-applied on
 the archive write itself (`website_quote_withdrawn_address_unverified`
 audit event), so its old token neither renders nor accepts — and the row's

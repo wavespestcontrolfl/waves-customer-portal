@@ -36,7 +36,7 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
       .orWhere((own) => own
         .whereRaw('LOWER(customer_email) = ?', [String(contactEmail).toLowerCase().trim()])
         .whereRaw("right(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(contactPhone).replace(/\D/g, '').slice(-10)])))
-    .select('id', 'address', 'status', trx.raw("estimate_data->>'lead_id' as lead_id"), trx.raw("(estimate_data->'websiteSelfService' IS NOT NULL) as website"), trx.raw(`(${DELIVERY_CLAIM_NOT_LIVE_SQL}) as claim_not_live`));
+    .select('id', 'address', 'status', 'sent_at', 'viewed_at', trx.raw("estimate_data->>'lead_id' as lead_id"), trx.raw("(estimate_data->'websiteSelfService' IS NOT NULL) as website"), trx.raw(`(${DELIVERY_CLAIM_NOT_LIVE_SQL}) as claim_not_live`));
   // Premise-matched in BOTH arms: this lead's own rows match on
   // identity plus the (loose) premise — a lead's publication for a
   // different property must not be archived by a flag on this one;
@@ -54,20 +54,31 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
     throw Object.assign(new Error('A quote is mid-delivery — retry in a moment.'), { code: 'DELIVERY_CLAIM_LIVE', statusCode: 503 });
   }
   const toWithdraw = matched.filter((row) => row.website === true);
-  // A legacy (non-website) row that already EXPIRED is not blocked: it has
-  // no revival path (the extension refuses off-surface rows, the revise
-  // block refuses expired SERVER rows) so a block would be permanent; it
-  // cannot be viewed or accepted anyway. Expired WEBSITE publications stay
-  // in the withdrawal set — the public extension could revive them (codex
-  // #4667 r39 P0).
-  const toBlock = matched.filter((row) => row.website !== true && row.status !== 'expired');
+  // Expired rows are blocked only when they were PUBLISHED (delivered or
+  // viewed): those are the ones the public extension could revive for the
+  // rejected address (codex r39 P1); a never-delivered expired legacy row
+  // has no revival path and is left alone (codex r39 P0). The block on an
+  // expired row is lifted by a later clean county answer (the /calculate
+  // and lookup supersession), otherwise the office re-quotes — the
+  // documented recovery path.
+  const toBlock = matched.filter((row) => row.website !== true && (row.status !== 'expired' || row.sent_at || row.viewed_at));
   // Every write re-asserts the EXACT address the row was matched on (codex
   // r33 P1): a Customer 360 correction fanning a new premise onto the row
   // between the SELECT and this row lock must win, or the block would be
   // stamped onto the corrected premise and its valid link would 404.
+  // A write that affects no row because a delivery claim went live between
+  // the SELECT and the row lock refuses the withdrawal the same way the
+  // pre-check does (atomic with the write — codex r39 P1).
+  const refuseIfClaimLive = async (rowId) => {
+    const fresh = await trx('estimates').where({ id: rowId }).first(trx.raw(`(${DELIVERY_CLAIM_NOT_LIVE_SQL}) as claim_not_live`));
+    if (fresh && fresh.claim_not_live === false) {
+      throw Object.assign(new Error('A quote is mid-delivery — retry in a moment.'), { code: 'DELIVERY_CLAIM_LIVE', statusCode: 503 });
+    }
+  };
   for (const row of toBlock) {
-    await trx('estimates')
+    const blockedCount = await trx('estimates')
       .where({ id: row.id, source: 'quote_wizard', address: row.address })
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       // …and the OWNERSHIP predicate the candidate query used (this lead's
       // row, or this contact pair's): a contact correction that moved the
       // row to another pair without changing its address must win (codex
@@ -88,6 +99,7 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
         updated_at: new Date(),
         estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: flag || null, addressUnverifiedClearedBy: null })]),
       });
+    if (!blockedCount) await refuseIfClaimLive(row.id);
   }
   if (!toWithdraw.length) return [];
   // The eligibility predicates are repeated on the UPDATE: an
@@ -101,6 +113,7 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
   for (const row of toWithdraw) {
     const archived = await trx('estimates')
       .where({ id: row.id, source: 'quote_wizard', address: row.address })
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
       // …and the OWNERSHIP predicate the candidate query used (this lead's
       // row, or this contact pair's): a contact correction that moved the
       // row to another pair without changing its address must win (codex
@@ -120,6 +133,7 @@ async function withdrawFlaggedPublications(trx, { leadId, contactEmail, contactP
         estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ addressUnverified: true, addressUnverifiedFlag: flag || null, addressUnverifiedClearedBy: null })]),
       })
       .returning('id');
+    if (!archived.length) await refuseIfClaimLive(row.id);
     rows.push(...archived);
   }
   const { recordAuditEvent } = require('../services/audit-log');
