@@ -416,6 +416,8 @@ describe('legacyDisputeServiceIntent', () => {
     expect(legacyDisputeServiceIntent({ matched_service: 'Waves Assessment', requested_service: 'come look at the lawn' })).toBe('inspection_only');
     expect(legacyDisputeServiceIntent({ requested_service: 'termite inspection' })).toBe('inspection_only');
     expect(legacyDisputeServiceIntent({ matched_service: 'General Pest Control', specific_service_name: 'Bi-Monthly Pest Control' })).toBe('active_infestation_treatment');
+    // The resolved service decides over the caller's words (codex r37 P2).
+    expect(legacyDisputeServiceIntent({ matched_service: 'Termite Treatment', requested_service: 'treatment after the inspection' })).toBe('active_infestation_treatment');
     expect(legacyDisputeServiceIntent({})).toBe('active_infestation_treatment');
     expect(legacyDisputeServiceIntent(null)).toBe('active_infestation_treatment');
   });

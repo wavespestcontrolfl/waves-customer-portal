@@ -873,6 +873,10 @@ async function settleHeldConflictCard(trx, { item, verdict, wrongFields = [], he
         extraction: { meta: { call_summary: taskSummary }, scheduling: decision.approvedWindow || { status: 'confirmed' } },
         extraPayload: {
           skipped_reason: retained && decision.scheduleDenied ? 'retained_visit_review_after_denial' : retained ? 'address_correction_needed_on_retained_visit' : decision.skippedReason,
+          // The customer this task was filed against: a later relink must
+          // not hand its booking / correction work to another account
+          // (codex r37 P1) — the verdict route refuses until a reprocess.
+          dispute_customer_id: heldConflictPayload?.dispute_customer_id || (callRowForAddress?.customer_id ? String(callRowForAddress.customer_id) : null),
           // Explicit nulls when no visit qualifies any more: the merge onto a
           // standing task would otherwise keep an obsolete retained visit
           // (cancelled / completed since) in the instructions (codex r31 P1).
@@ -1013,6 +1017,7 @@ router.post('/:id/verdict', async (req, res) => {
     // inside the transaction; drives the calibration verdict below.)
     let conflictCardSettled = false;
     let staleConflictVersion = false;
+    let relinkedRecoveryTask = false;
     await db.transaction(async (trx) => {
       // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
       // first_touch_holds rows → triage_items. The advisory lock is the
@@ -1031,12 +1036,25 @@ router.post('/:id/verdict', async (req, res) => {
       // refreshes in place (codex r31 P1): Accept / Deny on them is
       // version-bound the same way.
       if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {
-        const liveCard = await trx('triage_items').where({ id }).first('updated_at');
+        const liveCard = await trx('triage_items').where({ id }).first('updated_at', 'payload');
         const expectedUpdatedAt = req.body?.expected_updated_at || null;
         if (!liveCard || !expectedUpdatedAt
           || new Date(expectedUpdatedAt).getTime() !== new Date(liveCard.updated_at).getTime()) {
           staleConflictVersion = true;
           return;
+        }
+        // A recovery task filed against another customer (the call was
+        // relinked since) is refused until a reprocess — the same guard the
+        // conflict card's settlement applies (codex r37 P1).
+        if (item.reason_code === 'auto_booking_skipped_after_approval') {
+          const livePayload = typeof liveCard.payload === 'string' ? (() => { try { return JSON.parse(liveCard.payload); } catch { return null; } })() : liveCard.payload;
+          if (livePayload?.dispute_customer_id) {
+            const liveCall = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
+            if (String(livePayload.dispute_customer_id) !== String(liveCall?.customer_id || '')) {
+              relinkedRecoveryTask = true;
+              return;
+            }
+          }
         }
       }
       if (holdsTable) {
@@ -1189,6 +1207,9 @@ router.post('/:id/verdict', async (req, res) => {
     // audit P1 after r27).
     if (staleConflictVersion) {
       return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
+    }
+    if (relinkedRecoveryTask) {
+      return res.status(409).json({ error: 'This call was relinked to another customer since the task was filed — reprocess the call to refresh it, then review it.', code: 'CONFLICT_CUSTOMER_RELINKED' });
     }
     if (resolved === 0) {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });

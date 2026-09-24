@@ -10290,6 +10290,11 @@ const CallRecordingProcessor = {
                 customer: p?.dispute_customer_id ? String(p.dispute_customer_id) : null,
               });
               const sameIdentity = identityKey(claimedPayload) === identityKey(parsedCard);
+              // A claimed card an earlier pass durably CLEARED cannot record a
+              // freshly detected conflict (the status-gated upsert never
+              // clears its marker): the ask is unrecorded, so the fallback
+              // files it (codex r37 P1).
+              if (claimedPayload?.address_dispute_cleared_at) return 'claimed_unrecorded';
               if (!sameStreet || !sameOnFile || !sameService || !sameIdentity) return 'claimed_unrecorded';
               if (!newlyConfirmed) return 'filed';
               const claimedConfirmed = claimedPayload?.scheduling_window?.status === 'confirmed' || claimedPayload?.scheduling_status === 'confirmed';
@@ -15412,7 +15417,7 @@ const CallRecordingProcessor = {
                   // onto that task instead — never a "book another" task
                   // beside a live appointment (codex r30 P1).
                   if (!noted) {
-                    await ttrx('triage_items')
+                    const merged = await ttrx('triage_items')
                       .where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })
                       .whereIn('status', ['open', 'in_progress'])
                       .update({
@@ -15420,6 +15425,23 @@ const CallRecordingProcessor = {
                         summary: `Address confirmed on file after a house-number dispute — the retained appointment (visit ${svc.id}) still carries the disputed number; correct its address, do not book a second one`,
                         updated_at: new Date(),
                       });
+                    // No open task either (the card was DENIED between the
+                    // reuse commit and this stamp, so the settlement filed
+                    // nothing): the live retained visit still needs explicit
+                    // cancel-or-review work — never silently left scheduled
+                    // (codex r37 P1).
+                    if (!merged) {
+                      await ttrx('triage_items')
+                        .insert(buildTriageItem({
+                          callLogId: call.id,
+                          flag: 'auto_booking_skipped_after_approval',
+                          extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                          severity: 'advisory',
+                          extraPayload: { skipped_reason: 'retained_visit_review_after_denial', retained_service_id: svc.id, dispute_customer_id: customerId ? String(customerId) : null },
+                        }))
+                        .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                        .ignore();
+                    }
                   }
                 }).catch((noteErr) => logger.warn(`[call-proc] retained visit not noted on the conflict card for ${maskSid(callSid)}: ${noteErr.code || noteErr.name || 'db_error'}`));
               } else {
@@ -18552,8 +18574,11 @@ const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 // treatment ask only by a treatment (codex #4666 r25 P1).
 function legacyDisputeServiceIntent(extracted) {
   const { isInspection } = require('./triage-auto-resolve');
-  const words = [extracted?.matched_service, extracted?.specific_service_name, extracted?.requested_service]
-    .filter(Boolean).join(' ');
+  // The RESOLVED service decides; the caller's own words only when the
+  // catalog resolved nothing — a treatment requested after a prior
+  // inspection must not read as an inspection ask (codex r37 P2).
+  const resolved = String(extracted?.matched_service || '').trim();
+  const words = resolved || [extracted?.specific_service_name, extracted?.requested_service].filter(Boolean).join(' ');
   return isInspection(words) ? 'inspection_only' : 'active_infestation_treatment';
 }
 
