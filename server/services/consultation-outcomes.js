@@ -9,6 +9,10 @@
  * Table: server/models/migrations/20260923000010_consultation_outcomes.js
  * One row per scheduled_service_id (unique), upserted on re-record.
  *
+ * WHAT COUNTS AS A WIN (round 11): a NEW recurring or one-time purchase
+ * attributable to the consultation — see isQualifyingSaleBooking below for
+ * the full positive rule a candidate scheduled_services row must pass.
+ *
  * RECONCILIATION MODEL (round 10): direct hooks (markWonForCustomer called
  * from admin-leads.js and admin-schedule.js right after a qualifying
  * booking commits) are the FAST PATH at the two main manual-booking routes,
@@ -257,28 +261,42 @@ function toDateOnlyString(value) {
   return String(value).slice(0, 10);
 }
 
-// Round 8: four straight rounds patched findSaleEvidenceForConsultation's
+// Round 8-11: successive rounds patched findSaleEvidenceForConsultation's
 // non-assessment-booking evidence check with one more excluded class at a
 // time (P1-B is_callback, then recurring_parent_id, then followup_included +
-// isAlwaysFreeServiceType). This is the restructure — ONE positive
-// predicate, THE decision point both call sites use, instead of scattered
-// negative checks that need re-deriving (and re-missing a case) every time
-// a new non-sale booking shape turns up.
+// isAlwaysFreeServiceType; round 9 added the office-review check; round 11
+// folded in an explicit $0 price and prepay-term-renewal linkage). Round 8
+// was the restructure — ONE positive predicate, THE decision point both
+// call sites use, instead of scattered negative checks that need
+// re-deriving (and re-missing a case) every time a new non-sale booking
+// shape turns up; rounds 9-11 are new terms added to that ONE predicate,
+// not new scattered checks.
 //
 // THE RULE: a scheduled_services row counts as evidence of a real,
-// confirmed sale only if its status is one still on the books in some
+// confirmed sale — a NEW recurring/one-time purchase attributable to the
+// consultation — only if its status is one still on the books in some
 // active-or-done form (not cancelled/skipped/no_show — a visit that never
-// happened proves nothing was bought), it is not an AI-created booking
+// happened proves nothing was bought); it is not an AI-created booking
 // still awaiting office review (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS +
 // customer_confirmed — voice-agent/outbound-callback bookings; office
 // confirm is what makes one real, exactly as job-status.js's own
 // OFFICE_REVIEW_PENDING_SOURCE_ACTIONS + customer_confirmed check keys the
-// SAME "still needs activation" decision on), and it is not one of the
-// four already-established non-sale classes: a free re-service callback
+// SAME "still needs activation" decision on); and it is not one of the six
+// already-established non-sale classes: a free re-service callback
 // (is_callback), a recurring-series child spawned onto an EXISTING plan
 // (recurring_parent_id), an included $0 follow-up minted from a completion
-// (followup_included), or any other service type this codebase already
-// treats as ALWAYS no-cost by name (isAlwaysFreeServiceType).
+// (followup_included), any other service type this codebase already
+// treats as ALWAYS no-cost by name (isAlwaysFreeServiceType), an EXPLICIT
+// $0 price (estimated_price === 0 — a genuine complimentary/comp visit,
+// e.g. health-alerts.js's retention "free_service" action; NULL/undefined
+// stays qualifying since plenty of real bookings carry no price at
+// insert), or a row seeded for an annual-prepay TERM's coverage
+// (annual_prepay_term_id set — annual-prepay-renewals.js's buildInsert
+// stamps this on EVERY visit it seeds for a term, first-ever or later
+// renewal alike; the sale event for annual prepay is the term's own
+// payment, evidenced separately via an accepted estimate — evidence type
+// (b) above — never via this scheduled_services insert, so excluding it
+// here loses no true evidence).
 //
 // 'pending' is deliberately IN the qualifying status set: it is the
 // default initial status for every ordinary staff/customer booking (e.g.
@@ -289,7 +307,12 @@ function toDateOnlyString(value) {
 // defaults to false too (schema default), so that field is read ONLY in
 // combination with OFFICE_REVIEW_PENDING_SOURCE_ACTIONS membership, never
 // standalone — reading it standalone would wrongly disqualify every manual
-// booking, which never sets it at all.
+// booking, which never sets it at all. estimated_price is read the same
+// disciplined way: `=== 0` is a NUMBER (or a numeric-string — Postgres
+// returns `decimal` columns as strings, so a raw `estimated_price:
+// '0.00'` row must resolve the same as the JS number `0`), never a bare
+// falsy check, so NULL/undefined (no price stamped, the common case) is
+// never mistaken for a genuine zero.
 //
 // NOT the "another consultation is not a sale" check (isAssessmentBooking)
 // — that one is async (a legacy-row catalog lookup) and stays a separate
@@ -307,6 +330,8 @@ function isQualifyingSaleBooking(row) {
   if (row.is_callback) return false;
   if (row.recurring_parent_id) return false;
   if (row.followup_included) return false;
+  if (row.estimated_price != null && Number(row.estimated_price) === 0) return false;
+  if (row.annual_prepay_term_id) return false;
   if (isAlwaysFreeServiceType(row.service_type)) return false;
   return true;
 }
@@ -387,6 +412,7 @@ async function findSaleEvidenceForConsultation(database, { customerId, scheduled
       // see the comment above that function for what each one decides.
       'status', 'source_action', 'customer_confirmed',
       'is_callback', 'recurring_parent_id', 'followup_included',
+      'estimated_price', 'annual_prepay_term_id',
     );
   for (const booking of bookings) {
     if (await isAssessmentBooking(booking, database)) continue; // another consultation is not a sale — separate, async, not part of the sync predicate

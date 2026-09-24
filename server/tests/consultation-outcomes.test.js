@@ -256,6 +256,31 @@ describe('isQualifyingSaleBooking — the ONE positive-allow-list predicate for 
     ['an included $0 follow-up (followup_included)', { ...BASE, followup_included: true }, false],
     ['an always-free-by-name service type (isAlwaysFreeServiceType)', { ...BASE, service_type: 'Estimate Visit' }, false],
 
+    // round 11: health-alerts.js's retention "free_service"/"complimentary"
+    // action — exact insert shape (service_type e.g. "General Pest -
+    // Complimentary" doesn't match isAlwaysFreeServiceType's fixed term
+    // list, and none of the other flags are set — estimated_price:0 alone
+    // is what disqualifies it).
+    ['health-alerts.js complimentary $0 retention visit (estimated_price: 0, a JS number)', {
+      ...BASE, service_type: 'General Pest - Complimentary', status: 'pending', estimated_price: 0,
+    }, false],
+    ['the same complimentary visit as Postgres would actually return it — estimated_price is a `decimal` column, so pg hands back the STRING "0.00", never the JS number 0', {
+      ...BASE, service_type: 'General Pest - Complimentary', status: 'pending', estimated_price: '0.00',
+    }, false],
+    ['estimated_price NULL (no price stamped at insert — the common case for a real booking) still qualifies — never mistaken for a genuine zero', {
+      ...BASE, estimated_price: null,
+    }, true],
+    ['a real non-zero estimated_price still qualifies', { ...BASE, estimated_price: '149.00' }, true],
+
+    // round 11: annual-prepay-renewals.js's buildInsert — every visit it
+    // seeds for a term (first-ever seed or a later renewal alike) stamps
+    // annual_prepay_term_id; the term's own payment is the real sale
+    // evidence (an accepted estimate, evidence type (b)), never this
+    // scheduled_services insert.
+    ['an annual-prepay term coverage seed (annual_prepay_term_id set)', {
+      ...BASE, status: 'pending', annual_prepay_term_id: 'term-uuid-0',
+    }, false],
+
     ['a null row', null, false],
   ])('%s → %s', (_label, row, expected) => {
     expect(isQualifyingSaleBooking(row)).toBe(expected);
