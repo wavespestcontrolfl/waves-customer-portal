@@ -1344,29 +1344,32 @@ router.post('/:id/send-sms', async (req, res, next) => {
     // Codex P1). Shared function, called directly here rather than the
     // whole bearerLinkSendCheck, which needs customer/account context this
     // route doesn't have.
-    const { checkConsultationLinkSend } = require('../services/composer-customer-links');
-    const consultationRefusal = await checkConsultationLinkSend(
+    // The SAME send-time check the Communications route runs (Codex #4709
+    // r9 local P1): every bearer re-check (consultation included, bound to
+    // THIS lead), the US-only rule, and the shared customer-owner recovery
+    // — a number exactly one live customer owns is that customer's text, so
+    // their notification preferences apply; an ambiguous number is refused.
+    const { bearerLinkSendCheck } = require('../services/composer-customer-links');
+    const bearerCheck = await bearerLinkSendCheck(
       message,
       String(lead.phone || '').replace(/\D/g, '').slice(-10),
-      null,
-      lead.id,
-      // Same US-only bearer rule the Communications route applies (Codex
-      // #4709 r5 P1): a bare 10-digit number or +1/1-prefixed 11 digits.
-      { usDestination: isUsPhone(lead.phone) },
+      { trustedCustomerId: null, usDestination: isUsPhone(lead.phone), expectedLeadId: lead.id },
     );
-    if (consultationRefusal) {
-      return res.status(409).json({ error: consultationRefusal.error });
+    if (!bearerCheck.ok) {
+      return res.status(409).json({ error: bearerCheck.error });
     }
+    const ownerCustomerId = bearerCheck.customerId || null;
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     const sendResult = await sendCustomerMessage({
       to: lead.phone,
       body: message,
       channel: 'sms',
-      audience: 'lead',
+      audience: ownerCustomerId ? 'customer' : 'lead',
       purpose: 'conversational',
       leadId: lead.id,
-      identityTrustLevel: 'phone_provided_unverified',
+      ...(ownerCustomerId ? { customerId: ownerCustomerId } : {}),
+      identityTrustLevel: ownerCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       // Send-window operator provenance: this is the Leads-page manual
       // send — an authenticated operator typed and clicked this message,
       // so it's allowlisted in validators/send-window.js like the other

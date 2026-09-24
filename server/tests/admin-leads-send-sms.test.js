@@ -173,6 +173,7 @@ describe('attachments and fromNumber reach the sender (same shape as /admin/comm
 describe('a consultation short code in the message is re-checked at THIS send boundary too (pre-push Codex P1)', () => {
   const originalGate = process.env.GATE_LEAD_INSPECTION_LINK;
   let shortCodeRows;
+  let ownerRows = [];
 
   function wireConsultationDb() {
     db.mockImplementation((table) => {
@@ -181,14 +182,24 @@ describe('a consultation short code in the message is re-checked at THIS send bo
           whereIn: jest.fn(() => q),
           where: jest.fn(() => q),
           select: jest.fn(async () => shortCodeRows),
+          // bearerLinkSendCheck's account-bound pass reads each /l/ code's
+          // own row — a consultation code (lead-bound, no account owner).
+          first: jest.fn(async () => (shortCodeRows[0]
+            ? { ...shortCodeRows[0], kind: 'consultation', target_url: 'https://portal.wavespestcontrol.com/inspection/tok' }
+            : undefined)),
         };
         return q;
       }
       const builder = {
-        where: jest.fn(() => builder), whereNull: jest.fn(() => builder),
         first: jest.fn(async () => ({ ...lead })), update,
         insert: jest.fn(async (row) => { if (table === 'lead_activities') activities.push(row); }),
+        // bearerLinkSendCheck's owner recovery lists customers on the number
+        // (none here — an unconverted lead).
+        select: jest.fn(async () => (table === 'customers' ? ownerRows : [])),
       };
+      for (const m of ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNot', 'whereRaw', 'orderBy', 'limit', 'andWhere', 'orWhere']) {
+        builder[m] = jest.fn(() => builder);
+      }
       return builder;
     });
   }
@@ -202,6 +213,31 @@ describe('a consultation short code in the message is re-checked at THIS send bo
   afterEach(() => {
     if (originalGate === undefined) delete process.env.GATE_LEAD_INSPECTION_LINK;
     else process.env.GATE_LEAD_INSPECTION_LINK = originalGate;
+  });
+
+  // Local audit P1 (#4709 r9): the Leads send runs the shared owner
+  // recovery — a number exactly one live customer owns is that customer's
+  // text (their notification preferences apply); an ambiguous one refuses.
+  test('the number belongs to exactly one live customer → sent as that customer', async () => {
+    ownerRows = [{ id: 'cust-owner' }];
+    try {
+      const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1 Reply STOP to opt out.', to: '+19415550103' });
+      expect(response.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-owner', audience: 'customer' }));
+    } finally {
+      ownerRows = [];
+    }
+  });
+
+  test('the number belongs to more than one live customer → 409, never sent', async () => {
+    ownerRows = [{ id: 'c1' }, { id: 'c2' }];
+    try {
+      const response = await send({ message: 'Pick a time: portal.wavespestcontrol.com/l/cons1 Reply STOP to opt out.', to: '+19415550103' });
+      expect(response.status).toBe(409);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      ownerRows = [];
+    }
   });
 
   test('a live, open, matching-phone consultation link sends normally', async () => {
