@@ -22,6 +22,13 @@ const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSupplies
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
+// Only a DELIVERED or SETTLED invoice satisfies the project closeout billing
+// guard (ADMIN-BUG-R49). A lone 'draft' — e.g. one minted by a cancelled
+// "Send with invoice" preview on a non-WDO project — was never sent to the
+// customer, carries no balance (open-balance.js only counts sent/viewed/
+// overdue) and is delivered by nothing in the close flow, so it must not
+// let the visit close as though it were billed.
+const COMPLETION_DELIVERED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'processing'];
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -247,11 +254,24 @@ async function resolveProjectCompletionBilling({
     knex,
   });
   if (invoice) {
+    if (COMPLETION_DELIVERED_INVOICE_STATUSES.includes(invoice.status)) {
+      return {
+        required: true,
+        resolved: true,
+        amount: invoiceAmount,
+        reason: 'invoice_exists',
+        invoice,
+      };
+    }
+    // A never-sent draft (or any other non-terminal, non-delivered status)
+    // does not resolve billing — nothing in the close path sends or charges
+    // it, so treating it as resolved would close the visit as billed while
+    // the money sits uncollected in an orphan draft.
     return {
       required: true,
-      resolved: true,
+      resolved: false,
       amount: invoiceAmount,
-      reason: 'invoice_exists',
+      reason: 'invoice_draft_unsent',
       invoice,
     };
   }

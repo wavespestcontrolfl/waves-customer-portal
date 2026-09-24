@@ -1326,7 +1326,7 @@ async function releaseFromAutopayHold(invoiceId) {
     is_autopay_held: false,
     // A shifted anchor (delivered-invoice due-date edit while held) wins so
     // the re-armed step lands on the same timeline fireStep progression uses.
-    next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index),
+    next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at, seq.step_index),
   });
 }
 
@@ -1374,7 +1374,7 @@ async function resumeSequence(invoiceId, dbc = db) {
   if (!invoice || isTerminalInvoice(invoice)) return;
   // A shifted anchor (delivered-invoice due-date edit while paused) wins so
   // the re-armed step lands on the same timeline fireStep progression uses.
-  const nextTouchAt = computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index);
+  const nextTouchAt = computeNextTouchAt(seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at, seq.step_index);
   if (!nextTouchAt) {
     // Sequence exhausted — step_index is past the last configured step, so
     // there is nothing to schedule. 'active' with a null due time is a dead

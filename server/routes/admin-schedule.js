@@ -9462,6 +9462,33 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       discountId,
     } = req.body;
     let { discountType, discountAmount } = req.body;
+    // ADMIN-BUG-R52: reject negative money inputs outright. Without this, a
+    // negative discountAmount (custom appointment discount OR a per-add-on
+    // one) INFLATES the price instead of reducing it (applyDiscount only
+    // floors at zero), and a negative estimatedPrice fabricates a positive
+    // discount stamp the operator never chose when the replay reconciles a
+    // $0 gross against the negative net. Matches the n >= 0 rule this
+    // handler's own toMoney already enforces for add-on gross, and the
+    // [0, gross] clamp the booking/create path enforces via
+    // calculateDiscountDollars.
+    if (estimatedPrice !== undefined && estimatedPrice !== '' && Number(estimatedPrice) < 0) {
+      throw httpError(400, 'Price cannot be negative.');
+    }
+    if (primaryLinePrice !== undefined && primaryLinePrice !== '' && Number(primaryLinePrice) < 0) {
+      throw httpError(400, 'Price cannot be negative.');
+    }
+    if (discountAmount !== undefined && discountAmount !== null && discountAmount !== '' && Number(discountAmount) < 0) {
+      throw httpError(400, 'Discount amount cannot be negative.');
+    }
+    if (Array.isArray(addons)) {
+      for (const addon of addons) {
+        const addonDiscountAmount = addon?.discountAmount;
+        if (addonDiscountAmount !== undefined && addonDiscountAmount !== null && addonDiscountAmount !== ''
+          && Number(addonDiscountAmount) < 0) {
+          throw httpError(400, 'Add-on discount amount cannot be negative.');
+        }
+      }
+    }
     const updates = {};
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
