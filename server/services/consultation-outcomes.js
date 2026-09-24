@@ -1012,8 +1012,12 @@ async function repairMissedNoShowOutcomes({ now, limit, result }) {
 async function markNoShow(scheduledServiceId, { trx } = {}) {
   const database = trx || db;
   if (!scheduledServiceId) return null;
-  const svcRow = await database('scheduled_services').where({ id: scheduledServiceId }).first();
-  if (!svcRow) return null;
+  // Locked and re-checked (local audit P1): the repair sweep selects visits
+  // before processing them, so the office may have reopened/rescheduled one
+  // in between. The job-status caller already moved the row to no_show in
+  // this same transaction, so the check always holds there.
+  const svcRow = await database('scheduled_services').where({ id: scheduledServiceId }).forNoKeyUpdate().first();
+  if (!svcRow || svcRow.status !== 'no_show') return null;
   if (!(await isAssessmentBooking(svcRow, database))) return null;
 
   const now = new Date();

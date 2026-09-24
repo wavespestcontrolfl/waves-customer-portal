@@ -1261,13 +1261,22 @@ describe('markNoShow', () => {
   function seededDb(extraOutcomes = []) {
     return makeFakeDb({
       scheduled_services: [
-        { id: 'visit-1', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', service_id: null },
-        { id: 'visit-2', service_type: 'Quarterly Pest Control', customer_id: 'cust-2', technician_id: 'tech-2', service_id: null },
+        // status no_show: job-status moves the row there in the same
+        // transaction before calling markNoShow.
+        { id: 'visit-1', status: 'no_show', service_type: 'Waves Assessment', customer_id: 'cust-1', technician_id: 'tech-1', service_id: null },
+        { id: 'visit-2', status: 'no_show', service_type: 'Quarterly Pest Control', customer_id: 'cust-2', technician_id: 'tech-2', service_id: null },
       ],
       leads: [{ id: 'lead-1', customer_id: 'cust-1', deleted_at: null, created_at: '2026-01-01' }],
       consultation_outcomes: extraOutcomes,
     });
   }
+
+  test('local audit P1: a visit reopened since the sweep selected it (no longer no_show) is left alone', async () => {
+    const fakeDb = seededDb([{ id: 'co-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', outcome: 'warm' }]);
+    fakeDb.__store.scheduled_services.find((r) => r.id === 'visit-1').status = 'confirmed';
+    expect(await markNoShow('visit-1', { trx: fakeDb })).toBeNull();
+    expect(fakeDb.__store.consultation_outcomes.find((r) => r.id === 'co-1').outcome).toBe('warm');
+  });
 
   test('no-op for a non-consultation visit', async () => {
     const fakeDb = seededDb();
