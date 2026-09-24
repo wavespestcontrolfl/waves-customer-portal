@@ -519,6 +519,15 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
 
   const isCommittedToTerm = (row) => rowCommittedToTerm(term, row);
   let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  // A row explicitly linked to a DIFFERENT term never counts toward THIS
+  // term's coverage, for EVERY coverage family (not only palm — the palm
+  // branch below already re-applies this, redundantly but harmlessly, as
+  // part of its own identity filter). Without this, a prior term's
+  // stamped visit that slips into the new term's window (a rescheduled
+  // final quarterly visit, an operator-shortened boundary) is treated as
+  // one of THIS term's existing rows: the renewal seeds and stamps one
+  // visit short while the prior term's row double-counts (ADMIN-BUG-R19).
+  matching = matching.filter((row) => !rowLinkedToAnotherTerm(term, row));
   // PALM coverage candidates require identity or provenance (codex r18
   // pre-push P0): matching is by service-type TEXT, and Waves sells
   // genuine one-time palm injections — a name-matched one-time

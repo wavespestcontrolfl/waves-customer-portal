@@ -162,8 +162,13 @@ function seed({ prepaidChild, invoices = [], terms = [{ id: 'term-1', covered: t
   db.__state.terms = terms;
   db.__state.rows = [
     { id: 'parent', technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
-    { id: 'child-1', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(33), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
-    { id: 'child-2', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(63), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, ...(prepaidChild || { annual_prepay_term_id: null, prepaid_amount: null }) },
+    // Ordinary recurring cadence children (not boosters) carry is_recurring:
+    // true, same as the real booking route inserts them (admin-schedule.js
+    // child loop) — stampSeriesPrepaid now reads this flag to keep a
+    // series prepayment off booster rows (ADMIN-BUG-R09), so the fixture
+    // must match production row shapes rather than an arbitrary false.
+    { id: 'child-1', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(33), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
+    { id: 'child-2', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(63), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: 'parent', recurring_ongoing: true, ...(prepaidChild || { annual_prepay_term_id: null, prepaid_amount: null }) },
   ];
   db.__state.writes = [];
   db.__state.hasTableCalls = [];

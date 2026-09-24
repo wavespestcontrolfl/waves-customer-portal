@@ -4,6 +4,7 @@
 // fans a series-level payment across siblings and reconstructs the "visit X of
 // Y · N more covered" context for the appointment detail UI.
 const { recordAuditEvent } = require('./audit-log');
+const logger = require('./logger');
 
 // Statuses that should NOT receive a prepayment stamp. A completed visit
 // already has its books closed; cancelled / no-show / skipped are dead rows
@@ -155,6 +156,7 @@ async function stampSeriesPrepaid(db, {
   const now = new Date();
   const updatedRows = [];
   let eligible = [];
+  let stampTargets = [];
   let slices = [];
   const run = useExistingTransaction
     ? async (handler) => handler(db)
@@ -192,7 +194,26 @@ async function stampSeriesPrepaid(db, {
       err.isOperational = true;
       throw err;
     }
-    if (Math.round(amount * 100) < eligible.length) {
+    // A recurring family can carry booster rows alongside its cadence
+    // visits: same recurring_parent_id, but inserted with is_recurring:
+    // false AND no recurring_pattern (admin-schedule.js booster insert
+    // never sets one — only the cadence child loop does) because boosters
+    // bill their own price and are never a dues-covered plan visit. A
+    // series-level prepayment covers the cadence visits the operator was
+    // shown and charged for — fanning it across boosters too stamps every
+    // cadence visit short (re-billed at completion) while crediting a
+    // booster the customer never paid for (ADMIN-BUG-R09). Requiring BOTH
+    // signals (not is_recurring alone) keeps this from misfiring on a row
+    // that is simply not flagged recurring but still carries a real
+    // cadence (schedule-integrity fixtures do this) — that row is not a
+    // booster and must not be dropped from the split. Only exclude
+    // boosters when the family actually has cadence rows to receive their
+    // share — a lone booster stamped on its own (applyToSeries on a family
+    // of one) still gets its full stamp, unaffected.
+    const cadenceRows = eligible.filter((row) => row.is_recurring === true);
+    const boosterRows = eligible.filter((row) => row.is_recurring === false && !row.recurring_pattern);
+    stampTargets = (cadenceRows.length > 0 && boosterRows.length > 0) ? cadenceRows : eligible;
+    if (Math.round(amount * 100) < stampTargets.length) {
       const err = new Error('Series prepayment must allocate at least one cent to every covered visit');
       err.status = 400;
       err.statusCode = 400;
@@ -206,11 +227,29 @@ async function stampSeriesPrepaid(db, {
     await retireActiveAllocationAudits(trx, {
       customerId: anchor.customer_id,
       parentId,
-      ids: eligible.map((row) => row.id),
+      ids: stampTargets.map((row) => row.id),
     });
-    slices = splitTotalAcrossVisits(amount, eligible.length);
-    for (let i = 0; i < eligible.length; i++) {
-      const row = eligible[i];
+    slices = splitTotalAcrossVisits(amount, stampTargets.length);
+    // When every targeted row carries its own known price, never stamp a
+    // row above that price — an even split across fewer rows than were
+    // planned (blackout/day-off exhaustion placed 3 of 4) would otherwise
+    // over-stamp each placed row and still leave the eventual extra visit
+    // unstamped (ADMIN-BUG-R09 variant B). Cap each slice at the row's own
+    // price and report whatever the caps left unallocated instead of
+    // hiding it inside an inflated per-visit stamp; rows without a known
+    // price (legacy data, mocked fixtures) fall back to the plain even
+    // split so unrelated behaviour is unchanged.
+    const rowPrices = stampTargets.map((row) => Number(row.estimated_price));
+    if (rowPrices.every((price) => Number.isFinite(price) && price > 0)) {
+      slices = slices.map((slice, i) => Math.min(slice, rowPrices[i]));
+      const allocated = Math.round(slices.reduce((sum, v) => sum + v, 0) * 100) / 100;
+      const unallocated = Math.round((amount - allocated) * 100) / 100;
+      if (unallocated > 0.005) {
+        logger.warn(`[prepaid-series] $${unallocated.toFixed(2)} of a $${amount} series prepayment for parent ${parentId} could not be allocated across ${stampTargets.length} visit(s) at their own price — the office collected more than the placed visits are worth; reconcile the series.`);
+      }
+    }
+    for (let i = 0; i < stampTargets.length; i++) {
+      const row = stampTargets[i];
       const amt = slices[i];
       const [updated] = await trx('scheduled_services')
         .where({ id: row.id })
@@ -236,7 +275,7 @@ async function stampSeriesPrepaid(db, {
   });
   return {
     seriesParentId: parentId,
-    visitsCovered: eligible.length,
+    visitsCovered: stampTargets.length,
     perVisitAmount: slices[0] ?? 0,
     seriesTotal: Number(totalAmount),
     updatedRows,
@@ -253,6 +292,23 @@ async function clearSeriesPrepaid(db, anchor) {
     await fetchSeriesRows(trx, parentId, { lock: true });
     const family = await fetchSeriesRows(trx, parentId);
     const ids = family.filter((row) => row.customer_id === anchor.customer_id).map((row) => row.id);
+    // Symmetry with the manual writers (stampSeriesPrepaid, POST
+    // /:id/prepaid, bulk mark_prepaid): a series clear must never erase
+    // annual-prepay coverage evidence. Nulling the stamp here (with the
+    // annual_prepay_term_id link left in place) makes annualPrepayCoversVisit
+    // false while the completion billing gate has no other record the visit
+    // was already paid inside the annual term — completion mints a second
+    // invoice for a visit the customer already paid for (ADMIN-BUG-R33).
+    // The only sanctioned way to remove annual coverage is
+    // clearPrepaidStampsForTerm (the void/refund path), which operates on
+    // the term directly rather than through this manual clear.
+    if (family.filter((row) => ids.includes(row.id)).some(hasAnnualCoverage)) {
+      const err = new Error('Series has annual prepay coverage; reconcile that term (void/refund) before clearing a manual prepayment');
+      err.status = 409;
+      err.statusCode = 409;
+      err.isOperational = true;
+      throw err;
+    }
     const cleared = await trx('scheduled_services').whereIn('id', ids)
       .whereNotNull('prepaid_amount')
       .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null })

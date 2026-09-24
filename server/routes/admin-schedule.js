@@ -9025,12 +9025,20 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'mark_prepaid': {
             const amt = Number(payload?.totalAmount);
             if (!Number.isFinite(amt) || amt <= 0) throw Object.assign(new Error('totalAmount must be a positive number'), { isValidation: true });
-            // Annual coverage is refused IN the UPDATE, not by a pre-read: an
-            // annual-prepay activation stamping the row between a SELECT and
-            // an unconditional UPDATE would be overwritten with a manual
-            // method, and completion would skip the annual coverage
-            // validator for an already-paid visit (Codex #4030 r7 P1).
+            // Terminal rows never take a stamp — same rule as the
+            // single-visit writer (PREPAID_STAMP_REFUSED_STATUSES /
+            // visit_terminal, admin-schedule.js:13384) and the series
+            // fan-out (TERMINAL_STATUSES): a completed/cancelled/no_show/
+            // skipped visit must not end up holding money for a visit that
+            // never runs or already closed its books (ADMIN-BUG-R50).
+            // Annual coverage is refused IN the SAME UPDATE, not by a
+            // pre-read: an annual-prepay activation stamping the row
+            // between a SELECT and an unconditional UPDATE would be
+            // overwritten with a manual method, and completion would skip
+            // the annual coverage validator for an already-paid visit
+            // (Codex #4030 r7 P1).
             const stamped = await withoutAnnualCoverage(db('scheduled_services').where({ id }))
+              .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
               .update({
                 prepaid_amount: amt,
                 prepaid_method: payload?.method || 'cash',
@@ -9038,9 +9046,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 prepaid_at: new Date(),
               })
               .returning(['id']);
-            const unstamped = stamped.length ? null : await db('scheduled_services').where({ id }).first('id');
-            if (!stamped.length && !unstamped) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
-            if (!stamped.length) throw Object.assign(new Error('Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
+            if (!stamped.length) {
+              const current = await db('scheduled_services').where({ id }).first('status', 'annual_prepay_term_id', 'prepaid_method');
+              if (!current) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
+              const refusal = PREPAID_STAMP_REFUSALS.find(({ refused }) => refused(current));
+              throw Object.assign(new Error(refusal ? refusal.body(current).error
+                : 'Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
+            }
             break;
           }
         }
@@ -13450,15 +13462,32 @@ router.delete('/:id/prepaid', async (req, res, next) => {
       if (!anchor) return res.status(404).json({ error: 'Scheduled service not found' });
       return res.json(await clearSeriesPrepaid(db, anchor));
     }
+    // Symmetry with the POST writer (13384-13388): a manual clear must never
+    // erase annual-prepay coverage evidence — nulling the stamp while
+    // annual_prepay_term_id stays set leaves the completion billing gate
+    // with no record the visit was already paid inside the annual term, so
+    // it mints a second invoice for it (ADMIN-BUG-R33). Reconcile the term
+    // (void/refund) instead of clearing the manual stamp field.
     const cleared = await db('scheduled_services').where({ id: req.params.id })
       .modify((q) => technicianLiveVisitFilter(req, q))
+      .modify(withoutAnnualCoverage)
       .update({
         prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
       })
       .returning(['id']);
-    // 0 rows = the visit was reassigned/settled after the pre-check —
-    // report that instead of claiming the prepayment was cleared.
-    if (!cleared.length) return res.status(404).json({ error: 'Scheduled service not found' });
+    // 0 rows = the visit was reassigned/settled after the pre-check, or it
+    // carries annual coverage — tell the operator which before claiming the
+    // prepayment was cleared.
+    if (!cleared.length) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('annual_prepay_term_id', 'prepaid_method');
+      if (current && hasAnnualCoverage(current)) {
+        return res.status(409).json({
+          error: 'This visit has annual prepay coverage — reconcile that term (void/refund) before clearing a manual prepayment.',
+          code: 'annual_prepay_coverage',
+        });
+      }
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });

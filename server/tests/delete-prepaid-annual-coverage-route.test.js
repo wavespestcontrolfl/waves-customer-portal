@@ -1,0 +1,114 @@
+/**
+ * Audit repro r1-sched-series-2 — DELETE /api/admin/schedule/:id/prepaid wipes an
+ * annual_prepay_invoice coverage stamp (single form, technician token; series
+ * form, admin token) with no annual-coverage refusal, and the completion gate
+ * (annualPrepayCoversVisit) then reports the visit as NOT covered.
+ *
+ * Real Postgres (DATABASE_URL must point at a private clone of waves_audit_tpl).
+ * The real admin-schedule router runs; only adminAuthenticate is stubbed to
+ * inject the role (same pattern as tests/admin-tech-role-scoping.test.js).
+ */
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+jest.setTimeout(60000);
+
+let mockCurrentRole = 'technician';
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../middleware/admin-auth', () => {
+  const actual = jest.requireActual('../middleware/admin-auth');
+  return {
+    ...actual,
+    adminAuthenticate: (req, _res, next) => {
+      req.technician = { id: global.__TECH_ID, role: mockCurrentRole };
+      req.technicianId = global.__TECH_ID;
+      req.techRole = mockCurrentRole;
+      return next();
+    },
+  };
+});
+
+const express = require('express');
+const db = require('../models/db');
+const scheduleRouter = require('../routes/admin-schedule');
+const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
+let server; let baseUrl;
+beforeAll((done) => {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/admin/schedule', scheduleRouter);
+  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+  server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; done(); });
+});
+afterAll(async () => { await new Promise((r) => server.close(r)); await db.destroy(); });
+
+async function call(method, path) {
+  const res = await fetch(`${baseUrl}${path}`, { method, headers: { 'content-type': 'application/json' } });
+  let json = null; try { json = await res.json(); } catch { /* none */ }
+  return { status: res.status, body: json || {} };
+}
+
+const SERVICE = 'Quarterly Pest Control';
+async function seed({ children = 0 } = {}) {
+  const [customer] = await db('customers').insert({
+    first_name: 'Audit', last_name: 'Series2', phone: `555${Date.now() % 10000000}`, email: `audit-s2-${Date.now()}-${Math.random()}@example.com`,
+  }).returning('id');
+  const customerId = customer.id || customer;
+  const [tech] = await db('technicians').insert({
+    name: 'Tech Repro', email: `tech-s2-${Date.now()}-${Math.random()}@example.com`, role: 'technician', active: true,
+  }).returning('id');
+  const techId = tech.id || tech;
+  const [term] = await db('annual_prepay_terms').insert({
+    customer_id: customerId, term_start: etDateString(addETDays(new Date(), -30)), term_end: etDateString(addETDays(new Date(), 335)),
+    status: 'active', prepay_amount: 400, coverage_service_type: SERVICE, coverage_visit_count: 4, plan_label: 'Quarterly',
+  }).returning('id');
+  const termId = term.id || term;
+  const stamp = { prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', prepaid_at: new Date(), annual_prepay_term_id: termId };
+  const [parent] = await db('scheduled_services').insert({
+    customer_id: customerId, technician_id: techId, scheduled_date: etDateString(addETDays(new Date(), 3)), service_type: SERVICE,
+    status: 'pending', is_recurring: children > 0, estimated_price: 100, ...stamp,
+  }).returning('id');
+  const parentId = parent.id || parent;
+  const childIds = [];
+  for (let i = 1; i <= children; i++) {
+    const [c] = await db('scheduled_services').insert({
+      customer_id: customerId, technician_id: techId, scheduled_date: etDateString(addETDays(new Date(), 3 + 90 * i)), service_type: SERVICE,
+      status: 'pending', is_recurring: true, recurring_parent_id: parentId, estimated_price: 100, ...stamp,
+    }).returning('id');
+    childIds.push(c.id || c);
+  }
+  return { customerId, techId, termId, parentId, childIds };
+}
+
+const row = (id) => db('scheduled_services').where({ id }).first('id', 'status', 'prepaid_amount', 'prepaid_method', 'annual_prepay_term_id', 'technician_id');
+
+describe('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
+  test('single form, TECHNICIAN token on own live visit: 200, stamp wiped, term id left, coverage gate now false', async () => {
+    const { techId, parentId } = await seed();
+    global.__TECH_ID = techId; mockCurrentRole = 'technician';
+    const before = await row(parentId);
+    expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(before, db)).toBe(true); // covered before
+
+    const res = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid`);
+    const after = await row(parentId);
+    console.log('single/tech DELETE ->', res.status, JSON.stringify(res.body), '\nrow after:', JSON.stringify(after));
+
+    // EXPECTED (symmetry with POST /:id/prepaid at admin-schedule.js:13384-13388): refusal
+    expect(res.status).toBe(409);
+    expect(after.prepaid_method).toBe('annual_prepay_invoice');
+    expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, db)).toBe(true);
+  });
+
+  test('series form, ADMIN token: every stamped sibling wiped in one call, term ids left, gate false on all', async () => {
+    const { techId, parentId, childIds } = await seed({ children: 3 });
+    global.__TECH_ID = techId; mockCurrentRole = 'admin';
+    const res = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid?series=1`);
+    const rows = await Promise.all([parentId, ...childIds].map(row));
+    const covered = await Promise.all(rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r, db)));
+    console.log('series/admin DELETE ->', res.status, JSON.stringify(res.body), '\nrows after:', JSON.stringify(rows.map((r) => [r.prepaid_method, r.annual_prepay_term_id != null])), 'covered:', JSON.stringify(covered));
+
+    // EXPECTED (symmetry with stampSeriesPrepaid prepaid-series.js:188): 409 'annual prepay coverage'
+    expect(res.status).toBe(409);
+    for (const c of covered) expect(c).toBe(true);
+  });
+});
