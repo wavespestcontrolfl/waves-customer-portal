@@ -45,6 +45,18 @@
 // excluding it let a second same-family series activate, and would let an
 // archive/churn through while a rebook is still owed).
 const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
+// track_state can LEAD the legacy status column (track-transitions.js flips
+// track_state first and syncs `status` best-effort — a sync failure only
+// logs), in BOTH directions: a tech already rolling can read track_state
+// en_route/on_property while `status` still says pending/confirmed (the
+// LIVE_TRACK_STATES export, cancellation-eligibility.js), and a finished or
+// pulled visit can read track_state complete/cancelled while `status` lags
+// behind at a live-looking value. Neither direction should trust `status`
+// alone: the first must count as live even off today's date/CANCELLABLE_
+// STATUSES allowlist (the tech is there NOW), and the second must NOT block
+// on a stale status once the tracker itself says the work is done or gone.
+const { LIVE_TRACK_STATES } = require('./cancellation-eligibility');
+const TERMINAL_TRACK_STATES = ['complete', 'cancelled'];
 // A live visit/series obligation: either an upcoming-or-in-progress
 // scheduled_services row, OR a series ANCHOR still marked recurring_ongoing
 // with no upcoming child seeded yet (a completed last occurrence whose next
@@ -57,22 +69,28 @@ const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 async function findLiveFutureVisit(dbh, customerId, { todayIso } = {}) {
   const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
   const today = todayIso || require('../utils/datetime-et').etDateString();
-  // Built from `.where()` (incl. its function-callback OR form) only —
-  // never whereIn/whereNot/whereNotIn/whereRaw — the smallest common
+  // Built from `.where()` (incl. its function-callback OR/whereRaw form)
+  // only — never whereIn/whereNot/whereNotIn — the smallest common
   // denominator across this repo's several hand-rolled query-builder test
   // doubles, which mock different subsets of knex's chain methods; none of
   // them actually invoke a callback passed to `.where()`, so this form is
   // inert (never crashes) under every one of them and correct under real knex.
   const dateExemptStatuses = ['rescheduled', ...IN_PROGRESS_STATUSES];
+  const liveTrackStatesSql = LIVE_TRACK_STATES.map(() => '?').join(', ');
+  const terminalTrackStatesSql = TERMINAL_TRACK_STATES.map(() => '?').join(', ');
   const [upcoming, ongoingAnchor] = await Promise.all([
     dbh('scheduled_services')
       .where({ customer_id: customerId })
-      .where(function inLiveStatus() {
-        for (const status of [...CANCELLABLE_STATUSES, ...IN_PROGRESS_STATUSES]) this.orWhere('status', status);
-      })
-      .where(function activeBound() {
-        this.where('scheduled_date', '>=', today);
-        for (const status of dateExemptStatuses) this.orWhere('status', status);
+      .where(function liveByStatusOrTrack() {
+        this.where(function statusDateLive() {
+          this.where(function inCancellableStatus() {
+            for (const status of [...CANCELLABLE_STATUSES, ...IN_PROGRESS_STATUSES]) this.orWhere('status', status);
+          }).where(function activeBound() {
+            this.where('scheduled_date', '>=', today);
+            for (const status of dateExemptStatuses) this.orWhere('status', status);
+          }).whereRaw(`(track_state IS NULL OR track_state NOT IN (${terminalTrackStatesSql}))`, TERMINAL_TRACK_STATES);
+        });
+        this.orWhereRaw(`track_state IN (${liveTrackStatesSql})`, LIVE_TRACK_STATES);
       })
       .first('id', 'scheduled_date', 'status'),
     dbh('scheduled_services')
@@ -129,9 +147,39 @@ function billingWindDownStamps() {
   return { active: false, autopay_enabled: false, next_charge_date: null };
 }
 
+// One-shot per-row decision for a write entering pipeline_stage='churned':
+// refuse (naming what's still live) or return the wind-down stamps to merge
+// into that row's own update. The SINGLE canonical helper every churn writer
+// calls — the admin routes (PUT /:id, PUT /:id/stage), IB's updateCustomer,
+// AND both of bulkUpdateCustomers' branches (the fast CASE path for a plain
+// stage move, and the per-row path a combined stage+address/email edit
+// takes) — so a bulk edit that combines a churn move with an address/email
+// change gets the exact same guard the plain bulk path already had, instead
+// of silently skipping it (the bug the per-row branch had until this fix).
+async function churnGuardForRow(dbh, customerId) {
+  const [liveVisit, liveTerm] = await Promise.all([
+    findLiveFutureVisit(dbh, customerId),
+    findActivePrepayTerm(dbh, customerId),
+  ]);
+  if (liveVisit || liveTerm) {
+    return {
+      blocked: true,
+      liveVisit: liveVisit || null,
+      liveTerm: liveTerm || null,
+      // Short, generic wording — callers that want the fuller
+      // describeLiveVisit() sentence build it themselves from liveVisit.
+      error: liveVisit
+        ? 'still has a scheduled visit — use "Cancel plan…" first'
+        : 'still has an active prepay term — use "Cancel plan…" first',
+    };
+  }
+  return { blocked: false, stamps: billingWindDownStamps() };
+}
+
 module.exports = {
   findLiveFutureVisit,
   describeLiveVisit,
   findActivePrepayTerm,
   billingWindDownStamps,
+  churnGuardForRow,
 };

@@ -1542,20 +1542,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
         const enteringChurnRows = liveRows.filter((r) => r.pipeline_stage !== 'churned');
         const enteringChurnIds = enteringChurnRows.map((r) => String(r.id));
         if (enteringChurnIds.length) {
-          const { findLiveFutureVisit, findActivePrepayTerm } = require('../customer-lifecycle-guard');
+          const { churnGuardForRow } = require('../customer-lifecycle-guard');
           const blocked = [];
           for (const cid of enteringChurnIds) {
-            const [liveVisit, liveTerm] = await Promise.all([
-              findLiveFutureVisit(trx, cid),
-              findActivePrepayTerm(trx, cid),
-            ]);
-            if (liveVisit || liveTerm) {
-              blocked.push({
-                customer_id: cid,
-                error: liveVisit
-                  ? 'still has a scheduled visit — use "Cancel plan…" first'
-                  : 'still has an active prepay term — use "Cancel plan…" first',
-              });
+            const decision = await churnGuardForRow(trx, cid);
+            if (decision.blocked) {
+              blocked.push({ customer_id: cid, error: decision.error });
             } else {
               churnWindDownIds.push(cid);
             }
@@ -1677,6 +1669,22 @@ async function bulkUpdateCustomers(customerIds, updates) {
           throw err;
         }
         const lockedMerged = { ...lockedBefore, ...clean };
+        // ADMIN-BUG-R10: a bulk edit that combines a churn move with an
+        // address/email field takes THIS per-row branch instead of the fast
+        // CASE path above, and this branch has its own per-row before-state
+        // (lockedBefore) — so it gets the identical guard, via the same
+        // shared helper, rather than silently skipping it.
+        let churnStamps = {};
+        if (clean.pipeline_stage === 'churned' && lockedBefore.pipeline_stage !== 'churned') {
+          const { churnGuardForRow } = require('../customer-lifecycle-guard');
+          const decision = await churnGuardForRow(trx, customerId);
+          if (decision.blocked) {
+            const err = new Error(decision.error);
+            err.churnBlocked = true;
+            throw err;
+          }
+          churnStamps = decision.stamps;
+        }
         await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
         if (emailSubmitted && clean.email) {
           // Serialization ONLY — no claimant refusal (r23): shared
@@ -1689,7 +1697,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
         // every later row.
         rowLaneStamp = require('../billing-lane').impliedMonthlyStampForWrite(lockedBefore, lockedMerged);
         await trx('customers').where('id', customerId).update(
-          rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
+          rowLaneStamp ? { ...clean, ...stageStamp, ...churnStamps, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp, ...churnStamps },
         );
         if (clean.monthly_rate !== undefined
           && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
@@ -1714,6 +1722,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
     } catch (e) {
       if (e && e.customerNoLongerLive) {
         errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+        continue;
+      }
+      if (e && e.churnBlocked) {
+        errors.push({ customer_id: customerId, error: e.message });
         continue;
       }
       if (e && e.code === '23505') {

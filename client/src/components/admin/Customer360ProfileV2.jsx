@@ -187,6 +187,17 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// A structured refusal's human `message` (e.g. {error: 'customer_still_
+// billing_or_scheduled', message: 'This customer still has a scheduled
+// visit...'}) rides on err.body, the full parsed clone above — prefer it
+// over err.message, which adminFetch derives from body.error/body.reason/
+// body.message/body.code IN THAT ORDER, so a refusal carrying both an error
+// CODE and a human message would otherwise surface the opaque code to the
+// operator instead of the sentence that actually explains it.
+export function apiErrorMessage(err, fallback) {
+  return err?.body?.message || err?.message || fallback;
+}
+
 function timeAgo(dateStr) {
   if (!dateStr) return "";
   const mins = Math.floor((Date.now() - new Date(dateStr)) / 60000);
@@ -7432,7 +7443,7 @@ function CustomerProfileEditor({
                   setEditOpen(false);
                   onClose?.();
                 } catch (e) {
-                  setEditErr(e.details?.message || e.message || "Delete failed");
+                  setEditErr(apiErrorMessage(e, "Delete failed"));
                 }
                 setDeletingCustomer(false);
               }}
@@ -7490,7 +7501,7 @@ function CustomerProfileEditor({
                     await reloadCustomer();
                     setEditOpen(false);
                   } catch (e) {
-                    setEditErr(e.details?.message || e.message || "Save failed");
+                    setEditErr(apiErrorMessage(e, "Save failed"));
                   }
                   setSavingEdit(false);
                 }}
