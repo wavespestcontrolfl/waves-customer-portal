@@ -88,7 +88,7 @@ function AssessmentLink({ draft }) {
   if (draft.intent !== "photo_triage" || !ASSESSMENT_TYPES.has(type) || !id) return null;
   const params = new URLSearchParams({ open: `${type}:${id}` });
   return (
-    <a href={`/admin/lawn-assessments?${params.toString()}`} style={{ fontSize: 13, color: D.blue, textDecoration: "none" }}>
+    <a href={`/admin/lawn-assessments?${params.toString()}`} style={{ fontSize: 14, color: D.blue, textDecoration: "none" }}>
       View assessment
     </a>
   );

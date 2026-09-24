@@ -66,7 +66,7 @@ const {
 const { isSignableStoredMediaKey } = require('./sms-media');
 const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 const { countSegments } = require('./messaging/segment-counter');
-const { buildPestTeaser } = require('./pest-identification');
+const { buildPestTeaser, PEST_LIBRARY } = require('./pest-identification');
 const { safePublicFirstName } = require('../utils/public-report-egress');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
@@ -191,28 +191,49 @@ async function releaseVisionSlot(messageId) {
     .catch((err) => logger.error(`[photo-triage] vision slot release failed for message ${messageId}: ${err.message}`));
 }
 
-// The one customer-safe label the teaser allowlist publishes pre-capture.
-function teaserFindingLabel(type, analysis) {
+const LIBRARY_BY_SLUG = new Map(PEST_LIBRARY.map((entry) => [entry.slug, entry]));
+const HEALTHY_LAWN_LABEL = 'no major visible stress';
+
+// What the draft may say, from the pre-capture teaser allowlists only:
+//   { kind: 'actionable', label } — a finding worth a treatment offer;
+//   { kind: 'harmless', label }   — a clean lawn, or a not-a-pest ID
+//                                   (the category, or its library entry's);
+//   { kind: 'none' }              — nothing we can name.
+function teaserOutcome(type, analysis) {
   if (type === 'lawn') {
     const { buildTeaser } = require('../routes/public-lawn-assessment');
-    return buildTeaser(analysis).first_finding?.name || null;
+    const teaser = buildTeaser(analysis);
+    const label = teaser.first_finding?.name || null;
+    if (label === HEALTHY_LAWN_LABEL || (!label && teaser.overall_status === 'Healthy')) {
+      return { kind: 'harmless', label: 'a healthy lawn' };
+    }
+    return label ? { kind: 'actionable', label } : { kind: 'none' };
   }
-  const teaser = buildPestTeaser(JSON.parse(analysis.report_contract || '{}'));
+  const contract = JSON.parse(analysis.report_contract || '{}');
+  const teaser = buildPestTeaser(contract);
   const match = /^We identified (.+)\.$/.exec(teaser.identified_teaser || '');
-  return match ? match[1] : null;
+  if (!match) return { kind: 'none' };
+  const item = LIBRARY_BY_SLUG.get(contract.identification?.slug);
+  const harmless = teaser.category === 'not_a_pest' || item?.category === 'not_a_pest';
+  return { kind: harmless ? 'harmless' : 'actionable', label: match[1] };
 }
+
+// The sentences after the greeting, per outcome. Fixed copy + an allowlisted
+// label only, and nothing Approve does not deliver: approving sends only
+// this text (no report, no link — staff mint the report link from the
+// draft's View assessment link). A harmless finding never gets a treatment
+// pitch.
+const DRAFT_BODIES = {
+  actionable: (label) => ` From what we can see, it's consistent with ${label}. Want us to come take a closer look and quote treatment?`,
+  harmless: (label) => ` From what we can see, it's ${label}, so no treatment is needed. Reply if you'd like us to take a look anyway.`,
+  none: () => ' Want us to take a look?',
+};
 
 // ≤ MAX_DRAFT_SEGMENTS SMS segments, no link. The first name is dropped
 // before anything else when the copy would run long.
-function buildDraftText({ firstName, findingLabel }) {
-  const finding = findingLabel
-    ? ` From what we can see, it's consistent with ${findingLabel}.`
-    : '';
-  // Promises nothing Approve does not deliver: approving sends only this
-  // text, and the report link exists only once staff mint it from the
-  // assessment (the draft's View assessment link).
-  const close = ' Want us to come take a closer look and quote treatment?';
-  const compose = (name) => `Thanks for the photo${name ? `, ${name}` : ''}.${finding}${close}`;
+function buildDraftText({ firstName, outcome }) {
+  const bodyText = DRAFT_BODIES[outcome.kind](outcome.label);
+  const compose = (name) => `Thanks for the photo${name ? `, ${name}` : ''}.${bodyText}`;
   const named = compose(safePublicFirstName(firstName));
   return countSegments(named).segmentCount <= MAX_DRAFT_SEGMENTS ? named : compose(null);
 }
@@ -320,7 +341,7 @@ function legacyAiDraftsAllowed(candidacy) {
 async function parkForAssessment({ intent, messageId, smsLogId, body, from, customer }, created) {
   const text = buildDraftText({
     firstName: customer?.first_name,
-    findingLabel: teaserFindingLabel(created.type, created.analysis),
+    outcome: teaserOutcome(created.type, created.analysis),
   });
   // A second photo text from the same contact may have drafted while this
   // one's vision call ran — the assessment is kept (its slot stays spent),
@@ -405,7 +426,7 @@ module.exports = {
     releaseVisionSlot,
     parkDraftUnlessPending,
     insertDraftUnlessPending,
-    teaserFindingLabel,
+    teaserOutcome,
     buildDraftText,
   },
 };

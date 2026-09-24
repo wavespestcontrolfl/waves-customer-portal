@@ -125,7 +125,7 @@ async function triageInboundPhotoText(args) {
   return triage.runPhotoTriage(await triage.assessPhotoTriageCandidacy(args), { legacyFallback: mockLegacyFallback });
 }
 const AMBIGUOUS = 'Look at this by the driveway';
-const { buildDraftText, dailyCap, imageMedia, teaserFindingLabel } = triage._test;
+const { buildDraftText, dailyCap, imageMedia, teaserOutcome } = triage._test;
 
 const MESSAGE_ID = 'dddddddd-eeee-4fff-8000-111111111111';
 const INBOUND_KEY = 'sms-media/inbound/abc123';
@@ -485,51 +485,85 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
 });
 
 describe('draft text builder', () => {
+  const act = (label) => ({ kind: 'actionable', label });
+  const ok = (label) => ({ kind: 'harmless', label });
+  const NONE = { kind: 'none' };
+
+  test('one closing line per outcome: actionable offers a quote, harmless says no treatment, none just offers a look', () => {
+    expect(buildDraftText({ firstName: 'Dana', outcome: act('weed pressure') })).toBe(
+      "Thanks for the photo, Dana. From what we can see, it's consistent with weed pressure. Want us to come take a closer look and quote treatment?",
+    );
+    expect(buildDraftText({ firstName: 'Dana', outcome: ok('nothing to worry about') })).toBe(
+      "Thanks for the photo, Dana. From what we can see, it's nothing to worry about, so no treatment is needed. Reply if you'd like us to take a look anyway.",
+    );
+    expect(buildDraftText({ firstName: 'Dana', outcome: NONE })).toBe('Thanks for the photo, Dana. Want us to take a look?');
+    // Only the actionable outcome ever mentions a quote or treatment offer.
+    expect(buildDraftText({ firstName: 'Dana', outcome: ok('a healthy lawn') })).not.toMatch(/quote/i);
+    expect(buildDraftText({ firstName: 'Dana', outcome: NONE })).not.toMatch(/quote|treatment/i);
+  });
+
   test('promises nothing Approve does not send: no report, no link', () => {
-    for (const findingLabel of [null, 'weed pressure']) {
-      const text = buildDraftText({ firstName: 'Dana', findingLabel });
-      expect(text).not.toMatch(/report|link|https?:|shortly/i);
+    for (const outcome of [NONE, act('weed pressure'), ok('a healthy lawn')]) {
+      expect(buildDraftText({ firstName: 'Dana', outcome })).not.toMatch(/report|link|https?:|shortly/i);
     }
   });
 
   test('every lawn label the teaser can publish fits two segments with a long first name, and carries no link', () => {
-    for (const label of CONDITION_LABEL_VALUES) {
-      const text = buildDraftText({ firstName: 'Bartholomew-Alexander', findingLabel: label });
-      expect(countSegments(text).segmentCount).toBeLessThanOrEqual(2);
-      expect(text).not.toMatch(/https?:|www\.|\.com/i);
+    for (const label of [...CONDITION_LABEL_VALUES, 'a healthy lawn']) {
+      for (const outcome of [act(label), ok(label)]) {
+        const text = buildDraftText({ firstName: 'Bartholomew-Alexander', outcome });
+        expect(countSegments(text).segmentCount).toBeLessThanOrEqual(2);
+        expect(text).not.toMatch(/https?:|www\.|\.com/i);
+      }
     }
   });
 
-  test('every pest teaser label fits two segments', () => {
+  test('every pest teaser label fits two segments in either outcome', () => {
     const { GROUP_GENERIC, CATEGORY_GENERIC } = require('../services/pest-identification')._test;
     for (const label of [...Object.values(GROUP_GENERIC), ...Object.values(CATEGORY_GENERIC)]) {
-      expect(countSegments(buildDraftText({ firstName: 'Dana', findingLabel: label })).segmentCount).toBeLessThanOrEqual(2);
+      for (const outcome of [act(label), ok(label)]) {
+        expect(countSegments(buildDraftText({ firstName: 'Bartholomew-Alexander', outcome })).segmentCount).toBeLessThanOrEqual(2);
+      }
     }
   });
 
   test('first name only, sanitized; dropped when it would push past two segments', () => {
-    expect(buildDraftText({ firstName: 'Dana Reed', findingLabel: null }))
-      .toBe('Thanks for the photo, Dana. Want us to come take a closer look and quote treatment?');
-    expect(buildDraftText({ firstName: '12345', findingLabel: null })).toMatch(/^Thanks for the photo\. /);
+    expect(buildDraftText({ firstName: 'Dana Reed', outcome: NONE })).toBe('Thanks for the photo, Dana. Want us to take a look?');
+    expect(buildDraftText({ firstName: '12345', outcome: NONE })).toMatch(/^Thanks for the photo\. /);
     // A non-GSM letter flips the whole text to UCS-2 (67 chars/segment), so
     // the name goes rather than the copy running to a third segment.
-    const long = buildDraftText({ firstName: 'Łukasz', findingLabel: 'large patch (fungal) activity' });
+    const long = buildDraftText({ firstName: 'Łukasz', outcome: act('large patch (fungal) activity') });
     expect(long.startsWith('Thanks for the photo. ')).toBe(true);
     expect(countSegments(long).segmentCount).toBeLessThanOrEqual(2);
   });
 
-  test('teaser labels come only from the allowlists, never the raw contract', () => {
-    const lawnRow = {
-      report_contract: JSON.stringify({ diagnosis: { findings: [{ name: 'Talstar-resistant chinch bugs RAW', confidence: 'low' }] } }),
-      overall_score: 30,
-      created_at: new Date(),
-    };
+  test('teaser outcomes come only from the allowlists, never the raw contract', () => {
+    const lawnRow = (findings, score) => ({
+      report_contract: JSON.stringify({ diagnosis: { findings } }), overall_score: score, created_at: new Date(),
+    });
     // A low-confidence cause downgrades to the generic label.
-    expect(teaserFindingLabel('lawn', lawnRow)).toBe('general lawn stress');
-    const pestRow = { report_contract: JSON.stringify({ identification: { slug: 'not-a-real-slug', category: 'insect' } }) };
-    expect(teaserFindingLabel('pest', pestRow)).toBe('an insect');
+    expect(teaserOutcome('lawn', lawnRow([{ name: 'Talstar-resistant chinch bugs RAW', confidence: 'low' }], 30)))
+      .toEqual({ kind: 'actionable', label: 'general lawn stress' });
+    // A clean finding, or no finding on a Healthy score, is harmless.
+    expect(teaserOutcome('lawn', lawnRow([{ name: 'Healthy, dense turf', confidence: 'high' }], 85)))
+      .toEqual({ kind: 'harmless', label: 'a healthy lawn' });
+    expect(teaserOutcome('lawn', lawnRow([], 85))).toEqual({ kind: 'harmless', label: 'a healthy lawn' });
+    expect(teaserOutcome('lawn', lawnRow([], 30))).toEqual({ kind: 'none' });
+
+    const pestRow = (identification) => ({ report_contract: JSON.stringify({ identification }) });
+    expect(teaserOutcome('pest', pestRow({ slug: 'not-a-real-slug', category: 'insect' })))
+      .toEqual({ kind: 'actionable', label: 'an insect' });
+    expect(teaserOutcome('pest', pestRow({ category: 'not_a_pest' })))
+      .toEqual({ kind: 'harmless', label: 'nothing to worry about' });
+    // A library entry flagged not_a_pest (beneficial species, lovebugs) is
+    // harmless even when the model called the category "insect".
+    expect(teaserOutcome('pest', pestRow({ slug: 'beneficial', category: 'insect', confidence: 'high' })))
+      .toMatchObject({ kind: 'harmless' });
+    expect(teaserOutcome('pest', pestRow({ slug: 'lovebug', category: 'insect', confidence: 'high' })))
+      .toMatchObject({ kind: 'harmless' });
   });
 });
+
 
 test('imageMedia caps at the pipeline photo limit', () => {
   const many = Array.from({ length: 8 }, (_, i) => ({ key: `sms-media/inbound/k${i}`, mimeType: 'image/png' }));
