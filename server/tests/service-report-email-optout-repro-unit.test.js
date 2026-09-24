@@ -153,10 +153,14 @@ describe('r2-completion-live-money-tail-1: report-v1 email honors portal email o
     expect(result.error).not.toBe('No service report recipient email');
   });
 
-  // A transient prefs-lookup FAILURE is a real gap, not a policy choice —
-  // it must keep the generic message (and therefore the "failed" closeout
-  // classification staff should see), not the opt-out "Suppressed:" text.
-  test('integration: an unreadable prefs row keeps the generic no-recipient reason', async () => {
+  // Codex round-3 P2 follow-up: a transient prefs-lookup FAILURE is neither
+  // a genuine opt-out NOR a "real gap" in the sense of a permanent missing
+  // recipient — it must NOT be reported as `skipped:true`. delivery-queue.js's
+  // markDeliverySkipped treats every skip as TERMINAL (no retry, ever), so a
+  // DB blip reported that way would strand the report forever even after
+  // the DB recovers. It must route through markDeliveryFailed instead
+  // (a non-skipped failure), which re-queues for the normal retry ladder.
+  test('integration: an unreadable prefs row is a non-skipped, transient failure (retries after the DB recovers)', async () => {
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') {
         return { where: () => ({ first: () => Promise.reject(new Error('db down')) }) };
@@ -171,6 +175,17 @@ describe('r2-completion-live-money-tail-1: report-v1 email honors portal email o
     });
     const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
     const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
-    expect(result.error).toBe('No service report recipient email');
+    expect(result).toMatchObject({ ok: false, transient: true, reason: 'prefs_unavailable' });
+    expect(result.skipped).not.toBe(true);
+  });
+
+  // A GENUINE missing recipient (real prefs row, just no usable contact) is
+  // still the permanent, staff-visible gap — unaffected by the transient
+  // carve-out above, so it must keep skipped:true and the generic message.
+  test('integration: a real prefs row with no usable recipient still skips terminally with the generic message', async () => {
+    installDb({ service_report_notify_primary: false, service_report_notify_billing: false });
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: false, skipped: true, error: 'No service report recipient email' });
   });
 });

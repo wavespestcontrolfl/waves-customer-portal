@@ -35,6 +35,7 @@ const express = require('express');
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const EmailTemplateLibrary = require('../services/email-template-library');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const router = require('../routes/admin-service-outlines');
 
 function chain(overrides = {}) {
@@ -62,7 +63,7 @@ function rowsChain(rows) {
 
 const SUPPRESSED = 'optedout@example.com';
 
-async function postSend() {
+async function postSend(sendMethod = 'email') {
   const app = express();
   app.use(express.json());
   app.use('/admin/service-outlines', router);
@@ -70,7 +71,7 @@ async function postSend() {
   const server = app.listen(0);
   try {
     const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/service-outlines/packet-1/send`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: 'email' }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: sendMethod }),
     });
     const body = await res.json();
     return { status: res.status, body };
@@ -105,7 +106,10 @@ function installDb({ suppressionRows = [], prefs = null } = {}) {
     }
     if (table === 'estimates') {
       return chain({
-        first: jest.fn().mockResolvedValue({ id: 'est-1', customer_id: 'cust-1', customer_email: SUPPRESSED, customer_name: 'Pat' }),
+        first: jest.fn().mockResolvedValue({
+          id: 'est-1', customer_id: 'cust-1', customer_email: SUPPRESSED, customer_name: 'Pat',
+          customer_phone: '+15555550123',
+        }),
       });
     }
     if (table === 'email_suppressions') return rowsChain(suppressionRows);
@@ -155,5 +159,23 @@ describe('lawn service-outline send honors suppressions and the portal opt-out',
     expect(body.packet.status).not.toBe('sent');
     expect(outlineEvents.some((e) => e.event_type === 'sent_email')).toBe(false);
     expect(outlineEvents.some((e) => e.event_type === 'email_blocked')).toBe(true);
+  });
+
+  // Codex round-3 P2: with method "both", the SMS leg used to dispatch
+  // BEFORE the email suppression/prefs preflight ran, so a transient DB
+  // error in that preflight surfaced as a bare 500 to the operator AFTER
+  // Twilio had already accepted the SMS — a retry (the operator's only
+  // recourse to a 500) sent the same SMS again. The preflight now runs
+  // before either channel dispatches.
+  test('method "both": an email-preflight (suppression lookup) failure sends NO SMS and no email', async () => {
+    installDb({});
+    jest.spyOn(EmailTemplateLibrary, 'activeSuppressionFor').mockRejectedValueOnce(new Error('connection terminated'));
+
+    const { status, body } = await postSend('both');
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(status).toBe(503);
+    expect(body.code).toBe('EMAIL_PREFLIGHT_UNAVAILABLE');
   });
 });

@@ -501,6 +501,37 @@ router.post('/:id/send', async (req, res, next) => {
     }
     const outcomes = {};
 
+    // Resolve the email suppression/portal-opt-out preflight BEFORE
+    // dispatching EITHER channel (Codex round-3 follow-up): this lookup
+    // used to run only after the SMS leg had already dispatched via
+    // sendCustomerMessage, so a transient DB error here surfaced as a bare
+    // 500 to the operator AFTER Twilio had already accepted the SMS — a
+    // retry (the operator's only recourse to a 500) sent the same SMS
+    // again. Running it first means a transient failure here is returned
+    // before anything is dispatched, so a retry cannot double-send.
+    let emailPreflight = null;
+    if (sendEmail) {
+      try {
+        const emailSuppression = estimate.customer_email
+          ? await EmailTemplateLibrary.activeSuppressionFor(
+            LAWN_SERVICE_OUTLINE_SUPPRESSION_TEMPLATE,
+            estimate.customer_email,
+            LAWN_SERVICE_OUTLINE_GROUP_KEY,
+          )
+          : null;
+        const emailPrefs = !emailSuppression && estimate.customer_id
+          ? await db('notification_prefs').where({ customer_id: estimate.customer_id }).first()
+          : null;
+        emailPreflight = { emailSuppression, emailOptedOut: emailPrefs?.email_enabled === false };
+      } catch (err) {
+        logger.warn(`[service-outlines] email preflight (suppression/prefs) failed for packet ${packet.id}: ${err.message}`);
+        return res.status(503).json({
+          error: 'Could not verify email suppression/preferences — nothing was sent. Try again.',
+          code: 'EMAIL_PREFLIGHT_UNAVAILABLE',
+        });
+      }
+    }
+
     if (sendSms) {
       if (!estimate.customer_phone) {
         outcomes.sms = { ok: false, error: 'No phone on estimate' };
@@ -542,18 +573,9 @@ router.post('/:id/send', async (req, res, next) => {
       // sendgrid.sendOne directly with neither check, so a do-not-email /
       // unsubscribed / bounced address, or a customer who turned off
       // "Email Messages" in the portal, still received the packet email
-      // (and the packet was stamped 'sent' regardless).
-      const emailSuppression = estimate.customer_email
-        ? await EmailTemplateLibrary.activeSuppressionFor(
-          LAWN_SERVICE_OUTLINE_SUPPRESSION_TEMPLATE,
-          estimate.customer_email,
-          LAWN_SERVICE_OUTLINE_GROUP_KEY,
-        )
-        : null;
-      const emailPrefs = !emailSuppression && estimate.customer_id
-        ? await db('notification_prefs').where({ customer_id: estimate.customer_id }).first()
-        : null;
-      const emailOptedOut = emailPrefs?.email_enabled === false;
+      // (and the packet was stamped 'sent' regardless). Resolved above,
+      // before either channel dispatched.
+      const { emailSuppression, emailOptedOut } = emailPreflight;
 
       if (!estimate.customer_email) {
         outcomes.email = { ok: false, error: 'No email on estimate' };
