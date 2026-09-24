@@ -262,7 +262,7 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
 // primary absorbs, mirroring the converter's multi-service 422).
 // Returns { eligible, invoiceTotal, reason }. Async because the eligible-path
 // invoiceTotal resolves the customer's effective commercial tax rate.
-async function prepayBookingEligibility(estimate = {}) {
+async function prepayBookingEligibility(estimate = {}, database = db) {
   const ineligible = (reason) => ({ eligible: false, invoiceTotal: null, reason });
   const baseAnnual = resolveAnnualPrepayAmount(estimate);
   if (!baseAnnual) return ineligible('no_recurring_annual');
@@ -279,6 +279,23 @@ async function prepayBookingEligibility(estimate = {}) {
   // at accept but the term's payment-time stamp still rewrites it to
   // 'annual_prepay', silently killing the other plan's dues for the term.
   if (estimateDataMembershipSnapshotIsExistingCustomer(estimate)) return ineligible('existing_customer');
+  // Same LIVE-row predicate markEstimateManuallyAccepted's guard checks
+  // (codex P2): an older estimate has no frozen membershipSnapshot at all,
+  // or the customer became a member AFTER the snapshot froze — either way
+  // the snapshot check above says nothing, this preflight said "eligible",
+  // and the schedule-modal one-step flow then BOOKED the appointment before
+  // the accept guard (which reads the live row) rejected it — leaving a
+  // booked-but-unlinked appointment behind. Read-only preflight, so a lookup
+  // failure here just falls through to the ordinary eligibility checks below
+  // rather than blocking the whole preview on a transient DB error.
+  if (estimate.customer_id) {
+    try {
+      const linkedCustomer = await database('customers').where({ id: estimate.customer_id }).first();
+      if (linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer)) return ineligible('existing_customer');
+    } catch (e) {
+      logger.warn(`[estimate-manual-acceptance] prepayBookingEligibility: live-customer membership lookup failed for estimate ${estimate.id}: ${e.message}`);
+    }
+  }
   // Mirror the accept transaction's own blockers (status window, expiry,
   // manager approval, commercial risk-type review): the schedule POST books
   // the visit BEFORE calling markEstimateManuallyAccepted, so anything the
@@ -452,6 +469,13 @@ async function markEstimateManuallyAccepted({
     {
       const freshLinkRow = await trx('estimates').where({ id: estimateId })
         .forUpdate().first('estimate_data', 'archived_at');
+      // Propagate the LOCKED re-read back onto `estimate` (codex P1): every
+      // check below this point — including the existing-member prepay guard
+      // — read `estimate.estimate_data` from the earlier UNLOCKED select, so
+      // a membershipSnapshot that flipped to isExistingCustomer between the
+      // two reads (e.g. a concurrent reprice/save) was invisible here even
+      // though the row is, from this line on, held FOR UPDATE.
+      if (freshLinkRow) estimate = { ...estimate, estimate_data: freshLinkRow.estimate_data };
       const manualAcceptData = (() => {
         const raw = freshLinkRow?.estimate_data;
         if (!raw) return null;

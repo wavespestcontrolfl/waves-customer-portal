@@ -131,10 +131,97 @@ function makeDb(estimate) {
   return { database, updates, inserts };
 }
 
+// A customer row that does NOT preserve monthly membership on its own (so
+// the live-customer half of the guard cannot be what catches the accept) —
+// isolates the FROZEN-SNAPSHOT half of the guard for the race test below.
+const nonPreservingCustomer = {
+  id: 'customer-monthly',
+  pipeline_stage: 'active_customer',
+  billing_mode: 'annual_prepay',
+  monthly_rate: 120,
+};
+
+// Simulates the two-read race the codex P1 flagged: markEstimateManuallyAccepted
+// reads the estimate row TWICE before the prepay guard — once unlocked (to
+// resolve customer_id / status / the comms lock) and once FOR UPDATE
+// (freshLinkRow, for the call-linkage checks). Only the locked read is
+// authoritative from that point on. `staleData` is what the unlocked reads
+// return; `freshData` is what a concurrent write landed by the time the row
+// is locked — exactly the shape the FOR UPDATE query in the source
+// (`.forUpdate().first('estimate_data', 'archived_at')` on 'estimates') is
+// used to distinguish, since it is the ONLY forUpdate() call on 'estimates'
+// in this function.
+function makeRacingDb(baseEstimate, staleData, freshData) {
+  const database = jest.fn((table) => {
+    let forUpdateCalled = false;
+    const builder = {
+      clause: null,
+      where(clause) { if (typeof clause !== 'function') this.clause = clause; return this; },
+      whereIn() { return this; },
+      whereNull(column) { this.nullColumns = [...(this.nullColumns || []), column]; return this; },
+      whereNotNull() { return this; },
+      whereRaw() { return this; },
+      orderBy() { return this; },
+      forUpdate() { forUpdateCalled = true; return this; },
+      first: async () => {
+        if (table === 'estimates') {
+          return { ...baseEstimate, estimate_data: forUpdateCalled ? freshData : staleData };
+        }
+        if (table === 'customers') return nonPreservingCustomer;
+        return null;
+      },
+      update(patch) {
+        const applied = { ...patch };
+        const updated = { ...baseEstimate, estimate_data: freshData, ...applied };
+        return { returning: async () => [updated] };
+      },
+      insert: async (row) => [row],
+    };
+    return builder;
+  });
+  database.fn = { now: () => 'NOW' };
+  database.raw = jest.fn((sql) => ({ rows: [], __raw: String(sql) }));
+  database.transaction = jest.fn(async (callback) => callback(database));
+  return database;
+}
+
 describe('r2-estimate-conversion-money-1: annual prepay of an add-on for an existing monthly member', () => {
   test('prepayBookingEligibility reports the shape INELIGIBLE (public accept refuses it)', async () => {
     const result = await prepayBookingEligibility(makeEstimate());
     expect(result.eligible).toBe(false);
+  });
+
+  test('prepayBookingEligibility falls back to the LIVE customer row when the estimate has no (or a stale) membershipSnapshot (codex P2)', async () => {
+    // An older estimate, or one built before computeMembershipContext ran /
+    // before the customer became a member: no membershipSnapshot at all.
+    // Without the live-row fallback this preflight would say eligible even
+    // though the accept guard (which reads the live customer row) rejects,
+    // letting the schedule-modal one-step flow book the appointment first.
+    const noSnapshotEstimate = makeEstimate();
+    delete noSnapshotEstimate.estimate_data.membershipSnapshot;
+    const customerLookupDb = jest.fn((table) => ({
+      where: () => ({ first: async () => (table === 'customers' ? existingMember : null) }),
+    }));
+    const result = await prepayBookingEligibility(noSnapshotEstimate, customerLookupDb);
+    expect(result).toMatchObject({ eligible: false, reason: 'existing_customer' });
+    expect(customerLookupDb).toHaveBeenCalledWith('customers');
+  });
+
+  test('prepayBookingEligibility stays eligible when the live row also does not preserve membership, and a lookup failure fails OPEN to the ordinary checks (not a hard error)', async () => {
+    const noSnapshotEstimate = makeEstimate();
+    delete noSnapshotEstimate.estimate_data.membershipSnapshot;
+    const freshCustomerDb = jest.fn(() => ({
+      where: () => ({ first: async () => ({ id: 'cust-brand-new', pipeline_stage: 'new_lead', monthly_rate: 0, billing_mode: null }) }),
+    }));
+    // Not an existing member on the live row either — normal eligibility
+    // checks proceed (this estimate lacks recurring rows in the shape those
+    // checks expect, so it lands on a different ineligible reason, not
+    // 'existing_customer').
+    const result = await prepayBookingEligibility(noSnapshotEstimate, freshCustomerDb);
+    expect(result.reason).not.toBe('existing_customer');
+
+    const throwingDb = jest.fn(() => { throw new Error('connection reset'); });
+    await expect(prepayBookingEligibility(noSnapshotEstimate, throwingDb)).resolves.toMatchObject({});
   });
 
   test('markEstimateManuallyAccepted(prepay_annual) is refused with 400 and never converts', async () => {
@@ -151,6 +238,39 @@ describe('r2-estimate-conversion-money-1: annual prepay of an add-on for an exis
 
     await expect(markEstimateManuallyAccepted({
       estimateId: estimate.id,
+      adminUserId: 'admin-1',
+      source: 'verbal_annual_prepay',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService,
+      estimateConverter,
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a membershipSnapshot that flips to isExistingCustomer between the unlocked read and the FOR UPDATE re-read is still caught (codex P1)', async () => {
+    const base = makeEstimate();
+    // The UNLOCKED reads (initial select + the comms-lock loop's re-read)
+    // see NO membership story yet — the snapshot had not been computed when
+    // this transaction started.
+    const staleData = { ...base.estimate_data, membershipSnapshot: undefined };
+    delete staleData.membershipSnapshot;
+    // A concurrent save lands between those unlocked reads and the FOR
+    // UPDATE re-read, freezing the snapshot the way computeMembershipContext
+    // would for this exact add-on.
+    const freshData = { ...base.estimate_data, membershipSnapshot: { isExistingCustomer: true, existingServiceKeys: ['pest_control'], tierLabel: 'Silver' } };
+    const database = makeRacingDb(base, staleData, freshData);
+    const estimateConverter = {
+      convertEstimate: jest.fn().mockResolvedValue({
+        customerId: existingMember.id,
+        billingTerm: 'prepay_annual',
+        draftInvoiceId: 'invoice-addon-prepay',
+      }),
+    };
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: base.id,
       adminUserId: 'admin-1',
       source: 'verbal_annual_prepay',
       billingTerm: 'prepay_annual',

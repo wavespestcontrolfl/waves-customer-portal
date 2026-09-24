@@ -216,4 +216,65 @@ postgres('r2-prepay-switch-and-term-lifecycle-1: estimate-origin switch prepay �
       setupObligations: 1,
     });
   });
+
+  test('codex P1: dispute-lost -> dispute-won (revival) -> staff-refund must not permanently drop the setup obligation', async () => {
+    f = await seed();
+    const Renewals = require('../services/annual-prepay-renewals');
+    const InvoiceService = require('../services/invoice');
+
+    // --- Cycle 1: pay P, then refund it (identical to the test above) —
+    // restoreSwitchSupersededInvoicesForPrepay re-mints the superseded
+    // accept invoice (INV-A') carrying the $99 setup line; no claim exists
+    // yet because the switch never wrote one and this is the FIRST payment.
+    const paidAt = new Date();
+    await mockPg('invoices').where({ id: f.prepayInvoiceId }).update({ status: 'paid', paid_at: paidAt, payment_recorded_at: paidAt, payment_method: 'cash' });
+    await Renewals.syncTermForInvoicePayment({ id: f.prepayInvoiceId, status: 'paid', paid_at: paidAt });
+    await mockPg('invoices').where({ id: f.prepayInvoiceId }).update({ status: 'refunded', paid_at: null });
+    await Renewals.syncTermForInvoicePayment({ id: f.prepayInvoiceId, status: 'refunded', paid_at: null });
+
+    const beforeRevival = await liveSetupLineInvoices(f.customerId);
+    expect(beforeRevival).toHaveLength(1); // INV-A' (the marker re-mint), live.
+    const restoredInvoiceId = beforeRevival[0].id;
+
+    // --- Cycle 2: the prepay is REVIVED (dispute won, or simply re-paid) —
+    // exactly the two calls annual-prepay-renewals.js's revival branches run,
+    // in the same order (retireRodentSetupObligationForRevivedPrepay THEN
+    // _retireSwitchRestoredInvoicesForRevivedPrepay), against the same
+    // connection the real sync uses (not a fresh transaction, so both see
+    // each other's writes exactly as production does).
+    await mockPg('invoices').where({ id: f.prepayInvoiceId }).update({ status: 'paid', paid_at: new Date(), payment_recorded_at: new Date() });
+    await InvoiceService.retireRodentSetupObligationForRevivedPrepay(mockPg, f.prepayInvoiceId);
+    await InvoiceService._retireSwitchRestoredInvoicesForRevivedPrepay(mockPg, f.prepayInvoiceId);
+
+    // The revival must have voided the now-duplicate restored invoice AND
+    // ledgered a claim on P — otherwise the setup obligation is now nowhere
+    // (this is exactly the P1: on current code neither happens together).
+    const restoredInvoiceAfterRevival = await mockPg('invoices').where({ id: restoredInvoiceId }).first('status');
+    expect(restoredInvoiceAfterRevival.status).toBe('void');
+    const claimOnPrepayAfterRevival = await mockPg('setup_fee_claims').where({ invoice_id: f.prepayInvoiceId }).first();
+    expect(claimOnPrepayAfterRevival).toMatchObject({ scheduled_service_id: f.rootId, amount: '99.00' });
+
+    // --- Cycle 3: staff refunds the revived prepay AGAIN. The marker path
+    // is now permanently spent (restoreSwitchSupersededInvoicesForPrepay's
+    // own `existing` guard refuses to re-mint a second restore for the same
+    // superseded invoice), so the claims path — now that cycle 2 ledgered a
+    // record — must be the one that brings the setup back.
+    await mockPg('invoices').where({ id: f.prepayInvoiceId }).update({ status: 'refunded', paid_at: null });
+    await InvoiceService.restoreSwitchSupersededInvoicesForPrepay(f.prepayInvoiceId, mockPg);
+    await InvoiceService.restoreRetiredSetupFeeClaimForPrepay(f.prepayInvoiceId, mockPg, {
+      sourceEstimateId: f.estimateId, customerId: f.customerId, coverageServiceType: 'Rodent Bait Stations',
+    });
+
+    const liveInvoicesAfterSecondRefund = await liveSetupLineInvoices(f.customerId);
+    const rootAfterSecondRefund = await mockPg('scheduled_services').where({ id: f.rootId }).first('pending_setup_fee');
+    const stampAfterSecondRefund = rootAfterSecondRefund.pending_setup_fee != null ? Number(rootAfterSecondRefund.pending_setup_fee) : null;
+    const obligationsAfterSecondRefund = liveInvoicesAfterSecondRefund.length + (stampAfterSecondRefund > 0 ? 1 : 0);
+
+    // Exactly ONE collectible setup after the second refund — restored this
+    // time via the claims-ledger stamp on the root, since the marker re-mint
+    // can never fire again for this superseded invoice. Zero would be the
+    // P1 bug (obligation silently dropped); two would be the double-bill.
+    expect(obligationsAfterSecondRefund).toBe(1);
+    expect(stampAfterSecondRefund).toBe(99);
+  });
 });
