@@ -79,6 +79,33 @@ describe("PendingDraftsTab", () => {
     expect(adminFetch).toHaveBeenCalledWith("/admin/drafts?status=pending");
   });
 
+  it.each([false, true])("unlocks drafts when a refresh supersedes Retry (failure=%s)", async (fails) => {
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+    adminFetch.mockRejectedValueOnce(new Error("Temporary failure"));
+    await act(async () => refresh.callback());
+    const retry = screen.getByRole("button", { name: "Retry" });
+    let finishRetry;
+    let finishRefresh;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { finishRetry = resolve; }));
+    adminFetch.mockReturnValueOnce(new Promise((resolve, reject) => {
+      finishRefresh = () => fails ? reject(new Error("Refresh failed")) : resolve(DRAFTS);
+    }));
+    let refreshPromise;
+    act(() => {
+      retry.click();
+      refreshPromise = refresh.callback();
+    });
+    await act(async () => finishRetry({ drafts: [], pendingCount: 0 }));
+    expect(screen.getAllByText("Reject")[0]).toBeDisabled();
+    await act(async () => { finishRefresh(); await refreshPromise; });
+    expect(screen.getByText("Pat Customer")).toBeInTheDocument();
+    expect(screen.getAllByText("Reject")[0]).not.toBeDisabled();
+    if (fails) expect(screen.getByRole("button", { name: "Retry" })).not.toBeDisabled();
+    await act(async () => refresh.callback());
+    expect(adminFetch).toHaveBeenCalledTimes(5);
+  });
+
   it("locks every card while one mutation is in flight", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<PendingDraftsTab embedded />);

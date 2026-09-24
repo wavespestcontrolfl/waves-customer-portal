@@ -25,3 +25,33 @@ it("finishes the initial read even if Add Assessment opens while it is pending",
   await act(async () => window.dispatchEvent(new Event("focus")));
   expect(adminFetch).toHaveBeenCalledTimes(2);
 });
+
+// Keep Retry and focus in one React batch to exercise the window before
+// loading=true removes the automatic-refresh listener.
+it.each([false, true])("clears Retry loading when a focus refresh wins (failure=%s)", async (fails) => {
+  adminFetch.mockImplementation((path) => Promise.resolve(path.includes("/funnel")
+    ? { ok: true, json: async () => ({ lawn: {}, pest: {} }) }
+    : { ok: false, status: 503 }));
+  render(<MemoryRouter><PhotoAssessmentsPage /></MemoryRouter>);
+  const retry = await screen.findByRole("button", { name: "Retry" });
+  const pending = [];
+  adminFetch.mockImplementation((path) => path.includes("/funnel")
+    ? Promise.resolve({ ok: true, json: async () => ({ lawn: {}, pest: {} }) })
+    : new Promise((resolve) => pending.push(resolve)));
+  act(() => {
+    retry.click();
+    window.dispatchEvent(new Event("focus"));
+  });
+  expect(pending).toHaveLength(2);
+  await act(async () => pending[0]({ ok: true, json: async () => ({ assessments: [] }) }));
+  expect(screen.getByText("Loading…")).toBeInTheDocument();
+  await act(async () => pending[1](fails
+    ? { ok: false, status: 502 }
+    : { ok: true, json: async () => ({ assessments: [] }) }));
+  expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+  if (fails) expect(screen.getByText(/List failed \(502\)/)).toBeInTheDocument();
+  else expect(screen.getByText(/No assessments yet/)).toBeInTheDocument();
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(pending).toHaveLength(3);
+  await act(async () => pending[2]({ ok: true, json: async () => ({ assessments: [] }) }));
+});

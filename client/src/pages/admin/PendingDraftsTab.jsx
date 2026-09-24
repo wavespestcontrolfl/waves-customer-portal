@@ -310,7 +310,8 @@ export default function PendingDraftsTab({ embedded = false }) {
         setError(err.message || "Failed to load drafts");
       }
     } finally {
-      if (!background && seq === loadSeq.current) setLoading(false);
+      // The winning read also finishes any foreground load it superseded.
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, []);
 

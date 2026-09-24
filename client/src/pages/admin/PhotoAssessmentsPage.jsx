@@ -278,7 +278,8 @@ export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav 
     } catch (err) {
       if (seq === loadSeq.current) setLoadError(err.message);
     } finally {
-      if (!background && seq === loadSeq.current) setLoading(false);
+      // The winning read also finishes any foreground load it superseded.
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [typeTab, status]);
 
