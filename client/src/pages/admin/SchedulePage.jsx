@@ -2426,6 +2426,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         : `$${Number(d.amount).toFixed(2)}`
     }`;
   };
+  // GitHub Codex round 15 P2 (#4657, :5003): the stored appointment
+  // discount's own "(current)" option — read off the raw stamp
+  // ({discountType, discountAmount} on `service`), never a catalog preset
+  // row, so presetOptionLabel's own shape doesn't fit — same three type
+  // rules (free_service reads "Free", a percentage OR variable_percentage
+  // reads "N%", everything else is a dollar amount) applied to the stamp
+  // directly.
+  const formatStoredDiscountAmount = (discountType, amount) => {
+    if (discountType === "free_service") return "Free";
+    if (discountType === "percentage" || discountType === "variable_percentage") {
+      return `${Number(amount)}%`;
+    }
+    return `$${Number(amount).toFixed(2)}`;
+  };
   // A line-slot pick: the catalog preset, or (for a variable preset) the
   // operator's own amount — the same inline prompt Create/Invoices use.
   // Returns undefined on a cancelled/invalid prompt (caller must not act).
@@ -2532,6 +2546,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const storedAppointmentDiscountRow = storedAppointmentDiscount
     ? { ...(linePresetById(storedAppointmentDiscount.id) || {}), spansAll: true }
     : null;
+  // GitHub Codex round 15 P2 (#4657, :2567/:2585): the PRIMARY line's own
+  // stored catalog discount (service.lineDiscountId, read-only in this
+  // modal — see :3620's note) is a stack-group participant exactly like an
+  // add-on's chosen row, but chosenLineDiscountRows below only walks
+  // serviceLines (add-ons) — the primary line's discount was invisible to
+  // both pickers' conflict check, so the UI could still offer a same-group
+  // preset on an add-on line or at appointment level that the server then
+  // refused with a stack-group error. `scope: 'primary'` marks it
+  // distinctly from every add-on's own `line-N` scope and from the
+  // appointment slot's own (unscoped, spansAll) query. Unresolvable (no
+  // catalog id, or the presets haven't loaded yet) is null — no group to
+  // conflict on, the same posture storedAppointmentDiscountRow's own
+  // comment above documents.
+  const storedPrimaryLineDiscountRow = service.lineDiscountId
+    ? { ...(linePresetById(service.lineDiscountId) || {}), scope: "primary" }
+    : null;
   // Every OTHER line's chosen discount row, in the shape stackablePresets
   // reads (stack_group/is_stackable/scope) — one WaveGuard tier per visit:
   // a tier already on another line is hidden here, though the same tier may
@@ -2565,6 +2595,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       lineDiscountPresets.filter((d) => presetReachesLine(d, line)),
       [
         ...chosenLineDiscountRows(ownKey),
+        storedPrimaryLineDiscountRow,
         // The appointment-level pick spans every line it reaches — never
         // offer the same non-stackable tier again on a line it already
         // compounds with. Either the operator's OWN pick this session, or
@@ -2583,7 +2614,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // see a valid-looking (but wrong) compounded total, and only learn of the
   // conflict from the server's 400 on Save.
   const appointmentPresetOptions = stackingEnabled
-    ? stackablePresets(discountPresets, chosenLineDiscountRows(null), { spansAll: true })
+    ? stackablePresets(
+        discountPresets,
+        [...chosenLineDiscountRows(null), storedPrimaryLineDiscountRow].filter(Boolean),
+        { spansAll: true },
+      )
     : discountPresets;
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -2731,8 +2766,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // server, and the Discount control always opens empty (it never seeds the
   // stored discount), so a non-empty selection is always a change made in
   // this session — without this the operator could never apply a discount
-  // change to following visits.
-  const discountDirty = discountType !== "";
+  // change to following visits. GitHub Codex round 15 P2 (#4657, :2735):
+  // choosing None on a stored appointment discount posts a removal
+  // (discountType/discountAmount/discountId all null) without ever setting
+  // discountType — storedDiscountCleared is the only signal that removal
+  // happened, so it must count as dirty too, or the scope control never
+  // offers applying that removal to following visits.
+  const discountDirty = discountType !== "" || storedDiscountCleared;
   // Base-series rows only: boosters share recurring_parent_id but carry
   // is_recurring=false and their OWN pricing — a booster edit must stay
   // per-visit, never rewrite the base series (the server refuses a posted
@@ -3239,6 +3279,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           priceServiceScope: priceServiceScopeActive
             ? priceServiceScope
             : undefined,
+          // GitHub Codex round 15 P1 (#4657, :3019): a confirmed preview's
+          // own total, sent back as a witness the server compares against
+          // what it's about to persist — refuses (409 VISIT_CHANGED_RETRY,
+          // reason PREVIEW_TOTAL_DRIFT) rather than silently saving a
+          // different figure than the one just confirmed on screen.
+          // appointmentTotal is null until a preview has actually resolved
+          // for these exact inputs (moneyPreviewFresh); omit the key
+          // entirely rather than post null — undefined is this route's
+          // "don't check" contract, and a notes-only save whose money can
+          // never change (saveTouchesMoney false) may never even get a
+          // resolved preview total to send.
+          expectedTotal:
+            typeof appointmentTotal === "number" ? appointmentTotal : undefined,
         }),
       });
       if (notifyOnMove && result?.notificationSent === false) {
@@ -5003,9 +5056,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     {serviceHasStoredAppointmentDiscount && (
                       <option value={STORED_APPOINTMENT_DISCOUNT_OPTION}>
                         {storedAppointmentDiscountRow?.name || "Custom Discount"} (current) -{" "}
-                        {service.discountType === "percentage"
-                          ? `${Number(service.discountAmount)}%`
-                          : `$${Number(service.discountAmount).toFixed(2)}`}
+                        {formatStoredDiscountAmount(service.discountType, service.discountAmount)}
                       </option>
                     )}
                     {appointmentPresetOptions.map((d) => (

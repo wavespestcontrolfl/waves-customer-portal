@@ -1201,6 +1201,15 @@ postgres('round 4 on #4657 — preview must equal what the PUT persists, verbati
     expect(Number(savedRow.primary_line_price)).toBe(0);
     expect(savedRow.line_discount_dollars).toBeNull();
     expect(savedRow.line_discount_name).toBeNull();
+    // GitHub Codex round 15 P1 (#4657, :10871): clearing only
+    // dollars/name left line_discount_id/_type/_amount persisted, so
+    // the hidden primary discount still read as ACTIVE to the
+    // stack-group conflict check and a later canonical restack could
+    // reapply it from the surviving id/type/amount. A free callback
+    // must clear all five line_discount_* columns.
+    expect(savedRow.line_discount_id).toBeNull();
+    expect(savedRow.line_discount_type).toBeNull();
+    expect(savedRow.line_discount_amount).toBeNull();
   });
 });
 

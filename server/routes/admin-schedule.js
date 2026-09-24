@@ -1511,6 +1511,20 @@ function addonRowIdsDrifted(expectedIds, freshIds) {
   return false;
 }
 
+// GitHub Codex round 15 P1 (#4657, :3019): the client gates Save on a
+// server preview (POST /:id/update-details/preview returns
+// `total: updates.estimated_price ?? null`), but the PUT never received
+// that confirmed total back — if catalog amounts/caps/eligibility changed
+// between preview and save, the PUT could silently persist a different
+// total than the one the operator actually confirmed. No witness (no
+// expectedTotal posted) never drifts — only a save that opted into the
+// witness is held to it.
+function previewTotalDrifted(expectedTotal, plannedEstimatedPrice) {
+  if (expectedTotal === undefined || expectedTotal === null) return false;
+  if (plannedEstimatedPrice === undefined) return true;
+  return Math.abs(Number(plannedEstimatedPrice) - Number(expectedTotal)) >= 0.005;
+}
+
 function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
   const existingType = existing?.discount_type || null;
   const existingAmount = existing?.discount_amount == null || existing.discount_amount === ''
@@ -10869,6 +10883,19 @@ async function computeUpdateDetailsFinancialPlan({
       // in when these keys are left undefined).
       if (zeroCols.line_discount_dollars) updates.line_discount_dollars = null;
       if (zeroCols.line_discount_name) updates.line_discount_name = null;
+      // GitHub Codex round 15 P1 (#4657, :10871): clearing only the
+      // dollars/name left line_discount_id/_type/_amount persisted, so
+      // the hidden primary discount still reads as ACTIVE — the
+      // stack-group conflict check ("the PRIMARY line's own stored
+      // slot", ~:10460) reads existing.line_discount_id and can reject a
+      // fresh same-group add-on discount, and a later multi-line
+      // reprice's canonical restack can reapply it from the surviving
+      // id/type/amount. Null all five columns together, matching what
+      // the single-service price-rebase branch (~:9903-9907) already
+      // does.
+      if (zeroCols.line_discount_id) updates.line_discount_id = null;
+      if (zeroCols.line_discount_type) updates.line_discount_type = null;
+      if (zeroCols.line_discount_amount) updates.line_discount_amount = null;
     } catch { /* non-blocking */ }
     if (Array.isArray(replaceAddons)) {
       replaceAddons = replaceAddons.map((line) => ({
@@ -10954,8 +10981,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       payerId, poNumber, selfPayOverride,
       notifyCustomer,
       discountId,
+      // GitHub Codex round 15 P1 (#4657, :11355): the confirmed total the
+      // operator saw on the server preview (POST .../update-details/preview
+      // — see previewTotalDrifted below), witnessed back so the save can
+      // refuse when catalog amounts/caps/eligibility changed underneath it
+      // between preview and save.
+      expectedTotal,
     } = req.body;
     let { discountType, discountAmount } = req.body;
+    if (expectedTotal !== undefined && expectedTotal !== null && !Number.isFinite(Number(expectedTotal))) {
+      throw httpError(422, 'expectedTotal must be a number');
+    }
     const updates = {};
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
@@ -11382,6 +11418,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         throw Object.assign(
           httpError(422, 'This visit’s original price isn’t on file, so its discount can’t be edited here. Set the primary price explicitly, or contact support to reprice this visit.'),
           { code: 'LEGACY_PRIMARY_GROSS_UNKNOWN' },
+        );
+      }
+      // GitHub Codex round 15 P1 (#4657, :11355): one check, right after
+      // the plan this save will actually persist is available — never
+      // repeated for the collective/series path's own re-run of the
+      // planner further down, since that would just re-check the same
+      // witness against a plan for a DIFFERENT visit.
+      if (previewTotalDrifted(expectedTotal, updates.estimated_price)) {
+        throw Object.assign(
+          new Error('The total changed while saving — review the new total and save again.'),
+          { statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'PREVIEW_TOTAL_DRIFT' },
         );
       }
     }
@@ -21483,6 +21530,7 @@ function blackoutDateString(value) {
 
 router._test = {
   addonRowIdsDrifted,
+  previewTotalDrifted,
   scheduledServicesDiscountProvenanceColumns,
   resetDiscountProvenanceColumnCache,
   weeklyBlackoutRefreshDates,

@@ -51,7 +51,12 @@ beforeAll((done) => {
   const app = express();
   app.use(express.json());
   app.use('/api/admin/schedule', adminScheduleRouter);
-  app.use((err, _req, res, _next) => res.status(err.statusCode || 500).json({ error: err.message }));
+  // Mirrors middleware/errors.js's own isOperational handling (code included)
+  // closely enough for route-level `code` assertions on an error the route's
+  // own inline catch does not itself enrich (i.e. one thrown with only
+  // `statusCode`/`isOperational`, never `.status` — the pattern every
+  // VISIT_CHANGED_RETRY throw in this route already uses).
+  app.use((err, _req, res, _next) => res.status(err.statusCode || 500).json({ error: err.message, ...(err.code ? { code: err.code } : {}) }));
   server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; done(); });
 });
 afterAll((done) => { server.close(done); });
@@ -487,4 +492,56 @@ test('an address change combined with a cadence rewrite is refused under lock be
   expect(block).toContain("throw httpError(422, 'Change the address and the recurrence in separate saves.')");
   // No scheduled_services write may precede the refusal inside the trx.
   expect(handler.slice(trxStart, refuse)).not.toMatch(/\.(update|insert|del|delete)\(/);
+});
+
+describe('expectedTotal witness — GitHub Codex round 15 P1 (#4657, :11355)', () => {
+  test('a non-numeric expectedTotal is refused 422 before any DB work', async () => {
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status, body } = await put({ notes: 'x', expectedTotal: 'lots' });
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/expectedTotal must be a number/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('null expectedTotal is treated as "no witness" — never refused', async () => {
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status } = await put({ scheduledDate: '2099-02-01', expectedTotal: null });
+    expect(status).toBe(418);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('a witnessed save that never plans a price (a schedule-only edit) refuses 409 VISIT_CHANGED_RETRY / PREVIEW_TOTAL_DRIFT before opening the transaction', async () => {
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status, body } = await put({ scheduledDate: '2099-02-01', expectedTotal: 199.99 });
+    expect(status).toBe(409);
+    expect(body.code).toBe('VISIT_CHANGED_RETRY');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a stale expectedTotal against a genuine price edit refuses 409, even off by a cent', async () => {
+    db.mockImplementation(() => {
+      const c = chain({ ...STORED, estimated_price: 100 });
+      c.columnInfo = jest.fn().mockResolvedValue({ estimated_price: {} });
+      return c;
+    });
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    // This save plans estimated_price = 150 (a genuine $100 → $150 edit);
+    // the operator's confirmed witness is stale by a single cent.
+    const { status, body } = await put({ estimatedPrice: 150, expectedTotal: 150.01 });
+    expect(status).toBe(409);
+    expect(body.code).toBe('VISIT_CHANGED_RETRY');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a matching expectedTotal against a genuine price edit proceeds to the transaction', async () => {
+    db.mockImplementation(() => {
+      const c = chain({ ...STORED, estimated_price: 100 });
+      c.columnInfo = jest.fn().mockResolvedValue({ estimated_price: {} });
+      return c;
+    });
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status } = await put({ estimatedPrice: 150, expectedTotal: 150 });
+    expect(status).toBe(418);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
 });

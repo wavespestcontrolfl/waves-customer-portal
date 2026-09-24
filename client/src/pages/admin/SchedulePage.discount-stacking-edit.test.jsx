@@ -1812,3 +1812,109 @@ it('round 14 P2 (:2494): returning to the "(current)" option after None posts un
   const body = JSON.parse(writes()[0][1].body);
   expect(body.discountType).toBeUndefined();
 });
+
+// ---------------------------------------------------------------------
+// GitHub Codex round 15 on PR #4657: 4 P2/P1 against 19892edc23.
+// ---------------------------------------------------------------------
+
+function mockFetchWithSeriesSummary(opts, seriesSummary) {
+  const base = mockFetch(opts);
+  return vi.fn(async (url, options) => {
+    if (url.endsWith('/series-summary')) {
+      return { ok: true, json: async () => seriesSummary };
+    }
+    return base(url, options);
+  });
+}
+
+it('round 15 P2 (:2735): choosing None on a stored appointment discount on a series row activates "Apply price & service change to"', async () => {
+  const service = {
+    ...baseService,
+    isRecurring: true,
+    recurringParentId: 'series-1',
+    discountType: 'percentage', discountAmount: 10, discountId: 'disc-military', discountMaxDollars: null,
+  };
+  vi.stubGlobal('fetch', mockFetchWithSeriesSummary(
+    { stackingEnabled: true, service },
+    { series: true, canScopePriceService: true, upcomingCount: 3, ongoing: true },
+  ));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  // Nothing dirty yet — the scope control is not offered.
+  expect(screen.queryByText('Apply price & service change to')).not.toBeInTheDocument();
+  // Choose None on the stored discount — discountType stays "" the whole
+  // time (only storedDiscountCleared flips), so without the fix
+  // discountDirty never sees this as a change and the control never
+  // renders, silently preventing the removal from ever reaching later
+  // visits in the series.
+  fireEvent.change(apptDiscountSelect(), { target: { value: '' } });
+  await waitFor(() => expect(screen.getByText('Apply price & service change to')).toBeInTheDocument());
+});
+
+it('round 15 P2 (:2567/:2585): a primary-line catalog discount from a non-stackable group hides the OTHER preset of that group on an add-on picker and the appointment select, but still offers a stackable one', async () => {
+  const service = {
+    ...baseService,
+    serviceAddons: [
+      // No discount of its own — the picker renders in "None" state.
+      { id: 'addon-2', serviceId: 'svc-fert', serviceName: 'Quarterly Fertilization', serviceKey: 'lawn_fert', serviceCategory: 'lawn', basePrice: 40, estimatedPrice: 40, estimatedDuration: 20 },
+    ],
+    lineDiscountType: 'percentage', lineDiscountAmount: 10, lineDiscountId: 'disc-silver',
+  };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  const fertPicker = screen.getByRole('combobox', { name: 'Line discount for Quarterly Fertilization' });
+  const fertOptionNames = [...fertPicker.options].map((o) => o.textContent);
+  // GOLD shares Silver's 'waveguard' stack_group — hidden. Military has no
+  // group at all — still offered.
+  expect(fertOptionNames.some((t) => t.includes('WaveGuard Gold'))).toBe(false);
+  expect(fertOptionNames.some((t) => t.includes('Military Discount'))).toBe(true);
+  const apptOptionNames = [...apptDiscountSelect().options].map((o) => o.textContent);
+  expect(apptOptionNames.some((t) => t.includes('WaveGuard Gold'))).toBe(false);
+  expect(apptOptionNames.some((t) => t.includes('Military Discount'))).toBe(true);
+});
+
+it('round 15 P2 (:5003): the stored appointment discount\'s "(current)" option formats free_service and variable_percentage correctly', async () => {
+  const freeService = { ...baseService, serviceAddons: [], discountType: 'free_service', discountAmount: 0 };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: freeService }));
+  const { unmount } = render(<Harness service={freeService} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  let select = apptDiscountSelect();
+  expect(select.options[select.selectedIndex].textContent).toMatch(/\(current\) - Free$/);
+  unmount();
+  cleanup();
+
+  const variablePct = { ...baseService, serviceAddons: [], discountType: 'variable_percentage', discountAmount: 15 };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service: variablePct }));
+  render(<Harness service={variablePct} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitForMoneyReady();
+  select = apptDiscountSelect();
+  expect(select.options[select.selectedIndex].textContent).toMatch(/\(current\) - 15%$/);
+});
+
+it('round 15 P1 (:3133/:3019): a save after a confirmed preview sends expectedTotal, the confirmed total', async () => {
+  const service = { ...baseService, serviceAddons: [], primaryLinePrice: 123.45, estimatedPrice: 123.45 };
+  vi.stubGlobal('fetch', mockFetch({ stackingEnabled: true, service }));
+  render(<Harness service={service} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(totalText()).toBe('$123.45'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  expect(body.expectedTotal).toBe(123.45);
+});
+
+it('round 15 P1 (:3133/:3019): a save with no resolved preview total (r14 saveTouchesMoney path, preview down on an undiscounted visit) omits expectedTotal', async () => {
+  vi.stubGlobal('fetch', previewDownFetch(undiscountedVisit));
+  render(<Harness service={undiscountedVisit} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  const body = JSON.parse(writes()[0][1].body);
+  expect(body).not.toHaveProperty('expectedTotal');
+});
