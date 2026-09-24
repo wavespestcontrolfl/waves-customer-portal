@@ -40,6 +40,7 @@ const SOURCE_FILES = Object.freeze([
   'server/services/messaging/send-manual-customer-sms.js',
   'server/services/messaging/review-ask-reservation.js',
   'server/routes/admin-drafts.js',
+  'server/routes/tech-line.js',
   'server/services/intelligence-bar/comms-tools.js',
   'server/services/sms-intent.js',
   'server/services/context-aggregator.js',
