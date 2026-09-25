@@ -249,9 +249,10 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject, onRevisionState
           <ActionButton tone="primary" disabled={busy} onClick={() => onApprove(draft)}>
             Approve &amp; send
           </ActionButton>
-          {/* Photo-triage drafts are approve-as-written or reject — the
-              server refuses a revision (PHOTO_TRIAGE_NOT_REVISABLE). */}
-          {draft.intent !== "photo_triage" && (
+          {/* Gauge-written photo-triage drafts (flags.gauge_version) are
+              approve-as-written or reject — the server refuses a revision
+              (PHOTO_TRIAGE_NOT_REVISABLE). Older ones stay revisable. */}
+          {!(draft.intent === "photo_triage" && draft.flags?.gauge_version) && (
             <ActionButton disabled={busy} onClick={() => {
               onRevisionStateChange(draft.id, true);
               setRevising(true);
