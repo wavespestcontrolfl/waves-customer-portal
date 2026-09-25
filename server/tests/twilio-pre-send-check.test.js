@@ -177,6 +177,43 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     } finally { jest.useRealTimers(); require('../models/db').mockReset(); }
   });
 
+  test.each([
+    ['stamps human_authored on the sms_log row for a composer-typed body', { humanAuthored: true }, true],
+    ['leaves human_authored off for an automated or unchanged-draft manual send', { humanAuthored: false }, false],
+    ['leaves human_authored off when the option is absent', {}, false],
+  ])('%s', async (_label, extra, expected) => {
+    const rows = [];
+    require('../models/db').mockImplementation(() => ({ insert: async row => { rows.push(row); } }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Yes, the app is the easiest way to move it.', {
+        messageType: 'manual', fromNumber: FROM, ...extra,
+      });
+      expect(result.success).toBe(true);
+      expect(rows).toHaveLength(1);
+      const metadata = JSON.parse(rows[0].metadata);
+      expect(metadata.pre_handoff_stamp).toBe(true);
+      expect(metadata.human_authored === true).toBe(expected);
+      expect(Object.prototype.hasOwnProperty.call(metadata, 'human_authored')).toBe(expected);
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  test.each([
+    ['a typed send with no media option (scheduled dispatch) records zero media', { humanAuthored: true }, []],
+    ['a typed send with media urls but no media option stays unknown', { humanAuthored: true, mediaUrls: ['https://example.invalid/a.jpg'] }, undefined],
+    ['an automated send records no media evidence', { humanAuthored: false }, undefined],
+    ['a caller-supplied media array is kept as is', { humanAuthored: true, media: [] }, []],
+  ])('%s', async (_label, extra, expected) => {
+    const rows = [];
+    require('../models/db').mockImplementation(() => ({ insert: async row => { rows.push(row); } }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Yes, the app is the easiest way to move it.', {
+        messageType: 'manual', fromNumber: FROM, ...extra,
+      });
+      expect(result.success).toBe(true);
+      expect(JSON.parse(rows[0].metadata).media).toEqual(expected);
+    } finally { require('../models/db').mockReset(); }
+  });
+
   test('a direct customer caller publishes before its handoff and settles the normalized accepted provider context afterward', async () => {
     const coordination = require('../services/messaging/provider-handoff-reservation');
     const handle = { direct: true };
