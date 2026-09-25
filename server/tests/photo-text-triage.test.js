@@ -363,7 +363,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
       // CUSTOMER carries no pipeline_stage / property facts in this fixture,
       // so the opportunity gauge lands on advise (lead + no facts to quote).
       opportunity_mode: 'advise',
-      opportunity_reasons: ['lead', 'actionable', 'no_offer'],
+      opportunity_reasons: ['lead', 'actionable', 'lead_not_priced'],
       quote: null,
     });
     expect(draft.draft_response).toBe(

@@ -1063,15 +1063,21 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
       requireSharedLocality: true,
     };
     const ownedKeys = await loadOwnedRecurringServiceKeys(database, customerId, { streetScope });
-    if (!ownedKeys.length) return null;
 
     // Plan-rate ledger evidence: suppress/demote only, never advance —
-    // identical role to the report path.
+    // identical role to the report path. Loaded BEFORE the empty-ownership
+    // return so a requested family with a live plan rate but no seeded
+    // visit row still fails closed instead of reading as "nothing owned,
+    // go ahead and ask for a quote" (codex #4810 r5).
     const { loadComponents } = require('../plan-rate-ledger');
     const planRateFamilies = (await loadComponents(database, customerId))
       .filter((row) => Number(row.monthly_rate) > 0)
       .map((row) => String(row.family_key || ''))
       .filter((key) => key && key !== 'unattributed');
+    if (requestedTargetKey && offerVocabulary(planRateFamilies).has(requestedTargetKey)) {
+      return unavailableBasis(requestedTargetKey, customer, ownedKeys, primaryStreet);
+    }
+    if (!ownedKeys.length) return null;
 
     // A requested family the customer already owns is never re-priced —
     // same never-re-price rule the ladder enforces by construction. Says so

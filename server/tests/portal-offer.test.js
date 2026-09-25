@@ -202,6 +202,15 @@ describe('buildOfferForFamily', () => {
     expect(await buildPortalOffer('cust-1', ladderDb, { propertyLookup: missLookup })).toBeNull();
   });
 
+  test('a live plan-rate on the requested family with NO seeded visit row still fails closed (codex #4810 r5)', async () => {
+    const db = dbFor({ serviceTypes: [], planRates: [{ family_key: 'lawn_care', monthly_rate: 55 }] });
+    expect(await buildOfferForFamily('cust-1', db, 'lawn_care', { propertyLookup: missLookup })).toMatchObject({ serviceKey: 'lawn_care', mode: 'unavailable', option: null });
+    // Other families on an owns-nothing account are still simply not offered.
+    expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toBeNull();
+    // The ladder path is unchanged: owns nothing → null.
+    expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+  });
+
   test('an ownership lookup failure fails closed → mode unavailable, never null', async () => {
     const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
     const broken = Object.assign((table) => {

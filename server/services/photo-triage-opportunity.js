@@ -220,8 +220,11 @@ const PALM_RE = /\bpalms?\b/i;
 // and only a PRICED offer becomes a quote. Returns { quote } on success or
 // { reason } naming why not:
 //   'no_customer_record'  — a lead with no customer row has nothing to
-//                           price against (and leads never get engine
-//                           quotes anyway)
+//                           price against
+//   'lead_not_priced'     — a customer row still in a lead stage (or
+//                           inactive): leads never get engine quotes, so
+//                           the offer core is not even asked (codex #4810
+//                           r5) — the manual-quote ask is the reply
 //   'palm_assessment_first' — a palm photo: never the T&S program offer
 //   'already_owned'       — the family is on the customer's plan (never
 //                           re-priced; the draft carries no quote CTA)
@@ -238,11 +241,12 @@ const PALM_RE = /\bpalms?\b/i;
 // the offer core derived it (owner-only metadata — the draft text carries
 // no price; rounding it here would hand the owner a wrong figure, codex
 // #4810 r4).
-async function priceForCustomer(type, customer, body) {
+async function priceForCustomer(type, customer, body, { lead = false } = {}) {
   const serviceKey = SERVICE_KEY[type];
   if (!serviceKey) return { reason: 'no_offer' };
   if (type === 'tree_shrub' && PALM_RE.test(body || '')) return { reason: 'palm_assessment_first' };
   if (!customer?.id) return { reason: 'no_customer_record' };
+  if (lead) return { reason: 'lead_not_priced' };
   const offer = await buildOfferForFamily(customer.id, db, serviceKey);
   if (!offer || offer.serviceKey !== serviceKey) return { reason: 'no_offer' };
   // The family is already on the customer's plan: the draft must not pitch
@@ -315,7 +319,7 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
   // priced offer to quote mode; a watch-level finding keeps advice.
   let priced;
   try {
-    priced = await priceForCustomer(type, customer, text);
+    priced = await priceForCustomer(type, customer, text, { lead });
   } catch (err) {
     logger.error(`[photo-triage-opportunity] pricing failed for customer ${customer?.id || 'none'}: ${err.message}`);
     priced = { reason: 'no_offer' };

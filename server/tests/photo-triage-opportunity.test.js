@@ -368,17 +368,18 @@ describe('gaugeOpportunity', () => {
     expect(result.quote).toBeNull();
   });
 
-  test('lead with a customer row but no plan → the offer core declines → advise, never a guessed quote', async () => {
-    mockBuildOffer.mockResolvedValueOnce(null);
+  test('a customer row still in a lead stage is never priced — the offer core is not even asked (codex #4810 r5)', async () => {
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub'));
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('pest_activity', 55),
-      customer: { id: 'newlead-1' }, // pipeline_stage absent → lead
+      customer: { id: 'newlead-1', pipeline_stage: 'new_lead', active: true },
       body: 'small bug spot on one shrub',
       images: [],
     });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
     expect(result.mode).toBe('advise');
-    expect(result.reasons).toEqual(expect.arrayContaining(['lead', 'no_offer']));
+    expect(result.reasons).toEqual(expect.arrayContaining(['lead', 'lead_not_priced']));
     expect(result.quote).toBeNull();
   });
 
