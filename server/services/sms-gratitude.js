@@ -74,9 +74,19 @@ const MANUAL_MESSAGE_TYPE = 'manual';
 // there by 3". The visit or estimate is still ahead, so thanks in reply is not
 // a closure. Manual texts only: our en-route template says "on the way" and is
 // a closure by type.
-const MANUAL_PROMISE_RE = /\b(?:give (?:me |us )?(?:a |an |\d+ |a few |a couple(?: of)? |several |about \d+ )?(?:minutes?|mins?|sec(?:ond)?s?|moments?)|in (?:about |around |roughly |like |just )?(?:a few |a couple(?: of)? |several |a |an |\d+(?:-\d+)?(?: or \d+)? |(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty|forty-five|sixty) )?(?:minutes?|mins?|hours?|hrs?|sec(?:ond)?s?|moments?)|one (?:moment|minute|min|sec(?:ond)?)|just a (?:moment|minute|min|sec(?:ond)?)|hold on|hang on|bear with (?:me|us)|let me (?:check|look|see|find out|confirm|ask|get back)|checking (?:now|on (?:it|that))|looking into (?:it|that)|get back to you|circle back|follow(?:ing)? up|later (?:today|tonight|this week)|(?:this|by) (?:afternoon|evening|morning|weekend|week)|tonight|tomorrow|next (?:week|month|visit)|leaving now|on (?:the|my|our) way|swinging by|heading (?:over|out|your way)|be (?:right )?(?:there|over)(?: (?:by|at|around|after|in) \S+)?|there in \d+)\b/i;
+const MANUAL_DURATION_NUMBER = String.raw`(?:\d+(?:-\d+)?(?: or \d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|forty-five|fifty|sixty|ninety|a few|a couple(?: of)?|couple|several|a bit|about \d+|around \d+)`;
+const MANUAL_DURATION_UNIT = String.raw`(?:minutes?|mins?|hours?|hrs?|sec(?:ond)?s?|moments?)`;
+const MANUAL_PROMISE_RE = new RegExp(String.raw`\b(?:give (?:me |us )?(?:${MANUAL_DURATION_NUMBER} )?${MANUAL_DURATION_UNIT}|in (?:about |around |roughly |like |just )?(?:${MANUAL_DURATION_NUMBER} )?${MANUAL_DURATION_UNIT}|in a (?:bit|little (?:bit|while)|while|jiffy)|one (?:moment|minute|min|sec(?:ond)?)|just a (?:moment|minute|min|sec(?:ond)?)|hold on|hang on|bear with (?:me|us)|let me (?:check|look|see|find out|confirm|ask|get back)|checking (?:now|on (?:it|that))|looking into (?:it|that)|get back to you|circle back|follow(?:ing)? up|later (?:today|tonight|this week)|(?:this|by) (?:afternoon|evening|morning|weekend|week)|tonight|tomorrow|next (?:week|month|visit)|leaving now|on (?:the|my|our) way|swinging by|heading (?:over|out|your way)|be (?:right )?(?:there|over)(?: (?:by|at|around|after|in) \S+)?|there in \d+)\b`, 'i');
+// Hand-typed questions often drop the question mark ("Can you send a
+// picture", "Which day works"). Any sentence that opens with an
+// interrogative, or asks to be told something, still needs an answer.
+const MANUAL_QUESTION_RE = /(?:^|[.!\n]\s*)(?:can|could|would|will|do|does|did|is|are|was|were|should|shall|have|has|what|which|when|where|who|whom|how|why|any chance|let me know|let us know|lmk|please (?:send|confirm|reply|let|advise|text|call|share))\b/i;
+// A hand-typed courtesy ("Thanks, Dana!", "Anytime!", "Happy to help") is
+// not an answer to close on; another thanks after it is the loop the
+// courtesy guard exists to stop.
+const MANUAL_COURTESY_RE = /^(?:thanks?(?: you)?|thank you|ty|tysm|anytime|any time|happy to help|glad to help|glad (?:i|we) could help|of course|absolutely|sure thing|you got it|you bet|my pleasure|our pleasure|you(?:'re| are|re) (?:very )?welcome|no worries|no problem|np|welcome)(?:[ ,]+[\p{L}\p{M}'’ -]+)?[!.\s]*$/iu;
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
-  || (row.messageType === MANUAL_MESSAGE_TYPE && MANUAL_PROMISE_RE.test(text));
+  || (row.messageType === MANUAL_MESSAGE_TYPE && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text)));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
 const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! We got your bank payment for invoice [\w-]+\. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does\.$/u;
 
@@ -114,6 +124,7 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
   const body = withoutOptionalFooter(String(previous.body || ''));
   const bankAcknowledgement = BANK_ACK_RE.test(body);
   const manualReply = previous.messageType === MANUAL_MESSAGE_TYPE;
+  if (manualReply && (MANUAL_COURTESY_RE.test(body) || isCourtesyOnly(body, { awaitingAnswer: false }))) return deny('courtesy_already_sent');
   const invalidClosure = [
     [() => !bankAcknowledgement && outboundPending(body, previous), 'outbound_needs_attention'],
     [() => !bankAcknowledgement && !manualReply && !AUTOMATED_CLOSURE_TYPES.has(previous.messageType)

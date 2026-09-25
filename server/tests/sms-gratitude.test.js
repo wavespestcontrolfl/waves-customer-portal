@@ -107,6 +107,10 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'I can get that to you later today',
     'See you tomorrow!',
     'Next week works',
+    'Give me two minutes',
+    'Should have it in six minutes',
+    'Give me a couple minutes',
+    'In a bit',
     'On the way, 15-20 min',
     'On my way now',
     'Leaving now',
@@ -115,6 +119,18 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Should be there by 3',
   ])('a hand-typed time promise abstains: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
+  });
+  test.each([
+    'Can you send a picture',
+    'Which option would you prefer',
+    'Let me know what day works',
+    'Please confirm someone will be home. Thanks',
+  ])('a hand-typed question without a question mark still needs an answer: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
+  });
+  test.each(['Thanks, Dana!', 'Anytime!', 'Happy to help', 'You are welcome!', 'No problem'])('a hand-typed courtesy is not a closure to thank again: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [report, { ...manual(body), createdAt: '2030-01-10T14:59:30Z' }] }).reason)
+      .toBe('courtesy_already_sent');
   });
   test('a hand-typed reply answers an earlier operational text', () => {
     expect(evaluateGratitudeContext({ ...context, history: [earlierRequest,
