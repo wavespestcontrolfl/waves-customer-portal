@@ -625,3 +625,27 @@ describe('legacy SSR estimate page — same palm-care sentence on the T&S servic
     expect(html).not.toContain('Includes care for your');
   });
 });
+
+describe('treeShrubPalmCountForEstData — quote-required mirror row does not shadow result.lineItems (Codex round 6)', () => {
+  const pricedLine = { service: 'tree_shrub', palmCount: 4, palmCountSource: 'service_line' };
+  const unpricedLine = { service: 'tree_shrub', palmCount: 4, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } };
+  const mirror = { recurring: { services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 57.35 }] } };
+
+  test('slim { service, name, mo } mirror falls through to the evidence-bearing lineItems', () => {
+    expect(treeShrubPalmCountForEstData({ result: { ...mirror, lineItems: [pricedLine] } })).toBe(4);
+  });
+
+  test('the fallthrough still gates: unpriced lineItems evidence shows nothing', () => {
+    expect(treeShrubPalmCountForEstData({ result: { ...mirror, lineItems: [unpricedLine] } })).toBeNull();
+  });
+
+  test('a recurring row WITH its own evidence stays the exclusive envelope (one-tap raw row)', () => {
+    const estData = {
+      result: {
+        recurring: { services: [{ ...unpricedLine }] },
+        lineItems: [pricedLine],
+      },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+});

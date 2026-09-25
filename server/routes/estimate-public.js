@@ -19955,7 +19955,17 @@ function treeShrubPalmCountForEstData(estData = {}, freshEngineResult = null) {
     ? result.results.tsMeta : null;
   const mappedServices = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
   const mappedTsRow = mappedServices.find((s) => (s?.service || '') === 'tree_shrub');
-  const hasMappedTs = !!tsMeta || !!mappedTsRow
+  // A recurring row counts toward the envelope only when it carries palm
+  // evidence of its own (one-tap's raw engine line does). A quote-required
+  // mirror row ({ service, name, mo } from buildQuoteRequiredEstimateResult)
+  // proves nothing and must not shadow the evidence-bearing result.lineItems
+  // beside it (Codex r6 on #4789).
+  const mappedRowHasEvidence = !!mappedTsRow && (
+    mappedTsRow.palmCountSource !== undefined
+    || mappedTsRow.palmReserveActive !== undefined
+    || mappedTsRow.pricingKnobs !== undefined
+  );
+  const hasMappedTs = !!tsMeta || mappedRowHasEvidence
     || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
   if (hasMappedTs) {
     const fromTsMeta = tsMeta ? pricedTreeShrubPalmCount(tsMeta) : null;
