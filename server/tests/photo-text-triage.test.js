@@ -549,6 +549,12 @@ describe('draft text builder', () => {
     expect(text).not.toMatch(/no major visible stress/i);
   });
 
+  test('onsite with no safe label keeps the explanation and the scheduling ask (codex #4810 r9)', () => {
+    expect(draft('Riley', null, ONSITE)).toBe(
+      "Thanks for the photo, Riley. With that much to cover we'd rather see it in person before quoting. What day this week works for a quick visit?",
+    );
+  });
+
   test('onsite: never mentions a price, asks for a day this week', () => {
     const text = draft('Riley', 'pest-pressure signals', ONSITE);
     expect(text).toBe(

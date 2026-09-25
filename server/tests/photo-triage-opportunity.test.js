@@ -65,9 +65,9 @@ describe('large_scope / prior_treatment_failed regexes', () => {
   ])('%p is not large scope', (body) => expect(largeScope(body)).toBe(false));
 
   test.each([
-    "it still won't go away",
-    "can't get rid of it",
-    'it keeps coming back every year',
+    "we sprayed it twice and it still won't go away",
+    "I've tried everything and can't get rid of it",
+    'it keeps coming back no matter what we spray',
     "it's still there after the last visit",
     "our lawn guy came out and couldn't fix it",
     'our lawn company tried treating it and it did not work',
@@ -86,6 +86,11 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     'the nest is still there, should I knock it down?',
     "my sprinkler didn't work and this shrub has spots",
     'my lawn company failed to show up; what is this bug?',
+    // Recurrence alone attempted nothing (codex #4810 r9).
+    'this one patch keeps coming back every year',
+    "it still won't go away",
+    "can't get rid of these weeds, what are they?",
+    "it's still there after the rain",
   ])('%p is not a prior failure', (body) => expect(priorTreatmentFailed(body)).toBe(false));
 });
 
@@ -469,6 +474,36 @@ describe('recheckDraftOffer', () => {
     mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
     const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
     expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: text })).toEqual({ blocked: 'owned', family: 'tree_shrub' });
+  });
+
+  test('a bare dollar amount at the start of a sentence or after a space still counts as a pitch (codex #4810 r9)', async () => {
+    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
+    for (const text of ['We can do this for $80 per application.', '$80 per application.']) {
+      mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
+      expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: text })).toEqual({ blocked: 'owned', family: 'tree_shrub' });
+    }
+  });
+
+  test('a revised pitch naming a DIFFERENT service is rechecked against that service (codex #4810 r9)', async () => {
+    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
+    const text = 'Looks like thin foliage. Want a quote for pest control?';
+    // tree_shrub is fine, but the customer already owns pest control.
+    mockBuildOffer.mockImplementation(async (_c, _db, key) => (key === 'pest_control'
+      ? { serviceKey: key, mode: 'owned', option: null }
+      : CTA_OFFER(key)));
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: text })).toEqual({ blocked: 'owned', family: 'pest_control' });
+    expect(mockBuildOffer).toHaveBeenCalledWith('c1', mockDb, 'pest_control', { throwOnError: true });
+    // A service the offer core cannot check fails closed.
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Want a quote for mosquito service?' }))
+      .toEqual({ blocked: 'unavailable', family: 'tree_shrub' });
+    // Only PITCH sentences name a family — the finding sentence ("pest-
+    // pressure signals") does not make this a pest-control pitch.
+    mockBuildOffer.mockClear();
+    const quote = FLAGS();
+    mockBuildOffer.mockImplementation(async (_c, _db, key) => PRICED_OFFER(key, { perVisit: 83.33 }));
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: quote, outgoingText: "From what we can see, it's pest-pressure signals. Want a quote for our tree & shrub program? Just reply yes." }))
+      .toEqual({ ok: true });
+    expect(mockBuildOffer.mock.calls.map((c) => c[2])).toEqual(['tree_shrub']);
   });
 
   test('an advise draft that still pitches a quote is fine when the offer core simply has nothing (manual quote conversation)', async () => {

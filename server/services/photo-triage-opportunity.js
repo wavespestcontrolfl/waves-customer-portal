@@ -106,8 +106,13 @@ const LARGE_SCOPE_RE = new RegExp(`\\b(both sides of (?:the |my |our )?${PROPERT
 // "didn't work" needs a treatment/remedy subject nearby — "my sprinkler
 // didn't work and this shrub has spots" is an equipment failure, not a
 // failed treatment (codex #4810 r3).
-const TREATMENT_SUBJECT = '(?:spray\\w*|treat\\w*|product|remedy|application|pesticide|fungicide|insecticide|granules?|fertiliz\\w*|sevin|neem|soap|put down|used|tried)';
-const PRIOR_TREATMENT_RE = new RegExp(`\\b(?:${TREATMENT_SUBJECT}\\b[^.!?]{0,40}\\b(?:didn.?t|did not) work|won.?t go away|can.?t get rid|keeps coming back|still (?:there|here) after|couldn.?t (?:get rid|fix|kill|stop|control|treat|clear))\\b`, 'i');
+const TREATMENT_SUBJECT = '(?:spray\\w*|treat\\w*|product|remedy|application|pesticide|fungicide|insecticide|granules?|fertiliz\\w*|sevin|neem|soap|put down|used|tried|visits?)';
+// Recurrence phrases ("keeps coming back", "won't go away", "can't get
+// rid") say nothing about a TREATMENT on their own — "this patch keeps
+// coming back every year" attempted nothing — so they need the treatment
+// subject in the same sentence, on either side (codex #4810 r9).
+const RECURRENCE = '(?:won.?t go away|(?:can.?t|couldn.?t) get rid|keeps coming back|still (?:there|here) after)';
+const PRIOR_TREATMENT_RE = new RegExp(`\\b(?:${TREATMENT_SUBJECT}\\b[^.!?]{0,40}\\b(?:(?:didn.?t|did not) work|${RECURRENCE})|${RECURRENCE}\\b[^.!?]{0,40}\\b${TREATMENT_SUBJECT}|couldn.?t (?:fix|kill|stop|control|treat|clear))\\b`, 'i');
 // "our lawn guy/company ... failed [to fix it]" — a wider gap between the
 // subject and the verdict, and the one failure word (failed) the plain list
 // above doesn't already cover on its own.
@@ -360,7 +365,34 @@ const NO_PITCH_REASONS = new Set(['harmless', 'already_owned', 'offer_unavailabl
 // Any price/estimate wording counts as a pitch, not just "quote" — an
 // owner revision saying "want pricing?" or "we can prepare an estimate"
 // must be rechecked too (codex #4810 r8).
-const PITCH_LANGUAGE_RE = /\b(?:quot(?:e|es|ed|ing)|pric(?:e|es|ed|ing)|estimate[sd]?|cost[s]?|rate[s]?|add it|sign(?: you)? up|\$\s?\d)\b/i;
+// The dollar alternative sits OUTSIDE the \b wrapper: "$" is a non-word
+// character, so "\b\$" never matches at the start of a string or after a
+// space — "We can do this for $80" read as no pitch (codex #4810 r9).
+const PITCH_LANGUAGE_RE = /\b(?:quot(?:e|es|ed|ing)|pric(?:e|es|ed|ing)|estimate[sd]?|cost[s]?|rate[s]?|add it|sign(?: you)? up)\b|\$\s?\d/i;
+// Service families a pitch sentence can NAME (codex #4810 r9): a revision
+// that asks about a different service than the photo's family must be
+// rechecked against the family it names, not the stored one. Families the
+// offer core cannot check (mosquito, rodent, palm) fail closed.
+const NAMED_FAMILY = [
+  ['pest_control', /\bpest control\b|\bpest (?:program|plan|service|treatments?)\b/i],
+  ['lawn_care', /\blawns?\b/i],
+  ['tree_shrub', /\btrees?\b|\bshrubs?\b/i],
+  ['termite', /\btermites?\b/i],
+  [null, /\bmosquito(?:es)?\b|\brodents?\b|\bpalms?\b/i],
+];
+function familiesNamedInPitch(text) {
+  const named = new Set();
+  let unchecked = false;
+  for (const sentence of String(text || '').split(/(?<=[.!?])\s+/)) {
+    if (!PITCH_LANGUAGE_RE.test(sentence)) continue;
+    for (const [family, re] of NAMED_FAMILY) {
+      if (!re.test(sentence)) continue;
+      if (family) named.add(family);
+      else unchecked = true;
+    }
+  }
+  return { named, unchecked };
+}
 async function recheckDraftOffer({ customerId, flags, outgoingText = null }) {
   if (!flags || flags.origin !== 'photo_triage') return { ok: true };
   const mode = flags.opportunity_mode;
@@ -369,12 +401,22 @@ async function recheckDraftOffer({ customerId, flags, outgoingText = null }) {
   const pitches = textPitches || mode === 'quote' || (mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
   if (!pitches || !customerId) return { ok: true };
   const family = flags.quote?.service || SERVICE_KEY[flags.assessment_type] || null;
-  if (!family) return { ok: true };
+  // Every family the outgoing pitch NAMES is rechecked too — a tree & shrub
+  // draft revised to ask about pest control must not pass on the tree
+  // check alone (codex #4810 r9). An uncheckable named family fails closed.
+  const { named, unchecked } = textPitches ? familiesNamedInPitch(outgoingText) : { named: new Set(), unchecked: false };
+  if (unchecked) return { blocked: 'unavailable', family: family || 'the named service' };
+  const families = [...new Set([family, ...named].filter(Boolean))];
+  if (!families.length) return { ok: true };
   // throwOnError: an outage here must surface as a 503 (draft left pending
   // for retry), never as confirmed staleness.
-  const offer = await buildOfferForFamily(customerId, db, family, { throwOnError: true });
-  if (offer?.mode === 'owned') return { blocked: 'owned', family };
-  if (offer?.mode === 'unavailable') return { blocked: 'unavailable', family };
+  let offer = null;
+  for (const key of families) {
+    const answer = await buildOfferForFamily(customerId, db, key, { throwOnError: true });
+    if (answer?.mode === 'owned') return { blocked: 'owned', family: key };
+    if (answer?.mode === 'unavailable') return { blocked: 'unavailable', family: key };
+    if (key === family) offer = answer;
+  }
   if (mode === 'quote') {
     if (!offer || offer.mode !== 'priced' || !offer.option) return { blocked: 'no_longer_priced', family };
     const perApplication = Math.round((Number(offer.option.perVisit) || 0) * 100) / 100;

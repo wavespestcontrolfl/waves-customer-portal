@@ -232,6 +232,16 @@ describe('buildOfferForFamily', () => {
     await expect(buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup, throwOnError: true })).rejects.toThrow('probe down');
   });
 
+  test('throwOnError surfaces a property-lookup throw the pricer would swallow into a profile-only price (codex #4810 r9)', async () => {
+    const downLookup = jest.fn(async () => { throw new Error('lookup down'); });
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    // Creation-time: best effort, no throw.
+    await expect(buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: downLookup })).resolves.not.toBeUndefined();
+    expect(downLookup).toHaveBeenCalled();
+    // Dispatch-time: the lookup outage reaches the caller.
+    await expect(buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: downLookup, throwOnError: true })).rejects.toThrow('lookup down');
+  });
+
   test('a verified correction on file demotes to the quote CTA, same as the card', async () => {
     hasVerifiedOverrides.mockImplementation(async () => true);
     const db = dbFor({ serviceTypes: ['Lawn Care Program'] });

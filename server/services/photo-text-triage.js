@@ -244,9 +244,10 @@ const QUOTE_SERVICE_LABEL = { tree_shrub: 'tree & shrub', lawn_care: 'lawn', pes
 // "every real label fits in two segments" regression tests) never need a
 // real photo-analysis fixture.
 function composeBody({ label, advice, opportunity }) {
-  if (label === null) return 'Want us to take a look?';
-
-  const lead = `From what we can see, it's ${label}.`;
+  // No safe label → no finding sentence, but an on-site verdict still gets
+  // its explanation and scheduling ask (codex #4810 r9); every other mode
+  // falls back to the plain look-offer below.
+  const lead = label === null ? '' : `From what we can see, it's ${label}.`;
 
   if (opportunity.mode === 'onsite') {
     // The explanation names the reason that actually fired (codex #4810
@@ -262,6 +263,8 @@ function composeBody({ label, advice, opportunity }) {
       : `Since what's been tried hasn't held, we'd rather see it in person${quoting}.`;
     return joinSentences([lead, why, 'What day this week works for a quick visit?']);
   }
+
+  if (label === null) return 'Want us to take a look?';
 
   if (opportunity.mode === 'quote' && opportunity.quote) {
     // NO dollar amount in the customer text (codex #4810 r1–r3): AGENTS.md

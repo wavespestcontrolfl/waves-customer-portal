@@ -1120,8 +1120,18 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
     // Verified-correction probe: identical to the report path — the absence
     // of a usable lookup result is what needs probing.
     let lookupProducedResult = false;
+    // buildCustomerPricingResponse swallows a lookup throw into a profile-
+    // only price; dispatch callers need it as an error (codex #4810 r9), so
+    // it is captured here and rethrown after the pricer returns.
+    let lookupError = null;
     const trackedPropertyLookup = async (address) => {
-      const found = await propertyLookup(address);
+      let found;
+      try {
+        found = await propertyLookup(address);
+      } catch (err) {
+        lookupError = err;
+        throw err;
+      }
       if (found && !hasGlobalVerifyFlag(found.enriched || {})) lookupProducedResult = true;
       return found;
     };
@@ -1147,6 +1157,12 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
       }
     }
 
+    if (throwOnError && lookupError) throw lookupError;
+    // PRICING_UNAVAILABLE is the pricer's swallowed ownership-reader
+    // failure — an outage, not an answer, for a dispatch caller.
+    if (throwOnError && result?.code === 'PRICING_UNAVAILABLE') {
+      throw Object.assign(new Error('pricing ownership lookup failed'), { code: 'PRICING_UNAVAILABLE' });
+    }
     if (!result || result.code === 'PRICING_UNAVAILABLE') return null;
     if ((result.alreadyIncluded || []).length) return null;
     if (isCommercialProperty({ propertyType: result.property?.propertyType })) return null;
