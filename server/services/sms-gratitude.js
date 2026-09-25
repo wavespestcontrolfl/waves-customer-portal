@@ -80,7 +80,7 @@ const MANUAL_PROMISE_RE = new RegExp(String.raw`\b(?:give (?:me |us )?(?:${MANUA
 // Hand-typed questions often drop the question mark ("Can you send a
 // picture", "Which day works"). Any sentence that opens with an
 // interrogative, or asks to be told something, still needs an answer.
-const MANUAL_QUESTION_RE = /(?:^|[.!\n]\s*)(?:can|could|would|will|do|does|did|is|are|was|were|should|shall|have|has|what|which|when|where|who|whom|how|why|any chance|let me know|let us know|lmk|please (?:send|confirm|reply|let|advise|text|call|share))\b/i;
+const MANUAL_QUESTION_RE = /(?:^|[.!,;:\n—-]\s*|\b(?:just|please|also|and|so|then|or)\s+)(?:can|could|would|will|do|does|did|is|are|was|were|should|shall|have|has|what|which|when|where|who|whom|how|why|any chance)\b|\b(?:let (?:me|us) know|lmk|feel free to (?:reply|text|call|let)|please (?:send|confirm|reply|let|advise|text|call|share))\b/i;
 // A hand-typed courtesy ("Thanks, Dana!", "Anytime!", "Happy to help") is
 // not an answer to close on; another thanks after it is the loop the
 // courtesy guard exists to stop.

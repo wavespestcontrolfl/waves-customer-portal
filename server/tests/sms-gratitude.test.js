@@ -125,6 +125,11 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Which option would you prefer',
     'Let me know what day works',
     'Please confirm someone will be home. Thanks',
+    'Hi Dana, can you send a picture',
+    'Sure, could you confirm the address',
+    'Just let me know what day works',
+    'Feel free to let us know',
+    'Sounds good and lmk if anything changes',
   ])('a hand-typed question without a question mark still needs an answer: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
   });
