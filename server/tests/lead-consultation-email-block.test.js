@@ -288,4 +288,17 @@ describe('computeConsultationSlotsForLead ordering', () => {
     expect(catalogAt).toBeGreaterThan(-1);
     expect(locationAt).toBeGreaterThan(catalogAt);
   });
+
+  // Codex #4813 r3 P1: the email uses the page's lead-wide eligibility
+  // (readEligibility — trusted + untrusted profiles), never the narrower
+  // single-profile resolveEligibility.
+  test('eligibility is the lead-wide readEligibility, same as GET', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/inspection-public.js'), 'utf8');
+    const start = src.indexOf('async function computeConsultationSlotsForLead');
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    expect(body).toContain('await readEligibility(lead, custRow, undefined, { includeRescheduleUrl: false })');
+    expect(body).not.toContain('await resolveEligibility(');
+  });
 });

@@ -759,7 +759,11 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const lead = await loadLead(db, leadId);
     if (!lead) return { ok: false };
     const custRow = await loadTrustedCustomer(db, lead, undefined);
-    const eligibility = await resolveEligibility(db, lead, custRow, { includeRescheduleUrl: false });
+    // The SAME lead-wide predicate as GET (Codex #4813 r3 P1): every
+    // trusted AND untrusted profile the lead touches — an open assessment
+    // or future visit on any of them means no slots, never a link that
+    // lands on already_booked/converted.
+    const eligibility = await readEligibility(lead, custRow, undefined, { includeRescheduleUrl: false });
     if (eligibility.state !== 'ok') return { ok: false };
     // Catalog BEFORE the address-only state (Codex #4813 r1 P2): a retired
     // or booking-disabled Waves Assessment must not produce a "Pick a time"
