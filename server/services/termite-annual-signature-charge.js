@@ -33,13 +33,23 @@
 // shared RecurringCards classifiers read the outcome the same way the
 // accept route does.
 //
-// Authorization: the customer's signature on the annual agreement. It is
-// recorded in the consent ledger with the SIGNED agreement text as the
-// snapshot and evidence_contract_id pointing at the signed contract. The
-// charge is capped at the total frozen when the customer accepted
+// Authorization: the customer's signature on an annual agreement whose
+// OWN signed text explicitly authorizes the initial charge (codex round-4
+// P1) — the BILLING clause must carry
+// termite-program-agreement.js's ANNUAL_INITIAL_CHARGE_AUTHORIZATION. A
+// signed agreement without it authorizes renewal charges only, so its
+// initial invoice gets the pay link; an Auto Pay enrollment alone is never
+// treated as consent for this charge. The signature is recorded in the
+// consent ledger with the SIGNED agreement text as the snapshot and
+// evidence_contract_id pointing at the signed contract. The charge is
+// capped at the total frozen when the customer accepted
 // (maxAuthorizedTotalCents) — the agreement's prices are total maximum
-// prices, so a card whose surcharge would push past that total is skipped
-// (the charge service's own quote, checked first) and gets the pay link.
+// prices. Before any surcharge reasoning the invoice's BASE (subtotal,
+// discount, tax — everything before a card surcharge) must still be the
+// frozen one: an invoice edited after activation is held for staff with no
+// charge and no pay link (codex round-4 P1). Only an unchanged base whose
+// credit-card surcharge would push past the frozen total is skipped (the
+// charge service's own quote, checked first) and gets the pay link.
 // ============================================================
 
 const crypto = require('crypto');
@@ -72,6 +82,10 @@ const BELL_COPY = {
   surcharge_not_authorized: (ctx) => ({
     title: 'Termite annual plan — card on file not charged (surcharge)',
     body: `The payment method on file for invoice #${ctx.invoiceId} (estimate #${ctx.estimateId}) is a credit card whose surcharge would exceed the total the customer signed for, so it was not charged. The pay link is being sent instead; the customer sees the exact total before paying.`,
+  }),
+  invoice_base_drift: (ctx) => ({
+    title: 'Termite annual plan — invoice changed since signing, not charged',
+    body: `Invoice #${ctx.invoiceId} (estimate #${ctx.estimateId}) no longer matches the price the customer signed for (${ctx.reason}). The card on file was NOT charged and NO pay link was sent. Restore the signed amounts or collect by hand after confirming the change with the customer.`,
   }),
   no_accepted_amount: (ctx) => ({
     title: 'Termite annual plan — no accepted total to charge against',
@@ -137,7 +151,7 @@ async function followExistingOutcome(existing, ctx) {
   if (PAY_LINK_OUTCOMES.has(status)) return { status, reason: existing.reason || null, deliverPayLink: true };
   if (SETTLED_OUTCOMES.has(status)) return { status, reason: existing.reason || null, deliverPayLink: false };
   if (status === 'deferred') {
-    await ringBell('charge_deferred', { ...ctx, reason: existing.reason || 'held for staff' });
+    await ringBell('charge_deferred', { ...ctx, reason: existing.detail || existing.reason || 'held for staff' });
     return { status, reason: existing.reason || null, deliverPayLink: false };
   }
   const claimedAt = existing?.claimed_at ? new Date(existing.claimed_at).getTime() : 0;
@@ -146,6 +160,21 @@ async function followExistingOutcome(existing, ctx) {
   }
   await ringBell('charge_unresolved', { ...ctx, reason: existing?.reason || 'the charge attempt never recorded an outcome' });
   return { status: 'ambiguous', reason: existing?.reason || 'unresolved_claim', deliverPayLink: false };
+}
+
+// The invoice's pre-surcharge base must still be the frozen accepted one:
+// the same subtotal to the cent, no discount layered on, and never MORE
+// tax than was accepted (a verified exemption may only lower it — the same
+// rule the activation mint enforces). Returns a reason string on drift,
+// else null.
+function invoiceBaseDrift(invoice, frozen) {
+  const cents = (v) => Math.round((Number(v) || 0) * 100);
+  const drift = [];
+  if (cents(invoice.subtotal) !== cents(frozen.subtotal)) drift.push(`subtotal ${invoice.subtotal} vs signed ${frozen.subtotal}`);
+  if (cents(invoice.discount_amount) !== 0) drift.push(`discount ${invoice.discount_amount} added`);
+  if (cents(invoice.tax_amount) > cents(frozen.taxAmount)) drift.push(`tax ${invoice.tax_amount} vs signed ${frozen.taxAmount}`);
+  if (cents(invoice.total) > cents(frozen.total)) drift.push(`total ${invoice.total} vs signed ${frozen.total}`);
+  return drift.length ? drift.join('; ') : null;
 }
 
 async function signedAnnualContractFor(conn, estimateId, contractId) {
@@ -209,26 +238,55 @@ function classifyVerifiedCharge(freshInvoice, chargeResult) {
 // should be handed back for a later retry.
 async function runClaimedCharge({ conn, ctx, trigger }) {
   const RecurringCards = require('./recurring-card-on-file');
-  if (!RecurringCards.isPrepayCardAndChargeEnabled()) return { status: 'skipped', reason: 'gate_off' };
 
-  const invoice = await conn('invoices').where({ id: ctx.invoiceId }).first('id', 'customer_id', 'payer_id', 'status');
+  const invoice = await conn('invoices').where({ id: ctx.invoiceId })
+    .first('id', 'customer_id', 'payer_id', 'status', 'subtotal', 'discount_amount', 'tax_amount', 'total');
   if (!invoice) return { status: 'skipped', reason: 'invoice_missing' };
   if (invoice.payer_id) return { status: 'skipped', reason: 'payer_billed' };
 
-  let frozenTotalCents;
+  let frozen;
   try {
     const estimate = await conn('estimates').where({ id: ctx.estimateId }).first('id', 'annual_plan_deferred_invoice');
-    frozenTotalCents = Math.round(require('./estimate-converter').frozenTermiteAnnualFinancialsFor(estimate).total * 100);
+    frozen = require('./estimate-converter').frozenTermiteAnnualFinancialsFor(estimate);
   } catch {
     await ringBell('no_accepted_amount', ctx);
     return { status: 'skipped', reason: 'no_accepted_amount' };
   }
+  const frozenTotalCents = Math.round(frozen.total * 100);
+
+  // Base drift is an edited invoice, not a surcharge: neither the card nor
+  // a pay link may collect an amount the customer never signed for — so it
+  // is checked before every pay-link lane below (gate off, no method, no
+  // authorization, surcharge).
+  const drift = invoiceBaseDrift(invoice, frozen);
+  if (drift) {
+    await ringBell('invoice_base_drift', { ...ctx, reason: drift });
+    return { status: 'deferred', reason: 'invoice_base_drift', detail: drift, belled: true };
+  }
+
+  if (!RecurringCards.isPrepayCardAndChargeEnabled()) return { status: 'skipped', reason: 'gate_off' };
 
   const method = await RecurringCards.resolvePrepayChargeMethod({
     policy: { exemptReason: 'autopay_already_active' },
     customerId: invoice.customer_id,
   });
   if (!method?.paymentMethodRowId) return { status: 'skipped', reason: 'no_enrolled_method' };
+
+  let contract;
+  try {
+    contract = await signedAnnualContractFor(conn, ctx.estimateId, ctx.contractId);
+    if (!contract?.contract_text_snapshot) throw new Error('signed annual agreement not found');
+  } catch (err) {
+    logger.warn(`[termite-annual-charge] signed agreement read failed for estimate ${ctx.estimateId} — releasing for retry: ${err.message}`);
+    await ringBell('charge_deferred', { ...ctx, reason: 'the signed agreement could not be read yet; the daily sweep will retry' });
+    return { release: true };
+  }
+  // Only the agreement's own signed words authorize this charge — never an
+  // Auto Pay enrollment on its own.
+  const { agreementAuthorizesInitialCharge } = require('./termite-program-agreement');
+  if (!agreementAuthorizesInitialCharge(contract.contract_text_snapshot)) {
+    return { status: 'skipped', reason: 'no_initial_charge_authorization' };
+  }
 
   // The agreement's prices are total maximums: a credit-card surcharge
   // that would carry the charge past the accepted total is not authorized
@@ -248,8 +306,6 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   }
 
   try {
-    const contract = await signedAnnualContractFor(conn, ctx.estimateId, ctx.contractId);
-    if (!contract?.contract_text_snapshot) throw new Error('signed annual agreement not found');
     await recordSignatureConsent({
       conn, customerId: invoice.customer_id, method, contract,
     });
@@ -321,10 +377,11 @@ async function chargeAnnualInvoiceAtSignature({
       await releaseClaim(conn, estimateId, claimToken);
       return { status: 'deferred', reason: 'consent_record_failed', deliverPayLink: false };
     }
-    await resolveClaim(conn, estimateId, claimToken, outcome);
+    const { belled, ...recorded } = outcome;
+    await resolveClaim(conn, estimateId, claimToken, recorded);
     if (outcome.status === 'declined') await ringBell('charge_declined', { ...ctx, reason: outcome.reason });
     if (outcome.status === 'ambiguous') await ringBell('charge_unresolved', { ...ctx, reason: outcome.reason });
-    if (outcome.status === 'deferred') await ringBell('charge_deferred', { ...ctx, reason: outcome.reason });
+    if (outcome.status === 'deferred' && !belled) await ringBell('charge_deferred', { ...ctx, reason: outcome.reason });
     logger.info(`[termite-annual-charge] estimate ${estimateId} invoice ${invoiceId}: ${outcome.status}${outcome.reason ? ` (${outcome.reason})` : ''}`);
     return { status: outcome.status, reason: outcome.reason || null, deliverPayLink: PAY_LINK_OUTCOMES.has(outcome.status) };
   } catch (err) {
@@ -338,5 +395,5 @@ async function chargeAnnualInvoiceAtSignature({
 
 module.exports = {
   chargeAnnualInvoiceAtSignature,
-  _private: { classifyChargeError, classifyVerifiedCharge },
+  _private: { classifyChargeError, classifyVerifiedCharge, invoiceBaseDrift },
 };

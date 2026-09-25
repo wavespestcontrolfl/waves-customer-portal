@@ -19,6 +19,18 @@ const describeOrSkip = SKIP ? describe.skip : describe;
 
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 const FROZEN_TOTAL = 449;
+// The v3 BILLING clause as slice 3c words it — wrapped across lines the way
+// the rendered agreement is, so the whitespace-normalized match is what is
+// exercised (codex round-4 P1: the signed text itself must authorize the
+// initial charge).
+const SIGNED_TEXT_WITH_AUTHORIZATION = [
+  'THE SIGNED AGREEMENT TEXT',
+  'BILLING. The setup fee and the first annual protection fee are billed together',
+  'and are due before installation: Waves charges them to the payment',
+  'method on file at signing, or, if none is on file, sends a payment link',
+  'to complete before installation.',
+].join('\n');
+const SIGNED_TEXT_RENEWALS_ONLY = 'THE SIGNED AGREEMENT TEXT\nRENEWAL. Waves charges the renewal fee to the payment method on file.';
 
 async function createScratchDb() {
   const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
@@ -39,7 +51,11 @@ async function createScratchDb() {
     customer_id uuid,
     payer_id uuid,
     status text,
-    payment_method text
+    payment_method text,
+    subtotal numeric(10,2),
+    discount_amount numeric(10,2) DEFAULT 0,
+    tax_amount numeric(10,2) DEFAULT 0,
+    total numeric(10,2)
   )`);
   await db.raw(`CREATE TABLE customer_contracts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -101,13 +117,15 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
       annual_plan_activation_status: 'activated',
       annual_plan_deferred_invoice: JSON.stringify(frozenContext()),
     }).returning('*');
-    const [invoice] = await db('invoices').insert({ customer_id: customerId, status: 'sent' }).returning('*');
+    const [invoice] = await db('invoices').insert({
+      customer_id: customerId, status: 'sent', subtotal: FROZEN_TOTAL, discount_amount: 0, tax_amount: 0, total: FROZEN_TOTAL,
+    }).returning('*');
     const [contract] = await db('customer_contracts').insert({
       customer_id: customerId,
       document_template_key: ANNUAL_TEMPLATE_KEY,
       status: 'signed',
       signed_at: new Date(),
-      contract_text_snapshot: 'THE SIGNED AGREEMENT TEXT',
+      contract_text_snapshot: SIGNED_TEXT_WITH_AUTHORIZATION,
       annual_plan_version: 'v3',
       signer_ip: '203.0.113.9',
       signer_user_agent: 'jest',
@@ -173,7 +191,7 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
       estimateId: ids.estimateId, contractId: ids.contractId, invoiceId: ids.invoiceId, conn: db, trigger: 'signature', ...extra,
     });
     return {
-      run, notifyAdmin, chargeInvoiceWithSavedCard, db, resolvedMethod, logger,
+      run, notifyAdmin, chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge, db, resolvedMethod, logger,
     };
   }
 
@@ -203,7 +221,7 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
       customer_id: ids.customerId,
       stripe_payment_method_id: 'pm_saved',
       source: 'contract_signing',
-      consent_text_snapshot: 'THE SIGNED AGREEMENT TEXT',
+      consent_text_snapshot: SIGNED_TEXT_WITH_AUTHORIZATION,
       consent_text_version: 'termite_annual_agreement_v3',
       evidence_contract_id: ids.contractId,
       ip: '203.0.113.9',
@@ -248,7 +266,7 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     expect((await chargeState(db)).status).toBe('declined');
   });
 
-  test('a credit-card surcharge past the frozen total is not authorized by the signature: skipped up front, pay link + bell, never charged', async () => {
+  test('an UNCHANGED base whose credit-card surcharge passes the frozen total is not authorized by the signature: skipped up front, pay link + bell, never charged', async () => {
     const {
       run, chargeInvoiceWithSavedCard, notifyAdmin, db,
     } = load({ quoteTotal: 462.02 });
@@ -260,6 +278,70 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
       'billing', expect.stringContaining('surcharge'), expect.any(String),
       expect.objectContaining({ dedupeKey: `termite-annual-signature-charge:${ids.estimateId}:surcharge_not_authorized` }),
     );
+  });
+
+  test('codex round-4 P1: a signed agreement WITHOUT the explicit initial-charge clause never charges — pay link, no consent row', async () => {
+    const {
+      run, chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge, db,
+    } = load();
+    await db('customer_contracts').where({ id: ids.contractId }).update({ contract_text_snapshot: SIGNED_TEXT_RENEWALS_ONLY });
+
+    expect(await run()).toEqual({ status: 'skipped', reason: 'no_initial_charge_authorization', deliverPayLink: true });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    expect(await db('payment_method_consents')).toHaveLength(0);
+    expect((await chargeState(db)).status).toBe('skipped');
+  });
+
+  test('codex round-4 P1: an Auto Pay enrollment alone is not consent — the enrolled method is never charged without the signed clause', async () => {
+    const { run, chargeInvoiceWithSavedCard, db } = load({
+      method: {
+        stripePaymentMethodId: 'pm_legacy_autopay', paymentMethodRowId: randomUUID(), methodType: 'card', funding: 'debit', source: 'autopay',
+      },
+    });
+    await db('customer_contracts').where({ id: ids.contractId }).update({ contract_text_snapshot: 'THE SIGNED AGREEMENT TEXT' });
+
+    expect(await run()).toMatchObject({ status: 'skipped', reason: 'no_initial_charge_authorization', deliverPayLink: true });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('codex round-4 P1: an invoice whose BASE was edited upward is held — owner bell, no charge, NO pay link (not treated as a surcharge)', async () => {
+    const {
+      run, chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge, notifyAdmin, db,
+    } = load({ quoteTotal: 520 });
+    await db('invoices').where({ id: ids.invoiceId }).update({ subtotal: 520, total: 520 });
+
+    const outcome = await run();
+
+    expect(outcome).toEqual({ status: 'deferred', reason: 'invoice_base_drift', deliverPayLink: false });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'billing', expect.stringContaining('changed since signing'), expect.stringContaining('subtotal 520'),
+      expect.objectContaining({ dedupeKey: `termite-annual-signature-charge:${ids.estimateId}:invoice_base_drift` }),
+    );
+    expect(await chargeState(db)).toMatchObject({ status: 'deferred', reason: 'invoice_base_drift' });
+
+    // A later sweep entry follows the recorded hold: still no charge, no link.
+    const replay = await run({ trigger: 'sweep' });
+    expect(replay).toMatchObject({ status: 'deferred', deliverPayLink: false });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('codex round-4 P1: base drift is held even on a pay-link lane (charging gate off)', async () => {
+    const { run, db } = load({ gateOn: false });
+    await db('invoices').where({ id: ids.invoiceId }).update({ tax_amount: 31.43, total: 480.43 });
+
+    expect(await run()).toMatchObject({ status: 'deferred', reason: 'invoice_base_drift', deliverPayLink: false });
+  });
+
+  test('an unchanged base with a deposit credit applied (total below the frozen total) is not drift — charges', async () => {
+    const { run, chargeInvoiceWithSavedCard, db } = load({ quoteTotal: 400 });
+    await db('invoices').where({ id: ids.invoiceId }).update({ total: 400 });
+
+    expect(await run()).toMatchObject({ status: 'paid', deliverPayLink: false });
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
   });
 
   test('if the charge-time total still exceeds the ceiling, the charge service refuses → decline lane (pay link), never overcharged', async () => {
