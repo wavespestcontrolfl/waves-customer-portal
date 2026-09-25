@@ -451,7 +451,7 @@ export default function SocialMediaPage() {
         </Card>
       )}
       {activeGroup.tabs.length > 1 && (
-        <div className="flex flex-wrap gap-2 mb-4">
+        <div className="flex flex-wrap justify-center gap-2 mb-4">
           {activeGroup.tabs.map((key) => {
             const leaf = SOCIAL_LEAF_BY_KEY[key];
             const active = tab === key;

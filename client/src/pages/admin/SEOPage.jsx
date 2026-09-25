@@ -1597,9 +1597,9 @@ function BacklinksTab() {
   return (
     <div className="flex flex-col [gap:16px]">
       {/* Sub-tabs */}
-      <div className="flex justify-between items-center flex-wrap [gap:8px]">
+      <div className="flex flex-col items-stretch [gap:8px]">
         {" "}
-        <div className="seo-sub-tabs flex max-sm:flex-nowrap max-sm:overflow-x-auto [gap:4px] overflow-x-auto">
+        <div className="seo-sub-tabs flex w-full [justify-content:safe_center] [&>button]:shrink-0 [gap:4px] overflow-x-auto">
           {[
             {
               key: "overview",
@@ -1637,7 +1637,7 @@ function BacklinksTab() {
           ))}
         </div>{" "}
         {canRunSeoActions && (
-          <Button onClick={handleScan} disabled={scanning} variant="secondary">
+          <Button onClick={handleScan} disabled={scanning} variant="secondary" className="self-end">
             {scanning ? "Scanning..." : "Scan Backlinks"}
           </Button>
         )}{" "}
@@ -7411,21 +7411,23 @@ function UrlIntelTab({ domain }) {
   };
   return (
     <div className="[padding:24px] flex flex-col [gap:20px]">
-      <div className="seo-sub-tabs flex max-sm:flex-nowrap max-sm:overflow-x-auto [gap:8px] items-center flex-wrap">
-        {subTabs.map((st) => (
-          <Button
-            key={st.key}
-            onClick={() => {
-              setSubTab(st.key);
-              setScanPage(0);
-            }}
-            variant={subTab === st.key ? "primary" : "secondary"}
-          >
-            {st.label}
-          </Button>
-        ))}
+      <div className="flex flex-col items-stretch [gap:8px]">
+        <div className="seo-sub-tabs flex w-full [justify-content:safe_center] [&>button]:shrink-0 [gap:8px] overflow-x-auto">
+          {subTabs.map((st) => (
+            <Button
+              key={st.key}
+              onClick={() => {
+                setSubTab(st.key);
+                setScanPage(0);
+              }}
+              variant={subTab === st.key ? "primary" : "secondary"}
+            >
+              {st.label}
+            </Button>
+          ))}
+        </div>
         {canRefresh && (
-          <Button onClick={handleRefresh} className="[margin-left:auto]">
+          <Button onClick={handleRefresh} className="self-end">
             Refresh Domain
           </Button>
         )}
@@ -7886,18 +7888,20 @@ function ActionsTab({ domain }) {
   };
   return (
     <div className="[padding:24px] flex flex-col [gap:20px]">
-      <div className="seo-sub-tabs flex max-sm:flex-nowrap max-sm:overflow-x-auto [gap:8px] items-center flex-wrap">
-        {subTabs.map((st) => (
-          <Button
-            key={st.key}
-            onClick={() => setSubTab(st.key)}
-            variant={subTab === st.key ? "primary" : "secondary"}
-          >
-            {st.label}
-          </Button>
-        ))}
+      <div className="flex flex-col items-stretch [gap:8px]">
+        <div className="seo-sub-tabs flex w-full [justify-content:safe_center] [&>button]:shrink-0 [gap:8px] overflow-x-auto">
+          {subTabs.map((st) => (
+            <Button
+              key={st.key}
+              onClick={() => setSubTab(st.key)}
+              variant={subTab === st.key ? "primary" : "secondary"}
+            >
+              {st.label}
+            </Button>
+          ))}
+        </div>
         {canAdmin && subTab === "queue" && (
-          <div className="[margin-left:auto] flex [gap:8px]">
+          <div className="flex flex-wrap justify-end [gap:8px]">
             <Button
               onClick={() =>
                 adminPost("/admin/seo/actions/generate", { domain }).then(loadData)
@@ -7920,7 +7924,7 @@ function ActionsTab({ domain }) {
             onClick={() =>
               adminPost("/admin/seo/actions/generate-drafts", {}).then(loadData)
             }
-            className="[margin-left:auto]"
+            className="self-end"
           >
             Generate Drafts
           </Button>
@@ -8338,7 +8342,7 @@ function IndexationTab({ domain }) {
   ];
   return (
     <div className="[padding:24px] flex flex-col [gap:20px]">
-      <div className="seo-sub-tabs flex max-sm:flex-nowrap max-sm:overflow-x-auto [gap:8px] flex-wrap">
+      <div className="seo-sub-tabs flex w-full [justify-content:safe_center] [&>button]:shrink-0 [gap:8px] overflow-x-auto">
         {subTabs.map((st) => (
           <Button
             key={st.key}

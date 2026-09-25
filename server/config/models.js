@@ -79,6 +79,7 @@ const DEFAULTS = Object.freeze({
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
   OPENAI_FRONTIER: 'gpt-6-astra',
   OPENAI_ESTIMATE_VISION: 'gpt-6-sol',
+  OPENAI_IMAGE_SCREEN: 'gpt-5.6-sol',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
   GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
@@ -156,6 +157,10 @@ const OPENAI_FRONTIER      = process.env.MODEL_OPENAI_FRONTIER || DEFAULTS.OPENA
 // Estimate imagery has its own Sol fallback so generic OpenAI overrides cannot
 // silently replace it with an unrelated model (owner directive 2026-09-25).
 const OPENAI_ESTIMATE_VISION = process.env.MODEL_OPENAI_ESTIMATE_VISION || DEFAULTS.OPENAI_ESTIMATE_VISION;
+// Generated-image screen (owner ruling 2026-09-25: Sol first). In the
+// 2026-09-25 lab GPT-5.6 Sol judged the uniform badge's chest side 12 of 12
+// from badge/placket positions; Claude Opus got it wrong in both directions.
+const OPENAI_IMAGE_SCREEN  = process.env.MODEL_OPENAI_IMAGE_SCREEN || DEFAULTS.OPENAI_IMAGE_SCREEN;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
@@ -356,6 +361,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: DEEP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  imageScreen: Object.freeze({
+    name: 'imageScreen',
+    // The blog image text/logo/uniform/van screen (content/hero-alt-vision.js
+    // screenGeneratedImage). Sol first, by owner ruling 2026-09-25; Claude
+    // VISION answers only when the OpenAI leg misses (owner, same day: "add
+    // claude as backup") — it misreads the chest side more often, but a
+    // checked image beats one shipped unchecked during an OpenAI outage.
+    // The alt-text pass stays on visionAnalysis.
+    primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_IMAGE_SCREEN }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
+  }),
   voiceJudge: Object.freeze({
     name: 'voiceJudge',
     // Voice relay eval judge: the pinned Claude leg, Sol as the cross-provider
@@ -388,6 +404,7 @@ module.exports = {
   OPENAI_REPORT_WRITER,
   OPENAI_FRONTIER,
   OPENAI_ESTIMATE_VISION,
+  OPENAI_IMAGE_SCREEN,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,
   EMBEDDING_DIMS,

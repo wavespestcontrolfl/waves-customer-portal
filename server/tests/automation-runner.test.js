@@ -805,6 +805,36 @@ describe('sendStepLocked (via sendStep) — consultation-booking block wiring', 
     expect(sentArgs.text).toContain('Pick a time: https://x');
   });
 
+  test('a hidden block leaves the body byte-identical to the pre-placeholder original (separator consumed)', async () => {
+    buildConsultationEmailBlock.mockResolvedValue({ html: '', text: '' });
+    setDbQueues(queuesForNewLeadSend({
+      id: 'step-1', step_order: 0, subject: 'Hi',
+      html_body: "<h2>Hi</h2>\n{{consultation_booking}}\n<h2>What's next</h2>",
+      text_body: 'Hi. {{consultation_booking_text}}\nReply with your address.',
+      from_email: 'automations@wavespestcontrol.com', enabled: true,
+    }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-h' });
+    await sendStep('enrollment-lead-1');
+    const sentArgs = sendgrid.sendOne.mock.calls[0][0];
+    expect(sentArgs.html).toContain("<h2>Hi</h2>\n<h2>What's next</h2>");
+    expect(sentArgs.text).toContain('Hi. Reply with your address.');
+  });
+
+  test('a shown block keeps exactly one separator before the anchor', async () => {
+    buildConsultationEmailBlock.mockResolvedValue({ html: '<p>3 slots</p>', text: 'Pick a time: https://x' });
+    setDbQueues(queuesForNewLeadSend({
+      id: 'step-1', step_order: 0, subject: 'Hi',
+      html_body: "<h2>Hi</h2>\n{{consultation_booking}}\n<h2>What's next</h2>",
+      text_body: 'Hi. {{consultation_booking_text}}\nReply with your address.',
+      from_email: 'automations@wavespestcontrol.com', enabled: true,
+    }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-s' });
+    await sendStep('enrollment-lead-1');
+    const sentArgs = sendgrid.sendOne.mock.calls[0][0];
+    expect(sentArgs.html).toContain("<p>3 slots</p>\n<h2>What's next</h2>");
+    expect(sentArgs.text).toContain('Hi. Pick a time: https://x\nReply with your address.');
+  });
+
   test('a step body with NO placeholder never calls buildConsultationEmailBlock', async () => {
     setDbQueues(queuesForNewLeadSend({
       id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}',
