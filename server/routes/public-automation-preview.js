@@ -26,7 +26,12 @@ function fill(s) {
     .replace(/\{\{\s*last_name\s*\}\}/g, SAMPLE.last_name)
     .replace(/\{\{\s*email\s*\}\}/g, SAMPLE.email)
     .replace(/\{first_name\}/g, SAMPLE.first_name)
-    .replace(/\{last_name\}/g, SAMPLE.last_name);
+    .replace(/\{last_name\}/g, SAMPLE.last_name)
+    // The new_lead consultation-booking placeholders render per lead at
+    // send time (automation-runner.js); a shared preview has no lead, so
+    // show the email as a non-recurring lead receives it — never the
+    // template syntax (Codex #4813 r4 P2).
+    .replace(/\{\{\s*consultation_booking(?:_text)?\s*\}\}\n?/g, '');
 }
 
 function escapeHtml(s) {
@@ -96,3 +101,4 @@ function notFoundPage() {
 }
 
 module.exports = router;
+module.exports._test = { fill };

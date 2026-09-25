@@ -736,6 +736,77 @@ function shapeAvailability(availability, range) {
   };
 }
 
+// The next `count` open consultation slots for a lead, earliest first
+// across every active tech — shared with the new_lead automation email's
+// consultation-booking block (server/services/lead-consultation-email-block.js)
+// so it can never offer a slot this route itself would refuse. Read-only:
+// no lock, no provisioning, no token — mirrors the GET handler's own read
+// path (eligibility -> location -> availability) without any of the
+// write-side customer/booking machinery. `token` is intentionally omitted
+// from loadTrustedCustomer/resolveEligibility (this runs from a background
+// email send, not a token-authenticated request) — leadContactVerified
+// still verifies a call-sourced lead by its own call_log row, so a
+// call-originated lead's already-booked assessment is still caught.
+// Returns `{ ok:false }` on ANY ineligibility/error (fail closed — the
+// email caller renders nothing), or `{ ok:true, slots, needsAddress }`:
+// `needsAddress:true` (empty slots) means the lead has no address on file
+// at all — the caller may still offer a plain booking-page link; any other
+// reason for zero slots (out of area, unresolved address, no bookable
+// times) also comes back as empty slots with `needsAddress:false`, which
+// the email treats identically to "no bookable slots" (render nothing).
+async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
+  try {
+    const lead = await loadLead(db, leadId);
+    if (!lead) return { ok: false };
+    const custRow = await loadTrustedCustomer(db, lead, undefined);
+    // The SAME lead-wide predicate as GET (Codex #4813 r3 P1): every
+    // trusted AND untrusted profile the lead touches — an open assessment
+    // or future visit on any of them means no slots, never a link that
+    // lands on already_booked/converted.
+    const eligibility = await readEligibility(lead, custRow, undefined, { includeRescheduleUrl: false });
+    if (eligibility.state !== 'ok') return { ok: false };
+    // Catalog BEFORE the address-only state (Codex #4813 r1 P2): a retired
+    // or booking-disabled Waves Assessment must not produce a "Pick a time"
+    // CTA whose page can only answer booking_unavailable once an address
+    // is supplied.
+    const catalog = await loadAssessmentCatalog();
+    if (!catalog.serviceId) return { ok: true, slots: [], needsAddress: false };
+    const resolved = await finalizeBookingLocation(lead, custRow, null);
+    if (!resolved.location) {
+      return { ok: true, slots: [], needsAddress: resolved.failure === 'address_required' };
+    }
+    const booking = require('./booking');
+    const config = await booking._internals.loadBookingConfig();
+    const range = bookingRange(config);
+    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
+    return { ok: true, slots: flattenNextSlots(built, count), needsAddress: false };
+  } catch (err) {
+    logger.warn(`[inspection-public] consultation slot compute failed for lead ${leadId}: ${err.message}`);
+    return { ok: false };
+  }
+}
+
+// The earliest `count` slots across every day, in the days/slots order
+// buildAvailabilityForLead already returns (day-sorted, each day's own
+// slots time-sorted) — flattening just caps the total instead of re-sorting.
+function flattenNextSlots(availability, count) {
+  const picked = [];
+  for (const day of (availability?.days || [])) {
+    for (const slot of (day.slots || [])) {
+      picked.push({
+        date: day.date,
+        start_time: slot.start_time,
+        dayOfWeek: day.dayOfWeek,
+        month: day.month,
+        dayNum: day.dayNum,
+        start_label: slot.start_label,
+      });
+      if (picked.length >= count) return picked;
+    }
+  }
+  return picked;
+}
+
 function visitShape(row) {
   return {
     date: typeof row.scheduled_date === 'string'
@@ -2328,6 +2399,13 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
     next(err);
   }
 });
+
+// Production-safe reuse surface (same convention as booking.js's own
+// `_internals`) — unlike `_test` below, this is a real caller (the new_lead
+// automation email), not test introspection.
+router._internals = {
+  computeConsultationSlotsForLead,
+};
 
 router._test = {
   tokenMayUseProfile,

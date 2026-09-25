@@ -33,6 +33,60 @@ const smsInput = (purpose) => ({
 const contactState = (prefs, customer = { id: 'c1' }) => ({ prefs, customer, lookupFailed: false });
 
 describe('billing / payment-confirmation delivery channel (SMS leg gating)', () => {
+  test('multi-channel API fields map to charged-profile array columns in canonical order', () => {
+    expect(notificationPrefsDbUpdates({
+      invoiceChannels: ['push', 'email'],
+      paymentIssueChannels: ['sms'],
+      billingReminderChannels: ['push', 'sms', 'email'],
+      paymentConfirmationChannels: ['email'],
+    })).toMatchObject({
+      invoice_channels: ['email', 'push'],
+      payment_issue_channels: ['sms'],
+      billing_channels: ['email', 'sms', 'push'],
+      payment_receipt_channels: ['email'],
+    });
+    for (const column of ['invoice_channels', 'payment_issue_channels', 'billing_channels', 'payment_receipt_channels']) {
+      expect(CHANNEL_DB_COLUMNS).not.toContain(column);
+    }
+  });
+
+  test('legacy scalar writes leave an explicit multi-channel choice untouched', () => {
+    expect(notificationPrefsDbUpdates(
+      { paymentConfirmationChannel: 'sms' },
+      { payment_receipt_channels: ['email', 'push'] },
+    )).toEqual({ payment_receipt_channel: 'sms' });
+  });
+
+  test('account payload exposes billing arrays while property payloads omit them', () => {
+    const original = process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
+    try {
+      process.env.GATE_BILLING_NOTIFICATION_CHANNELS = 'true';
+      expect(preferencePayload({ invoice_channels: ['push', 'email'] })).toMatchObject({
+        invoiceChannels: ['email', 'push'],
+        billingChannelsAvailable: true,
+      });
+      expect(preferencePayload({}, { includeChannels: false })).not.toHaveProperty('billingChannelsAvailable');
+    } finally {
+      if (original === undefined) delete process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
+      else process.env.GATE_BILLING_NOTIFICATION_CHANNELS = original;
+    }
+  });
+
+  test.each([undefined, 'false'])('account payload hides billing arrays when the rollout gate is %s', (gate) => {
+    const original = process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
+    try {
+      if (gate === undefined) delete process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
+      else process.env.GATE_BILLING_NOTIFICATION_CHANNELS = gate;
+      const payload = preferencePayload({ invoice_channels: ['email', 'push'] });
+      for (const key of ['billingChannelsAvailable', ...Object.keys(require('../services/billing-delivery-channels').BILLING_DELIVERY_FIELDS)]) {
+        expect(payload).not.toHaveProperty(key);
+      }
+    } finally {
+      if (original === undefined) delete process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
+      else process.env.GATE_BILLING_NOTIFICATION_CHANNELS = original;
+    }
+  });
+
   test('the channel gate reads the SAME migration-104 columns the channel-aware receipt senders use', () => {
     // estimate-deposits / estimate-card-holds branch their email legs off
     // payment_receipt_channel — the consent gate must not read a parallel

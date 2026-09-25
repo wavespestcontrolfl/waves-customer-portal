@@ -15,7 +15,7 @@ const logger = require('../services/logger');
 const db = require('../models/db');
 const { RelayConversation, MODEL } = require('../services/voice-agent/relay-conversation');
 const { classifyRelayEvent } = require('../services/voice-agent/relay-protocol');
-const { summarizeTurnStats, buildTranscriptUpdate } = require('../services/voice-agent/relay-transcript');
+const { summarizeTurnStats, storedTurnStats, buildTranscriptUpdate, LATENCY_BOUNDARIES, LATENCY_BOUNDARIES_VERSION } = require('../services/voice-agent/relay-transcript');
 
 function convoWithSpokenTurn({ callSid = 'CA-tel-1', ...rest } = {}) {
   const send = jest.fn();
@@ -264,6 +264,110 @@ describe('per-turn stats', () => {
   });
 });
 
+describe('events subscribed / received — trustworthy measurement (brief §3A)', () => {
+  test('no relay profile ⇒ speaker-events/tokens-played were never subscribed (confirmed false, not unknown)', () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-1', from: '+19415551234', send: jest.fn() });
+    expect(convo._relayEventsSubscribed).toEqual({ speaker: false, tokensPlayed: false });
+    expect(convo._eventsTelemetry()).toMatchObject({
+      subscribed: { speaker: false, tokensPlayed: false },
+      counts: {},
+      shapes: {},
+    });
+  });
+
+  test('a known profile whose events attribute includes both ⇒ subscribed true', () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-2', from: '+19415551234', send: jest.fn(), relayProfileId: 'flux_balanced_v1' });
+    expect(convo._relayEventsSubscribed).toEqual({ speaker: true, tokensPlayed: true });
+  });
+
+  test('an unresolvable profile id (e.g. a sandbox raw-attribute hash) is reported UNKNOWN, never guessed', () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-3', from: '+19415551234', send: jest.fn(), relayProfileId: 'sandbox_raw_deadbeefcafe' });
+    expect(convo._relayEventsSubscribed).toEqual({ speaker: null, tokensPlayed: null });
+  });
+
+  test('handleRelayEvent counts every classified kind and records its shape ONCE per kind — even when two kinds share an identical shape', () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-4', from: '+19415551234', send: jest.fn() });
+    logger.info.mockClear(); // isolate this test's log lines from earlier tests sharing the module-level mock
+    // Both frames below have the identical key set (speaker-event:event,speaking,type)
+    // but classify as two DIFFERENT kinds — a per-shape dedupe would have logged
+    // only the first; per-kind dedupe must record both.
+    convo.handleRelayEvent({ type: 'speaker-event', event: 'clientSpeaking', speaking: true }); // caller_speaking_start
+    convo.handleRelayEvent({ type: 'speaker-event', event: 'agent_speaking', speaking: false }); // agent_speaking_end
+    convo.handleRelayEvent({ type: 'speaker-event', event: 'clientSpeaking', speaking: false }); // caller_speaking_end
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'hello there' });
+    convo.handleRelayEvent({ type: 'tokens-played', tokens: 'again' }); // same kind, second occurrence — not re-logged
+    const telemetry = convo._eventsTelemetry();
+    expect(telemetry.counts).toEqual({ caller_speaking_start: 1, agent_speaking_end: 1, caller_speaking_end: 1, tokens_played: 2 });
+    expect(telemetry.shapes).toEqual({
+      caller_speaking_start: 'speaker-event:event,speaking,type',
+      agent_speaking_end: 'speaker-event:event,speaking,type',
+      caller_speaking_end: 'speaker-event:event,speaking,type',
+      tokens_played: 'tokens-played:tokens,type',
+    });
+    // Logged once per KIND, not once per shape.
+    const shapeLines = logger.info.mock.calls.map((c) => c[0]).filter((s) => /relay event shape seen/.test(s));
+    expect(shapeLines).toHaveLength(4);
+  });
+
+  test('the per-turn log line names whether events were subscribed and how many of each kind arrived', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-5', from: '+19415551234', send: jest.fn(), relayProfileId: 'flux_balanced_v1' });
+    await convo.handlePrompt('hi there');
+    logger.info.mockClear(); // isolate: only this call's own turn=1 line should be found below
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'started' });
+    const line = logger.info.mock.calls.map((c) => c[0]).find((s) => /\[voice-relay\] turn=1 /.test(s));
+    expect(line).toContain('events=subscribed');
+    expect(line).toMatch(/eventCounts=caller_speaking_end=0,agent_speaking_start=1,agent_speaking_end=0,tokens_played=0/);
+  });
+
+  test('no profile ⇒ the per-turn log line reports events=none', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-6', from: '+19415551234', send: jest.fn() });
+    await convo.handlePrompt('hi there');
+    logger.info.mockClear(); // isolate: only this call's own turn=1 line should be found below
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'started' });
+    const line = logger.info.mock.calls.map((c) => c[0]).find((s) => /\[voice-relay\] turn=1 /.test(s));
+    expect(line).toContain('events=none');
+  });
+
+  test('unresolvable (unknown) profile + no speaker event ever arrives ⇒ events=unknown at flush, never a false "none" (codex r1 P2)', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-6b', from: '+19415551234', send: jest.fn(), relayProfileId: 'sandbox_raw_deadbeefcafe' });
+    expect(convo._relayEventsSubscribed).toEqual({ speaker: null, tokensPlayed: null });
+    await convo.handlePrompt('hi there'); // firstSendAt gets set (fallback say()); no agent-speaking event ⇒ awaits, not logged yet
+    expect(convo._turnStats[0].logged).toBeUndefined();
+    logger.info.mockClear();
+    convo.leadCaptured = true; // keep the hangup capture floor out of this test
+    await convo.end('caller_hangup'); // flushes any turn whose event never arrived
+    const line = logger.info.mock.calls.map((c) => c[0]).find((s) => /\[voice-relay\] turn=1 /.test(s));
+    expect(line).toContain('events=unknown');
+  });
+
+  test('unresolvable (unknown) profile but a speaker event DID arrive ⇒ events=subscribed(observed), evidence overrides the unknown lookup', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-6c', from: '+19415551234', send: jest.fn(), relayProfileId: 'sandbox_raw_deadbeefcafe' });
+    expect(convo._relayEventsSubscribed).toEqual({ speaker: null, tokensPlayed: null });
+    await convo.handlePrompt('hi there');
+    logger.info.mockClear(); // isolate: only this call's own turn=1 line should be found below
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'started' });
+    const line = logger.info.mock.calls.map((c) => c[0]).find((s) => /\[voice-relay\] turn=1 /.test(s));
+    expect(line).toContain('events=subscribed(observed)');
+  });
+
+  test('each turn stat carries the session/segment generation it ran under, so a metric survives being pulled out of the session (brief §3A item 4)', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-7', from: '+19415551234', sessionGeneration: 42, send: jest.fn() });
+    await convo.handlePrompt('hi there');
+    expect(convo._turnStats[0].segmentGeneration).toBe(42);
+    // `turn` must survive serialization too (codex r1 P2) — relay_segments[].turn_stats
+    // entries need their turn correlation, not just the segment/session one.
+    expect(storedTurnStats(convo._turnStats)[0]).toMatchObject({ turn: 1, segmentGeneration: 42 });
+    // turn index / model round count / renderer were already carried — reused, not duplicated.
+    expect(convo._turnStats[0]).toMatchObject({ turn: 1, rounds: expect.any(Number), renderer: expect.any(String) });
+  });
+
+  test('no reconnect/segment concept in play ⇒ null, not 0 (a real generation 0 would be indistinguishable)', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-8', from: '+19415551234', send: jest.fn() });
+    await convo.handlePrompt('hi there');
+    expect(convo._turnStats[0].segmentGeneration).toBeNull();
+  });
+});
+
 describe('interrupt(detail) — the record is what the caller heard', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
@@ -429,11 +533,115 @@ describe('summarizeTurnStats — estimates and audio metrics never mix', () => {
     expect(s.barge_ins).toBe(1);
     expect(s.effort_counts).toEqual({ low: 3 });
     expect(s.played_sources).toEqual({ twilio_event: 1, assumed: 2 });
+    // Every audio field had data ⇒ no null-explaining sibling fields at all.
+    expect(s.missing).toBeUndefined();
+    expect(s.audio_metrics_reason).toBeUndefined();
+    expect(s.boundaries_version).toBe(1);
   });
 
   test('a garbage entry is ignored, never thrown on', () => {
     expect(() => summarizeTurnStats([null, 'x', turn({ promptAt: 5, firstSendAt: 1 })])).not.toThrow();
     expect(summarizeTurnStats([null, turn({})]).turns).toBe(1);
+  });
+});
+
+describe('summarizeTurnStats — every null audio field is explainable (brief §3A)', () => {
+  const turn = (over) => ({ promptAt: 0, callerSpeechStoppedAt: null, firstTokenAt: null, firstSendAt: null, agentSpeakingStartAt: null, modelMs: 0, toolMs: 0, toolCount: 0, rounds: 1, effort: 'low', renderer: 'block', interrupted: false, interruptWithoutFollowupTranscript: false, timedOut: false, partialCount: 0, playedSource: 'assumed', ...over });
+
+  test('no turns at all ⇒ no reason fields (nothing happened yet, not a diagnosed failure)', () => {
+    const s = summarizeTurnStats([]);
+    expect(s.missing).toBeUndefined();
+    expect(s.audio_metrics_reason).toBeUndefined();
+    expect(s.boundaries_version).toBe(1);
+    expect(s.observability).toEqual({ events_subscribed: { speaker: null, tokens_played: null }, events_received: {}, event_shapes: {} });
+  });
+
+  test('events_not_subscribed — no profile rendered the events attribute, every audio field null, one shared reason', () => {
+    const stats = [turn({ promptAt: 500 }), turn({ promptAt: 900 })];
+    const meta = { subscribed: { speaker: false, tokensPlayed: false }, counts: {}, shapes: {} };
+    const s = summarizeTurnStats(stats, meta);
+    expect(s.audio_metrics_reason).toBe('events_not_subscribed');
+    expect(s.missing).toBeUndefined(); // the single shared-reason field replaces the per-field map
+    expect(s.endpoint_delay_p50).toBeNull();
+    expect(s.stop_to_first_audio_p50).toBeNull();
+    expect(s.observability.events_subscribed).toEqual({ speaker: false, tokens_played: false });
+  });
+
+  test('no_events_received — subscribed (or unknown), but not a single speaker/tokens-played event arrived', () => {
+    const stats = [turn({ promptAt: 500 })];
+    const subscribedTrue = summarizeTurnStats(stats, { subscribed: { speaker: true, tokensPlayed: true }, counts: {} });
+    expect(subscribedTrue.audio_metrics_reason).toBe('no_events_received');
+    // Unknown subscription (e.g. a sandbox raw-attribute id) with zero arrivals
+    // reads the same way — it is still, literally, true that none arrived.
+    const unknown = summarizeTurnStats(stats, { subscribed: { speaker: null, tokensPlayed: null }, counts: {} });
+    expect(unknown.audio_metrics_reason).toBe('no_events_received');
+  });
+
+  test('insufficient_turns — events DID arrive but never landed on a turn with both stamps; only the affected fields are named', () => {
+    // One turn spoke and got an agent_speaking_start (send_to_first_audio is
+    // fine), but no turn ever recorded a caller_speaking_end even though the
+    // session-wide count says three arrived — a real caller_speaking_end was
+    // received and is simply unusable for pairing, not "never subscribed".
+    const stats = [turn({ promptAt: 0, firstSendAt: 500, agentSpeakingStartAt: 800 })];
+    const meta = { subscribed: { speaker: true, tokensPlayed: true }, counts: { caller_speaking_end: 3, agent_speaking_start: 1 } };
+    const s = summarizeTurnStats(stats, meta);
+    expect(s.send_to_first_audio_p50).toBe(300); // unaffected — this one paired fine
+    expect(s.missing).toEqual({
+      endpoint_delay: 'insufficient_turns',
+      stop_to_first_send: 'insufficient_turns',
+      stop_to_first_audio: 'insufficient_turns',
+    });
+    expect(s.audio_metrics_reason).toBeUndefined(); // partial, not all four ⇒ the map, not the single reason
+  });
+
+  test('partial_events_received — one boundary stream never arrived, so the two-event span is an outage, not a pairing miss (codex r2)', () => {
+    const stats = [turn({ promptAt: 0, firstSendAt: 500 })];
+    const meta = { subscribed: { speaker: true, tokensPlayed: true }, counts: { caller_speaking_end: 3 } };
+    const s = summarizeTurnStats(stats, meta);
+    expect(s.missing).toEqual({
+      endpoint_delay: 'insufficient_turns', // its only kind arrived; no turn carried the stamp
+      stop_to_first_send: 'insufficient_turns',
+      send_to_first_audio: 'no_events_received', // needs agent_speaking_start alone; none came
+      stop_to_first_audio: 'partial_events_received', // needs both; only caller events came
+    });
+  });
+
+  test('instrumentation_unknown — a pre-instrumentation leg makes silence unknown, never zero events (codex r2)', () => {
+    const stats = [turn({ promptAt: 0, firstSendAt: 500 })];
+    const s = summarizeTurnStats(stats, { subscribed: { speaker: null, tokensPlayed: null }, counts: {}, shapes: {}, unknown: true });
+    expect(s.audio_metrics_reason).toBe('instrumentation_unknown');
+    expect(s.observability.instrumentation_unknown).toBe(true);
+    const known = summarizeTurnStats(stats, { subscribed: { speaker: null, tokensPlayed: null }, counts: {} });
+    expect(known.observability.instrumentation_unknown).toBeUndefined();
+  });
+
+  test('a received event count is persisted as observability evidence a call row can be diagnosed from alone', () => {
+    const meta = {
+      subscribed: { speaker: true, tokensPlayed: true },
+      counts: { caller_speaking_end: 2, agent_speaking_start: 2, agent_speaking_end: 2, tokens_played: 5 },
+      shapes: { caller_speaking_end: 'info:name,type', agent_speaking_start: 'info:name,type', tokens_played: 'tokens-played:tokens,type' },
+    };
+    const s = summarizeTurnStats([turn({ promptAt: 0, callerSpeechStoppedAt: 0, firstSendAt: 100, agentSpeakingStartAt: 200 })], meta);
+    expect(s.observability).toEqual({
+      events_subscribed: { speaker: true, tokens_played: true },
+      events_received: { caller_speaking_end: 2, agent_speaking_start: 2, agent_speaking_end: 2, tokens_played: 5 },
+      event_shapes: { caller_speaking_end: 'info:name,type', agent_speaking_start: 'info:name,type', tokens_played: 'tokens-played:tokens,type' },
+    });
+  });
+});
+
+describe('latency boundaries doc (brief §3A item 3)', () => {
+  test('documents exactly the six persisted spans, each naming its clock kind', () => {
+    expect(LATENCY_BOUNDARIES_VERSION).toBe(1);
+    const fields = ['endpoint_delay', 'prompt_to_first_send', 'first_token', 'stop_to_first_send', 'send_to_first_audio', 'stop_to_first_audio'];
+    expect(Object.keys(LATENCY_BOUNDARIES).sort()).toEqual(fields.sort());
+    for (const field of fields) expect(typeof LATENCY_BOUNDARIES[field]).toBe('string');
+    // Application-clock spans say so, and never claim a provider proxy.
+    expect(LATENCY_BOUNDARIES.prompt_to_first_send).toMatch(/application-observed/i);
+    expect(LATENCY_BOUNDARIES.first_token).toMatch(/application-observed/i);
+    // Provider-derived spans are explicit that event arrival is a proxy.
+    expect(LATENCY_BOUNDARIES.stop_to_first_audio).toMatch(/provider-reported/);
+    expect(LATENCY_BOUNDARIES.send_to_first_audio).toMatch(/proxy/i);
   });
 });
 
