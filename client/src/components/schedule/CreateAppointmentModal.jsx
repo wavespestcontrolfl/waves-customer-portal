@@ -1501,8 +1501,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         params.set('search', q);
         params.set('is_active', 'true');
         // Hide retired-for-sale rows (quarterly T&S, retired 2026-09-24);
-        // grandfathered plans keep their existing visits.
+        // a customer who already has visits on one (the grandfathered plan) still
+        // sees it for a catch-up visit.
         params.set('sellable', 'true');
+        if (selectedCustomer?.id) params.set('sellable_customer_id', selectedCustomer.id);
         params.set('limit', '50');
         const r = await adminFetch(`/admin/services?${params}`);
         setServiceResults((r.services || []).map((s) => ({
@@ -1526,7 +1528,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
     }, 200);
     return () => clearTimeout(handle);
-  }, [serviceSearch]);
+  }, [serviceSearch, selectedCustomer?.id]);
 
   useEffect(() => {
     const customerId = selectedCustomer?.id;

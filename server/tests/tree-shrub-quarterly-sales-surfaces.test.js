@@ -55,12 +55,25 @@ describe('knowledge index service connector (codex r8)', () => {
 describe('service library list — new-appointment picker (codex r11)', () => {
   const run = async (opts) => {
     const db = require('../models/db');
-    const notIn = [];
+    const calls = { notIn: [], exists: [] };
+    const sub = {
+      whereNull() { return this; },
+      orWhereNotIn(column, values) { calls.notIn.push([column, values]); return this; },
+      orWhereExists(fn) {
+        const inner = {
+          select() { return this; }, from(t) { calls.exists.push(t); return this; },
+          whereRaw(sql) { calls.exists.push(sql); return this; },
+          where(col, val) { calls.exists.push([col, val]); return this; },
+          whereNot() { return this; },
+        };
+        fn.call(inner);
+        return this;
+      },
+    };
     const builder = {
       select() { return this; },
       orderBy() { return this; },
-      where() { return this; },
-      whereNotIn(column, values) { notIn.push([column, values]); return this; },
+      where(arg) { if (typeof arg === 'function') arg.call(sub); return this; },
       clone() { return this; },
       clearSelect() { return this; },
       clearOrder() { return this; },
@@ -70,17 +83,34 @@ describe('service library list — new-appointment picker (codex r11)', () => {
       offset() { return Promise.resolve([]); },
     };
     db.mockImplementation(() => builder);
+    db.raw = (sql) => sql;
     const { getServices } = require('../services/service-library');
     await getServices(opts);
-    return notIn;
+    return calls;
   };
+  const CUSTOMER = '5a3f2c1d-9b8e-4f6a-a1b2-c3d4e5f60789';
 
   test('sellable=true hides retired-for-sale rows', async () => {
-    expect(await run({ isActive: 'true', sellable: 'true' }))
-      .toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
+    const calls = await run({ isActive: 'true', sellable: 'true' });
+    expect(calls.notIn).toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
+    expect(calls.exists).toEqual([]);
+  });
+
+  test('a customer with visits on the retired row still sees it (grandfathered catch-up)', async () => {
+    const calls = await run({ isActive: 'true', sellable: 'true', sellableCustomerId: CUSTOMER });
+    expect(calls.notIn).toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
+    expect(calls.exists).toEqual(expect.arrayContaining([
+      'scheduled_services', 'scheduled_services.service_id = services.id', ['scheduled_services.customer_id', CUSTOMER],
+    ]));
+  });
+
+  test('a non-uuid customer id is ignored', async () => {
+    const calls = await run({ isActive: 'true', sellable: 'true', sellableCustomerId: "x' OR 1=1" });
+    expect(calls.exists).toEqual([]);
   });
 
   test('the Service Library page (no sellable flag) still lists them', async () => {
-    expect(await run({ isActive: 'true' })).toEqual([]);
+    const calls = await run({ isActive: 'true' });
+    expect(calls.notIn).toEqual([]);
   });
 });

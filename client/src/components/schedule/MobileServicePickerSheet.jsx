@@ -43,8 +43,7 @@ export default function MobileServicePickerSheet({
   const [query, setQuery] = useState('');
 
   useEffect(() => {
-    // sellable: hide retired-for-sale rows (quarterly T&S, retired 2026-09-24).
-    adminFetch('/admin/services?is_active=true&sellable=true&limit=500')
+    adminFetch('/admin/services?is_active=true&limit=500')
       .then((d) => { setServices(d.services || []); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);

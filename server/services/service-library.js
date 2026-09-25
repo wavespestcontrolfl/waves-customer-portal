@@ -6,6 +6,8 @@ const { auditServiceCatalogChange, auditServicePackageChange } = require('./audi
 const { inferCloseoutDefaults } = require('./service-closeout-requirements');
 const { refreshCatalogNames } = require('./service-catalog-names');
 const logger = require('./logger');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const { capacityEnabled } = require('./scheduling/policy');
 
 const SERVICE_COLS = [
@@ -299,7 +301,7 @@ function assertOperationalConsistency(merged) {
 /**
  * Paginated list of services with filters
  */
-async function getServices({ category, billingType, isActive, isArchived, includeArchived = false, sellable = false, search, limit = 50, offset = 0 } = {}) {
+async function getServices({ category, billingType, isActive, isArchived, includeArchived = false, sellable = false, sellableCustomerId = null, search, limit = 50, offset = 0 } = {}) {
   const parsedLimit = Number(limit);
   const parsedOffset = Number(offset);
   const safeLimit = Number.isInteger(parsedLimit) ? Math.min(500, Math.max(1, parsedLimit)) : 50;
@@ -312,10 +314,25 @@ async function getServices({ category, billingType, isActive, isArchived, includ
   else if (isActive === 'true') query = query.where('is_active', true);
   else if (isActive === 'false') query = query.where('is_active', false);
   // New-sale pickers only: retired-for-sale rows stay active for their
-  // grandfathered plans but must not be offered for a new appointment.
+  // grandfathered plans but must not be offered for a new appointment —
+  // except to a customer who already has visits on that service (the
+  // grandfathered plan's catch-up / one-off visits).
   if (sellable === true || sellable === 'true') {
     const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
-    query = query.whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS]);
+    const retiredKeys = [...RETIRED_SALE_SERVICE_KEYS];
+    const customerId = UUID_RE.test(String(sellableCustomerId || '')) ? String(sellableCustomerId) : null;
+    query = query.where(function () {
+      // NULL-key rows are not retired; NOT IN alone would drop them.
+      this.whereNull('service_key').orWhereNotIn('service_key', retiredKeys);
+      if (customerId) {
+        this.orWhereExists(function () {
+          this.select(db.raw('1')).from('scheduled_services')
+            .whereRaw('scheduled_services.service_id = services.id')
+            .where('scheduled_services.customer_id', customerId)
+            .whereNot('scheduled_services.status', 'cancelled');
+        });
+      }
+    });
   }
   if (search) {
     // Token-AND across the searchable text columns. Splitting on

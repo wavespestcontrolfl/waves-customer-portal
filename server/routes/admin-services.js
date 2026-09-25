@@ -40,7 +40,7 @@ function auditFromReq(req) {
 // GET / — paginated list with filters
 router.get('/', async (req, res, next) => {
   try {
-    const { category, billing_type, is_active, is_archived, include_archived, sellable, search, limit, offset } = req.query;
+    const { category, billing_type, is_active, is_archived, include_archived, sellable, sellable_customer_id: sellableCustomerId, search, limit, offset } = req.query;
     const result = await serviceLibrary.getServices({
       category,
       billingType: billing_type,
@@ -48,6 +48,7 @@ router.get('/', async (req, res, next) => {
       isArchived: is_archived,
       includeArchived: include_archived,
       sellable,
+      sellableCustomerId,
       search,
       limit: limit ? parseInt(limit) : undefined,
       offset: offset ? parseInt(offset) : undefined,
