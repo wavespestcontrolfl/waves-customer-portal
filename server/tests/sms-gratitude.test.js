@@ -121,6 +121,9 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'I can have that by end of day',
     'Should have it before noon',
     'We will be out on Thursday',
+    'It should arrive Friday',
+    'Expect it Friday',
+    "I'm gonna move your tree and shrub care to Wednesday",
     'On the way, 15-20 min',
     'On my way now',
     'Leaving now',
@@ -150,10 +153,12 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Email me the invoice number',
     'Tell me which option you prefer',
     'Text us a good time',
+    'Please provide a photo of the issue',
+    'Provide us the gate code',
   ])('a hand-typed question without a question mark still needs an answer: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
   });
-  test.each(['Thanks, Dana!', 'Anytime!', 'Happy to help', 'You are welcome!', 'No problem'])('a hand-typed courtesy is not a closure to thank again: %s', body => {
+  test.each(['Thanks, Dana!', 'Anytime!', 'Happy to help', 'You are welcome!', 'No problem', 'Not a problem Steve!'])('a hand-typed courtesy is not a closure to thank again: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [report, { ...manual(body), createdAt: '2030-01-10T14:59:30Z' }] }).reason)
       .toBe('courtesy_already_sent');
   });
