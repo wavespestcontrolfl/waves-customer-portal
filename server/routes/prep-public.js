@@ -132,8 +132,19 @@ async function fetchUpcomingFamilyVisits(customerId, projectType) {
   }
 }
 
+// The prep page (PrepGuidePage.jsx) and the PDF turn author-written
+// `[label](https://…)` markdown into links AFTER this substitution runs, so
+// a substituted value must never be able to complete link syntax. Values
+// are customer-influenced (name, address, service label); mirroring the
+// email renderer's rule (codex #3167 P1: only author text becomes an
+// anchor), any `](` inside a VALUE is broken with a space so it stays
+// inert text. Author markdown in the template is untouched.
+function neutralizeLinkSyntax(value) {
+  return String(value == null ? '' : value).replace(/\]\(/g, '] (');
+}
+
 function interpolate(text, vars) {
-  return String(text || '').replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] || '');
+  return String(text || '').replace(/\{\{(\w+)\}\}/g, (_, key) => neutralizeLinkSyntax(vars[key] || ''));
 }
 
 function interpolateBlock(block, vars) {
@@ -142,9 +153,13 @@ function interpolateBlock(block, vars) {
   if (typeof result.content === 'string') {
     result.content = interpolate(result.content, vars);
   }
+  if (Array.isArray(result.items)) {
+    result.items = result.items.map((item) => (typeof item === 'string' ? interpolate(item, vars) : item));
+  }
   if (Array.isArray(result.rows)) {
     result.rows = result.rows.map((row) => ({
       ...row,
+      label: typeof row.label === 'string' ? interpolate(row.label, vars) : row.label,
       value: typeof row.value === 'string' ? interpolate(row.value, vars) : row.value,
     }));
   }
@@ -446,3 +461,4 @@ module.exports = router;
 // The public page's own resolver (token → source, expiry enforced), re-run
 // by the composer's send-time bearer check.
 module.exports.resolvePrepSource = resolvePrepSource;
+module.exports.interpolateBlock = interpolateBlock;

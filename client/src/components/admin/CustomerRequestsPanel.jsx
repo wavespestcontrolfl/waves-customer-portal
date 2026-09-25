@@ -21,11 +21,59 @@ function fmtDate(d) {
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+function RequestPhotos({ request, detail, onLoad }) {
+  const [selectedPhoto, setSelectedPhoto] = useState("");
+  if (!detail) {
+    return (
+      <Button className="mt-2" variant="secondary" size="sm" onClick={() => onLoad(request.id)}>
+        Check photos
+      </Button>
+    );
+  }
+  if (detail.loading) return <div className="text-12 text-ink-tertiary mt-2">Loading photos…</div>;
+  if (detail.error) {
+    return (
+      <div className="mt-2">
+        <div className="text-13 text-alert-fg">{detail.error}</div>
+        <Button className="mt-1.5" variant="secondary" size="sm" onClick={() => onLoad(request.id)}>Retry photos</Button>
+      </div>
+    );
+  }
+  const unavailableCount = Math.max(0, Number(detail.unavailableCount) || 0);
+  return (
+    <>
+      {unavailableCount > 0 && (
+        <div className="mt-2">
+          <div className="text-12 text-ink-tertiary">Some attached photos are unavailable.</div>
+          <Button className="mt-1.5" variant="secondary" size="sm" onClick={() => onLoad(request.id)}>Retry unavailable photos</Button>
+        </div>
+      )}
+      {!detail.photos?.length && <div className="text-12 text-ink-tertiary mt-2">No request photos are available.</div>}
+      {selectedPhoto && (
+        <div className="mt-2">
+          <img src={selectedPhoto} alt={`Expanded request evidence for ${request.subject}`} className="w-full max-h-[420px] object-contain bg-zinc-50 rounded-sm border-hairline border-zinc-200" />
+          <Button className="mt-1.5" variant="secondary" size="sm" onClick={() => setSelectedPhoto("")}>Close photo</Button>
+        </div>
+      )}
+      {detail.photos?.length > 0 && (
+        <div className="grid grid-cols-3 gap-2 mt-2" aria-label={`Photos for ${request.subject}`}>
+          {detail.photos.map((photo, index) => (
+            <button key={index} type="button" onClick={() => setSelectedPhoto(photo)} aria-label={`Expand photo ${index + 1} for ${request.subject}`}>
+              <img src={photo} alt={`Photo ${index + 1} for ${request.subject}`} className="w-full aspect-square object-cover rounded-sm border-hairline border-zinc-200" />
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function CustomerRequestsPanel({ customerId }) {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState("");
+  const [photoDetails, setPhotoDetails] = useState({});
 
   // Load is owned by this effect so a customer switch aborts the in-flight
   // request and discards any late response. Without this guard, an operator who
@@ -37,6 +85,7 @@ export default function CustomerRequestsPanel({ customerId }) {
   useEffect(() => {
     if (!customerId) {
       setRequests([]);
+      setPhotoDetails({});
       setLoading(false);
       return;
     }
@@ -44,6 +93,7 @@ export default function CustomerRequestsPanel({ customerId }) {
     let cancelled = false;
     setLoading(true);
     setError("");
+    setPhotoDetails({});
     (async () => {
       try {
         const res = await adminFetch(
@@ -72,6 +122,32 @@ export default function CustomerRequestsPanel({ customerId }) {
       ac.abort();
     };
   }, [customerId]);
+
+  const loadPhotos = useCallback(async (requestId) => {
+    setPhotoDetails((current) => ({
+      ...current,
+      [requestId]: { loading: true, photos: [], unavailableCount: 0, error: "" },
+    }));
+    try {
+      const res = await adminFetch(`/admin/requests/${requestId}/photos`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setPhotoDetails((current) => ({
+        ...current,
+        [requestId]: {
+          loading: false,
+          photos: Array.isArray(data.photos) ? data.photos : [],
+          unavailableCount: Math.max(0, Number(data.unavailableCount) || 0),
+          error: "",
+        },
+      }));
+    } catch (e) {
+      setPhotoDetails((current) => ({
+        ...current,
+        [requestId]: { loading: false, photos: [], unavailableCount: 0, error: e?.message || "Could not load photos" },
+      }));
+    }
+  }, []);
 
   const markHandled = useCallback(async (id) => {
     setBusyId(id);
@@ -144,6 +220,7 @@ export default function CustomerRequestsPanel({ customerId }) {
             {r.description && (
               <div className="text-ink-secondary mt-1.5 whitespace-pre-wrap">{r.description}</div>
             )}
+            <RequestPhotos request={r} detail={photoDetails[r.id]} onLoad={loadPhotos} />
           </div>
         ))}
       </div>

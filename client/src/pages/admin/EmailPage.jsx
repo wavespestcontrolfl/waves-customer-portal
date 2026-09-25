@@ -38,7 +38,7 @@ export default function EmailPage({ navigation, active }) {
   } : undefined;
 
   return <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
-    <AdminCommandHeader {...navigation} variant="workspace" sticky={false}
+    <AdminCommandHeader {...navigation}
       secondarySections={connected ? EMAIL_SECTIONS : []}
       secondaryActiveKey={tab} onSecondaryChange={setTab}
       secondaryAriaLabel="Email section" secondaryNavGridClassName="grid-cols-2" action={action} />

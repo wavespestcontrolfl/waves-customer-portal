@@ -71,12 +71,12 @@ describe('reminder settings rows', () => {
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
     const switchNames = [
-      'Appointment Confirmations',
-      '72-Hour Appointment Reminder',
-      '24-Hour Service Reminder',
-      'Tech En Route Alert',
-      'Tech Arrived Alert',
-      'Weather & Property Alerts',
+      'Appointment updates',
+      '3-day reminder',
+      'Day-before reminder',
+      'On the way',
+      'Technician arrival',
+      'Weather & property alerts',
     ];
     for (const name of switchNames) {
       expect(await screen.findByRole('switch', { name })).toBeInTheDocument();
@@ -89,27 +89,27 @@ describe('reminder settings rows', () => {
 
   it('keeps labelled channel selects on the alerts that offer delivery choice', async () => {
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
-    await screen.findByRole('switch', { name: 'Appointment Confirmations' });
+    await screen.findByRole('switch', { name: 'Appointment updates' });
 
     const channelNames = [
-      'Appointment Confirmations',
-      '72-Hour Appointment Reminder',
-      '24-Hour Service Reminder',
-      'Tech En Route Alert',
-      'Tech Arrived Alert',
+      'Appointment updates',
+      '3-day reminder',
+      'Day-before reminder',
+      'On the way',
+      'Technician arrival',
     ];
     for (const name of channelNames) {
       expect(screen.getByRole('combobox', { name: `Delivery method for ${name}` })).toBeInTheDocument();
     }
     // App-only advisories deliberately never grew a select.
-    expect(screen.queryByRole('combobox', { name: /Weather & Property Alerts/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Weather & property alerts/i })).not.toBeInTheDocument();
   });
 
   it('stacks the channel select and switch on a compact phone width', async () => {
     window.innerWidth = 360;
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
-    await screen.findByRole('switch', { name: 'Appointment Confirmations' });
+    await screen.findByRole('switch', { name: 'Appointment updates' });
     const row = document.querySelector('[data-reminder-row]');
     expect(row.lastElementChild.style.flex).toContain('1 0 100%');
     expect(row.firstElementChild.style.flex).toContain('1 1 160px');

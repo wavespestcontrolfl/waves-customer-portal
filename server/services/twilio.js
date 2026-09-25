@@ -24,6 +24,25 @@ const { publicPortalUrl } = require("../utils/portal-url");
 // or set to anything else → restore.
 const HARDCODED_OWNER_FALLBACKS = ["+19413187612", "+19415993489"];
 
+// The arrival text names the visit ("has arrived for your Pest Control
+// Re-Service"), not a bare "your service" (owner directive 2026-09-24).
+// The label comes from the reminder path's own resolver (buildServiceLabel:
+// strips admin suffixes, joins add-ons) so the arrival text reads like the
+// reminders the customer already received. Best-effort: a failed lookup
+// falls back to "service" rather than dropping the arrival notice.
+async function arrivedServiceLabel(scheduledServiceId) {
+  if (!scheduledServiceId) return "service";
+  try {
+    const visit = await db("scheduled_services").where({ id: scheduledServiceId }).first("service_type");
+    if (!visit) return "service";
+    const label = await require("./appointment-reminders").buildServiceLabel(scheduledServiceId, visit.service_type);
+    return label || "service";
+  } catch (err) {
+    logger.warn(`[twilio] tech_arrived service label lookup failed for ${scheduledServiceId}: ${err.message}`);
+    return "service";
+  }
+}
+
 function normalizePhone(p) {
   if (!p || typeof p !== "string") return "";
   // Canonicalize to bare digits. SMS recipient strings arrive in mixed
@@ -1824,6 +1843,7 @@ const TwilioService = {
     const results = [];
     const { sendCustomerMessage } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
+    const serviceType = await arrivedServiceLabel(scheduledServiceId);
     const attemptSmsLegs = async () => {
       for (const contact of contacts) {
         // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
@@ -1834,6 +1854,7 @@ const TwilioService = {
           body = await smsTemplatesRouter.getTemplate("tech_arrived", {
             first_name: firstName,
             tech_name: customerTechName,
+            service_type: serviceType,
           }, { workflow: "tech_arrived", entity_type: "customer", entity_id: customerId });
         }
         if (!body) {

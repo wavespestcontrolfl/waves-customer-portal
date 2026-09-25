@@ -8,7 +8,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/content-astro/github-client', () => ({ getPr: jest.fn(), retireBranch: jest.fn(async () => true) }));
 jest.mock('../services/content/codex-remediation', () => ({ markPrTerminal: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false }));
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const queue = require('../services/content/opportunity-queue');

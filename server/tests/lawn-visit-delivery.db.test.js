@@ -11,7 +11,7 @@ const { etDateString } = require('../utils/datetime-et');
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 const mockGateEnvValue = jest.fn((name) => name === 'GATE_LAWN_DELIVERY_RECOVERY');
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: (name) => mockGateEnvValue(name) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, gateEnvValue: (name) => mockGateEnvValue(name) }));
 
 const AI = { turf_density: 80, weed_suppression: 82, color_health: 76, fungus_control: 85, thatch_level: 90, stress_damage: 85 };
 const FINAL = { ...AI, turf_density: 60, stress_damage: 70 };

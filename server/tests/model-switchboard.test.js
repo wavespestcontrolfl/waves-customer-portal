@@ -321,7 +321,11 @@ describe('model-switchboard', () => {
     }
   });
 
-  it('the image lane resolves BLOG_IMAGE_PROVIDER as a chain: first valid slug, literal when none is valid', () => {
+  it('the blog image lane resolves BLOG_IMAGE_PROVIDER as a chain: first valid slug, real no-env default (Images 2.5) when none is valid', () => {
+    const { DEFAULT_CHAIN, parseChain, MODEL_MAP } = require('../services/content/image-generator')._internals;
+    // The literal is computed through the same parse helpers the env-override
+    // path uses, so it can never drift from image-generator's own chain.
+    const chainModels = parseChain(DEFAULT_CHAIN).map((slug) => MODEL_MAP[slug].model);
     const prev = process.env.BLOG_IMAGE_PROVIDER;
     try {
       // A Gemini slug in the env chain is dropped (SynthID pixel watermark,
@@ -336,22 +340,65 @@ describe('model-switchboard', () => {
       process.env.BLOG_IMAGE_PROVIDER = 'not-a-provider';
       jest.resetModules();
       lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
-      expect(lane.primary.model).toBe('gpt-image-2');
+      // No valid slug in the env chain → the real no-env default, Images 2.5
+      // leading since 2026-09-25 — never the old hardcoded 'gpt-image-2'.
+      expect(lane.primary.model).toBe(chainModels[0]);
+      expect(lane.primary.model).toBe('gpt-image-2.5-sunburst');
+
+      delete process.env.BLOG_IMAGE_PROVIDER;
+      jest.resetModules();
+      lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+      expect(lane.primary.model).toBe(chainModels[0]);
+      expect(lane.fallback.model).toBe(chainModels[1]);
+      expect(lane.fallback.model).toBe('gpt-image-2');
     } finally {
       if (prev === undefined) delete process.env.BLOG_IMAGE_PROVIDER; else process.env.BLOG_IMAGE_PROVIDER = prev;
     }
   });
 
-  it('the image lane is OpenAI-only: fallback gpt-image-1.5, Nano Banana Pro selector kept but marked unreachable (owner 2026-09-24)', () => {
+  it('the blog image lane is OpenAI-only: fallback gpt-image-2, Nano Banana Pro selector kept but marked unreachable (owner 2026-09-24)', () => {
     expect(sb.SELECTORS.find((s) => s.key === 'GEMINI_IMAGE_PRO')).toMatchObject({ env: 'MODEL_GEMINI_IMAGE_PRO', accepts: { providers: ['gemini'], cap: 'image' } });
     expect(sb.SELECTORS.find((s) => s.key === 'GEMINI_IMAGE_PRO').description).toMatch(/SynthID/);
     const lane = sb.getSwitchboard().lanes.find((l) => l.id === 'image_gen');
-    expect(lane.fallback.model).toBe('gpt-image-1.5');
+    expect(lane.fallback.model).toBe('gpt-image-2');
     expect(lane.fallback.provider).toBe('openai');
-    expect(lane.note).toMatch(/gpt-image-2 → gpt-image-1\.5 → gpt-image-1/);
+    expect(lane.note).toMatch(/gpt-image-2\.5-sunburst → gpt-image-2 → gpt-image-1\.5 → gpt-image-1/);
+    expect(lane.note).toMatch(/Images 2\.5 leads since 2026-09-25/);
   });
 
-  it('with ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true the image lane reports the restored Gemini backup (Codex r3 P2 on #4717)', () => {
+  it('the social image lane keeps the older chain (no Images 2.5 leg), env SOCIAL_IMAGE_PROVIDER', () => {
+    const { SOCIAL_DEFAULT_CHAIN } = require('../services/social-creative-engine');
+    const { parseChain, MODEL_MAP } = require('../services/content/image-generator')._internals;
+    const chainModels = parseChain(SOCIAL_DEFAULT_CHAIN).map((slug) => MODEL_MAP[slug].model);
+    expect(SOCIAL_DEFAULT_CHAIN).toBe('gpt-image-2,gpt-image-1.5,gpt-image-1');
+    const prev = process.env.SOCIAL_IMAGE_PROVIDER;
+    try {
+      delete process.env.SOCIAL_IMAGE_PROVIDER;
+      jest.resetModules();
+      let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'social_image_gen');
+      expect(lane.file).toBe('social-creative-engine.js');
+      expect(lane.lock).toBeTruthy();
+      expect(lane.primary.model).toBe(chainModels[0]);
+      expect(lane.primary.model).toBe('gpt-image-2');
+      expect(lane.fallback.model).toBe(chainModels[1]);
+      expect(lane.fallback.model).toBe('gpt-image-1.5');
+      // Social never picks up the blog lane's Images 2.5 leg with no env set.
+      expect(lane.primary.model).not.toBe('gpt-image-2.5-sunburst');
+
+      process.env.SOCIAL_IMAGE_PROVIDER = 'gemini-image-best, gpt-image-1';
+      jest.resetModules();
+      lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'social_image_gen');
+      // Same SynthID filter as the blog chain drops the Gemini slug.
+      expect(lane.primary.model).toBe('gpt-image-1');
+      expect(lane.primary.provider).toBe('openai');
+      expect(lane.primary.setEnv).toBe('SOCIAL_IMAGE_PROVIDER');
+    } finally {
+      if (prev === undefined) delete process.env.SOCIAL_IMAGE_PROVIDER; else process.env.SOCIAL_IMAGE_PROVIDER = prev;
+      jest.resetModules();
+    }
+  });
+
+  it('with ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true the blog image lane still leads on Images 2.5 (the Gemini legs moved past the card\'s first two legs, Codex r3 P2 on #4717 predates the sunburst reorder)', () => {
     const prev = process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
     const prevChain = process.env.BLOG_IMAGE_PROVIDER;
     try {
@@ -359,13 +406,13 @@ describe('model-switchboard', () => {
       process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true';
       jest.resetModules();
       let lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
-      expect(lane.primary.model).toBe('gpt-image-2');
-      expect(lane.fallback.model).toBe(MODELS.GEMINI_IMAGE_PRO);
-      expect(lane.fallback.provider).toBe('gemini');
+      expect(lane.primary.model).toBe('gpt-image-2.5-sunburst');
+      expect(lane.fallback.model).toBe('gpt-image-2');
+      expect(lane.fallback.provider).toBe('openai');
       delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
       jest.resetModules();
       lane = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'image_gen');
-      expect(lane.fallback.model).toBe('gpt-image-1.5');
+      expect(lane.fallback.model).toBe('gpt-image-2');
     } finally {
       if (prev === undefined) delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; else process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = prev;
       if (prevChain === undefined) delete process.env.BLOG_IMAGE_PROVIDER; else process.env.BLOG_IMAGE_PROVIDER = prevChain;
@@ -373,9 +420,27 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('registers the generated-image screen (owner ruling 2026-09-25: Sol first, Claude backup)', () => {
+    const { selectors, lanes } = sb.getSwitchboard();
+    const sel = selectors.find((s) => s.key === 'OPENAI_IMAGE_SCREEN');
+    expect(sel).toMatchObject({ env: 'MODEL_OPENAI_IMAGE_SCREEN', accepts: { providers: ['openai'], cap: 'vision' } });
+    expect(sel.current).toBe(MODELS.OPENAI_IMAGE_SCREEN);
+    expect(sb.POLICY_SELECTOR.imageScreen).toEqual({ primary: 'OPENAI_IMAGE_SCREEN', fallback: 'VISION' });
+    const lane = lanes.find((l) => l.id === 'image_screen');
+    expect(lane.file).toBe('content/hero-alt-vision.js');
+    expect(lane.primary.model).toBe(MODELS.TEXT_POLICIES.imageScreen.primary.model);
+    expect(lane.primary.provider).toBe('openai');
+    expect(lane.fallback.model).toBe(MODELS.TEXT_POLICIES.imageScreen.fallback.model);
+    expect(lane.fallback.provider).toBe('anthropic');
+    expect(lane.continuity).toBe('verified');
+    // The alt-text pass on the same file stays on the separate visionAnalysis policy.
+    const heroAlt = lanes.find((l) => l.id === 'hero_alt');
+    expect(heroAlt.primary.model).toBe(MODELS.TEXT_POLICIES.visionAnalysis.primary.model);
+  });
+
   it('locks the lanes a generic picker must not move', () => {
     const { lanes, selectors } = sb.getSwitchboard();
-    for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'mentions_prober']) {
+    for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'social_image_gen', 'mentions_prober']) {
       expect(lanes.find((l) => l.id === id).lock).toBeTruthy();
     }
     expect(selectors.find((s) => s.key === 'OPENAI_EMBEDDING').lock.kind).toBe('migration');
