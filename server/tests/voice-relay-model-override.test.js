@@ -176,6 +176,22 @@ describe('resolveSessionModel — precedence table', () => {
   });
 });
 
+describe('rejected-override warning is deduplicated per process', () => {
+  test('every call still stamps its fallback reason, but the warning is logged once per source/value', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-dedupe-probe-1';
+    const first = resolveSessionModel({ sandbox: false });
+    const second = resolveSessionModel({ sandbox: false });
+    expect(first.fallbackReason).toBe('unknown_model_override:VOICE_RELAY_INBOUND_MODEL=claude-dedupe-probe-1');
+    expect(second.fallbackReason).toBe(first.fallbackReason);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    // A different bad value is a new misconfiguration and warns again.
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-dedupe-probe-2';
+    resolveSessionModel({ sandbox: false });
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(logger.warn.mock.calls[1][0]).toContain('claude-dedupe-probe-2');
+  });
+});
+
 describe('per-session pinning', () => {
   test('two sessions built under different env values each keep their own resolved model; changing env afterwards moves neither', () => {
     process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-opus-5';

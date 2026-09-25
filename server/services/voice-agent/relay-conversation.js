@@ -134,6 +134,18 @@ function isAllowedOverrideModel(id) {
   return typeof id === 'string' && id.length > 0 && ALLOWED_OVERRIDE_MODEL_IDS.has(id);
 }
 
+// A misconfigured override is re-read by every new call; the per-session
+// fallback stamp records each one, but the operational warning (which lists
+// the whole allowlist) is logged once per process per source/value — the
+// relay-profiles.js warnOnce pattern — so a busy line cannot flood the logs.
+const warnedOverrides = new Set();
+function warnRejectedOverrideOnce(source, value) {
+  const key = `${source}=${value}`;
+  if (warnedOverrides.has(key)) return;
+  warnedOverrides.add(key);
+  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')})`);
+}
+
 /**
  * Resolve the ONE model this session pins for its whole lifetime. Called once
  * at RelayConversation construction; the caller stores the result on
@@ -164,7 +176,7 @@ function resolveSessionModel({ sandbox } = {}) {
     }
     if (!fallbackReason) {
       fallbackReason = `unknown_model_override:${source}=${value}`;
-      logger.warn(`[voice-relay] ignoring unknown model override ${source}=${value} — falling back (allowlist: ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')})`);
+      warnRejectedOverrideOnce(source, value);
     }
   }
   return { model: MODEL, fallbackReason };

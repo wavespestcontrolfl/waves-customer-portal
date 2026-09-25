@@ -195,7 +195,7 @@ function CatalogOnlyResults({ q, target, matches, probing, choose, deepBlocked, 
       {matches.length > 0 ? (
         <ResultList items={matches} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
       ) : (
-        <div className="text-13 text-ink-secondary">No model matches "{q.trim()}".</div>
+        <div className="text-14 text-ink-secondary">No model matches "{q.trim()}".</div>
       )}
     </div>
   );
@@ -224,7 +224,7 @@ function LiveSearchPanel({ q, target, typed, searching, results, newest, suggest
             Searching…
           </div>
         ) : results && results.length === 0 ? (
-          <div className="text-13 text-ink-secondary">No model matches "{q.trim()}".</div>
+          <div className="text-14 text-ink-secondary">No model matches "{q.trim()}".</div>
         ) : results ? (
           <ResultList items={results} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
         ) : null
