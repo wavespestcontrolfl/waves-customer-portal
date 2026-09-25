@@ -1551,6 +1551,20 @@ describe('SuccessCard — already-accepted retry', () => {
     expect(screen.getByText(/Payment is optional right now/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Pay now and save card/ })).toHaveAttribute('href', 'https://pay.example/inv');
   });
+
+  it('sign_agreement (termite annual-plan sign-before-pay): plain wording, no dollar amount, no "booked" copy', () => {
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true, nextStep: 'sign_agreement', billingTerm: 'prepay_annual',
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/Please sign your agreement to activate your plan/)).toBeInTheDocument();
+    expect(screen.queryByText("You're booked!")).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
+  });
 });
 
 describe('oneTimeExtrasForPaymentNote', () => {

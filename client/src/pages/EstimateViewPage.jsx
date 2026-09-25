@@ -3919,6 +3919,23 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
     );
   }
 
+  if (nextStep === 'sign_agreement') {
+    // Sign-before-pay (termite annual-plan restructure, P2): the accept
+    // parked — no invoice, no schedule, no charge — until the customer
+    // signs the annual agreement. Plain wording, no dollar amount (none is
+    // final until signature).
+    return (
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          You're approved — one step left.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          Please sign your agreement to activate your plan. We'll text and email you a link to sign, then confirm your schedule and send your invoice.
+        </div>
+      </div>
+    );
+  }
+
   if (nextStep === 'site_confirmation') {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.
