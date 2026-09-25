@@ -87,7 +87,7 @@ const mockReplayBillingRetryEmail = jest.fn(async () => ({
 }));
 jest.mock('../services/billing-retry-email-obligation', () => ({
   replayPaymentRetryNotice: (...args) => mockReplayBillingRetryEmail(...args),
-}), { virtual: true });
+}));
 
 const db = require('../models/db');
 const {
