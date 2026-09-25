@@ -75,6 +75,15 @@ test('the active recurring plan beats completed history (plan switch)', async ()
   expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['switched-to-9x', 42]]);
 });
 
+test('the plan\'s catalog key beats a generic "Tree & Shrub" label (codex r15)', async () => {
+  db.__state.rows = [
+    { ...row('engine-9x', 'Tree & Shrub', 45), active_plan_service_type: 'Tree & Shrub', active_plan_service_key: 'tree_shrub_6week' },
+    { ...row('engine-6x', 'Tree & Shrub', 45), active_plan_service_type: 'Tree & Shrub', active_plan_service_key: 'tree_shrub_program' },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['engine-9x', 42]]);
+});
+
 test('other categories keep their fixed interval', async () => {
   db.__state.rows = [{ ...row('pest', 'Quarterly Pest Control Service', 100) }];
   const result = await executeTool('find_overdue_customers', { service_category: 'pest' });

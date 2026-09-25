@@ -556,7 +556,11 @@ async function findOverdueCustomers(input) {
   // grandfathered 4x) — read from their ACTIVE recurring T&S plan, falling
   // back to their latest completed T&S service_type (codex r13: history lags
   // a plan switch until the first new-cadence visit completes).
-  const treeShrubIntervalDays = (serviceType) => {
+  // Catalog identity first: engine-converted plans keep the generic
+  // "Tree & Shrub" label while linking the cadence-specific service_id.
+  const TREE_SHRUB_KEY_INTERVAL = { tree_shrub_quarterly: 90, tree_shrub_6week: 42, tree_shrub_program: 60 };
+  const treeShrubIntervalDays = (serviceType, serviceKey) => {
+    if (TREE_SHRUB_KEY_INTERVAL[serviceKey]) return TREE_SHRUB_KEY_INTERVAL[serviceKey];
     const t = String(serviceType || '').toLowerCase();
     if (/quarterly/.test(t)) return 90;
     if (/6\s*weeks?|six\s*weeks?/.test(t)) return 42;
@@ -593,6 +597,7 @@ async function findOverdueCustomers(input) {
         'customers.monthly_rate', 'customers.active',
         db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) as last_service_date", [patterns[cat]]),
         db.raw("(SELECT service_type FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ? ORDER BY service_date DESC LIMIT 1) as last_service_type", [patterns[cat]]),
+        db.raw(`(SELECT services.service_key FROM scheduled_services JOIN services ON services.id = scheduled_services.service_id WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${Object.keys(TREE_SHRUB_KEY_INTERVAL).map(() => '?').join(', ')}) AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${TERMINAL_STATUSES.map(() => '?').join(', ')}) ORDER BY scheduled_services.scheduled_date ASC LIMIT 1) as active_plan_service_key`, [...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...TERMINAL_STATUSES]),
         db.raw(`(SELECT service_type FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND service_type ~* ? AND is_recurring = true AND status NOT IN (${TERMINAL_STATUSES.map(() => '?').join(', ')}) ORDER BY scheduled_date ASC LIMIT 1) as active_plan_service_type`, [patterns[cat], ...TERMINAL_STATUSES]),
         db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ~* ?) as next_scheduled", [patterns[cat]]),
       )
@@ -617,7 +622,7 @@ async function findOverdueCustomers(input) {
       const daysSince = c.last_service_date
         ? Math.floor((Date.now() - new Date(c.last_service_date)) / 86400000)
         : null;
-      const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type) : baseFreq;
+      const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type, c.active_plan_service_key) : baseFreq;
       if (daysSince != null && daysSince < freq + overdue_days) continue;
 
       results.push({

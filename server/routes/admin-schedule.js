@@ -12305,10 +12305,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // its own service is never re-checked.
     const postedCatalogIds = [updates.service_id, ...(Array.isArray(replaceAddons) ? replaceAddons.map((l) => l?.serviceId) : [])]
       .filter(Boolean);
-    // A label-only save (no catalog id resolved) can still rename the visit
-    // to the retired service — its name goes through the gate when it changes.
-    const labelOnly = typeof serviceType === 'string' && serviceType.trim() && updates.service_id === undefined;
-    if (postedCatalogIds.length || labelOnly) {
+    // service_type and service_id are written independently, so a changed
+    // label goes through the gate by name whether or not an id rides along.
+    const labelPosted = typeof serviceType === 'string' && !!serviceType.trim();
+    if (postedCatalogIds.length || labelPosted) {
       const current = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_id', 'service_type');
       if (current) {
         const currentAddonIds = postedCatalogIds.length
@@ -12316,7 +12316,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           : [];
         const onVisit = new Set([current.service_id, ...(currentAddonIds || [])].filter(Boolean).map(String));
         const added = postedCatalogIds.filter((id) => !onVisit.has(String(id)));
-        const renamed = labelOnly
+        const renamed = labelPosted
           && serviceType.trim().toLowerCase() !== String(current.service_type || '').trim().toLowerCase();
         const notHeldRetired = added.length || renamed
           ? await require('../services/service-library').retiredServicesNotHeldBy({
