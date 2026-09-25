@@ -35,7 +35,7 @@ function pendingDescriptor({ customerId, paymentId, retryDate, preferenceState }
 }
 
 function mergePendingDescriptor(database, descriptor) {
-  return database.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(?, ?::jsonb)", [
+  return database.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(?::text, ?::jsonb)", [
     DESCRIPTOR_FIELD, JSON.stringify(descriptor),
   ]);
 }

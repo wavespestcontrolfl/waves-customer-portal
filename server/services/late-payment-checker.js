@@ -144,7 +144,7 @@ async function completePendingEmail(row, channel = 'sms+email') {
   try {
     await db('activity_log').where({ id: row.id }).update({
       metadata: db.raw(
-        "(COALESCE(metadata, '{}'::jsonb) - 'pendingEmail') || jsonb_build_object('channel', ?)",
+        "(COALESCE(metadata, '{}'::jsonb) - 'pendingEmail') || jsonb_build_object('channel', ?::text)",
         [channel],
       ),
     });

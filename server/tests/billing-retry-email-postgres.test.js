@@ -263,4 +263,20 @@ postgres('billing retry Email obligation durability (private PostgreSQL)', () =>
     });
     expect(mockSendPaymentRetryNotice).toHaveBeenCalledTimes(1);
   });
+
+  test('the billing-cron descriptor merge binds and keeps sibling metadata', async () => {
+    await mockPg('payments').where({ id: paymentId }).update({
+      metadata: JSON.stringify({ retried_at: '2026-09-24' }),
+    });
+    const next = BillingRetryEmail.pendingDescriptor({
+      customerId, paymentId, retryDate: '2026-10-05T14:00:00.000Z', preferenceState: true,
+    });
+    await mockPg('payments').where({ id: paymentId }).update({
+      retry_count: 2,
+      metadata: BillingRetryEmail.mergePendingDescriptor(mockPg, next),
+    });
+    const row = await mockPg('payments').where({ id: paymentId }).first();
+    expect(row.retry_count).toBe(2);
+    expect(row.metadata).toEqual({ retried_at: '2026-09-24', billing_retry_email_notice: next });
+  });
 });
