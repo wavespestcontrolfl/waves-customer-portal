@@ -61,7 +61,18 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // the single PRIMARY entry (the accepted one if any, else the first
 // stated) so every existing reader of `price` keeps working unchanged.
 // Both additive/optional: older payloads still validate.
-const SCHEMA_VERSION = '1.13.0';
+// 1.14.0: additive — caller.caller_id_disclaimed (boolean|null) and
+// caller.phone_note (string|null, <=160 chars). Live miss 2026-09-25 (call
+// 6fee5f34): the caller said "this is our office line... they don't pick
+// up, I pick up, and then text" — the schema had no way to record that the
+// Twilio ANI is NOT the caller's own number, so the customer and every
+// booking confirmation/reminder SMS landed on a shared office line.
+// caller_id_disclaimed is true only when the caller explicitly says the
+// incoming number isn't theirs; phone_note carries their own words.
+// Feeds the deterministic callback_number_needed triage flag
+// (call-triage-flags.js) when no spoken callback number also covers it.
+// Optional/nullable: older payloads still validate.
+const SCHEMA_VERSION = '1.14.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

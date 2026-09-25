@@ -1,6 +1,7 @@
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2, normalizePhone, normalizeZip, normalizeState, cleanValidEmail } = require('../utils/normalize-extraction-v2');
-const { isV2Extraction, flatView, mapServiceCategoryToLegacy } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, mapServiceCategoryToLegacy, callerIdDisclaimedNoteText } = require('../utils/extraction-compat');
+const { callerIdDisclaimedNeedsCallback } = require('../services/call-triage-flags');
 
 function validModelOutput() {
   return {
@@ -136,8 +137,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.13.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.13.0');
+  test('schema version is 1.14.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.14.0');
   });
 
   describe('model-output schema', () => {
@@ -337,6 +338,70 @@ describe('schema validation', () => {
       data.caller.phone_e164 = null;
       const { valid } = validateModelOutput(data);
       expect(valid).toBe(true);
+    });
+
+    // caller.caller_id_disclaimed / caller.phone_note (schema 1.14.0, live
+    // miss 2026-09-25, call 6fee5f34): the caller stated the Twilio ANI is
+    // not their own number.
+    describe('caller.caller_id_disclaimed / phone_note', () => {
+      test('caller_id_disclaimed true with a phone_note validates', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = true;
+        data.caller.phone_note = 'this is our office line, they route it to me and I text back';
+        data.caller.phone_source = 'caller_id';
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('null caller_id_disclaimed / phone_note is valid (nothing said about the number)', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = null;
+        data.caller.phone_note = null;
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('omitting both fields is still valid (backward compatible with pre-1.14.0 prompts)', () => {
+        const data = validModelOutput();
+        delete data.caller.caller_id_disclaimed;
+        delete data.caller.phone_note;
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('a non-boolean caller_id_disclaimed fails', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = 'yes';
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('phone_note over 160 chars fails', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = true;
+        data.caller.phone_note = 'x'.repeat(161);
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('phone_note at exactly 160 chars validates', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = true;
+        data.caller.phone_note = 'x'.repeat(160);
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('survives persisted validation', () => {
+        const data = validPersisted();
+        data.caller.caller_id_disclaimed = true;
+        data.caller.phone_note = 'shared shop phone';
+        expect(validatePersisted(data).valid).toBe(true);
+      });
     });
 
     // service_request.price (call-agent audit 2026-09-23): captures any
@@ -638,6 +703,46 @@ describe('normalize extraction v2', () => {
     const result = normalizeExtractionV2(extraction);
     expect(result.caller.email).toBe('maria@gmail.com');
     expect(result.caller.email_raw).toBeNull();
+  });
+
+  // caller_id_disclaimed / phone_note (schema 1.14.0, live miss 2026-09-25,
+  // call 6fee5f34) MUST survive normalizeCaller — normalizeCaller's return
+  // object spreads `...caller` first, so any field not explicitly
+  // overridden below passes through unchanged; caller_id_disclaimed is
+  // never explicitly overridden, so it survives. Asserted directly (rather
+  // than trusted from reading the source) because every OTHER test in this
+  // file that exercises caller_id_disclaimed constructs the extraction
+  // object by hand and never calls the real normalizer — pre-push review
+  // flagged the gap even though the field was never actually dropped.
+  test('normalizeExtractionV2 preserves caller_id_disclaimed and phone_note through normalizeCaller', () => {
+    const extraction = validModelOutput();
+    extraction.caller.caller_id_disclaimed = true;
+    extraction.caller.phone_note = 'office line, routes to me, I text back';
+    extraction.caller.phone_source = 'caller_id';
+    const result = normalizeExtractionV2(extraction);
+    expect(result.caller.caller_id_disclaimed).toBe(true);
+    expect(result.caller.phone_note).toBe('office line, routes to me, I text back');
+    // The normalized shape still validates end to end.
+    result.meta.schema_version = SCHEMA_VERSION;
+    result.meta.call_id = '550e8400-e29b-41d4-a716-446655440000';
+    result.meta.extracted_at = '2026-09-25T00:00:00.000Z';
+    result.meta.extraction_model = 'test-model';
+    expect(validatePersisted(result).valid).toBe(true);
+  });
+
+  test('normalizeExtractionV2 clamps an over-length phone_note to 160 chars', () => {
+    const extraction = validModelOutput();
+    extraction.caller.caller_id_disclaimed = true;
+    extraction.caller.phone_note = 'x'.repeat(200);
+    const result = normalizeExtractionV2(extraction);
+    expect(result.caller.phone_note).toHaveLength(160);
+  });
+
+  test('normalizeExtractionV2 leaves caller_id_disclaimed/phone_note null when absent', () => {
+    const extraction = validModelOutput();
+    const result = normalizeExtractionV2(extraction);
+    expect(result.caller.caller_id_disclaimed).toBeUndefined();
+    expect(result.caller.phone_note).toBeNull();
   });
 
   test('normalizeExtractionV2 handles full extraction', () => {
@@ -1051,5 +1156,178 @@ describe('extraction compat adapter', () => {
 
     v2.sentiment_and_lead.lead_quality = 'wrong_number';
     expect(flatView(v2).lead_quality).toBe('spam');
+  });
+
+  // callerIdDisclaimedNeedsCallback (schema 1.14.0, single source of truth
+  // for callback_number_needed / the crm_notes stamp / the CSR coaching
+  // addendum). Codex round-1 P1: a bare phone_e164-presence check let a
+  // schema-valid model response set caller_id_disclaimed:true,
+  // phone_source:'caller_id', and copy the disclaimed ANI straight back
+  // into phone_e164 — that is the model recording caller ID, not a spoken
+  // callback, and the old check silently cleared the flag (and the SMS
+  // hold) on exactly the number the caller said isn't theirs. The fix
+  // requires EVIDENCE a callback was spoken: phone_source 'spoken'/'both',
+  // OR phone_e164 provably different from the call's own ANI (opts.ani).
+  describe('callerIdDisclaimedNeedsCallback', () => {
+    test('true only when disclaimed AND no dialable phone_e164 (missing phone → needed)', () => {
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_e164: null })).toBe(true);
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: false, phone_e164: null })).toBe(false);
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: null, phone_e164: null })).toBe(false);
+      expect(callerIdDisclaimedNeedsCallback(null)).toBe(false);
+      expect(callerIdDisclaimedNeedsCallback(undefined)).toBe(false);
+    });
+
+    // The exact gap the pre-push auditor flagged: phone_source says
+    // 'spoken' but the number never validated, so phone_e164 is null.
+    test('a stale phone_source=spoken claim does not suppress the predicate when phone_e164 is null', () => {
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: null })).toBe(true);
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_source: 'both', phone_e164: null })).toBe(true);
+    });
+
+    // Codex round-1 P1 — the model echoed the ANI back as phone_e164 under
+    // phone_source: 'caller_id'. That is NOT a spoken callback: with no ANI
+    // to compare against, or an ANI that matches, the disclaimer stays
+    // unresolved (this is the exact regression test for the finding —
+    // previously this returned false because phone_e164 was merely present).
+    test('caller_id source + phone_e164 same as ANI → still needed', () => {
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+19415550100' },
+        { ani: '+19415550100' },
+      )).toBe(true);
+      // No ANI available to compare against at all — fails closed the same way.
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+19415550100' },
+      )).toBe(true);
+    });
+
+    // Direct evidence: the MODEL heard the caller speak a number themselves,
+    // independent of the ANI — clears regardless of what the ANI is.
+    test('spoken source + a distinct number → not needed', () => {
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+19415551234' },
+        { ani: '+19415550100' },
+      )).toBe(false);
+    });
+
+    // caller_id-sourced, but the number doesn't even match the ANI — can't
+    // be the model echoing caller ID back, so it clears.
+    test('caller_id source but phone_e164 != ANI → not needed', () => {
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+19415551234' },
+        { ani: '+19415550100' },
+      )).toBe(false);
+    });
+
+    test('missing phone → needed, regardless of ANI', () => {
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: null },
+        { ani: '+19415550100' },
+      )).toBe(true);
+    });
+
+    // Codex round 8 P1: the caller REPEATS the shared office number aloud
+    // while saying it isn't theirs. The schema records that as
+    // phone_source 'both' (spoken AND matches the ANI) — or the model may
+    // call it 'spoken' — with phone_e164 === the ANI. That is not a
+    // replacement callback: the hold and the card must still happen.
+    describe('ANI repeated aloud (round 8 P1)', () => {
+      const ANI = '+19415550100';
+
+      test('spoken + a DISTINCT number → not needed (a real replacement callback)', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+12395557788' },
+          { ani: ANI },
+        )).toBe(false);
+      });
+
+      test('both + a number EQUAL to the ANI → still needed', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'both', phone_e164: ANI },
+          { ani: ANI },
+        )).toBe(true);
+      });
+
+      test('spoken + a number equal to the ANI → still needed', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: ANI },
+          { ani: ANI },
+        )).toBe(true);
+      });
+
+      test('equality is on the E.164 form, not the raw string', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '(941) 555-0100' },
+          { ani: '19415550100' },
+        )).toBe(true);
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'both', phone_e164: '+19415550100' },
+          { ani: '941-555-0100' },
+        )).toBe(true);
+      });
+
+      test('a one/two-digit near miss of the ANI is the same number (the processor keeps the ANI for it)', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+19415550109' },
+          { ani: ANI },
+        )).toBe(true);
+      });
+
+      test('no dialable ANI to compare: spoken/both still count, caller_id still fails closed', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+12395557788' },
+          { ani: 'anonymous' },
+        )).toBe(false);
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'both', phone_e164: '+12395557788' },
+          { ani: null },
+        )).toBe(false);
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+12395557788' },
+          { ani: 'anonymous' },
+        )).toBe(true);
+      });
+    });
+  });
+
+  // callerIdDisclaimedNoteText (schema 1.14.0, live miss 2026-09-25, call
+  // 6fee5f34): the crm_notes stamp for a customer created off a disclaimed
+  // ANI with no real callback.
+  describe('callerIdDisclaimedNoteText', () => {
+    test('builds the stamp with the caller\'s own words, using the ET calendar date', () => {
+      const note = callerIdDisclaimedNoteText(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_note: 'office line, routes to me' },
+        { now: new Date('2026-09-25T14:00:00Z') }, // 10am ET on 2026-09-25
+      );
+      expect(note).toBe('[2026-09-25] Caller ID number is UNVERIFIED — caller said this is a shared/office line, not their own ("office line, routes to me"). Confirm a personal callback number before relying on this number for texts.');
+    });
+
+    test('stamps the ET calendar date, not a raw UTC one, for a late-evening ET call', () => {
+      // 2026-01-01 21:30 ET (winter, EST = UTC-5) is 2026-01-02 02:30 UTC —
+      // a raw toISOString().slice(0,10) would misdate this one day forward.
+      const note = callerIdDisclaimedNoteText(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_note: null },
+        { now: new Date('2026-01-02T02:30:00Z') },
+      );
+      expect(note).toContain('[2026-01-01]');
+    });
+
+    test('omits the parenthetical when phone_note is absent', () => {
+      const note = callerIdDisclaimedNoteText(
+        { caller_id_disclaimed: true, phone_source: 'unknown', phone_note: null },
+        { now: new Date('2026-09-25T14:00:00Z') },
+      );
+      expect(note).toBe('[2026-09-25] Caller ID number is UNVERIFIED — caller said this is a shared/office line, not their own. Confirm a personal callback number before relying on this number for texts.');
+      expect(note).not.toContain('(');
+    });
+
+    test('returns null when a real callback number was captured', () => {
+      expect(callerIdDisclaimedNoteText({ caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+19415551234' })).toBeNull();
+    });
+
+    test('returns null when caller_id_disclaimed is not true', () => {
+      expect(callerIdDisclaimedNoteText({ caller_id_disclaimed: false })).toBeNull();
+      expect(callerIdDisclaimedNoteText({ caller_id_disclaimed: null })).toBeNull();
+      expect(callerIdDisclaimedNoteText(null)).toBeNull();
+    });
   });
 });

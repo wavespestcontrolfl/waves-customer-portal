@@ -57,6 +57,13 @@ function flatView(extraction) {
     last_name: caller.last_name || null,
     email: caller.email || null,
     phone: caller.phone_e164 || null,
+    // caller_id_disclaimed / phone_note (schema 1.14.0) — the caller said the
+    // incoming ANI is not their own. Tri-state boolean like price_accepted:
+    // null (never addressed) is distinct from false, which the model never
+    // sets (see the schema description) — a genuine "no" reads as null too.
+    // Watched by replay variance (FIELD_GROUPS medium).
+    caller_id_disclaimed: typeof caller.caller_id_disclaimed === 'boolean' ? caller.caller_id_disclaimed : null,
+    phone_note: caller.phone_note || null,
 
     address_line1: addr.street_line_1 || null,
     address_line2: addr.street_line_2 || null,
@@ -631,6 +638,36 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   return { merged, adoptedFields };
 }
 
+// caller_id_disclaimed (schema 1.14.0, live miss 2026-09-25, call 6fee5f34):
+// the caller told us the Twilio ANI is NOT their own number (a shared/office
+// line) and gave no spoken callback to use instead — the ANI is still the
+// only key we have to create/link a customer, but it must not read as a
+// verified personal number. There is no dedicated phone-verification/
+// line_type column for this meaning (customers.line_type is Twilio Lookup's
+// physical line type — mobile vs. landline/VOIP — a different signal from
+// "not this caller's phone"), so the fallback is the same operator-note
+// convention customer-dedupe.js's predictNoteAppends uses: a timestamped
+// stamp appended to crm_notes. Pure/testable; the caller does the DB write
+// (fail-open, after the customer row already exists). The disclaim
+// predicate itself is NOT re-derived here (pre-push review P1) — it calls
+// call-triage-flags.js's callerIdDisclaimedNeedsCallback, the same function
+// computeDeterministicTriageFlags uses for callback_number_needed, so this
+// can never silently disagree with the flag. The date is the server's own
+// ET calendar day (AGENTS.md America/New_York discipline) — Railway runs
+// UTC, so a raw toISOString() date would misdate every call after ~7pm ET.
+function callerIdDisclaimedNoteText(caller, { now = new Date(), ani = null } = {}) {
+  const { callerIdDisclaimedNeedsCallback } = require('../services/call-triage-flags');
+  if (!callerIdDisclaimedNeedsCallback(caller, { ani })) return null;
+  const said = typeof caller.phone_note === 'string' && caller.phone_note.trim()
+    ? caller.phone_note.trim()
+    : null;
+  const { etDateString } = require('./datetime-et');
+  const dateStr = etDateString(now);
+  return `[${dateStr}] Caller ID number is UNVERIFIED — caller said this is a shared/office line, not their own`
+    + (said ? ` ("${said}")` : '')
+    + `. Confirm a personal callback number before relying on this number for texts.`;
+}
+
 module.exports = {
   isV2Extraction,
   flatView,
@@ -642,5 +679,6 @@ module.exports = {
   mapSentimentToLegacy,
   mapCallNatureToLegacy,
   adoptV2PrimaryFields,
+  callerIdDisclaimedNoteText,
   EXTRACTION_INVALID_JSON_SUMMARY,
 };

@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -126,7 +126,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
-const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -866,6 +866,7 @@ const CONFIRM_REASON_TEXT = {
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
+  callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -2994,24 +2995,90 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   return null;
 }
 
-async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false }) {
-  try {
-    const AppointmentReminders = require('./appointment-reminders');
-    await AppointmentReminders.registerAppointment(
-      scheduledServiceId,
-      customerId,
-      `${scheduledDate}T${windowStart || '08:00'}`,
-      serviceType,
-      'call_recording',
-      // closeReminderWindows: a WINDOWLESS visit registers the canonical
-      // pre-closed placeholder at the date+08:00 slot instead of an ARMED
-      // reminder at a fabricated start — the cron must never text a time
-      // nobody chose (Codex #3361 r24 P1; same rule the confirm hook's
-      // registration leg applies).
-      { sendConfirmation: false, closeReminderWindows }
-    );
-  } catch (err) {
-    logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
+async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
+  // Codex round-2 finding #4 (PR #4807), tightened round 3: the AUTHORITATIVE
+  // stamp for the two main call-booking paths (fresh insert, idempotency-
+  // conflict reuse) now lands INSIDE the booking transaction itself
+  // (stampCallbackNumberHoldForCall, above the trx that creates svc) — that
+  // atomic write can never be skipped by a crash between commit and this
+  // post-commit helper. This write is the FALLBACK for paths that reach
+  // registerScheduleSideEffects without going through that transaction (the
+  // replay-repair self-heal below). Nulling call_sms_cleared_at (+
+  // recipient) in the SAME update closes finding #1's atomicity half — a
+  // fresh hold must never read as already-cleared by a stale clearance a
+  // reused/reprocessed row still carries from an earlier call. Round-3 P1:
+  // a THROWN failure here must refuse to arm messaging — proceeding to
+  // registerAppointment on an unconfirmed hold is exactly the gap this
+  // hardening closes, so skip it and log code/name only.
+  //
+  // Round-5 P1: a bare whereNull('callback_number_hold_at') no-ops on
+  // FORCE-REPROCESS of a call that was already cleared — the row still
+  // carries the OLD hold_at (non-null) from the first pass, so the guard
+  // blocks the write even though this pass just re-raised
+  // callback_number_needed, and the stale call_sms_cleared_at (>= the old
+  // hold_at) keeps reading as cleared while a new review card opens. Fixed
+  // by widening the guard to "install a fresh hold whenever this row is not
+  // CURRENTLY held" — null hold_at (never held) OR a hold_at that the
+  // row's own cleared_at already satisfies — so a reprocess that raises the flag again always
+  // gets a hold_at newer than any leftover clearance. Idempotent WITHIN one
+  // pass on purpose, not on every retry: once this update lands, hold_at is
+  // non-null and cleared_at is null, so the widened guard reads "currently
+  // held" and a second call in the SAME pass (there is exactly one path
+  // that can call this more than once per call — see
+  // stampCallbackNumberHoldForCall below) is a genuine no-op instead of
+  // pointlessly bumping the timestamp again.
+  let holdStampFailed = false;
+  if (scheduledServiceId && callbackNumberHoldActive) {
+    try {
+      // Codex round 6 (structural): the number-keyed hold every SMS is
+      // actually checked against (disclaimed-number-holds.js). Idempotent
+      // with the in-transaction write for the main booking paths; this is
+      // the fallback for paths that never ran that transaction.
+      // Round 7 P1: ensure-only (the pass's decision point armed it) —
+      // never re-arms; a clearance the office made after this pass decided
+      // stands, and the visit stamp below is skipped over it.
+      const numberHold = await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
+        phone: disclaimedPhone, customerId, callLogId,
+      });
+      if (!(numberHold.recorded && numberHold.active === false)) await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .where((qb) => {
+          qb.whereNull('callback_number_hold_at')
+            .orWhereRaw('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at');
+        })
+        .update({
+          callback_number_hold_at: new Date(),
+          call_sms_cleared_at: null,
+          call_sms_cleared_recipient: null,
+        });
+    } catch (holdErr) {
+      holdStampFailed = true;
+      logger.error(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId} — refusing to arm messaging: ${holdErr.code || holdErr.name || 'db_error'}`);
+    }
+  }
+  // Messaging (reminders/confirmation) is gated on the hold stamp actually
+  // landing — arming it on an unconfirmed hold is precisely the gap round-3
+  // P1 closes. Everything below (inspection credit) is unrelated to
+  // messaging and still runs.
+  if (!holdStampFailed) {
+    try {
+      const AppointmentReminders = require('./appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        scheduledServiceId,
+        customerId,
+        `${scheduledDate}T${windowStart || '08:00'}`,
+        serviceType,
+        'call_recording',
+        // closeReminderWindows: a WINDOWLESS visit registers the canonical
+        // pre-closed placeholder at the date+08:00 slot instead of an ARMED
+        // reminder at a fabricated start — the cron must never text a time
+        // nobody chose (Codex #3361 r24 P1; same rule the confirm hook's
+        // registration leg applies).
+        { sendConfirmation: false, closeReminderWindows }
+      );
+    } catch (err) {
+      logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
+    }
   }
 
   // Inspection credit: fast redemption for a confirmed call booking, same
@@ -9061,6 +9128,52 @@ const CallRecordingProcessor = {
     let v2RoutingBlocked = false;
     let v2SmsBlocked = false;
     let v2SmsConsentExplicit = false;
+    // P1-C (callback_number_needed reminder hold): set true the moment the
+    // disclaimed-caller-ID hold blocks the confirmation SMS; stamped onto
+    // scheduled_services.callback_number_hold_at once the visit is booked so
+    // the reminder cron can honor the same hold days later.
+    let callbackNumberNeededHoldActive = false;
+    // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
+    // the decision point — the same statement that flips the boolean above
+    // — before the card is published and before any further awaited work,
+    // so no sender (an invoice/estimate follow-up mid-flight, even at its
+    // provider check) sees the flag decided with no row. armDisclaimedNumber
+    // Hold serializes with the card's /resolve under the per-call triage
+    // lock and is the ONE write in this pass that may re-arm a cleared row
+    // (a genuine reprocess raising the flag again); every later write in
+    // the pass is ensure-only and cannot undo a clearance that lands after
+    // this decision. A failure fails the pass closed (the capped
+    // extraction_failed retry) — code/name only in the log (a Knex message
+    // can render the bound phone number).
+    //
+    // Round 8 P1: the write is FENCED to this pass's processing claim —
+    // armDisclaimedNumberHold verifies processing_token (+ generation)
+    // with a FOR UPDATE on call_log inside the same transaction as the
+    // insert (lock order: triage advisory lock → call_log row → hold row,
+    // the mintEmailReviewCardsFenced order; /resolve takes the advisory
+    // lock first too). A superseded worker writes nothing and gets false
+    // back: the caller abandons the pass (abandonToPeer), the same
+    // outcome as the stillOwnsClaim boundaries — it must never arm, or
+    // re-arm over a human clearance, from a stale extraction.
+    let callbackNumberHoldArmed = false;
+    const armCallbackNumberHoldAtDecision = async () => {
+      if (callbackNumberHoldArmed) return true;
+      try {
+        const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
+          phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
+          procToken, procGeneration,
+        });
+        if (armed?.claimLost) return false;
+        callbackNumberHoldArmed = true;
+        return true;
+      } catch (holdErr) {
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] disclaimed-number hold write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
+      }
+    };
     // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
     // inbound consent (no explicit sms_consent_given). The non-ANI recipient
     // hold at the send site keys off this — a send cleared by explicit consent
@@ -9477,6 +9590,31 @@ const CallRecordingProcessor = {
           v2SmsBlocked = !tcpa.canSms;
           v2SmsClearedByImpliedConsent = tcpa.canSms && tcpa.reason === 'implied_consent_inbound';
           v2EmailBlocked = !tcpa.canEmail;
+          // callback_number_needed (schema 1.14.0, live miss 2026-09-25, call
+          // 6fee5f34): the caller told us the ANI isn't theirs and gave no
+          // callback of their own — TCPA consent (if any) was given by
+          // whoever answers THAT line, not necessarily this caller, so the
+          // confirmation/reminder SMS leg holds here regardless of what tcpa
+          // decided. Booking is unaffected (not in BLOCKING_TRIAGE_FLAGS);
+          // email is unaffected (a different, non-ANI-keyed channel when one
+          // is on file). Clearing this hold is a human verdict (the
+          // callback_number_needed card) — never automatic. Pure decision
+          // in call-triage-flags.js so it's unit-testable independent of
+          // this pass's DB/LLM calls.
+          if (callbackNumberNeededBlocksSms(finalFlags)) {
+            v2SmsBlocked = true;
+            v2SmsClearedByImpliedConsent = false;
+            // P1-C: this hold must outlive the confirmation send — the
+            // 72h/24h reminder cron (appointment-reminders.js) runs on its
+            // own schedule with no notion of a call-level SMS hold, and
+            // would otherwise text the disclaimed ANI days later. Stamped
+            // onto the visit once scheduledServiceId is known (below).
+            callbackNumberNeededHoldActive = true;
+            // Round 7 P1: persisted NOW — before the route decision, the
+            // advisory card below, and anything else this pass awaits.
+            // Round 8 P1: a lost claim abandons the pass (nothing written).
+            if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
+          }
 
           const routeDecision = buildRouteDecision({
             callLogId: call.id,
@@ -9695,6 +9833,9 @@ const CallRecordingProcessor = {
           }
         }
       } catch (err) {
+        // A failed decision-point hold write is NOT a routing-gate error to
+        // soften: the pass must fail closed (round 7 P1).
+        if (err?.code === 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED') throw err;
         // Fail closed (soft): hold only the appointment for triage. No TCPA/DNC
         // decision was made here, so do NOT suppress SMS/email follow-up — the
         // call may be a real lead and email/newsletter should still proceed.
@@ -9756,6 +9897,28 @@ const CallRecordingProcessor = {
               computeDeterministicTriageFlags(v2Ext, { contactPhone, addressValidation: v2AddressValidation })
             );
           } catch (_e) { /* fall back to model flags only */ }
+        }
+        // Finding #4 (round 4 P1, PR #4807): the enforce branch above arms
+        // v2SmsBlocked + callbackNumberNeededHoldActive the moment
+        // callback_number_needed is in finalFlags, but that branch is
+        // guarded off in shadow mode (CALL_EXTRACTION_V2_DRIVES_ROUTING
+        // false) — this documented prod posture (V2_ENABLED=true,
+        // DRIVES_ROUTING=false) was arming NEITHER, so a disclaimed ANI
+        // kept getting confirmation/reminder texts with no durable hold and
+        // no review card. v2SmsBlocked/callbackNumberNeededHoldActive are
+        // read by the SAME common code (confirmation send gate,
+        // registerScheduleSideEffects) regardless of which branch set them
+        // — arm them here, from the SAME merged bridgeTriageFlags the card
+        // below is about to file from, so shadow mode behaves exactly like
+        // enforce mode for this one signal.
+        if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {
+          v2SmsBlocked = true;
+          v2SmsClearedByImpliedConsent = false;
+          callbackNumberNeededHoldActive = true;
+          // Round 7 P1: persisted NOW — before the bridge files the card
+          // below and before any further awaited work.
+          // Round 8 P1: a lost claim abandons the pass (nothing written).
+          if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
         }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the
@@ -9972,6 +10135,8 @@ const CallRecordingProcessor = {
         // in-flight release can send the unreviewed address — that state
         // must fail the run, not be skipped.
         if (bridgeErr.emailReviewStateUnavailable) throw bridgeErr;
+        // …and a failed decision-point hold write (round 7 P1).
+        if (bridgeErr?.code === 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED') throw bridgeErr;
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
       }
     } else {
@@ -10425,6 +10590,43 @@ const CallRecordingProcessor = {
             phone,
             name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
           });
+
+          // caller_id_disclaimed (schema 1.14.0, live miss 2026-09-25, call
+          // 6fee5f34): the caller said `phone` (the ANI, our only key to
+          // create this customer) is NOT their own number. No dedicated
+          // phone-verification column exists for this meaning (see
+          // callerIdDisclaimedNoteText) — stamp crm_notes instead. Fail-open,
+          // same posture as the line-type check just above: never blocks or
+          // delays creation, which has already committed.
+          //
+          // Gated on callExtractionV2PrimaryEnabled() (codex round-3 P2):
+          // v2CanonicalExtraction is populated even in V2 SHADOW mode (V2
+          // enabled but not driving routing/adoption) — writing a canonical
+          // customer field (crm_notes) off an unpromoted model's output
+          // there would violate the shadow contract every other adoption
+          // site in this file already honors (adoptV2PrimaryFields only
+          // runs when this same gate is on).
+          try {
+            const disclaimedNote = callExtractionV2PrimaryEnabled()
+              ? callerIdDisclaimedNoteText(v2CanonicalExtraction?.caller, { ani: contactPhone })
+              : null;
+            if (disclaimedNote) {
+              await db('customers').where({ id: customerId }).update({
+                crm_notes: db.raw(
+                  "CASE WHEN COALESCE(crm_notes, '') = '' THEN ? ELSE crm_notes || ? END",
+                  [disclaimedNote, `\n\n${disclaimedNote}`],
+                ),
+              });
+            }
+          } catch (e) {
+            // e.message on a Knex query-builder failure can render the SQL
+            // (incl. bindings — the caller's free-text phone_note/crm_notes)
+            // straight into the log (P1: never log the failed CRM-note
+            // binding). Same non-payload code/name convention as this
+            // file's other DB-failure handlers (e.g. the recovery-marker
+            // and address-evidence reconcile catches above).
+            logger.warn(`[call-proc] caller-id-disclaimed note stamp failed for ${customerId}: ${e.code || e.name || 'db_error'}`);
+          }
 
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently
@@ -11827,6 +12029,42 @@ const CallRecordingProcessor = {
         'Superseded — the reprocessed extraction carries no service address, so the prior property-role proposals no longer apply.',
         { procGeneration },
       );
+    }
+
+    // callback_number_needed — NUMBER-keyed hold (codex round 6, PR #4807,
+    // structural). Written here, once the customer is resolved and BEFORE
+    // anything below can text (secondary-contact opt-ins, the booking and
+    // its confirmation, card links, and every later sender that reads
+    // customers.phone or a lead's phone — estimate/invoice follow-ups carry
+    // no visit id at all): sendCustomerMessage checks every SMS `to` against
+    // this row, so the hold no longer depends on a booking existing.
+    // customerId may still be null (shared-phone ambiguity, explicit
+    // unlink) — the hold is number-scoped either way. The booking
+    // transaction writes the same row again (idempotent).
+    //
+    // Round 7 P1: the row was already PERSISTED at the decision point
+    // (armCallbackNumberHoldAtDecision); this later write is ensure-only —
+    // it fills customer_id now that the customer is resolved and never
+    // re-arms, so an office Resolve that landed after this pass decided
+    // stands. A failure HERE
+    // aborts the pass (fail closed) rather than continue unheld: a call
+    // that books nothing has no later write to fall back on, and the
+    // pass's own catch already turns a throw into the capped
+    // extraction_failed retry (reprocessing is idempotent) with a blocking
+    // card at the cap. The rethrown error carries code/name only — a Knex
+    // message can render the bound phone number into the log.
+    if (callbackNumberNeededHoldActive) {
+      try {
+        await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
+          phone: contactPhone, customerId: customerId || call.customer_id || null, callLogId: call.id,
+        });
+      } catch (holdErr) {
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] disclaimed-number hold write failed for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
+      }
     }
 
     // Secondary-contact persistence (additive, gated, non-blocking). Runs
@@ -15286,6 +15524,65 @@ const CallRecordingProcessor = {
                     return null;
                   }
                 };
+                // Codex round-3 P1 (findings #2 + #3): the disclaimed-
+                // caller-ID hold must land INSIDE this booking transaction —
+                // not only the post-commit registerScheduleSideEffects call,
+                // whose catch previously swallowed a failed write and let
+                // messaging arm unheld — and must cover the
+                // ai_call_pipeline_followup second-treatment row too, which
+                // ensureCallFollowUpVisit creates with no hold of its own
+                // (dispatch confirming it later texted the disclaimed ANI).
+                // One UPDATE by source_call_log_id catches every live row
+                // this call created (primary + any follow-up) regardless of
+                // which of the ensureCallFollowUpVisit call sites (fresh
+                // insert, idempotency-conflict reuse, marker/slot-match
+                // reuse) this pass took — called right after each, so the
+                // follow-up row (if any) already exists to be caught.
+                // Deliberately NOT caught here: a genuine write failure
+                // aborts the whole transaction (schedErr path) rather than
+                // let a booking the caller disclaimed their number on commit
+                // unheld — the outer catch's "no booking, no SMS, office
+                // reviews" outcome is the correct fail-closed answer.
+                // Round-5 P1: widened past a bare whereNull the same way and
+                // for the same reason as registerScheduleSideEffects's
+                // fallback writer above — a force-reprocess of a previously
+                // CLEARED call must still install a fresh hold_at (newer
+                // than the leftover cleared_at) when callback_number_needed
+                // is raised again, or the stale clearance keeps satisfying
+                // cleared_at >= hold_at while a new review card opens.
+                // Idempotent within THIS pass (not across retries) for the
+                // same reason: once landed, hold_at is non-null and
+                // cleared_at is null, so a second call in the same pass (the
+                // primary row, then again for a follow-up row sharing this
+                // source_call_log_id) reads "currently held" and no-ops
+                // rather than bumping the timestamp a second time.
+                const stampCallbackNumberHoldForCall = async () => {
+                  if (!callbackNumberNeededHoldActive) return;
+                  // Codex round 6 (structural): the NUMBER-keyed hold every
+                  // SMS is checked against, in this same transaction — a
+                  // failure aborts the booking exactly like the visit stamp
+                  // below. Idempotent per (number, call).
+                  // Round 7 P1: ensure-only — the decision point already
+                  // armed it; this write never re-arms. active=false means
+                  // the office resolved the card (verified the number)
+                  // after this pass decided: that clearance stands, and the
+                  // visit-level hold is not re-stamped over it either.
+                  const numberHold = await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
+                    phone: contactPhone, customerId, callLogId: call.id, conn: trx,
+                  });
+                  if (numberHold.recorded && numberHold.active === false) return;
+                  await trx('scheduled_services')
+                    .where({ source_call_log_id: call.id })
+                    .where((qb) => {
+                      qb.whereNull('callback_number_hold_at')
+                        .orWhereRaw('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at');
+                    })
+                    .update({
+                      callback_number_hold_at: new Date(),
+                      call_sms_cleared_at: null,
+                      call_sms_cleared_recipient: null,
+                    });
+                };
                 const existing = await findExistingCallAppointment({
                   customerId,
                   call,
@@ -15392,9 +15689,18 @@ const CallRecordingProcessor = {
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
                     attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                    // Codex round-4 P1 (PR #4807): this row's source_call_log_id
+                    // linkage may itself be durable from an earlier pass (a
+                    // reprocess landing here via the `linked` lookup in
+                    // findExistingCallAppointment) rather than freshly attached
+                    // in THIS pass — either way the hold must be present before
+                    // this trx commits. Idempotent (whereNull-guarded, keyed on
+                    // source_call_log_id), so a no-op when it already stuck.
+                    await stampCallbackNumberHoldForCall();
                   } else if (!primaryRowSkipped && !reuseHeldForAddress) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                    await stampCallbackNumberHoldForCall();
                   } else if (!primaryRowSkipped && reuseHeldForAddress && callFollowUpPlan) {
                     // Only when no AI follow-up child exists yet (an earlier
                     // pass may have created it; it was pulled above, not
@@ -15613,6 +15919,16 @@ const CallRecordingProcessor = {
                   reusedExistingSchedule = true;
                   attachedManualBookingId = attachable.row.id;
                   attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  // Codex round-4 P1 (PR #4807): the update just above stamped
+                  // source_call_log_id onto this human-created booking — the
+                  // ONLY linkage the hold stamp keys on — but this attach path
+                  // deliberately never calls ensureCallFollowUpVisit (see the
+                  // "Deliberately NO ensureCallFollowUpVisit" note below), which
+                  // was round 3's only call site for the stamp. Without this
+                  // call the row's existing confirmation/reminder send goes out
+                  // unheld to a caller who just disclaimed their ANI. Same trx
+                  // as the attach update, so it commits or rolls back with it.
+                  await stampCallbackNumberHoldForCall();
                   const primaryRow = stamped;
                   // The deal still closed — same idempotent, ownership-guarded
                   // conversion as the reuse path above, same re-service
@@ -16013,6 +16329,7 @@ const CallRecordingProcessor = {
                     });
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
+                  await stampCallbackNumberHoldForCall();
                   return created;
                 }
                 // Idempotency conflict: another writer already created a row with this key.
@@ -16061,6 +16378,7 @@ const CallRecordingProcessor = {
                   if (!existingByKeySkipped) {
                     followUpCreated = await ensureCallFollowUpVisit(existingByKey);
                   }
+                  await stampCallbackNumberHoldForCall();
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
@@ -16240,6 +16558,9 @@ const CallRecordingProcessor = {
                   scheduledDate,
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
+                  callbackNumberHoldActive: callbackNumberNeededHoldActive,
+                  disclaimedPhone: contactPhone,
+                  callLogId: call.id,
                 });
               } else if (attachedManualBookingId) {
                 if (disputeHeldReuse) await noteRetainedVisit();
@@ -16329,6 +16650,9 @@ const CallRecordingProcessor = {
                   windowStart: replaySlotStart ? String(replaySlotStart).slice(0, 5) : null,
                   serviceType: svc.service_type,
                   closeReminderWindows: !replaySlotStart,
+                  callbackNumberHoldActive: callbackNumberNeededHoldActive,
+                  disclaimedPhone: contactPhone,
+                  callLogId: call.id,
                 });
                 // Post-registration slot verify (Codex #3361 r26 P2): the
                 // fresh read above still leaves a gap before the reminder
@@ -16776,6 +17100,18 @@ const CallRecordingProcessor = {
               .ignore()
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
+          // callback_number_needed hold persistence moved to
+          // registerScheduleSideEffects (codex round-2 finding #4): stamped
+          // there, immediately before the reminder row is armed, instead of
+          // here — many awaits (routing, customer/lead writes, this whole
+          // confirmation-decision block) separate this point from booking,
+          // and a visit landing inside the 72h/24h window could have been
+          // texted before a stamp written only here ever committed. Lifted
+          // by the SAME durable clearance signal the card-request backstop
+          // already honors: call_sms_cleared_at (the confirm-leg clearance
+          // just above, or the office-confirm hook in
+          // outbound-review-confirm.js, or the triage-card / phone-edit
+          // clearance paths in customer-phone-fanout.js).
           // Card-on-file spec §3 Phase 5.3, REORDERED by owner ruling
           // 2026-08-06: the card/Auto Pay link goes out FIRST, before the
           // confirmation text — right after the call, when the appointment
@@ -16836,6 +17172,17 @@ const CallRecordingProcessor = {
             // call_sms_cleared_at stamp and NO call-recipient override:
             // call-level clearance was not given, so the stamp the pre-visit
             // backstop keys on must not assert it.
+            // SCOPED OUT of the callback_number_needed email-fallback ruling
+            // (2026-09-25): requestCardForAppointment has no email-only
+            // delivery mode today — its invitation email is a companion
+            // that only fires AFTER a CONFIRMED SMS dispatch (see
+            // startInvitationEmailLeg in appointment-card-request.js), so
+            // there is no clean way to reach an email-only recipient here
+            // without a real change to that (payment-adjacent, bearer-token)
+            // funnel. Staying 'none' is the SAFE default: no card link goes
+            // anywhere rather than risk one on the disclaimed ANI. Follow-up:
+            // build an email-only delivery mode there if the office wants
+            // the card ask to go out automatically for this case.
             try {
               const { requestCardForAppointment } = require('./appointment-card-request');
               await requestCardForAppointment({ scheduledServiceId, trigger: 'ai_call_pipeline', delivery: 'none' });
@@ -17987,6 +18334,7 @@ const CallRecordingProcessor = {
         // (codex r1 P2a). Same enforce-mode test used elsewhere in this file.
         v2Promoted: CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED,
         maskedCallSid: maskSid(callSid),
+        contactPhone, // → callbackNumberCoachingNote's ANI-comparison (call-triage-flags.js P1)
         // Checked inside, immediately before the score row is written: the
         // provider await between here and there is minutes long.
         stillOwnsClaim,
@@ -19782,6 +20130,16 @@ CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMP
 // ET-offset-vs-instant rule would drift from it.
 CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
 CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
+
+// Production contract for admin-triage.js's callback_number_needed clear
+// check (finding #3, round 4 P1, PR #4807 — NOT test-only): the direction-
+// aware ANI-vs-dialed-number resolution used to decide whether a customer's
+// on-file phone is a genuine replacement for the disclaimed number must be
+// the SAME one the call pipeline used to resolve the contact at hold time,
+// or the two can drift (an outbound call's disclaimed number is to_phone,
+// not from_phone). It lived only under `_test` — every real caller outside
+// this file got `undefined`.
+CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

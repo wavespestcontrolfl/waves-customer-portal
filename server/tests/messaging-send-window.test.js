@@ -23,6 +23,13 @@ jest.mock('../services/messaging/providers/twilio-sms', () => ({
 jest.mock('../config/feature-gates', () => ({ ...jest.requireActual('../config/feature-gates'), isEnabled: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+// callback_number_needed (PR #4807): every SMS is checked against
+// disclaimed_number_holds (sendCustomerMessage + sendSMS's dispatch). Not
+// under test here — stubbed to "never held" so no hold read reaches the db.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberBlocksSend: jest.fn(async () => false),
+}));
+
 const { isEnabled } = require('../config/feature-gates');
 const { sendViaTwilio } = require('../services/messaging/providers/twilio-sms');
 const {

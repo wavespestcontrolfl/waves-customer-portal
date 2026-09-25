@@ -56,6 +56,7 @@ const REASON_LABELS = {
   low_extraction_confidence: "Low extraction confidence",
   spam_or_wrong_number: "Spam / wrong number",
   caller_phone_missing: "Caller phone missing",
+  callback_number_needed: "Caller ID isn't theirs — need a callback number",
   do_not_contact_requested: "Do not contact",
   after_hours_emergency: "After-hours emergency",
   name_email_mismatch: "Name / email mismatch",
