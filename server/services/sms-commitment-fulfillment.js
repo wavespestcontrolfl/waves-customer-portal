@@ -21,7 +21,8 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
   AND (${t}.w IS NULL OR LEFT(split_part(${t}.w, '-', 1), 5) = LEFT(scheduled_services.window_start::text, 5))`;
 // Bump when admissibility or completeness rules change: cached verdicts
 // keyed on unchanged evidence would otherwise never be rechecked.
-const FULFILLMENT_POLICY = 3;
+// 4: R1–R3 witness rules (#4816) — bumped so cached invalid_witness checks re-ground.
+const FULFILLMENT_POLICY = 4;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -58,7 +59,7 @@ const SMS_TYPES = {
 // job — en route, on site, or completed all count as visible progress.
 const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'],
   technician_follow_up: ['completed'], other: ['en_route', 'on_site', 'completed'], callback: ['en_route', 'on_site', 'completed'] };
-// SMS ops closure lane (R2, owner ruling 2026-09-24 — Francisco Cruz "What is
+// SMS ops closure lane (R2, owner ruling 2026-09-24 — the Zelle-number ask, "What is
 // the Zelle number?"): the actual literal sms_log.message_type values a
 // payment settling stamps on the confirmation it sends (grepped
 // `message_type: '...'` / explicit `messageType:` across server/services,
@@ -76,8 +77,10 @@ const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'a
 // 'check' is deliberately absent: "please check whether the tech is coming"
 // is not a payment question (Codex #4816 r1). A payment by check reads as
 // "pay"/"paid"/"payment" in practice.
-const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay)\b/i;
-// A request to change HOW the customer pays (Lisa Reed: "separate the
+// Includes the terms the supported receipt flows use (deposit_receipt,
+// autopay_charge_success): deposit, charge(s|d), refund (Codex #4816 r4).
+const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay|deposit|charge|charges|charged|refund)\b/i;
+// A request to change HOW the customer pays (the split-billing ask: "separate the
 // charges under two payment methods", "update my card", "set up autopay") is
 // not answered by money landing, so a payment is never a witness for it
 // (Codex #4816 r2). Only a change VERB near a tender/method word counts:
@@ -350,7 +353,7 @@ const ORDERING_TIME = {
 };
 function witnessTypes(commitment) {
   if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
-  // R3 (owner ruling 2026-09-24, Lisa Reed "separate the charges" — Adam's
+  // R3 (owner ruling 2026-09-24, the split-billing ask "separate the charges" — the owner's
   // own staff reply "Done: ... is now the Auto Pay method" does NOT close
   // this): a human staff text/call/email no longer closes an `other` ask by
   // itself. Only a visit event (R1) or a payment landing (R2) does.

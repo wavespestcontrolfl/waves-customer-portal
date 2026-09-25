@@ -910,7 +910,7 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
-    // R4 owner ruling 2026-09-24 (Bill Graham "my son should be there"): a
+    // R4 owner ruling 2026-09-24 (the access-note text "my son should be there"): a
     // temporary-instruction-only message is not urgent and never bells.
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });

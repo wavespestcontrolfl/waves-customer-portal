@@ -368,7 +368,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
     // with the proposals, while execution hashes the same dedupe decision.
-    // Owner ruling 2026-09-24 (R4, Bill Graham "my son should be there" —
+    // Owner ruling 2026-09-24 (R4, the access-note text "my son should be there" —
     // a temporary access note is not urgent): a fact the durability/wording
     // check already labelled temporary_instruction never rings the bell on
     // its own. It still rides in `analysis.facts` with that outcome, and
@@ -554,29 +554,36 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {
   if (!smsCommitmentsEnabled()) return { skipped: 'gate_off' };
   if (!gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE')) return { skipped: 'activation_time_required' };
-  let afterId = null;
-  const cursorKey = 'sms_operations.fulfillment_cursor';
-  const cursor = await conn('system_settings').where({ key: cursorKey }).first('value');
-  if (/^[a-f0-9-]{36}$/i.test(cursor?.value || '')) afterId = cursor.value;
   let scanned = 0;
   let fulfilled = 0;
   let unverified = 0;
   let skippedNoWitness = 0;
   let skippedNotDue = 0;
-  // One bounded page per tick, with a durable cursor. An old open item
-  // cannot monopolize the first page and strand later customers forever.
-  // Every open row is scanned, including one whose deadline has not passed:
-  // R5 now stamps nearly every ask with a default window, and the owner's
-  // ruling is that a visit or payment event dismisses the ask when it
-  // HAPPENS, not a day later when the window runs out. Before the deadline
-  // only such a system event (R1) may act; the model check and the bell
-  // still wait for the deadline. A NULL due_at (legacy row with no stated
-  // time) stays verify-eligible on evidence but never bells (hasDueDate).
-  const rows = await conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
+  const PAGE = 25;
+  // Two bounded pages per tick, each with its own durable cursor, so an old
+  // open item cannot monopolize the first page and strand later customers.
+  // Due work (deadline passed, or a legacy NULL due_at that closes on
+  // evidence but never bells) keeps its full page; rows whose window is
+  // still open are probed on a SEPARATE page for early system-event closure
+  // (R1) and never eat into due capacity (Codex #4816 r4: a backlog of
+  // future-dated rows must not delay a 4h callback bell). Inside the window
+  // only a system event or an admissible event witness may act; the model
+  // check and the bell still wait for the deadline.
+  const openRows = () => conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
     .join('customers as c', 'c.id', 's.customer_id').whereNull('c.deleted_at')
-    .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state')
-    .modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
-    .orderBy('cc.id').limit(25).select('cc.*');
+    .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state');
+  const page = async (cursorKey, scope) => {
+    const cursor = await conn('system_settings').where({ key: cursorKey }).first('value');
+    const afterId = /^[a-f0-9-]{36}$/i.test(cursor?.value || '') ? cursor.value : null;
+    const rows = await scope(openRows()).modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
+      .orderBy('cc.id').limit(PAGE).select('cc.*');
+    return { cursorKey, rows };
+  };
+  const pages = [
+    await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),
+    await page('sms_operations.future_cursor', (q) => q.where('cc.due_at', '>', now)),
+  ];
+  const rows = pages.flatMap((p) => p.rows);
   for (const row of rows) {
     if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped_not_due: skippedNotDue, skipped: 'gate_off' };
     scanned += 1;
@@ -668,9 +675,11 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
     });
   }
-  const nextCursor = rows.length === 25 ? rows[rows.length - 1].id : null;
-  await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
-    .onConflict('key').merge({ value: nextCursor, updated_at: now });
+  for (const { cursorKey, rows: pageRows } of pages) {
+    const nextCursor = pageRows.length === PAGE ? pageRows[pageRows.length - 1].id : null;
+    await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
+      .onConflict('key').merge({ value: nextCursor, updated_at: now });
+  }
   return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped_not_due: skippedNotDue };
 }
 

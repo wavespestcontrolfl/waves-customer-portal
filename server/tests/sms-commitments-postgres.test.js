@@ -220,7 +220,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
-    // R4 owner ruling 2026-09-24 (Bill Graham "my son should be there"): a
+    // R4 owner ruling 2026-09-24 (the access-note text "my son should be there"): a
     // temporary-instruction-only message is not urgent and never bells.
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
@@ -1086,6 +1086,31 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('Codex #4816 r4: a backlog of future-dated rows never crowds a due row out of the tick (separate pages and cursors)', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
+      quote: 'Please call me back', description: 'Please call me back' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const seed = await mockPg('call_commitments').first();
+    const now = new Date(message.created_at.getTime() + 2000);
+    const { id: _id, created_at: _c, updated_at: _u, ...template } = seed;
+    const clone = (i, due_at) => ({ ...template, commitment_key: `${seed.commitment_key}:${i}`, due_at,
+      evidence: JSON.stringify(seed.evidence), sms_context: JSON.stringify(seed.sms_context) });
+    // 25 more future-dated rows (26 with the seed) and ONE row whose deadline has passed.
+    await mockPg('call_commitments').insert([...Array.from({ length: 25 }, (_, i) => clone(i, new Date(now.getTime() + 3600000))),
+      clone('due', new Date(now.getTime() - 1000))]);
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
+    // Due page: the one overdue row (verified, belled). Future page: 25 of the
+    // 26, each skipped before any model call since nothing on file answers it.
+    expect(outcome).toMatchObject({ scanned: 26, fulfilled: 0, skipped_no_witness: 25, skipped_not_due: 0 });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const cursors = Object.fromEntries((await mockPg('system_settings').whereIn('key', ['sms_operations.fulfillment_cursor', 'sms_operations.future_cursor'])).map((r) => [r.key, r.value]));
+    expect(cursors['sms_operations.fulfillment_cursor']).toBeNull();
+    expect(cursors['sms_operations.future_cursor']).toMatch(/^[a-f0-9-]{36}$/);
+  });
+
   test('inside an open window a message witness waits for the deadline: no model call, no bell, then verified once due', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
@@ -1171,7 +1196,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('R2 owner ruling 2026-09-24: an invoice paid after a payment "other" question closes it (Francisco Cruz "What is the Zelle number?")', async () => {
+  test('R2 owner ruling 2026-09-24: an invoice paid after a payment "other" question closes it (the Zelle-number ask)', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
       quote: 'What is the Zelle number?', description: 'What is the Zelle number?' };
@@ -1284,7 +1309,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
 
-  test('R3 owner ruling 2026-09-24: a delivered staff SMS reply no longer closes an "other" ask (Lisa Reed "separate the charges")', async () => {
+  test('R3 owner ruling 2026-09-24: a delivered staff SMS reply no longer closes an "other" ask (the split-billing ask "separate the charges")', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
       quote: 'Can you separate the charges under two payment methods?',

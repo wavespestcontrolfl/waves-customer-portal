@@ -817,7 +817,7 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, request)).toBe(false);
   });
 
-  test('R3 owner ruling 2026-09-24: an "other" ask no longer admits a staff sms or email reply at all (Lisa Reed "separate the charges")', () => {
+  test('R3 owner ruling 2026-09-24: an "other" ask no longer admits a staff sms or email reply at all (the split-billing ask "separate the charges")', () => {
     const other = { kind: 'other' };
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, other)).toBe(false);
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, other)).toBe(false);
