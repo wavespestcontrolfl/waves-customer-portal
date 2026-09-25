@@ -170,10 +170,34 @@ async function ringActivationBell(NotificationService, {
 // estimates.annual_plan_install_handoff_at is stamped; until then the
 // daily reconciliation re-rings it (the bell's own dedupeKey makes a
 // retry after a lost stamp land on the existing row, never a second bell).
+//
+// Codex round-5 P1: staff who accept while booking (admin-schedule's
+// accept-on-book → markEstimateManuallyAccepted) already created the
+// installation and linked it to the estimate by source_estimate_id. That
+// booking IS the handoff — ringing "nothing is booked" would invite a
+// duplicate installation — so it is stamped without a bell. A failed
+// lookup falls through to the bell (a spurious bell beats a lost handoff).
+const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled'];
+async function hasBookedInstallationVisit(conn, estimateId) {
+  try {
+    const row = await whereTermiteInstallationServiceType(
+      conn('scheduled_services as ss')
+        .where('ss.source_estimate_id', estimateId)
+        .whereNotIn('ss.status', DEAD_VISIT_STATUSES),
+      'ss',
+    ).first('ss.id');
+    return Boolean(row);
+  } catch (err) {
+    logger.warn(`[termite-annual-activation] booked-installation lookup failed for estimate ${estimateId}: ${err.message}`);
+    return false;
+  }
+}
+
 async function ringInstallHandoff({
   estimateId, contractId = null, requestedFirstVisit = null, conn = db,
 }) {
-  const delivered = await ringActivationBell(require('./notification-service'), {
+  const alreadyBooked = await hasBookedInstallationVisit(conn, estimateId);
+  const delivered = alreadyBooked || await ringActivationBell(require('./notification-service'), {
     estimateId, contractId, kind: 'schedule_first_visit', reason: requestedFirstVisitNote(requestedFirstVisit),
   });
   if (!delivered) {

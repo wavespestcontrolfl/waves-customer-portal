@@ -60,6 +60,7 @@ async function createScratchDb() {
   await db.raw(`CREATE TABLE scheduled_services (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
+    source_estimate_id uuid,
     status text,
     service_type text,
     scheduled_date date
@@ -280,6 +281,26 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     notifyAdmin.mockClear();
     expect((await sweep()).handoffScanned).toBe(0);
     expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('install handoff: an installation staff already booked on the estimate is the handoff — stamped, no bell', async () => {
+    const { sweep, notifyAdmin, db } = load();
+    await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
+    await addVisit(db, { scheduled_date: '2026-10-14', status: 'confirmed', source_estimate_id: ids.estimateId });
+
+    expect(await sweep()).toMatchObject({ handoffScanned: 1, handedOff: 1, handoffFailed: 0 });
+    expect(notifyAdmin).not.toHaveBeenCalledWith('estimate', expect.stringContaining('schedule the installation'), expect.anything(), expect.anything());
+    expect((await db('estimates').where({ id: ids.estimateId }).first()).annual_plan_install_handoff_at).toBeInstanceOf(Date);
+  });
+
+  test('install handoff: a cancelled booking, or a booking on another estimate, still rings the scheduling bell', async () => {
+    const { sweep, notifyAdmin, db } = load();
+    await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
+    await addVisit(db, { scheduled_date: '2026-10-14', status: 'cancelled', source_estimate_id: ids.estimateId });
+    await addVisit(db, { scheduled_date: '2026-10-15', status: 'confirmed', source_estimate_id: randomUUID() });
+
+    expect(await sweep()).toMatchObject({ handoffScanned: 1, handedOff: 1 });
+    expect(notifyAdmin).toHaveBeenCalledWith('estimate', expect.stringContaining('schedule the installation'), expect.anything(), expect.anything());
   });
 
   test('install handoff: a bell that fails to persist stays unstamped for the next sweep', async () => {
