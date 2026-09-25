@@ -124,9 +124,14 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 // Codex round (r2–r12 on #4785); the model's own split between the two
 // questions replaces it. The same marks anywhere off that van are still
 // ordinary readable text and brand marks to the main screen.
-const SCREEN_MAX_TOKENS = 400;
-const SCREEN_MAX_TOKENS_WITH_LOGO = 1200;
-const VAN_SCREEN_MAX_TOKENS = 600;
+// The screen runs on GPT-5.6 Sol (TEXT_POLICIES.imageScreen) at medium
+// reasoning, whose tokens count against the same cap — the budgets sit well
+// above the dispatcher's 1024-token reasoning floor, below which it turns
+// reasoning off (the chest-side positions were measured with it on).
+const SCREEN_REASONING_EFFORT = 'medium';
+const SCREEN_MAX_TOKENS = 4000;
+const SCREEN_MAX_TOKENS_WITH_LOGO = 6000;
+const VAN_SCREEN_MAX_TOKENS = 4000;
 const UNIFORM_LOGO_DESCRIPTION = 'the Waves company logo (a smiling blue wave mascot in a red-and-blue shield, lettered "WAVES" and "LAWN & PEST")';
 const VAN_WRAP_DESCRIPTION = 'the Waves van wrap (the whole van body wrapped bright blue with a halftone-dot pattern, a cartoon wave mascot in a red cap and red overalls, "WAVES" / "Lawn & Pest" lettering, a phone number and a web address)';
 // The wrap's contact details (owner ruling 2026-09-24/25): slight lettering
@@ -145,11 +150,11 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniform
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
   const shape = allowUniformLogo
-    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "technicians": [{"facing": "camera" | "side" | "away", "cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string[], "placket_x": number | null, "chest_badge_x": number | null}], "waves_logo_elsewhere": string[], "uniform_logo_lettering": string[], "forbidden_scenes": number[], "notes": string}'
+    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "technicians": [{"facing": "camera" | "side" | "away", "cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string[], "placket_x": number | null, "chest_badges_x": number[]}], "waves_logo_elsewhere": string[], "uniform_logo_lettering": string[], "forbidden_scenes": number[], "notes": string}'
     : '{"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": number[], "notes": string}';
   const uniformLogoRule = allowUniformLogo
     ? `
-- technicians: one entry PER uniformed technician in frame (empty array if none). For that person: facing is "camera" when their chest and shoulders face the viewer (straight on or a slight three-quarter turn), "side" when seen in profile, "away" when seen from behind; cap_front_visible is true only if their cap FRONT is in frame and legible enough to judge for a logo (false when the head is cropped, from behind, or too small); chest_visible is true only if their shirt chest is in frame and legible enough to judge (false when turned away, cropped, or covered); logo_on lists where ${UNIFORM_LOGO_DESCRIPTION} appears on THAT person, each as exactly "cap" or "chest", or naming any other spot (a sleeve, the back, the pants); placket_x is the horizontal position of their shirt's button placket (the row of buttons under the collar) and chest_badge_x the horizontal position of the CENTER of the logo badge on their shirt chest, both measured in the image from 0 (the picture's left edge) to 1000 (its right edge) — measure carefully rather than guessing from how shirts usually look; null when not visible.
+- technicians: one entry PER uniformed technician in frame (empty array if none). For that person: facing is "camera" when their chest and shoulders face the viewer (straight on or a slight three-quarter turn), "side" when seen in profile, "away" when seen from behind; cap_front_visible is true only if their cap FRONT is in frame and legible enough to judge for a logo (false when the head is cropped, from behind, or too small); chest_visible is true only if their shirt chest is in frame and legible enough to judge (false when turned away, cropped, or covered); logo_on lists where ${UNIFORM_LOGO_DESCRIPTION} appears on THAT person, each as exactly "cap" or "chest", or naming any other spot (a sleeve, the back, the pants); placket_x is the horizontal position of their shirt's button placket (the row of buttons under the collar), null when not visible; chest_badges_x lists the horizontal position of the CENTER of EACH logo badge on their shirt chest, one number per badge (empty array if none) — all measured in the image from 0 (the picture's left edge) to 1000 (its right edge); measure carefully rather than guessing from how shirts usually look.
 - waves_logo_elsewhere: every place that Waves logo appears that is NOT a technician's cap or chest (a vehicle, wall, sign, equipment, packaging, floating on its own), each named. Empty array if none.
 - uniform_logo_lettering: the lettering you can read INSIDE that Waves logo on a technician's cap or chest ("WAVES", "LAWN & PEST"), listed here and NOT under readable_text. Empty array if none is legible.
 EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks. Any OTHER lettering (including "WAVES" on a sign, vehicle or wall), and the Waves logo anywhere other than a cap or chest, must still be listed.`
@@ -229,7 +234,7 @@ function parseScreen(text, { requireForbidden = false, requirePlacements = false
     if (requirePlacements && !placementsWellFormed(obj)) return null;
     const strings = (v) => (Array.isArray(v) ? v.map((t) => String(t || '').trim()).filter(Boolean) : []);
     return {
-      technicians: Array.isArray(obj.technicians) ? obj.technicians.map((p) => ({ facing: p.facing, placketX: position(p.placket_x), badgeX: position(p.chest_badge_x), capVisible: p.cap_front_visible === true, chestVisible: p.chest_visible === true, logoOn: strings(p.logo_on) })) : [],
+      technicians: Array.isArray(obj.technicians) ? obj.technicians.map((p) => ({ facing: p.facing, placketX: position(p.placket_x), badgeXs: (Array.isArray(p.chest_badges_x) ? p.chest_badges_x : []).map(position).filter(Number.isFinite), capVisible: p.cap_front_visible === true, chestVisible: p.chest_visible === true, logoOn: strings(p.logo_on) })) : [],
       elsewhere: strings(obj.waves_logo_elsewhere),
       // Lettering the model attributes to the uniform logo itself — only the
       // logo's own words count (a model cannot launder arbitrary text here).
@@ -302,7 +307,7 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
   // allowed caption the image rendered correctly; the caller ranks two failed
   // candidates on it (Codex r11 P2 on #3964).
   const violations = logoReasons.length + vanReasons.length + brandMarks.length + strayText.length + incomplete.length + missing.length + forbidden.length;
-  const placements = allowUniformLogo ? [...parsed.technicians.flatMap((p) => p.logoOn.map((t) => (classifyPlacement(t) === 'chest' && chestSide(p) ? `${chestSide(p)} chest` : classifyPlacement(t)))), ...parsed.elsewhere.map((t) => `elsewhere: ${t}`)] : [];
+  const placements = allowUniformLogo ? [...parsed.technicians.flatMap((p) => [...p.logoOn.map(classifyPlacement).filter((t) => t !== 'chest' || !chestSides(p).length), ...chestSides(p).map((side) => `${side} chest`)]), ...parsed.elsewhere.map((t) => `elsewhere: ${t}`)] : [];
   return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: [...logos, ...vanFlagged], forbidden, reasons, violations, placements };
 }
 
@@ -347,16 +352,17 @@ function classifyPlacement(t) {
   if (/\bchest\b/.test(n)) return 'chest';
   return 'other';
 }
-// Which chest the badge is on → 'right' | 'left' | null (not judgeable).
+// Which chest each badge is on → ('right' | 'left')[], empty when not
+// judgeable.
 // Vision models cannot name the side in words — the 2026-09-25 lab screen
 // called 16 of 16 correct right-chest badges "left chest", and "picture-left"
 // wording fared no better — but the badge's and the button placket's
 // positions, compared in code, got 6 of 6 camera-facing technicians right.
 // Facing the camera, a badge left of the placket in the picture is on the
 // wearer's RIGHT chest. In profile or from behind the side is never judged.
-function chestSide(p) {
-  if (p.facing !== 'camera' || !Number.isFinite(p.placketX) || !Number.isFinite(p.badgeX) || p.badgeX === p.placketX) return null;
-  return p.badgeX < p.placketX ? 'right' : 'left';
+function chestSides(p) {
+  if (p.facing !== 'camera' || !Number.isFinite(p.placketX)) return [];
+  return p.badgeXs.filter((x) => x !== p.placketX).map((x) => (x < p.placketX ? 'right' : 'left'));
 }
 // The placement verdict for a uniform-logo image → { reasons, misplaced }.
 // Per technician: the logo must be on the cap when the cap front can be
@@ -377,10 +383,13 @@ function uniformLogoReasons({ technicians, elsewhere }) {
     const stray = p.logoOn.filter((t) => classifyPlacement(t) === 'other');
     if (stray.length) { reasons.push(`${who}logo or brand mark: Waves logo on ${stray.slice(0, 3).join(', ')}`); misplaced.push(...stray.map((t) => `${who}Waves logo on ${t}`)); }
     if (p.capVisible && !where.has('cap')) reasons.push(`${who}uniform logo missing on the cap`);
-    if (where.has('chest') && chestSide(p) === 'left') { reasons.push(`${who}uniform logo on the left chest, not the right`); misplaced.push(`${who}Waves logo on the left chest`); }
+    const sides = chestSides(p);
+    if (sides.includes('left')) { reasons.push(`${who}uniform logo on the left chest${sides.includes('right') ? ' as well as the right' : ', not the right'}`); misplaced.push(`${who}Waves logo on the left chest`); }
+    // Exactly one chest badge (Codex r3 P2 on #4761), whatever the view.
+    else if (p.badgeXs.length > 1) { reasons.push(`${who}more than one chest badge`); misplaced.push(`${who}extra Waves chest badge`); }
     // A chest badge is demanded only facing the camera: in profile the
     // visible half may be the plain one.
-    else if (p.chestVisible && p.facing === 'camera' && !where.has('chest')) reasons.push(`${who}uniform logo missing on the chest`);
+    else if (p.chestVisible && p.facing === 'camera' && !where.has('chest') && !p.badgeXs.length) reasons.push(`${who}uniform logo missing on the chest`);
   });
   return { reasons, misplaced };
 }
@@ -463,11 +472,12 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     return open;
   }
   try {
-    const ask = (text, maxTokens) => dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+    const ask = (text, maxTokens) => dispatchWithFallback(MODELS.TEXT_POLICIES.imageScreen, {
       text,
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: true,
       maxTokens,
+      reasoningEffort: SCREEN_REASONING_EFFORT,
       ...(timeoutMs > 0 ? { timeoutMs } : {}),
     });
     // The van question runs beside the main one, inside the same deadline.

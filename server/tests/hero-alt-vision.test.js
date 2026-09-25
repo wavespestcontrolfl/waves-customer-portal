@@ -95,10 +95,10 @@ describe('sanitizeAlt', () => {
 describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — required on cap + right chest per technician, forbidden elsewhere)', () => {
   const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
   const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
-  // facing 'camera' + chest_badge_x LEFT of placket_x (in picture coordinates)
+  // facing 'camera' + chest_badges_x LEFT of placket_x (in picture coordinates)
   // is the wearer's correct RIGHT chest — chestSide() judges it from these two
   // numbers only, never from the logo_on wording itself.
-  const tech = (extra = {}) => ({ facing: 'camera', cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'chest'], placket_x: 500, chest_badge_x: 440, ...extra });
+  const tech = (extra = {}) => ({ facing: 'camera', cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'chest'], placket_x: 500, chest_badges_x: [440], ...extra });
   const branded = (extra = {}) => answer({ readable_text: [], logos_or_brand_marks: [], technicians: [tech()], waves_logo_elsewhere: [], uniform_logo_lettering: [], forbidden_scenes: [], notes: '', ...extra });
   const screen = (extra) => { mockDispatch.mockResolvedValue(branded(extra)); return screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true }); };
   beforeEach(() => mockDispatch.mockReset());
@@ -107,11 +107,11 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     const plain = buildScreenPrompt({});
     expect(plain).not.toMatch(/EXCEPTION|technicians|waves_logo_elsewhere/);
     const p = buildScreenPrompt({ allowUniformLogo: true });
-    expect(p).toMatch(/"technicians": \[\{"facing": "camera" \| "side" \| "away", "cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string\[\], "placket_x": number \| null, "chest_badge_x": number \| null\}\], "waves_logo_elsewhere": string\[\], "uniform_logo_lettering": string\[\]/);
+    expect(p).toMatch(/"technicians": \[\{"facing": "camera" \| "side" \| "away", "cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string\[\], "placket_x": number \| null, "chest_badges_x": number\[\]\}\], "waves_logo_elsewhere": string\[\], "uniform_logo_lettering": string\[\]/);
     expect(p).toMatch(/one entry PER uniformed technician/);
     expect(p).toMatch(/facing is "camera" when their chest and shoulders face the viewer/);
     expect(p).toMatch(/placket_x is the horizontal position of their shirt's button placket/);
-    expect(p).toMatch(/chest_badge_x the horizontal position of the CENTER of the logo badge/);
+    expect(p).toMatch(/chest_badges_x lists the horizontal position of the CENTER of EACH logo badge on their shirt chest, one number per badge/);
     expect(p).toMatch(/EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected/);
   });
 
@@ -125,17 +125,27 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
   });
 
   test('a technician in frame with the logo missing, on one garment only, or on the LEFT chest (per the picture-position numbers) fails (Codex r1 P1 on #4761)', async () => {
-    expect((await screen({ technicians: [tech({ logo_on: [] })] })).reasons).toEqual(['uniform logo missing on the cap', 'uniform logo missing on the chest']);
-    expect((await screen({ technicians: [tech({ logo_on: ['cap'] })] })).reasons).toEqual(['uniform logo missing on the chest']);
-    // chest_badge_x RIGHT of placket_x (in picture coordinates) is the wearer's LEFT chest.
-    const left = await screen({ technicians: [tech({ chest_badge_x: 560 })] });
+    expect((await screen({ technicians: [tech({ chest_badges_x: [], logo_on: [] })] })).reasons).toEqual(['uniform logo missing on the cap', 'uniform logo missing on the chest']);
+    expect((await screen({ technicians: [tech({ chest_badges_x: [], logo_on: ['cap'] })] })).reasons).toEqual(['uniform logo missing on the chest']);
+    // chest_badges_x RIGHT of placket_x (in picture coordinates) is the wearer's LEFT chest.
+    const left = await screen({ technicians: [tech({ chest_badges_x: [560] })] });
     expect(left.ok).toBe(false);
     expect(left.reasons).toEqual(['uniform logo on the left chest, not the right']);
     expect(left.violations).toBe(1);
   });
 
+  test('an EXTRA chest badge fails: a wrong-side one beside a correct one, or two anywhere (Codex r3 P2 on #4761; pre-push fallback P1 on 0569ff57cd)', async () => {
+    const both = await screen({ technicians: [tech({ chest_badges_x: [440, 560] })] });
+    expect(both.reasons).toEqual(['uniform logo on the left chest as well as the right']);
+    expect(both.logos).toEqual(['Waves logo on the left chest']);
+    expect(both.placements).toEqual(['cap', 'right chest', 'left chest']);
+    const twoInProfile = await screen({ technicians: [tech({ facing: 'side', chest_badges_x: [300, 340] })] });
+    expect(twoInProfile.reasons).toEqual(['more than one chest badge']);
+    expect(twoInProfile.logos).toEqual(['extra Waves chest badge']);
+  });
+
   test('a missing (null or empty) placket or badge position never fakes a side verdict — Number(null) is 0 (pre-push fallback P1 on 199826df78)', async () => {
-    for (const extra of [{ placket_x: null, chest_badge_x: 440 }, { placket_x: 500, chest_badge_x: null }, { placket_x: '', chest_badge_x: 440 }, { placket_x: '500', chest_badge_x: 560 }]) {
+    for (const extra of [{ placket_x: null, chest_badges_x: [440] }, { placket_x: 500, chest_badges_x: [] }, { placket_x: '', chest_badges_x: [440] }, { placket_x: '500', chest_badges_x: [560] }]) {
       const r = await screen({ technicians: [tech(extra)] });
       expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
       expect(r.placements).toEqual(['cap', 'chest']);
@@ -143,24 +153,24 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
   });
 
   test('a side-facing technician with no chest badge is not flagged, and a side-facing badge\'s side is never judged (facing gates the chest requirement and chestSide)', async () => {
-    const sideNoBadge = await screen({ technicians: [tech({ facing: 'side', logo_on: ['cap'] })] });
+    const sideNoBadge = await screen({ technicians: [tech({ facing: 'side', chest_badges_x: [], logo_on: ['cap'] })] });
     expect(sideNoBadge.ok).toBe(true);
     // Numbers that would read as the wrong side facing the camera are never
     // judged in profile — the badge's side is not knowable off-camera.
-    const sideBadge = await screen({ technicians: [tech({ facing: 'side', chest_badge_x: 560 })] });
+    const sideBadge = await screen({ technicians: [tech({ facing: 'side', chest_badges_x: [560] })] });
     expect(sideBadge.ok).toBe(true);
     expect(sideBadge.placements).toEqual(['cap', 'chest']);
   });
 
   test('each placement is demanded only for a garment that can be judged on THAT person (pre-push P1 on f3efa39462)', async () => {
-    expect((await screen({ technicians: [tech({ chest_visible: false, logo_on: ['cap'] })] })).ok).toBe(true);
+    expect((await screen({ technicians: [tech({ chest_visible: false, chest_badges_x: [], logo_on: ['cap'] })] })).ok).toBe(true);
     expect((await screen({ technicians: [tech({ cap_front_visible: false, logo_on: ['chest'] })] })).ok).toBe(true);
-    expect((await screen({ technicians: [tech({ chest_visible: false, logo_on: [] })] })).reasons).toEqual(['uniform logo missing on the cap']);
+    expect((await screen({ technicians: [tech({ chest_visible: false, chest_badges_x: [], logo_on: [] })] })).reasons).toEqual(['uniform logo missing on the cap']);
     expect((await screen({ technicians: [] })).ok).toBe(true); // a bait-station close-up: nobody to judge
   });
 
   test('a partially branded crew fails: one correct technician beside an unbranded one (Codex r3 P2 on #4761)', async () => {
-    const r = await screen({ technicians: [tech(), tech({ logo_on: [] })] });
+    const r = await screen({ technicians: [tech(), tech({ chest_badges_x: [], logo_on: [] })] });
     expect(r.ok).toBe(false);
     expect(r.reasons).toEqual(['technician 2: uniform logo missing on the cap', 'technician 2: uniform logo missing on the chest']);
   });
@@ -236,7 +246,7 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(isAllowedUniformLogo('Waves badge on the uniform')).toBe(false);
     expect(isAllowedUniformLogo('wave pattern on the shirt')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on the glove and cap')).toBe(false);
-    // Side is judged only from technicians[]' picket_x/chest_badge_x numbers,
+    // Side is judged only from technicians[]' placket_x/chest_badges_x numbers,
     // never from this free text — "left" alone no longer excludes it
     // (Codex r4 P2 on #4761 excluded it; the 2026-09-25 lab showed the
     // screen's own left/right words were unreliable).
@@ -255,7 +265,7 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     // "left chest" in free text alone is now the allowed uniform logo — the
     // side comes only from the picture-position numbers on technicians[].
     expect((await screen({ logos_or_brand_marks: ['Waves logo on left chest'] }))).toMatchObject({ ok: true, logos: [] });
-    const r = await screen({ technicians: [tech({ chest_badge_x: 560 })] });
+    const r = await screen({ technicians: [tech({ chest_badges_x: [560] })] });
     expect(r.ok).toBe(false);
     expect(r.reasons).toEqual(['uniform logo on the left chest, not the right']);
     expect(r.logos).toEqual(['Waves logo on the left chest']);
@@ -314,6 +324,19 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER })).toMatchObject({ ok: true, checked: true });
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/IGNORE THE WAVES VAN/);
+  });
+
+  test('both screen questions run on the Sol-only imageScreen policy at medium reasoning, above the reasoning floor (owner ruling 2026-09-25)', async () => {
+    mockAnswers();
+    await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true, allowVanWrap: true });
+    expect(mockDispatch).toHaveBeenCalledTimes(2);
+    for (const [policy, req] of mockDispatch.mock.calls) {
+      expect(policy).toBe(MODELS.TEXT_POLICIES.imageScreen);
+      expect(req.reasoningEffort).toBe('medium');
+      expect(req.maxTokens).toBeGreaterThan(1024);
+    }
+    expect(MODELS.TEXT_POLICIES.imageScreen.primary.provider).toBe('openai');
+    expect(MODELS.TEXT_POLICIES.imageScreen.fallback).toBeUndefined();
   });
 
   test('the wrap on the van, nothing off it, its own phone number and web address → clean', async () => {
@@ -376,7 +399,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
   });
 
   test('with the uniform logo too: a correctly branded technician beside the wrapped van is clean — the uniform rules are unchanged (Codex r12 P2 on #4785)', async () => {
-    const tech = { facing: 'camera', cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'chest'], placket_x: 500, chest_badge_x: 440 };
+    const tech = { facing: 'camera', cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'chest'], placket_x: 500, chest_badges_x: [440] };
     const r = await screen({ allowUniformLogo: true, main: { ...CLEAN_MAIN, technicians: [tech], waves_logo_elsewhere: [], uniform_logo_lettering: [] } });
     expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
     const elsewhere = await screen({ allowUniformLogo: true, main: { ...CLEAN_MAIN, technicians: [tech], waves_logo_elsewhere: ['a sign on the fence'], uniform_logo_lettering: [] } });
