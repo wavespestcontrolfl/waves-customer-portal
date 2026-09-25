@@ -180,7 +180,11 @@ cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
 `SCHEDULING_MAX_DETOUR_MINUTES` (default 30; an empty day counts the whole trip
-from HQ). Staff and phone booking see every fit. Gate-off availability is unchanged apart from the
+from HQ). Staff and phone booking see every fit. The finder's per-slot `return_time`
+(modeled return to HQ) and result-level `rejections` tally are staff/diagnostic
+fields only: /api/booking/availability builds each public slot field by field
+(`routes/booking.js`) and the estimate routes build theirs through
+`classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
