@@ -126,33 +126,56 @@ function answerRecommendations({ project }) {
   return 'No extra steps were flagged for you on this report.';
 }
 
-function answerProjectReportQuestion({ question, project, payload }) {
+// Explicit intents the client's shipped prompt chips can send (AW-06: bind
+// each chip to its own answer instead of relying only on free-text routing
+// of its label — a rewritten chip label can never silently reroute an
+// answer function it no longer matches). Server-validated whitelist; an
+// unrecognized or missing intent falls through to the free-text router
+// below so older/unknown clients keep working.
+const PROMPT_INTENTS = {
+  findings: ({ project, typeCfg }) => answerFindings({ project, typeCfg }),
+  treatment: ({ project, typeCfg }) => answerTreatment({ project, typeCfg }),
+  recommendations: ({ project }) => answerRecommendations({ project }),
+  next_visit: ({ project, payload }) => answerNextVisit({ project, payload }),
+};
+
+// Free-text routing, in precedence order. Checked in order; first match
+// wins. Treatment/recommendation intents are checked BEFORE the visit/
+// schedule router (AW-06): a bare "next" — as in "What should I do next?" —
+// is not itself scheduling intent, and "treated" (an inflection of "treat")
+// must be recognized as a treatment word.
+function answerProjectReportQuestion({ question, project, payload, intent }) {
   const q = String(question || '').toLowerCase();
   const typeCfg = getProjectType(project.project_type);
 
-  if (/\b(next|follow|when|appointment|visit|schedule|come back)\b/.test(q)) {
-    return answerNextVisit({ project, payload });
+  if (intent && Object.prototype.hasOwnProperty.call(PROMPT_INTENTS, intent)) {
+    return PROMPT_INTENTS[intent]({ project, payload, typeCfg });
   }
-  if (/\b(treat|product|use|used|appl|chemical|spray|bait|gallon)\b/.test(q)) {
+
+  if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|use|used|using|appl(?:y|ies|ied|ying|ication|ications)|chemical|chemicals|spray|sprays|sprayed|spraying|bait|baits|baited|gallon|gallons)\b/.test(q)) {
     return answerTreatment({ project, typeCfg });
   }
-  if (/\b(recommend|next step|advice|prep|do now|should i)\b/.test(q)) {
+  if (/\b(recommend(?:ation|ations)?|next step|advice|prep|do now|should i|do i need|need to do|do next)\b/.test(q)) {
     return answerRecommendations({ project });
   }
-  if (/\b(find|found|finding|see|saw|observe|activity|evidence|result)\b/.test(q)) {
+  if (/\b(find|found|finding|findings|see|saw|observe|observed|activity|evidence|result|results)\b/.test(q)) {
     return answerFindings({ project, typeCfg });
+  }
+  if (/\b(follow|when|appointment|visit|schedule|come back)\b/.test(q)) {
+    return answerNextVisit({ project, payload });
   }
   return `The full details of this project are on the report above. For anything it doesn't cover, call or text ${WAVES_PHONE_DISPLAY} and we'll walk through it with you.`;
 }
 
-// Suggested prompt chips, mirrored client-side. Kept here so the answer
+// Suggested prompt chips, mirrored client-side, each paired with the
+// explicit intent the chip click sends (AW-06). Kept here so the answer
 // router and the suggestions never drift apart.
 function projectReportAskPrompts(project = {}) {
   return [
-    'What did you find?',
-    'What was treated?',
-    'What should I do next?',
-    'When is my next visit?',
+    { text: 'What did you find?', intent: 'findings' },
+    { text: 'What was treated?', intent: 'treatment' },
+    { text: 'What should I do next?', intent: 'recommendations' },
+    { text: 'When is my next visit?', intent: 'next_visit' },
   ];
 }
 
@@ -160,4 +183,5 @@ module.exports = {
   answerProjectReportQuestion,
   projectReportAskPrompts,
   cleanFindings,
+  PROMPT_INTENTS,
 };

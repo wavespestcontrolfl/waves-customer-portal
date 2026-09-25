@@ -1,5 +1,19 @@
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
+const WAVES_PHONE_DISPLAY = '(941) 297-5749';
+
+// AW-06: the only cues allowed to route a typed question to the re-entry
+// answer on their own. A bare location word ("outside"/"inside") is NOT a
+// safety cue by itself — "What was applied outside today?" must reach the
+// treatment answer, not be hijacked here. Safety-subject words (who is
+// affected) always win regardless of the rest of the wording, and their
+// plural forms are included (the old matcher had "pet" but missed "pets").
+const SAFETY_SUBJECT_RE = /\b(pets?|dogs?|cats?|kids?|child(?:ren)?)\b/;
+const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b|\bwait\b|\bgo(?:ing)?\s*back\b|\bcome\s*back\b|\bback\s*(?:out|outside|in|inside)\b/;
+function isReentryIntent(q) {
+  return SAFETY_SUBJECT_RE.test(q) || REENTRY_PHRASE_RE.test(q);
+}
+
 const PRODUCT_INSIGHTS = [
   {
     match: /\btaurus\b|fipronil/i,
@@ -369,9 +383,12 @@ function answerReentry({ data = {} } = {}) {
   // reentry.js's framing (audit 2026-07-16 — this was the one surface that
   // still said "N min outside, N min inside").
   const hasWindow = Number(advisory.exterior_reentry_min) > 0 || Number(advisory.interior_reentry_min) > 0;
+  // AW-06: no recorded interval is not itself an answer — hand the customer
+  // an explicit way to confirm it's safe rather than leaving them with a
+  // bare "not recorded" and nothing to do next.
   const base = hasWindow
     ? 'Give treated areas time to fully dry before normal use.'
-    : 'No re-entry timer was recorded for this report.';
+    : `No re-entry timer was recorded for this report — call or text ${WAVES_PHONE_DISPLAY} and we'll confirm it's safe to go back out.`;
   return `${base}${advisory.pet_advisory ? ` ${advisory.pet_advisory}` : ''}`;
 }
 
@@ -461,8 +478,11 @@ function answerServiceReportQuestion({
   // plan shown on the same page (codex #3565 gh-r29). Without a plan the
   // existing routing (irrigation → re-entry) stands.
   // Safety first: re-entry / pets / kids questions answer with the once-dry
-  // rule even when they mention minutes or water (codex gh-r30).
-  if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside)\b/.test(q)) {
+  // rule even when they mention minutes or water (codex gh-r30). AW-06: a
+  // bare location word ("outside"/"inside") is no longer enough on its own —
+  // see isReentryIntent — so "What was applied outside today?" reaches the
+  // treatment answer below instead of being hijacked here.
+  if (isReentryIntent(q)) {
     return answerReentry({ data });
   }
 
@@ -500,15 +520,24 @@ function answerServiceReportQuestion({
     return answerReentry({ data });
   }
 
-  if (/\b(pressure|trend|better|worse|score|index|improving|lawn|turf|weed|fungus|thatch)\b/.test(q)) {
+  // AW-06: covers the lawn V2 insight chips too (water/weeds/damage/
+  // coverage/color categories in ReportViewPage.jsx's reportAskPrompts),
+  // which all read from this same score breakdown in answerTrend.
+  if (/\b(pressure|trend|trending|better|worse|score|index|improving|lawn|turf|weeds?|fungus|thatch|stress|damage|coverage|color|thicken\w*|thin)\b/.test(q)) {
     return answerTrend({ data });
   }
 
-  if (/\b(treat|treated|product|application|spray|bait|chemical|applied)\b/.test(q)) {
+  // AW-06: exact-word matching missed inflections ("treated", "applying",
+  // "products", "used") — this is the branch "What was applied outside
+  // today?" and "Why was <product> used?" must reach.
+  if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|application|applications|apply|applies|applied|applying|spray|sprays|sprayed|spraying|bait|baits|baited|chemical|chemicals|use|used|using)\b/.test(q)) {
     return answerAppliedToday({ data });
   }
 
-  if (/\b(do|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q)) {
+  // "watch" added (AW-06): "What should I watch for next?" is advisory
+  // next-steps intent, not an appointment-date lookup — checked here, before
+  // the bare "next" appointment branch below.
+  if (/\b(do|watch|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q)) {
     return answerNextSteps({ data, nextAppointment });
   }
 

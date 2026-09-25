@@ -8,7 +8,7 @@ const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
-const { answerProjectReportQuestion } = require('../services/project-report-assistant');
+const { answerProjectReportQuestion, PROMPT_INTENTS } = require('../services/project-report-assistant');
 const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
@@ -209,6 +209,19 @@ const reportLimiter = rateLimit({
   skip: isReportLimiterExempt,
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
+
+// Ask Waves privacy headers (audit "Additional gaps"): both report ask
+// endpoints answer with recorded-but-sensitive service/project facts and
+// must never be cached or indexed. Global Helmet already sets
+// Referrer-Policy — do not duplicate it here. Registered as router-level
+// middleware BEFORE the rate limiter below so it always runs on these two
+// paths, including on a 429 response.
+function reportsAskPrivacyHeaders(req, res, next) {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  next();
+}
+router.use(['/project/:token/ask', '/:token/ask'], reportsAskPrivacyHeaders);
 
 router.use(reportLimiter);
 
@@ -945,6 +958,14 @@ router.post('/project/:token/ask', async (req, res, next) => {
     const question = String(req.body?.question || '').trim();
     if (!question) return res.status(400).json({ error: 'question_required' });
     if (question.length > 500) return res.status(400).json({ error: 'question_too_long' });
+    // AW-06: a shipped prompt chip may send its own explicit intent instead
+    // of relying on free-text matching of its (possibly later reworded)
+    // label. Optional and whitelisted — an older client that never sends it,
+    // or sends something unrecognized, falls through to free-text routing.
+    const rawIntent = req.body?.intent;
+    const intent = typeof rawIntent === 'string' && Object.prototype.hasOwnProperty.call(PROMPT_INTENTS, rawIntent)
+      ? rawIntent
+      : null;
 
     const project = await findProjectByReportSegment(req.params.token);
     if (!project) return res.status(404).json({ error: 'Report not found' });
@@ -964,6 +985,7 @@ router.post('/project/:token/ask', async (req, res, next) => {
     const answer = answerProjectReportQuestion({
       question,
       project,
+      intent,
       payload: {
         upcomingAppointment: upcomingAppointment
           ? { serviceType: upcomingAppointment.service_type, scheduledDate: upcomingAppointment.scheduled_date }
