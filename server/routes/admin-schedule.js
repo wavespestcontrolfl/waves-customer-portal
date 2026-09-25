@@ -12305,15 +12305,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // its own service is never re-checked.
     const postedCatalogIds = [updates.service_id, ...(Array.isArray(replaceAddons) ? replaceAddons.map((l) => l?.serviceId) : [])]
       .filter(Boolean);
-    if (postedCatalogIds.length) {
-      const current = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_id');
+    // A label-only save (no catalog id resolved) can still rename the visit
+    // to the retired service — its name goes through the gate when it changes.
+    const labelOnly = typeof serviceType === 'string' && serviceType.trim() && updates.service_id === undefined;
+    if (postedCatalogIds.length || labelOnly) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_id', 'service_type');
       if (current) {
-        const currentAddonIds = await db('scheduled_service_addons')
-          .where({ scheduled_service_id: req.params.id }).pluck('service_id');
+        const currentAddonIds = postedCatalogIds.length
+          ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).pluck('service_id')
+          : [];
         const onVisit = new Set([current.service_id, ...(currentAddonIds || [])].filter(Boolean).map(String));
         const added = postedCatalogIds.filter((id) => !onVisit.has(String(id)));
-        const notHeldRetired = added.length
-          ? await require('../services/service-library').retiredServicesNotHeldBy({ customerId: current.customer_id, serviceIds: added })
+        const renamed = labelOnly
+          && serviceType.trim().toLowerCase() !== String(current.service_type || '').trim().toLowerCase();
+        const notHeldRetired = added.length || renamed
+          ? await require('../services/service-library').retiredServicesNotHeldBy({
+            customerId: current.customer_id, serviceIds: added, serviceTypes: renamed ? [serviceType] : [],
+          })
           : [];
         if (notHeldRetired.length) {
           return res.status(409).json({

@@ -609,7 +609,8 @@ async function findOverdueCustomers(input) {
     // they sort oldest-first — a SQL limit would let them crowd out a truly
     // overdue 6-week customer. Filter per customer first; the final slice
     // below applies the limit.
-    if (cat !== 'tree_shrub') customersQuery = customersQuery.limit(limit);
+    // (T&S keeps a generous safety cap instead.)
+    customersQuery = customersQuery.limit(cat === 'tree_shrub' ? 2000 : limit);
     const customers = await customersQuery;
 
     for (const c of customers) {
