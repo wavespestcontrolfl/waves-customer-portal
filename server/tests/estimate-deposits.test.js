@@ -24,7 +24,7 @@ jest.mock('../services/logger', () => ({
 // Email leg of the deposit receipt: SendGrid configured so the leg runs;
 // sendTemplate captured; recipient resolution mocked to the customer's own
 // email (the real helper's contact-slot logic is unit-tested elsewhere).
-const mockSendTemplate = jest.fn(async () => ({ message: { provider_message_id: 'sg-1' } }));
+const mockSendTemplate = jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1' } }));
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => true),
 }));
@@ -327,6 +327,29 @@ describe('webhook + invoice credit', () => {
     // Webhook replay — the row is already received; no second text.
     await handleDepositIntentSucceeded(succeededPi);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
+  it('routes an App-only deposit receipt without inventing a phone recipient', async () => {
+    forceRecordableViaFailOpen();
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1' },
+      customerRow: { id: 'cust-1', phone: '', first_name: 'Sam' },
+      prefsRow: { payment_receipt_channels: ['push'] },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '',
+      customerId: 'cust-1',
+      hasEmailLeg: false,
+      metadata: expect.objectContaining({ billingDeliveryCategory: 'payment_receipt' }),
+    }));
     renderSmsTemplate.mockResolvedValue(null);
   });
 
@@ -1734,6 +1757,33 @@ describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the em
     const r = await sendDepositReceiptEmailFallback('est-1');
     expect(r).toEqual({ sent: false, reason: 'no_recipient_email' });
     expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it.each(['preference', 'recipient'])('an aborted provider handoff after a %s change stays undelivered', async (change) => {
+    const customer = { ...baseCustomer };
+    const prefs = { payment_receipt_channels: ['email'] };
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer, prefs, ledger: baseLedger });
+    mockSendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      if (change === 'preference') prefs.payment_receipt_channels = ['sms'];
+      else customer.email = 'changed@customer.example';
+      const dispatch = jest.fn();
+      expect(await withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(dispatch).not.toHaveBeenCalled();
+      return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+    });
+
+    await expect(sendDepositReceiptEmailFallback('est-1')).resolves.toEqual({
+      sent: false, reason: 'aborted_by_caller_before_dispatch',
+    });
+  });
+
+  it('counts only a previously delivered dedupe as sent', async () => {
+    mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: {}, ledger: baseLedger });
+    mockSendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, message: { status: 'delivered' } });
+    await expect(sendDepositReceiptEmailFallback('est-1')).resolves.toEqual({ sent: true });
+
+    mockSendTemplate.mockResolvedValueOnce({ sent: false, deduped: true, message: { status: 'dropped' } });
+    await expect(sendDepositReceiptEmailFallback('est-1')).resolves.toEqual({ sent: false, reason: 'email_not_sent' });
   });
 
   it('fails CLOSED when the prefs lookup errors — a DB blip must not bypass the kill switch', async () => {
