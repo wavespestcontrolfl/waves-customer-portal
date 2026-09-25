@@ -77,7 +77,10 @@ function communicationsHref(draft) {
   return `/admin/communications?${params.toString()}`;
 }
 
-const ASSESSMENT_TYPES = new Set(["lawn", "pest"]);
+// Matches the assessments page's own ASSESSMENT_TYPES
+// (client/src/pages/admin/PhotoAssessmentsPage.jsx), which already handles
+// ?open=tree_shrub:<id>.
+const ASSESSMENT_TYPES = new Set(["lawn", "pest", "tree_shrub"]);
 
 // Photo-triage drafts carry the assessment they were written from
 // (flags.assessment_type / assessment_id, stamped server-side by

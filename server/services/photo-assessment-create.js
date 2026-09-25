@@ -8,7 +8,7 @@
  * route (POST /api/admin/photo-assessments/:type, source 'admin'), which
  * also reads TYPES/configFor for its list/detail/report routes, and the
  * inbound photo-text triage (services/photo-text-triage.js, source
- * 'auto_triage'; lawn/pest only for now).
+ * 'auto_triage'; lawn, pest, and tree_shrub).
  *
  * createAdminAssessment({ type, source, photos, message_photos, lead_id,
  * customer_id, contact, address, note }) resolves the photos (base64 uploads

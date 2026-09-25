@@ -176,23 +176,25 @@ const PHOTO_PROBLEM_RE = /\b(wrong|problem|dead|dying|brown|yellow(?:ing)?|patch
 // the model even when it also reads like a question about a photo.
 const PHOTO_NON_DIAGNOSTIC_RE = /\b(invoice|receipt|bill(?:ed|ing)?|charge[ds]?|pay(?:ment)?|paid|price|quote|estimate|schedul\w*|reschedul\w*|appointment|visit|come (?:out|by)|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|gate|code|address|screenshot)\b/i;
 
-// TODO(tree_shrub): tree/shrub photos run the pest identifier until the
-// tree_shrub assessment type lands in its own PR; flip this constant then.
-const TREE_SHRUB_TRIAGE_TYPE = 'pest';
+// Tree/shrub photos run their own assessment type (photo-assessment-create.js
+// TYPES.tree_shrub).
+const TREE_SHRUB_TRIAGE_TYPE = 'tree_shrub';
 
 function countTokens(lower, tokens) {
   return tokens.filter((t) => tokenMatches(lower, [t])).length;
 }
 
 // Lawn only when lawn words strictly outnumber the pest-side words (pest +
-// tree/shrub, which currently route to TREE_SHRUB_TRIAGE_TYPE); a tie or a
-// question with no subject word runs the pest identifier.
+// tree/shrub combined, same "lawn must clearly win" rule as before the
+// tree_shrub split); otherwise tree/shrub words winning outright over pest
+// words route to TREE_SHRUB_TRIAGE_TYPE — a tie (including 0-0, a question
+// with no subject word) runs the pest identifier, same default as always.
 function photoAssessmentType(lower) {
-  const scores = { lawn: 0, pest: 0 };
-  scores.lawn += countTokens(lower, PHOTO_LAWN_WORDS);
-  scores.pest += countTokens(lower, PHOTO_PEST_WORDS);
-  scores[TREE_SHRUB_TRIAGE_TYPE] += countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
-  return scores.lawn > scores.pest ? 'lawn' : 'pest';
+  const lawnScore = countTokens(lower, PHOTO_LAWN_WORDS);
+  const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
+  const treeShrubScore = countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
+  if (lawnScore > pestScore + treeShrubScore) return 'lawn';
+  return treeShrubScore > pestScore ? TREE_SHRUB_TRIAGE_TYPE : 'pest';
 }
 
 function regexClassifyPhoto(body) {
