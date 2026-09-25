@@ -538,6 +538,34 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     } finally { balanceRead.mockRestore(); send.mockRestore(); }
   });
 
+  test('a partially delivered episode for a superseded invoice or date still counts toward the allowance', async () => {
+    // Text accepted, Email still pending, then the visit was rescheduled:
+    // the episode is incomplete and no longer `pending` for this date, but
+    // the customer was reached and must not get another gentle reminder.
+    const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 6 * 86400000) });
+    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const dayAgo = (days) => new Date(Date.now() - days * 86400000);
+    const key = 'balance-reminder:inv-1:gentle:May 20, 2026';
+    const partial = [
+      { id: 'led-sms', channel: 'sms', occurred_at: dayAgo(3),
+        metadata: { delivered: true, notificationEventKey: key, invoiceId: 'inv-1', scheduledDate: 'May 20, 2026' } },
+      { id: 'led-email', channel: 'email', occurred_at: dayAgo(3),
+        metadata: { notificationEventKey: key, invoiceId: 'inv-1', scheduledDate: 'May 20, 2026' } },
+    ];
+    const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    const send = jest.spyOn(BalanceReminder, 'sendReminder').mockResolvedValue(true);
+    try {
+      setDbQueues({
+        scheduled_services: [chain({ result: [service] })],
+        notification_prefs: [chain({ first: { billing_channels: ['sms', 'email'] } })],
+        collections_contact_ledger: [chain({ result: partial })],
+        sms_log: [chain({ result: [{ id: 'sms-keyed', created_at: dayAgo(3), metadata: { notificationEventKey: key } }] })],
+      });
+      await BalanceReminder.dailyCheck();
+      expect(send).not.toHaveBeenCalled();
+    } finally { balanceRead.mockRestore(); send.mockRestore(); }
+  });
+
   test('a keyed Text is counted once, through its ledger episode, never again through its sms_log row', async () => {
     const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 3.5 * 86400000) });
     const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };

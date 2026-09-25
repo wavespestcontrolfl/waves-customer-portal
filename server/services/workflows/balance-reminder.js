@@ -165,16 +165,18 @@ class BalanceReminder {
           })
           .where("created_at", ">", new Date(Date.now() - 14 * 86400000))
           .orderBy("created_at", "desc");
-        // Explicit channels count completed keyed episodes plus the legacy
-        // sms_log history: a reminder texted before the customer's first
-        // channel save carries no event key and must still consume the
-        // 14-day allowance. Keyed rows are already their ledger episode.
+        // Explicit channels count every keyed episode with a delivered leg
+        // (a partially delivered episode still reached the customer) plus
+        // the legacy sms_log history: a reminder texted before the
+        // customer's first channel save carries no event key and must still
+        // consume the 14-day allowance. An sms_log row is skipped only when
+        // its episode was counted here, so a keyed Text is counted once.
+        const window = new Date(Date.now() - 14 * 86400000);
+        const counted = progress.filter((event) => event.deliveredAt && new Date(event.deliveredAt) > window);
+        const countedKeys = new Set(counted.map((event) => event.metadata.notificationEventKey));
         const prevReminders = channels ? [
-          ...progress.filter((event) => event.complete
-            && new Date(event.deliveredAt) > new Date(Date.now() - 14 * 86400000))
-            .map((event) => ({ created_at: event.deliveredAt })),
-          ...smsHistory.filter((row) => !progress.some((event) => event.metadata.notificationEventKey
-            === smsLogMetadata(row).notificationEventKey)),
+          ...counted.map((event) => ({ created_at: event.deliveredAt })),
+          ...smsHistory.filter((row) => !countedKeys.has(smsLogMetadata(row).notificationEventKey)),
         ] : smsHistory;
 
         if (prevReminders.length >= 3) continue;
@@ -604,11 +606,12 @@ class BalanceReminder {
     const source = 'balance_reminder_late_payment_check';
     const progress = await reminderProgress(customer.id, source, channels);
     const pending = progress.find((event) => !event.complete && event.metadata.invoiceId === invoice.id);
-    // A fresh episode keeps the legacy seven-day spacing: keyed completions
+    // A fresh episode keeps the legacy seven-day spacing: any keyed episode
+    // with a delivered leg (partial delivery still reached the customer)
     // and the sms_log history (reminders texted before the first explicit
     // channel save carry no key) both count.
     const sevenDaysAgo = new Date(Date.now() - 7 * 86400000);
-    if (!pending && (progress.some((event) => event.complete && new Date(event.deliveredAt) > sevenDaysAgo)
+    if (!pending && (progress.some((event) => event.deliveredAt && new Date(event.deliveredAt) > sevenDaysAgo)
       || await db('sms_log').where({ customer_id: customer.id, message_type: 'late_payment' })
         .where('created_at', '>', sevenDaysAgo).first())) return false;
     const stage = balance.daysOverdue >= 90 ? 90 : balance.daysOverdue >= 60 ? 60 : balance.daysOverdue >= 30 ? 30 : balance.daysOverdue >= 14 ? 14 : 7;
