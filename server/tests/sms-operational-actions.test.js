@@ -719,8 +719,12 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
   });
 
   test('a kind outside the table with no stated due_at falls back to the legacy null-due behavior', () => {
-    expect(resolveDueDeadline({ kind: 'send_reschedule_link', basis: 'request', due_at: null }, at))
+    expect(resolveDueDeadline({ kind: 'not_a_kind', basis: 'request', due_at: null }, at))
       .toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('send_reschedule_link shares the 24h scheduling window', () => {
+    expect(DEFAULT_DEADLINE_HOURS.send_reschedule_link).toBe(24);
   });
 });
 

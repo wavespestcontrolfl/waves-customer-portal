@@ -1059,6 +1059,56 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('R1 owner ruling 2026-09-24: a visit system event closes an "other" ask INSIDE its default 24h window, the moment it happens', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+      quote: 'You still coming this morning?', description: 'You still coming this morning?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const inserted = await mockPg('call_commitments').first();
+    expect(inserted.due_basis).toBe('default_kind');
+    const after = new Date(message.created_at.getTime() + 1000);
+    // Two seconds after the text: the 24h window is nowhere near over.
+    const now = new Date(after.getTime() + 1000);
+    expect(new Date(inserted.due_at) > now).toBe(true);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Lawn',
+      scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 1000),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    const verify = jest.fn(() => { throw new Error('verify must never be called for a system-event closure'); });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1, skipped_not_due: 0 });
+    const commitment = await mockPg('call_commitments').first();
+    expect(commitment.status).toBe('fulfilled');
+    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', reason: 'system_event', record_type: 'visit', record_id: visit.id });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('inside an open window a message witness waits for the deadline: no model call, no bell, then verified once due', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
+      quote: 'Please call me back', description: 'Please call me back' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
+      transcription: 'Returned your call about the gate code', created_at: after });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'not_yet', evidence_hash: 'x', retry_after: null }));
+    const early = await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(after.getTime() + 1000) });
+    expect(verify).not.toHaveBeenCalled();
+    expect(early).toMatchObject({ scanned: 1, fulfilled: 0, skipped_not_due: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // Past the 4h callback window the same row reaches the model as before.
+    await mockPg('system_settings').where({ key: 'sms_operations.fulfillment_cursor' }).del();
+    const late = await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(message.created_at.getTime() + 4 * 3600000 + 1000) });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(late).toMatchObject({ scanned: 1, fulfilled: 0, skipped_not_due: 0 });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('R1 owner ruling 2026-09-24: a logged reschedule move closes a NULL-due "schedule_visit" commitment deterministically', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'schedule_visit', due_at: null,

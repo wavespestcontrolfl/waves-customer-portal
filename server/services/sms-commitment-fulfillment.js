@@ -64,7 +64,8 @@ const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'a
 // about money — never a blanket "any payment closes any open ask".
 const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay|card|check)\b/i;
 function mentionsPayment(commitment) {
-  return PAYMENT_MENTION.test(`${commitment.description || ''} ${JSON.stringify(commitment.evidence ?? [])}`);
+  const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((item) => item?.quote || '');
+  return PAYMENT_MENTION.test([commitment.description || '', ...quotes].join(' '));
 }
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {

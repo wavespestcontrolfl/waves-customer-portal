@@ -275,9 +275,11 @@ async function appliedSmsProfileFields(conn, message) {
 // keeps a bare "this morning"/"mid Oct" undated on purpose). Quick
 // request/response asks get a same-day window; deliverables that take real
 // work get a day or two; a technician follow-up gets the longest window.
+// send_reschedule_link sits with schedule_visit: both ask Waves to move a
+// booking, one by hand and one by texting the self-serve link.
 const DEFAULT_DEADLINE_HOURS = Object.freeze({
   callback: 4, send_appointment_confirmation: 4,
-  schedule_visit: 24, send_estimate: 24, other: 24,
+  schedule_visit: 24, send_reschedule_link: 24, send_estimate: 24, other: 24,
   send_report: 48, send_paperwork: 48,
   technician_follow_up: 72,
 });
@@ -551,19 +553,23 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   let fulfilled = 0;
   let unverified = 0;
   let skippedNoWitness = 0;
+  let skippedNotDue = 0;
   // One bounded page per tick, with a durable cursor. An old open item
   // cannot monopolize the first page and strand later customers forever.
-  // A NULL due_at (a "when will you be by" type ask with no stated time)
-  // is scanned too, so it can close on real evidence, but never bells on
-  // its own timer the way a due row does (see the hasDueDate guard below).
+  // Every open row is scanned, including one whose deadline has not passed:
+  // R5 now stamps nearly every ask with a default window, and the owner's
+  // ruling is that a visit or payment event dismisses the ask when it
+  // HAPPENS, not a day later when the window runs out. Before the deadline
+  // only such a system event (R1) may act; the model check and the bell
+  // still wait for the deadline. A NULL due_at (legacy row with no stated
+  // time) stays verify-eligible on evidence but never bells (hasDueDate).
   const rows = await conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
     .join('customers as c', 'c.id', 's.customer_id').whereNull('c.deleted_at')
     .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state')
-    .where((q) => q.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))
     .modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
     .orderBy('cc.id').limit(25).select('cc.*');
   for (const row of rows) {
-    if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped: 'gate_off' };
+    if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped_not_due: skippedNotDue, skipped: 'gate_off' };
     scanned += 1;
     const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
     // A later delivery failure cannot erase already-recorded staff work.
@@ -574,17 +580,27 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
     const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
     const hasDueDate = row.due_at != null;
-    // No stated deadline and nothing on file even looks like an answer: skip
-    // the model call entirely rather than spend it on an obligation with no
-    // chance of a grounded verdict, and leave the row open and silent.
-    if (!hasDueDate && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
+    const deadlinePassed = hasDueDate && new Date(row.due_at) <= now;
+    // No deadline to enforce yet (none stated, or the window is still open)
+    // and nothing on file even looks like an answer: skip the model call
+    // entirely rather than spend it on an obligation with no chance of a
+    // grounded verdict, and leave the row open and silent.
+    if (!deadlinePassed && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
       skippedNoWitness += 1;
       continue;
     }
     // R1 (owner ruling 2026-09-24): a visit or payment system event that
     // already answers this ask closes it deterministically — no model call,
     // and `verify` is never invoked for it.
-    const verdict = systemEventFulfillment(evidence, current) || await verify(current, evidence, { now });
+    const systemVerdict = systemEventFulfillment(evidence, current);
+    // Inside an open window only a system event may act; a message witness
+    // (a staff text, a call) waits for the deadline before it costs a model
+    // call, exactly as a stated-deadline row always has.
+    if (!systemVerdict && hasDueDate && !deadlinePassed) {
+      skippedNotDue += 1;
+      continue;
+    }
+    const verdict = systemVerdict || await verify(current, evidence, { now });
     if (verdict.verdict === 'uncertain') unverified += 1;
     await conn.transaction(async (trx) => {
       // Match merge and intake: customer, source, then commitment. A relink
@@ -623,7 +639,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       // never rings a bell on its own (there is no stated deadline to have
       // passed). The fulfillment_check above is still stored so a later
       // pass with new evidence does not repeat the same model call for free.
-      if (!hasDueDate) return;
+      if (!deadlinePassed) return;
       const when = new Date(message.created_at).toLocaleString('en-US', {
         timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
       });
@@ -641,7 +657,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   const nextCursor = rows.length === 25 ? rows[rows.length - 1].id : null;
   await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
     .onConflict('key').merge({ value: nextCursor, updated_at: now });
-  return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness };
+  return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped_not_due: skippedNotDue };
 }
 
 // Explicit operator action only. The scheduled intake never clears analysis
