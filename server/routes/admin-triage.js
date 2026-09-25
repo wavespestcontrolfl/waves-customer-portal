@@ -944,7 +944,8 @@ async function resumeFirstTouchAfterConfirmEmail(id, item, resumeHeldFirstTouch,
       await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_confirm_email' });
     }
   } catch (resumeErr) {
-    logger.warn(`[admin-triage] first-touch resume failed after email confirm for item ${id}: ${resumeErr.message}`);
+    // Code/name only: a knex message embeds bound values (held_email).
+    logger.warn(`[admin-triage] first-touch resume failed after email confirm for item ${id}: ${resumeErr.code || resumeErr.name || 'error'}`);
   }
 }
 

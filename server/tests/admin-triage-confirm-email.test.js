@@ -662,6 +662,32 @@ describe('POST /admin/triage/:id/confirm-email', () => {
     });
   });
 
+  // Pre-push audit (round 10): a Google address's MAILBOX key is taken in the
+  // same up-front acquisition as its exact key (lockCustomerEmail →
+  // customerEmailLockKeys), before any call lock — the canonical writer's
+  // later lockAssignedCustomerEmails is a same-transaction re-entry.
+  test('lock order with a Gmail dot/+tag address: exact key AND mailbox key both precede the call locks', async () => {
+    const order = [];
+    const { conn } = fixture();
+    lockTriageCall.mockImplementation(async (_trx, callId) => { order.push(`call-lock:${callId}`); });
+    wireDb(db, { conn: trackConn(conn, order) });
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'jane.doe+calls@gmail.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      const firstCallLock = order.indexOf(`call-lock:${CALL_ID}`);
+      expect(order.indexOf('email-key:customer-email:jane.doe+calls@gmail.com')).toBeGreaterThan(-1);
+      expect(order.indexOf('email-key:customer-email:jane.doe+calls@gmail.com')).toBeLessThan(firstCallLock);
+      expect(order.indexOf('email-key:customer-mailbox:janedoe@gmail.com')).toBeGreaterThan(-1);
+      expect(order.indexOf('email-key:customer-mailbox:janedoe@gmail.com')).toBeLessThan(firstCallLock);
+    } finally {
+      lockTriageCall.mockImplementation(async () => {});
+    }
+  });
+
   // Codex round-7 P1 (finding at admin-triage.js:793): the router is only
   // requireTechOrAdmin, but this endpoint overwrites a customer's email of
   // record and triggers token fanout + first-touch comms — admin-only, same
