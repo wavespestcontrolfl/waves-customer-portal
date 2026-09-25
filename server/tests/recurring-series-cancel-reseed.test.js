@@ -195,4 +195,25 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(body).toMatch(/targetCount: live\.length \+ 1/);
     expect(body).toMatch(/claimToken: null/);
   });
+
+  test('idempotent per cancelled visit: the stamp is read under the lock and written in the adding transaction', () => {
+    const body = schedule.slice(
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancelLocked('),
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancel('),
+    );
+    const lock = body.indexOf('acquireRecurringSeriesMaintenanceLock(trx, parentId)');
+    const read = body.indexOf("action: 'recurring_cancel_reseed' })");
+    const skip = body.indexOf("skipped: 'already_reseeded'");
+    const reconcile = body.indexOf('reconcileRecurringSeriesVisitCount(trx, {');
+    const stamp = body.indexOf("action: 'recurring_cancel_reseed',");
+    expect(lock).toBeGreaterThan(-1);
+    expect(read).toBeGreaterThan(lock);
+    expect(skip).toBeGreaterThan(read);
+    expect(reconcile).toBeGreaterThan(skip);
+    expect(stamp).toBeGreaterThan(reconcile);
+    // the stamp keys on the cancelled row, is written on `trx` (same commit as the insert), and only when a row was added
+    expect(body).toMatch(/whereRaw\("metadata->>'cancelled_service_id' = \?", \[String\(cancelledServiceId\)\]\)/);
+    expect(body.slice(reconcile)).toMatch(/if \(result\.added\.length\) \{\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*await trx\('activity_log'\)\.insert\(\{/);
+    expect(body.slice(stamp)).toMatch(/cancelled_service_id: String\(cancelledServiceId\)/);
+  });
 });

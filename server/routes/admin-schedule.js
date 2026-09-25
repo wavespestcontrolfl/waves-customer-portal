@@ -17862,6 +17862,8 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 //   - the series was STOPPED (recurring_plan_alerts ledger: cancel_series /
 //     let_lapse — readStoppedRecurringRoots, the same reader the accepted-
 //     plan audit and the converter consult);
+//   - this cancelled visit already produced a reseed (activity_log
+//     'recurring_cancel_reseed' stamp, written in the adding transaction);
 //   - the customer is deleted / held / inactive / churned
 //     (TOPUP_CUSTOMER_INELIGIBILITY_RULES, FOR UPDATE like the top-up);
 //   - annual-prepay series, family on plan hold, duplicate series
@@ -17896,6 +17898,18 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const stopped = await readStoppedRecurringRoots(trx, [parent.customer_id]);
   if (stopped.has(parentId)) return { added: [], skipped: 'series_stopped' };
 
+  // Idempotent per cancelled visit (fallback auditor P1): the added visit
+  // lands at the END of the series — for a continuing plan that is usually
+  // past the cancelled visit's term, so the term-count check alone would
+  // let a retried request / double-click / bulk replay add another visit
+  // each time. The ledger row below is written in this same transaction
+  // and read here under the same per-parent lock.
+  const alreadyReseeded = await trx('activity_log')
+    .where({ customer_id: parent.customer_id, action: 'recurring_cancel_reseed' })
+    .whereRaw("metadata->>'cancelled_service_id' = ?", [String(cancelledServiceId)])
+    .first('id');
+  if (alreadyReseeded) return { added: [], skipped: 'already_reseeded' };
+
   const customer = await trx('customers').where({ id: parent.customer_id })
     .forUpdate()
     .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
@@ -17927,6 +17941,22 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
     baselineCount: null,
     ongoingSeries,
   });
+  if (result.added.length) {
+    // The idempotency stamp — same trx as the insert, so a rolled-back add
+    // leaves no stamp and a committed add can never be repeated.
+    await trx('activity_log').insert({
+      customer_id: parent.customer_id,
+      action: 'recurring_cancel_reseed',
+      description: `Cancelled ${parent.service_type || 'recurring'} visit on ${dateOnly(cancelled.scheduled_date)} re-added to the plan: ${result.added.map((c) => c.date).join(', ')} (term ${window.index + 1} had ${counting} of ${expected})`,
+      metadata: JSON.stringify({
+        cancelled_service_id: String(cancelledServiceId),
+        recurring_parent_id: String(parentId),
+        added_service_ids: result.added.map((c) => String(c.id)),
+        term_index: window.index, term_start: window.start, term_end: window.end,
+        counting, expected,
+      }),
+    });
+  }
   return {
     added: result.added,
     skipped: result.added.length ? null : 'not_placed',
