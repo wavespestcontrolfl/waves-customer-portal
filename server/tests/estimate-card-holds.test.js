@@ -1629,6 +1629,19 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'receipt_email_auto:inv1' }));
   });
 
+  it('queues an Email-only fee receipt when the handoff sees a changed selection', async () => {
+    stubDb([null, { payment_receipt_channels: ['email'], email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
+    expect(await settleNoShowFee(pi())).toMatchObject({ settled: true });
+    expect(mockEnqueueReceiptDelivery).toHaveBeenCalledWith({
+      invoiceId: 'inv1', source: 'no_show_fee_preference_change',
+    });
+    expect(mockSendReceipt).not.toHaveBeenCalled();
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ receipt_sent_at: 'NOW' }),
+    ]));
+  });
+
   it('receipt-texts opt-out on the sms channel: the SMS leg is doomed at the consent gate, so the email carries the fee receipt', async () => {
     // payment_confirmation_sms=false (or a STOP sms_enabled=false) blocks the
     // receipt SMS at the messaging policy — NOT the full kill switch, so the

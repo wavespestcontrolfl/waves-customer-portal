@@ -2371,6 +2371,13 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
       });
       if (emailResult?.ok) {
         emailDelivered = true;
+      } else if (wantsRoutedMessage === false && emailResult?.reason === 'billing_email_not_selected') {
+        // The choice changed after our first read. Let the durable receipt
+        // owner reload it instead of losing this one-shot fee receipt.
+        await require('./receipt-delivery-queue').enqueueReceiptDelivery({
+          invoiceId: invoice.id,
+          source: 'no_show_fee_preference_change',
+        });
       } else if (emailResult?.error === 'No receipt recipient email') {
         emailDeterministicMiss = true;
       }
