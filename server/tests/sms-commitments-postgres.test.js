@@ -928,6 +928,60 @@ postgres('SMS commitments on PostgreSQL', () => {
       .toEqual([rows[0].id, rows[1].id, rows[2].id, rows[6].id].sort());
   });
 
+  test.each([['other', 'en_route'], ['callback', 'on_site']])(
+    'owner ruling 2026-09-24: real post-request field progress nullifies a %s ask; before it or a mere booking does not',
+    async (kind, status) => {
+      const before = new Date(message.created_at.getTime() - 1000);
+      const after = new Date(message.created_at.getTime() + 1000);
+      const base = { customer_id: message.customer_id, property_id: context.properties[0].id,
+        service_type: 'Quarterly Lawn', scheduled_date: etDateString(message.created_at),
+        window_start: '09:00:00', created_at: before };
+      const [progressed, bookedOnly] = await mockPg('scheduled_services').insert([
+        { ...base, status }, // reaches en_route/on_site after the request
+        { ...base, status: 'confirmed', created_at: after }, // merely (re)booked after the request
+      ]).returning('id');
+      await mockPg('job_status_history').insert({
+        job_id: progressed.id, from_status: 'confirmed', to_status: status, transitioned_at: after,
+      });
+      const commitment = { kind, sms_context: { property_id: base.property_id, source_at: message.created_at.toISOString() } };
+      const now = new Date(after.getTime() + 1000);
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+      expect(evidence.failures).toEqual([]);
+      const progressedRecord = evidence.records.find((r) => r.id === progressed.id);
+      expect(progressedRecord.text).toContain('en route/on site/completed after the request');
+      const admissible = evidence.records.filter((r) => admissibleWitness(r, commitment));
+      expect(admissible.map((r) => r.id)).toEqual([progressed.id]);
+      expect(bookedOnly.id).not.toBe(progressed.id);
+      expect(new Date(admissible[0].progressed_at).toISOString()).toBe(after.toISOString());
+
+      // The identical transition, logged before the request, cannot clear it.
+      await mockPg('job_status_history').where({ job_id: progressed.id }).update({ transitioned_at: before });
+      const staleEvidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+      expect(staleEvidence.records.filter((r) => admissibleWitness(r, commitment))).toEqual([]);
+    },
+  );
+
+  test('owner ruling 2026-09-24: an "other" ask with no stated property accepts any of the customer\'s own visits', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const otherProperty = await mockPg('customer_properties').insert({ customer_id: message.customer_id,
+      is_primary: false, address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236', active: true }).returning('id');
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: otherProperty[0].id, service_type: 'Quarterly Lawn',
+      scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'completed',
+      created_at: new Date(message.created_at.getTime() - 1000),
+    }).returning('id');
+    await mockPg('job_status_history').insert({
+      job_id: visit.id, from_status: 'on_site', to_status: 'completed', transitioned_at: after,
+    });
+    const commitment = { kind: 'other', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    expect(evidence.failures).toEqual([]);
+    const record = evidence.records.find((r) => r.id === visit.id);
+    expect(record).toBeTruthy();
+    expect(admissibleWitness(record, commitment)).toBe(true);
+  });
+
   test('merge and merge undo retain open obligations on the source SMS’s current owner', async () => {
     result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
     await recordMessageOperations(mockPg, message, result, context);
@@ -968,6 +1022,40 @@ postgres('SMS commitments on PostgreSQL', () => {
     });
     await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(message.created_at.getTime() + 2000) });
     expect(verify).toHaveBeenCalledTimes(1);
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('owner ruling 2026-09-24: a NULL-due commitment with an admissible witness can verify and close, but never bells', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+      quote: 'You still coming this morning?', description: 'You still coming this morning?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Lawn',
+      scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 1000),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`, quote: 'Quarterly Lawn' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('owner ruling 2026-09-24: a NULL-due commitment with no admissible witness is never sent to the model and never bells', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+      quote: 'You still coming this morning?', description: 'You still coming this morning?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const now = new Date(message.created_at.getTime() + 2000);
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_no_witness: 1 });
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
