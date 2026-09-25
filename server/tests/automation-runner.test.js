@@ -615,6 +615,10 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
 
     const patch = reactivateUpdate.update.mock.calls[0][0];
     expect(patch.metadata).toEqual({ sql: expect.stringContaining('jsonb_set'), bindings: [JSON.stringify('lead-456')] });
+    // Table-qualified: the same payload is the ON CONFLICT merge, where a
+    // bare `metadata` is ambiguous with EXCLUDED (Codex #4813 r4 P1).
+    expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
+    expect(patch.metadata.sql).not.toMatch(/\(metadata,/);
   });
 
   test('a context-free reactivation DROPS a prior episode\'s lead_id, keeping unrelated metadata (Codex #4813 r1 P2)', async () => {
@@ -634,6 +638,7 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
 
     const patch = reactivateUpdate.update.mock.calls[0][0];
     expect(patch.metadata).toEqual({ sql: expect.stringContaining("- 'lead_id'"), bindings: undefined });
+    expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
     expect(patch.metadata.sql).not.toContain('jsonb_set');
   });
 
@@ -723,6 +728,24 @@ describe('sendStepLocked (via sendStep) — consultation-booking block wiring', 
 
     expect(buildConsultationEmailBlock).toHaveBeenCalledWith({ leadId: 'lead-789', recipientEmail: 'operator@wavespestcontrol.com' });
     expect(sendgrid.sendOne.mock.calls[0][0].to).toBe('operator@wavespestcontrol.com');
+  });
+
+  test('the spaced form {{ consultation_booking }} still builds the block (Codex #4813 r4 P2)', async () => {
+    buildConsultationEmailBlock.mockResolvedValue({ html: '<p>3 slots</p>', text: 'Pick a time: https://x' });
+    setDbQueues(queuesForNewLeadSend({
+      id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}',
+      html_body: '<h2>Hi {{first_name}}</h2>{{ consultation_booking }}',
+      text_body: 'Hi {{first_name}}. {{ consultation_booking_text }}',
+      from_email: 'automations@wavespestcontrol.com', enabled: true,
+    }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-sp' });
+
+    await sendStep('enrollment-lead-1');
+
+    expect(buildConsultationEmailBlock).toHaveBeenCalledTimes(1);
+    const sentArgs = sendgrid.sendOne.mock.calls[0][0];
+    expect(sentArgs.html).toContain('<p>3 slots</p>');
+    expect(sentArgs.text).toContain('Pick a time: https://x');
   });
 
   test('a step body with NO placeholder never calls buildConsultationEmailBlock', async () => {

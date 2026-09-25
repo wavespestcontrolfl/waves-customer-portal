@@ -35,6 +35,13 @@ function substitute(text, customer) {
     .replace(/\{last_name\}/g, last);
 }
 
+// The consultation-booking placeholders, whitespace-tolerant like every
+// other {{merge}} field here. ONE definition for the preflight (does this
+// step need the block built?) and the render (where does it go?).
+const CONSULTATION_HTML_RE = /\{\{\s*consultation_booking\s*\}\}/g;
+const CONSULTATION_TEXT_RE = /\{\{\s*consultation_booking_text\s*\}\}/g;
+const CONSULTATION_PLACEHOLDER_RE = /\{\{\s*consultation_booking(?:_text)?\s*\}\}/;
+
 const AUTOMATION_FROM_ALLOWLIST = (process.env.AUTOMATION_FROM_ALLOWLIST
   || 'automations@wavespestcontrol.com,newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
 ).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -104,8 +111,8 @@ async function cancelEnrollmentForSuppression(enrollment, reason) {
 // whose body never carries the placeholder) renders byte-identical to
 // before these params existed.
 function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId, consultationHtml = '', consultationText = '' }) {
-  const rawHtml = substitute(htmlBody || '', customer).replace(/\{\{\s*consultation_booking\s*\}\}/g, consultationHtml);
-  const rawText = substitute(textBody || '', customer).replace(/\{\{\s*consultation_booking_text\s*\}\}/g, consultationText);
+  const rawHtml = substitute(htmlBody || '', customer).replace(CONSULTATION_HTML_RE, consultationHtml);
+  const rawText = substitute(textBody || '', customer).replace(CONSULTATION_TEXT_RE, consultationText);
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
   // Every automation renders the service chrome — "Waves Newsletter"
   // header is reserved for actual newsletter sends (owner call 2026-07-10;
@@ -299,9 +306,12 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
   // inherit a prior episode's lead — the block would mint that lead's link
   // for an enrollment that is supposed to render it empty (Codex #4813 r1
   // P2). Drop just the key; unrelated metadata survives.
+  // Table-qualified (Codex #4813 r4 P1): the same payload is the
+  // ON CONFLICT ... DO UPDATE merge below, where a bare `metadata` is
+  // ambiguous between the target row and EXCLUDED and fails the insert.
   reactivatePayload.metadata = leadId
-    ? dbh.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{lead_id}', ?::jsonb, true)", [JSON.stringify(leadId)])
-    : dbh.raw("COALESCE(metadata,'{}'::jsonb) - 'lead_id'");
+    ? dbh.raw("jsonb_set(COALESCE(automation_enrollments.metadata,'{}'::jsonb), '{lead_id}', ?::jsonb, true)", [JSON.stringify(leadId)])
+    : dbh.raw("COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id'");
   if (existing) {
     const [reactivated] = await dbh('automation_enrollments')
       .where({ id: existing.id })
@@ -434,7 +444,9 @@ function enrollmentLeadId(enrollment) {
 // own fail-closed '' — this wrapper's only job is the cheap skip.
 async function resolveConsultationBlock(step, enrollment, recipient) {
   const body = `${step.html_body || ''}${step.text_body || ''}`;
-  if (!body.includes('{{consultation_booking')) return EMPTY_CONSULTATION_BLOCK;
+  // Same whitespace-tolerant shape the renderer replaces (Codex #4813 r4
+  // P2) — `{{ consultation_booking }}` must build the block too.
+  if (!CONSULTATION_PLACEHOLDER_RE.test(body)) return EMPTY_CONSULTATION_BLOCK;
   const leadId = enrollmentLeadId(enrollment);
   if (!leadId) return EMPTY_CONSULTATION_BLOCK;
   const { buildConsultationEmailBlock } = require('./lead-consultation-email-block');
