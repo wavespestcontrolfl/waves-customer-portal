@@ -32,10 +32,19 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 const mockPropagateCustomerEmailChange = jest.fn(async () => ({}));
-jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: mockPropagateCustomerEmailChange }));
+const mockResendPendingConfirmation = jest.fn(async () => {});
+jest.mock('../services/customer-email-fanout', () => ({
+  propagateCustomerEmailChange: mockPropagateCustomerEmailChange,
+  resendPendingConfirmation: mockResendPendingConfirmation,
+}));
+const mockResumeHeldNewsletterPostCommit = jest.fn(async () => {});
 jest.mock('../services/lead-first-touch-resume', () => {
   const actual = jest.requireActual('../services/lead-first-touch-resume');
-  return { ...actual, resumeHeldFirstTouch: jest.fn(async () => ({ resumed: false })) };
+  return {
+    ...actual,
+    resumeHeldFirstTouch: jest.fn(async () => ({ resumed: false })),
+    resumeHeldNewsletterPostCommit: mockResumeHeldNewsletterPostCommit,
+  };
 });
 
 const express = require('express');
@@ -340,6 +349,66 @@ describe('POST /admin/triage/:id/confirm-email', () => {
     }));
   });
 
+  // Codex round-6 P1 (finding at admin-triage.js:709): propagateCustomerEmailChange's
+  // unrollbackable sends (a held newsletter DOI resume, a moved
+  // pending-confirmation resend) must run AFTER commit, exactly like the
+  // Customer 360 edit path (admin-customers.js).
+  describe('post-commit email-sync callbacks', () => {
+    test('runs resumeHeldNewsletterPostCommit and resendPendingConfirmation with the fanout\'s returned payloads', async () => {
+      const { conn, tables } = fixture();
+      mockPropagateCustomerEmailChange.mockResolvedValueOnce({
+        heldNewsletterResume: { subscriberId: 'sub-1' },
+        pendingConfirmation: { token: 'tok-1' },
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      // The customer row is already committed by the time these run — this
+      // suite has no real begin/commit boundary to assert against directly,
+      // but the write above happens inside the transaction while these
+      // callbacks are the code that runs strictly after it returns.
+      expect(tables.customers[0].email).toBe('janedoe@example.com');
+      expect(mockResumeHeldNewsletterPostCommit).toHaveBeenCalledWith({ subscriberId: 'sub-1' });
+      expect(mockResendPendingConfirmation).toHaveBeenCalledWith({ token: 'tok-1' });
+    });
+
+    test('calls neither callback when the fanout returns nothing to resume', async () => {
+      const { conn } = fixture();
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(mockResumeHeldNewsletterPostCommit).not.toHaveBeenCalled();
+      expect(mockResendPendingConfirmation).not.toHaveBeenCalled();
+    });
+
+    test('never runs the callbacks on the customer-less lead path (no fanout call at all)', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [],
+        first_touch_holds: [],
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: null }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.leads[0].email).toBe('janedoe@example.com');
+      expect(mockResumeHeldNewsletterPostCommit).not.toHaveBeenCalled();
+      expect(mockResendPendingConfirmation).not.toHaveBeenCalled();
+    });
+  });
+
   // Codex round-6 P1 (finding at admin-triage.js:638): pre-Step-6 window —
   // the disagreement card committed, but the processor's own hold-ledger
   // write for this run has not landed yet (mintEmailReviewCardsFenced and
@@ -440,6 +509,52 @@ describe('POST /admin/triage/:id/confirm-email', () => {
       // it and waits on callX: the AB-BA deadlock this fix removes).
       const firstTwoLockedIds = lockTriageCall.mock.calls.slice(0, 2).map((c) => c[1]);
       expect(firstTwoLockedIds).toEqual([CALL_ID, OTHER_CALL_ID].sort());
+    });
+
+    test('locks the customer row (FOR UPDATE) before taking any call advisory lock — same order as the Customer 360 edit path (Codex round-6 P2)', async () => {
+      const OTHER_CALL_ID = 'call-2';
+      const order = [];
+      const { conn } = fixture({
+        call_log: [
+          { id: CALL_ID, review_status: 'open', customer_id: CUSTOMER_ID, twilio_call_sid: 'CA000' },
+          { id: OTHER_CALL_ID, review_status: 'open', customer_id: CUSTOMER_ID, twilio_call_sid: 'CA111' },
+        ],
+      });
+      // admin-customers.js's email edit locks the customer row (FOR UPDATE,
+      // ~admin-customers.js:3939) BEFORE propagateCustomerEmailChange waits
+      // on this customer's sorted call-lock set (customer-email-fanout.js:
+      // 255-257). Wrap the fake conn so a `customers` FOR UPDATE is
+      // recorded relative to each lockTriageCall — proves this route now
+      // takes the SAME order instead of the reverse (the AB-BA deadlock
+      // this fix removes).
+      const trackedConn = (table) => {
+        const api = conn(table);
+        if (String(table).split(' ')[0] === 'customers') {
+          const origForUpdate = api.forUpdate;
+          api.forUpdate = (...args) => { order.push('customer-row-lock'); return origForUpdate.apply(api, args); };
+        }
+        return api;
+      };
+      trackedConn.transaction = async (fn) => fn(trackedConn);
+      trackedConn.raw = conn.raw;
+      trackedConn.schema = conn.schema;
+      lockTriageCall.mockImplementation(async (_trx, callId) => { order.push(`call-lock:${callId}`); });
+      wireDb(db, { conn: trackedConn });
+      try {
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+            email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+          });
+          expect(res.status).toBe(200);
+        });
+        expect(order).toEqual([
+          'customer-row-lock',
+          `call-lock:${CALL_ID}`,
+          `call-lock:${OTHER_CALL_ID}`,
+        ]);
+      } finally {
+        lockTriageCall.mockImplementation(async () => {});
+      }
     });
   });
 });
