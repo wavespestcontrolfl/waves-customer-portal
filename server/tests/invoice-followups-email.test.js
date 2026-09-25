@@ -200,7 +200,10 @@ describe('invoice follow-up email sidecar', () => {
       to: '+19415550101',
       body: 'invoice follow-up sms',
       entryPoint: 'invoice_followup_sequence',
-      metadata: { original_message_type: 'invoice_followup', notificationEventKey: 'invoice-followup:seq-1:d3_friendly' },
+      metadata: expect.objectContaining({
+        original_message_type: 'invoice_followup',
+        notificationEventKey: 'invoice-followup:seq-1:d3_friendly',
+      }),
     }));
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       step_index: 1,
@@ -359,7 +362,8 @@ describe('invoice follow-up email sidecar', () => {
     await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
   });
 
-  test('advances the sequence when email sends but the customer has no phone', async () => {
+  test.each([false, true])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
+    const prefs = { email_enabled: true, ...(appSelected ? { invoice_channels: ['push'] } : {}) };
     const emailInteraction = chain();
     const finalInteraction = chain();
     const sequenceUpdate = chain();
@@ -371,7 +375,7 @@ describe('invoice follow-up email sidecar', () => {
       // bails at its payment_plans probe in this harness) + the pre-dun
       // refresh + the email-eligibility read.
       invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
-      notification_prefs: [chain({ first: { email_enabled: true } })],
+      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
       customer_interactions: [emailInteraction, finalInteraction],
       // Claim → cadence advance → claim clear (see the sidecar test above).
       invoice_followup_sequences: [
@@ -384,10 +388,13 @@ describe('invoice follow-up email sidecar', () => {
 
     await InvoiceFollowUps.runPending();
 
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      templateKey: 'invoice.followup_3_day',
-    }));
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    if (appSelected) {
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', to: null }));
+    } else {
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'invoice.followup_3_day' }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    }
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       step_index: 1,
       status: 'active',

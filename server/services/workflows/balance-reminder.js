@@ -13,6 +13,7 @@ const { formatDateOnly } = require("../../utils/date-only");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../../constants/business");
 const { collectionsChannelPermitted } = require("../collections/rail-guard");
 const ContactLedger = require("../collections/contact-ledger");
+const { billingChannelAllowed } = require('../billing-delivery-channels');
 
 const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
   late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
@@ -321,7 +322,11 @@ class BalanceReminder {
       customerId: service.cust_id,
       invoiceId: balance.oldestInvoiceId,
       entryPoint: "balance_reminder_workflow",
-      metadata: { original_message_type: "balance_reminder" },
+      metadata: {
+        original_message_type: "balance_reminder",
+        billingDeliveryCategory: 'billing',
+        notificationEventKey: `balance-reminder:${balance.oldestInvoiceId}:${tier}:${formatDateOnly(service.scheduled_date)}`,
+      },
       // The last ownership check, run by the canonical sender immediately
       // before provider preparation (Codex #4311 r43 P1): a Bill-To change
       // during the balance render must not text the homeowner an AP-owned
@@ -373,6 +378,7 @@ class BalanceReminder {
     invoiceTitle,
     serviceDateClause,
     payUrl,
+    initialPrefs,
   }) {
     const config = LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE[smsTemplateKey];
     if (!config) return { ok: false, skipped: true, reason: "no_email_template_mapping" };
@@ -400,13 +406,18 @@ class BalanceReminder {
       return { ok: false, skipped: true, reason: "missing_pay_url" };
     }
 
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customer.id })
-      .first()
-      .catch((err) => {
+    let prefs = initialPrefs;
+    if (prefs === undefined) {
+      try {
+        prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
+      } catch (err) {
         logger.warn(`[balance-reminder] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
-        return null;
-      });
+        prefs = null;
+      }
+    }
+    if (billingChannelAllowed(prefs || {}, 'billing', 'email') === false) {
+      return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
+    }
 
     const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
       .filter((entry) => isEmailLike(entry.email));
@@ -451,6 +462,12 @@ class BalanceReminder {
         withProviderHandoff: async (dispatch) => {
           const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, db)();
           if (verdict.ok !== true) return verdict;
+          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (billingChannelAllowed(freshPrefs || {}, 'billing', 'email') === false) return { ok: false };
+          const freshCustomer = await db('customers').where({ id: customer.id }).first();
+          const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
+            .filter((entry) => isEmailLike(entry.email));
+          if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
           await dispatch();
           return { ok: true };
         },
@@ -624,27 +641,61 @@ class BalanceReminder {
         continue;
       }
 
-      // Collections policy for the SMS leg (gate off ⇒ permitted without
-      // consulting — byte-identical, pinned). In THIS rail the email is
-      // strictly a sidecar of a DELIVERED SMS (a blocked SMS already skips
-      // the customer, there is no email-fallback leg), so a policy-denied
-      // SMS skips the customer the same way a blocked SMS does; the email
-      // channel still gets its own independent consult below before the
-      // sidecar fires.
-      if (!(await collectionsChannelPermitted({
+      let prefs = null;
+      try {
+        prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+      } catch { /* preserve legacy routing when preferences cannot be read */ }
+      const explicitEmailSelected = billingChannelAllowed(prefs || {}, 'billing', 'email') === true;
+      const emailPolicyPermitted = await collectionsChannelPermitted({
+        customerId: customer.id,
+        invoiceId: oldestInvoice.id,
+        channel: 'email',
+        purpose: 'late_payment',
+        logTag: 'balance-reminder',
+      });
+      const smsPolicyPermitted = await collectionsChannelPermitted({
         customerId: customer.id,
         invoiceId: oldestInvoice.id,
         channel: "sms",
         purpose: "late_payment",
         logTag: "balance-reminder",
-      }))) {
-        continue;
-      }
+      });
+      let emailResult = null;
+      let emailAttempted = false;
+      const attemptEmail = async () => {
+        if (emailAttempted || !emailPolicyPermitted) return emailResult;
+        emailAttempted = true;
+        let emailLedger = null;
+        try {
+          emailLedger = await ContactLedger.recordContact({
+            customerId: customer.id,
+            channel: 'email',
+            purpose: 'late_payment',
+            invoiceIds: [oldestInvoice.id],
+            source: 'balance_reminder_late_payment_check',
+            metadata: { template_key: templateKey, days_overdue: balance.daysOverdue },
+          });
+        } catch (ledgerErr) {
+          logger.warn(`[balance-reminder] late-payment email sidecar skipped for customer ${customer.id} — contact ledger unavailable: ${ledgerErr.message}`);
+        }
+        if (!emailLedger) return emailResult;
+        emailResult = await this.sendLatePaymentEmail({
+          customer, invoice: oldestInvoice, balance, smsTemplateKey: templateKey,
+          invoiceTitle, serviceDateClause: dateClause, payUrl: link, initialPrefs: prefs,
+        }).catch((err) => {
+          logger.error(`[balance-reminder] late-payment email sidecar failed for customer ${customer.id}: ${err.message}`);
+          return null;
+        });
+        if (emailResult?.ok === true) await ContactLedger.markDelivered(emailLedger);
+        else await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+        return emailResult;
+      };
+      if (explicitEmailSelected) await attemptEmail();
 
       // RECORD-THEN-SEND: ledger row precedes the delivery attempt; insert
       // failure skips the send, delivery failure stamps the standing row.
-      let smsLedger;
-      try {
+      let smsLedger = null;
+      if (smsPolicyPermitted && (customer.phone || billingChannelAllowed(prefs || {}, 'billing', 'push') === true)) try {
         smsLedger = await ContactLedger.recordContact({
           customerId: customer.id,
           channel: "sms",
@@ -655,9 +706,8 @@ class BalanceReminder {
         });
       } catch (ledgerErr) {
         logger.warn(`[balance-reminder] late-payment SMS skipped for customer ${customer.id} — contact ledger unavailable: ${ledgerErr.message}`);
-        continue;
       }
-      const sendResult = await sendCustomerMessage({
+      const sendResult = smsLedger ? await sendCustomerMessage({
         to: customer.phone,
         body: message,
         channel: "sms",
@@ -666,70 +716,28 @@ class BalanceReminder {
         customerId: customer.id,
         invoiceId: oldestInvoice.id,
         entryPoint: "balance_reminder_late_payment_check",
-        metadata: { original_message_type: "late_payment" },
+        metadata: {
+          original_message_type: "late_payment",
+          billingDeliveryCategory: 'billing',
+          notificationEventKey: `balance-late-payment:${oldestInvoice.id}:${balance.daysOverdue}`,
+        },
+        hasEmailLeg: true,
         // Same provider-boundary ownership guard as the balance leg.
         preDispatchCheck: require("../invoice-helpers").selfPayAtDispatch(oldestInvoice.id, db),
-      });
+      }) : { sent: false, blocked: true, code: customer.phone ? 'COLLECTIONS_POLICY' : 'NO_PHONE' };
       if (sendResult.blocked || sendResult.sent === false) {
-        await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || "blocked" });
+        if (smsLedger) await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || "blocked" });
         logger.warn(
           `[balance-reminder] late-payment SMS blocked for customer ${customer.id}: ${sendResult.code || "unknown"} ${sendResult.reason || ""}`,
         );
-        continue;
+        if (emailResult?.ok !== true) continue;
+      } else {
+        await ContactLedger.markDelivered(smsLedger);
       }
-      // Positive delivery stamp (codex gh-r2): the dunning-touch floor
-      // counts only rows the rail CONFIRMED delivered — a bare reservation
-      // is not a touch. Best-effort; a missed stamp only under-counts.
-      await ContactLedger.markDelivered(smsLedger);
-      // Email sidecar — its OWN channel consult and its own pre-send row.
-      // The same-run SMS row is excluded (gh prb-r18): the any-channel 24h
-      // window must not fence the sidecar with its own sibling leg.
-      if (await collectionsChannelPermitted({
-        customerId: customer.id,
-        invoiceId: oldestInvoice.id,
-        channel: "email",
-        purpose: "late_payment",
-        excludeLedgerIds: [smsLedger.id],
-        logTag: "balance-reminder",
-      })) {
-        let emailLedger = null;
-        try {
-          emailLedger = await ContactLedger.recordContact({
-            customerId: customer.id,
-            channel: "email",
-            purpose: "late_payment",
-            invoiceIds: [oldestInvoice.id],
-            source: "balance_reminder_late_payment_check",
-            metadata: { template_key: templateKey, days_overdue: balance.daysOverdue },
-          });
-        } catch (ledgerErr) {
-          logger.warn(`[balance-reminder] late-payment email sidecar skipped for customer ${customer.id} — contact ledger unavailable: ${ledgerErr.message}`);
-        }
-        if (emailLedger) {
-          const emailResult = await this.sendLatePaymentEmail({
-            customer,
-            invoice: oldestInvoice,
-            balance,
-            smsTemplateKey: templateKey,
-            invoiceTitle,
-            serviceDateClause: dateClause,
-            payUrl: link,
-          }).catch((err) => {
-            logger.error(
-              `[balance-reminder] late-payment email sidecar failed for customer ${customer.id}: ${err.message}`,
-            );
-            return null;
-          });
-          if (emailResult?.ok !== true) {
-            await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || "email_not_sent" });
-          } else {
-            await ContactLedger.markDelivered(emailLedger);
-          }
-        }
-      }
+      await attemptEmail();
       await db("customer_interactions").insert({
         customer_id: customer.id,
-        interaction_type: "sms_outbound",
+        interaction_type: sendResult.sent ? "sms_outbound" : "email_outbound",
         subject: `Late payment tier ${count + 1} — ${balance.daysOverdue} days`,
         body: `$${balance.totalBalance.toFixed(2)} overdue ${balance.daysOverdue} days. Tier ${count + 1} sent.`,
       });

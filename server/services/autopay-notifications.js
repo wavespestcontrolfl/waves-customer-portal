@@ -7,6 +7,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { isPaused } = require('./autopay-eligibility');
 const { MONTHLY_LANE_SQL, isMembershipTier, resolveBillingLane } = require('./billing-lane');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 /**
  * Autopay Notifications
@@ -63,7 +64,10 @@ async function sendPreChargeReminders() {
 
   for (const c of customers) {
     try {
-      if (!c.phone) { skipped++; continue; }
+      if (!c.phone) {
+        const prefs = await db('notification_prefs').where({ customer_id: c.id }).first();
+        if (!['email', 'push'].some((channel) => billingChannelAllowed(prefs || {}, 'billing', channel) === true)) { skipped++; continue; }
+      }
 
       // Skip if paused through the charge date
       if (isPaused(c, target)) {
@@ -282,7 +286,10 @@ async function sendCardExpiryWarnings() {
         })
         : Promise.resolve();
 
-      if (!r.phone) { await emailPromise; skipped++; continue; }
+      if (!r.phone) {
+        const prefs = await db('notification_prefs').where({ customer_id: r.customer_id }).first();
+        if (billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; skipped++; continue; }
+      }
 
       // Dedup: one per card per 30 days
       const already = await eventExistsRecently(r.customer_id, eventType, 30, r.payment_method_id);
@@ -314,7 +321,13 @@ async function sendCardExpiryWarnings() {
         purpose: 'autopay',
         customerId: r.customer_id,
         entryPoint: 'autopay_card_expiry_warning',
-        metadata: { original_message_type: 'payment_expiry', billing_mode_at_send: r.billing_mode_at_send },
+        metadata: {
+          original_message_type: 'payment_expiry',
+          billingDeliveryCategory: 'billing',
+          notificationEventKey: `payment-expiry:${r.payment_method_id}:${r.exp_month}:${expYear}`,
+          billing_mode_at_send: r.billing_mode_at_send,
+        },
+        hasEmailLeg: true,
       });
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`card expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);

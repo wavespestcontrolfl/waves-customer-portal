@@ -44,6 +44,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice.followup_3_day',
@@ -160,7 +161,7 @@ async function logFollowupEmailAttempt({
   }
 }
 
-async function sendFollowupEmail({ row, customer, step, ctx }) {
+async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true }) {
   const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
 
@@ -183,6 +184,9 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
       logger.warn(`[invoice-followups] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
       return null;
     });
+  if (enforceBillingPreference && billingChannelAllowed(prefs || {}, 'invoice', 'email') === false) {
+    return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
+  }
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
     .filter((entry) => isEmailLike(entry.email));
   if (!recipient?.email) return { ok: false, skipped: true, reason: 'missing_email' };
@@ -217,6 +221,10 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
       withProviderHandoff: async (dispatch) => {
         const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, db)();
         if (verdict.ok !== true) return verdict;
+        if (enforceBillingPreference) {
+          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (billingChannelAllowed(freshPrefs || {}, 'invoice', 'email') === false) return { ok: false };
+        }
         await dispatch();
         return { ok: true };
       },
@@ -978,8 +986,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
             invoice: { id: row.invoice_id, title: row.title, total: row.total, credit_applied: row.credit_applied },
             customer,
             touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
+            enforceBillingPreference: !operatorInitiated,
           })
-        : await sendFollowupEmail({ row, customer, step, ctx });
+        : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
       if (emailResult?.ok !== true) {
         await ContactLedger.markSendFailed(emailLedger, {
           reason: emailResult?.reason || emailResult?.error || 'email_not_sent',
@@ -994,11 +1003,13 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // The held SMS leg failed to reach the scheduled rail: nothing durable
   // owns it, so this touch must stay retryable (codex r21).
   let smsHoldUnowned = false;
+  const appWithoutPhone = !customer?.phone && !operatorInitiated
+    && billingChannelAllowed(await db('notification_prefs').where({ customer_id: customer.id }).first() || {}, mdPending ? 'payment_issue' : 'invoice', 'push') === true;
   if (!smsPermitted) {
     // Collections policy denial — transient; the no-channel branch below
     // leaves the sequence armed instead of pausing it.
     smsSkipReason = 'collections_policy_denied';
-  } else if (customer?.phone) {
+  } else if (customer?.phone || appWithoutPhone) {
     const messageType = mdPending ? 'bank_verification_incomplete' : 'invoice_followup';
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
@@ -1042,7 +1053,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         metadata: {
           original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
+          billingDeliveryCategory: mdPending ? 'payment_issue' : 'invoice',
         },
+        hasEmailLeg: true,
         // The LAST ownership check, run by the canonical sender immediately
         // before provider preparation (Codex #4311 r42 P1): the short-link
         // round-trip and the contact-ledger writes are awaited after the

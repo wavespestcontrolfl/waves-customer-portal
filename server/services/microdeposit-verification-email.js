@@ -15,6 +15,7 @@ const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { currency } = require('./email-template');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 function firstToken(value) {
   return String(value || '').trim().split(/\s+/)[0] || '';
@@ -28,7 +29,7 @@ function isEmailLike(value) {
  * @returns {{ ok: boolean, skipped?: boolean, blocked?: boolean, deduped?: boolean,
  *             reason?: string, error?: string }}
  */
-async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey }) {
+async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, enforceBillingPreference = false }) {
   if (!invoice?.id || !customer?.id) return { ok: false, skipped: true, reason: 'missing_context' };
 
   const prefs = await db('notification_prefs')
@@ -38,6 +39,9 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey }
       logger.warn(`[microdeposit-email] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
       return null;
     });
+  if (enforceBillingPreference && billingChannelAllowed(prefs || {}, 'payment_issue', 'email') === false) {
+    return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
+  }
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {}).filter((e) => isEmailLike(e.email));
   if (!recipient?.email) return { ok: false, skipped: true, reason: 'missing_email' };
 
@@ -59,6 +63,16 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey }
       idempotencyKey: `microdeposit_verification_email:${invoice.id}:${touch}`,
       suppressionGroupKey: 'transactional_required',
       categories: ['bank_verification', 'payment_setup'],
+      ...(enforceBillingPreference ? {
+        withProviderHandoff: async (dispatch) => {
+          const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
+          if (ownership.ok !== true) return ownership;
+          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (billingChannelAllowed(freshPrefs || {}, 'payment_issue', 'email') === false) return { ok: false };
+          await dispatch();
+          return { ok: true };
+        },
+      } : {}),
     });
     return {
       ok: !!result.sent,

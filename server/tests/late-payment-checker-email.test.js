@@ -142,7 +142,7 @@ describe('late-payment checker email sidecar', () => {
       to: '+19415550101',
       body: 'sms body for late_payment_14d',
       entryPoint: 'late_payment_checker',
-      metadata: { original_message_type: 'late_payment' },
+      metadata: expect.objectContaining({ original_message_type: 'late_payment' }),
     }));
     expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalledWith(expect.objectContaining({
       customer,

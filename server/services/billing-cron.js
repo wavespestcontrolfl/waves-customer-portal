@@ -38,9 +38,14 @@ const { isBillingDayMatch } = require('./billing-helpers');
 const { isPaused } = require('./autopay-eligibility');
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
 
-async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0 }) {
+async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0, hasEmailLeg = false }) {
   const metadata = { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode,
-    ...(attemptPaymentId ? { notificationEventKey: `payment-problem:attempt:${attemptPaymentId}:${messageType}` } : {}),
+    ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
+    ...(attemptPaymentId
+      ? { notificationEventKey: `payment-problem:attempt:${attemptPaymentId}:${messageType}` }
+      : paymentId
+        ? { notificationEventKey: `payment:${paymentId}:${messageType}` }
+        : {}),
   };
   const sendResult = await sendCustomerMessage({
     to: customer.phone,
@@ -52,6 +57,7 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     entryPoint,
     // RESOLVED lane AT SEND TIME (codex #3607 r2 + r5) — see autopay-sms-digest.js.
     metadata,
+    ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
   });
   if (purpose === 'payment_failure' && paymentId && attemptPaymentId && !sendResult.sent
     && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(sendResult.code)
@@ -556,6 +562,7 @@ const BillingCron = {
             purpose: 'payment_receipt',
             messageType: 'autopay_charge_success',
             entryPoint: 'monthly_billing_success',
+            paymentId: paymentResult.id,
           });
         } catch (smsErr) {
           logger.error(`[billing-cron] Payment confirmation SMS failed: ${smsErr.message}`);
@@ -718,6 +725,7 @@ const BillingCron = {
             messageType: 'autopay_charge_failed',
             entryPoint: 'monthly_billing_failure',
             paymentId: err.paymentRecord?.id, attemptPaymentId: err.paymentRecord?.id,
+            hasEmailLeg: Boolean(failedPayment),
           });
         } catch (smsErr) {
           logger.error(`[billing-cron] SMS notification failed: ${smsErr.message}`);
@@ -1549,6 +1557,7 @@ const BillingCron = {
               messageType: 'autopay_retry_failed',
               entryPoint: 'autopay_retry_failed',
               paymentId: payment.id, attemptPaymentId: err.paymentRecord?.id, retryCount: newRetryCount,
+              hasEmailLeg: true,
             });
           } catch (smsErr) {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);
@@ -1720,6 +1729,7 @@ const BillingCron = {
           purpose: 'payment_receipt',
           messageType: 'autopay_retry_success',
           entryPoint: 'autopay_retry_success',
+          paymentId: newPayment.id,
         });
       } catch (smsErr) {
         logger.error(`[billing-cron] Success SMS failed: ${smsErr.message}`);

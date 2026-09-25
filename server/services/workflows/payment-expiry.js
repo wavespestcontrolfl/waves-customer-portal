@@ -4,6 +4,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
 const PaymentLifecycleEmail = require('../payment-lifecycle-email');
+const { billingChannelAllowed } = require('../billing-delivery-channels');
 
 class PaymentExpiry {
   /**
@@ -271,7 +272,10 @@ class PaymentExpiry {
           logger.warn(`Payment expiry email failed for card ${card.id}: ${emailErr.message}`);
         });
 
-        if (!customer.phone) { await emailPromise; continue; }
+        if (!customer.phone) {
+          const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; continue; }
+        }
 
         // 30-day cooldown per customer
         const recentNotice = await db('sms_log')
@@ -306,9 +310,12 @@ class PaymentExpiry {
           entryPoint: 'payment_expiry_workflow',
           metadata: {
             original_message_type: 'payment_expiry',
+            billingDeliveryCategory: 'billing',
+            notificationEventKey: `payment-expiry:${card.id}:${card.exp_month}:${card.exp_year}`,
             billing_mode_at_send: require('../billing-lane').resolveBillingLane(customer).mode,
             customerLocationId: customer.location_id,
           },
+          hasEmailLeg: true,
         });
         if (sendResult.blocked || sendResult.sent === false) {
           throw new Error(`payment expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);

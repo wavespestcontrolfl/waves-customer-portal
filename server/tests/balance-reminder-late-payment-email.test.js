@@ -169,7 +169,7 @@ describe('late-payment email sidecar', () => {
       customerId: 'cust-1',
       invoiceId: 'inv-1',
       entryPoint: 'balance_reminder_late_payment_check',
-      metadata: { original_message_type: 'late_payment' },
+      metadata: expect.objectContaining({ original_message_type: 'late_payment' }),
     }));
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'billing_late_payment_7_day',
@@ -345,9 +345,9 @@ describe('late-payment email sidecar', () => {
 // the gate-ON consult, the per-channel independence of the email sidecar,
 // and the record-then-send ledger discipline.
 describe('collections policy + ledger on latePaymentCheck', () => {
-  function armHappyPath() {
+  function armHappyPath(prefs = { email_enabled: true }, customerOverrides = {}) {
     setDbQueues({
-      customers: [chain({ result: [customer()] })],
+      customers: [chain({ result: [customer(customerOverrides)] })],
       payments: [chain({ result: [overduePayment(8)] })],
       invoices: [
         chain({ result: [] }),
@@ -359,7 +359,7 @@ describe('collections policy + ledger on latePaymentCheck', () => {
         chain({ first: { count: '0' } }),
         chain({ first: null }),
       ],
-      notification_prefs: [chain({ first: { email_enabled: true } })],
+      notification_prefs: [chain({ first: prefs })],
       customer_interactions: [chain(), chain()],
     });
   }
@@ -395,6 +395,28 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     // The SMS leg still recorded before sending; no email row was minted.
     const channels = ContactLedger.recordContact.mock.calls.map(([args]) => args.channel);
     expect(channels).toEqual(['sms']);
+  });
+
+  test('selected Email and Text share a reminder without the first delivery blocking its sibling', async () => {
+    armHappyPath({ email_enabled: true, billing_channels: ['email', 'sms'] });
+    ContactPolicy.evaluate.mockImplementation(async () => ({
+      allowed: ContactLedger.recordContact.mock.calls.length === 0,
+      eligibleInvoiceIds: ['inv-1'],
+      denialReasons: ['contact_within_24h'],
+    }));
+    await BalanceReminder.latePaymentCheck();
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['email', 'sms']);
+  });
+
+  test('a selected App reaches the canonical sender even without a phone', async () => {
+    armHappyPath({ billing_channels: ['push'] }, { phone: null });
+    await BalanceReminder.latePaymentCheck();
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1', to: null, metadata: expect.objectContaining({ billingDeliveryCategory: 'billing' }),
+    }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('allowed path records BEFORE each send and both channels get their own ledger rows', async () => {
