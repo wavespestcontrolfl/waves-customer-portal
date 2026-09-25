@@ -375,7 +375,10 @@ function draftSendPolicyFields(draft, recipient) {
  * later.
  */
 function blockedSendResponse(res, smsResult) {
-  return res.status(422).json({
+  // The photo-triage late recheck's outage is transient — same retryable
+  // 503 contract as its route-level check (codex #4810 r13).
+  const status = smsResult.code === 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE' ? 503 : 422;
+  return res.status(status).json({
     error: smsResult.reason || smsResult.code || 'SMS send blocked/failed',
     code: smsResult.code,
     nextAllowedAt: smsResult.nextAllowedAt,
@@ -558,21 +561,27 @@ async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id
     // can enroll meanwhile. A non-ok answer there blocks the send; the
     // failed-send path releases the claim, and the next approve lands in
     // the handling below.
+    // Run at BOTH late hooks — preDispatchCheck (after the validators) and
+    // preProviderCheck (at the Twilio handoff, after the provider's own
+    // awaits; codex #4810 r13). An outage there answers the same retryable
+    // code the route-level 503 uses, never a raw exception message.
     const resolvedCustomerId = customerId || draft.customer_id;
-    return {
-      blocked: false,
-      preDispatchCheck: async () => {
+    const lateCheck = async () => {
+      try {
         const late = await recheckDraftOffer({ customerId: resolvedCustomerId, flags });
         return late.ok ? { ok: true } : { ok: false, code: 'PHOTO_TRIAGE_OFFER_STALE', reason: 'photo-triage offer changed before dispatch — draft left pending' };
-      },
+      } catch {
+        return { ok: false, code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE', reason: 'Photo-triage offer recheck unavailable — draft left pending, try again', retryable: true };
+      }
     };
+    return { blocked: false, preDispatchCheck: lateCheck, preProviderCheck: lateCheck };
   }
   if (verdict.blocked === 'recipient_changed') {
     // Nothing stored can be patched into shape: the copy itself (lead
-    // on-site ask, quote ask) was chosen for another customer.
+    // on-site ask, quote ask) was chosen for another audience.
     await releaseDraftClaim(draft.id);
     res.status(409).json({
-      error: 'This photo-triage draft was written before the sender was linked to this customer — reject it and reply from the conversation.',
+      error: 'This photo-triage draft was written before the sender was linked to this customer or became a customer — reject it and reply from the conversation.',
       code: 'PHOTO_TRIAGE_RECIPIENT_CHANGED',
     });
     return { blocked: true };
@@ -969,6 +978,7 @@ router.put('/:id/approve', async (req, res, next) => {
         ...sendPolicy,
         // At most one is set: clarify and photo-triage drafts are distinct intents.
         preDispatchCheck: clarifyGuard.preDispatchCheck || photoTriageGuard.preDispatchCheck,
+        preProviderCheck: photoTriageGuard.preProviderCheck,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',

@@ -106,7 +106,10 @@ const LARGE_SCOPE_RE = new RegExp(`\\b(both sides of (?:the |my |our )?${PROPERT
 // "didn't work" needs a treatment/remedy subject nearby — "my sprinkler
 // didn't work and this shrub has spots" is an equipment failure, not a
 // failed treatment (codex #4810 r3).
-const TREATMENT_SUBJECT = '(?:spray\\w*|treat\\w*|product|remedy|application|pesticide|fungicide|insecticide|granules?|fertiliz\\w*|sevin|neem|soap|put down|used|tried|visits?)';
+// Bare "tried"/"used" are NOT treatment subjects — "I tried uploading the
+// photo but it didn't work" attempted nothing (codex #4810 r13); "tried
+// everything" still is.
+const TREATMENT_SUBJECT = '(?:spray\\w*|treat\\w*|product|remedy|application|pesticide|fungicide|insecticide|granules?|fertiliz\\w*|sevin|neem|soap|put down|tried everything|visits?)';
 // Recurrence phrases ("keeps coming back", "won't go away", "can't get
 // rid") say nothing about a TREATMENT on their own — "this patch keeps
 // coming back every year" attempted nothing — so they need the treatment
@@ -322,6 +325,14 @@ function needsOnsite({ lead, actionable, scopeIsLarge, treatmentFailed }) {
   return (lead && actionable && (scopeIsLarge || treatmentFailed)) || (treatmentFailed && scopeIsLarge);
 }
 
+// Same live-customer predicate as customer-stages.js#scopeLiveCustomers
+// (active + not deleted + a customer stage): an inactive row that still
+// carries 'active_customer' is a former customer and follows the lead path
+// (codex #4810 r4). Shared by the gauge and the dispatch recheck.
+function isLead(customer) {
+  return !customer || customer.active !== true || !!customer.deleted_at || !CUSTOMER_STAGES.includes(customer.pipeline_stage);
+}
+
 // ── The gauge ────────────────────────────────────────────────────────────
 
 /**
@@ -332,12 +343,8 @@ function needsOnsite({ lead, actionable, scopeIsLarge, treatmentFailed }) {
 async function gaugeOpportunity({ type, analysis, customer, body, /* images reserved for a future visual-scope signal */ images: _images }) {
   const text = typeof body === 'string' ? body : '';
   const outcome = outcomeFor(type, analysis);
-  // Same live-customer predicate as customer-stages.js#scopeLiveCustomers
-  // (active + not deleted + a customer stage): an inactive row that still
-  // carries 'active_customer' is a former customer and follows the lead
-  // path (codex #4810 r4).
   const signals = {
-    lead: !customer || customer.active !== true || !!customer.deleted_at || !CUSTOMER_STAGES.includes(customer.pipeline_stage),
+    lead: isLead(customer),
     large_scope: largeScope(text),
     prior_treatment_failed: priorTreatmentFailed(text),
     actionable: outcome.kind === 'actionable',
@@ -392,6 +399,18 @@ function draftPitches(flags) {
     || (flags.opportunity_mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
 }
 
+// Whether the draft's audience moved since it was gauged: a different (or
+// newly linked) customer, or the same row crossing the lead/customer line
+// (a lead converted while an onsite "before quoting" draft sat pending —
+// codex #4810 r13). Either way the whole stored verdict is stale. Checked
+// only on drafts that recorded their audience.
+async function audienceChanged(customerId, flags) {
+  if (Object.hasOwn(flags, 'gauged_customer_id') && (flags.gauged_customer_id || null) !== (customerId || null)) return true;
+  if (!customerId || typeof flags.gauged_lead !== 'boolean') return false;
+  const row = await db('customers').where({ id: customerId }).first();
+  return isLead(row) !== flags.gauged_lead;
+}
+
 // Re-run the offer check immediately before a photo-triage draft is SENT
 // (admin-drafts approve — codex #4810 r6): the creation-time check is stale
 // the moment the customer enrolls in the family, a plan rate lands, or
@@ -416,9 +435,7 @@ async function recheckDraftOffer({ customerId, flags }) {
   // gauged against. A recipient linked (or re-linked) since then makes all
   // of it stale — onsite and uncheckable-family drafts included — so the
   // draft is held rather than re-judged piecemeal (codex #4810 r12).
-  if (Object.hasOwn(flags, 'gauged_customer_id') && (flags.gauged_customer_id || null) !== (customerId || null)) {
-    return { blocked: 'recipient_changed', family };
-  }
+  if (await audienceChanged(customerId, flags)) return { blocked: 'recipient_changed', family };
   if (!family || !customerId || !draftPitches(flags)) return { ok: true };
   // throwOnError: an outage here must surface as a 503 (draft left pending
   // for retry), never as confirmed staleness.

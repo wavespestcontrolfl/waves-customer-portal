@@ -359,6 +359,7 @@ async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, cr
       // Who the verdict was computed for — a recipient linked after
       // creation makes the whole verdict stale (codex #4810 r12).
       gauged_customer_id: customer?.id || null,
+      gauged_lead: opportunity.reasons.includes('lead'),
       quote: opportunity.quote,
     }),
   });

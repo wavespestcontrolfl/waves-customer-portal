@@ -91,6 +91,9 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     "it still won't go away",
     "can't get rid of these weeds, what are they?",
     "it's still there after the rain",
+    // Bare "tried"/"used" name no treatment (codex #4810 r13).
+    "I tried uploading the photo but it didn't work; what are these spots?",
+    "I used the app but it didn't work, what is this?",
   ])('%p is not a prior failure', (body) => expect(priorTreatmentFailed(body)).toBe(false));
 });
 
@@ -531,6 +534,16 @@ describe('recheckDraftOffer', () => {
     expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS({ gauged_customer_id: 'c1' }) })).toEqual({ ok: true });
     // An unlinked draft still unlinked → nothing to recheck.
     expect(await recheckDraftOffer({ customerId: null, flags: mosquitoLead })).toEqual({ ok: true });
+  });
+
+  test('the same row crossing the lead/customer line since the draft was gauged holds it too (codex #4810 r13)', async () => {
+    const onsiteLead = FLAGS({ gauged_customer_id: 'c1', gauged_lead: true, opportunity_mode: 'onsite', opportunity_reasons: ['lead', 'actionable', 'large_scope', 'onsite_scope'], quote: null });
+    mockDb.mockReturnValueOnce({ where: () => ({ first: async () => ({ id: 'c1', active: true, pipeline_stage: 'active_customer' }) }) });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: onsiteLead })).toEqual({ blocked: 'recipient_changed', family: 'tree_shrub' });
+    // Still a lead → onsite pitches nothing to recheck.
+    mockDb.mockReturnValueOnce({ where: () => ({ first: async () => ({ id: 'c1', active: true, pipeline_stage: 'new_lead' }) }) });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: onsiteLead })).toEqual({ ok: true });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
   });
 
   test('the text is never an input — the recheck reads only the stored verdict (drafts are approve-as-written)', async () => {

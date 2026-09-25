@@ -368,6 +368,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
       offer_family: 'lawn_care',
       // Who the verdict was computed for (codex #4810 r12).
       gauged_customer_id: CUSTOMER.id,
+      gauged_lead: true,
       quote: null,
     });
     expect(draft.draft_response).toBe(

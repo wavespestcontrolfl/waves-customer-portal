@@ -286,6 +286,32 @@ describe('approve — the recheck runs again at the pre-dispatch hook (codex #48
   });
 });
 
+describe('approve — the late recheck also guards the provider handoff and keeps the retry contract (codex #4810 r13)', () => {
+  test('the same check is passed as preProviderCheck; an outage there answers the retryable 503, never a raw error', async () => {
+    enqueue('message_drafts', { returning: [photoDraft()] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
+    enqueue('message_drafts', { update: 1 });
+    mockRecheck.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: true }).mockRejectedValueOnce(new Error('db down: secret detail'));
+    let atHandoff;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      expect((await input.preDispatchCheck({ channel: 'sms' })).ok).toBe(true);
+      atHandoff = await input.preProviderCheck({ channel: 'sms' });
+      return { sent: false, blocked: true, code: atHandoff.code, reason: atHandoff.reason, retryable: atHandoff.retryable };
+    });
+
+    let body;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
+      expect(res.status).toBe(503);
+      body = await res.json();
+    });
+    expect(atHandoff).toMatchObject({ ok: false, code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE', retryable: true });
+    expect(body.code).toBe('PHOTO_TRIAGE_RECHECK_UNAVAILABLE');
+    expect(JSON.stringify(body)).not.toMatch(/secret detail/);
+    expect(updates.some((u) => u.payload.status === 'sent')).toBe(false);
+  });
+});
+
 describe('approve — recipient changed since the draft was gauged', () => {
   test('→ 409 PHOTO_TRIAGE_RECIPIENT_CHANGED, claim released, flags and text untouched, nothing sent', async () => {
     enqueue('message_drafts', { returning: [photoDraft()] });
