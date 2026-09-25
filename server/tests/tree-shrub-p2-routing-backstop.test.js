@@ -366,6 +366,31 @@ describe('rewriteTreeShrubRecurringServices — palm rows are never tier-rewritt
       recurring: { services: [staleRow] },
     })).toBe(true);
   });
+
+  // codex P0 round 5: a valid 6/9 count must not short-circuit the other
+  // retired signals, and the restamp must clear every stale one.
+  test('a valid count does not excuse a retired cadence field or catalog key (codex P0 r5)', () => {
+    const gate = (svc) => recurringTreeShrubRowAtRetiredCadence({ recurring: { services: [svc] } });
+    expect(gate({ name: 'Tree & Shrub Care', serviceKey: 'tree_shrub_quarterly', visitsPerYear: 6 })).toBe(true);
+    expect(gate({ name: 'Tree & Shrub Care', frequency: 'quarterly', visitsPerYear: 6 })).toBe(true);
+    expect(gate({ name: 'Tree & Shrub Care', recurring_pattern: 'quarterly', visitsPerYear: 9 })).toBe(true);
+    // Live rows still pass.
+    expect(gate({ name: 'Bi-Monthly Tree & Shrub Care Service', serviceKey: 'tree_shrub_program', frequency: 'bi_monthly', visitsPerYear: 6 })).toBe(false);
+    expect(gate({ name: 'Every 6 Weeks Tree & Shrub Care Service', serviceKey: 'tree_shrub_6week', frequency: 'every_6_weeks', visitsPerYear: 9 })).toBe(false);
+  });
+
+  test.each(['standard', 'enhanced'])('restamping a fully-stale Light row onto %s clears every retired signal (codex P0 r5)', (key) => {
+    const staleLight = {
+      name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', service_key: 'tree_shrub_quarterly',
+      frequency: 'quarterly', frequency_key: 'quarterly', recurringPattern: 'quarterly', recurring_pattern: 'quarterly',
+      planFrequency: 'quarterly', visitsPerYear: 4, visits: 4, v: 4, mo: 30,
+    };
+    expect(recurringTreeShrubRowAtRetiredCadence({ recurring: { services: [staleLight] } })).toBe(true);
+    // No visitsPerYear on the selection: the tier's own count must win over the stale 4.
+    const { services } = rewriteTreeShrubRecurringServices([staleLight], { key });
+    expect(recurringTreeShrubRowAtRetiredCadence({ recurring: { services } })).toBe(false);
+    expect(services[0].visitsPerYear).toBe(key === 'standard' ? 6 : 9);
+  });
 });
 
 describe('remainingUnitCatalogKey — converted T&S rows link their catalog row', () => {

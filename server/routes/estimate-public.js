@@ -17885,6 +17885,14 @@ const TREE_SHRUB_VISIT_COUNT_ALIAS_KEYS = Object.freeze([
   'appsPerYear', 'apps_per_year', 'apps',
   'treatmentsPerYear', 'treatments_per_year',
 ]);
+// Every cadence-field spelling estimate-converter's cadenceFieldRawValues
+// reads; selectedTreeShrubServiceRow overwrites all of them on restamp.
+const TREE_SHRUB_CADENCE_FIELD_KEYS = Object.freeze([
+  'frequency', 'freq', 'frequencyKey', 'frequency_key',
+  'recurringPattern', 'recurring_pattern',
+  'cadence', 'cadenceKey', 'cadence_key',
+  'planFrequency', 'plan_frequency',
+]);
 
 // Retired T&S tiers = the 12x Premium AND, as of 2026-09-24 (owner
 // directive: stop offering quarterly tree & shrub care), the 4x Light. The
@@ -17922,10 +17930,13 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
     const rawVisitAliases = TREE_SHRUB_VISIT_COUNT_ALIAS_KEYS
       .map((key) => Number(svc?.[key]))
       .filter((value) => Number.isFinite(value) && value > 0);
-    if (rawVisitAliases.length > 0) {
-      return rawVisitAliases.some((value) => value !== 6 && value !== 9);
-    }
-    // No raw visit-count alias is present — safe to trust the converter's
+    if (rawVisitAliases.some((value) => value !== 6 && value !== 9)) return true;
+    // A valid 6/9 count is NOT proof the row is current (codex P0 round 5):
+    // { serviceKey: 'tree_shrub_quarterly', visitsPerYear: 6 } or
+    // { frequency: 'quarterly', visitsPerYear: 6 } still carry a retired
+    // signal the converter honors (explicit cadence fields win over counts;
+    // catalog keys are preserved), so every check below still runs.
+    // The converter's
     // own cadence reader, which is what catches a legacy abbreviated label
     // like '4x applications/yr' (codex P0 round 2): the prior manual regex
     // here required whitespace directly before "applications", which
@@ -17934,7 +17945,7 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
     // the text and maps it to 'quarterly' — exactly how the converter
     // itself would read it.
     const pattern = converter.explicitServiceCadence(svc);
-    if (pattern) return !['bimonthly', 'every_6_weeks'].includes(pattern);
+    if (pattern && !['bimonthly', 'every_6_weeks'].includes(pattern)) return true;
     // Wording the converter's reader doesn't cover: "N visits/apps/
     // applications" WORDY phrasing (normalizeRecurringPattern only
     // recognizes the abbreviated "Nx" form or exact words like "quarterly"/
@@ -20977,8 +20988,10 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
   const monthly = finiteNumberOrNull(frequency.monthly ?? frequency.monthlyBase ?? existing.mo ?? existing.monthly ?? existing.monthlyTotal);
   const annual = finiteNumberOrNull(frequency.annual ?? existing.annual ?? existing.ann ?? existing.annualAfterDiscount);
   const perTreatment = finiteNumberOrNull(frequency.perTreatment ?? frequency.perVisit ?? existing.perTreatment ?? existing.perVisit ?? existing.pa);
-  const visits = finiteNumberOrNull(frequency.visitsPerYear ?? existing.visitsPerYear ?? existing.visits ?? existing.v)
-    || meta.visitsPerYear;
+  // The selected tier's own count wins over the row's prior count: a stale
+  // 4 left on the existing row must never be carried onto a Standard or
+  // Enhanced restamp (it would trip the retired-cadence gate on accept).
+  const visits = finiteNumberOrNull(frequency.visitsPerYear) || meta.visitsPerYear;
   const label = frequency.label || meta.label;
   const row = {
     ...existing,
@@ -21024,6 +21037,11 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
   if (visits != null) {
     for (const key of TREE_SHRUB_VISIT_COUNT_ALIAS_KEYS) row[key] = visits;
   }
+  // Same for every cadence FIELD spelling the converter reads
+  // (cadenceFieldRawValues): a stale recurringPattern/frequency_key
+  // 'quarterly' surviving the restamp would conflict with the new tier's
+  // cadence and trip the retired-cadence gate (codex P0 round 5).
+  for (const key of TREE_SHRUB_CADENCE_FIELD_KEYS) row[key] = meta.frequencyKey;
   return row;
 }
 
