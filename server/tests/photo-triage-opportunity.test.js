@@ -195,6 +195,10 @@ describe('gaugeOpportunity', () => {
     expect(result.quote).toMatchObject({ service: 'tree_shrub', tier: 'standard', frequency: 6 });
     expect(result.quote.monthly).toBeGreaterThan(0);
     expect(result.quote.annual).toBeCloseTo(result.quote.monthly * 12, 0);
+    // AGENTS.md P1 "per application price copy": the customer-facing quote
+    // line reads per_visit, never the monthly/annual total.
+    expect(result.quote.per_visit).toBeGreaterThan(0);
+    expect(result.quote.per_visit).toBeCloseTo(result.quote.annual / result.quote.frequency, 0);
   });
 
   test('Gretchen Dimartini-shaped: new lead, hibiscus hedges on both sides, already tried and failed → onsite', async () => {

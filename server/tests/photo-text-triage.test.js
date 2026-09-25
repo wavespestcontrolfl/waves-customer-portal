@@ -490,7 +490,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
 });
 
 describe('draft text builder', () => {
-  const { composeBody, composeDraft } = triage._test;
+  const { composeBody, composeDraft, buildDraftText } = triage._test;
   // opportunity fixtures: composeBody only reads .mode / .reasons / .quote.
   const ADVISE_ACTIONABLE = { mode: 'advise', reasons: ['actionable'], quote: null };
   const ADVISE_HARMLESS = { mode: 'advise', reasons: ['harmless'], quote: null };
@@ -498,7 +498,7 @@ describe('draft text builder', () => {
   const QUOTE = (overrides = {}) => ({
     mode: 'quote',
     reasons: ['actionable', 'quoted'],
-    quote: { service: 'tree_shrub', tier: 'standard', monthly: 41.31, annual: 495.72, frequency: 6, ...overrides },
+    quote: { service: 'tree_shrub', tier: 'standard', monthly: 41.31, annual: 495.72, frequency: 6, per_visit: 83, ...overrides },
   });
   const draft = (firstName, label, opportunity, advice = '') => composeDraft({
     firstName, bodyText: composeBody({ label, advice, opportunity }),
@@ -516,13 +516,28 @@ describe('draft text builder', () => {
     expect(draft('Dana', 'a healthy lawn', ADVISE_HARMLESS)).not.toMatch(/quote/i);
   });
 
-  test('quote: names the frequency, service, and monthly price, and asks to add it', () => {
+  test('quote: names the service and a per-visit price, never a combined monthly/annual total (AGENTS.md P1)', () => {
     const text = draft('Shelley', 'water or heat stress', QUOTE(), 'Pull mulch a few inches back from the trunk and water deep and even.');
     expect(text).toBe(
       "Thanks for the photo, Shelley. From what we can see, it's water or heat stress. "
       + 'Pull mulch a few inches back from the trunk and water deep and even. '
-      + 'Our 6-visit tree & shrub program at your home is about $41/mo. Want me to add it?',
+      + 'Our tree & shrub program is about $83 per visit, 6 visits a year. Want me to add it?',
     );
+    expect(text).not.toMatch(/\/mo\b|\/yr\b|per month|per year/i);
+  });
+
+  test('tree_shrub healthy (no worst_signal): a customer-friendly label, not the internal "no major visible stress" sentinel', () => {
+    // End to end through buildDraftText → messageLabel → outcomeFor
+    // (photo-triage-opportunity.js) — the real label pipeline, not the
+    // composeBody-level fixtures the other tests use here.
+    const text = buildDraftText({
+      firstName: 'Dana',
+      type: 'tree_shrub',
+      analysis: { worst_signal: null, overall_score: 95 },
+      opportunity: ADVISE_HARMLESS,
+    });
+    expect(text).toBe("Thanks for the photo, Dana. From what we can see, it's a healthy tree or shrub. No treatment is needed.");
+    expect(text).not.toMatch(/no major visible stress/i);
   });
 
   test('onsite: never mentions a price, asks for a day this week', () => {

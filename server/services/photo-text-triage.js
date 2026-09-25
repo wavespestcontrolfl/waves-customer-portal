@@ -74,7 +74,7 @@ const {
 const { isSignableStoredMediaKey } = require('./sms-media');
 const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 const { countSegments } = require('./messaging/segment-counter');
-const { gaugeOpportunity, teaserOutcome } = require('./photo-triage-opportunity');
+const { gaugeOpportunity, teaserOutcome, outcomeFor } = require('./photo-triage-opportunity');
 const { safePublicFirstName } = require('../utils/public-report-egress');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
@@ -199,18 +199,6 @@ async function releaseVisionSlot(messageId) {
     .catch((err) => logger.error(`[photo-triage] vision slot release failed for message ${messageId}: ${err.message}`));
 }
 
-// tree_shrub has no customer-safe teaser label of its own (see
-// photo-triage-opportunity.js#treeShrubOutcome) — this phrase map mirrors
-// TREE_SHRUB_SIGNAL_PHRASE there, sized for "it's {label}." in a text.
-const TREE_SHRUB_LABEL = {
-  water_heat_mechanical_stress: 'water or heat stress',
-  pest_activity: 'pest-pressure signals',
-  disease_leaf_spot: 'leaf-spot signals',
-  foliage_fullness: 'thin foliage',
-  leaf_color_vigor: 'uneven leaf color',
-};
-const TREE_SHRUB_HEALTHY_LABEL = 'no major visible stress';
-
 // One short piece of fixed advice per tree/shrub worst_signal — never model
 // text, so the copy can't drift or overclaim. Empty for lawn/pest (their own
 // teaser label already carries the finding) and for signals with no simple
@@ -219,18 +207,14 @@ const TREE_SHRUB_ADVICE = {
   water_heat_mechanical_stress: 'Pull mulch a few inches back from the trunk and water deep and even.',
 };
 
-// "it's {label}." — lawn/pest reuse the allowlisted teaser label
-// (photo-triage-opportunity.js#teaserOutcome); tree_shrub has no teaser
-// builder yet, so its worst_signal maps to a fixed phrase above. A pest
-// outcome of kind 'none' (nothing nameable) returns null — the caller falls
-// back to the old bare "want us to take a look?" copy for that case only.
+// "it's {label}." — the SAME resolved label the opportunity gauge itself
+// reasons over (photo-triage-opportunity.js#outcomeFor: lawn/pest via the
+// allowlisted teaser, tree_shrub via its own worst_signal phrase map). One
+// source for the label, never a second copy here. A pest outcome of kind
+// 'none' (nothing nameable) resolves label null — the caller falls back to
+// the old bare "want us to take a look?" copy for that case only.
 function messageLabel(type, analysis) {
-  if (type === 'tree_shrub') {
-    const worst = analysis?.worst_signal || null;
-    return worst ? (TREE_SHRUB_LABEL[worst] || 'a few things worth a look') : TREE_SHRUB_HEALTHY_LABEL;
-  }
-  const teaser = teaserOutcome(type, analysis);
-  return teaser.label || null;
+  return outcomeFor(type, analysis).label;
 }
 
 function messageAdvice(type, analysis) {
@@ -265,9 +249,12 @@ function composeBody({ label, advice, opportunity }) {
   }
 
   if (opportunity.mode === 'quote' && opportunity.quote) {
+    // AGENTS.md P1 "per application price copy": never state a combined
+    // plan total ($X/mo, $X/yr) in customer-facing copy — per_visit only
+    // (photo-triage-opportunity.js#perVisitFrom).
     const serviceLabel = QUOTE_SERVICE_LABEL[opportunity.quote.service] || 'service';
-    const monthly = Math.round(Number(opportunity.quote.monthly) || 0);
-    const quoteLine = `Our ${opportunity.quote.frequency}-visit ${serviceLabel} program at your home is about $${monthly}/mo. Want me to add it?`;
+    const perVisit = Math.round(Number(opportunity.quote.per_visit) || 0);
+    const quoteLine = `Our ${serviceLabel} program is about $${perVisit} per visit, ${opportunity.quote.frequency} visits a year. Want me to add it?`;
     return joinSentences([lead, advice, quoteLine]);
   }
 

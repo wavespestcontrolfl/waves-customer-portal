@@ -99,7 +99,9 @@ function priorTreatmentFailed(body) {
 
 // Human-readable phrase for a tree/shrub worst_signal, sized for "it's
 // {label}." — the five-category admin LABELS ("Water, Heat & Pruning
-// Stress") read fine on a chart but not inline in a sentence.
+// Stress") read fine on a chart but not inline in a sentence. Single source
+// for this mapping — photo-text-triage.js reads the resolved label through
+// outcomeFor()/gaugeOpportunity() rather than keeping its own copy.
 const TREE_SHRUB_SIGNAL_PHRASE = {
   water_heat_mechanical_stress: 'water or heat stress',
   pest_activity: 'pest-pressure signals',
@@ -107,6 +109,10 @@ const TREE_SHRUB_SIGNAL_PHRASE = {
   foliage_fullness: 'thin foliage',
   leaf_color_vigor: 'uneven leaf color',
 };
+// Customer-facing copy for "nothing flagged" — distinct from
+// HEALTHY_LAWN_LABEL above, which is an internal sentinel string the lawn
+// diagnostic module emits as a finding NAME, never customer copy itself.
+const TREE_SHRUB_HEALTHY_LABEL = 'a healthy tree or shrub';
 
 // tree_shrub has no customer-safe teaser builder (no customer report page
 // exists yet — photo-assessment-create.js#TYPES.tree_shrub.customerPreview
@@ -116,7 +122,7 @@ function treeShrubOutcome(analysis) {
   const worstSignal = analysis?.worst_signal || null;
   const scoreRaw = Number(analysis?.overall_score);
   const score = Number.isFinite(scoreRaw) ? scoreRaw : null;
-  const label = worstSignal ? (TREE_SHRUB_SIGNAL_PHRASE[worstSignal] || 'a few things worth a look') : HEALTHY_LAWN_LABEL;
+  const label = worstSignal ? (TREE_SHRUB_SIGNAL_PHRASE[worstSignal] || 'a few things worth a look') : TREE_SHRUB_HEALTHY_LABEL;
   if (!worstSignal) return { kind: 'harmless', label, cultural: false, uncertain: false };
   if (worstSignal === 'water_heat_mechanical_stress') {
     return { kind: 'cultural', label, cultural: true, uncertain: false };
@@ -213,9 +219,25 @@ async function customerHasActiveService(customerId, serviceKey) {
   }
 }
 
+// AGENTS.md P1 "per application price copy": customer-facing estimate copy
+// must never state a combined plan total ($X/mo, $X/yr) — only a per-visit
+// amount. The pricing engine already computes the per-visit figure
+// (priceTreeShrub: internalPerVisitRevenue/perApp; priceLawnCare/
+// pricePestControl: perApp) — prefer that over deriving one, and fall back
+// to annual/frequency only if a pricer result is ever missing both.
+function perVisitFrom(result, frequency) {
+  const preferred = Number(result.internalPerVisitRevenue ?? result.perApp);
+  if (Number.isFinite(preferred) && preferred > 0) return Math.round(preferred);
+  const freq = Number(frequency) || 1;
+  return Math.round((Number(result.annual) || 0) / freq);
+}
+
 // Compute-only pricing for one service — NEVER inserts an estimates row,
 // NEVER sends anything. Returns { quote } on success or { reason } naming
-// why not ('no_property_facts' | 'already_active').
+// why not ('no_property_facts' | 'already_active'). quote.monthly/.annual
+// are admin-audit context only (flags.quote, context_summary) — the
+// customer-facing draft copy (photo-text-triage.js) uses quote.per_visit
+// only, never a combined total.
 async function priceForCustomer(type, customer, facts) {
   const serviceKey = SERVICE_KEY[type];
   if (!serviceKey) return { reason: 'no_property_facts' };
@@ -233,7 +255,12 @@ async function priceForCustomer(type, customer, facts) {
     // (a bare 2,000 sqft guess) is exactly what "no facts" means here.
     if (result.bedAreaSource === 'fallback') return { reason: 'no_property_facts' };
     if (await customerHasActiveService(customer?.id, serviceKey)) return { reason: 'already_active' };
-    return { quote: { service: serviceKey, tier: result.tier, monthly: result.monthly, annual: result.annual, frequency: result.frequency } };
+    return {
+      quote: {
+        service: serviceKey, tier: result.tier, monthly: result.monthly, annual: result.annual,
+        frequency: result.frequency, per_visit: perVisitFrom(result, result.frequency),
+      },
+    };
   }
 
   if (type === 'lawn') {
@@ -249,7 +276,12 @@ async function priceForCustomer(type, customer, facts) {
       logger.error(`[photo-triage-opportunity] lawn pricing failed: ${err.message}`);
       return { reason: 'no_property_facts' };
     }
-    return { quote: { service: serviceKey, tier: result.tier, monthly: result.monthly, annual: result.annual, frequency: result.frequency } };
+    return {
+      quote: {
+        service: serviceKey, tier: result.tier, monthly: result.monthly, annual: result.annual,
+        frequency: result.frequency, per_visit: perVisitFrom(result, result.frequency),
+      },
+    };
   }
 
   // pest: needs homeSqFt, which loadPropertyFacts can never supply today
@@ -264,7 +296,12 @@ async function priceForCustomer(type, customer, facts) {
     logger.error(`[photo-triage-opportunity] pest pricing failed: ${err.message}`);
     return { reason: 'no_property_facts' };
   }
-  return { quote: { service: serviceKey, tier: result.frequency, monthly: result.monthly, annual: result.annual, frequency: result.visitsPerYear } };
+  return {
+    quote: {
+      service: serviceKey, tier: result.frequency, monthly: result.monthly, annual: result.annual,
+      frequency: result.visitsPerYear, per_visit: perVisitFrom(result, result.visitsPerYear),
+    },
+  };
 }
 
 // onsite when a new/non-customer lead's actionable finding comes with either
@@ -278,7 +315,7 @@ function needsOnsite({ lead, actionable, scopeIsLarge, treatmentFailed }) {
 // ── The gauge ────────────────────────────────────────────────────────────
 
 /**
- * @returns {Promise<{ mode: 'advise'|'quote'|'onsite', reasons: string[], quote: null | { service, tier, monthly, annual, frequency } }>}
+ * @returns {Promise<{ mode: 'advise'|'quote'|'onsite', reasons: string[], quote: null | { service, tier, monthly, annual, frequency, per_visit } }>}
  */
 async function gaugeOpportunity({ type, analysis, customer, body, /* images reserved for a future visual-scope signal */ images: _images }) {
   const reasons = [];
@@ -328,6 +365,10 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
 module.exports = {
   gaugeOpportunity,
   teaserOutcome,
+  // The resolved { kind, label, cultural, uncertain } for any type — the
+  // single source photo-text-triage.js reads its draft-copy label from
+  // (never a second lawn/pest/tree_shrub label map of its own).
+  outcomeFor,
   _test: {
     outcomeFor,
     largeScope,
