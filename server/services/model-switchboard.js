@@ -132,7 +132,7 @@ const POLICY_SELECTOR = {
 const T = (tier) => ({ kind: 'tier', key: tier });
 const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
-const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null, catalogOnly: !!opts.catalogOnly });
+const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null, catalogOnly: !!opts.catalogOnly, allowed: opts.allowed || null });
 // D(env | [env, ...aliases], literal): the call site reads the first set var
 // in order (satellite: OPENAI_VISION_MODEL || OPENAI_MODEL || 'gpt-5-mini').
 // The composer writes the FIRST (specific) name; aliases only report.
@@ -218,17 +218,21 @@ const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by eight photo lane
 // warns on that specific move.
 const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ id, name, file, policy, primary, fallback, ...extra });
 
-// voice_relay's E() parse hook (below): VOICE_RELAY_INBOUND_MODEL is the one
-// pin here the call site itself allowlist-checks. Lazy require — this file
-// loads at server boot, well before any inbound call; relay-conversation.js
+// voice_relay's E() parse + allowed hooks (below): VOICE_RELAY_INBOUND_MODEL is
+// the one pin here the call site itself allowlist-checks. Lazy require — this
+// file loads at server boot, well before any inbound call; relay-conversation.js
 // pulls in the Anthropic SDK, db and other heavier deps this module has no
-// other reason to load. resolveInboundModelForReporting() is pure (always
-// reads the live env, never memoized) and mirrors exactly what a session
-// pins on `this.model`, so this can only ever report what actually runs.
+// other reason to load. Both hooks ask the runtime's OWN allowlist verdict
+// (isAllowedOverrideModel, the check resolveSessionModel applies) — never
+// compare resolved model ids, which cannot tell a rejected override from a
+// fallback that happens to carry the same id.
 function inboundOverrideParse(raw) {
-  const { resolveInboundModelForReporting } = require('./voice-agent/relay-conversation');
-  const { model } = resolveInboundModelForReporting();
-  return model === raw ? raw : null;
+  const { isAllowedOverrideModel } = require('./voice-agent/relay-conversation');
+  return isAllowedOverrideModel(raw) ? raw : null;
+}
+function inboundOverrideAllowed() {
+  const { ALLOWED_OVERRIDE_MODEL_IDS } = require('./voice-agent/relay-conversation');
+  return [...ALLOWED_OVERRIDE_MODEL_IDS];
 }
 
 // The audited call-site map (server/, 2026-09-02). Grouped by the kind of
@@ -345,7 +349,7 @@ const LANES = [
   // it would draft an env value inboundOverrideParse() (and the runtime's own
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE')), { parse: inboundOverrideParse, catalogOnly: true }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE')), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
@@ -780,6 +784,75 @@ function resolveSelectors() {
 
 const SELECTOR_BY_KEY = Object.fromEntries(SELECTORS.map((s) => [s.key, s]));
 
+// A ROUTES / TEXT_POLICIES leg is attributed to its registry selector only
+// while the selector still supplies that exact model.
+function resolveAttributed(model, selKey, path) {
+  const attributed = selKey && MODELS[selKey] === model ? selKey : null;
+  return { model, selector: attributed, via: `${path}${attributed ? ` → ${attributed}` : ''}`, pinEnv: null, pinned: false, live: false, accepts: attributed ? SELECTOR_BY_KEY[attributed].accepts : null };
+}
+
+// One env pin's own state, before any fallback: which alias is set (`setEnv`
+// is the name to DELETE, not the canonical first name the composer writes),
+// the model it yields (through ref.parse when the call site validates or
+// decodes the value), and `afterUnpin` — the next lower-priority alias still
+// set, which is what the leg runs on once `setEnv` is deleted.
+function envLink(ref) {
+  const names = Array.isArray(ref.env) ? ref.env : [ref.env];
+  const setName = names.find((n) => process.env[n]) || null;
+  const raw = setName ? process.env[setName] : null;
+  const model = raw ? (ref.parse ? ref.parse(raw) : raw) || null : null;
+  const afterUnpin = setName ? names.slice(names.indexOf(setName) + 1).map((n) => process.env[n]).find(Boolean) || null : null;
+  return { env: names[0], setEnv: setName, model, accepted: !!model, afterUnpin };
+}
+
+// D(env, literal): `process.env.PIN || 'literal'`.
+function resolveEnvLiteral(ref) {
+  const link = envLink(ref);
+  const model = link.model || ref.literal;
+  const via = link.setEnv ? `${link.setEnv}${link.setEnv !== link.env ? ' (alias)' : ''}` : `${link.env} (code default)`;
+  return { model, selector: null, via, pinEnv: link.env, setEnv: link.setEnv, pinned: !!link.setEnv, unpinnedModel: link.afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
+}
+
+// E(env, base): `process.env.PIN || <base>`, where base may itself be an E()
+// (voice_relay: VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → VOICE tier).
+//
+// `chain` is the whole env chain, highest precedence first, each link with its
+// own accepted/rejected verdict; `chainBase` is the selector / model at the
+// bottom. The composer (client/src/pages/admin/agents/modelDraft.js walkChain)
+// resolves every draft question — where a leg lands, which env moves it,
+// whether it still follows a selector — by walking this one list with the
+// draft applied, instead of re-deriving the chain from summary flags.
+//
+// `pinned` = the model comes from an env rather than the selector (the tab's
+// selector-follower lists key on `!pinned`). An override ref.parse REJECTED
+// is set but not in effect, so the leg is pinned exactly when its base is.
+// `dependsOnEnvs` lists lower envs the CURRENT resolution rides (non-empty
+// only when this leg's own pin is not in effect).
+function resolveEnvChain(ref) {
+  const link = envLink(ref);
+  const base = resolveRef(ref.ref);
+  const own = link.accepted;
+  const dependsOnEnvs = own ? [] : [...(base.pinEnv ? [base.pinEnv] : []), ...(base.dependsOnEnvs || [])];
+  const chain = [link, ...(base.chain || [])];
+  const chainBase = base.chainBase || { selector: base.selector || null, model: base.model };
+  const accepts = ref.catalogOnly ? { ...base.accepts, catalogOnly: true, allowedIds: ref.allowed ? ref.allowed() : null } : base.accepts;
+  const via = own ? `${link.setEnv} (pinned)` : link.setEnv ? `${link.setEnv} rejected → ${base.via}` : `${link.env} → ${base.via}`;
+  return {
+    model: own ? link.model : base.model,
+    selector: base.selector,
+    via,
+    pinEnv: link.env,
+    setEnv: link.setEnv,
+    pinned: own || !!base.pinned,
+    unpinnedModel: link.afterUnpin || base.model,
+    live: ref.live,
+    accepts,
+    dependsOnEnvs,
+    chain,
+    chainBase,
+  };
+}
+
 // Resolve a ref to { model, selector, via, pinEnv, pinned, live, accepts }.
 // `selector` is the registry selector the value ultimately comes from (null
 // for out-of-registry literals); `via` is the human-readable path.
@@ -790,71 +863,14 @@ function resolveRef(ref) {
       const sel = SELECTOR_BY_KEY[ref.key];
       return { model: MODELS[ref.key], selector: ref.key, via: ref.key, pinEnv: null, pinned: false, live: false, accepts: sel ? sel.accepts : null };
     }
-    case 'route': {
-      const route = MODELS.ROUTES[ref.key];
-      const selKey = ROUTE_SELECTOR[ref.key];
-      const attributed = selKey && MODELS[selKey] === route?.model ? selKey : null;
-      return { model: route?.model, selector: attributed, via: `ROUTES.${ref.key}${attributed ? ` → ${attributed}` : ''}`, pinEnv: null, pinned: false, live: false, accepts: attributed ? SELECTOR_BY_KEY[attributed].accepts : null };
-    }
-    case 'policy': {
-      const leg = MODELS.TEXT_POLICIES[ref.key]?.[ref.leg];
-      const selKey = POLICY_SELECTOR[ref.key]?.[ref.leg];
-      const attributed = selKey && MODELS[selKey] === leg?.model ? selKey : null;
-      return { model: leg?.model, selector: attributed, via: `TEXT_POLICIES.${ref.key}.${ref.leg}${attributed ? ` → ${attributed}` : ''}`, pinEnv: null, pinned: false, live: false, accepts: attributed ? SELECTOR_BY_KEY[attributed].accepts : null };
-    }
+    case 'route':
+      return resolveAttributed(MODELS.ROUTES[ref.key]?.model, ROUTE_SELECTOR[ref.key], `ROUTES.${ref.key}`);
+    case 'policy':
+      return resolveAttributed(MODELS.TEXT_POLICIES[ref.key]?.[ref.leg]?.model, POLICY_SELECTOR[ref.key]?.[ref.leg], `TEXT_POLICIES.${ref.key}.${ref.leg}`);
     case 'literal':
       return { model: ref.model, selector: null, via: 'code constant', pinEnv: null, pinned: false, unpinnedModel: ref.model, live: false, accepts: ref.accepts || { providers: [providerOf(ref.model)], cap: 'text' } };
-    case 'env': {
-      const names = Array.isArray(ref.env) ? ref.env : [ref.env];
-      const setName = names.find((n) => process.env[n]) || null;
-      const pinned = !!setName;
-      const primaryName = names[0];
-      // unpinnedModel = what the leg runs on once the env var is deleted, so
-      // the composer can offer "unpin" with an honest before/after. With an
-      // alias chain that is the next set alias, then the literal / base.
-      // `setEnv` is the name to DELETE (the active alias, not the canonical
-      // first name); `afterUnpin` is the next lower-priority alias still set.
-      const afterUnpin = setName ? names.slice(names.indexOf(setName) + 1).map((n) => process.env[n]).find(Boolean) || null : null;
-      if (ref.literal !== undefined) {
-        const raw = (setName && process.env[setName]) || null;
-        const model = (raw && (ref.parse ? ref.parse(raw) : raw)) || ref.literal;
-        const via = setName ? `${setName}${setName !== primaryName ? ' (alias)' : ''}` : `${primaryName} (code default)`;
-        return { model, selector: null, via, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
-      }
-      const base = resolveRef(ref.ref);
-      const raw = (setName && process.env[setName]) || null;
-      // ref.parse is set only for an env the call site validates (see E()
-      // above) — a rejected raw value reports the same fallback the call
-      // site itself falls back to, never the rejected string.
-      const parsed = raw && ref.parse ? ref.parse(raw) : raw;
-      const model = parsed || base.model;
-      // dependsOnEnvs: env(s) further down the fallback chain the CURRENT
-      // resolution still rides — non-empty exactly when `model` above fell
-      // through to `base.model` (this leg's own override is unset, or set to
-      // a value ref.parse rejected). A single `pinEnv` can only ever name ONE
-      // env (the one THIS leg's own change would write to), so a shared lower
-      // env's change is invisible to a naive `pinEnv === env` match; the
-      // composer's blast-radius grouping (computeChanges in
-      // client/src/pages/admin/agents/modelDraft.js) additionally matches on
-      // this list, so e.g. a VOICE_RELAY_MODEL change is attributed to
-      // voice_relay too whenever VOICE_RELAY_INBOUND_MODEL isn't overriding
-      // it — not just to voice_relay_collections, which reads
-      // VOICE_RELAY_MODEL directly and has no override of its own to unset.
-      const dependsOnEnvs = !parsed ? [...(base.pinEnv ? [base.pinEnv] : []), ...(base.dependsOnEnvs || [])] : [];
-      // `pinned` = the model comes from an env rather than the selector, which
-      // is what the Models tab's selector-follower lists key on (`!g.pinned`).
-      // An override ref.parse REJECTED is set but not in effect: the leg rides
-      // its base, so it is pinned exactly when the base is (VOICE_RELAY_MODEL
-      // set) and otherwise follows the VOICE selector like any unpinned leg.
-      // `setEnv` still names the rejected var so the tab can offer to delete it.
-      const effectivePin = setName ? !!parsed : false;
-      // fallbackEnvs / fallbackPinned: the chain BELOW this leg's own pin,
-      // reported whether or not the pin is active, so the composer can resolve
-      // where the leg lands when a draft DELETES the pin (modelDraft.js).
-      const fallbackEnvs = [...(base.pinEnv ? [base.pinEnv] : []), ...(base.fallbackEnvs || [])];
-      const accepts = ref.catalogOnly ? { ...base.accepts, catalogOnly: true } : base.accepts;
-      return { model, selector: base.selector, via: effectivePin ? `${setName} (pinned)` : setName ? `${setName} rejected → ${base.via}` : `${primaryName} → ${base.via}`, pinEnv: primaryName, setEnv: setName, pinned: effectivePin || !!base.pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts, dependsOnEnvs, fallbackEnvs, fallbackPinned: !!base.pinned };
-    }
+    case 'env':
+      return ref.literal !== undefined ? resolveEnvLiteral(ref) : resolveEnvChain(ref);
     default:
       return null;
   }

@@ -504,18 +504,33 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
     expect(inbound.primary.setEnv).toBeNull();
   });
 
-  it('reports the chain below the override (fallbackEnvs / fallbackPinned) even while the override is active, so the composer can resolve an unpin', () => {
+  it('reports the whole env chain with a per-link verdict, even while the override is active, so the composer can resolve any draft', () => {
     process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';
     process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
     jest.resetModules();
-    const { lanes } = require('../services/model-switchboard').getSwitchboard();
-    const inbound = lanes.find((l) => l.id === 'voice_relay');
-    expect(inbound.primary.fallbackEnvs).toEqual(['VOICE_RELAY_MODEL']);
-    expect(inbound.primary.fallbackPinned).toBe(true);
-    expect(inbound.primary.unpinnedModel).toBe('claude-sonnet-5');
-    delete process.env.VOICE_RELAY_MODEL;
-    const after = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
-    expect(after.primary.fallbackEnvs).toEqual(['VOICE_RELAY_MODEL']);
-    expect(after.primary.fallbackPinned).toBe(false);
+    const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.chain.map((k) => [k.env, k.model, k.accepted])).toEqual([
+      ['VOICE_RELAY_INBOUND_MODEL', 'claude-haiku-4-5-20251001', true],
+      ['VOICE_RELAY_MODEL', 'claude-sonnet-5', true],
+    ]);
+    expect(inbound.primary.chainBase).toEqual({ selector: 'VOICE', model: require('../config/models').VOICE });
+  });
+
+  it('an override that is rejected but equal to VOICE_RELAY_MODEL is still reported as rejected (verdict, not id equality)', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-nope-9000';
+    process.env.VOICE_RELAY_MODEL = 'claude-nope-9000';
+    jest.resetModules();
+    const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.chain[0]).toMatchObject({ env: 'VOICE_RELAY_INBOUND_MODEL', accepted: false });
+    expect(inbound.primary.dependsOnEnvs).toEqual(['VOICE_RELAY_MODEL']);
+    expect(inbound.primary.via).toMatch(/rejected/);
+  });
+
+  it('the catalog-only picker receives the runtime allowlist itself', () => {
+    const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+    const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+    expect(inbound.primary.accepts.allowedIds).toEqual([...ALLOWED_OVERRIDE_MODEL_IDS]);
+    expect(inbound.primary.accepts.allowedIds).toContain('claude-haiku-4-5-20251001');
+    expect(inbound.primary.accepts.allowedIds.some((id) => id.includes('fable'))).toBe(false);
   });
 });

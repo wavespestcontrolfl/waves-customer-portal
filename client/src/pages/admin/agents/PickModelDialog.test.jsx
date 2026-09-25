@@ -53,7 +53,7 @@ describe("PickModelDialog", () => {
   // live-discovered id the picker offered here would be silently rejected
   // after the restart the owner thought would apply it.
   it("catalogOnly: never calls live search, offers only catalog models, and a query filters them locally", async () => {
-    const catalogOnlyTarget = { ...target, accepts: { ...target.accepts, catalogOnly: true } };
+    const catalogOnlyTarget = { ...target, accepts: { ...target.accepts, catalogOnly: true, allowedIds: ["m1", "m2"] } };
     const onPick = vi.fn();
     render(<PickModelDialog target={catalogOnlyTarget} catalog={CATALOG} onClose={() => {}} onPick={onPick} />);
     expect(await screen.findByText(/live provider search is off here/)).toBeInTheDocument();
@@ -66,5 +66,17 @@ describe("PickModelDialog", () => {
     expect(screen.getByText(/No model matches/)).toBeInTheDocument();
     // Never hit the live search endpoint, in browse mode or once typed.
     expect(adminFetch).not.toHaveBeenCalled();
+  });
+
+  // The tab merges ids discovered by an earlier live pick (another lane) into
+  // `catalog`; a catalogOnly lane offers only the server's runtime allowlist.
+  it("catalogOnly: a client-discovered id outside accepts.allowedIds is never offered", async () => {
+    const catalogOnlyTarget = { ...target, accepts: { ...target.accepts, catalogOnly: true, allowedIds: ["m1", "m2"] } };
+    const catalog = { ...CATALOG, m9: { label: "Claude Discovered 9", provider: "anthropic", caps: ["text"], status: "current" } };
+    render(<PickModelDialog target={catalogOnlyTarget} catalog={catalog} onClose={() => {}} onPick={vi.fn()} />);
+    expect(await screen.findByText("Claude Opus 5")).toBeInTheDocument();
+    expect(screen.queryByText("Claude Discovered 9")).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText(/fable 5.1/), { target: { value: "discovered" } });
+    expect(screen.queryByText("Claude Discovered 9")).toBeNull();
   });
 });

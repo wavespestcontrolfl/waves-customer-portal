@@ -63,37 +63,42 @@ export const selectorUnpinnedModel = (s, selectorByKey) => s.unpinnedModel || (s
 // the composer writes new values to.
 const deleteEnvOf = (c) => c.deleteEnv || c.env;
 
-// Where a leg lands once the draft DELETES its own pin: a lower env in its
-// fallback chain the same draft sets (the server's `fallbackEnvs` —
-// voice_relay's VOICE_RELAY_MODEL under VOICE_RELAY_INBOUND_MODEL), else that
-// chain's current env value when it is set (`fallbackPinned`), else the
-// drafted selector or the server's after-unpin model.
-function unpinnedLegModel(leg, draft, selectorDraft) {
-  for (const env of leg.fallbackEnvs || []) {
-    if (draft[env] && draft[env] !== UNPIN) return draft[env];
+// Walk a server env chain (resolveEnvChain in model-switchboard.js: `chain`
+// highest precedence first, `chainBase` = the selector / model at the bottom)
+// with the draft applied — the ONE place the composer decides where an
+// env-pinned leg lands. At each link: a drafted value wins; a drafted delete
+// falls to a still-set alias, else to the next link; an accepted current value
+// wins; an unset or runtime-REJECTED one falls through. Returns the model and
+// the link env that supplies it (null = the selector / code default).
+export function walkChain(leg, draft, selectorDraft) {
+  for (const link of leg.chain) {
+    const drafted = draft[link.env];
+    if (drafted === UNPIN) {
+      if (link.afterUnpin) return { model: link.afterUnpin, env: link.env };
+      continue;
+    }
+    if (drafted) return { model: drafted, env: link.env };
+    if (link.accepted) return { model: link.model, env: link.env };
   }
-  if (leg.fallbackPinned) return leg.unpinnedModel;
-  return (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel;
+  const base = leg.chainBase || {};
+  return { model: (base.selector && selectorDraft(base.selector)) || base.model, env: null };
 }
 
-// Effective model for a leg after the draft: a lane pin wins over its
-// selector, exactly as `process.env.PIN || MODELS.TIER` does at boot.
+// Legs without a chain (registry tier / route / policy legs, and D() pins with
+// a code-literal default): a lane pin wins over its selector, exactly as
+// `process.env.PIN || MODELS.TIER` does at boot.
+function plainLegModel(leg, draft, selectorDraft) {
+  if (leg.pinEnv && draft[leg.pinEnv] === UNPIN) return (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel;
+  if (leg.pinEnv && draft[leg.pinEnv]) return draft[leg.pinEnv];
+  if (leg.pinEnv && leg.pinned) return leg.model;
+  return (leg.selector && selectorDraft(leg.selector)) || leg.model;
+}
+
+// Effective model for a leg after the draft.
 export function effectiveLegFor(draft, selectorDraft) {
   return (leg) => {
     if (!leg) return null;
-    if (leg.pinEnv && draft[leg.pinEnv] === UNPIN) return unpinnedLegModel(leg, draft, selectorDraft);
-    if (leg.pinEnv && draft[leg.pinEnv]) return draft[leg.pinEnv];
-    // Its own pin not in effect (unset, or set to a value the server
-    // rejected): still follows whichever lower env in its fallback chain the
-    // server currently resolved through — e.g. voice_relay follows
-    // VOICE_RELAY_MODEL whenever its own VOICE_RELAY_INBOUND_MODEL override is
-    // unset (server's `dependsOnEnvs`). Checked before `pinned`, which is also
-    // true when that lower env is what pins the leg.
-    for (const env of leg.dependsOnEnvs || []) {
-      if (draft[env] && draft[env] !== UNPIN) return draft[env];
-    }
-    if (leg.pinEnv && leg.pinned) return leg.model;
-    return (leg.selector && selectorDraft(leg.selector)) || leg.model;
+    return leg.chain ? walkChain(leg, draft, selectorDraft).model : plainLegModel(leg, draft, selectorDraft);
   };
 }
 
@@ -101,23 +106,34 @@ export function effectiveLegFor(draft, selectorDraft) {
 // selector it follows (a change there moves every lane on that selector).
 export const envForLeg = (leg, selectorByKey) => leg.pinEnv || (leg.selector && selectorByKey[leg.selector]?.env) || null;
 
-// Does this leg move when `env` changes — either because it is the leg's own
-// pin, or because (per the server's `dependsOnEnvs`) the leg's resolution
-// currently falls through to `env` whenever its own pin is unset. A leg only
-// ever reports ONE `pinEnv` (the env its own "Change" button writes to), so a
-// shared lower env's change would otherwise be invisible to an exact
-// `pinEnv === env` match — see model-switchboard.js's resolveRef.
-// Draft-aware: a leg whose own pin the draft SETS stops following anything
-// below it, and one whose pin the draft DELETES follows its whole fallback
-// chain (the server's `dependsOnEnvs` only describes the pre-draft state).
-const legFollowsEnv = (leg, env, draft = {}) => {
+// Does this leg move when `env` changes, given the rest of the draft? A plain
+// leg only on its own pin. A chained leg on the first link the walk would stop
+// at — so voice_relay follows VOICE_RELAY_MODEL while its inbound override is
+// unset, rejected, or drafted for deletion, and not once it is set or drafted.
+const legFollowsEnv = (leg, env, draft) => {
   if (!leg) return false;
-  if (leg.pinEnv === env) return true;
-  const own = leg.pinEnv && draft[leg.pinEnv];
-  if (own === UNPIN) return !!leg.fallbackEnvs?.includes(env);
-  if (own) return false;
-  return !!leg.dependsOnEnvs?.includes(env);
+  if (!leg.chain) return leg.pinEnv === env;
+  for (const link of leg.chain) {
+    if (link.env === env) return true;
+    const drafted = draft[link.env];
+    if (drafted === UNPIN ? !!link.afterUnpin : drafted || link.accepted) return false;
+  }
+  return false;
 };
+
+// Is the leg held by an env (not its selector) once the draft applies?
+function pinnedAfterDraft(leg, draft, selectorDraft) {
+  if (leg.chain) return walkChain(leg, draft, selectorDraft).env !== null;
+  const own = leg.pinEnv && draft[leg.pinEnv];
+  return own ? own !== UNPIN : !!leg.pinned;
+}
+
+// What the leg would run on if its OWN pin were not set, under the rest of
+// the draft (a change setting that pin to exactly this is a no-op).
+function baseAfterDraft(leg, draft, selectorDraft) {
+  if (leg.chain) return walkChain(leg, { ...draft, [leg.pinEnv]: UNPIN }, selectorDraft).model;
+  return (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel || leg.model;
+}
 
 // Holds that must accompany a selector draft: a LOCKED lane that follows the
 // selector through an unset per-lane env is pinned at its current model, so
@@ -136,90 +152,95 @@ export function holdsFor(data, selectorKey) {
   return holds;
 }
 
+// The change a drafted SELECTOR env makes: its followers, plus holds for any
+// locked selector that derives from it.
+function selectorChanges(data, draft, selectorDraft, s) {
+  const drafted = draft[s.env];
+  const unpin = drafted === UNPIN;
+  if (!drafted || (unpin && !s.overridden)) return [];
+  const next = unpin ? selectorDraft(s.key) : drafted;
+  if (!unpin && next === s.current) return [];
+  // Followers = this selector plus any unlocked selector that derives from
+  // it and is not set or drafted on its own. A LOCKED derived selector is
+  // held at its current model with a pin line of its own.
+  const derived = data.selectors.filter((d) => d.derived && d.derivesFrom === s.key && !draft[d.env]);
+  const held = derived.filter((d) => d.lock);
+  const moving = derived.filter((d) => !d.lock);
+  const keys = [s.key, ...moving.map((d) => d.key)];
+  const follows = (leg) => leg && keys.includes(leg.selector) && !pinnedAfterDraft(leg, draft, selectorDraft);
+  const following = data.lanes.filter((l) => movesOnEnv(l) && legsOf(l).some(follows));
+  const change = {
+    env: s.env,
+    from: s.current,
+    to: next,
+    unpin,
+    deleteEnv: unpin ? s.overrideEnv || s.env : undefined,
+    label: `${s.key} selector${moving.length ? ` (+ ${moving.map((d) => d.key).join(", ")}, unset so it follows)` : ""}`,
+    lanes: following.length,
+    laneNames: following.map((l) => l.name),
+    // Locked followers the composer could not hold (no env of their own).
+    lockedLanes: following.filter((l) => l.lock).map((l) => l.name),
+    uncheckedLanes: following.filter((l) => l.continuity === "unchecked").length,
+    restart: true,
+  };
+  const holds = held.map((d) => ({ env: d.env, from: d.current, to: d.current, hold: true, label: `${d.key} held at its current model (locked; it would otherwise follow ${s.key})`, lanes: 0, restart: true }));
+  return [change, ...holds];
+}
+
+// The change a drafted PIN env makes, aggregated over every lane leg that
+// moves with it (its own pin, or a lower link its chain currently rides).
+function pinChange(data, draft, selectorDraft, l, leg) {
+  const env = leg.pinEnv;
+  const next = draft[env];
+  const unpin = next === UNPIN;
+  const sharing = data.lanes.filter((x) => legsOf(x).some((g) => legFollowsEnv(g, env, draft)));
+  const legOf = (x) => legsOf(x).find((g) => legFollowsEnv(g, env, draft));
+  const effective = effectiveLegFor(draft, selectorDraft);
+  // Unpinning a shared env can land its lanes on different models — and
+  // an UNSET shared env's lanes may sit on different models today (one on
+  // its selector, one on a literal default), so setting it moves them all.
+  const destinations = unpin ? [...new Set(sharing.map((x) => effective(legOf(x))))] : [next];
+  const sources = [...new Set(sharing.map((x) => legOf(x).model))];
+  if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x), draft, selectorDraft) && !legOf(x).pinned)) return null;
+  // A hold keeps EVERY follower where it is; if any sharing lane sits on a
+  // different model today, setting the env moves that lane.
+  const hold = !unpin && sharing.every((x) => !legOf(x).pinned && next === legOf(x).model);
+  const label = hold
+    ? `${l.name} held at its current model (locked; it would otherwise follow ${leg.selector})`
+    : sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
+  return {
+    env,
+    from: leg.model,
+    sources,
+    to: destinations[0],
+    destinations,
+    unpin,
+    hold,
+    deleteEnv: unpin ? leg.setEnv || env : undefined,
+    label,
+    lanes: sharing.length,
+    laneNames: sharing.map((x) => x.name),
+    uncheckedLanes: sharing.filter((x) => x.continuity === "unchecked").length,
+    // Timing comes from the leg the env feeds (a live fallback pin
+    // applies on the next request even if the primary is boot-time).
+    restart: sharing.some((x) => !legOf(x).live),
+  };
+}
+
 // One change per env var, computed from the COMPLETE draft: selectors (with
 // derived aliases and locked holds), then pins aggregated by env.
 export function computeChanges({ data, draft, selectorDraft }) {
   if (!data) return [];
-  const pinnedAfterDraft = (leg) => {
-    const own = leg.pinEnv && draft[leg.pinEnv];
-    if (!own) return !!leg.pinned;
-    if (own !== UNPIN) return true;
-    return !!leg.fallbackPinned || (leg.fallbackEnvs || []).some((e) => draft[e] && draft[e] !== UNPIN);
-  };
-  const baseAfterDraft = (leg) => (leg.pinEnv && draft[leg.pinEnv] === UNPIN ? unpinnedLegModel(leg, draft, selectorDraft) : null)
-    || (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel || leg.model;
   const byEnv = new Map();
   for (const s of data.selectors) {
-    const drafted = draft[s.env];
-    if (!drafted) continue;
-    const unpin = drafted === UNPIN;
-    if (unpin && !s.overridden) continue;
-    const next = unpin ? selectorDraft(s.key) : drafted;
-    if (!unpin && next === s.current) continue;
-    // Followers = this selector plus any unlocked selector that derives from
-    // it and is not set or drafted on its own. A LOCKED derived selector is
-    // held at its current model with a pin line of its own.
-    const derived = data.selectors.filter((d) => d.derived && d.derivesFrom === s.key && !draft[d.env]);
-    const held = derived.filter((d) => d.lock);
-    const moving = derived.filter((d) => !d.lock);
-    const keys = [s.key, ...moving.map((d) => d.key)];
-    const follows = (leg) => leg && keys.includes(leg.selector) && !pinnedAfterDraft(leg);
-    const following = data.lanes.filter((l) => movesOnEnv(l) && legsOf(l).some(follows));
-    byEnv.set(s.env, {
-      env: s.env,
-      from: s.current,
-      to: next,
-      unpin,
-      deleteEnv: unpin ? s.overrideEnv || s.env : undefined,
-      label: `${s.key} selector${moving.length ? ` (+ ${moving.map((d) => d.key).join(", ")}, unset so it follows)` : ""}`,
-      lanes: following.length,
-      laneNames: following.map((l) => l.name),
-      // Locked followers the composer could not hold (no env of their own).
-      lockedLanes: following.filter((l) => l.lock).map((l) => l.name),
-      uncheckedLanes: following.filter((l) => l.continuity === "unchecked").length,
-      restart: true,
-    });
-    for (const d of held) {
-      byEnv.set(d.env, { env: d.env, from: d.current, to: d.current, hold: true, label: `${d.key} held at its current model (locked; it would otherwise follow ${s.key})`, lanes: 0, restart: true });
-    }
+    for (const change of selectorChanges(data, draft, selectorDraft, s)) byEnv.set(change.env, change);
   }
   for (const l of data.lanes) {
     for (const leg of legsOf(l)) {
       const env = leg?.pinEnv;
-      const next = env && draft[env];
-      if (!next || byEnv.has(env)) continue;
-      const unpin = next === UNPIN;
-      const sharing = data.lanes.filter((x) => legsOf(x).some((g) => legFollowsEnv(g, env, draft)));
-      const legOf = (x) => legsOf(x).find((g) => legFollowsEnv(g, env, draft));
-      // Unpinning a shared env can land its lanes on different models — and
-      // an UNSET shared env's lanes may sit on different models today (one on
-      // its selector, one on a literal default), so setting it moves them all.
-      const destinations = unpin ? [...new Set(sharing.map((x) => baseAfterDraft(legOf(x))))] : [next];
-      const sources = [...new Set(sharing.map((x) => legOf(x).model))];
-      if (!unpin && sharing.every((x) => next === baseAfterDraft(legOf(x)) && !legOf(x).pinned)) continue;
-      // A hold keeps EVERY follower where it is; if any sharing lane sits on a
-      // different model today, setting the env moves that lane.
-      const hold = !unpin && sharing.every((x) => !legOf(x).pinned && next === legOf(x).model);
-      const label = hold
-        ? `${l.name} held at its current model (locked; it would otherwise follow ${leg.selector})`
-        : sharing.length > 1 ? `${env} (${sharing.map((x) => x.name).join(", ")})` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
-      byEnv.set(env, {
-        env,
-        from: leg.model,
-        sources,
-        to: destinations[0],
-        destinations,
-        unpin,
-        hold,
-        deleteEnv: unpin ? leg.setEnv || env : undefined,
-        label,
-        lanes: sharing.length,
-        laneNames: sharing.map((x) => x.name),
-        uncheckedLanes: sharing.filter((x) => x.continuity === "unchecked").length,
-        // Timing comes from the leg the env feeds (a live fallback pin
-        // applies on the next request even if the primary is boot-time).
-        restart: sharing.some((x) => !legOf(x).live),
-      });
+      if (!env || !draft[env] || byEnv.has(env)) continue;
+      const change = pinChange(data, draft, selectorDraft, l, leg);
+      if (change) byEnv.set(env, change);
     }
   }
   return [...byEnv.values()];

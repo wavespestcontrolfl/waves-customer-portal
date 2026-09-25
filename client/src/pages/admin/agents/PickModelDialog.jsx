@@ -56,13 +56,19 @@ export default function PickModelDialog({ target, catalog, onClose, onPick }) {
     return () => { closedRef.current = true; };
   }, []);
 
-  const suggestions = useMemo(() => optionsFor(catalog, target.accepts, target.current), [catalog, target]);
-  // A lane the runtime allowlist-checks against MODEL_CATALOG (never a bare
-  // pass-through) must never be offered a live-discovered id: it would draft
-  // an env value the call site rejects after the restart the owner thought
-  // would apply it (see model-switchboard.js's E(...,{catalogOnly:true})).
-  // Search stays local to the models already known here — no live search.
+  // A lane the runtime allowlist-checks (never a bare pass-through) must never
+  // be offered an id outside that allowlist — not a live search result, and
+  // not one the tab merged into `catalog` from an earlier pick on another lane:
+  // it would draft an env value the call site rejects after the restart the
+  // owner thought would apply it. The server sends the runtime's own list as
+  // `accepts.allowedIds` (model-switchboard.js E(..., { catalogOnly, allowed })).
+  // Search stays local to those ids — no live search.
   const catalogOnly = !!target.accepts?.catalogOnly;
+  const allowedIds = target.accepts?.allowedIds;
+  const suggestions = useMemo(() => {
+    const all = optionsFor(catalog, target.accepts, target.current);
+    return catalogOnly ? all.filter((m) => !!allowedIds?.includes(m.id)) : all;
+  }, [catalog, target, catalogOnly, allowedIds]);
   const catalogMatches = useMemo(() => {
     if (!catalogOnly) return suggestions;
     const query = q.trim().toLowerCase();

@@ -131,89 +131,89 @@ describe("computeChanges · shared unset pin", () => {
   });
 });
 
-// Mirrors voice_relay / voice_relay_collections: an inbound-style lane whose
-// OWN pin (INBOUND_MODEL) is unset falls through to a second lane's shared
-// pin (SHARED_MODEL) — server-reported via `dependsOnEnvs` (resolveRef in
-// model-switchboard.js). A single `pinEnv` can only ever name the ONE env a
-// lane's own "Change" button writes to, so the blast-radius grouping must
-// also consult `dependsOnEnvs`, or a SHARED_MODEL change reports affecting
-// only the lane that pins it directly — never the one riding it by fallthrough.
-describe("computeChanges · dependsOnEnvs (a leg following a lower env in its own fallback chain)", () => {
-  function inboundStyleData() {
-    const data = makeData();
-    const shared = { id: "voice_relay_collections", name: "Collections calls", describe: null, area: "office", continuity: "unchecked", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: "m1", selector: null, pinEnv: "SHARED_MODEL", setEnv: null, pinned: false, unpinnedModel: "m1", accepts: text(["anthropic"]), live: false }, fallback: null, retry: null, also: [] };
-    const inbound = { id: "voice_relay", name: "Inbound Sandy", describe: null, area: "office", continuity: "unchecked", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: "m1", selector: null, pinEnv: "INBOUND_MODEL", setEnv: null, pinned: false, unpinnedModel: "m1", accepts: text(["anthropic"]), live: false, dependsOnEnvs: ["SHARED_MODEL"] }, fallback: null, retry: null, also: [] };
-    data.lanes.push(shared, inbound);
-    return data;
-  }
 
-  it("with the inbound override unset, a shared-env change affects both lanes", () => {
-    const data = inboundStyleData();
+describe("walkChain · a leg whose env pin falls back to another env (voice_relay)", () => {
+  // Mirrors resolveEnvChain in model-switchboard.js: INBOUND_MODEL → SHARED_MODEL
+  // → code default m1. Collections reads SHARED_MODEL directly.
+  const link = (env, model = null, extra = {}) => ({ env, setEnv: model ? env : null, model, accepted: !!model, afterUnpin: null, ...extra });
+  function chainData({ inbound = null, shared = null, inboundRejected = false } = {}) {
+    const data = makeData();
+    const sharedLink = link("SHARED_MODEL", shared);
+    const inboundLink = inboundRejected
+      ? { env: "INBOUND_MODEL", setEnv: "INBOUND_MODEL", model: null, accepted: false, afterUnpin: null }
+      : link("INBOUND_MODEL", inbound);
+    const base = { selector: null, model: "m1" };
+    const sharedModel = shared || "m1";
+    const collections = { id: "voice_relay_collections", name: "Collections calls", describe: null, area: "office", continuity: "unchecked", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: sharedModel, selector: null, pinEnv: "SHARED_MODEL", setEnv: sharedLink.setEnv, pinned: !!shared, unpinnedModel: "m1", accepts: text(["anthropic"]), live: false, chain: [sharedLink], chainBase: base }, fallback: null, retry: null, also: [] };
+    const sandy = { id: "voice_relay", name: "Inbound Sandy", describe: null, area: "office", continuity: "unchecked", inbound: false, lock: null, fanout: false, applies: "restart", primary: { model: inbound || sharedModel, selector: null, pinEnv: "INBOUND_MODEL", setEnv: inboundLink.setEnv, pinned: !!inbound || !!shared, unpinnedModel: sharedModel, accepts: text(["anthropic"]), live: false, chain: [inboundLink, sharedLink], chainBase: base }, fallback: null, retry: null, also: [] };
+    data.lanes.push(collections, sandy);
+    return { data, sandy };
+  }
+  const changesFor = (data, draft) => computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+
+  it("override unset: a shared-env change moves both lanes", () => {
+    const { data, sandy } = chainData();
     const draft = { SHARED_MODEL: "m2" };
-    const [c] = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
+    expect(resolve(data, draft).effectiveLeg(sandy.primary)).toBe("m2");
+    const [c] = changesFor(data, draft);
     expect(c).toMatchObject({ env: "SHARED_MODEL", to: "m2", lanes: 2 });
     expect(c.laneNames.sort()).toEqual(["Collections calls", "Inbound Sandy"]);
   });
 
-  it("with the inbound override set, a shared-env change affects only the lane that pins it directly", () => {
-    const data = inboundStyleData();
-    const inbound = data.lanes.find((l) => l.id === "voice_relay");
-    // The inbound lane's own override is now active — its dependsOnEnvs on
-    // SHARED_MODEL is gone, exactly as resolveRef reports once `parsed` wins.
-    inbound.primary = { ...inbound.primary, model: "m2", pinned: true, setEnv: "INBOUND_MODEL", dependsOnEnvs: [] };
-    const draft = { SHARED_MODEL: "m2" };
-    const [c] = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
-    expect(c).toMatchObject({ env: "SHARED_MODEL", to: "m2", lanes: 1 });
-    expect(c.laneNames).toEqual(["Collections calls"]);
+  it("override active: a shared-env change moves only collections", () => {
+    const { data, sandy } = chainData({ inbound: "m2", shared: "m1" });
+    const draft = { SHARED_MODEL: "m3" };
+    expect(resolve(data, draft).effectiveLeg(sandy.primary)).toBe("m2");
+    expect(changesFor(data, draft)).toEqual([expect.objectContaining({ env: "SHARED_MODEL", lanes: 1, laneNames: ["Collections calls"] })]);
   });
 
-  it("effectiveLegFor: the inbound lane's preview follows a drafted shared env only while its own override is unset", () => {
-    const data = inboundStyleData();
-    const draft = { SHARED_MODEL: "m2" };
-    const { effectiveLeg } = resolve(data, draft);
-    const inbound = data.lanes.find((l) => l.id === "voice_relay");
-    expect(effectiveLeg(inbound.primary)).toBe("m2");
-
-    inbound.primary = { ...inbound.primary, pinned: true, setEnv: "INBOUND_MODEL", dependsOnEnvs: [] };
-    expect(effectiveLeg(inbound.primary)).toBe("m1"); // its own (undrafted) pin wins, never the shared env
-  });
-
-  // An ACTIVE override unpinned in the same draft that changes the shared env:
-  // the server's dependsOnEnvs is empty (pre-draft state), so only
-  // fallbackEnvs tells the composer the lane lands on the NEW shared value.
-  function activeOverride(data) {
-    const inbound = data.lanes.find((l) => l.id === "voice_relay");
-    inbound.primary = { ...inbound.primary, model: "m2", pinned: true, setEnv: "INBOUND_MODEL", dependsOnEnvs: [], fallbackEnvs: ["SHARED_MODEL"], fallbackPinned: false, unpinnedModel: "m1" };
-    return inbound;
-  }
-
-  it("unpinning an active override while changing the shared env lands the lane on the drafted shared value, and counts it in the shared change", () => {
-    const data = inboundStyleData();
-    const inbound = activeOverride(data);
+  it("unpinning an active override while changing the shared env lands Sandy on the drafted shared value, in both changes", () => {
+    const { data, sandy } = chainData({ inbound: "m2" });
     const draft = { INBOUND_MODEL: UNPIN, SHARED_MODEL: "m3" };
-    const { effectiveLeg, selectorDraft } = resolve(data, draft);
-    expect(effectiveLeg(inbound.primary)).toBe("m3");
-    const changes = computeChanges({ data, draft, selectorDraft });
+    expect(resolve(data, draft).effectiveLeg(sandy.primary)).toBe("m3");
+    const changes = changesFor(data, draft);
     expect(changes.find((c) => c.env === "INBOUND_MODEL")).toMatchObject({ unpin: true, to: "m3", destinations: ["m3"] });
     const shared = changes.find((c) => c.env === "SHARED_MODEL");
     expect(shared).toMatchObject({ to: "m3", lanes: 2 });
     expect(shared.laneNames.sort()).toEqual(["Collections calls", "Inbound Sandy"]);
   });
 
-  it("setting the override in the same draft as a shared change keeps the lane out of the shared change", () => {
-    const data = inboundStyleData(); // override unset: dependsOnEnvs = [SHARED_MODEL]
-    const draft = { INBOUND_MODEL: "m2", SHARED_MODEL: "m3" };
-    const changes = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
-    expect(changes.find((c) => c.env === "SHARED_MODEL")).toMatchObject({ lanes: 1, laneNames: ["Collections calls"] });
+  it("deleting BOTH pins lands Sandy on the bottom of the chain, not the stale shared value", () => {
+    const { data, sandy } = chainData({ inbound: "m2", shared: "m3" });
+    const draft = { INBOUND_MODEL: UNPIN, SHARED_MODEL: UNPIN };
+    expect(resolve(data, draft).effectiveLeg(sandy.primary)).toBe("m1");
+    expect(changesFor(data, draft).find((c) => c.env === "INBOUND_MODEL")).toMatchObject({ destinations: ["m1"] });
   });
 
-  it("a rejected override (set but not pinned) on a selector follows that selector's change", () => {
-    const data = inboundStyleData();
-    const inbound = data.lanes.find((l) => l.id === "voice_relay");
-    inbound.primary = { ...inbound.primary, selector: "FLAGSHIP", pinned: false, setEnv: "INBOUND_MODEL" };
-    const draft = { MODEL_FLAGSHIP: "m2" };
-    const changes = computeChanges({ data, draft, selectorDraft: resolve(data, draft).selectorDraft });
-    expect(changes.find((c) => c.env === "MODEL_FLAGSHIP").laneNames).toContain("Inbound Sandy");
+  it("deleting both pins over a SELECTOR base puts Sandy in a simultaneous selector change", () => {
+    const { data, sandy } = chainData({ inbound: "m2", shared: "m3" });
+    for (const lane of data.lanes.filter((l) => l.id.startsWith("voice_relay"))) {
+      lane.primary = { ...lane.primary, selector: "FLAGSHIP", chainBase: { selector: "FLAGSHIP", model: "m1" } };
+    }
+    const draft = { INBOUND_MODEL: UNPIN, SHARED_MODEL: UNPIN, MODEL_FLAGSHIP: "m2" };
+    expect(resolve(data, draft).effectiveLeg(sandy.primary)).toBe("m2");
+    expect(changesFor(data, draft).find((c) => c.env === "MODEL_FLAGSHIP").laneNames).toEqual(expect.arrayContaining(["Inbound Sandy", "Collections calls"]));
+  });
+
+  it("setting the override in the same draft as a shared change keeps Sandy out of the shared change", () => {
+    const { data } = chainData();
+    const draft = { INBOUND_MODEL: "m2", SHARED_MODEL: "m3" };
+    expect(changesFor(data, draft).find((c) => c.env === "SHARED_MODEL")).toMatchObject({ lanes: 1, laneNames: ["Collections calls"] });
+  });
+
+  it("a REJECTED override is set but not in effect: Sandy follows the shared env, even when both hold the same id", () => {
+    const { data, sandy } = chainData({ inboundRejected: true, shared: "m2" });
+    const draft = { SHARED_MODEL: "m3" };
+    expect(resolve(data, draft).effectiveLeg(sandy.primary)).toBe("m3");
+    expect(changesFor(data, draft).find((c) => c.env === "SHARED_MODEL").lanes).toBe(2);
+  });
+
+  it("a deleted alias falls to the next still-set alias, which keeps the leg on that env", () => {
+    const { data, sandy } = chainData({ inbound: "m2" });
+    sandy.primary.chain[0] = { ...sandy.primary.chain[0], setEnv: "INBOUND_MODEL_LEGACY", afterUnpin: "m4" };
+    const draft = { INBOUND_MODEL: UNPIN, SHARED_MODEL: "m3" };
+    expect(resolve(data, draft).effectiveLeg(sandy.primary)).toBe("m4");
+    expect(changesFor(data, draft).find((c) => c.env === "SHARED_MODEL").laneNames).toEqual(["Collections calls"]);
   });
 });
 

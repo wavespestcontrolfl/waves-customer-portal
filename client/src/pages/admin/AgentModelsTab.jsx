@@ -180,7 +180,7 @@ export default function AgentModelsTab() {
         : lane.describe,
       canUnpin: ownPinSet || !!selectorUnpin,
       unpinLabel: ownPinSet
-        ? `Unpin · follow ${(leg.fallbackPinned && leg.fallbackEnvs?.[0]) || leg.selector || "code default"} (${modelLabel(catalog, leg.unpinnedModel)})`
+        ? `Unpin · follow ${leg.chain?.slice(1).find((link) => link.accepted)?.env || leg.selector || "code default"} (${modelLabel(catalog, leg.unpinnedModel)})`
         : selectorUnpin
           ? `Remove the ${leg.selector} override · back to ${selector.derivesFrom ? `following ${selector.derivesFrom}` : "the registry default"} (${modelLabel(catalog, selectorUnpin)})`
           : null,
