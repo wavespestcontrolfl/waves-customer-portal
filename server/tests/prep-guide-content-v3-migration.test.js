@@ -1,10 +1,11 @@
 /**
- * 20260924000001 + 20260924000002 — prep guide content v3.
+ * 20260924000001 → 000002 → 000003 — prep guide content v3.
  *
- * 000001 ran on the PR preview database before Codex round 1 and is frozen;
- * 000002 supersedes it with exact-match text patches and publishes the
- * effective content. This suite reads 000002's TEMPLATES as the content
- * customers receive, and checks the supersession itself.
+ * Each earlier file ran on the PR preview database before the next Codex
+ * round and is frozen; each later file supersedes the previous with
+ * exact-match text patches and publishes the effective content. This suite
+ * reads the LATEST file's TEMPLATES as the content customers receive, and
+ * checks each supersession link.
  *
  * Guards the compliance rules the 2026-07-15 refresh established (they
  * must never regress in prep copy) plus the v3 additions: links are plain
@@ -18,8 +19,9 @@ jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => fals
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({}));
 
-const baseMigration = require('../models/migrations/20260924000001_prep_guide_content_v3');
-const migration = require('../models/migrations/20260924000002_prep_guide_content_v3_codex_r1');
+const firstMigration = require('../models/migrations/20260924000001_prep_guide_content_v3');
+const baseMigration = require('../models/migrations/20260924000002_prep_guide_content_v3_codex_r1');
+const migration = require('../models/migrations/20260924000003_prep_guide_content_v3_codex_r2');
 const { normalizeBlocks, renderTemplate } = require('../services/email-template-library');
 
 const { TEMPLATES, MIGRATION_MARKER } = migration;
@@ -108,6 +110,21 @@ describe('prep guide v3 content compliance', () => {
     }
     const flea = textChunks(TEMPLATES.find((x) => x.key === 'prep.flea')).join(' ');
     expect(flea).toMatch(/two-visit/i);
+  });
+
+  test('copy never over- or under-states the sold package (Codex r2)', () => {
+    const flea = textChunks(TEMPLATES.find((x) => x.key === 'prep.flea')).join('\n');
+    expect(flea).not.toMatch(/saves a second visit/i);
+    expect(flea).toMatch(/when yard treatment is part of your package/);
+    expect(flea).not.toMatch(/then treats exterior harborage/);
+    const roach = textChunks(TEMPLATES.find((x) => x.key === 'prep.cockroach')).join('\n');
+    expect(roach).not.toMatch(/initial visit plus the 10 to 14 day follow-up/);
+    const bedBug = textChunks(TEMPLATES.find((x) => x.key === 'prep.bed_bug')).join('\n');
+    expect(bedBug).not.toMatch(/\b3 days\b/);
+    expect(bedBug).toMatch(/at least 4 full days/);
+    expect(bedBug).not.toMatch(/hot (garage|car)/i);
+    expect(bedBug).not.toMatch(/A second treatment 10 to 14 days later/);
+    expect(bedBug).toMatch(/follow-up visits your infestation calls for/);
   });
 
   test('bed bug guide describes chemical/IPM work only — no heat-treatment or steam component', () => {
@@ -214,11 +231,13 @@ describe('prep guide v3 content compliance', () => {
   });
 });
 
-describe('000002 supersedes 000001 (frozen after its preview run)', () => {
+describe('000003 supersedes 000002 supersedes 000001 (each frozen after its preview run)', () => {
   test('publishes the same eight keys, records what it supersedes, and every patch landed', () => {
     expect(migration.TEMPLATES.map((t) => t.key)).toEqual(baseMigration.TEMPLATES.map((t) => t.key));
+    expect(baseMigration.TEMPLATES.map((t) => t.key)).toEqual(firstMigration.TEMPLATES.map((t) => t.key));
     expect(migration.SUPERSEDES).toBe(baseMigration.MIGRATION_MARKER);
-    expect(migration.MIGRATION_MARKER).not.toBe(baseMigration.MIGRATION_MARKER);
+    expect(baseMigration.SUPERSEDES).toBe(firstMigration.MIGRATION_MARKER);
+    expect(new Set([migration.MIGRATION_MARKER, baseMigration.MIGRATION_MARKER, firstMigration.MIGRATION_MARKER]).size).toBe(3);
     const effective = allNewCopy().join('\n');
     for (const patch of migration.PATCHES) {
       expect(effective).not.toContain(patch.from);
@@ -226,18 +245,12 @@ describe('000002 supersedes 000001 (frozen after its preview run)', () => {
     }
   });
 
-  test('only the patched templates and the signature differ from 000001', () => {
+  test('only the patched templates differ from 000002', () => {
     for (const t of migration.TEMPLATES) {
       const before = baseMigration.TEMPLATES.find((x) => x.key === t.key);
-      const strip = (blocks) => blocks.filter((b) => b.type !== 'signature');
       const patchedKeys = new Set(migration.PATCHES.map((p) => p.key));
-      if (patchedKeys.has(t.key)) {
-        expect(strip(t.blocks)).not.toEqual(strip(before.blocks));
-      } else {
-        expect(strip(t.blocks)).toEqual(strip(before.blocks));
-      }
-      expect(t.subject).toBe(before.subject);
-      expect(t.preview).toBe(before.preview);
+      const changed = JSON.stringify([t.blocks, t.subject, t.preview]) !== JSON.stringify([before.blocks, before.subject, before.preview]);
+      expect(changed).toBe(patchedKeys.has(t.key));
     }
   });
 });
