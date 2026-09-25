@@ -654,6 +654,21 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   if (usesHomeSqft && FALLBACK_SQFT_SOURCES.has(propertyFacts?.home?.source)) {
     reasons.push(`home/building sqft from fallback source (${propertyFacts.home.source}${propertyFacts.home.sampleCount ? `, n=${propertyFacts.home.sampleCount}` : ''})`);
   }
+  // Commercial-suite sizing (server/services/commercial-suite-size/): a
+  // license-derived or type-defaulted suite size auto-prices the draft
+  // (buildingSizeMeasured stays true — these sources are deliberately NOT
+  // in FALLBACK_SQFT_SOURCES), but it is still an INFERENCE, not a
+  // measurement, so it parks yellow with a reason the operator can verify
+  // on site. A web-search-confirmed listing (commercial_listing) is not
+  // flagged here — it may still be green if nothing else parks the draft.
+  const suiteSize = propertyFacts?.commercialSuiteSize;
+  if (usesHomeSqft && suiteSize
+    && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS || suiteSize.source === SQFT_SOURCES.SUITE_TYPE_DEFAULT)) {
+    const sizedSqft = Number(propertyFacts.home?.value) || suiteSize.value;
+    reasons.push(suiteSize.source === SQFT_SOURCES.LICENSE_SEATS
+      ? `suite size estimated from state restaurant license: ${suiteSize.seats ?? '?'} seats → ${sizedSqft.toLocaleString()} sq ft — confirm on site`
+      : `suite size not found by license or listing — defaulted to ${sizedSqft.toLocaleString()} sq ft for ${suiteSize.businessType || 'this business type'} — confirm on site`);
+  }
   // Lot-driven services (lawn/mosquito/tree & shrub price off turf/treatable
   // area derived from the lot) priced from an unverified lot source deserve
   // the same review flag as fallback building sqft.
@@ -808,6 +823,20 @@ function unitBandNoteLines(unitScope) {
   return lines;
 }
 
+// Commercial-suite sizing audit lines (server/services/commercial-suite-size/):
+// businessName + the evidence trail, so an operator reviewing the draft sees
+// WHY a suite priced the way it did without opening estimate_data by hand.
+function commercialSuiteSizeNoteLines(suiteSize) {
+  if (!suiteSize) return [];
+  const lines = [
+    `- Suite business: ${suiteSize.businessName || '(not identified)'}${suiteSize.businessType ? ` (${suiteSize.businessType})` : ''} · size source: ${suiteSize.source}`,
+  ];
+  for (const e of (suiteSize.evidence || [])) {
+    lines.push(`  - ${e.detail}${e.url ? ` (${e.url})` : ''}`);
+  }
+  return lines;
+}
+
 function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call }) {
   const factLine = (label, fact) => {
     if (!fact) return `- ${label}: (unresolved)`;
@@ -833,6 +862,7 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
       ? `- Scope: ${propertyFacts.unitScope.serviceScope} · Use: ${propertyFacts.unitScope.propertyUse} · Relationship: ${propertyFacts.unitScope.customerRelationship} · Size basis: ${propertyFacts.unitScope.sizeBasis}`
       : null,
     ...unitBandNoteLines(propertyFacts?.unitScope),
+    ...commercialSuiteSizeNoteLines(propertyFacts?.commercialSuiteSize),
     '',
     `Totals: $${totals.monthly}/mo · $${totals.annual}/yr · $${totals.oneTime} one-time`,
     comps && !comps.insufficient

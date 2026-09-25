@@ -1,0 +1,174 @@
+const {
+  parseDbprCsv,
+  normalizeStreetName,
+  matchDbprRow,
+  seatsToSqft,
+  resolveViaDbprLicense,
+  _resetCacheForTests,
+} = require('../services/commercial-suite-size/dbpr-food-license');
+
+const DBPR_HEADER = [
+  'Board Code', 'License Type Code', 'Licensee Name', 'Rank Code', 'Modifier Code',
+  'Mailing Name', 'Mailing Street Address', 'Mailing Address Line 2', 'Mailing Address Line 3',
+  'Mailing City', 'Mailing State Code', 'Mailing Zip Code', 'Primary Phone Number',
+  'Mailing County Code', 'Business Name', 'Filler', 'Location Street Address',
+  'Location Address Line 2', 'Location Address Line 3', 'Location City', 'Location State Code',
+  'Location Zip Code', 'Location County Code', 'Location County', 'Secondary Phone Number',
+  'District', 'Region', 'License Number', 'Primary Status Code', 'Secondary Status Code',
+  'License Expiry Date', 'Last Inspection Date', 'Number of Seats or Rental Units',
+  'Base Risk Level', 'Secondary Risk Level',
+];
+
+// Builds one synthetic CSV row from a sparse field map — every column the
+// test doesn't care about is blank, matching how the real extract pads
+// unused columns.
+function csvRow(fields = {}) {
+  return DBPR_HEADER.map((h) => `"${String(fields[h] ?? '').replace(/"/g, '""')}"`).join(',');
+}
+
+function csv(rows) {
+  return [DBPR_HEADER.map((h) => `"${h}"`).join(','), ...rows.map(csvRow)].join('\r\n') + '\r\n';
+}
+
+describe('normalizeStreetName', () => {
+  test('State Road / SR spellings and direction words compare equal', () => {
+    expect(normalizeStreetName('State Road 999 East')).toBe(normalizeStreetName('SR 999 E'));
+    expect(normalizeStreetName('State Rd 999 E')).toBe(normalizeStreetName('SR 999 East'));
+  });
+
+  test('punctuation and case fall away', () => {
+    expect(normalizeStreetName('Main St.')).toBe(normalizeStreetName('MAIN STREET'));
+  });
+});
+
+describe('parseDbprCsv', () => {
+  test('maps header to synthetic rows', () => {
+    const text = csv([
+      { 'Business Name': 'TEST TACO SHOP', 'Location Zip Code': '00000', 'Number of Seats or Rental Units': '25' },
+    ]);
+    const rows = parseDbprCsv(text);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['Business Name']).toBe('TEST TACO SHOP');
+    expect(rows[0]['Number of Seats or Rental Units']).toBe('25');
+  });
+
+  test('handles quoted commas inside a field', () => {
+    const text = csv([{ 'Business Name': 'TEST, BAR & GRILL', 'Location Zip Code': '00000' }]);
+    const rows = parseDbprCsv(text);
+    expect(rows[0]['Business Name']).toBe('TEST, BAR & GRILL');
+  });
+});
+
+describe('seatsToSqft', () => {
+  test('formula: 600 base + 32/seat, clamped 1000-6000', () => {
+    expect(seatsToSqft(25)).toBe(1400); // matches the owner's dry-run example
+    expect(seatsToSqft(0)).toBe(1000); // floors at the minimum
+    expect(seatsToSqft(null)).toBe(1000);
+    expect(seatsToSqft(-5)).toBe(1000);
+    expect(seatsToSqft(200)).toBe(6000); // ceilings at the maximum
+  });
+});
+
+describe('matchDbprRow', () => {
+  const baseRow = (overrides = {}) => ({
+    'Location Street Address': '4400 Test Commons Pkwy E #102',
+    'Location Zip Code': '00000',
+    'Secondary Phone Number': '(941) 555-0199',
+    'Business Name': 'TEST TACO SHOP',
+    'Number of Seats or Rental Units': '25',
+    ...overrides,
+  });
+
+  test('matches on zip + house number + normalized street + unit', () => {
+    const rows = [baseRow()];
+    const match = matchDbprRow(rows, {
+      street: '4400 Test Commons Parkway East', unit: '102', zip: '00000',
+    });
+    expect(match).toBeTruthy();
+    expect(match['Business Name']).toBe('TEST TACO SHOP');
+  });
+
+  test('disambiguates multiple suites at the same building by unit number', () => {
+    const rows = [
+      baseRow({ 'Location Street Address': '4400 Test Commons Pkwy E #102', 'Business Name': 'SUITE 102 EATERY' }),
+      baseRow({ 'Location Street Address': '4400 Test Commons Pkwy E #104', 'Business Name': 'SUITE 104 EATERY', 'Secondary Phone Number': '941-000-0000' }),
+    ];
+    const match = matchDbprRow(rows, { street: '4400 Test Commons Pkwy E', unit: '104', zip: '00000' });
+    expect(match['Business Name']).toBe('SUITE 104 EATERY');
+  });
+
+  test('disambiguates by phone digits when no unit is supplied', () => {
+    const rows = [
+      baseRow({ 'Location Street Address': '4400 Test Commons Pkwy E #102', 'Business Name': 'SUITE 102 EATERY', 'Secondary Phone Number': '(941) 555-0199' }),
+      baseRow({ 'Location Street Address': '4400 Test Commons Pkwy E #104', 'Business Name': 'SUITE 104 EATERY', 'Secondary Phone Number': '941-000-0000' }),
+    ];
+    const match = matchDbprRow(rows, { street: '4400 Test Commons Pkwy E', zip: '00000', phone: '9415550199' });
+    expect(match['Business Name']).toBe('SUITE 102 EATERY');
+  });
+
+  test('disambiguates by business-name hint', () => {
+    const rows = [
+      baseRow({ 'Location Street Address': '4400 Test Commons Pkwy E #102', 'Business Name': 'SUITE 102 EATERY', 'Secondary Phone Number': '941-111-1111' }),
+      baseRow({ 'Location Street Address': '4400 Test Commons Pkwy E #104', 'Business Name': 'SUITE 104 EATERY', 'Secondary Phone Number': '941-222-2222' }),
+    ];
+    const match = matchDbprRow(rows, { street: '4400 Test Commons Pkwy E', zip: '00000', businessNameHint: 'Suite 104 Eatery' });
+    expect(match['Business Name']).toBe('SUITE 104 EATERY');
+  });
+
+  test('skips (returns null) when several candidates match with no disambiguator', () => {
+    const rows = [
+      baseRow({ 'Location Street Address': '4400 Test Commons Pkwy E #102', 'Secondary Phone Number': '941-111-1111' }),
+      baseRow({ 'Location Street Address': '4400 Test Commons Pkwy E #104', 'Secondary Phone Number': '941-222-2222' }),
+    ];
+    // No unit, no phone, no name hint on the target — neither row can be
+    // singled out, and a wrong match is worse than no match.
+    const match = matchDbprRow(rows, { street: '4400 Test Commons Pkwy E', zip: '00000' });
+    expect(match).toBeNull();
+  });
+
+  test('does not match a different zip or a different house number', () => {
+    const rows = [baseRow()];
+    expect(matchDbprRow(rows, { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00001' })).toBeNull();
+    expect(matchDbprRow(rows, { street: '8800 Test Commons Pkwy E', unit: '102', zip: '00000' })).toBeNull();
+  });
+});
+
+describe('resolveViaDbprLicense', () => {
+  beforeEach(() => _resetCacheForTests());
+
+  test('resolves seats -> sqft with evidence on a matched suite', async () => {
+    const text = csv([{
+      'Location Street Address': '4400 Test Commons Pkwy E #102',
+      'Location Zip Code': '00000',
+      'Business Name': 'TEST TACO SHOP',
+      'Number of Seats or Rental Units': '25',
+      'License Number': 'SEA9999999',
+    }]);
+    const fetchText = jest.fn().mockResolvedValue(text);
+    const result = await resolveViaDbprLicense({
+      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
+    }, { fetchText });
+    expect(result).toEqual(expect.objectContaining({
+      value: 1400,
+      businessName: 'TEST TACO SHOP',
+      seats: 25,
+    }));
+    expect(result.evidence[0].detail).toMatch(/25 seats/);
+  });
+
+  test('a fetch failure resolves null, never throws', async () => {
+    const fetchText = jest.fn().mockRejectedValue(new Error('network down'));
+    await expect(resolveViaDbprLicense({
+      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
+    }, { fetchText })).resolves.toBeNull();
+  });
+
+  test('no address match resolves null', async () => {
+    const text = csv([{ 'Location Street Address': '1 Other St', 'Location Zip Code': '00000' }]);
+    const fetchText = jest.fn().mockResolvedValue(text);
+    const result = await resolveViaDbprLicense({
+      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
+    }, { fetchText });
+    expect(result).toBeNull();
+  });
+});

@@ -43,7 +43,13 @@ const {
 // The estimator's own condo-record predicate (propertyType OR county
 // land-use text) — shared so the unit-lot verify flag and the unit-scope
 // model can never disagree on what counts as a condo record.
-const { _private: { isCondoRecord: shadowIsCondoRecord } } = require('../services/estimator-engine/property-facts-shadow');
+const {
+  _private: {
+    isCondoRecord: shadowIsCondoRecord,
+    hasSubpremiseSignal: shadowHasSubpremiseSignal,
+    hasPartBuildingEvidence: shadowHasPartBuildingEvidence,
+  },
+} = require('../services/estimator-engine/property-facts-shadow');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
@@ -446,7 +452,7 @@ async function performPropertyLookupCore(address, options = {}) {
       // attempt stamps the row", and counting only live lookups
       // undercounts served traffic (codex r36 P1). Respects persist:false.
       if (persist) await stampLookupAttempt(address, 'cache_hit');
-      return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
+      return await buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
 
@@ -874,6 +880,12 @@ async function performPropertyLookupCore(address, options = {}) {
     result.propertyRecord._storiesSource = 'verified';
   }
   result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit, address);
+  // Commercial suite sizing (owner ruling 2026-09-25,
+  // server/services/commercial-suite-size/): buildEnrichedProfile stays
+  // synchronous (it is called directly, unawaited, by dozens of existing
+  // unit tests) and only STASHES the candidate; this awaits the actual
+  // DBPR/web-search resolution and folds the result back in.
+  await applyCommercialSuiteSize(result.enriched);
 
   // Clean up internal fields before sending to client
   if (result.satellite) {
@@ -953,12 +965,19 @@ async function performPropertyLookupCore(address, options = {}) {
 // are never stored), enriched is recomputed live (modifier logic evolves —
 // enriched_snapshot is lead-history only), and verified overrides re-apply
 // on every hit because they never expire.
-function buildResultFromCachedLookup(address, row, verifiedOverrides, t0) {
+async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0) {
   const record = applyVerifiedOverrides(row.property_record, verifiedOverrides);
   const aiAnalysis = row.ai_analysis || null;
   const lat = row.lat == null ? null : Number(row.lat);
   const lng = row.lng == null ? null : Number(row.lng);
   if (verifiedOverrides?.stories && record) record._storiesSource = 'verified';
+
+  const enriched = buildEnrichedProfile(record, aiAnalysis, lat, lng, null, null, address);
+  // skipWebSearch: a cache hit must stay fast — the DBPR leg is cheap once
+  // warm (24h in-process cache), but a multi-second Claude web-search call
+  // on every cache hit would defeat the point of caching. The FRESH lookup
+  // path (performPropertyLookupCore) runs the full leg.
+  await applyCommercialSuiteSize(enriched, { skipWebSearch: true });
 
   const result = {
     address: String(address).trim(),
@@ -967,7 +986,7 @@ function buildResultFromCachedLookup(address, row, verifiedOverrides, t0) {
     avm: null,
     satellite: buildSatelliteUrlSet(lat, lng),
     aiAnalysis,
-    enriched: buildEnrichedProfile(record, aiAnalysis, lat, lng, null, null, address),
+    enriched,
     errors: [],
     meta: {
       timestamp: new Date().toISOString(),
@@ -1640,6 +1659,33 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
   const commercialProfile = category === 'COMMERCIAL';
   const commercialSubtype = commercialProfile ? wholePropertySubtype : null;
+  // Commercial suite sizing (owner ruling 2026-09-25,
+  // server/services/commercial-suite-size/): a COMMERCIAL lookup whose
+  // address carries a unit/suite signal on a part-building/multi-tenant
+  // record must not hand the operator the whole building's sqft as the
+  // quotable size — same doctrine as residentialUnitLookup above, reusing
+  // the SAME shared predicates (never a second classifier). Only a
+  // CANDIDATE is stashed here (this function stays synchronous — dozens of
+  // existing unit tests call it directly and un-awaited); the async route
+  // wrapper (applyCommercialSuiteSize) resolves it and folds the result
+  // back into the profile before it reaches the client.
+  let commercialSuiteCandidate = null;
+  if (commercialProfile) {
+    const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress });
+    const suitePartBuildingEvidence = shadowHasPartBuildingEvidence({
+      subpremiseSignal: suiteSubpremiseSignal,
+      aggregated: rc?._parcel?.aggregated === true,
+      propertyType: rc?.propertyType,
+      landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
+    });
+    if (suiteSubpremiseSignal && suitePartBuildingEvidence) {
+      commercialSuiteCandidate = {
+        address: lookupAddress,
+        buildingSqft: rc?.squareFootage || null,
+        commercialSubtype,
+      };
+    }
+  }
   if (residentialUnitLookup) {
     // Everything the record and the imagery say about SIZE and GROUNDS is
     // the building's / the parcel's, not the unit's — carrying any of it
@@ -1923,7 +1969,19 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     association: rc?._parcel?.association || null,
 
     // ── DIMENSIONS ──
-    homeSqFt: rc?.squareFootage || 0,
+    // Commercial suite sizing: a part-building suite tenant's county sqft
+    // describes the WHOLE BUILDING, never the suite — never hand that
+    // number to the operator as the quotable size (the exact overquote
+    // class this lane exists to end). homeSqFt/suiteSize are filled in by
+    // applyCommercialSuiteSize once the resolver runs; buildingSqFt keeps
+    // the whole-building total available for display. A non-suite lookup
+    // (residential, or a whole-building commercial tenant/owner) is
+    // byte-identical to before.
+    homeSqFt: commercialSuiteCandidate ? 0 : (rc?.squareFootage || 0),
+    ...(commercialSuiteCandidate ? { buildingSqFt: rc?.squareFootage || 0, suiteSize: null } : {}),
+    // Internal only — never read by a consumer; applyCommercialSuiteSize
+    // deletes this before the profile reaches the client.
+    _commercialSuiteCandidate: commercialSuiteCandidate,
     lotSqFt: rc?.lotSize || 0,
     // Machine-readable twin of the vacantParcel verify flag (vacant roll
     // parcel, no building record — possibly new construction) — consumers
@@ -2329,6 +2387,62 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     });
   }
 
+  return profile;
+}
+
+// Commercial suite sizing (owner ruling 2026-09-25,
+// server/services/commercial-suite-size/) — the async half of the
+// candidate buildEnrichedProfile stashes on `_commercialSuiteCandidate`.
+// Mutates `profile` in place (homeSqFt / suiteSize / commercialSubtype) and
+// ALWAYS deletes the candidate marker so it never reaches the client, win
+// or lose. `opts.skipWebSearch` keeps the cached-lookup rebuild path fast
+// (see buildResultFromCachedLookup) — the DBPR leg is cheap once its 24h
+// in-process cache is warm, but a multi-second web-search call on every
+// cache hit would defeat the point of caching.
+async function applyCommercialSuiteSize(profile, opts = {}) {
+  if (!profile) return profile;
+  const candidate = profile._commercialSuiteCandidate;
+  delete profile._commercialSuiteCandidate;
+  if (!candidate) return profile;
+  try {
+    const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
+    const { parseRawAddress, splitStreetLineUnitParts } = require('../utils/address-normalizer');
+    const parsedAddr = parseRawAddress(candidate.address) || {};
+    const { street, unit } = splitStreetLineUnitParts(parsedAddr.line1 || candidate.address || '');
+    const suiteSize = await resolveCommercialSuiteSize({
+      address: { street, unit, city: parsedAddr.city, zip: parsedAddr.zip },
+      phone: null,
+      // The point of this lane is discovering the business FROM the
+      // address — no hint is typed in by the operator here.
+      businessNameHint: null,
+      commercialRiskType: null,
+      commercialSubtype: candidate.commercialSubtype,
+      buildingSqft: candidate.buildingSqft,
+    }, opts);
+    if (suiteSize && Number(suiteSize.value) > 0) {
+      profile.homeSqFt = suiteSize.value;
+      profile.suiteSize = {
+        value: suiteSize.value,
+        source: suiteSize.source,
+        confidence: suiteSize.confidence,
+        businessName: suiteSize.businessName || null,
+        evidence: suiteSize.evidence || [],
+        ...(suiteSize.seats != null ? { seats: suiteSize.seats } : {}),
+      };
+      // Reconcile subtype: resolveCommercialSubtype reads the WHOLE
+      // building's/parcel's text, which for a plaza suite falls through to
+      // the generic 'office_retail' bucket even when the actual tenant is
+      // a restaurant — a positive food-service signal from the resolver
+      // overrides that generic default.
+      const isFoodService = suiteSize.source === 'license_seats'
+        || /restaurant|food/i.test(String(suiteSize.businessType || ''));
+      if (isFoodService && profile.commercialSubtype === 'office_retail') {
+        profile.commercialSubtype = 'restaurant';
+      }
+    }
+  } catch (err) {
+    logger.warn(`[property-lookup] commercial suite size resolve failed: ${err.message}`);
+  }
   return profile;
 }
 
@@ -5100,6 +5214,7 @@ module.exports.countyCeilingStillValid = countyCeilingStillValid;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
+  applyCommercialSuiteSize,
   cachedAggregateResolvesToOwnUnit,
   subdivisionMedianEstimate,
   inFlightLookups,

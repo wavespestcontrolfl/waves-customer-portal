@@ -10,6 +10,7 @@ const {
   estimateDataHasUnresolvedManagerApproval,
   normalizeEstimateDethatchingManagerApproval,
   validateEstimateDeliveryOptions,
+  isCommercialEstimateData,
 } = require('./estimate-delivery-options');
 const {
   attachLeadToEstimate,
@@ -1551,6 +1552,20 @@ function buildEstimatePersistenceFields(body, context = {}) {
     : null;
 
   return {
+    // Always emitted (create AND update, both funnel through this
+    // function): the estimates.category CHECK-constrained column
+    // (RESIDENTIAL|COMMERCIAL, migration 20260401000014) was never written
+    // by the manual admin-tool save path before this — every commercial
+    // estimate saved through EstimateToolViewV2 silently kept the column's
+    // RESIDENTIAL default. That let a commercial row slip through
+    // residential-only guards keyed on estimates.category (AGENTS.md P0
+    // "Estimate service-mix rail member exclusion" checks
+    // `category !== 'RESIDENTIAL'` to stay out of a plan member's ladder —
+    // a commercial estimate stamped RESIDENTIAL passed that check by
+    // accident). isCommercialEstimateData scans the saved payload the same
+    // way estimate-delivery-options.js already does for its own commercial
+    // detection, so this can never disagree with that reader.
+    category: isCommercialEstimateData(estimateData) ? 'COMMERCIAL' : 'RESIDENTIAL',
     // Always emitted: a non-SERVER rewrite RESETS the column to its migration
     // default, so a draft first stamped by a server price can't keep claiming
     // that version after a CLIENT_FALLBACK/quote-required rewrite replaced

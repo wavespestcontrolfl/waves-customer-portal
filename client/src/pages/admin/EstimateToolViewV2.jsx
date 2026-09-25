@@ -335,6 +335,29 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // A dwelling unit designator anywhere in a typed address (the server's
 // unit-scope model reads the same forms; "#" alone counts).
 
+// Commercial suite sizing (owner ruling 2026-09-25,
+// server/services/commercial-suite-size/): one-line operator note for the
+// Home Sq Ft field when the lookup sized a suite instead of the whole
+// building — where the number came from, and the building total for
+// context. Returns null when the lookup carries no suite-size result.
+const COMMERCIAL_SUITE_SOURCE_LABELS = {
+  license_seats: "state restaurant license",
+  commercial_listing: "commercial listing",
+  suite_type_default: "typical size for this business type",
+};
+
+function commercialSuiteSizeNote(enrichedProfile) {
+  const suite = enrichedProfile?.suiteSize;
+  if (!suite || !(Number(suite.value) > 0)) return null;
+  const sourceLabel = COMMERCIAL_SUITE_SOURCE_LABELS[suite.source] || suite.source;
+  const seatsNote = suite.source === "license_seats" && suite.seats != null ? ` (${suite.seats} seats)` : "";
+  const buildingNote = Number(enrichedProfile?.buildingSqFt) > 0
+    ? ` Building total ${Number(enrichedProfile.buildingSqFt).toLocaleString()} sq ft.`
+    : "";
+  const nameNote = suite.businessName ? ` — ${suite.businessName}` : "";
+  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}`;
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
@@ -5201,7 +5224,7 @@ export default function EstimateToolViewV2({
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {" "}
-                <Field label="Home Sq Ft" id="estimate-homeSqFt" className="mb-4">
+                <Field label="Home Sq Ft" id="estimate-homeSqFt" className="mb-4" help={commercialSuiteSizeNote(enrichedProfile)}>
                   <InputV2 k="homeSqFt" type="number" placeholder="2000" />
                 </Field>{" "}
                 <Field label="Stories" id="estimate-stories" className="mb-4" help={enrichedProfile?.storiesSource === "default" && (

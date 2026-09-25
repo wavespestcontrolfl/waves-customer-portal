@@ -25,7 +25,7 @@ const logger = require('../logger');
 const { deliveryClaimFresh } = require('../admin-estimate-persistence');
 const contextBuilder = require('./context-builder');
 const { buildCallContext, existingDraftForCall } = contextBuilder;
-const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
+const { resolvePropertyFacts, normalizeParcelView, SQFT_SOURCES } = require('./source-arbitration');
 const { hasWrongPremiseFlag } = require('../lookup-confidence');
 const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../../utils/call-agreed-price');
 // Terminal, money-bearing estimate statuses + the row-scoped verdict
@@ -2623,6 +2623,55 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // (codex r10 P1, refining the r4 fence).
       if (unitScopeGuardrailsEnabled()) {
         applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
+        // Commercial suite sizing (owner ruling 2026-09-25,
+        // server/services/commercial-suite-size/): a commercial tenant in a
+        // multi-tenant building must auto-price off the SUITE's own square
+        // footage, never the whole building and never a $0 manual quote —
+        // the same expectation residential auto-drafting already meets.
+        // Runs only when the apply above left home genuinely unresolved: a
+        // caller-stated size, or a non-aggregated condo's own per-unit
+        // folio, both survive the apply and always outrank this.
+        if (intent.is_commercial === true
+          && unitScope.serviceScope === 'commercial_suite'
+          && propertyFacts.home?.source === SQFT_SOURCES.NONE) {
+          try {
+            const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
+            const { parseRawAddress, splitStreetLineUnitParts } = require('../../utils/address-normalizer');
+            const quotedAddressLine = intent.address || result.addressUsed || address;
+            const parsedAddr = parseRawAddress(quotedAddressLine) || {};
+            const { street, unit } = splitStreetLineUnitParts(parsedAddr.line1 || quotedAddressLine || '');
+            const buildingSqftRaw = Number(effectiveSignals.propertyRecord?.squareFootage);
+            const suiteSize = await resolveCommercialSuiteSize({
+              address: { street, unit, city: parsedAddr.city, zip: parsedAddr.zip },
+              phone: context?.phone || null,
+              businessNameHint: intent.customer_name || null,
+              commercialRiskType: intent.commercial_risk_type || null,
+              commercialSubtype: intent.commercial_subtype || null,
+              buildingSqft: Number.isFinite(buildingSqftRaw) && buildingSqftRaw > 0 ? buildingSqftRaw : null,
+            });
+            if (suiteSize && Number(suiteSize.value) > 0) {
+              propertyFacts.home = {
+                value: suiteSize.value,
+                source: suiteSize.source,
+                confidence: suiteSize.confidence,
+                rejected: propertyFacts.home?.rejected || [],
+              };
+              unitScope.sizeBasis = suiteSize.source;
+              propertyFacts.commercialSuiteSize = suiteSize;
+              // A food-service business the resolver identified (DBPR
+              // license, or a web-search businessType) sets the commercial
+              // cadence when the composer left it null — a restaurant needs
+              // the 12-visit program, not the pricer's generic default.
+              if (!intent.commercial_risk_type
+                && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS
+                  || /restaurant|food/i.test(String(suiteSize.businessType || '')))) {
+                intent.commercial_risk_type = 'restaurant_food';
+              }
+            }
+          } catch (err) {
+            logger.warn(`[estimator-engine] commercial suite size resolve failed: ${err.message}`);
+          }
+        }
       }
     } catch (err) {
       logger.warn(`[estimator-engine] unit-scope model failed: ${err.message}`);
