@@ -17905,10 +17905,19 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
       svc?.visitsPerYear ?? svc?.appsPerYear ?? svc?.visits ?? svc?.apps ?? svc?.treatmentsPerYear ?? svc?.v,
     );
     if (Number.isFinite(visits) && visits > 0) return visits !== 6 && visits !== 9;
+    // Same keyText precedent as the lawn backstop above (codex P0 r1): a
+    // row shaped { serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub
+    // Care' } carries no cadence text on `name`/`label`/`displayName` at
+    // all — the retired identity lives ONLY on the catalog key fields,
+    // which the converter's remainingUnitCatalogKey preserves verbatim.
+    // Checking `text` alone let it slip through this backstop.
     const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
-    return /\b12\s*(visits?|apps?|applications?)\b/.test(text)
-      || /\b4\s*(visits?|apps?|applications?)\b/.test(text)
-      || /\bquarterly\b|_quarterly\b/.test(text);
+    const keyText = [svc?.service, svc?.serviceKey, svc?.service_key]
+      .filter(Boolean).join(' ').toLowerCase();
+    const combined = `${text} ${keyText}`;
+    return /\b12\s*(visits?|apps?|applications?)\b/.test(combined)
+      || /\b4\s*(visits?|apps?|applications?)\b/.test(combined)
+      || /\bquarterly\b|_quarterly\b/.test(combined);
   });
 }
 

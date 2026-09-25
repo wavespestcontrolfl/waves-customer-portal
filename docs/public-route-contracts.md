@@ -1251,7 +1251,23 @@ Mounted at `server/index.js` → `routes/public-services-menu.js`; payload is
 with `Cache-Control: public, max-age=300` on success and `no-store` on
 error; inherits the global `/api/` IP rate limit. Consumed by the Astro
 quote form, so its item shape is a spoke-fleet contract per CLAUDE.md
-rule 18 — additive changes only).
+rule 18 — additive changes only, with ONE documented exception: a catalog
+row the menu previously advertised can be RETIRED from it via
+`services.public_quote_selectable=false` (owner directive, mirrors a
+retired cadence tier — e.g. `lawn_care_recurring` 2026-09-24,
+`tree_shrub_quarterly` 2026-09-24) — the item disappears from `items` on
+the NEXT menu fetch, but never breaks a caller that already has the old
+payload cached: `services/public-services-menu.js`'s `FORMERLY_PUBLIC_KEYS`
+denylist keeps posting that key to `/api/public/quote/calculate` resolving
+(never a 404/500) as a quote-on-request lead — never instant-priced,
+never silently repriced at a different tier. `is_active` stays true either
+way (historic/scheduled visits still reference the row); `customer_visible`
+is a separate, per-row decision independent of this menu removal —
+`tree_shrub_quarterly` keeps `customer_visible=true` (20260924020010,
+superseding 20260924020000's flip of that one flag) specifically so an
+existing customer's tracking-page visit summary is unaffected, while
+`lawn_care_recurring` set it false too since it has no such grandfathered
+dependency).
 `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
 token, public `Cache-Control`. Consumed by the Astro build and the admin blog
 UI; no PII).
@@ -2420,7 +2436,14 @@ expose only already-public data: customer-visible catalog rows (price
 columns excluded AND `description` excluded — tighter than /api/mcp
 get_service, because catalog descriptions are admin-editable free text
 that is neither compliance-curated nor price-synced and must not reach an
-anonymous surface),
+anonymous surface). `list_services`/`get_service` additionally exclude
+`services/public-services-menu.js`'s `FORMERLY_PUBLIC_KEYS` denylist even
+when a row's own `customer_visible=true` — `tree_shrub_quarterly` is the
+first key excluded this way rather than by `customer_visible=false`
+(2026-09-24; see the services/menu entry above for why its customer_visible
+stays true), so a retired catalog row never becomes agent-discoverable
+again just because its customer_visible flag serves an unrelated
+customer-facing surface,
 the /api/public/pricing-ranges payload via its shared fail-closed producer,
 the service-areas table, and a static description of the
 /api/public/quote/calculate HTTP contract (how_to_request_quote). No

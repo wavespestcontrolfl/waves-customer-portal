@@ -44,7 +44,7 @@ let mockRows = [];
 let mockFirstRow = null;
 let mockRejectWith = null;
 const builders = [];
-const CHAIN_METHODS = ['where', 'whereIn', 'whereRaw', 'whereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
+const CHAIN_METHODS = ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'whereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
 const makeBuilder = (table) => {
   const b = { table };
   CHAIN_METHODS.forEach((m) => { b[m] = jest.fn(() => b); });
@@ -185,6 +185,29 @@ describe('catalog tools', () => {
     mockFirstRow = null;
     const missing = await callTool('get_service', { service_key: 'nope' });
     expect(missing.body.result.isError).toBe(true);
+  });
+
+  // codex P1 pre-push (2026-09-24): tree_shrub_quarterly's customer_visible
+  // was RESTORED to true (20260924020010) so the grandfathered quarterly
+  // customer's tracking-page summary isn't blanked — this anonymous public
+  // catalog must keep it out through its own code-side filter instead.
+  test('list_services excludes FORMERLY_PUBLIC_KEYS (e.g. tree_shrub_quarterly) even though its row is customer_visible', async () => {
+    const { FORMERLY_PUBLIC_KEYS } = require('../services/public-services-menu');
+    mockRows = [{ service_key: 'tree_shrub_program', name: 'Tree & Shrub Care', category: 'tree_shrub' }];
+    const { body } = await callTool('list_services', {});
+    expect(toolResult(body).services).toHaveLength(1);
+    const b = builders.find((x) => x.table === 'services');
+    expect(b.whereNotIn).toHaveBeenCalledWith('service_key', expect.arrayContaining(['tree_shrub_quarterly']));
+    expect([...FORMERLY_PUBLIC_KEYS]).toContain('tree_shrub_quarterly');
+  });
+
+  test('get_service short-circuits a FORMERLY_PUBLIC_KEYS key to not-found without querying the DB', async () => {
+    mockFirstRow = { service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care Service' };
+    const before = builders.length;
+    const { body } = await callTool('get_service', { service_key: 'tree_shrub_quarterly' });
+    expect(body.result.isError).toBe(true);
+    // No new 'services' query builder was created for this call.
+    expect(builders.slice(before).some((x) => x.table === 'services')).toBe(false);
   });
 
   test('get_service_areas returns active rows ordered by display_order', async () => {

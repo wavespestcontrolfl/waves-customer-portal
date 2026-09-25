@@ -115,6 +115,33 @@ describe('recurringTreeShrubRowAtRetiredCadence — premium + light backstop (9x
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 4 }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 6 }))).toBe(false);
   });
+
+  test('the retired catalog key alone proves the retired cadence, even with a generic name and no cadence/count fields (codex P0 pre-push)', () => {
+    // A row shaped { serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub
+    // Care' } used to pass this backstop: the final check only searched
+    // name/label/displayName text, never service/serviceKey/service_key —
+    // so a row whose ONLY retired-identity signal is its catalog key slipped
+    // through. The converter's remainingUnitCatalogKey preserves that exact
+    // key verbatim, so the accepted row could still link to the retired
+    // quarterly catalog service. Mirrors the lawn backstop's keyText check
+    // (lawn_care_recurring) exactly.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub Care',
+    }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      service_key: 'tree_shrub_quarterly', name: 'Tree & Shrub Care',
+    }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      service: 'tree_shrub_quarterly', name: 'Tree & Shrub Care',
+    }))).toBe(true);
+    // The live catalog keys stay unaffected.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      serviceKey: 'tree_shrub_program', name: 'Tree & Shrub Care',
+    }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      serviceKey: 'tree_shrub_6week', name: 'Tree & Shrub Care',
+    }))).toBe(false);
+  });
 });
 
 describe('retiredTreeShrubRequoteNeeded — shared quote gate (deposit mirror contract, codex P1 r4)', () => {

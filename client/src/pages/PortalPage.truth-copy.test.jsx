@@ -67,6 +67,26 @@ describe('empty schedule does not invent treatments', () => {
   });
 });
 
+describe('My Plan tree & shrub card does not invent the retired quarterly cadence (codex P1 pre-push, 2026-09-24)', () => {
+  it('shows 0/0 applications for a fresh tree & shrub plan with no real schedule yet, not the retired 4-visit Feb/May/Aug/Nov fallback', async () => {
+    // Platinum pads the included-services list to 4 from SERVICE_CATALOG
+    // order (pest_control, lawn_care, mosquito, tree_shrub), so with an
+    // empty schedule/services response tree_shrub renders with ZERO real
+    // events — exactly the case SERVICE_SCHEDULE_MONTHS.tree_shrub used to
+    // paper over with a fabricated 4-visit cadence (any newly sold 6x
+    // Standard or 9x Enhanced customer would see the same wrong 4/4).
+    render(<MyPlanTab customer={{ ...customer, tier: 'Platinum' }} />);
+    // "Tree & Shrub" renders twice (the service row + the summary sentence)
+    // — wait on the summary line, then assert on the unambiguous applications count.
+    expect(await screen.findByText(/4 services bundled under WaveGuard Platinum/)).toBeInTheDocument();
+    expect(screen.getAllByText('Tree & Shrub').length).toBeGreaterThan(0);
+    expect(screen.getByText('0/0 applications')).toBeInTheDocument();
+    expect(screen.queryByText('4/4 applications')).not.toBeInTheDocument();
+    // pest_control and lawn_care keep their own (unaffected) 4-month fallbacks.
+    expect(screen.getAllByText('0/4 applications')).toHaveLength(2);
+  });
+});
+
 describe('cancelled visit tracker', () => {
   const cancelledTracker = {
     currentStep: 7,

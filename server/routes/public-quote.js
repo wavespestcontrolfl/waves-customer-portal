@@ -125,6 +125,7 @@ const {
   OPEN_ESTIMATE_STATUSES,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { TREE_SHRUB } = require('../services/pricing-engine/constants');
 const {
   isCommercialProperty,
   normalizePropertyType,
@@ -1035,6 +1036,24 @@ function dropKeyedOnlyServices(bodyServices) {
   return out;
 }
 
+// Light (4x/quarterly) is retired for new sales (owner directive
+// 2026-09-24) — reject it (and any other hidden/unknown tier) at this
+// public, unkeyed boundary too, mirroring property-lookup-v2.js's builder
+// validation (which only protects the admin/property-lookup path). Absent
+// stays absent (the engine's own 'enhanced' default runs); a PRESENT but
+// hidden tier is refused rather than silently priced — codex P1 pre-push:
+// this route used to forward services.treeShrub.tier unchanged, so an
+// unkeyed request could still persist a fresh Light quote after retirement.
+// Extracted so it's directly unit-testable without a full HTTP harness.
+function publicQuoteTreeShrubTierRejection(tier) {
+  const requested = String(tier || '').trim().toLowerCase();
+  if (!requested) return null;
+  if (!TREE_SHRUB.tiers[requested] || TREE_SHRUB.tiers[requested].hidden) {
+    return 'Tree & Shrub program must be standard or enhanced.';
+  }
+  return null;
+}
+
 const quoteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -1678,6 +1697,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.rodentInspection = {};
     }
     if (services.treeShrub) {
+      const treeShrubTierError = publicQuoteTreeShrubTierRejection(services.treeShrub.tier);
+      if (treeShrubTierError) return res.status(400).json({ error: treeShrubTierError });
       // Only forward a real count. An explicit treeCount: 0 (the old ?? 0
       // default) suppresses priceTreeShrub's density fallback — it estimates
       // the count from the property's treeDensity only when the field is
@@ -4296,6 +4317,7 @@ module.exports._internals = {
   resolveEntryChannel,
   unitOnMultiUnitParcelForcesSiteQuote,
   lotPricedServiceRequested,
+  publicQuoteTreeShrubTierRejection,
 };
 module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;
 module.exports.KEYED_ONLY_SERVICE_KEYS = KEYED_ONLY_SERVICE_KEYS;
