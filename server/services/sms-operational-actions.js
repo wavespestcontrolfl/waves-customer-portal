@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -330,7 +330,12 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // with the proposals, while execution hashes the same dedupe decision.
     const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome));
     let notification = null;
-    if (exceptions.length + extracted.dropped) {
+    // Owner ruling 2026-09-24: dropped model proposals (rejected by the
+    // grounding filter) are not, on their own, a real exception — only a
+    // fact that actually needs a human decision rings the review bell.
+    // `dropped` still rides in `operational_analysis` and, when a bell does
+    // fire for a real exception, in that bell's `unverified_count`.
+    if (exceptions.length) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
         'Part of this message needs an evidence, property, timing, or existing-value check. Open the customer profile to review the source conversation.',
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
@@ -509,16 +514,20 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   let scanned = 0;
   let fulfilled = 0;
   let unverified = 0;
+  let skippedNoWitness = 0;
   // One bounded page per tick, with a durable cursor. An old open item
   // cannot monopolize the first page and strand later customers forever.
+  // A NULL due_at (a "when will you be by" type ask with no stated time)
+  // is scanned too, so it can close on real evidence, but never bells on
+  // its own timer the way a due row does (see the hasDueDate guard below).
   const rows = await conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
     .join('customers as c', 'c.id', 's.customer_id').whereNull('c.deleted_at')
     .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state')
-    .whereNotNull('cc.due_at').where('cc.due_at', '<=', now)
+    .where((q) => q.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))
     .modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
     .orderBy('cc.id').limit(25).select('cc.*');
   for (const row of rows) {
-    if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped: 'gate_off' };
+    if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped: 'gate_off' };
     scanned += 1;
     const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
     // A later delivery failure cannot erase already-recorded staff work.
@@ -528,6 +537,14 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     // is only a snapshot; never let its former owner strand the obligation.
     const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
     const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
+    const hasDueDate = row.due_at != null;
+    // No stated deadline and nothing on file even looks like an answer: skip
+    // the model call entirely rather than spend it on an obligation with no
+    // chance of a grounded verdict, and leave the row open and silent.
+    if (!hasDueDate && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
+      skippedNoWitness += 1;
+      continue;
+    }
     const verdict = await verify(current, evidence, { now });
     if (verdict.verdict === 'uncertain') unverified += 1;
     await conn.transaction(async (trx) => {
@@ -563,6 +580,11 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
         fulfilled += 1;
         return;
       }
+      // A NULL-due commitment only ever closes quietly on real evidence; it
+      // never rings a bell on its own (there is no stated deadline to have
+      // passed). The fulfillment_check above is still stored so a later
+      // pass with new evidence does not repeat the same model call for free.
+      if (!hasDueDate) return;
       const when = new Date(message.created_at).toLocaleString('en-US', {
         timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
       });
@@ -580,7 +602,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   const nextCursor = rows.length === 25 ? rows[rows.length - 1].id : null;
   await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
     .onConflict('key').merge({ value: nextCursor, updated_at: now });
-  return { scanned, fulfilled, unverified };
+  return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness };
 }
 
 // Explicit operator action only. The scheduled intake never clears analysis

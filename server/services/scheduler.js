@@ -3423,6 +3423,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN (offset one minute) — Delayed gratitude replies
+  // Independent of the scheduled-SMS sweep: queued operational sends never
+  // wait behind courtesy replies, and a stalled scheduled-SMS recovery never
+  // runs a gratitude reply past its ten-minute deadline. The five-minute
+  // cadence fits the eight-minute eligibility window.
+  // No cron lease: runExclusive would pin a pool connection for the whole
+  // sweep, and each send already holds a second one through the provider call
+  // while Twilio's own sms_log insert needs a third (DB_POOL_MAX=2 is
+  // supported). Overlap is safe without it — every claim is send-once per
+  // inbound under the thread lock — so an in-process guard only skips a tick
+  // that would overlap this instance's still-running sweep.
+  // =========================================================================
+  let gratitudeSweepRunning = false;
+  cron.schedule('1-59/5 * * * *', async () => {
+    if (!isEnabled('smsGratitudeReplies') || gratitudeSweepRunning) return;
+    gratitudeSweepRunning = true;
+    try {
+      const result = await require('./sms-auto-send').processGratitudeAutoSendCandidates();
+      if (result?.attempted) logger.info(`[sms-gratitude] delayed send sweep: ${result.sent} sent of ${result.attempted} attempted`);
+    } catch (err) {
+      logger.warn(`[sms-gratitude] delayed send sweep failed: ${err.message}`);
+    } finally {
+      gratitudeSweepRunning = false;
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {

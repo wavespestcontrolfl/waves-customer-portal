@@ -3058,16 +3058,20 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
     try {
       failedCombinedAlloc = require('../services/pay-combined').parseCombinedAllocation(paymentIntent.metadata);
     } catch { failedCombinedAlloc = null; }
-    PaymentLifecycleEmail.sendPaymentFailed({
-      paymentIntentId: piId,
-      attemptId,
-      ...(failedCombinedAlloc ? {
-        invoiceId: paymentIntent.metadata?.waves_invoice_id || failedCombinedAlloc[0].invoiceId,
-        amountDueOverride: require('../services/pay-combined').allocationTotalCents(failedCombinedAlloc) / 100,
-      } : {}),
-    }).catch((err) => {
+    try {
+      await PaymentLifecycleEmail.sendPaymentFailed({
+        paymentIntentId: piId,
+        attemptId,
+        customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
+        ...(failedCombinedAlloc ? {
+          invoiceId: paymentIntent.metadata?.waves_invoice_id || failedCombinedAlloc[0].invoiceId,
+          amountDueOverride: require('../services/pay-combined').allocationTotalCents(failedCombinedAlloc) / 100,
+        } : {}),
+      });
+    } catch (err) {
       logger.warn(`[stripe-webhook] payment_failed customer email failed: ${err.message}`);
-    });
+      throw err;
+    }
   }
 
   // Persist the notification before acknowledging Stripe. The background

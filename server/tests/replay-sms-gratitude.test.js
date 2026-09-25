@@ -46,6 +46,17 @@ function withWarmup(rawRows) {
 }
 
 describe('offline gratitude replay', () => {
+  test('an exported message_type lets thanks after a reminder qualify, as live', () => {
+    const rows = (messageType) => withWarmup([
+      { ...exportRow({ id: 'SM-reminder', at: '2026-09-01T14:00:00Z', direction: 'outbound-api',
+        body: 'Hello Jeanette! Reminder: your appointment is tomorrow between 8 and 10 AM.' }),
+      ...(messageType ? { message_type: messageType } : {}) },
+      exportRow({ id: 'SM-thanks', at: '2026-09-01T14:01:00Z', direction: 'inbound', body: 'Thank you' }),
+    ]);
+    expect(replayRows(normalized(rows('appointment_reminder'))).candidates).toHaveLength(1);
+    expect(replayRows(normalized(rows(null))).candidates).toEqual([]);
+  });
+
   test.each(['failed', 'undelivered', null])('a %s outbound cannot establish closure', status => {
     const report = replayRows(normalized(withWarmup([
       exportRow({ id: 'SM-report', at: '2026-09-01T14:00:00Z', direction: 'outbound-api',

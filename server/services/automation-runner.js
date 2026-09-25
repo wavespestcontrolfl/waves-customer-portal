@@ -19,6 +19,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -34,6 +35,20 @@ function substitute(text, customer) {
     .replace(/\{first_name\}/g, first)          // also support single-brace for parity with SMS templates
     .replace(/\{last_name\}/g, last);
 }
+
+// The consultation-booking placeholders, whitespace-tolerant like every
+// other {{merge}} field here. ONE definition for the preflight (does this
+// step need the block built?) and the render (where does it go?).
+// Each swallows the ONE separator newline the placeholder migration wrote
+// after it, and the render puts it back only when the block is non-empty —
+// so a hidden block leaves the email byte-identical to the pre-placeholder
+// body instead of a stray blank line (Codex #4821 r1 P2).
+const CONSULTATION_HTML_RE = /\{\{\s*consultation_booking\s*\}\}\n?/g;
+const CONSULTATION_TEXT_RE = /\{\{\s*consultation_booking_text\s*\}\}\n?/g;
+function withSeparator(block) {
+  return block ? `${block}\n` : '';
+}
+const CONSULTATION_PLACEHOLDER_RE = /\{\{\s*consultation_booking(?:_text)?\s*\}\}/;
 
 const AUTOMATION_FROM_ALLOWLIST = (process.env.AUTOMATION_FROM_ALLOWLIST
   || 'automations@wavespestcontrol.com,newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
@@ -87,20 +102,48 @@ async function activeAutomationSuppressionFor(template, email) {
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
 }
 
-async function cancelEnrollmentForSuppression(enrollment, reason) {
+async function blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason }) {
+  await db('automation_step_sends').where({ id: sendId }).update({
+    status: 'blocked',
+    failure_reason: reason.slice(0, 500),
+    updated_at: new Date(),
+  });
   await db('automation_enrollments').where({ id: enrollment.id }).update({
     status: 'cancelled',
     next_send_at: null,
     completed_at: new Date(),
-    metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify('email_suppressed')]),
+    metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify(cancelReason)]),
     updated_at: new Date(),
   });
   logger.warn(`[automation-runner] cancelled enrollment=${enrollment.id} reason=${reason}`);
+  return { sent: false, blocked: true, reason };
 }
 
-function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId }) {
-  const rawHtml = substitute(htmlBody || '', customer);
-  const rawText = substitute(textBody || '', customer);
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient }) {
+  if (testRecipient) return null;
+  const suppression = await activeAutomationSuppressionFor(template, recipient);
+  if (suppression) {
+    const reason = automationSuppressionReason(suppression);
+    return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason: 'email_suppressed' });
+  }
+  if (template.key !== 'payment_failed' || !enrollment.customer_id) return null;
+  // SELECT * keeps this consumer deployable before the additive foundation
+  // migration; an absent column is the same legacy NULL behavior.
+  const prefs = await db('notification_prefs').where({ customer_id: enrollment.customer_id }).first();
+  const selected = billingChannelAllowed(prefs, 'payment_issue', 'email');
+  if (selected === null || (selected && prefs.email_enabled !== false)) return null;
+  return blockSendAndCancelEnrollment({ enrollment, sendId,
+    reason: 'Billing delivery preference excludes Email', cancelReason: 'billing_email_deselected' });
+}
+
+// {{consultation_booking}} / {{consultation_booking_text}} — the new_lead
+// email's recurring-lead booking block (lead-consultation-email-block.js).
+// Defaulted to '' so every existing caller (testSequence, and any step
+// whose body never carries the placeholder) renders byte-identical to
+// before these params existed.
+function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId, consultationHtml = '', consultationText = '' }) {
+  const rawHtml = substitute(htmlBody || '', customer).replace(CONSULTATION_HTML_RE, withSeparator(consultationHtml));
+  const rawText = substitute(textBody || '', customer).replace(CONSULTATION_TEXT_RE, withSeparator(consultationText));
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
   // Every automation renders the service chrome — "Waves Newsletter"
   // header is reserved for actual newsletter sends (owner call 2026-07-10;
@@ -142,7 +185,8 @@ async function hasLocalContent(templateKey) {
  * appointment tagger holds a per-customer advisory lock and must not need a
  * second pooled connection while doing so).
  */
-async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode = 'block' }) {
+async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode = 'block', context = {} }) {
+  const { leadId } = context;
   const template = await dbh('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error(`Unknown automation template: ${templateKey}`);
   if (!template.enabled) return { enrolled: false, reason: 'template disabled' };
@@ -221,7 +265,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
         last_name: fresh.last_name || customer.last_name || null,
       };
     }
-    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps });
+    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps, leadId });
   };
   if (!customer.id) return runEnrollment(dbh);
   if (dbh.isTransaction) {
@@ -249,7 +293,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   });
 }
 
-async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps }) {
+async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId }) {
   const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });
@@ -285,6 +329,20 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
     first_name: customer.first_name || null,
     last_name: customer.last_name || null,
   };
+  // The enrolling lead id (new_lead's consultation-booking block reads
+  // `metadata.lead_id` at send time) — merged in, never a whole-object
+  // overwrite, so a pre-existing metadata key (e.g. cancel_reason from a
+  // prior cancelled episode) survives a reactivation.
+  // A context-free reactivation (manual/admin or generic enroll) must NOT
+  // inherit a prior episode's lead — the block would mint that lead's link
+  // for an enrollment that is supposed to render it empty (Codex #4813 r1
+  // P2). Drop just the key; unrelated metadata survives.
+  // Table-qualified (Codex #4813 r4 P1): the same payload is the
+  // ON CONFLICT ... DO UPDATE merge below, where a bare `metadata` is
+  // ambiguous between the target row and EXCLUDED and fails the insert.
+  reactivatePayload.metadata = leadId
+    ? dbh.raw("jsonb_set(COALESCE(automation_enrollments.metadata,'{}'::jsonb), '{lead_id}', ?::jsonb, true)", [JSON.stringify(leadId)])
+    : dbh.raw("COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id'");
   if (existing) {
     const [reactivated] = await dbh('automation_enrollments')
       .where({ id: existing.id })
@@ -302,6 +360,7 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
     status: 'active',
     current_step: 0,
     next_send_at: nextSendAt,
+    ...(leadId ? { metadata: JSON.stringify({ lead_id: leadId }) } : {}),
   };
 
   let row;
@@ -395,6 +454,40 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
   return outcome;
 }
 
+const EMPTY_CONSULTATION_BLOCK = { html: '', text: '' };
+
+// The enrolling lead id stamped by enrollCustomer's `context.leadId`
+// (automation_enrollments.metadata jsonb). node-pg parses jsonb columns to
+// plain objects, but a defensive string-parse matches the rest of this
+// codebase's metadata readers (e.g. inspection-public.js's
+// latestProvenance) in case a caller ever hands this a raw driver row.
+function enrollmentLeadId(enrollment) {
+  const meta = enrollment?.metadata;
+  if (!meta) return null;
+  const obj = typeof meta === 'string' ? (() => { try { return JSON.parse(meta); } catch { return null; } })() : meta;
+  return obj?.lead_id || null;
+}
+
+// Only bothers building the consultation block when the step's own body
+// actually carries a placeholder for it — every other template/step skips
+// the lead lookup and availability query entirely. Never throws: a lead id
+// with no eligible lead, or any downstream error, is buildConsultationEmailBlock's
+// own fail-closed '' — this wrapper's only job is the cheap skip.
+async function resolveConsultationBlock(step, enrollment, recipient) {
+  const body = `${step.html_body || ''}${step.text_body || ''}`;
+  // Same whitespace-tolerant shape the renderer replaces (Codex #4813 r4
+  // P2) — `{{ consultation_booking }}` must build the block too.
+  if (!CONSULTATION_PLACEHOLDER_RE.test(body)) return EMPTY_CONSULTATION_BLOCK;
+  const leadId = enrollmentLeadId(enrollment);
+  if (!leadId) return EMPTY_CONSULTATION_BLOCK;
+  const { buildConsultationEmailBlock } = require('./lead-consultation-email-block');
+  // The ACTUAL recipient rides along (testRecipient || enrollment.email —
+  // the address the mail goes to, pre-push audit P1): the block mints a
+  // bearer link only when that address is the lead's OWN email, so an
+  // operator test-send to another inbox gets the block empty.
+  return buildConsultationEmailBlock({ leadId, recipientEmail: recipient });
+}
+
 async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const enrollmentId = enrollment.id;
   const template = await db('automation_templates').where({ key: enrollment.template_key }).first();
@@ -426,15 +519,17 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const subject = substitute(step.subject || `(${template.name})`, personal);
   const asmGroupId = automationAsmGroupId(template);
   const fromEmail = normalizeAutomationFromEmail(step.from_email);
+  const recipient = testRecipient || enrollment.email;
+  const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
   const { html, text } = renderAutomationStepContent({
     template,
     htmlBody: step.html_body,
     textBody: step.text_body,
     customer: personal,
     asmGroupId,
+    consultationHtml: consultationBlock.html,
+    consultationText: consultationBlock.text,
   });
-
-  const recipient = testRecipient || enrollment.email;
 
   const sendRow = await db('automation_step_sends').insert({
     enrollment_id: enrollment.id,
@@ -444,19 +539,9 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
 
-  if (!testRecipient) {
-    const suppression = await activeAutomationSuppressionFor(template, recipient);
-    if (suppression) {
-      const reason = automationSuppressionReason(suppression);
-      await db('automation_step_sends').where({ id: sendRow.id }).update({
-        status: 'blocked',
-        failure_reason: reason.slice(0, 500),
-        updated_at: new Date(),
-      });
-      await cancelEnrollmentForSuppression(enrollment, reason);
-      return { sent: false, blocked: true, reason };
-    }
-  }
+  const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
+    sendId: sendRow.id, testRecipient });
+  if (deliveryBlock) return deliveryBlock;
 
   try {
     const res = await sendgrid.sendOne({

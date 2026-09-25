@@ -1,3 +1,4 @@
+const { addMonthsSameDay: addMonthsSameDayShared } = require('../utils/date-only');
 const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const db = require('../models/db');
 const logger = require('./logger');
@@ -119,19 +120,10 @@ function parseYmd(value) {
   return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
 }
 
-function daysInMonth(year, month1) {
-  return new Date(Date.UTC(year, month1, 0, 12, 0, 0)).getUTCDate();
-}
-
+// Shared with the termite annual agreement's coverage end date — one
+// clamping rule for every "+ N months" in the repo (utils/date-only.js).
 function addMonthsSameDay(value, months) {
-  const parts = parseYmd(value);
-  if (!parts) return null;
-  const monthIndex = parts.month - 1 + Number(months || 0);
-  const targetYear = parts.year + Math.floor(monthIndex / 12);
-  const targetMonthIndex = ((monthIndex % 12) + 12) % 12;
-  const targetMonth = targetMonthIndex + 1;
-  const targetDay = Math.min(parts.day, daysInMonth(targetYear, targetMonth));
-  return `${targetYear}-${String(targetMonth).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
+  return addMonthsSameDayShared(dateOnly(value), months);
 }
 
 function addDaysYmd(value, days) {

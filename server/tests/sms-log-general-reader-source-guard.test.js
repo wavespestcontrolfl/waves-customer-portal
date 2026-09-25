@@ -410,6 +410,11 @@ const ALLOWLIST = [
   },
   {
     file: 'services/sms-auto-send.js',
+    snippet: "const anchor = await trx('sms_log').where({ id: smsLogId, direction: 'inbound' })",
+    reason: 'single-row inbound lookup for the gratitude thread lock; an outbound send reservation cannot match the id plus inbound direction predicate.',
+  },
+  {
+    file: 'services/sms-auto-send.js',
     snippet: 'reservationsCleared = await db(\'sms_log\')',
     reason: 'this IS the reply-reservation reconciliation sweep itself (settles manual_send_reservation / auto_send_reservation rows; review-ask reservations are explicitly excluded from it) — applying the exclusion helper here would hide the very rows this sweep exists to find and release.',
   },

@@ -23,6 +23,7 @@ jest.mock('../config/feature-gates', () => ({
   // Push channel routing reads this at send time; false keeps routing inert
   // so these tests keep asserting the legacy SMS path.
   gateEnvValue: jest.fn(() => false),
+  gateEnvTimestamp: jest.fn(() => null),
 }));
 jest.mock('../models/db', () => jest.fn());
 // Codex round 3 on #4608 (structural move, P1 PRRT_kwDOR3YQi86j8Ydm): the

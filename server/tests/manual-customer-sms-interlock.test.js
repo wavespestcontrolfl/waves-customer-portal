@@ -8,6 +8,7 @@ const mockSettleHumanReply = jest.fn();
 
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'smsGratitudeReplies' && mockGate.enabled),
+  gateEnvTimestamp: jest.fn(() => mockGate.activatedAt || null),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...args) => mockSendCustomerMessage(...args),
@@ -53,6 +54,7 @@ const reservation = () => ({
 
 beforeEach(() => {
   mockGate.enabled = false;
+  mockGate.activatedAt = null;
   jest.clearAllMocks();
   mockDeriveOutboundNumber.mockResolvedValue('+19413529161');
   mockReserveHumanReply.mockResolvedValue(reservation());
@@ -74,6 +76,32 @@ test('gate off is an exact canonical-send pass-through', async () => {
   expect(mockReserveHumanReply).not.toHaveBeenCalled();
   expect(mockSettleHumanReply).not.toHaveBeenCalled();
   expect(manualSmsDeliveryState(result)).toBeNull();
+});
+
+test.each([
+  ['blocks on', true, 'AUTO_REPLY_IN_FLIGHT'],
+  ['reserves and sends without', false, null],
+])('gate off after activation %s an outstanding claim under the thread-lock reservation', async (_label, claimed, code) => {
+  // A retained uncertain claim, or an old instance still claiming during a
+  // rolling disable, is serialized by reserveHumanReply's lock — never a
+  // lockless snapshot.
+  mockGate.activatedAt = new Date('2026-09-24T12:00:00Z');
+  if (claimed) mockReserveHumanReply.mockResolvedValue({ ...reservation(), reservationId: null, autoSendInFlight: true });
+
+  const result = await sendManualCustomerSms(input());
+
+  expect(mockReserveHumanReply).toHaveBeenCalledWith(expect.objectContaining({
+    to: '+19415550100', customerId: 'customer-1', blockOnActiveManualReservation: true,
+  }));
+  if (code) {
+    expect(result).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', code });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  } else {
+    expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415550100',
+      providerHandoffReservation: expect.anything(),
+    }));
+  }
 });
 
 test('an existing gratitude auto-send claim blocks before canonical delivery', async () => {
