@@ -626,6 +626,14 @@ function vanWrapReasons({ van, vanWrapElsewhere }, { allowUniformLogo = false } 
         flagged.push(...garbled.map((t) => `garbled van wrap text: ${t}`));
       }
     }
+    // A van close enough to confirm as the Transit is close enough to read:
+    // it must carry at least the WAVES lettering, or the wrap dropped its
+    // text (Codex r10 P2 on #4785). A distant "unsure" van is not held to it.
+    const readsWaves = matchWrapText(van.wrapText || [], VAN_WRAP_ALLOWED_TEXT).complete.includes('WAVES');
+    if (van.body === 'ford_transit_medium_roof' && !readsWaves) {
+      reasons.push('van wrap missing the WAVES lettering');
+      flagged.push('van wrap missing the WAVES lettering');
+    }
   }
   return { reasons, flagged };
 }

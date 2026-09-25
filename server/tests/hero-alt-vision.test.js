@@ -239,7 +239,7 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
 describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks/text allowed ON the van only)', () => {
   const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
   const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
-  const van = (extra = {}) => ({ present: true, body: 'ford_transit_medium_roof', wrapped: true, wrap_text: ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'], wrap_mascot: true, ...extra });
+  const van = (extra = {}) => ({ present: true, body: 'unsure', wrapped: true, wrap_text: ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'], wrap_mascot: true, ...extra });
   const branded = (extra = {}) => answer({ readable_text: [], logos_or_brand_marks: [], van: van(), van_wrap_elsewhere: [], forbidden_scenes: [], notes: '', ...extra });
   const screen = (extra) => { mockDispatch.mockResolvedValue(branded(extra)); return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true }); };
   beforeEach(() => mockDispatch.mockReset());
@@ -469,7 +469,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(combined).toMatch(/appearing anywhere OTHER than on that one van or on the technician's permitted cap\/chest logo \(already covered above\)/);
 
     const tech = { cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'right chest'] };
-    const withVan = { present: true, body: 'ford_transit_medium_roof', wrapped: true, wrap_text: [], wrap_mascot: true };
+    const withVan = { present: true, body: 'ford_transit_medium_roof', wrapped: true, wrap_text: ['WAVES'], wrap_mascot: true };
     // A response that (redundantly, against the updated instructions) STILL
     // lists the technician's own correct cap/chest mark under
     // van_wrap_elsewhere must not fail — the JS-level belt catches what the
@@ -576,6 +576,14 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     const offVan = await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true });
     expect(offVan.ok).toBe(false);
     expect(offVan.reasons).toContain('readable text: GoWavesFL.com');
+  });
+
+  test('a clearly visible Transit must carry the WAVES lettering; a distant "unsure" van is not held to it (Codex r10 P2 on #4785)', async () => {
+    const noText = await screen({ van: van({ body: 'ford_transit_medium_roof', wrap_text: [] }) });
+    expect(noText.ok).toBe(false);
+    expect(noText.reasons).toEqual(['van wrap missing the WAVES lettering']);
+    expect(await screen({ van: van({ body: 'ford_transit_medium_roof', wrap_text: ['WAVES Lawn & Pest'] }) })).toMatchObject({ ok: true, reasons: [] });
+    expect(await screen({ van: van({ body: 'unsure', wrap_text: [] }) })).toMatchObject({ ok: true, reasons: [] });
   });
 
   test('only a detection attributable EXCLUSIVELY to the permitted van is exempted — a mixed entry naming another surface or brand still fails (Codex r5 P2 on #4785)', async () => {
