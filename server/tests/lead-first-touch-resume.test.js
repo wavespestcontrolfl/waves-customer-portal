@@ -42,6 +42,7 @@ let mockCallRow = { customer_id: 'cust-1' }; // call_log's CURRENT customer link
 let mockGates = {}; // feature-gates.isEnabled by name (codex #4622 r4 gate provenance)
 let mockLockOrder = []; // 'email_key' (advisory lock) / 'hold_row' (first_touch_holds FOR UPDATE), in acquisition order (codex #4622 r5)
 let mockSuppressionQueue = null; // shift per email_suppressions read; each entry is the row list (codex #4622 r5)
+let mockLeadByPhoneRow = null; // resolveFirstTouchLeadId's phone-fallback lookup result
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -212,6 +213,9 @@ jest.mock('../models/db', () => {
           return mockSubscriberRow;
         }
         if (table === 'automation_templates') return { key: 'new_lead' };
+        // resolveFirstTouchLeadId's phone fallback (no call_log.metadata
+        // stamp) — the most recent OPEN lead on the call's phone.
+        if (table === 'leads') return mockLeadByPhoneRow;
         return null;
       }),
       then: (resolve, reject) => {
@@ -308,6 +312,7 @@ beforeEach(() => {
   mockHoldUpdates = [];
   mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
   mockCallRow = { customer_id: 'cust-1' };
+  mockLeadByPhoneRow = null;
   mockGates = {};
   mockLockOrder = [];
   mockSuppressionQueue = null;
@@ -368,6 +373,28 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com' });
     expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({
       customer: expect.objectContaining({ email: 'corrected@example.com' }),
+    }));
+  });
+
+  // Consultation-booking email block (dark behind GATE_LEAD_INSPECTION_LINK)
+  // needs a lead id on the enrollment to render from — resolveFirstTouchLeadId
+  // supplies it via context.leadId (see its own contract tests below for the
+  // full metadata-vs-phone-fallback-vs-no-match matrix).
+  test('carries the call_log.metadata.lead_id stamp into the enroll context', async () => {
+    mockCallRow = { customer_id: 'cust-1', metadata: { lead_id: 'lead-999' } };
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({
+      context: { leadId: 'lead-999' },
+    }));
+  });
+
+  test('no metadata stamp and no matching open lead by phone → context.leadId is null (never blocks the release)', async () => {
+    mockCallRow = { customer_id: 'cust-1' }; // no metadata, no from_phone
+    mockLeadByPhoneRow = null;
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.resumed).toBe(true);
+    expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({
+      context: { leadId: null },
     }));
   });
 

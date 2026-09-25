@@ -99,6 +99,27 @@ function applyLeadEstimateAutomationGate(readiness = {}) {
   };
 }
 
+// Enrolls this submission in the local new_lead automation sequence
+// (SendGrid-backed). Runs AFTER leadRecord is resolved (both the call-lead
+// attach branch and the fresh-insert branch) so `leadId` is this
+// submission's own leads-table row — the consultation-booking email block
+// (dark behind GATE_LEAD_INSPECTION_LINK) reads it off
+// automation_enrollments.metadata at send time and renders empty without
+// it. No-ops (returns null) when there is no email to enroll. Extracted
+// for direct unit coverage (_test) — the surrounding POST handler is not
+// itself unit-tested.
+async function enrollNewLeadAutomation({ email, firstName, lastName, customerId, leadId }) {
+  if (!email) return null;
+  const AutomationRunner = require('../services/automation-runner');
+  const r = await AutomationRunner.enrollCustomer({
+    templateKey: 'new_lead',
+    customer: { email, first_name: firstName, last_name: lastName, id: customerId || null },
+    context: { leadId: leadId || null },
+  });
+  logger.info(`[lead-webhook] enrolled customer ${customerId || 'unlinked'} in new_lead: ${JSON.stringify(r)}`);
+  return r;
+}
+
 // --- Abuse protection for the public, unauthenticated lead webhook ---
 // Every accepted POST fans out to real-money side effects: a customer-facing
 // SMS to the SUBMITTED number, a call/SMS to the owner's personal cell, and
@@ -811,18 +832,6 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       }
     } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
 
-    // Enroll in the local new_lead automation sequence (SendGrid-backed).
-    try {
-      if (email) {
-        const AutomationRunner = require('../services/automation-runner');
-        const r = await AutomationRunner.enrollCustomer({
-          templateKey: 'new_lead',
-          customer: { email, first_name: firstName, last_name: lastName, id: customer?.id || null },
-        });
-        logger.info(`[lead-webhook] enrolled customer ${customer?.id || 'unlinked'} in new_lead: ${JSON.stringify(r)}`);
-      }
-    } catch (e) { logger.error(`Lead enroll failed: ${e.message}`); }
-
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     let createdEstimateId = null;
     let createdEstimateServiceInterest = serviceInterest || null;
@@ -977,6 +986,18 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     } catch (leadErr) {
       logger.error(`Lead record creation failed: ${leadErr.message}`);
     }
+
+    // Enroll in the local new_lead automation sequence (SendGrid-backed).
+    // Moved here (was originally right after the auto-reply block, before
+    // leadRecord existed) so the consultation-booking email block
+    // (dark behind GATE_LEAD_INSPECTION_LINK) has a lead id to stamp onto
+    // the enrollment's metadata — no return/throw sits between the old
+    // position and here, so every case that enrolled before still does.
+    try {
+      await enrollNewLeadAutomation({
+        email, firstName, lastName, customerId: customer?.id, leadId: leadRecord?.id,
+      });
+    } catch (e) { logger.error(`Lead enroll failed: ${e.message}`); }
 
     // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): a blocked
     // readiness verdict carries the machine-readable missing items — park
@@ -1968,4 +1989,5 @@ module.exports._test = {
   applyLeadEstimateAutomationGate,
   determineLeadSource,
   isHoneypotTripped,
+  enrollNewLeadAutomation,
 };
