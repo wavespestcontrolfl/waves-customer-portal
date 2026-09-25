@@ -761,6 +761,12 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const custRow = await loadTrustedCustomer(db, lead, undefined);
     const eligibility = await resolveEligibility(db, lead, custRow, { includeRescheduleUrl: false });
     if (eligibility.state !== 'ok') return { ok: false };
+    // Catalog BEFORE the address-only state (Codex #4813 r1 P2): a retired
+    // or booking-disabled Waves Assessment must not produce a "Pick a time"
+    // CTA whose page can only answer booking_unavailable once an address
+    // is supplied.
+    const catalog = await loadAssessmentCatalog();
+    if (!catalog.serviceId) return { ok: true, slots: [], needsAddress: false };
     const resolved = await finalizeBookingLocation(lead, custRow, null);
     if (!resolved.location) {
       return { ok: true, slots: [], needsAddress: resolved.failure === 'address_required' };
@@ -768,8 +774,6 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
-    const catalog = await loadAssessmentCatalog();
-    if (!catalog.serviceId) return { ok: true, slots: [], needsAddress: false };
     const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
     return { ok: true, slots: flattenNextSlots(built, count), needsAddress: false };
   } catch (err) {

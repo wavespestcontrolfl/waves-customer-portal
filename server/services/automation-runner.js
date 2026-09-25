@@ -295,9 +295,13 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
   // `metadata.lead_id` at send time) — merged in, never a whole-object
   // overwrite, so a pre-existing metadata key (e.g. cancel_reason from a
   // prior cancelled episode) survives a reactivation.
-  if (leadId) {
-    reactivatePayload.metadata = dbh.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{lead_id}', ?::jsonb, true)", [JSON.stringify(leadId)]);
-  }
+  // A context-free reactivation (manual/admin or generic enroll) must NOT
+  // inherit a prior episode's lead — the block would mint that lead's link
+  // for an enrollment that is supposed to render it empty (Codex #4813 r1
+  // P2). Drop just the key; unrelated metadata survives.
+  reactivatePayload.metadata = leadId
+    ? dbh.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{lead_id}', ?::jsonb, true)", [JSON.stringify(leadId)])
+    : dbh.raw("COALESCE(metadata,'{}'::jsonb) - 'lead_id'");
   if (existing) {
     const [reactivated] = await dbh('automation_enrollments')
       .where({ id: existing.id })

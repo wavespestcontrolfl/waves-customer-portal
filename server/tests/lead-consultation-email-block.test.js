@@ -271,3 +271,21 @@ describe('buildConsultationEmailBlock — full block', () => {
     expect(result).toEqual({ html: '', text: '' });
   });
 });
+
+// Structural pin (Codex #4813 r1 P2): the slot engine checks the assessment
+// catalog BEFORE the address-only state, so a retired/booking-disabled
+// Waves Assessment never yields a "Pick a time" CTA the page cannot honor.
+describe('computeConsultationSlotsForLead ordering', () => {
+  test('catalog is loaded before finalizeBookingLocation', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/inspection-public.js'), 'utf8');
+    const start = src.indexOf('async function computeConsultationSlotsForLead');
+    const end = src.indexOf('\n}\n', start);
+    const body = src.slice(start, end);
+    const catalogAt = body.indexOf('await loadAssessmentCatalog()');
+    const locationAt = body.indexOf('await finalizeBookingLocation(');
+    expect(catalogAt).toBeGreaterThan(-1);
+    expect(locationAt).toBeGreaterThan(catalogAt);
+  });
+});

@@ -617,6 +617,26 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
     expect(patch.metadata).toEqual({ sql: expect.stringContaining('jsonb_set'), bindings: [JSON.stringify('lead-456')] });
   });
 
+  test('a context-free reactivation DROPS a prior episode\'s lead_id, keeping unrelated metadata (Codex #4813 r1 P2)', async () => {
+    const reactivateUpdate = chain();
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-1' }]);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'new_lead', name: 'New Lead', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [
+        chain({ first: { id: 'enr-1', status: 'completed', email: 'lead@example.com', metadata: { lead_id: 'lead-A', cancel_reason: 'x' } } }),
+        reactivateUpdate,
+      ],
+    });
+
+    await enrollCustomer({ templateKey: 'new_lead', customer: { email: 'lead@example.com' } });
+
+    const patch = reactivateUpdate.update.mock.calls[0][0];
+    expect(patch.metadata).toEqual({ sql: expect.stringContaining("- 'lead_id'"), bindings: undefined });
+    expect(patch.metadata.sql).not.toContain('jsonb_set');
+  });
+
   test('no context.leadId leaves metadata untouched (byte-identical to every pre-existing enroll site)', async () => {
     const insertChain = chain({ returning: [{ id: 'enr-new' }] });
     setDbQueues({

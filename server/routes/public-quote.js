@@ -3957,6 +3957,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
           await db('newsletter_subscribers').where({ id: result.subscriber.id }).update({
             quote_lead_automation_pending: true,
+            // Carried through double opt-in so the confirmed enrollment can
+            // still stamp the lead (consultation-booking block, Codex
+            // #4813 r1 P1). Latest quote wins.
+            quote_lead_id: lead.id,
             updated_at: new Date(),
           });
           try {

@@ -73,9 +73,14 @@ async function maybeEnrollConfirmedQuoteLead(subscriber) {
         first_name: subscriber.first_name || null,
         last_name: subscriber.last_name || null,
       },
+      // The quote lead persisted with the pending flag (public-quote.js) —
+      // the consultation-booking block reads it at send time (Codex #4813
+      // r1 P1). Null when the flag predates the column.
+      context: { leadId: subscriber.quote_lead_id || null },
     });
     await db('newsletter_subscribers').where({ id: subscriber.id }).update({
       quote_lead_automation_pending: false,
+      quote_lead_id: null,
       updated_at: new Date(),
     });
     logger.info(`[newsletter] confirmed quote subscriber id=${subscriber.id}; new_lead ${result.enrolled ? 'queued' : 'skipped'}`);
@@ -701,3 +706,4 @@ router.get('/posts/:id', async (req, res) => {
 module.exports = router;
 module.exports.EMAIL_RE = EMAIL_RE;
 module.exports.escapeHtml = escapeHtml;
+module.exports._test = { maybeEnrollConfirmedQuoteLead };
