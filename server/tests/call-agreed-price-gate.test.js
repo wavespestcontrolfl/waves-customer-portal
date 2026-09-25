@@ -88,34 +88,65 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(block).toContain('agreedPriceDraftSweepPending = true;');
   });
 
-  test('a failed pre-write invalidation queues a durable retry (codex #4815 r2 P1)', () => {
+  // codex #4815 r5 P1: the durable queue write for a failed pre-write
+  // invalidation is no longer attempted synchronously here, with its own
+  // fallback ladder (a live-owner retry-lane push, then a parallel
+  // finalStatus='extraction_failed' flip) — that parallel transition wrote
+  // through NORMAL finalization, never touched extraction_attempts, and
+  // reported success:true, so processAllPending retried the call every 10
+  // minutes forever instead of stopping at CALL_EXTRACTION_MAX_ATTEMPTS.
+  // Deferred instead: this site only remembers the marker to write
+  // (pendingQuarantineMarker), and the finalization transaction writes it
+  // atomically with the terminal status — see the block below.
+  test('a failed pre-write invalidation defers the durable retry marker to the finalization transaction, not a synchronous write here (codex #4815 r5 P1)', () => {
     const block = priceAgreedSyncBlock();
     const notOkAt = block.indexOf('if (!invalidation.ok) {');
     expect(notOkAt).toBeGreaterThan(-1);
     const notOkBody = block.slice(notOkAt, block.indexOf('} else {', notOkAt));
-    expect(notOkBody).toContain("markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });");
+    expect(notOkBody).toContain("pendingQuarantineMarker = { reason: 'price_agreed_on_call', procGeneration };");
+    // No synchronous markQuarantinePending call, no liveOwner retry-lane
+    // push, and no parallel finalStatus flip at this site any more.
+    expect(notOkBody).not.toContain('markQuarantinePending(');
+    expect(notOkBody).not.toContain('pushCallToRetryLaneAfterQuarantineFailure({');
+    expect(notOkBody).not.toContain("finalStatus = 'extraction_failed';");
   });
 
-  test('a failed pre-write invalidation ALSO falls back to the shared retry-lane push when markQuarantinePending itself fails (codex #4815 r3 P1)', () => {
+  test('a thrown pre-write invalidation attempt ALSO defers the durable retry marker (codex #4815 r5 P1)', () => {
     const block = priceAgreedSyncBlock();
-    const notOkAt = block.indexOf('if (!invalidation.ok) {');
-    const notOkBody = block.slice(notOkAt, block.indexOf('} else {', notOkAt));
-    expect(notOkBody).toContain('const queued = await markQuarantinePending(');
-    expect(notOkBody).toContain('if (!queued) {');
-    expect(notOkBody).toContain('await pushCallToRetryLaneAfterQuarantineFailure({');
-    expect(notOkBody).toContain("reason: 'price_agreed_on_call',");
+    const catchAt = block.indexOf('} catch (invalidateErr) {');
+    expect(catchAt).toBeGreaterThan(-1);
+    const catchBody = block.slice(catchAt, block.indexOf('agreedPriceDraftSweepPending = true;', catchAt));
+    expect(catchBody).toContain("pendingQuarantineMarker = { reason: 'price_agreed_on_call', procGeneration };");
   });
 
-  test('the pre-finalization fallback runs in liveOwner mode AND flips finalStatus so finalization keeps the call retry-eligible (codex #4815 r4 P1)', () => {
-    const block = priceAgreedSyncBlock();
-    const notOkAt = block.indexOf('if (!invalidation.ok) {');
-    const notOkBody = block.slice(notOkAt, block.indexOf('} else {', notOkAt));
-    expect(notOkBody).toContain("procToken, procGeneration, reason: 'price_agreed_on_call', mode: 'liveOwner',");
-    expect(notOkBody).toContain("finalStatus = 'extraction_failed';");
+  test('the finalization transaction writes the deferred quarantine marker atomically with the terminal status, fenced on written > 0 (codex #4815 r5 P1)', () => {
+    const trxAt = source.indexOf('const finalized = await db.transaction(async (trx) => {');
+    expect(trxAt).toBeGreaterThan(-1);
+    const trxEndAt = source.indexOf('return written;\n    });', trxAt);
+    expect(trxEndAt).toBeGreaterThan(trxAt);
+    const trxBody = source.slice(trxAt, trxEndAt);
+    const markAt = trxBody.indexOf('if (written > 0 && pendingQuarantineMarker) {');
+    expect(markAt).toBeGreaterThan(-1);
+    // Must land AFTER the `written` update (it reads `written`) and inside
+    // this same transaction callback (before the callback's own return).
+    const writtenUpdateAt = trxBody.indexOf("const written = await trx('call_log')");
+    expect(writtenUpdateAt).toBeGreaterThan(-1);
+    expect(markAt).toBeGreaterThan(writtenUpdateAt);
+    const markBody = trxBody.slice(markAt, markAt + 400);
+    expect(markBody).toContain("const { markQuarantinePending } = require('./estimator-engine');");
+    expect(markBody).toContain('await markQuarantinePending(call.id, pendingQuarantineMarker.reason, {');
+    expect(markBody).toContain('procGeneration: pendingQuarantineMarker.procGeneration,');
+    expect(markBody).toContain('trx,');
   });
 
-  test('a later lead-creation failure never overwrites the retry-eligible status (codex #4815 r4 P1)', () => {
-    expect(source).toContain("if (finalStatus !== 'extraction_failed') finalStatus = 'lead_creation_failed';");
+  test('lead-creation failure sets finalStatus unconditionally — extraction_failed is no longer a possible prior value (codex #4815 r5 P1)', () => {
+    expect(source).toContain(
+      "if ((workableUnnamedLead || sameCallOwnershipRejected) && !leadId) {\n      finalStatus = 'lead_creation_failed';",
+    );
+    // The dead r4 guard (a parallel finalStatus='extraction_failed' flip no
+    // longer exists anywhere in this file to protect against overwriting).
+    expect(source).not.toContain("if (finalStatus !== 'extraction_failed') finalStatus = 'lead_creation_failed';");
+    expect(source).not.toContain("finalStatus = 'extraction_failed';");
   });
 
   test('a successful pre-write invalidation delegates bell retirement to the shared helper, passing invalidated + callQuotePromised through (codex #4815 r2 P2, refined r3 P1)', () => {

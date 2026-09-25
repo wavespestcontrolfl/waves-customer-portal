@@ -747,6 +747,16 @@ const CALL_ORIGIN = {
 // under the per-row lock in case a status changed between the two (a
 // concurrent accept). Omitted (default), every row is in scope — the
 // identity-conflict and spam/voicemail callers are unaffected.
+//
+// The same scope also excludes a row already linked to a live booking via
+// estimate_data.scheduled_service_id (codex #4815 r5 P2) — the exact stamp
+// linkEstimateToBooking writes for the assessment pre-draft exception. A
+// force-reprocess otherwise archived a PRIOR pass's valid, owner-approved
+// assessment draft on every replay, because this scope only ever filtered
+// on estimate STATUS, never on whether the row is the booking's own quote.
+// Re-checked under the per-row lock for the same reason the terminal check
+// is: the exception's own linkage write can land between the scan and the
+// lock.
 async function invalidateDraftForCall(callLogId, { reason, identityConflict = false, ownershipFence = null, scope = null }) {
   // EXPLICIT result, never a swallowed failure (codex P0, PR #3304 GH
   // r8c): callers finalized spam/voicemail processing — or reported an
@@ -772,7 +782,10 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
     // (codex P0, PR #3304 GH r8d): concurrent composers and historical
     // duplicates both exist, and leaving an older row unmarked keeps a
     // PERMANENT public token sendable.
-    const conflictedRows = await strictExistingDraftForCall(callLogId, { excludeTerminal: scope === 'nonterminal_drafts' });
+    const conflictedRows = await strictExistingDraftForCall(callLogId, {
+      excludeTerminal: scope === 'nonterminal_drafts',
+      excludeBookingLinked: scope === 'nonterminal_drafts',
+    });
     let invalidatedAny = false;
     for (const conflicted of conflictedRows) {
       // Set INSIDE the transaction, only once real work happens (codex
@@ -814,6 +827,12 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         // not be raced past — bail out with NOTHING touched, same as a row
         // the scan never returned.
         if (scope === 'nonterminal_drafts' && terminalQRow) return;
+        // Same re-check for the booking-linked exclusion (codex #4815 r5
+        // P2): a booking-predraft linkage write can land between the scan
+        // and this lock (the assessment composer runs concurrently with
+        // this same-call invalidation) — bail out untouched rather than
+        // archive the exception the moment it lands.
+        if (scope === 'nonterminal_drafts' && data.scheduled_service_id != null) return;
         if (!terminalQRow && !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
         // And the same delivery-claim fence (codex P0 r22): never
         // commit an archive inside a live send's verdict-to-handoff
@@ -1126,9 +1145,20 @@ async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = nul
 // -invalidation sweep runs BEFORE the quarantine sweep, so the queue is
 // not cleared first.) Only genuinely legacy markers should need that
 // fail-closed fallback.
-async function markQuarantinePending(callLogId, reason, { procGeneration = null } = {}) {
+// `trx` (codex #4815 r5 P1): when the caller hands in the SAME transaction
+// that is about to commit the call's terminal finalization status, this
+// write rides inside it — atomic with that status, not a separate
+// best-effort attempt beside it. A failure THEN throws instead of being
+// swallowed to `false`: the caller's transaction must roll back rather than
+// finalize with an unwritten marker, so "invalidation failed AND the queue
+// write failed but the call finalized anyway" cannot happen — the rollback
+// leaves the row's claim stale for the normal reclaim to pick up, and the
+// pass falls through to the ordinary extraction_failed retry accounting
+// instead of a parallel one. Every other caller (no `trx`) keeps the
+// original best-effort, log-and-return-false contract.
+async function markQuarantinePending(callLogId, reason, { procGeneration = null, trx = null } = {}) {
   try {
-    await db('call_log').where({ id: callLogId }).update({
+    await (trx || db)('call_log').where({ id: callLogId }).update({
       metadata: db.raw(
         "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_quarantine_pending}', ?::jsonb, true)",
         [JSON.stringify({
@@ -1143,6 +1173,7 @@ async function markQuarantinePending(callLogId, reason, { procGeneration = null 
     return true;
   } catch (markErr) {
     logger.error(`[estimator-engine] could not queue the quarantine retry for call ${callLogId}: ${markErr.message}`);
+    if (trx) throw markErr;
     return false;
   }
 }
@@ -1237,6 +1268,93 @@ async function clearQuarantineMarker(callLogId, pending) {
 
 // Drains the queue above; runs from the scheduler's recovery pass. Each
 // success clears its marker, so the sweep is idempotent and self-limiting.
+// Table-driven verdict revalidation (codex #4815 r5 P2 — repo rule 20:
+// remove decisions, don't relocate them into one-use helpers). Every queued
+// reason resolves to exactly ONE of three verdicts, decided by exactly ONE
+// type-specific check:
+//   - 'stands'       — the original verdict still holds; fall through and
+//                       replay the forced invalidation.
+//   - 'requalified'  — the call no longer carries that verdict; drop both
+//                       call-side markers (estimator_draft_block AND the
+//                       queue entry) — a lone queue-clear would leave the
+//                       now-valid estimate blocked forever.
+//   - 'defer'        — inconclusive (a transient read failure, or an
+//                       unresolved transcript): proves nothing either way,
+//                       so every marker is left untouched for the next
+//                       sweep rather than risk archiving a valid
+//                       replacement or exposing a genuinely-still-blocked
+//                       draft.
+// This replaces three near-identical if/else-if/else revalidation blocks —
+// one per reason family — with one shared dispatch. Order matters: the
+// rejection entry matches everything, so it must stay last.
+const QUARANTINE_REVALIDATORS = [
+  {
+    type: 'price_agreed',
+    matches: (reason) => reason === 'price_agreed_on_call',
+    // codex #4815 r2 P1 / r3 P1: a queued price_agreed_on_call marker has
+    // NO vocabulary in callRejectedForDrafting (it only understands
+    // spam/voicemail/no_attribution/identity-conflict verdicts) — falling
+    // into the rejection check read every such marker as "re-qualified" on
+    // the very next sweep and dropped the block WITHOUT re-invalidating,
+    // leaving the stale draft sendable again. Revalidate with the SAME
+    // signal the engine entry itself checks (resolveAgreedPriceForCall)
+    // instead. Its tri-state return also tells a READ ERROR apart from a
+    // genuine "no agreed price" (codex #4815 r3 P1) — a bare null used to
+    // mean both, and a transient DB blip would have deleted the durable
+    // block AND the retry marker on nothing more than that blip.
+    revalidate: async (row) => {
+      const stillAgreedPrice = await resolveAgreedPriceForCall(row.id);
+      if (stillAgreedPrice.status === 'error') return { verdict: 'defer' };
+      if (stillAgreedPrice.status === 'none') {
+        return { verdict: 'requalified', note: 'no agreed price on the current extraction' };
+      }
+      return { verdict: 'stands' };
+    },
+  },
+  {
+    type: 'identity_conflict',
+    matches: (reason) => String(reason).startsWith('email_'),
+    // CONCLUSIVE clean only (codex P0, PR #3304 GH r8f): buildCallContext
+    // RETURNS error objects for lookup failures rather than throwing, so a
+    // transient one (customer_lookup_unavailable, no_usable_transcript)
+    // must not read as "conflict cleared" — that would discard the only
+    // durable retry for a conflict never disproved. Only an explicitly
+    // RE-OBSERVED conflict (codex P1, generation-rework GH round) may
+    // replay the forced invalidation; every other unresolved failure
+    // defers — the queue entry keeps every creator and public guard
+    // failing closed until a sweep can actually re-verify.
+    revalidate: async (row) => {
+      const freshContext = await buildCallContext(row.id).catch(() => null);
+      if (freshContext && !freshContext.error) {
+        return { verdict: 'requalified', note: 'the identity conflict cleared' };
+      }
+      const reObserved = ['email_matches_existing_customer', 'email_identity_conflict']
+        .includes(freshContext?.error);
+      return reObserved ? { verdict: 'stands' } : { verdict: 'defer' };
+    },
+  },
+  {
+    type: 'rejection',
+    matches: () => true, // every remaining reason: spam/voicemail/no_attribution
+    // The LIVE pipeline verdict only (codex P1, PR #3304 GH r9): the queued
+    // markers are this sweep's own artifacts, so counting them as proof
+    // made the re-qualification cleanup unreachable — the sweep would
+    // replay an obsolete rejection forever and keep drafting and delivery
+    // blocked.
+    revalidate: async (row, pending) => {
+      const { callRejectedForDrafting } = require('../admin-estimate-persistence');
+      const stillRejected = await callRejectedForDrafting(db, row.id, { ignoreQueuedMarkers: true });
+      return stillRejected
+        ? { verdict: 'stands' }
+        : { verdict: 'requalified', note: `the call was re-qualified (${pending.reason})` };
+    },
+  },
+];
+
+function quarantineRevalidatorFor(reason) {
+  return QUARANTINE_REVALIDATORS.find((entry) => entry.matches(reason));
+}
+
 async function sweepPendingQuarantines({ limit = 50 } = {}) {
   let rows = [];
   try {
@@ -1262,9 +1380,7 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     // P0, PR #3304 GH r8e): a later reprocessing pass can legitimately
     // re-qualify the call, and replaying the stale reason would archive
     // every current draft — including the valid replacement — and then
-    // clear the queue. Defer while a pass is running; for a rejection,
-    // require the call to still be rejected; for an identity conflict,
-    // require the context to still report one.
+    // clear the queue.
     const live = await db('call_log').where({ id: row.id })
       .first('processing_token', 'processing_status', 'metadata', 'extraction_attempts', 'created_at', 'processing_generation');
     if (!live) continue;
@@ -1277,98 +1393,29 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
       const { callReprocessInFlight } = require('../admin-estimate-persistence');
       if (callReprocessInFlight(live)) continue;
     }
-    const identityConflict = String(pending.reason).startsWith('email_');
-    // codex #4815 r2 P1: a queued price_agreed_on_call marker has NO
-    // vocabulary in callRejectedForDrafting (it only understands
-    // spam/voicemail/no_attribution/identity-conflict verdicts) — falling
-    // into the rejection branch below read every such marker as
-    // "re-qualified" on the very next sweep and dropped the block WITHOUT
-    // re-invalidating, leaving the stale draft sendable again. Revalidate
-    // with the SAME signal the engine entry itself checks
-    // (resolveAgreedPriceForCall) instead: the call still carries an agreed
-    // price ⇒ the verdict stands and replays below; a later pass corrected
-    // the extraction (no agreed price anymore) ⇒ genuinely re-qualified,
-    // same cleanup as the rejection branch.
-    const isAgreedPrice = pending.reason === 'price_agreed_on_call';
-    if (isAgreedPrice) {
-      const stillAgreedPrice = await resolveAgreedPriceForCall(row.id);
-      // codex #4815 r3 P1: a READ ERROR is NOT proof the call no longer
-      // carries an agreed price — resolveAgreedPriceForCall's tri-state
-      // return lets this drainer tell the two apart. A bare null used to
-      // mean both, and a transient DB blip would delete the durable block
-      // AND the retry marker on nothing more than that blip, exposing the
-      // stale draft with nothing left to catch it. Leave BOTH markers
-      // completely untouched on error; the next sweep re-checks.
-      if (stillAgreedPrice.status === 'error') continue;
-      if (stillAgreedPrice.status === 'none') {
-        await clearDraftBlockOnCall(row.id, {
-          notNewerThan: String(pending.at || new Date().toISOString()),
-          generation: live.processing_generation != null ? Number(live.processing_generation) : null,
-        });
-        await clearQuarantineMarker(row.id, pending);
-        logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — no agreed price on the current extraction`);
-        continue;
-      }
-      // status === 'agreed' falls through to the replay below.
-    } else if (!identityConflict) {
-      const { callRejectedForDrafting } = require('../admin-estimate-persistence');
-      // The LIVE pipeline verdict only (codex P1, PR #3304 GH r9): the
-      // queued markers are this sweep's own artifacts, so counting them
-      // as proof made the re-qualification cleanup unreachable — the
-      // sweep would replay an obsolete rejection forever and keep
-      // drafting and delivery blocked.
-      const stillRejected = await callRejectedForDrafting(db, row.id, { ignoreQueuedMarkers: true });
-      if (!stillRejected) {
-        // The re-qualified call must lose BOTH markers (pre-push P1, PR
-        // #3304): the rejection's invalidateDraftForCall also stamped
-        // estimator_draft_block, which every draft creator and public-
-        // estimate guard honors — clearing only the queue left a now-valid
-        // estimate suppressed forever when reprocessing took the
-        // reconcile-only path and no drafting pass ever ran the clean-
-        // context clear. Same generation-aware clear as the identity
-        // branch below; a NEWER generation-stamped marker survives.
-        await clearDraftBlockOnCall(row.id, {
-          notNewerThan: String(pending.at || new Date().toISOString()),
-          generation: live.processing_generation != null ? Number(live.processing_generation) : null,
-        });
-        await clearQuarantineMarker(row.id, pending);
-        logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the call was re-qualified (${pending.reason})`);
-        continue;
-      }
-    } else {
-      const freshContext = await buildCallContext(row.id).catch(() => null);
-      // CONCLUSIVE clean only (codex P0, PR #3304 GH r8f): buildCallContext
-      // RETURNS error objects for lookup failures rather than throwing, so
-      // `customer_lookup_unavailable` would otherwise read as "conflict
-      // cleared" and discard the only durable retry for a conflict that
-      // was never disproved.
-      if (freshContext && !freshContext.error) {
-        // The call is SETTLED (the in-flight check above deferred
-        // otherwise) and the verdict re-verified clean — clearing with the
-        // call's LIVE generation retires every marker (marker generations
-        // never exceed the call's), while the timestamp still fences any
-        // generation-less legacy marker.
-        await clearDraftBlockOnCall(row.id, {
-          notNewerThan: String(pending.at || new Date().toISOString()),
-          generation: live.processing_generation != null ? Number(live.processing_generation) : null,
-        });
-        await clearQuarantineMarker(row.id, pending);
-        logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the identity conflict cleared`);
-        continue;
-      }
-      // Only an explicitly RE-OBSERVED conflict may replay the forced
-      // invalidation (codex P1, PR #3304 — generation-rework GH round): a
-      // transient context failure (customer_lookup_unavailable,
-      // no_usable_transcript, a thrown build) proves nothing about the
-      // conflict, and replaying the OBSOLETE queued verdict would archive
-      // every current draft — including a valid replacement a newer pass
-      // composed after re-qualifying the call. DEFER instead: the queue
-      // entry itself keeps every creator and public guard failing closed
-      // ('call_quarantine_pending') until a sweep can actually re-verify.
-      const reObserved = ['email_matches_existing_customer', 'email_identity_conflict']
-        .includes(freshContext?.error);
-      if (!reObserved) continue;
+    const revalidator = quarantineRevalidatorFor(pending.reason);
+    const identityConflict = revalidator.type === 'identity_conflict';
+    const isAgreedPrice = revalidator.type === 'price_agreed';
+    const { verdict, note } = await revalidator.revalidate(row, pending);
+    if (verdict === 'defer') continue;
+    if (verdict === 'requalified') {
+      // The re-qualified call must lose BOTH markers (pre-push P1, PR
+      // #3304): the verdict's invalidateDraftForCall also stamped
+      // estimator_draft_block, which every draft creator and public-
+      // estimate guard honors — clearing only the queue left a now-valid
+      // estimate suppressed forever. Clearing with the call's LIVE
+      // generation retires every marker (marker generations never exceed
+      // the call's), while the timestamp still fences any generation-less
+      // legacy marker.
+      await clearDraftBlockOnCall(row.id, {
+        notNewerThan: String(pending.at || new Date().toISOString()),
+        generation: live.processing_generation != null ? Number(live.processing_generation) : null,
+      });
+      await clearQuarantineMarker(row.id, pending);
+      logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — ${note}`);
+      continue;
     }
+    // verdict === 'stands': the original verdict still holds — replay it.
     const outcome = await invalidateDraftForCall(row.id, {
       reason: pending.reason,
       identityConflict,
@@ -1436,7 +1483,14 @@ const TERMINAL_ESTIMATE_STATUSES = ['accepted', 'declined', 'expired'];
 // expired draft — see invalidateDraftForCall's `scope` option below. The
 // identity-conflict and spam/voicemail callers pass nothing and keep
 // touching every row, unchanged.
-async function strictExistingDraftForCall(callLogId, { excludeTerminal = false } = {}) {
+// excludeBookingLinked (codex #4815 r5 P2): scopes the SCAN to rows with no
+// estimate_data.scheduled_service_id — the exact stamp linkEstimateToBooking
+// writes for the assessment-booking exception. Same rationale as
+// excludeTerminal: this is the price-agreed cleanup's own scope, and a row
+// already earning a live booking's exception is not a stale draft to
+// archive. Identity-conflict and spam/voicemail callers pass nothing and
+// keep touching every row, unchanged.
+async function strictExistingDraftForCall(callLogId, { excludeTerminal = false, excludeBookingLinked = false } = {}) {
   let q = db('estimates')
     .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(callLogId)])
     // ARCHIVED rows included (codex P0, PR #3304 GH r8c): an
@@ -1447,6 +1501,7 @@ async function strictExistingDraftForCall(callLogId, { excludeTerminal = false }
     // (`fresh.archived_at || new Date()`), so marking one is safe.
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''");
   if (excludeTerminal) q = q.whereNotIn('status', TERMINAL_ESTIMATE_STATUSES);
+  if (excludeBookingLinked) q = q.whereRaw("estimate_data ->> 'scheduled_service_id' IS NULL");
   // EVERY row, oldest first — a deterministic order for the per-row
   // locks taken below.
   return q.orderBy('created_at', 'asc').select('id', 'status', 'estimate_data');
@@ -1681,10 +1736,6 @@ async function maybeDraftEstimateForCall({
         if (unitLineOverride) sa.street_line_2 = String(unitLineOverride);
       }
     }
-    // A CONCLUSIVELY clean context retires the call-side conflict verdict.
-    if (!dryRun && context && !context.error) {
-      await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration });
-    }
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];
@@ -1883,7 +1934,31 @@ async function maybeDraftEstimateForCall({
     }
     return result;
   }
-  return runDraftPipeline({ context, origin: CALL_ORIGIN, result, dryRun, refreshLookup, quotePromised });
+  const pipelineResult = await runDraftPipeline({
+    context, origin: CALL_ORIGIN, result, dryRun, refreshLookup, quotePromised,
+  });
+  // codex #4815 r5 P1: the call-side conflict verdict (estimator_draft_block
+  // + estimator_quarantine_pending) is retired ONLY once a NEW draft
+  // actually replaces whatever it was blocking — never merely because this
+  // pass observed a clean context. The former eager clear (fired the moment
+  // buildCallContext came back clean, before existingDraftForCall even ran)
+  // let the price-agreed assessment exception silently erase a queued
+  // price_agreed_on_call retry the instant the composer started: the
+  // existing-draft branch above returns the SAME unpriced-agreement draft
+  // untouched, with nothing new to justify lifting the block. A pass that
+  // reuses an existing draft (the several `return result` above, before this
+  // point) never reaches here and never clears; only pipelineResult.created
+  // does. This also fails closed for a clean context whose pipeline still
+  // lands RED with nothing drafted (e.g. pricing failed) — the prior verdict
+  // stays in place for another pass to resolve, which is the same
+  // conservative direction the block already takes everywhere else.
+  if (!dryRun && pipelineResult.created === true) {
+    await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration })
+      .catch((clearErr) => {
+        logger.warn(`[estimator-engine] draft-block clear skipped after a fresh draft for call ${callLogId}: ${clearErr.message}`);
+      });
+  }
+  return pipelineResult;
 }
 
 /**

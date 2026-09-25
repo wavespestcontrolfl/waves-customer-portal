@@ -1,19 +1,32 @@
 /**
- * codex #4815 r3 P1: pushCallToRetryLaneAfterQuarantineFailure
+ * codex #4815 r3 P1 (r5 P1: routed through the bounded extraction-failure
+ * accounting): pushCallToRetryLaneAfterQuarantineFailure
  * (call-recording-processor.js) — the shared last-resort fallback when a
  * durable quarantine-retry queue write (markQuarantinePending) itself
  * fails to land. Previously the identity-conflict quarantine catch had its
  * own inline copy of this fallback, and both NEW price_agreed_on_call call
  * sites ignored markQuarantinePending's boolean entirely — a false left
  * the call finalized as 'processed' with neither the block nor a queued
- * retry. Now all three sites share this one function.
+ * retry. r5: a bare processing_status write never advanced
+ * extraction_attempts, so processAllPending retried the call every 10
+ * minutes forever instead of stopping at CALL_EXTRACTION_MAX_ATTEMPTS, with
+ * no exhausted-retry card ever filed — this now increments the SAME
+ * counter and files the SAME triage card the ordinary extraction_failed
+ * path uses. The live-owner mode this file used to also cover was retired
+ * in r5: the pre-finalization price-agreed call site now defers its durable
+ * queue write into the finalization transaction itself and never reaches
+ * this fallback.
  *
- * Drives the real function against a minimal call_log query mock.
- * Fixtures fictitious (call-1); no real customer data.
+ * Drives the real function against a minimal call_log/triage_items query
+ * mock. Fixtures fictitious (call-1); no real customer data.
  */
 
+const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
+
 let mockUpdateResult = 1;
+let mockAttemptsAfterWrite = 1;
 const mockCalls = [];
+const triageInserts = [];
 
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
@@ -21,12 +34,26 @@ jest.mock('../models/db', () => {
     for (const m of ['where', 'whereNull']) {
       b[m] = (...a) => { b._wheres.push([m, ...a]); return b; };
     }
-    b.update = async (row) => {
+    b.update = (row) => {
       mockCalls.push({ table, wheres: b._wheres.slice(), row });
-      return mockUpdateResult;
+      return {
+        returning: () => Promise.resolve(
+          mockUpdateResult ? [{ extraction_attempts: mockAttemptsAfterWrite }] : [],
+        ),
+        then: (resolve, reject) => Promise.resolve(mockUpdateResult).then(resolve, reject),
+      };
     };
+    b.insert = (row) => ({
+      onConflict: () => ({
+        ignore: () => {
+          triageInserts.push({ table, row });
+          return Promise.resolve();
+        },
+      }),
+    });
     return b;
   });
+  db.raw = jest.fn((sql) => ({ __raw: sql }));
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -46,11 +73,13 @@ const CALL = { id: 'call-1', twilio_call_sid: 'CA-fallback-1' };
 beforeEach(() => {
   jest.clearAllMocks();
   mockCalls.length = 0;
+  triageInserts.length = 0;
   mockUpdateResult = 1;
+  mockAttemptsAfterWrite = 1;
 });
 
 describe('pushCallToRetryLaneAfterQuarantineFailure', () => {
-  test('pushes the call to extraction_failed, fenced on processing_token IS NULL and the SAME generation', async () => {
+  test('pushes the call to extraction_failed, fenced on processing_token IS NULL and the SAME generation, and increments extraction_attempts', async () => {
     await pushCallToRetryLaneAfterQuarantineFailure({
       call: CALL, callSid: CALL.twilio_call_sid, procGeneration: 7, reason: 'price_agreed_on_call',
     });
@@ -58,25 +87,11 @@ describe('pushCallToRetryLaneAfterQuarantineFailure', () => {
     expect(mockCalls).toHaveLength(1);
     const write = mockCalls[0];
     expect(write.table).toBe('call_log');
-    expect(write.row).toMatchObject({ processing_status: 'extraction_failed' });
+    expect(write.row).toMatchObject({ processing_status: 'extraction_failed', extraction_attempts: { __raw: 'COALESCE(extraction_attempts, 0) + 1' } });
     expect(write.wheres).toContainEqual(['where', { id: 'call-1' }]);
     expect(write.wheres).toContainEqual(['whereNull', 'processing_token']);
     expect(write.wheres).toContainEqual(['where', 'processing_generation', 7]);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('pushed to the retry lane'));
-  });
-
-  test('liveOwner mode (codex #4815 r4 P1) fences on THIS pass\'s own token, never IS NULL, and never clears the token', async () => {
-    await pushCallToRetryLaneAfterQuarantineFailure({
-      call: CALL, callSid: CALL.twilio_call_sid, procToken: 'tok-live', procGeneration: 7,
-      reason: 'price_agreed_on_call', mode: 'liveOwner',
-    });
-
-    const write = mockCalls[0];
-    expect(write.wheres).toContainEqual(['where', 'processing_token', 'tok-live']);
-    expect(write.wheres.some(([m]) => m === 'whereNull')).toBe(false);
-    expect(write.wheres).toContainEqual(['where', 'processing_generation', 7]);
-    expect(write.row).toEqual({ processing_status: 'extraction_failed', updated_at: expect.any(Date) });
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('pushed to the retry lane'));
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('pushed to the bounded retry lane'));
   });
 
   test('with no generation, the write is NOT generation-fenced (legacy shape)', async () => {
@@ -88,7 +103,7 @@ describe('pushCallToRetryLaneAfterQuarantineFailure', () => {
     expect(write.wheres.some(([m, col]) => m === 'where' && col === 'processing_generation')).toBe(false);
   });
 
-  test('a 0-row write (a newer pass owns the call) logs info, not error — this is a verdict, not a failure', async () => {
+  test('a 0-row write (a newer pass owns the call) logs info, not error, and files no triage card — this is a verdict, not a failure', async () => {
     mockUpdateResult = 0;
 
     await pushCallToRetryLaneAfterQuarantineFailure({
@@ -97,6 +112,7 @@ describe('pushCallToRetryLaneAfterQuarantineFailure', () => {
 
     expect(logger.error).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('a newer pass owns the call'));
+    expect(triageInserts).toHaveLength(0);
   });
 
   test('a thrown write is caught and logged, never propagated', async () => {
@@ -114,5 +130,30 @@ describe('pushCallToRetryLaneAfterQuarantineFailure', () => {
       call: CALL, callSid: CALL.twilio_call_sid, procGeneration: 7, reason: 'email_identity_conflict',
     });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('email_identity_conflict'));
+  });
+
+  test('below CALL_EXTRACTION_MAX_ATTEMPTS, no exhausted-retry triage card files — the sweep still has budget left', async () => {
+    mockAttemptsAfterWrite = Math.max(1, CALL_EXTRACTION_MAX_ATTEMPTS - 1);
+
+    await pushCallToRetryLaneAfterQuarantineFailure({
+      call: CALL, callSid: CALL.twilio_call_sid, procGeneration: 7, reason: 'price_agreed_on_call',
+    });
+
+    expect(triageInserts).toHaveLength(0);
+  });
+
+  test('at CALL_EXTRACTION_MAX_ATTEMPTS, files the SAME exhausted-retry triage card the ordinary extraction_failed path uses — this is the bounded accounting the r4 finalStatus flip skipped entirely', async () => {
+    mockAttemptsAfterWrite = CALL_EXTRACTION_MAX_ATTEMPTS;
+
+    await pushCallToRetryLaneAfterQuarantineFailure({
+      call: CALL, callSid: CALL.twilio_call_sid, procGeneration: 7, reason: 'price_agreed_on_call',
+    });
+
+    expect(triageInserts).toHaveLength(1);
+    expect(triageInserts[0].table).toBe('triage_items');
+    expect(triageInserts[0].row).toMatchObject({
+      call_log_id: 'call-1',
+      reason_code: 'extraction_failed_permanent',
+    });
   });
 });

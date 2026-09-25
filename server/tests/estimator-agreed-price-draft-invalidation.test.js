@@ -247,3 +247,73 @@ describe('invalidateDraftForCall(reason: price_agreed_on_call, scope: nontermina
     expect(mockUpdates.estimates).toHaveLength(0);
   });
 });
+
+// codex #4815 r5 P2: 'nonterminal_drafts' must ALSO exclude a row already
+// linked to a live booking via estimate_data.scheduled_service_id — the
+// assessment pre-draft exception's own stamp (linkEstimateToBooking). A
+// force-reprocess otherwise archived a PRIOR pass's valid assessment draft
+// on every replay, because this scope only ever filtered on estimate
+// STATUS, never on booking linkage.
+describe('invalidateDraftForCall(reason: price_agreed_on_call, scope: nonterminal_drafts) — booking-linked exclusion', () => {
+  test('a draft already linked to a booking (scheduled_service_id) is left COMPLETELY untouched', async () => {
+    const originalEstimateData = {
+      estimatorEngine: { callLogId: 'call-1', lane: 'yellow' },
+      scheduled_service_id: 'svc-9',
+    };
+    mockEstimateRow = draftRow({ status: 'draft', estimate_data: JSON.stringify(originalEstimateData) });
+
+    const out = await invalidateDraftForCall('call-1', {
+      reason: 'price_agreed_on_call',
+      scope: 'nonterminal_drafts',
+      ownershipFence: { callLogId: 'call-1', procToken: 'tok-a', procGeneration: 5 },
+    });
+
+    // Nothing archived — the assessment booking's own quote stands.
+    expect(out).toMatchObject({ ok: true, invalidated: false });
+    expect(mockUpdates.estimates).toHaveLength(0);
+    expect(mockUpdates.leads).toHaveLength(0);
+    // The call-level block still lands, same as the terminal-row exclusion
+    // above — only the linked estimate row itself is protected.
+    expect(mockUpdates.call_log.some((u) => typeof u.metadata === 'string' && u.metadata.includes('estimator_draft_block'))).toBe(true);
+  });
+
+  test('a booking-predraft linkage that lands between the scan and the per-row lock is re-checked and still refused (defense in depth)', async () => {
+    // Same shape as the concurrent-accept race above: the per-row locked
+    // read (.forUpdate().first(), mocked to the same live row) observes
+    // the linkage even though a bare initial scan would not have excluded
+    // it yet.
+    mockEstimateRow = draftRow({
+      status: 'draft',
+      estimate_data: JSON.stringify({
+        estimatorEngine: { callLogId: 'call-1', lane: 'yellow' },
+        scheduled_service_id: 'svc-9',
+      }),
+    });
+
+    const out = await invalidateDraftForCall('call-1', {
+      reason: 'price_agreed_on_call',
+      scope: 'nonterminal_drafts',
+      ownershipFence: { callLogId: 'call-1', procToken: 'tok-a', procGeneration: 5 },
+    });
+
+    expect(out).toMatchObject({ ok: true, invalidated: false });
+    expect(mockUpdates.estimates).toHaveLength(0);
+  });
+
+  test('an UNSCOPED caller (identity conflict / rejection) still archives a booking-linked row — the exclusion is price-agreed-only', async () => {
+    const originalEstimateData = {
+      estimatorEngine: { callLogId: 'call-1', lane: 'yellow' },
+      scheduled_service_id: 'svc-9',
+    };
+    mockEstimateRow = draftRow({ status: 'draft', estimate_data: JSON.stringify(originalEstimateData) });
+
+    const out = await invalidateDraftForCall('call-1', {
+      reason: 'email_identity_conflict',
+      identityConflict: true,
+      ownershipFence: { callLogId: 'call-1', procToken: 'tok-a', procGeneration: 5 },
+    });
+
+    expect(out).toMatchObject({ ok: true, invalidated: true });
+    expect(mockUpdates.estimates).toHaveLength(1);
+  });
+});

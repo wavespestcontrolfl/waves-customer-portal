@@ -169,7 +169,27 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
         ownerProcToken: passToken || null,
         ownerProcGeneration: passGeneration ?? null,
       });
-      if (outcome?.estimateId) {
+      // codex #4815 r5 P1: a NEWLY created draft is always this pass's own
+      // — safe to link and report as the assessment exception. A RECOVERED
+      // existing draft (outcome.created === false, e.g. a replayed
+      // pre-draft re-finding what it drafted last time) only counts as the
+      // SAME exception when it is already linked to THIS booking —
+      // existingDraftForCall inside the engine returns whatever draft
+      // currently sits open for the CALL, not this booking specifically,
+      // so an untouched pre-existing draft (e.g. one an upstream
+      // agreed-price invalidation failed to archive) must never be
+      // reported, linked, or treated as a valid exception — that would
+      // both wrongly attach a stale/wrong-priced draft to this booking and
+      // tell the post-finalization price-agreed sweep to stand down.
+      let exceptionEstimateId = outcome?.created === true ? outcome.estimateId : null;
+      if (!exceptionEstimateId && outcome?.estimateId) {
+        const alreadyLinked = await db('estimates')
+          .where({ id: outcome.estimateId })
+          .whereRaw("estimate_data ->> 'scheduled_service_id' = ?", [String(booking.id)])
+          .first('id');
+        if (alreadyLinked) exceptionEstimateId = outcome.estimateId;
+      }
+      if (exceptionEstimateId) {
         // The engine stamps its call linkage but not the booking's — merge
         // scheduled_service_id so the draft gets the exact schedule badge
         // and the booking-link collision guard sees it (existing linkage,
@@ -180,13 +200,13 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
         // linked. The draft deliberately stands either way — the quote was
         // promised on the CALL, and cancelling the visit does not cancel
         // the caller's pricing request.
-        await linkEstimateToBooking(outcome.estimateId, booking.id);
+        await linkEstimateToBooking(exceptionEstimateId, booking.id);
       }
       return {
         drafted: outcome?.created === true,
         delegated: 'call_engine',
         lane: outcome?.lane,
-        estimateId: outcome?.estimateId,
+        estimateId: exceptionEstimateId,
       };
     }
 

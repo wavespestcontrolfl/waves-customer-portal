@@ -1852,55 +1852,40 @@ async function bookingPreDraftAssessmentDrafted(bookingPreDraftPromise) {
   }
 }
 
-// codex #4815 r3 P1 (live-owner mode added r4 P1): shared last-resort
-// fallback when a durable quarantine-retry queue write (markQuarantinePending)
-// itself fails to land — reused by the identity-conflict quarantine catch
-// AND both price_agreed_on_call invalidation call sites, so this fallback
-// lives in exactly one place rather than three near-identical copies
-// drifting apart.
+// codex #4815 r3 P1 (r5 P1: live-owner mode retired — the pre-finalization
+// price-agreed call site now defers its durable-queue write into the
+// finalization transaction itself, so it never reaches this fallback at
+// all; see that transaction): shared last-resort fallback when a durable
+// quarantine-retry queue write (markQuarantinePending) itself fails to
+// land — reused by the identity-conflict quarantine catch and the
+// price-agreed POST-finalization sweep, both DETACHED continuations that
+// run AFTER finalization already cleared processing_token to null.
+// whereNull matches the settled row (or correctly no-ops with "a newer
+// pass owns it" if a peer genuinely reclaimed since).
 //
-// TWO fence modes, because the callers sit on opposite sides of
-// finalization:
-//   - mode: 'settled' (default) — the identity-conflict catch and the
-//     price-agreed POST-finalization sweep are both DETACHED continuations
-//     that typically run AFTER finalization already cleared
-//     processing_token to null; whereNull matches the settled row (or
-//     correctly no-ops with "a newer pass owns it" if a peer genuinely
-//     reclaimed since).
-//   - mode: 'liveOwner' — the price-agreed PRE-finalization (sync) call
-//     site calls this WHILE STILL HOLDING its own claim: finalization has
-//     not run yet, so whereNull would ALWAYS match zero rows here and
-//     silently misreport "a newer pass owns the call" when actually nobody
-//     did — this pass just had the wrong fence (codex #4815 r4 P1: the
-//     exact bug). Fences on processing_token = procToken (own current
-//     claim) instead, and deliberately never touches processing_token
-//     itself — stillOwnsClaim() and every downstream check in this pass
-//     key off that column alone, so leaving it alone means the rest of
-//     this pass's OWN legitimate processing (booking, SMS, lead work) is
-//     completely unaffected. This closes the crash window early: the
-//     caller must ALSO set its local finalStatus so the natural,
-//     already-atomic finalization transaction (which DOES clear
-//     processing_token) commits the SAME retry-eligible status instead of
-//     overwriting this back to 'processed' when it runs — this function
-//     cannot do that itself, since finalStatus is processRecording's own
-//     local variable.
+// Routes through the SAME bounded accounting the ordinary extraction_failed
+// path uses (codex #4815 r5 P1) — increments extraction_attempts and files
+// the exhausted-retry triage card at the cap — rather than a bare status
+// write: a bare write never advanced the retry budget, so processAllPending
+// retried the call every 10 minutes forever instead of stopping at
+// CALL_EXTRACTION_MAX_ATTEMPTS, with no card ever filed once exhausted.
 async function pushCallToRetryLaneAfterQuarantineFailure({
-  call, callSid, procToken = null, procGeneration, reason, mode = 'settled',
+  call, callSid, procGeneration, reason,
 }) {
   try {
-    let lastResortQ = db('call_log').where({ id: call.id });
-    lastResortQ = mode === 'liveOwner'
-      ? lastResortQ.where('processing_token', procToken)
-      : lastResortQ.whereNull('processing_token');
+    let lastResortQ = db('call_log').where({ id: call.id }).whereNull('processing_token');
     if (procGeneration != null) {
       lastResortQ = lastResortQ.where('processing_generation', procGeneration);
     }
-    const pushed = await lastResortQ.update({
+    const pushedRows = await lastResortQ.update({
       processing_status: 'extraction_failed',
+      extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
       updated_at: new Date(),
-    });
-    if (pushed) {
-      logger.error(`[call-proc] quarantine queue write failed for ${maskSid(callSid)} (${reason}) — call pushed to the retry lane`);
+    }).returning(['extraction_attempts']);
+    if (pushedRows.length) {
+      const attempts = Number(pushedRows[0]?.extraction_attempts) || 0;
+      logger.error(`[call-proc] quarantine queue write failed for ${maskSid(callSid)} (${reason}) — call pushed to the bounded retry lane (attempt ${attempts})`);
+      await fileExtractionExhaustedTriage(call.id, attempts, new Error(`durable quarantine queue write failed (${reason})`), callSid);
     } else {
       logger.info(`[call-proc] quarantine retry-lane write skipped for ${maskSid(callSid)} (${reason}) — a newer pass owns the call`);
     }
@@ -13906,6 +13891,13 @@ const CallRecordingProcessor = {
     // draft AFTER this pass's pre-write block stamp but before its own
     // token clears.
     let agreedPriceDraftSweepPending = false;
+    // Set below when the pre-finalization price-agreed invalidation did not
+    // land (codex #4815 r5 P1): the durable retry-queue write for it is
+    // deferred into the finalization transaction itself (the db.transaction
+    // a few thousand lines down that clears processing_token) rather than
+    // attempted here, non-transactionally, with its own cascade of
+    // fallbacks — see that transaction for why.
+    let pendingQuarantineMarker = null;
     // Set below, by the booking-triggered pre-draft hook, ONLY when
     // GATE_ESTIMATOR_BOOKING_PREDRAFTS is on for THIS call (codex #4815 r2
     // P2): the price-agreed sweep chains onto this SAME settled promise
@@ -14007,47 +13999,28 @@ const CallRecordingProcessor = {
             ownershipFence: { callLogId: call.id, procToken, procGeneration },
           });
           if (!invalidation.ok) {
-            // Durable retry (codex #4815 r2 P1): a log line alone left the
-            // call finalized with no block and no queued retry if BOTH this
-            // pass and the post-finalization sweep below hit a transient DB
-            // outage — the stale draft would stay sendable until the next
-            // reprocess happens to notice. sweepPendingQuarantines now
-            // understands this reason (re-derives the agreed price via
-            // resolveAgreedPriceForCall before replaying, exactly like the
-            // engine entry itself) instead of misreading it as a spam/
-            // voicemail/identity verdict and dropping it as re-qualified.
-            logger.warn(`[call-proc] price-agreed draft invalidation did not land for ${maskSid(callSid)} — queuing a durable retry`);
-            const { markQuarantinePending } = require('./estimator-engine');
-            const queued = await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });
-            if (!queued) {
-              // codex #4815 r3 P1: markQuarantinePending's own boolean was
-              // previously ignored here — a false left the call finalized
-              // with NEITHER the block (which invalidation.ok:false already
-              // means never landed) NOR a queued retry.
-              //
-              // LIVE-OWNER mode (codex #4815 r4 P1): unlike the identity-
-              // conflict catch (a detached continuation that runs AFTER
-              // finalization), THIS call site is still mid-pass — this
-              // pass still holds procToken, finalization hasn't run yet.
-              // The settled-mode (whereNull) fence would always match zero
-              // rows here and silently claim "a newer pass owns the call"
-              // when nobody did. Fence on our OWN current token instead
-              // (never touching processing_token, so the rest of this
-              // pass's own processing is unaffected), AND flip finalStatus
-              // so the natural finalization transaction below — which DOES
-              // atomically clear processing_token — commits the SAME
-              // retry-eligible status instead of silently overwriting this
-              // back to 'processed'. Without both halves, a worker restart
-              // anywhere between here and that natural finalize (or between
-              // finalize and the detached post-finalization sweep, which is
-              // purely in-memory and lost on restart) left the call cleanly
-              // 'processed' with NEITHER the block nor a queued retry —
-              // nothing left to ever revisit it.
-              await pushCallToRetryLaneAfterQuarantineFailure({
-                call, callSid, procToken, procGeneration, reason: 'price_agreed_on_call', mode: 'liveOwner',
-              });
-              finalStatus = 'extraction_failed';
-            }
+            // codex #4815 r5 P1: the durable queue write used to be
+            // attempted HERE, non-transactionally, with its own fallback
+            // ladder (a live-owner retry-lane push, then a parallel
+            // finalStatus='extraction_failed' flip) when it ALSO failed.
+            // That parallel transition wrote through NORMAL finalization —
+            // never touched extraction_attempts, returned success:true —
+            // so processAllPending retried the call every 10 minutes
+            // forever instead of stopping at CALL_EXTRACTION_MAX_ATTEMPTS,
+            // and no exhausted-retry card ever filed. Deferred instead: the
+            // finalization transaction below (the db.transaction a few
+            // thousand lines down that clears processing_token) writes
+            // this SAME marker atomically with the terminal status. Either
+            // both the status and the marker commit, or neither does — a
+            // marker write failure there throws, the transaction rolls
+            // back (a stale claim the normal reclaim picks up), and the
+            // ALREADY-ESTABLISHED extraction_failed path in the outer
+            // catch takes over: it increments extraction_attempts, files
+            // the exhausted-retry card at the cap, and reports
+            // success:false — the one bounded-retry accounting this call
+            // needs, not a second one built beside it.
+            logger.warn(`[call-proc] price-agreed draft invalidation did not land for ${maskSid(callSid)} — the finalization transaction will queue the durable retry`);
+            pendingQuarantineMarker = { reason: 'price_agreed_on_call', procGeneration };
           } else {
             // Retire the earlier engine run's "draft ready" bell — or the
             // deduped generic quote-promised bell it upgraded in place —
@@ -14066,6 +14039,9 @@ const CallRecordingProcessor = {
           }
         } catch (invalidateErr) {
           logger.warn(`[call-proc] price-agreed draft invalidation threw for ${maskSid(callSid)}: ${invalidateErr.message}`);
+          // A thrown invalidation attempt landed nothing either — same
+          // durable-retry need as an explicit invalidation.ok:false above.
+          pendingQuarantineMarker = { reason: 'price_agreed_on_call', procGeneration };
         }
         agreedPriceDraftSweepPending = true;
       }
@@ -14084,10 +14060,7 @@ const CallRecordingProcessor = {
     // clean 'processed' with no lead and nothing for a human to look at.
     // Same flag and lane: the lead this call needed is not available.
     if ((workableUnnamedLead || sameCallOwnershipRejected) && !leadId) {
-      // An earlier live-owner retry-lane push (price_agreed_on_call, codex
-      // #4815 r4 P1) keeps the call retry-eligible — the retry re-runs lead
-      // creation too; the triage card below still surfaces it now.
-      if (finalStatus !== 'extraction_failed') finalStatus = 'lead_creation_failed';
+      finalStatus = 'lead_creation_failed';
       logger.error(`[call-proc] Customer-less recovery lead did not persist for ${callSid} — flagged lead_creation_failed`);
       try {
         const failTriageItem = buildTriageItem({
@@ -18138,6 +18111,24 @@ const CallRecordingProcessor = {
           ),
           updated_at: new Date(),
         });
+      // codex #4815 r5 P1: the durable price-agreed quarantine-retry
+      // marker commits ATOMICALLY with the terminal status it protects —
+      // either both land or neither does. Fenced on `written > 0`: if this
+      // pass lost ownership of the row, the marker is not this pass's to
+      // write either — a peer's own pass owns the call now. A write
+      // failure here THROWS (markQuarantinePending's trx form) and rolls
+      // the whole transaction back, so the call stays claimed and falls
+      // through to the outer extraction_failed catch below — the one
+      // bounded-retry accounting (extraction_attempts increment,
+      // exhausted-retry triage card) this failure needs, not a parallel
+      // one built beside it.
+      if (written > 0 && pendingQuarantineMarker) {
+        const { markQuarantinePending } = require('./estimator-engine');
+        await markQuarantinePending(call.id, pendingQuarantineMarker.reason, {
+          procGeneration: pendingQuarantineMarker.procGeneration,
+          trx,
+        });
+      }
       // The customer_creation_failed card rides the SAME transaction as the
       // status it describes: filed after finalization it could outlive the
       // pass — a force reprocess repairing the call while the insert was
@@ -18537,9 +18528,14 @@ const CallRecordingProcessor = {
             const { markQuarantinePending } = require('./estimator-engine');
             const queued = await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });
             if (!queued) {
-              // codex #4815 r3 P1: same last-resort fallback as the
-              // pre-write pass — a false here previously left the call
-              // processed with no block and no queued retry at all.
+              // codex #4815 r3 P1 (r5 P1: now routes through the bounded
+              // extraction-failure accounting): this sweep runs DETACHED,
+              // after finalization already cleared processing_token — the
+              // pre-write pass's own failure instead defers its marker
+              // write into the finalization transaction (see there), so it
+              // never reaches this fallback. A false here previously left
+              // the call processed with no block and no queued retry at
+              // all.
               await pushCallToRetryLaneAfterQuarantineFailure({
                 call, callSid, procGeneration, reason: 'price_agreed_on_call',
               });

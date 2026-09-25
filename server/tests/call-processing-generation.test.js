@@ -1112,13 +1112,17 @@ describe('completePendingInvalidation — forced verdicts vs a newer generation'
     const source = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
     const fnAt = source.indexOf('async function markQuarantinePending');
     expect(fnAt).toBeGreaterThan(-1);
-    expect(source.indexOf('{ procGeneration = null } = {}', fnAt)).toBeGreaterThan(fnAt);
+    // codex #4815 r5 P1: `trx` joined the options bag so the finalization
+    // transaction can write this marker atomically with the terminal
+    // status it protects (either both commit or neither does).
+    expect(source.indexOf('{ procGeneration = null, trx = null } = {}', fnAt)).toBeGreaterThan(fnAt);
     const stampAt = source.indexOf('generation: Number(procGeneration)', fnAt);
     expect(stampAt).toBeGreaterThan(fnAt);
-    // Every processor call site forwards the pass generation (2 original
-    // spam/voicemail sites + 2 added by codex #4815 r2 P1 for the
-    // price_agreed_on_call durable retry — pre-write pass and the
-    // post-finalization sweep).
+    // Every processor call site forwards the pass generation: 1 original
+    // spam/voicemail site, 1 identity-conflict quarantine catch, 1 in the
+    // finalization transaction (codex #4815 r5 P1 — the price-agreed
+    // pre-write pass's deferred marker write), 1 in the price-agreed
+    // post-finalization sweep.
     const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const sites = proc.split('markQuarantinePending(call.id').slice(1);
     expect(sites.length).toBe(4);
