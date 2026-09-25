@@ -163,6 +163,26 @@ describe('sweepPendingQuarantines — price_agreed_on_call revalidation (codex #
     expect(mockUpdates.estimates).toHaveLength(0);
   });
 
+  // codex #4815 r3 P1: resolveAgreedPriceForCall used to collapse "no
+  // agreed price" and "the read itself failed" into the same bare null —
+  // this drainer read a transient DB blip as proof the extraction was
+  // corrected and deleted BOTH the durable block and the retry marker,
+  // exposing the stale draft with nothing left to catch it. The tri-state
+  // return lets the drainer tell them apart: an error must leave everything
+  // untouched so the next sweep gets another chance.
+  test('resolveAgreedPriceForCall READ ERROR ⇒ leaves BOTH the block and the queue entry completely untouched (never misread as re-qualified)', async () => {
+    contextBuilderPrivate.extractionFromCall.mockImplementation(() => {
+      throw new Error('transient read failure');
+    });
+
+    const cleared = await sweepPendingQuarantines();
+
+    expect(cleared).toBe(0);
+    // No block clear, no queue clear, no replay attempt — a true no-op.
+    expect(mockUpdates.call_log).toHaveLength(0);
+    expect(mockUpdates.estimates).toHaveLength(0);
+  });
+
   test('regression pin: a queued marker with an agreed price is REPLAYED even though callRejectedForDrafting (spam/voicemail/no_attribution/identity vocabulary only) would answer "not rejected" for it', async () => {
     // Prove the fix is not incidental: independently confirm the real
     // callRejectedForDrafting genuinely has nothing to say about this call

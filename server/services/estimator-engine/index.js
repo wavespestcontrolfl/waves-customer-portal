@@ -1292,7 +1292,15 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     const isAgreedPrice = pending.reason === 'price_agreed_on_call';
     if (isAgreedPrice) {
       const stillAgreedPrice = await resolveAgreedPriceForCall(row.id);
-      if (stillAgreedPrice == null) {
+      // codex #4815 r3 P1: a READ ERROR is NOT proof the call no longer
+      // carries an agreed price — resolveAgreedPriceForCall's tri-state
+      // return lets this drainer tell the two apart. A bare null used to
+      // mean both, and a transient DB blip would delete the durable block
+      // AND the retry marker on nothing more than that blip, exposing the
+      // stale draft with nothing left to catch it. Leave BOTH markers
+      // completely untouched on error; the next sweep re-checks.
+      if (stillAgreedPrice.status === 'error') continue;
+      if (stillAgreedPrice.status === 'none') {
         await clearDraftBlockOnCall(row.id, {
           notNewerThan: String(pending.at || new Date().toISOString()),
           generation: live.processing_generation != null ? Number(live.processing_generation) : null,
@@ -1301,6 +1309,7 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
         logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — no agreed price on the current extraction`);
         continue;
       }
+      // status === 'agreed' falls through to the replay below.
     } else if (!identityConflict) {
       const { callRejectedForDrafting } = require('../admin-estimate-persistence');
       // The LIVE pipeline verdict only (codex P1, PR #3304 GH r9): the
@@ -1454,47 +1463,80 @@ async function strictExistingDraftForCall(callLogId, { excludeTerminal = false }
 // raw transcript, never the unvalidated V1 blob. Either of two independent
 // V2 signals is enough: `service_request.quoted_price_usd` (the schema's
 // own narrower accepted-total-only field — unchanged semantics since V1,
-// per validate-extraction.js's 1.12.0 note), or
-// `service_request.price.accepted === true` (the normalizer has already
-// selected the accepted prices[] entry into `price` at parse time).
+// per validate-extraction.js's 1.12.0 note; never a range — the prompt
+// nulls it out for one), or `service_request.price.accepted === true` (the
+// normalizer has already selected the accepted prices[] entry into `price`
+// at parse time) — amount_usd is the LOW end of a stated range and
+// amount_max_usd the HIGH end, so amountMax rides along whenever the
+// caller accepted a genuine range (codex #4815 r3 P2): the engine still
+// has no single number to draft from either way, but a caller who
+// consumes this for a log/notification must not collapse "$90 to $100
+// agreed" into "$90 agreed".
+//
+// TRI-STATE return (codex #4815 r3 P1): { status: 'agreed', amount,
+// amountMax? } | { status: 'none' } | { status: 'error' }. A bare null
+// used to mean BOTH "genuinely no agreed price" and "the read itself
+// failed" — sweepPendingQuarantines's drainer read a transient DB error
+// the exact same way as a later pass's genuine correction and deleted the
+// durable block + retry marker on nothing more than a blip. The two
+// verdicts are now distinguishable; only 'none' (a SUCCESSFUL read proving
+// no agreed price) may clear anything.
 async function resolveAgreedPriceForCall(callLogId) {
-  if (!callLogId) return null;
+  if (!callLogId) return { status: 'none' };
   // A test double for context-builder (jest.mock) commonly stubs only the
   // public buildCallContext/existingDraftForCall pair, with no _private —
-  // fail open (no agreed-price signal available) rather than throw, same
-  // fail-open contract as the try/catch below.
+  // this is a testing artifact, never a real production state (the real
+  // module always has it), so it resolves the same as "no signal
+  // available" rather than as a read failure.
   const extractionFromCall = contextBuilder._private && contextBuilder._private.extractionFromCall;
-  if (typeof extractionFromCall !== 'function') return null;
+  if (typeof extractionFromCall !== 'function') return { status: 'none' };
   try {
     const call = await db('call_log').where({ id: callLogId })
       .first('ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
-    if (!call) return null;
+    if (!call) return { status: 'none' };
     const { extraction, source } = extractionFromCall(call);
-    if (source !== 'enriched') return null;
+    if (source !== 'enriched') return { status: 'none' };
     const svc = extraction?.service_request;
-    if (!svc) return null;
+    if (!svc) return { status: 'none' };
     if (typeof svc.quoted_price_usd === 'number'
       && Number.isFinite(svc.quoted_price_usd)
       && svc.quoted_price_usd > 0) {
-      return svc.quoted_price_usd;
+      return { status: 'agreed', amount: svc.quoted_price_usd };
     }
     const price = svc.price;
     if (price && price.accepted === true
       && typeof price.amount_usd === 'number'
       && Number.isFinite(price.amount_usd)
       && price.amount_usd > 0) {
-      return price.amount_usd;
+      const agreed = { status: 'agreed', amount: price.amount_usd };
+      if (typeof price.amount_max_usd === 'number'
+        && Number.isFinite(price.amount_max_usd)
+        && price.amount_max_usd > price.amount_usd) {
+        agreed.amountMax = price.amount_max_usd;
+      }
+      return agreed;
     }
-    return null;
+    return { status: 'none' };
   } catch (err) {
-    // Fail OPEN on the pre-check itself — a read failure here must not
-    // silently eat a genuine quote-promised draft; it just loses this one
-    // defensive layer, and the call-recording-processor's own upstream
-    // check (which already skipped calling in for a plain agreed-price
-    // call) still stands.
+    // A READ FAILURE — distinct from a successful read that finds no
+    // agreed price (codex #4815 r3 P1). Callers must never treat this as
+    // proof the call no longer carries an agreed price.
     logger.warn(`[estimator-engine] agreed-price pre-check failed for call ${callLogId}: ${err.message}`);
-    return null;
+    return { status: 'error' };
   }
+}
+
+// One shared formatter, same contract as call-recording-processor.js's
+// formatAgreedPriceLabel (codex #4815 r3 P2) — never collapses an accepted
+// RANGE to its low end in a log line.
+function formatAgreedPriceLabel(agreed) {
+  const amount = agreed?.amount;
+  if (typeof amount !== 'number' || !Number.isFinite(amount)) return '$0.00';
+  const amountMax = agreed?.amountMax;
+  if (typeof amountMax === 'number' && Number.isFinite(amountMax) && amountMax > amount) {
+    return `$${amount.toFixed(2)}–$${amountMax.toFixed(2)}`;
+  }
+  return `$${amount.toFixed(2)}`;
 }
 
 async function maybeDraftEstimateForCall({
@@ -1518,8 +1560,20 @@ async function maybeDraftEstimateForCall({
   // same refusal without having to duplicate the check itself.
   if (quotePromised !== true && !supersedeEstimateId) {
     const agreedPrice = await resolveAgreedPriceForCall(callLogId);
-    if (agreedPrice != null) {
-      logger.info(`[estimator-engine] skipped call ${callLogId} — price agreed on call ($${agreedPrice.toFixed(2)}), skipped:'price_agreed_on_call'`);
+    // Fail OPEN on a READ ERROR here (codex #4815 r3 P1, made explicit):
+    // this check is a BACKSTOP behind the call-recording-processor's own
+    // PRIMARY check — the processor gate is authoritative and already
+    // refused to invoke this function at all for a plain agreed-price call.
+    // A transient read failure at this second layer must not silently eat
+    // a genuine quote-promised draft the processor already correctly
+    // allowed through; it only loses this one defensive layer for this one
+    // call. This is deliberately DIFFERENT from sweepPendingQuarantines's
+    // own use of the same resolver, where an error must NOT be read as
+    // "no agreed price" — there the durable block already stands and the
+    // sweep is choosing whether to clear it, so an error there defers
+    // (leaves it intact) rather than fails open.
+    if (agreedPrice.status === 'agreed') {
+      logger.info(`[estimator-engine] skipped call ${callLogId} — price agreed on call (${formatAgreedPriceLabel(agreedPrice)}), skipped:'price_agreed_on_call'`);
       return { ...result, skipped: 'price_agreed_on_call', reasons: ['price_agreed_on_call'] };
     }
   }
@@ -2867,6 +2921,6 @@ module.exports = {
   notify,
   _private: {
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
-    parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall,
+    parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, formatAgreedPriceLabel,
   },
 };

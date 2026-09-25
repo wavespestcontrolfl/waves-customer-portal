@@ -96,17 +96,24 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(notOkBody).toContain("markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });");
   });
 
-  test('a successful pre-write invalidation retires the prior estimator bell in place, never manufacturing a new one (codex #4815 r2 P2)', () => {
+  test('a failed pre-write invalidation ALSO falls back to the shared retry-lane push when markQuarantinePending itself fails (codex #4815 r3 P1)', () => {
+    const block = priceAgreedSyncBlock();
+    const notOkAt = block.indexOf('if (!invalidation.ok) {');
+    const notOkBody = block.slice(notOkAt, block.indexOf('} else {', notOkAt));
+    expect(notOkBody).toContain('const queued = await markQuarantinePending(');
+    expect(notOkBody).toContain('if (!queued) {');
+    expect(notOkBody).toContain('await pushCallToRetryLaneAfterQuarantineFailure({');
+    expect(notOkBody).toContain("reason: 'price_agreed_on_call',");
+  });
+
+  test('a successful pre-write invalidation delegates bell retirement to the shared helper, passing invalidated + callQuotePromised through (codex #4815 r2 P2, refined r3 P1)', () => {
     const block = priceAgreedSyncBlock();
     const elseAt = block.indexOf('} else {');
     expect(elseAt).toBeGreaterThan(-1);
     const notifyBlock = block.slice(elseAt, block.indexOf('} catch (invalidateErr)', elseAt));
-    expect(notifyBlock).toContain("notify: notifyEstimator } = require('./estimator-engine');");
-    expect(notifyBlock).toContain("title: 'Price agreed on call — draft retired',");
-    expect(notifyBlock).toContain('estimateId: null,');
-    expect(notifyBlock).toContain('quotePromised: false,');
-    expect(notifyBlock).toContain('forceUpdate: true,');
-    expect(notifyBlock).toContain('updateOnly: true,');
+    expect(notifyBlock).toContain('await retirePriceAgreedEstimatorBell({');
+    expect(notifyBlock).toContain('call, callSid, callerName, callAgreedPrice, callQuotePromised,');
+    expect(notifyBlock).toContain('invalidated: invalidation.invalidated === true,');
   });
 
   function priceAgreedSweepBlock() {
@@ -130,27 +137,46 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(block).toContain('ownershipFence: { callLogId: call.id, procToken, procGeneration }');
   });
 
-  test('the sweep queues a durable retry on failure and retires the bell on success, same as the pre-write pass (codex #4815 r2 P1/P2)', () => {
+  test('the sweep falls back to the shared retry-lane push on a failed markQuarantinePending write (codex #4815 r3 P1)', () => {
     const block = priceAgreedSweepBlock();
-    expect(block).toContain("markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });");
-    expect(block).toContain("notify: notifyEstimatorSweep } = require('./estimator-engine');");
-    expect(block).toContain('updateOnly: true,');
+    expect(block).toContain("const queued = await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });");
+    expect(block).toContain('if (!queued) {');
+    expect(block).toContain('await pushCallToRetryLaneAfterQuarantineFailure({');
   });
 
-  // codex #4815 r2 P2: the booking pre-draft hook (quotePromised:true, the
-  // documented assessment exception) can clear this call's same-generation
-  // estimator_draft_block while composing — the sweep must never race it.
-  test('the sweep chains onto the SAME tracked booking-predraft promise (via bookingPreDraftAssessmentDrafted) and stands down when it drafted', () => {
+  test('the sweep delegates bell retirement to the shared helper on success, same contract as the pre-write pass (codex #4815 r2 P2, refined r3 P1)', () => {
     const block = priceAgreedSweepBlock();
-    expect(block).toContain('const assessmentExceptionDrafted = await bookingPreDraftAssessmentDrafted(bookingPreDraftPromise);');
-    expect(block).toContain('if (assessmentExceptionDrafted) {');
-    // The invalidation call must be INSIDE the else (stood-down) branch —
-    // never reached when the exception drafted.
-    const standDownAt = block.indexOf('if (assessmentExceptionDrafted) {');
+    expect(block).toContain('await retirePriceAgreedEstimatorBell({');
+    expect(block).toContain('call, callSid, callerName, callAgreedPrice, callQuotePromised,');
+    expect(block).toContain('invalidated: sweepInvalidation.invalidated === true,');
+  });
+
+  // codex #4815 r3 P2: awaiting bookingPreDraftAssessmentDrafted here
+  // blocked the SEQUENTIAL processAllPending batch on a minutes-long
+  // composer — the sweep must be DETACHED (fire-and-forget, chained with
+  // .then) rather than awaited inline in processRecording, while still
+  // never running before the SAME tracked pre-draft promise settles.
+  test('the sweep chains fire-and-forget (never awaited inline) onto the SAME tracked booking-predraft promise', () => {
+    const block = priceAgreedSweepBlock();
+    expect(block).toContain('void bookingPreDraftAssessmentDrafted(bookingPreDraftPromise).then(async (assessmentExceptionDrafted) => {');
+    // Never a plain inline await of the helper — that was the r2 shape
+    // this P2 fix replaced.
+    expect(block).not.toContain('const assessmentExceptionDrafted = await bookingPreDraftAssessmentDrafted(bookingPreDraftPromise);');
+    // The chain itself must carry a .catch — bookingPreDraftAssessmentDrafted
+    // never rejects, but the fire-and-forget promise still needs one so a
+    // hypothetical throw doesn't become an unhandled rejection.
+    expect(block).toContain('.catch((chainErr) => {');
+  });
+
+  test('within the chained callback, a drafted exception stands the sweep down BEFORE the invalidation call is ever reached', () => {
+    const block = priceAgreedSweepBlock();
+    const thenAt = block.indexOf('.then(async (assessmentExceptionDrafted) => {');
+    expect(thenAt).toBeGreaterThan(-1);
+    const standDownAt = block.indexOf('if (assessmentExceptionDrafted) {', thenAt);
+    const returnAt = block.indexOf('return;', standDownAt);
     const invalidateAt = block.indexOf('invalidateAgreedPriceAgain(call.id', standDownAt);
-    const elseAt = block.indexOf('} else {', standDownAt);
-    expect(elseAt).toBeGreaterThan(standDownAt);
-    expect(invalidateAt).toBeGreaterThan(elseAt);
+    expect(returnAt).toBeGreaterThan(standDownAt);
+    expect(returnAt).toBeLessThan(invalidateAt);
   });
 
   test('the booking pre-draft hook tracks its chain in bookingPreDraftPromise instead of discarding it (void)', () => {
@@ -169,5 +195,24 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
   test('resolveCallAgreedPrice is exported for reuse/testing (contract with the engine-entry backstop)', () => {
     const CallRecordingProcessor = require('../services/call-recording-processor');
     expect(typeof CallRecordingProcessor._test.resolveCallAgreedPrice).toBe('function');
+  });
+
+  test('the identity-conflict quarantine catch reuses the SAME shared retry-lane fallback, not its own inline copy (codex #4815 r3 P1)', () => {
+    const identityAt = source.indexOf("if (engineErr.quarantineFailed) {");
+    expect(identityAt).toBeGreaterThan(-1);
+    const identityEndAt = source.indexOf('\n          }\n        });', identityAt);
+    expect(identityEndAt).toBeGreaterThan(identityAt);
+    const identityBlock = source.slice(identityAt, identityEndAt);
+    expect(identityBlock).toContain('await pushCallToRetryLaneAfterQuarantineFailure({');
+    expect(identityBlock).toContain("reason: 'email_identity_conflict',");
+    // No duplicated inline copy of the fallback (its own db('call_log')...
+    // extraction_failed write) at this site any more.
+    expect(identityBlock).not.toContain("processing_status: 'extraction_failed'");
+  });
+
+  test('pushCallToRetryLaneAfterQuarantineFailure and retirePriceAgreedEstimatorBell are exported for reuse/testing', () => {
+    const CallRecordingProcessor = require('../services/call-recording-processor');
+    expect(typeof CallRecordingProcessor._test.pushCallToRetryLaneAfterQuarantineFailure).toBe('function');
+    expect(typeof CallRecordingProcessor._test.retirePriceAgreedEstimatorBell).toBe('function');
   });
 });

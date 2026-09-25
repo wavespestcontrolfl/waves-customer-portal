@@ -1738,8 +1738,9 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
 // agreed to on the call must never be re-priced by the estimator engine.
 // The spoken word beats the estimator (see resolveCallQuoteSignals's
 // quote-requested/-promised split above, and the call-booking precedence
-// ruling this codifies). Returns the agreed USD amount, or null when no
-// price was accepted on the call.
+// ruling this codifies). Returns { amount, amountMax } — amountMax present
+// only for a genuine accepted RANGE — or null when no price was accepted
+// on the call.
 //
 // V2 ONLY (codex #4815 r1 P1): downstream composer decisions read the V2
 // canonical extraction plus the raw transcript, never the unvalidated V1
@@ -1756,44 +1757,88 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
 //     specifically to capture prices the caller had NOT accepted —
 //     validate-extraction.js 1.12.0 note: "quoted_price_usd keeps its
 //     existing semantics and consumers unchanged"). A valid V2 extraction
-//     can carry this while leaving the broader `price` object null.
+//     can carry this while leaving the broader `price` object null. NEVER
+//     a range (codex #4815 r3 P2 — checked against the prompt: "null when
+//     no price was quoted, the caller didn't accept, or the amount is
+//     uncertain or a range"), so this leg is always reported exact.
 //   - service_request.price.accepted === true: normalizeServiceRequestPricing
 //     (utils/normalize-extraction-v2.js) has ALREADY selected the accepted
 //     prices[] entry (by caller_response 'accepted') into `price` at parse
 //     time (finalizeV2Extraction normalizes before persisted-schema
 //     validation), so reading `price.accepted` alone here also covers the
-//     prices[] shape — there is no separate array to walk.
+//     prices[] shape — there is no separate array to walk. amount_usd is
+//     the LOW end of a stated range and amount_max_usd the HIGH end
+//     (schema description on amount_max_usd, verified against the prompt's
+//     own "$90 to 100" example) — a caller who accepted "$90 to 100" agreed
+//     to a RANGE, not to $90, so amountMax rides along whenever it's a
+//     genuinely higher, finite number. The engine still gates on a range
+//     (no engine number to draft from either way); only the reported label
+//     must never collapse it to the low end.
 function resolveCallAgreedPrice(v2Extraction = null) {
   const svc = v2Extraction?.service_request;
   if (!svc) return null;
   if (typeof svc.quoted_price_usd === 'number'
     && Number.isFinite(svc.quoted_price_usd)
     && svc.quoted_price_usd > 0) {
-    return svc.quoted_price_usd;
+    return { amount: svc.quoted_price_usd };
   }
   const price = svc.price;
   if (price && price.accepted === true
     && typeof price.amount_usd === 'number'
     && Number.isFinite(price.amount_usd)
     && price.amount_usd > 0) {
-    return price.amount_usd;
+    const result = { amount: price.amount_usd };
+    if (typeof price.amount_max_usd === 'number'
+      && Number.isFinite(price.amount_max_usd)
+      && price.amount_max_usd > price.amount_usd) {
+      result.amountMax = price.amount_max_usd;
+    }
+    return result;
   }
   return null;
 }
 
-// codex #4815 r2 P2: whether the post-finalization price-agreed sweep must
-// stand down because the booking-triggered pre-draft hook's assessment
-// exception (quotePromised:true — an assessment booking IS an owed quote,
-// regardless of any price also agreed on the call) drafted for this same
-// call. Chains onto the SAME settled promise the hook itself sequences on
-// (bookingPreDraftPromise) rather than racing it: that hook can clear this
-// call's same-generation estimator_draft_block while composing, and the
-// sweep re-stamping it mid-composer made the exception's outcome
-// timing-dependent — sometimes a legitimate assessment-booking insert
-// bounced off the very block the sweep just wrote. Awaiting first makes
-// the order deterministic; a drafted outcome stands the sweep down
-// entirely so the exception's own draft is never the thing it "just"
-// retired. Isolated as its own function so this ordering is unit-testable
+// codex #4815 r3 P2: one shared formatter for the agreed-price label in
+// every log line and notification body — never lets a range collapse to
+// its low end ("$90 agreed" when the caller actually accepted "$90 to
+// $100"). Exact price ⇒ "$90.00"; a genuine range ⇒ "$90.00–$100.00".
+function formatAgreedPriceLabel(agreedPrice) {
+  const amount = agreedPrice?.amount;
+  if (typeof amount !== 'number' || !Number.isFinite(amount)) return '$0.00';
+  const amountMax = agreedPrice?.amountMax;
+  if (typeof amountMax === 'number' && Number.isFinite(amountMax) && amountMax > amount) {
+    return `$${amount.toFixed(2)}–$${amountMax.toFixed(2)}`;
+  }
+  return `$${amount.toFixed(2)}`;
+}
+
+// codex #4815 r2 P2 (refined r3 P2): whether the post-finalization
+// price-agreed sweep must stand down because the booking-triggered
+// pre-draft hook's assessment exception (quotePromised:true — an
+// assessment booking IS an owed quote, regardless of any price also agreed
+// on the call) OWNS a live estimate for this same call. Chains onto the
+// SAME settled promise the hook itself sequences on (bookingPreDraftPromise)
+// rather than racing it: that hook can clear this call's same-generation
+// estimator_draft_block while composing, and the sweep re-stamping it
+// mid-composer made the exception's outcome timing-dependent — sometimes a
+// legitimate assessment-booking insert bounced off the very block the
+// sweep just wrote. Awaiting first makes the order deterministic.
+//
+// Keyed on estimateId, NOT the outcome's own `drafted` flag (codex #4815
+// r3 P2): maybePreDraftForBooking/maybeDraftEstimateForCall report
+// `drafted: false` for an ALREADY-VALID exception estimate just as often as
+// for a genuine skip — an existing/reconciled draft (`skipped:
+// 'already_drafted'`), a duplicate-guard hit (`skipped:
+// 'duplicate_open_estimate'`), and the call-delegated path's OWN
+// "existing draft recovery" branch (`created: false` with `estimateId`
+// set) all carry a real estimateId while `drafted` reads false. Reading
+// `drafted` alone let the sweep archive that live, valid assessment
+// estimate. Any outcome carrying an estimateId — fresh or pre-existing —
+// stands the sweep down; only a genuine skip/failure with NO estimateId
+// (gate off, not an assessment, booking dead, composer error) lets it
+// proceed.
+//
+// Isolated as its own function so this ordering is unit-testable
 // independent of the ~10,000-line processRecording method it lives in.
 // Never throws — bookingPreDraftPromise itself never rejects (every branch
 // of its chain resolves), and the catch here is belt-and-braces only.
@@ -1801,9 +1846,82 @@ async function bookingPreDraftAssessmentDrafted(bookingPreDraftPromise) {
   if (!bookingPreDraftPromise) return false;
   try {
     const outcome = await bookingPreDraftPromise;
-    return outcome?.drafted === true;
+    return outcome?.estimateId != null;
   } catch {
     return false;
+  }
+}
+
+// codex #4815 r3 P1: shared last-resort fallback when a durable quarantine-
+// retry queue write (markQuarantinePending) itself fails to land — reused
+// by the identity-conflict quarantine catch AND both price_agreed_on_call
+// invalidation call sites, so this fallback lives in exactly one place
+// rather than three near-identical copies drifting apart. Pushes the call
+// into the retry lane (extraction_failed) under the SAME generation fence
+// every other post-claim write here uses: a newer pass may have already
+// claimed and finalized the call, and this must never overwrite that
+// pass's settled status with a stale failure.
+async function pushCallToRetryLaneAfterQuarantineFailure({ call, callSid, procGeneration, reason }) {
+  try {
+    let lastResortQ = db('call_log').where({ id: call.id })
+      .whereNull('processing_token');
+    if (procGeneration != null) {
+      lastResortQ = lastResortQ.where('processing_generation', procGeneration);
+    }
+    const pushed = await lastResortQ.update({
+      processing_status: 'extraction_failed',
+      updated_at: new Date(),
+    });
+    if (pushed) {
+      logger.error(`[call-proc] quarantine queue write failed for ${maskSid(callSid)} (${reason}) — call pushed to the retry lane`);
+    } else {
+      logger.info(`[call-proc] quarantine retry-lane write skipped for ${maskSid(callSid)} (${reason}) — a newer pass owns the call`);
+    }
+  } catch (lastResortErr) {
+    logger.error(`[call-proc] quarantine retry-lane write ALSO failed for ${maskSid(callSid)} (${reason}): ${lastResortErr.message}`);
+  }
+}
+
+// codex #4815 r3 P1: retiring the earlier engine "draft ready" bell (or the
+// deduped generic quote-promised bell it upgraded in place) must never
+// fire on a false pretense. Two guards a bare forceUpdate/updateOnly call
+// missed:
+//   - invalidated must be TRUE — no draft was actually archived (a fresh
+//     pass with nothing yet to retire, `invalidated:false`) must leave
+//     whatever bell exists alone, or staff are told a draft was retired
+//     that never existed.
+//   - quotePromised must survive when it was already true — an agreed
+//     price only retires the ENGINE'S draft attempt, not a genuinely
+//     promised WRITTEN quote (owner ruling: "keep that path"). Overwriting
+//     the bell to "No quote is owed" and quote_promised:false erased a
+//     real obligation and would also defeat quotePromisedAlreadyNotified's
+//     own metadata->>'quote_promised' = 'true' dedupe downstream. When
+//     promised, the bell instead drops the estimate link/amount and keeps
+//     both quote_promised:true and the send-it instruction.
+// Shared by both invalidation call sites so this decision lives once.
+async function retirePriceAgreedEstimatorBell({
+  call, callSid, callerName, callAgreedPrice, callQuotePromised, invalidated, customerId, logPrefix,
+}) {
+  if (!invalidated) return;
+  try {
+    const { notify: notifyEstimator } = require('./estimator-engine');
+    const link = customerId ? `/admin/customers/${customerId}` : '/admin/communications';
+    const priceLabel = formatAgreedPriceLabel(callAgreedPrice);
+    const promised = callQuotePromised === true;
+    await notifyEstimator({
+      call,
+      title: promised ? 'Price agreed on call — send the promised quote' : 'Price agreed on call — draft retired',
+      body: promised
+        ? `${callerName}: a price (${priceLabel}) was agreed on this call and the AI estimate draft was retired, but the agent still promised a written quote. Send it before end of day.`
+        : `${callerName}: a price (${priceLabel}) was agreed on this call, so the AI estimate draft was retired. No quote is owed — the price is already set.`,
+      estimateId: null,
+      quotePromised: promised,
+      link,
+      forceUpdate: true,
+      updateOnly: true,
+    });
+  } catch (notifyErr) {
+    logger.warn(`[call-proc] ${logPrefix} bell retirement failed for ${maskSid(callSid)}: ${notifyErr.message}`);
   }
 }
 
@@ -13811,29 +13929,9 @@ const CallRecordingProcessor = {
               // public and sendable with nothing scheduled. Push the call
               // into the retry lane so the whole pass runs again; the
               // estimator re-quarantines from a clean slate.
-              try {
-                let lastResortQ = db('call_log').where({ id: call.id })
-                  .whereNull('processing_token');
-                // Generation-fenced (pre-push P1, PR #3304): this detached
-                // handler can fire after a NEWER pass claimed and finalized
-                // — overwriting its settled status with extraction_failed
-                // would recreate the exact NULL-token ambiguity the
-                // generation counter closes. Same generation = still ours.
-                if (procGeneration != null) {
-                  lastResortQ = lastResortQ.where('processing_generation', procGeneration);
-                }
-                const pushed = await lastResortQ.update({
-                  processing_status: 'extraction_failed',
-                  updated_at: new Date(),
-                });
-                if (pushed) {
-                  logger.error(`[call-proc] quarantine queue write failed for ${callSid} — call pushed to the retry lane`);
-                } else {
-                  logger.info(`[call-proc] quarantine retry-lane write skipped for ${callSid} — a newer pass owns the call`);
-                }
-              } catch (lastResortErr) {
-                logger.error(`[call-proc] quarantine retry-lane write ALSO failed for ${callSid}: ${lastResortErr.message}`);
-              }
+              await pushCallToRetryLaneAfterQuarantineFailure({
+                call, callSid, procGeneration, reason: 'email_identity_conflict',
+              });
             }
           }
         });
@@ -13870,7 +13968,7 @@ const CallRecordingProcessor = {
       // call itself, so a failure here must not fail the whole run — the
       // post-finalization sweep below is the second, belt-and-braces pass.
       if (callAgreedPrice != null) {
-        logger.info(`[call-proc] estimator engine skipped for ${maskSid(callSid)} — price agreed on call ($${callAgreedPrice.toFixed(2)}), skipped:'price_agreed_on_call'`);
+        logger.info(`[call-proc] estimator engine skipped for ${maskSid(callSid)} — price agreed on call (${formatAgreedPriceLabel(callAgreedPrice)}), skipped:'price_agreed_on_call'`);
         try {
           const { invalidateDraftForCall } = require('./estimator-engine');
           const invalidation = await invalidateDraftForCall(call.id, {
@@ -13893,32 +13991,32 @@ const CallRecordingProcessor = {
             // voicemail/identity verdict and dropping it as re-qualified.
             logger.warn(`[call-proc] price-agreed draft invalidation did not land for ${maskSid(callSid)} — queuing a durable retry`);
             const { markQuarantinePending } = require('./estimator-engine');
-            await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });
+            const queued = await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });
+            if (!queued) {
+              // codex #4815 r3 P1: markQuarantinePending's own boolean was
+              // previously ignored here — a false left the call finalized
+              // with NEITHER the block (which invalidation.ok:false already
+              // means never landed) NOR a queued retry. Same last-resort
+              // fallback the identity-conflict quarantine catch uses.
+              await pushCallToRetryLaneAfterQuarantineFailure({
+                call, callSid, procGeneration, reason: 'price_agreed_on_call',
+              });
+            }
           } else {
             // Retire the earlier engine run's "draft ready" bell — or the
             // deduped generic quote-promised bell it upgraded in place —
-            // in the SAME row (codex #4815 r2 P2): otherwise staff are
-            // still told to send an amount the draft above just archived.
-            // updateOnly: nothing to retire (no prior bell for this call)
-            // must never manufacture a fresh one.
-            try {
-              const { notify: notifyEstimator } = require('./estimator-engine');
-              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
-                .filter(Boolean)
-                .join(' ') || (phone ? maskPhone(phone) : 'Unknown caller');
-              await notifyEstimator({
-                call,
-                title: 'Price agreed on call — draft retired',
-                body: `${callerName}: a price ($${callAgreedPrice.toFixed(2)}) was agreed on this call, so the AI estimate draft was retired. No quote is owed — the price is already set.`,
-                estimateId: null,
-                quotePromised: false,
-                link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
-                forceUpdate: true,
-                updateOnly: true,
-              });
-            } catch (notifyErr) {
-              logger.warn(`[call-proc] price-agreed bell retirement failed for ${maskSid(callSid)}: ${notifyErr.message}`);
-            }
+            // in the SAME row (codex #4815 r2 P2, refined r3 P1): otherwise
+            // staff are still told to send an amount the draft above just
+            // archived. Only when a draft was ACTUALLY invalidated, and a
+            // genuinely promised written quote is never silently cleared.
+            const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+              .filter(Boolean)
+              .join(' ') || (phone ? maskPhone(phone) : 'Unknown caller');
+            await retirePriceAgreedEstimatorBell({
+              call, callSid, callerName, callAgreedPrice, callQuotePromised,
+              invalidated: invalidation.invalidated === true,
+              customerId, logPrefix: 'price-agreed',
+            });
           }
         } catch (invalidateErr) {
           logger.warn(`[call-proc] price-agreed draft invalidation threw for ${maskSid(callSid)}: ${invalidateErr.message}`);
@@ -18348,20 +18446,24 @@ const CallRecordingProcessor = {
     // whatever landed. Best-effort — the block marker keeps any straggler
     // unsendable, whether or not this sweep itself succeeds.
     if (finalized > 0 && agreedPriceDraftSweepPending) {
-      // Chain onto the SAME settled booking-predraft promise the hook
-      // above already sequences on (codex #4815 r2 P2), rather than racing
-      // it: that hook (quotePromised:true, the documented assessment
-      // exception) can clear this call's same-generation
-      // estimator_draft_block while composing, and this sweep re-stamping
-      // it mid-composer made the exception's outcome timing-dependent —
-      // sometimes a legitimate assessment-booking insert bounced off the
-      // very block THIS sweep just wrote. Awaiting first makes the order
-      // deterministic; a drafted outcome stands down this sweep entirely
-      // so the exception's own draft is never the thing it "just" retired.
-      const assessmentExceptionDrafted = await bookingPreDraftAssessmentDrafted(bookingPreDraftPromise);
-      if (assessmentExceptionDrafted) {
-        logger.info(`[call-proc] post-finalization price-agreed sweep stood down for ${maskSid(callSid)} — the booking pre-draft's assessment exception drafted first`);
-      } else {
+      // Detached (codex #4815 r3 P2): awaiting bookingPreDraftAssessmentDrafted
+      // here blocked the SEQUENTIAL processAllPending batch on a minutes-long
+      // composer promise — chain fire-and-forget onto the SAME tracked
+      // pre-draft promise instead (the identical pattern the pre-draft hook
+      // itself already uses for estimatorEnginePromise a few thousand lines
+      // up), so this pass returns immediately while the sweep still never
+      // runs before the pre-draft hook settles. That hook (quotePromised:
+      // true, the documented assessment exception) can clear this call's
+      // same-generation estimator_draft_block while composing, and the
+      // sweep re-stamping it mid-composer made the exception's outcome
+      // timing-dependent — sometimes a legitimate assessment-booking
+      // insert bounced off the very block the sweep just wrote. Chaining
+      // preserves that ordering guarantee without the block.
+      void bookingPreDraftAssessmentDrafted(bookingPreDraftPromise).then(async (assessmentExceptionDrafted) => {
+        if (assessmentExceptionDrafted) {
+          logger.info(`[call-proc] post-finalization price-agreed sweep stood down for ${maskSid(callSid)} — the booking pre-draft's assessment exception owns a live estimate`);
+          return;
+        }
         try {
           const { invalidateDraftForCall: invalidateAgreedPriceAgain } = require('./estimator-engine');
           const sweepInvalidation = await invalidateAgreedPriceAgain(call.id, {
@@ -18384,34 +18486,38 @@ const CallRecordingProcessor = {
             // stale draft if this LAST attempt also failed.
             logger.warn(`[call-proc] post-finalization price-agreed draft sweep did not land for ${maskSid(callSid)} — queuing a durable retry`);
             const { markQuarantinePending } = require('./estimator-engine');
-            await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });
+            const queued = await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });
+            if (!queued) {
+              // codex #4815 r3 P1: same last-resort fallback as the
+              // pre-write pass — a false here previously left the call
+              // processed with no block and no queued retry at all.
+              await pushCallToRetryLaneAfterQuarantineFailure({
+                call, callSid, procGeneration, reason: 'price_agreed_on_call',
+              });
+            }
           } else {
             // Same bell retirement as the pre-write pass (codex #4815 r2
-            // P2) — covers the case where THAT attempt failed (queued
-            // above) and this sweep is the one that actually landed.
-            try {
-              const { notify: notifyEstimatorSweep } = require('./estimator-engine');
-              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
-                .filter(Boolean)
-                .join(' ') || (phone ? maskPhone(phone) : 'Unknown caller');
-              await notifyEstimatorSweep({
-                call,
-                title: 'Price agreed on call — draft retired',
-                body: `${callerName}: a price ($${callAgreedPrice.toFixed(2)}) was agreed on this call, so the AI estimate draft was retired. No quote is owed — the price is already set.`,
-                estimateId: null,
-                quotePromised: false,
-                link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
-                forceUpdate: true,
-                updateOnly: true,
-              });
-            } catch (notifyErr) {
-              logger.warn(`[call-proc] post-finalization price-agreed bell retirement failed for ${maskSid(callSid)}: ${notifyErr.message}`);
-            }
+            // P2, refined r3 P1) — covers the case where THAT attempt
+            // failed (queued above) and this sweep is the one that
+            // actually landed.
+            const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+              .filter(Boolean)
+              .join(' ') || (phone ? maskPhone(phone) : 'Unknown caller');
+            await retirePriceAgreedEstimatorBell({
+              call, callSid, callerName, callAgreedPrice, callQuotePromised,
+              invalidated: sweepInvalidation.invalidated === true,
+              customerId, logPrefix: 'post-finalization price-agreed',
+            });
           }
         } catch (sweepErr) {
           logger.warn(`[call-proc] post-finalization price-agreed draft sweep failed (non-blocking): ${sweepErr.message}`);
         }
-      }
+      }).catch((chainErr) => {
+        // Belt-and-braces only — bookingPreDraftAssessmentDrafted never
+        // rejects and the try/catch above swallows every failure inside
+        // the .then itself.
+        logger.warn(`[call-proc] post-finalization price-agreed sweep chain failed (non-blocking): ${chainErr.message}`);
+      });
     }
 
     // The pass did not complete if its final fenced write matched no rows: a
@@ -19212,7 +19318,10 @@ CallRecordingProcessor._test = {
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   resolveCallAgreedPrice,
+  formatAgreedPriceLabel,
   bookingPreDraftAssessmentDrafted,
+  pushCallToRetryLaneAfterQuarantineFailure,
+  retirePriceAgreedEstimatorBell,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
   resolveCallBillingPayer,

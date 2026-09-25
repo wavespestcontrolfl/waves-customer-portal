@@ -46,7 +46,7 @@ jest.mock('../services/estimator-engine/context-builder', () => ({
   _private: { extractionFromCall: (...args) => mockExtractionFromCall(...args) },
 }));
 
-const { maybeDraftEstimateForCall } = require('../services/estimator-engine');
+const { maybeDraftEstimateForCall, _private: { formatAgreedPriceLabel } } = require('../services/estimator-engine');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -167,5 +167,47 @@ describe('maybeDraftEstimateForCall — agreed-price refusal (owner ruling 2026-
 
     expect(result.skipped).not.toBe('price_agreed_on_call');
     expect(mockBuildCallContext).toHaveBeenCalledWith('call-1');
+  });
+
+  // codex #4815 r3 P1: this backstop is deliberately FAIL-OPEN on a read
+  // error, unlike sweepPendingQuarantines's use of the same resolver (which
+  // must fail CLOSED — leave a durable block standing rather than clear it
+  // on a blip). This is the SECOND layer behind the processor's own primary
+  // check, which already refused to invoke this function at all for a
+  // plain agreed-price call — a transient failure here only loses this one
+  // defensive layer for this one call, never eats a genuine draft the
+  // processor already correctly allowed through.
+  test('a resolveAgreedPriceForCall READ ERROR fails OPEN — the engine still runs (this is a backstop, not the primary gate)', async () => {
+    mockExtractionFromCall.mockImplementation(() => {
+      throw new Error('transient read failure');
+    });
+
+    const result = await maybeDraftEstimateForCall({ callLogId: 'call-1', quotePromised: false });
+
+    expect(result.skipped).not.toBe('price_agreed_on_call');
+    expect(mockBuildCallContext).toHaveBeenCalledWith('call-1');
+  });
+
+  // codex #4815 r3 P2: a genuinely accepted RANGE still gates the engine
+  // (there is no single engine number to draft from either way) — the
+  // range-vs-exact distinction only matters for how it's REPORTED
+  // (formatAgreedPriceLabel), not whether it gates.
+  test('quotePromised=false + an accepted RANGE (amount_usd low end + amount_max_usd high end) ⇒ still skipped', async () => {
+    mockExtractionFromCall.mockReturnValue({
+      source: 'enriched',
+      extraction: { service_request: { price: { amount_usd: 90, amount_max_usd: 100, accepted: true } } },
+    });
+
+    const result = await maybeDraftEstimateForCall({ callLogId: 'call-1', quotePromised: false });
+
+    expect(result.skipped).toBe('price_agreed_on_call');
+    expect(mockBuildCallContext).not.toHaveBeenCalled();
+  });
+});
+
+describe('estimator-engine formatAgreedPriceLabel (mirrors the processor\'s own formatter)', () => {
+  test('exact vs range, same contract as call-recording-processor.js', () => {
+    expect(formatAgreedPriceLabel({ amount: 90 })).toBe('$90.00');
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 100 })).toBe('$90.00–$100.00');
   });
 });

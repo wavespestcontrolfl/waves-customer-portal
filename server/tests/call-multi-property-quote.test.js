@@ -24,6 +24,7 @@ const {
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   resolveCallAgreedPrice,
+  formatAgreedPriceLabel,
   bookingPreDraftAssessmentDrafted,
   normalizeCallExtraction,
 } = _test;
@@ -156,19 +157,40 @@ describe('resolveCallAdditionalProperties / resolveCallQuoteSignals', () => {
 // ONLY — downstream composer decisions read the validated V2 extraction
 // plus the raw transcript, never the unvalidated V1 blob, so with no valid
 // V2 extraction this always returns null and the engine runs as before.
+//
+// codex #4815 r3 P2: returns { amount, amountMax? } (not a bare number) so
+// a genuinely accepted RANGE ("$90 to $100") is never collapsed to its low
+// end — amount_usd is defined as the range's LOW end and amount_max_usd
+// the HIGH end (schema description + the prompt's own "$90 to 100"
+// example), so reporting amount alone as an exact figure ("$90 agreed")
+// misrepresents what the caller actually accepted.
 describe('resolveCallAgreedPrice', () => {
-  test('V2 price.accepted: an accepted price with a finite positive amount is returned', () => {
+  test('V2 price.accepted: an accepted EXACT price with a finite positive amount is returned, no amountMax', () => {
     const v2 = { service_request: { price: { amount_usd: 300, accepted: true, caller_response: 'accepted', stated_by: 'agent' } } };
-    expect(resolveCallAgreedPrice(v2)).toBe(300);
+    expect(resolveCallAgreedPrice(v2)).toEqual({ amount: 300 });
   });
 
-  test('V2 quoted_price_usd: a finite positive value is agreed on its own, with no price object at all', () => {
-    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300 } })).toBe(300);
+  test('V2 price.accepted: a genuine accepted RANGE carries amountMax through', () => {
+    const v2 = { service_request: { price: { amount_usd: 90, amount_max_usd: 100, accepted: true, caller_response: 'accepted' } } };
+    expect(resolveCallAgreedPrice(v2)).toEqual({ amount: 90, amountMax: 100 });
+  });
+
+  test('a NON-range price.amount_max_usd (absent, equal, or lower than amount_usd) never adds amountMax', () => {
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 300, amount_max_usd: null, accepted: true } } })).toEqual({ amount: 300 });
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 300, amount_max_usd: 300, accepted: true } } })).toEqual({ amount: 300 });
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 300, amount_max_usd: 250, accepted: true } } })).toEqual({ amount: 300 });
+  });
+
+  test('V2 quoted_price_usd: a finite positive value is agreed on its own, with no price object at all — always EXACT, never a range', () => {
+    // codex #4815 r3 P2: quoted_price_usd is defined by the extraction
+    // prompt as null whenever the amount is "uncertain OR A RANGE" — it
+    // never itself carries a paired max, so this path stays exact.
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300 } })).toEqual({ amount: 300 });
   });
 
   test('V2 quoted_price_usd wins even when the broader price object is absent/null/unaccepted', () => {
-    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300, price: null } })).toBe(300);
-    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300, price: { amount_usd: 387, accepted: false } } })).toBe(300);
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300, price: null } })).toEqual({ amount: 300 });
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300, price: { amount_usd: 387, accepted: false } } })).toEqual({ amount: 300 });
   });
 
   test('a stated price the caller declined or is still considering returns null', () => {
@@ -202,6 +224,21 @@ describe('resolveCallAgreedPrice', () => {
     // not gate the engine.
     expect(resolveCallAgreedPrice({ quoted_price: 300, appointment_confirmed: true })).toBeNull();
     expect(resolveCallAgreedPrice(undefined)).toBeNull();
+  });
+});
+
+describe('formatAgreedPriceLabel', () => {
+  test('an exact amount formats as a single figure', () => {
+    expect(formatAgreedPriceLabel({ amount: 90 })).toBe('$90.00');
+  });
+
+  test('a genuine range formats as low–high, never collapsed to the low end', () => {
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 100 })).toBe('$90.00–$100.00');
+  });
+
+  test('an amountMax that is not actually higher is ignored (defense in depth)', () => {
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 90 })).toBe('$90.00');
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 50 })).toBe('$90.00');
   });
 });
 
@@ -322,13 +359,21 @@ describe('convertCallLeadOnPhoneBooking — keepOpenForQuote', () => {
   });
 });
 
-// ─── codex #4815 r2 P2: sweep/pre-draft ordering ───────────────────────────
+// ─── codex #4815 r2 P2 (refined r3 P2): sweep/pre-draft ordering ───────────
 // The booking pre-draft hook (quotePromised:true, the documented assessment
 // exception) can clear this call's same-generation estimator_draft_block
 // while composing an assessment draft; the post-finalization price-agreed
 // sweep must wait for that SAME promise to settle before deciding whether
 // to re-stamp the block, rather than racing it. bookingPreDraftAssessmentDrafted
 // is the isolated, unit-testable decision the sweep chains onto.
+//
+// codex #4815 r3 P2: keyed on estimateId, NOT the outcome's own `drafted`
+// flag — maybeDraftEstimateForCall/maybePreDraftForBooking report
+// `drafted: false` for an ALREADY-VALID exception estimate just as often as
+// for a genuine skip (an existing/reconciled draft, a duplicate-guard hit,
+// or the call-delegated path's own "existing draft recovery" branch all
+// carry a real estimateId while `drafted` reads false). Every shape that
+// can come back from those two functions is tested here.
 describe('bookingPreDraftAssessmentDrafted', () => {
   test('no tracked promise (gate off / no booking) never blocks the sweep', async () => {
     expect(await bookingPreDraftAssessmentDrafted(null)).toBe(false);
@@ -337,7 +382,7 @@ describe('bookingPreDraftAssessmentDrafted', () => {
 
   test('a genuinely SLOW pre-draft promise is awaited to completion — the ordering, not just the value, is real', async () => {
     // A fake promise ordering: resolves on a later microtask/macrotask tick
-    // with { drafted: true }, proving the helper actually AWAITS the
+    // with a fresh draft, proving the helper actually AWAITS the
     // settlement rather than reading a value that happened to be ready
     // synchronously.
     let resolved = false;
@@ -358,9 +403,43 @@ describe('bookingPreDraftAssessmentDrafted', () => {
     expect(result).toBe(true);
   });
 
-  test('a settled promise that did NOT draft (gate off, not an assessment, already drafted) lets the sweep proceed', async () => {
+  test('a FRESH draft (drafted:true, estimateId set) stands the sweep down', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: true, estimateId: 'est-1' }))).toBe(true);
+  });
+
+  test('an EXISTING/reconciled draft (drafted:false, skipped:"already_drafted", estimateId set) ALSO stands the sweep down', async () => {
+    // codex #4815 r3 P2: the exact regression — booking-predraft.js returns
+    // this shape for a draft the tagger hook already created, and reading
+    // `drafted` alone let the sweep archive that live, valid estimate.
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'already_drafted', estimateId: 'est-existing' }))).toBe(true);
+  });
+
+  test('a DUPLICATE-guard hit (drafted:false, skipped:"duplicate_open_estimate", estimateId set) ALSO stands the sweep down', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'duplicate_open_estimate', estimateId: 'est-dup' }))).toBe(true);
+  });
+
+  test('the call-delegated path\'s own "existing draft recovery" (created:false, estimateId set, mapped to drafted:false) ALSO stands the sweep down', async () => {
+    // maybeDraftEstimateForCall's re-entry recovery path sets lane:
+    // 'existing' + estimateId with created staying false — booking-predraft.js
+    // maps that straight through as { drafted: outcome.created === true,
+    // estimateId: outcome.estimateId }.
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, delegated: 'call_engine', lane: 'existing', estimateId: 'est-recovered' }))).toBe(true);
+  });
+
+  test('a genuine skip with NO estimateId (gate off, not an assessment, booking dead, no customer) lets the sweep proceed', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'gate_off' }))).toBe(false);
     expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'not_assessment' }))).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'booking_terminal' }))).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'no_customer' }))).toBe(false);
+  });
+
+  test('a genuine composer failure (drafted:false, skipped:"error", no estimateId) lets the sweep proceed', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'error' }))).toBe(false);
+  });
+
+  test('a null/undefined settled outcome lets the sweep proceed', async () => {
     expect(await bookingPreDraftAssessmentDrafted(Promise.resolve(null))).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve(undefined))).toBe(false);
   });
 
   test('a rejected promise (belt-and-braces — the tracked promise never actually rejects) never blocks the sweep', async () => {
