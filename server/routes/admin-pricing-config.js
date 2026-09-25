@@ -1493,6 +1493,19 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
 async function resolvePricingQuoteInput(body) {
   const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
   const input = sanitizeClientIdentityFields({ ...(body || {}) });
+  // These calculators mint NEW quotes: only a currently-sold T&S program is
+  // accepted (4x Light retired 2026-09-24). Absent means the engine default.
+  const tsTier = input.services?.treeShrub?.tier;
+  if (tsTier !== undefined && tsTier !== null && !(typeof tsTier === 'string' && tsTier.trim() === '')) {
+    const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
+    if (!isSellableTreeShrubTier(tsTier)) {
+      const err = new Error('Tree & Shrub program must be standard or enhanced.');
+      err.status = 400;
+      err.statusCode = 400;
+      err.isOperational = true;
+      throw err;
+    }
+  }
   const customerId = input.existingCustomerId || input.customerId;
   if (!customerId) return input;
   const { resolveCustomerQualifyingEvidence, isActivePlanCustomer } = require('../services/waveguard-existing-services');
@@ -1553,6 +1566,7 @@ router.post('/quick-quote', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.resolvePricingQuoteInput = resolvePricingQuoteInput;
 // The proposal-approval queue (admin-pricing-proposals) applies leaf edits
 // to the same billing-authoritative rows — it must run the SAME key-specific
 // validation on the prospective row before writing.
