@@ -834,7 +834,10 @@ const TwilioService = {
         // (gratitude manual closures) key on this flag, never on the type.
         ...(options.humanAuthored === true ? { human_authored: true } : {}),
         ...(isKnownOwnerPhone(to) ? { to_owner_phone_at_send: true } : {}),
-        ...(options.media ? { media: options.media } : {}),
+        // A typed send with no media option (the /schedule-sms dispatch)
+        // records explicit zero media when none was sent, so readers can
+        // tell "no attachment" from "unknown" (gratitude manual closures).
+        ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),
         ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
         ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
           ? { parked_decision_ids: options.parkedDecisionIds }
@@ -1284,7 +1287,7 @@ const TwilioService = {
             pre_handoff_stamp: true,
             ...(options.humanAuthored === true ? { human_authored: true } : {}),
             ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
-            ...(options.media ? { media: options.media } : {}),
+            ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),
             ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
             ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
               ? { parked_decision_ids: options.parkedDecisionIds }
