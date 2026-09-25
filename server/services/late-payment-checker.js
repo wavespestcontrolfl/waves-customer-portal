@@ -17,7 +17,7 @@ const { gates } = require('../config/feature-gates');
 const StripeService = require('./stripe');
 const { sendMicrodepositVerificationEmail } = require('./microdeposit-verification-email');
 const { formatDateOnly } = require('../utils/date-only');
-const { billingChannelAllowed } = require('./billing-delivery-channels');
+const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
 
 function tierDaysForOverdue(daysSince) {
   if (daysSince < 14) return 7;
@@ -66,6 +66,8 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
   const customer = await db('customers').where({ id: inv.customer_id }).first();
   if (!customer || customer.deleted_at) return 'skip';
   const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  const explicitChannels = explicitBillingChannels(prefs || {}, 'payment_issue');
+  if (!customer.phone && !explicitChannels?.some((channel) => channel === 'email' || channel === 'push')) return 'skip';
   const explicitEmailSelected = billingChannelAllowed(prefs || {}, 'payment_issue', 'email') === true;
 
   const body = await renderSmsTemplate('bank_verification_incomplete', {
@@ -150,6 +152,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       await ContactLedger.markDelivered(smsLedger);
     }
     await attemptEmail();
+    if (isTransientSmsResult(sendResult)) return 'skip';
     if (!sendResult.sent && !emailDelivered) return 'skip';
     await db('activity_log').insert({
       customer_id: customer.id,
@@ -320,6 +323,11 @@ const LatePaymentService = {
       try {
         prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
       } catch { /* preserve legacy routing when preferences cannot be read */ }
+      const explicitChannels = explicitBillingChannels(prefs || {}, 'billing');
+      if (!customer.phone && !explicitChannels?.some((channel) => channel === 'email' || channel === 'push')) {
+        skipped++;
+        continue;
+      }
       const explicitEmailSelected = billingChannelAllowed(prefs || {}, 'billing', 'email') === true;
 
       const name = customer.first_name || 'there';
@@ -492,7 +500,7 @@ const LatePaymentService = {
         // A transient hold (retryable carrier error, consent-lookup
         // DB blip) re-sends on a later run — don't email now or the customer gets
         // both when it lands, and don't burn the tier.
-        if (smsWillRetry && emailResult?.ok !== true) {
+        if (smsWillRetry) {
           logger.info(`[late-payment] SMS deferred for customer ${customer.id} (${sendResult.code || 'retryable'}); will retry next run`);
           skipped++;
           continue;

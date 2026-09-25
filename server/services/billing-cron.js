@@ -37,9 +37,20 @@ const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 const { isBillingDayMatch } = require('./billing-helpers');
 const { isPaused } = require('./autopay-eligibility');
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
+
+async function paymentIssueEmailSelected(customerId) {
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    return billingChannelAllowed(prefs || {}, 'payment_issue', 'email') !== false;
+  } catch {
+    return true;
+  }
+}
 
 async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0, hasEmailLeg = false }) {
   const metadata = { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode,
+    billingDeliveryCategory: purpose === 'payment_failure' ? 'payment_issue' : 'billing',
     ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
     ...(attemptPaymentId
       ? { notificationEventKey: `payment-problem:attempt:${attemptPaymentId}:${messageType}` }
@@ -706,6 +717,7 @@ const BillingCron = {
           details: { source: 'autopay', reason: err.message, next_retry_at: retryAt.toISOString() },
         });
 
+        const hasPaymentIssueEmailLeg = Boolean(failedPayment) && await paymentIssueEmailSelected(customer.id);
         // Send failure SMS with actionable card-update link
         try {
           // The row charge() just inserted for THIS attempt. Not
@@ -725,13 +737,13 @@ const BillingCron = {
             messageType: 'autopay_charge_failed',
             entryPoint: 'monthly_billing_failure',
             paymentId: err.paymentRecord?.id, attemptPaymentId: err.paymentRecord?.id,
-            hasEmailLeg: Boolean(failedPayment),
+            hasEmailLeg: hasPaymentIssueEmailLeg,
           });
         } catch (smsErr) {
           logger.error(`[billing-cron] SMS notification failed: ${smsErr.message}`);
         }
 
-        if (failedPayment) {
+        if (failedPayment && hasPaymentIssueEmailLeg) {
           // One email per failure (owner rule 2026-07-11): with the gate on,
           // the Automations-tab payment_failed sequence (editable; its copy
           // matches the Day-3 retry + portal card-update CTA) REPLACES the
@@ -1540,6 +1552,7 @@ const BillingCron = {
             details: { source: 'autopay', retry_count: newRetryCount, reason: err.message, next_retry_at: nextRetry.toISOString() },
           });
 
+          const hasPaymentIssueEmailLeg = await paymentIssueEmailSelected(customer.id);
           // Send retry SMS with update-card link
           try {
             // Same rule as the final-failure site above: this attempt's
@@ -1557,7 +1570,7 @@ const BillingCron = {
               messageType: 'autopay_retry_failed',
               entryPoint: 'autopay_retry_failed',
               paymentId: payment.id, attemptPaymentId: err.paymentRecord?.id, retryCount: newRetryCount,
-              hasEmailLeg: true,
+              hasEmailLeg: hasPaymentIssueEmailLeg,
             });
           } catch (smsErr) {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);
@@ -1572,7 +1585,7 @@ const BillingCron = {
           // fall back to the transactional notice — dunning never goes
           // email-silent.
           let retryEmailed = false;
-          if (isEnabled('paymentFailedEnroll')) {
+          if (hasPaymentIssueEmailLeg && isEnabled('paymentFailedEnroll')) {
             const { enrollSequenceFromEvent } = require('./automation-enroll');
             const enrollResult = await enrollSequenceFromEvent({
               templateKey: 'payment_failed',
@@ -1585,7 +1598,7 @@ const BillingCron = {
             });
             retryEmailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);
           }
-          if (!retryEmailed) {
+          if (hasPaymentIssueEmailLeg && !retryEmailed) {
             await PaymentLifecycleEmail.sendPaymentRetryNotice({
               customerId: customer.id,
               paymentId: payment.id,

@@ -8,6 +8,7 @@ jest.mock('../models/db', () => jest.fn());
 // collections-rails-policy.test.js.
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
+  markDelivered: jest.fn(async () => true),
   markSendFailed: jest.fn(async () => true),
 }));
 
@@ -71,6 +72,7 @@ function setDbQueues(queues) {
       // The checker's active-plan gate (fail-closed) probes payment_plans
       // per invoice — default to "no active plan" unless a test scripts one.
       if (table === 'payment_plans') return chain({ first: undefined });
+      if (table === 'notification_prefs') return chain({ first: undefined });
       throw new Error(`Unexpected db table ${table}`);
     }
     return queue.shift();
@@ -165,5 +167,21 @@ describe('late-payment micro-deposit diversion', () => {
     );
     expect(renderSmsTemplate).not.toHaveBeenCalledWith('bank_verification_incomplete', expect.anything(), expect.anything());
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ entryPoint: 'late_payment_checker' }));
+  });
+
+  test('preserves the legacy no-phone skip for a micro-deposit reminder', async () => {
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: null })],
+      customers: [chain({ first: { ...customer, phone: null } })],
+      notification_prefs: [chain({ first: {} })],
+    });
+
+    const result = await LatePaymentChecker.checkAndNotify();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(sendMicrodepositVerificationEmail).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(1);
   });
 });

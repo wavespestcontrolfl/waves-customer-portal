@@ -249,7 +249,7 @@ describe('late-payment checker email sidecar', () => {
     expect(result.skipped).toBe(1);
   });
 
-  test('defers (no email) when the SMS is only transiently held so a later run can retry', async () => {
+  test('keeps a selected retryable Text leg alive after the selected Email succeeds', async () => {
     const invoice = {
       id: 'inv-1',
       customer_id: 'cust-1',
@@ -268,6 +268,7 @@ describe('late-payment checker email sidecar', () => {
       sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true, deferred: true,
     });
 
+    const dedupeInsert = chain();
     setDbQueues({
       // The batch query, then the ownership re-reads: before the dunning
       // guards, on the last read before the provider, and the email leg's
@@ -278,15 +279,37 @@ describe('late-payment checker email sidecar', () => {
         chain({ first: { payer_id: null, scheduled_send_error: null } }),
         chain({ first: { payer_id: null, scheduled_send_error: null } }),
       ],
-      activity_log: [chain({ first: null })],
+      activity_log: [chain({ first: null }), dedupeInsert],
       customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
     });
 
     const result = await LatePaymentChecker.checkAndNotify();
 
-    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalled();
+    expect(dedupeInsert.insert).not.toHaveBeenCalled();
     expect(result.notified).toBe(0);
     expect(result.emailedFallback).toBe(0);
+    expect(result.skipped).toBe(1);
+  });
+
+  test('preserves the legacy no-phone skip when no explicit billing array exists', async () => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00.000Z',
+    };
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: null })],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: null } })],
+      notification_prefs: [chain({ first: {} })],
+    });
+
+    const result = await LatePaymentChecker.checkAndNotify();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
     expect(result.skipped).toBe(1);
   });
 

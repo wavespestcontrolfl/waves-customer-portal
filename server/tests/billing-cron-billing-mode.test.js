@@ -87,6 +87,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     const meta = JSON.parse(mockScheduledNotices[0].metadata);
     expect(meta).toMatchObject({ payment_id: 'attempt-1', retry_count: 0,
       entry_point: 'billing_failure_deferred', notificationEventKey: 'payment-problem:attempt:attempt-1:autopay_charge_failed',
+      billingDeliveryCategory: 'payment_issue',
     });
     expect(sender).toHaveBeenCalledWith(expect.objectContaining({
       metadata: expect.objectContaining({ notificationEventKey: meta.notificationEventKey }),

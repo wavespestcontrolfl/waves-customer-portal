@@ -273,9 +273,9 @@ async function sendCardExpiryWarnings() {
       const expYear = Number.isFinite(rawExpYear) && rawExpYear > 0 && rawExpYear < 100 ? rawExpYear + 2000 : rawExpYear;
       const { daysUntil, expired } = cardExpiryOutlook(expYear, r.exp_month, now);
       const eventType = expired ? 'card_expired' : 'card_expiring_soon';
-      const reminderStage = expired ? 'expired' : (daysUntil <= 7 ? '7_day' : (daysUntil <= 30 ? '30_day' : null));
+      const reminderStage = expired ? 'expired' : (daysUntil <= 7 ? '7_day' : (daysUntil <= 30 ? '30_day' : '60_day'));
 
-      const emailPromise = reminderStage
+      const emailPromise = reminderStage !== '60_day'
         ? PaymentLifecycleEmail.sendPaymentMethodExpiring({
           customerId: r.customer_id,
           paymentMethodId: r.payment_method_id,
@@ -324,10 +324,10 @@ async function sendCardExpiryWarnings() {
         metadata: {
           original_message_type: 'payment_expiry',
           billingDeliveryCategory: 'billing',
-          notificationEventKey: `payment-expiry:${r.payment_method_id}:${r.exp_month}:${expYear}`,
+          notificationEventKey: `payment-expiry:${r.payment_method_id}:${r.exp_month}:${expYear}:${reminderStage}`,
           billing_mode_at_send: r.billing_mode_at_send,
         },
-        hasEmailLeg: true,
+        hasEmailLeg: reminderStage !== '60_day',
       });
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`card expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);

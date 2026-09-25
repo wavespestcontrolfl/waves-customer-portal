@@ -263,10 +263,14 @@ class PaymentExpiry {
       try {
         const customer = await db('customers').where({ id: card.customer_id }).first();
         if (!customer) continue;
+        const { daysUntil, expired } = require('../autopay-notifications')
+          .cardExpiryOutlook(card.exp_year, card.exp_month, now);
+        const reminderStage = expired ? 'expired' : (daysUntil <= 7 ? '7_day' : (daysUntil <= 30 ? '30_day' : '60_day'));
 
-        const emailPromise = PaymentLifecycleEmail.sendPaymentMethodExpiring({
+        const emailPromise = reminderStage === '60_day' ? Promise.resolve() : PaymentLifecycleEmail.sendPaymentMethodExpiring({
           customerId: card.customer_id,
           paymentMethodId: card.id,
+          reminderStage,
           now,
         }).catch((emailErr) => {
           logger.warn(`Payment expiry email failed for card ${card.id}: ${emailErr.message}`);
@@ -311,11 +315,11 @@ class PaymentExpiry {
           metadata: {
             original_message_type: 'payment_expiry',
             billingDeliveryCategory: 'billing',
-            notificationEventKey: `payment-expiry:${card.id}:${card.exp_month}:${card.exp_year}`,
+            notificationEventKey: `payment-expiry:${card.id}:${card.exp_month}:${card.exp_year}:${reminderStage}`,
             billing_mode_at_send: require('../billing-lane').resolveBillingLane(customer).mode,
             customerLocationId: customer.location_id,
           },
-          hasEmailLeg: true,
+          hasEmailLeg: reminderStage !== '60_day',
         });
         if (sendResult.blocked || sendResult.sent === false) {
           throw new Error(`payment expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);

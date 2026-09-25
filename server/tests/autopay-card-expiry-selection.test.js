@@ -72,6 +72,10 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
     const res = await sendCardExpiryWarnings();
     expect(res.sent).toBe(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      hasEmailLeg: false,
+      metadata: expect.objectContaining({ notificationEventKey: 'payment-expiry:pm-cur:9:2026:60_day' }),
+    }));
   });
 
   test('chargeable current card NOT expiring soon → no warning even if a replaced card is in the window', async () => {

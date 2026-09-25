@@ -1103,6 +1103,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   ledger_reservation_key: require('crypto').randomUUID(),
                   followup_sequence_id: row.id,
                   notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
+                  billingDeliveryCategory: mdPending ? 'payment_issue' : 'invoice',
+                  hasEmailLeg: true,
                   original_block_code: sendResult.code,
                   replay_purpose: 'payment_link',
                   // The amount the frozen body NAMES (codex r27): credit

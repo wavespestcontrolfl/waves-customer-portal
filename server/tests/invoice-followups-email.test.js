@@ -435,6 +435,11 @@ describe('invoice follow-up email sidecar', () => {
     await InvoiceFollowUps.runPending();
 
     expect(failingSmsLog.insert).toHaveBeenCalled();
+    expect(JSON.parse(failingSmsLog.insert.mock.calls[0][0].metadata)).toMatchObject({
+      billingDeliveryCategory: 'invoice',
+      hasEmailLeg: true,
+      notificationEventKey: 'invoice-followup:seq-1:d3_friendly',
+    });
     const patch = sequenceUpdate.update.mock.calls[0][0];
     expect(patch.next_touch_at).toEqual(new Date('2026-05-27T12:00:00.000Z'));
     expect(patch).not.toHaveProperty('step_index');
