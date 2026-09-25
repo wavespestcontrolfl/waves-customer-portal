@@ -161,3 +161,37 @@ describe('resolvePrepSource — scheduled-service tokens', () => {
     expect(await resolvePrepSource(TOKEN)).toBeNull();
   });
 });
+
+describe('interpolateBlock — payload text can never become a link on the prep page', () => {
+  const { interpolateBlock } = require('../routes/prep-public');
+  const vars = {
+    first_name: 'Taylor',
+    property_address: 'see [my site](https://evil.example) now',
+    project_type: 'Flea Treatment',
+  };
+
+  test('substitutes content, list items, and details row labels + values', () => {
+    const block = interpolateBlock({
+      type: 'details',
+      rows: [{ label: 'Service for {{first_name}}', value: '{{project_type}}' }],
+    }, vars);
+    expect(block.rows[0].label).toBe('Service for Taylor');
+    expect(block.rows[0].value).toBe('Flea Treatment');
+    const list = interpolateBlock({ type: 'list', items: ['Hi {{first_name}}', 'plain'] }, vars);
+    expect(list.items).toEqual(['Hi Taylor', 'plain']);
+  });
+
+  test('a substituted value carrying markdown link syntax is broken so it stays inert text', () => {
+    const block = interpolateBlock({ type: 'paragraph', content: 'Property: {{property_address}}' }, vars);
+    expect(block.content).toBe('Property: see [my site] (https://evil.example) now');
+    expect(block.content).not.toMatch(/\]\(/);
+  });
+
+  test('author-written markdown links in the template are left intact', () => {
+    const block = interpolateBlock({
+      type: 'paragraph',
+      content: 'Hi {{first_name}}, buy a [flea comb](https://www.chewy.com/x) today.',
+    }, vars);
+    expect(block.content).toBe('Hi Taylor, buy a [flea comb](https://www.chewy.com/x) today.');
+  });
+});

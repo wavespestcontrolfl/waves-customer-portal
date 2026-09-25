@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
+import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, treeShrubPalmBulletText, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
 import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
@@ -377,6 +377,14 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
   // per-row counts — there the split is the information (and visitsPerYear
   // resolves null for differing counts anyway).
   const isRowless = !Array.isArray(frequency.perServiceTreatments) || frequency.perServiceTreatments.length === 0;
+  // Engine-backed split T&S card (buildPricingServices → frequencyFromTreatmentRow):
+  // rowless by construction (no perServiceTreatments), so the row-level
+  // palm bullet below never fires for it. It carries its palm count on the
+  // frequency itself instead (server-side, lower risk than giving the split
+  // card a synthetic row — see frequencyFromTreatmentRow). Only rendered
+  // when rowless: a rows-based card already gets the bullet appended to its
+  // row's own inclusion list.
+  const rowlessPalmBullet = isRowless ? treeShrubPalmBulletText(frequency.palmCount) : null;
   const showCadenceLine = perAppNet != null
     && Number.isFinite(visitsPerYear) && visitsPerYear > 0
     && (isRowless || (glass && treatmentRows.length === 1));
@@ -669,6 +677,12 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
         </div>
       ) : null}
 
+      {rowlessPalmBullet ? (
+        <div data-testid="rowless-palm-bullet" style={{ marginTop: 12, fontSize: 14, fontWeight: 600, color: W.textBody, lineHeight: 1.35 }}>
+          {rowlessPalmBullet}
+        </div>
+      ) : null}
+
       {treatmentRows.length ? (
         <div style={{ display: 'grid', gap: 12, marginTop: 20 }}>
           {treatmentRows.map((row, index) => {
@@ -738,16 +752,22 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                 // GATE_ESTIMATE_COMMERCIAL_GLASS is off, and the swap must
                 // hold on every stack (glass, residential-slug glass,
                 // baseline non-glass alike).
-                items={applyCommercialExteriorScope(
-                  (glass && glassRowInclusions(
-                    glassServiceSlug(String(row.service || row.key || row.label || '')),
-                    row.visitsPerYear,
-                    glassSetupBullet,
-                  )) || serviceInclusions(row),
-                  /commercial/.test(String(row.service || row.key || '').toLowerCase())
-                    && /pest/.test(String(row.service || row.key || '').toLowerCase()),
-                  commercialInteriorSelected,
-                )}
+                items={(() => {
+                  const glassSlug = glassServiceSlug(String(row.service || row.key || row.label || ''));
+                  const base = applyCommercialExteriorScope(
+                    (glass && glassRowInclusions(glassSlug, row.visitsPerYear, glassSetupBullet))
+                      || serviceInclusions(row),
+                    /commercial/.test(String(row.service || row.key || '').toLowerCase())
+                      && /pest/.test(String(row.service || row.key || '').toLowerCase()),
+                    commercialInteriorSelected,
+                  );
+                  // Palm-care bullet (owner 2026-09-24: palms priced inside
+                  // T&S via routine palm-care reserve) — classified the same
+                  // way as the inclusion-list swap above: glassServiceSlug
+                  // under glass, serviceKey(row) for the baseline list.
+                  const isTreeShrubRow = glass ? glassSlug === 'tree_shrub' : serviceKey(row) === 'tree_shrub';
+                  return isTreeShrubRow ? withTreeShrubPalmBullet(base, row.palmCount) : base;
+                })()}
                 collapsible={glass}
               />
             </div>

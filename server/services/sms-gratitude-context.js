@@ -41,6 +41,26 @@ function gratitudeActivation() {
   return require('../config/feature-gates').gateEnvTimestamp('SMS_GRATITUDE_ACTIVATED_AT');
 }
 
+// Can a gratitude claim exist? The activation stamp outlives the kill switch,
+// so a claim left provider-uncertain stays visible to manual send paths for
+// its 24-hour window after the gate is disabled. Clear the stamp only after
+// that window. Never stamped and gate off means no claim can exist, so those
+// paths stay an exact pass-through while the lane is dark.
+// First enable (gate + activation stamp set by a rolling deployment): old
+// instances still read both unset and do not coordinate. A process therefore
+// makes no gratitude claim until it has run longer than any deploy overlap,
+// by which time every instance serving sends reads the same stamp.
+const GRATITUDE_ROLLOUT_SETTLE_MS = 15 * 60 * 1000;
+
+function gratitudeRolloutSettled() {
+  return process.uptime() * 1000 >= GRATITUDE_ROLLOUT_SETTLE_MS;
+}
+
+function gratitudeClaimsPossible() {
+  return require('../config/feature-gates').isEnabled('smsGratitudeReplies')
+    || gratitudeActivation() !== null;
+}
+
 function validateGratitudeDraftContract(row, { expectedReply, expectedPromptVersion } = {}) {
   const rowFailure = [
     [() => !row || row.status !== 'shadow' || row.intent !== GRATITUDE_INTENT, 'draft_not_shadow_gratitude'],
@@ -81,10 +101,13 @@ function mediaCountFromMetadata(value) {
   return metadata && Array.isArray(metadata.media) ? metadata.media.length : null;
 }
 
-async function pendingGratitudeWork(dbh, { customerId, threadKey }) {
-  const openRequest = await dbh('service_requests').where({ customer_id: customerId })
-    .whereNotIn(dbh.raw("COALESCE(status, 'new')"), ['resolved', 'closed', 'cancelled']).first('id');
-  if (openRequest) return true;
+// Every open-work source that must keep a courtesy closer from concealing
+// operational work, as [query, id column] pairs. Built fresh per call so the
+// same definitions serve the sequential reader and the one-statement final
+// boundary read.
+function pendingWorkQueries(dbh, { customerId, threadKey, excludeDecisionId = null }) {
+  const openRequest = dbh('service_requests').where({ customer_id: customerId })
+    .whereNotIn(dbh.raw("COALESCE(status, 'new')"), ['resolved', 'closed', 'cancelled']);
 
   const openCallCommitment = dbh('call_commitments as cc')
     .join('call_log as cl', 'cc.call_log_id', 'cl.id')
@@ -98,7 +121,6 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey }) {
         )`, [threadKey, threadKey]);
       }
     });
-  if (await openCallCommitment.first('cc.id')) return true;
   const openSmsCommitment = dbh('call_commitments as cc_sms')
     .join('sms_log as s_commitment', 'cc_sms.sms_log_id', 's_commitment.id')
     .where({ 'cc_sms.status': 'open' })
@@ -111,7 +133,6 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey }) {
         )`, [threadKey, threadKey]);
       }
     });
-  if (await openSmsCommitment.first('cc_sms.id')) return true;
 
   const triage = dbh('triage_items as ti')
     .leftJoin('call_log as ti_call', 'ti.call_log_id', 'ti_call.id')
@@ -130,7 +151,6 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey }) {
         )`, [threadKey, threadKey, threadKey, threadKey]);
       }
     });
-  if (await triage.first('ti.id')) return true;
 
   const operatorItem = dbh('operator_inbox_items as oi')
     .leftJoin('sms_log as oi_sms', function joinSmsSource() {
@@ -146,11 +166,14 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey }) {
         )`, [threadKey, threadKey]);
       }
     });
-  if (await operatorItem.first('oi.id')) return true;
 
   const decision = dbh('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
     .whereIn('ad.status', ['pending_review', 'pending', 'scheduled', 'sending', 'initiated', 'active']);
+  // The final provider-boundary recheck runs after this executor has inserted
+  // its own `sending` claim. Exclude only that server-owned id; every other
+  // pending decision on the customer/thread still blocks the courtesy reply.
+  if (excludeDecisionId) decision.whereNot('ad.id', excludeDecisionId);
   if (threadKey) {
     decision.where(function pendingForCustomerOrThread() {
       this.where('ad.customer_id', customerId)
@@ -162,14 +185,37 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey }) {
   } else {
     decision.where('ad.customer_id', customerId);
   }
-  return Boolean(await decision.first('ad.id'));
+  return [
+    [openRequest, 'id'],
+    [openCallCommitment, 'cc.id'],
+    [openSmsCommitment, 'cc_sms.id'],
+    [triage, 'ti.id'],
+    [operatorItem, 'oi.id'],
+    [decision, 'ad.id'],
+  ];
 }
 
-async function gratitudeThreadAdvanced(dbh, { inboundId, fromPhone, toPhone, skipReservationId = null }) {
+async function pendingGratitudeWork(dbh, options) {
+  for (const [query, column] of pendingWorkQueries(dbh, options)) {
+    if (await query.first(column)) return true;
+  }
+  return false;
+}
+
+// Live customers on the thread phone (two rows are enough to detect ambiguity).
+function threadCustomersQuery(dbh, customerPhoneDigits) {
+  return dbh('customers').where({ active: true }).whereNull('deleted_at')
+    .whereIn(dbh.raw("REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g')"), customerPhoneDigits)
+    .limit(2).select('id', 'first_name', 'phone');
+}
+
+// Any later exchange on the exact endpoint pair, or null when the endpoints
+// cannot be identified (callers treat that as advanced, fail closed).
+function threadAdvancedQuery(dbh, { inboundId, fromPhone, toPhone, skipReservationId = null }) {
   const fromKey = phoneIdentityKey(fromPhone);
   const toKey = phoneIdentityKey(toPhone);
   if (!inboundId || !phoneMatchDigits(fromPhone).length || !phoneMatchDigits(toPhone).length
-      || !fromKey || !toKey) return true;
+      || !fromKey || !toKey) return null;
   const query = dbh('sms_log').whereNot('id', inboundId)
     // Any still-pending outbound owns the exchange, even if queued before
     // this inbound. Only the caller's exact reservation may be excluded.
@@ -193,7 +239,49 @@ async function gratitudeThreadAdvanced(dbh, { inboundId, fromPhone, toPhone, ski
         AND status IN ('accepted','queued','sent','delivered','scheduled','sending'))
     )`, [fromKey, toKey, toKey, toKey, fromKey]);
   if (skipReservationId) query.whereNot('id', skipReservationId);
-  return Boolean(await query.first('id'));
+  return query;
+}
+
+async function gratitudeThreadAdvanced(dbh, options) {
+  const query = threadAdvancedQuery(dbh, options);
+  return !query || Boolean(await query.first('id'));
+}
+
+/**
+ * The final provider-boundary read of mutable thread state as ONE statement:
+ * open work and thread advancement are evaluated against a single snapshot,
+ * so work that commits between two separate reads cannot be missed. Writers
+ * of those tables do not take the thread lock.
+ */
+async function gratitudeFinalState(dbh, { pending, thread, customer }) {
+  const threadQuery = threadAdvancedQuery(dbh, thread);
+  if (!threadQuery) return { pendingWork: false, threadAdvanced: true, customerChanged: true };
+  const pendingQueries = pendingWorkQueries(dbh, pending);
+  const row = await dbh.first(
+    dbh.raw(
+      `(${pendingQueries.map(() => 'EXISTS (?)').join(' OR ')}) AS pending_work`,
+      pendingQueries.map(([query, column]) => query.select(column)),
+    ),
+    dbh.raw('EXISTS (?) AS thread_advanced', [threadQuery.select('id')]),
+    dbh.raw("(SELECT COALESCE(json_agg(c), '[]'::json) FROM (?) c) AS customers", [
+      threadCustomersQuery(dbh, phoneMatchDigits(thread.fromPhone)),
+    ]),
+  );
+  // The same identity the claim trusted: exactly one live customer on this
+  // phone, the claimed id, the same phone, and the same fixed name reply.
+  const customers = Array.isArray(row?.customers) ? row.customers : [];
+  const current = customers.length === 1 ? customers[0] : null;
+  const customerChanged = ![
+    current,
+    current?.id === customer.id,
+    phoneIdentityKey(current?.phone) === customer.threadKey,
+    buildGratitudeReply(current?.first_name) === customer.reply,
+  ].every(Boolean);
+  return {
+    pendingWork: row?.pending_work === true,
+    threadAdvanced: row?.thread_advanced !== false,
+    customerChanged,
+  };
 }
 
 async function readGratitudeContext({
@@ -218,6 +306,10 @@ async function readGratitudeContext({
     [() => !inbound?.created_at || !inbound.from_phone || !inbound.to_phone, 'inbound_unavailable'],
     [() => draft.customer_id !== inbound.customer_id
       || draft.inbound_message !== inbound.message_body, 'immutable_source_mismatch'],
+    // Automated texts never originate from a technician's own line, and
+    // rerouting the reply to the location number would start a separate,
+    // unsolicited thread. Thanks sent to a tech line stay with the tech.
+    [() => require('../config/twilio-numbers').isTechLine(inbound.to_phone), 'tech_line_thread'],
   ].find(([rejected]) => rejected());
   if (sourceFailure) return { ok: false, reason: sourceFailure[1] };
   const timing = gratitudeTimingReason({ inboundCreatedAt: inbound.created_at, now, activatedAt });
@@ -229,9 +321,7 @@ async function readGratitudeContext({
   if (![threadKey, endpointKey, customerPhoneDigits.length, phoneMatchDigits(inbound.to_phone).length].every(Boolean)) {
     return { ok: false, reason: 'invalid_thread' };
   }
-  const customers = await dbh('customers').where({ active: true }).whereNull('deleted_at')
-    .whereIn(dbh.raw("REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g')"), customerPhoneDigits)
-    .limit(2).select('id', 'first_name', 'phone');
+  const customers = await threadCustomersQuery(dbh, customerPhoneDigits);
   const customer = customers.length === 1 ? customers[0] : null;
   if (![customer, customer?.id === draft.customer_id, customer?.id === inbound.customer_id,
     phoneIdentityKey(customer?.phone) === threadKey].every(Boolean)) {
@@ -268,8 +358,13 @@ async function readGratitudeContext({
     direction: row.direction,
     body: row.message_body,
     messageType: jsonObject(row.metadata)?.original_message_type || row.message_type,
+    // Set at send time only for Comms-composer bodies (services/twilio.js);
+    // 'manual' by itself is also written by automated senders.
+    humanAuthored: jsonObject(row.metadata)?.human_authored === true,
     createdAt: row.created_at,
     mediaCount: mediaCountFromMetadata(row.metadata),
+    // Provider row of a /schedule-sms send; names the queued row it delivered.
+    scheduledSourceId: jsonObject(row.metadata)?.scheduled_sms_log_id ?? null,
   }));
   const pendingWork = await pendingGratitudeWork(dbh, { customerId: customer.id, threadKey });
   const policy = evaluateGratitudeContext({
@@ -288,9 +383,13 @@ module.exports = {
   jsonObject,
   jsonArray,
   gratitudeActivation,
+  gratitudeClaimsPossible,
+  gratitudeRolloutSettled,
+  GRATITUDE_ROLLOUT_SETTLE_MS,
   validateGratitudeDraftContract,
   mediaCountFromMetadata,
   pendingGratitudeWork,
   gratitudeThreadAdvanced,
+  gratitudeFinalState,
   readGratitudeContext,
 };

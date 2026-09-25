@@ -771,17 +771,31 @@ function imageExtFromSource(url) {
 // and regex ONLY the bounded header; Buffer.from(base64) tolerates embedded
 // whitespace, so wrapped payloads now decode instead of erroring.
 // An admin-generated hero is stored as a bare data: URL (no row for its
-// provenance), so the one fact the publish-time re-screen needs — was the
-// Waves logo reference attached? — rides as an RFC 2397 media-type parameter
-// (`data:image/png;waves-logo=1;base64,…`; browsers render it unchanged).
-// stampLogoReference adds it; parseImageDataUrl reads it back as
-// logoReference (Codex r1 P2 on #4761).
+// provenance), so the facts the publish-time re-screen needs — was the
+// Waves logo reference attached? was the van wrap reference attached? —
+// ride as RFC 2397 media-type parameters
+// (`data:image/png;waves-logo=1;waves-van-wrap=1;base64,…`; browsers render
+// it unchanged, and the header's `((?:;key=val)*)` group below already
+// tolerates any number of them in either order). stampLogoReference /
+// stampVanWrapReference add their own marker on top of whatever the data
+// URL already carries; parseImageDataUrl reads both back as logoReference /
+// vanWrapReference (Codex r1 P2 on #4761; Codex r2 P2 on #4785 — the van
+// marker must mirror the logo one end to end or an admin-generated hero
+// with the van wrap re-screens without allowVanWrap at publish time and its
+// legitimate wrap text/branding gets reported as forbidden).
 const LOGO_REFERENCE_PARAM = 'waves-logo=1';
-function stampLogoReference(dataUrl) {
+const VAN_WRAP_REFERENCE_PARAM = 'waves-van-wrap=1';
+function stampDataUrlParam(dataUrl, param) {
   const s = String(dataUrl || '');
-  const m = s.match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
+  const m = s.match(/^data:(image\/[a-z0-9.+-]+)((?:;[a-z0-9-]+=[a-z0-9-]+)*);base64,/i);
   if (!m) return s;
-  return `data:${m[1]};${LOGO_REFERENCE_PARAM};base64,${s.slice(m[0].length)}`;
+  return `data:${m[1]}${m[2]};${param};base64,${s.slice(m[0].length)}`;
+}
+function stampLogoReference(dataUrl) {
+  return stampDataUrlParam(dataUrl, LOGO_REFERENCE_PARAM);
+}
+function stampVanWrapReference(dataUrl) {
+  return stampDataUrlParam(dataUrl, VAN_WRAP_REFERENCE_PARAM);
 }
 function parseImageDataUrl(url) {
   const s = String(url || '');
@@ -792,7 +806,12 @@ function parseImageDataUrl(url) {
   const m = header.match(/^data:(image\/[a-z0-9.+-]+)((?:;[a-z0-9-]+=[a-z0-9-]+)*);base64$/i);
   if (!m) return null;
   const params = (m[2] || '').split(';').filter(Boolean).map((p) => p.toLowerCase());
-  return { mime: m[1].toLowerCase(), base64: s.slice(comma + 1), logoReference: params.includes(LOGO_REFERENCE_PARAM) };
+  return {
+    mime: m[1].toLowerCase(),
+    base64: s.slice(comma + 1),
+    logoReference: params.includes(LOGO_REFERENCE_PARAM),
+    vanWrapReference: params.includes(VAN_WRAP_REFERENCE_PARAM),
+  };
 }
 
 async function fetchImageBuffer(url) {
@@ -867,9 +886,12 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     let gen;
     let img;
     try {
-      // Opt in to the Waves logo reference: this path screens the result with
-      // the uniform-logo allowance below (owner directive 2026-09-24).
-      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt, uniformLogo: true });
+      // Opt in to the Waves logo reference AND the van wrap reference: this
+      // path screens the result with the allowances below (owner directive
+      // 2026-09-24 for the logo, owner ruling 2026-09-24 for the van wrap).
+      // Each has its own kill switch and attaches independently — the van
+      // wrap only rides along when the plan actually places a van (plan.van).
+      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt, uniformLogo: true, vanWrap: true });
       img = await fetchImageBuffer(gen.dataUrl);
       if (!img?.buffer) throw new Error(`${mode} image generation produced no usable image`);
     } catch (err) {
@@ -889,14 +911,16 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     }
     const allowedText = plan.style === 'infographic' ? captions : [];
     // The screen runs inside the same slot deadline as the generation.
-    // The uniform logo is allowed on the cap/chest only when the generator
-    // actually attached the reference (owner directive 2026-09-24); a
-    // logo-free generation is screened as before.
+    // The uniform logo is allowed on the cap/chest, and the van wrap on the
+    // one van, only when the generator actually attached that reference
+    // (owner directive/ruling 2026-09-24); a reference-free generation is
+    // screened as before.
     const allowUniformLogo = gen.logoReference === true;
-    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, allowUniformLogo, timeoutMs: deadlineAt - Date.now() });
+    const allowVanWrap = gen.vanWrapReference === true;
+    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, allowUniformLogo, allowVanWrap, timeoutMs: deadlineAt - Date.now() });
     // deadlineAt rides along so the caller's alt-text vision pass runs
     // inside the same slot budget (Codex r9 P2).
-    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, logoReference: allowUniformLogo, deadlineAt };
+    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, logoReference: allowUniformLogo, vanWrapReference: allowVanWrap, deadlineAt };
     if (screen.ok) return candidate;
     candidates.push(candidate);
     if (attempt === 0) {
@@ -1293,11 +1317,14 @@ async function publishAstro(postId) {
         if (heroImage?.buffer && dataUrl) {
           const { screenGeneratedImage } = require('../content/hero-alt-vision');
           heroImage.model = 'admin pre-generated';
-          // The stored URL says whether the logo reference was attached, so
-          // a correctly branded cap/chest is not re-reported as a forbidden
-          // logo (Codex r1 P2 on #4761).
+          // The stored URL says whether the logo reference and/or the van
+          // wrap reference were attached, so a correctly branded cap/chest
+          // or a correctly wrapped van is not re-reported as a forbidden
+          // mark (Codex r1 P2 on #4761; Codex r2 P2 on #4785 for the van
+          // marker).
           heroImage.logoReference = dataUrl.logoReference === true;
-          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png', allowUniformLogo: heroImage.logoReference });
+          heroImage.vanWrapReference = dataUrl.vanWrapReference === true;
+          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png', allowUniformLogo: heroImage.logoReference, allowVanWrap: heroImage.vanWrapReference });
         }
       } catch (mediaErr) {
         const e = new Error(`featured image could not be fetched for Astro publish: ${mediaErr.message}`);
@@ -1322,7 +1349,7 @@ async function publishAstro(postId) {
     // source extension.
     if (heroImage?.buffer) {
       // Preserve alt across the recompress — only the generated path sets it.
-      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null, model: heroImage.model || null, plan: heroImage.plan || null, screen: heroImage.screen || null, logoReference: heroImage.logoReference === true };
+      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null, model: heroImage.model || null, plan: heroImage.plan || null, screen: heroImage.screen || null, logoReference: heroImage.logoReference === true, vanWrapReference: heroImage.vanWrapReference === true };
     }
     const heroImageExt = heroImage?.buffer ? 'webp' : imageExtFromSource(post.featured_image_url);
 
@@ -3060,7 +3087,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     const alt = vetGeneratedAlt(described, gen.alt || `Illustration for ${slot.heading}`, Array.isArray(frontmatter.domains) ? frontmatter.domains : null);
     logger.info(`[astro-publisher] generated body image ${n} for ${slug} via ${gen.model} (${gen.plan?.style || 'unplanned'}, "${slot.heading}")`);
     files.push({ path: repoPath, buffer });
-    images.push({ src, alt, reused: false, model: gen.model || null, plan: gen.plan || null, screen: gen.screen || null, logoReference: gen.logoReference === true });
+    images.push({ src, alt, reused: false, model: gen.model || null, plan: gen.plan || null, screen: gen.screen || null, logoReference: gen.logoReference === true, vanWrapReference: gen.vanWrapReference === true });
     newAlts.push(alt);
     placements.push({ insertAt: slot.insertAt, src, alt });
   }
@@ -4517,7 +4544,7 @@ function describeImageProvenance(label, img) {
   const screen = img.screen
     ? (img.screen.checked ? (img.screen.ok ? 'screen clean' : `**screen flagged after retry: ${img.screen.reasons.join('; ')}**`) : 'screen unavailable (fail-open)')
     : 'not screened';
-  return `- ${label}: ${img.model || 'unknown model'}${img.logoReference ? ' + uniform logo reference' : ''} (${plan}) — ${screen}`;
+  return `- ${label}: ${img.model || 'unknown model'}${img.logoReference ? ' + uniform logo reference' : ''}${img.vanWrapReference ? ' + van wrap reference' : ''} (${plan}) — ${screen}`;
 }
 
 function buildDraftPrBody({ frontmatter, slug, branch, content, brief, images = null }) {
@@ -5219,6 +5246,7 @@ module.exports = {
     fetchImageBuffer,
     parseImageDataUrl,
     stampLogoReference,
+    stampVanWrapReference,
     defaultHeroForCategory,
     describeHeroFailure,
     inferServiceAreas,

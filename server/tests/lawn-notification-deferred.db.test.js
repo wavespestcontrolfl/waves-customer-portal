@@ -19,7 +19,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null,
   gateEnvValue: (...args) => mockGateEnvValue(...args),
   isEnabled: (...args) => mockIsEnabled(...args),
   logGateStatus: jest.fn(),

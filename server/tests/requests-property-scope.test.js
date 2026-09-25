@@ -18,6 +18,8 @@ jest.mock('../services/cancellation-resolution/resolve', () => ({ situationalHar
 jest.mock('../services/messaging/gsm-normalize', () => ({ gsmSafeName: (s) => s }));
 jest.mock('../services/reservice-link', () => ({ reserviceStreamlineAccess: jest.fn(async () => ({ token: 'tok-reservice', lanes: ['pest'] })) }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/customer-photo-id-evidence', () => ({ requestPhotoIdEvidence: jest.fn() }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
   return { ...actual, resolveSessionScope: jest.fn(async () => global.__SCOPE__) };
@@ -147,4 +149,71 @@ test('the same covered issue under the PRIMARY selection is still steered to the
   expect(res.status).toBe(409);
   expect(res.body.code).toBe('use_reservice_picker');
   expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
+});
+
+test('Photo ID handoff copies saved evidence and keeps the durable source alongside property metadata', async () => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  const source = { type: 'pest', id: '11111111-1111-4111-8111-111111111111', photoIds: ['22222222-2222-4222-8222-222222222222'] };
+  const saved = 'data:image/jpeg;base64,/9j/2w==';
+  requestPhotoIdEvidence.mockResolvedValueOnce({ photos: [saved] });
+  const res = await post({ category: 'other', subject: 'Photo ID follow-up', photoIdSource: source });
+  expect(res.status).toBe(201);
+  const insert = log.find((e) => e[0] === 'insert')[1];
+  expect(JSON.parse(insert.photos)).toEqual([saved]);
+  expect(JSON.parse(insert.metadata)).toMatchObject({ propertyId: 'prop-b', photoIdSource: source });
+});
+
+test.each([404, 409, 503])('an unavailable Photo ID source (%s) never files a request without its evidence', async (status) => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  requestPhotoIdEvidence.mockResolvedValueOnce({ status, error: 'Saved evidence unavailable' });
+  const res = await post({ category: 'other', subject: 'Photo follow-up', photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+  expect(res.status).toBe(status);
+  expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
+  expect(notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('an already-filed Photo ID retry succeeds without reading photo storage again', async () => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  db.mockImplementation(() => chain([{ id: 'existing-request', category: 'other', photos: ['data:image/jpeg;base64,saved'] }], log));
+  const res = await post({ category: 'other', subject: 'Photo follow-up', photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+  expect(res.status).toBe(200);
+  expect(res.body).toMatchObject({ deduped: true, request: { id: 'existing-request', photoCount: 1 } });
+  expect(requestPhotoIdEvidence).not.toHaveBeenCalled();
+  expect(notifyAdmin).not.toHaveBeenCalled();
+});
+
+test.each([false, true])('missing original photo rows require a replacement (attached=%s)', async (attached) => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  requestPhotoIdEvidence.mockResolvedValueOnce({ photos: [], missingPhotos: true });
+  const res = await post({ category: 'other', subject: 'Photo follow-up', photos: attached ? ['data:image/jpeg;base64,/9j/2w=='] : [], photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+  expect(res.status).toBe(attached ? 201 : 409);
+  expect(log.some((e) => e[0] === 'insert')).toBe(attached);
+});
+
+test('combined new and saved attachments still obey the shared photo cap', async () => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  const photo = 'data:image/jpeg;base64,/9j/2w==';
+  requestPhotoIdEvidence.mockResolvedValueOnce({ photos: [photo] });
+  const res = await post({ category: 'other', subject: 'Photo follow-up', photos: [photo, photo, photo], photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+  expect(res.status).toBe(400);
+  expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
+});
+
+test('Photo ID scope failure refuses the request even with a validated property claim fallback', async () => {
+  const { resolveSessionScope } = require('../services/account-properties');
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  resolveSessionScope.mockRejectedValueOnce(new Error('scope unavailable'));
+  global.__REQ_PROPERTY__ = { ...SECONDARY.property, customer_id: 'cust-1' };
+  try {
+    const res = await post({ category: 'other', subject: 'Photo follow-up', photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+    expect(res.status).toBe(500);
+    expect(requestPhotoIdEvidence).not.toHaveBeenCalled();
+    expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  } finally { global.__REQ_PROPERTY__ = null; }
 });

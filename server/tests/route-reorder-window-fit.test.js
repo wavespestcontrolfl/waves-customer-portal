@@ -2,10 +2,12 @@
 // fails the chronology/feasibility guards, the nightly pass computes the best
 // LEGAL order in-process. Covered here: gate OFF = byte-for-byte the
 // pre-fallback skip; gate ON applies a legal order through the same fenced
-// write with source 'window_constrained' + unconstrained_saved_meters; an
-// infeasible/unprofitable day keeps its ORIGINAL skip reason plus the
-// fallback:'NO_FEASIBLE_IMPROVEMENT' tag; a legal Google order never
-// consults the fallback. Plus unit coverage of the search itself
+// write with source 'window_constrained' + unconstrained_saved_meters; a
+// search that finds no certifiable order keeps the ORIGINAL skip reason
+// plus the fallback:'NO_FEASIBLE_IMPROVEMENT' tag; a certifiable order below
+// the savings floor is honestly BELOW_MIN_SAVINGS with its original conflict
+// retained as evidence; a legal Google order never consults the fallback.
+// Plus unit coverage of the search itself
 // (backbone preserved, exhaustive optimality, greedy above the cap,
 // infeasible day ⇒ null).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -274,6 +276,32 @@ test('gate ON: a below-floor ILLEGAL Google order still reaches the fallback —
   expect(ledger().skips.find((s) => s.date === DAY)).toBeUndefined();
 });
 
+test('gate ON: a legal constrained order below the floor is feasible but not worth rewriting', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  // Current U,T2,T1 = 22,500 m. Google and the constrained search both find
+  // 22,000 m orders, but Google's order reverses the promised windows. The
+  // constrained order is legal and saves 500 m — below the 805 m write floor.
+  stopsByDate[DAY] = [
+    stop('T1', { window_start: '09:00', lng: 10, route_order: 3 }),
+    stop('T2', { window_start: '13:00', lng: 1, route_order: 2 }),
+    stop('U', { lng: 1.25, route_order: 1 }),
+  ];
+  mockOptimizerOrder(['T2', 'T1', 'U']);
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  const skip = ledger().skips.find((s) => s.date === DAY);
+  expect(skip).toMatchObject({
+    reason: 'BELOW_MIN_SAVINGS',
+    saved_meters: 500,
+    conflict: 'WINDOW_ORDER_CONFLICT',
+    constrained_order_feasible: true,
+    fallback_saved_meters: 500,
+  });
+  expect(skip.fallback).toBeUndefined();
+  expect(trxUpdates).toEqual([]);
+});
+
 test('gate OFF: a below-floor illegal Google order still skips BELOW_MIN_SAVINGS — legacy sequencing byte for byte', async () => {
   stopsByDate[DAY] = [
     stop('T1', { window_start: '09:00', lng: 10, route_order: 3 }),
@@ -304,6 +332,106 @@ test('gate ON: a LEGAL Google order never consults the fallback — applied as g
   const applied = ledger().reorders[0];
   expect(applied.source).toBe('google_routes_api');
   expect(applied.unconstrained_saved_meters).toBeUndefined();
+});
+
+// GATE_ROUTE_REORDER_COMPLETE_ORDER: an incomplete stored order waives the
+// 805 m floor for a strictly shorter legal order. Stored T1(1), T2(2), U
+// (null) runs T1,T2,U = 4800 m; the best legal order U,T1,T2 = 4400 m, a
+// 400 m saving the floor alone would decline. Google returns T2,T1,U —
+// the same 4400 m with the 13:00 promise first.
+const incompleteDay = (over = {}) => [
+  stop('T1', { window_start: '09:00', lat: 1, lng: 0.7, route_order: 1, ...over.T1 }),
+  stop('T2', { window_start: '13:00', lat: 1.5, lng: 0.5, route_order: 2, ...over.T2 }),
+  stop('U', { lat: 0.5, lng: 0.7, route_order: null, ...over.U }),
+];
+const enableFallbackGates = () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+};
+
+describe('complete-order gate', () => {
+  afterEach(() => { delete process.env.GATE_ROUTE_REORDER_COMPLETE_ORDER; });
+
+  test('gate OFF: a below-floor legal fallback on an incomplete order still skips', async () => {
+    enableFallbackGates();
+    stopsByDate[DAY] = incompleteDay();
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(0);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ fallback_saved_meters: 400 });
+    expect(trxUpdates).toEqual([]);
+    expect(JSON.parse(ledgerInserts[0].constraints).complete_order).toBe(false);
+  });
+
+  test('gate ON: an incomplete order gets the shorter legal fallback written below the floor', async () => {
+    enableFallbackGates();
+    process.env.GATE_ROUTE_REORDER_COMPLETE_ORDER = 'true';
+    stopsByDate[DAY] = incompleteDay();
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(1);
+    expect(ledger().reorders[0]).toMatchObject({
+      source: 'window_constrained',
+      before_distance_meters: 4800,
+      after_distance_meters: 4400,
+      saved_meters: 400,
+      floor_waived: 'INCOMPLETE_STORED_ORDER',
+    });
+    expect(trxUpdates).toEqual([
+      { id: 'U', route_order: 1 },
+      { id: 'T1', route_order: 2 },
+      { id: 'T2', route_order: 3 },
+    ]);
+    expect(JSON.parse(ledgerInserts[0].constraints).complete_order).toBe(true);
+  });
+
+  test('gate ON: a legal Google order below the floor is written when the stored order has duplicate positions', async () => {
+    enableFallbackGates();
+    process.env.GATE_ROUTE_REORDER_COMPLETE_ORDER = 'true';
+    // U shares T2's position: currentOrder still runs T1,T2,U (4800 m).
+    stopsByDate[DAY] = incompleteDay({ U: { route_order: 2 } });
+    mockOptimizerOrder(['U', 'T1', 'T2']);
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(1);
+    expect(ledger().reorders[0]).toMatchObject({
+      source: 'google_routes_api', saved_meters: 400, floor_waived: 'INCOMPLETE_STORED_ORDER',
+    });
+  });
+
+  test('gate ON: a complete stored order keeps the 805 m floor', async () => {
+    enableFallbackGates();
+    process.env.GATE_ROUTE_REORDER_COMPLETE_ORDER = 'true';
+    stopsByDate[DAY] = incompleteDay({ U: { route_order: 3 } });
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(0);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ fallback_saved_meters: 400 });
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('gate ON: an incomplete order that is already the shortest legal order is left alone', async () => {
+    enableFallbackGates();
+    process.env.GATE_ROUTE_REORDER_COMPLETE_ORDER = 'true';
+    // Stored U(1), T1(2), T2(null) already runs the 4400 m legal best.
+    stopsByDate[DAY] = incompleteDay({ U: { route_order: 1 }, T1: { route_order: 2 }, T2: { route_order: null } });
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(0);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ fallback_saved_meters: 0 });
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('gate ON: a day inside the 72-hour freeze is never completed', async () => {
+    enableFallbackGates();
+    process.env.GATE_ROUTE_REORDER_COMPLETE_ORDER = 'true';
+    const frozenDay = '2026-08-14';
+    stopsByDate[frozenDay] = incompleteDay();
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(0);
+    expect(ledger().skips.find((s) => s.date === frozenDay)).toMatchObject({ reason: 'WITHIN_72H' });
+    expect(trxUpdates).toEqual([]);
+  });
 });
 
 // ── Unit coverage of the search itself (custom optimizer with REAL travel

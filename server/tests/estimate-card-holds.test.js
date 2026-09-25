@@ -1605,9 +1605,9 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceipt).not.toHaveBeenCalled(); // receipt already sent → no re-send
   });
 
-  it('creates a face-value, self-pay PAID fee invoice and sends the receipt via the CANONICAL path (default sms channel)', async () => {
+  it('creates a face-value, self-pay PAID fee invoice without claiming an Email sidecar for explicit Text-only delivery', async () => {
     // first() queue: in-txn existence(none) → prefs → customer (for admin notify)
-    stubDb([null, { payment_receipt_channel: 'sms' }, { first_name: 'Sam' }]);
+    stubDb([null, { payment_receipt_channel: 'sms', payment_receipt_channels: ['sms'] }, { first_name: 'Sam' }]);
     const r = await settleNoShowFee(pi());
     expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
     expect(mockInvoiceCreate).toHaveBeenCalledWith(expect.objectContaining({
@@ -1616,7 +1616,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     }));
     // Uses InvoiceService.sendReceipt (kill switch + receipt_sent_at + location),
     // NOT a hand-rolled sendCustomerMessage/sendSMS.
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: false });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockSendReceiptEmail).not.toHaveBeenCalled(); // sms channel → no email
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
@@ -1627,6 +1627,19 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     await settleNoShowFee(pi());
     expect(mockSendReceipt).not.toHaveBeenCalled();
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'receipt_email_auto:inv1' }));
+  });
+
+  it.each(['billing_email_not_selected', 'receipt_handoff_aborted'])('queues an Email-only fee receipt after the sender returns %s', async (code) => {
+    stubDb([null, { payment_receipt_channels: ['email'], email_enabled: true }, { first_name: 'Sam' }]);
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: code, code });
+    expect(await settleNoShowFee(pi())).toMatchObject({ settled: true });
+    expect(mockEnqueueReceiptDelivery).toHaveBeenCalledWith({
+      invoiceId: 'inv1', source: 'no_show_fee_preference_change',
+    });
+    expect(mockSendReceipt).not.toHaveBeenCalled();
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ receipt_sent_at: 'NOW' }),
+    ]));
   });
 
   it('receipt-texts opt-out on the sms channel: the SMS leg is doomed at the consent gate, so the email carries the fee receipt', async () => {
@@ -1649,7 +1662,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'receipt_email_auto:inv1' }));
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
   });
 
   it('email-only channel with email messages opted out falls back to the SMS receipt', async () => {
@@ -1659,7 +1672,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
     expect(mockSendReceiptEmail).not.toHaveBeenCalled();
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: false });
   });
 
   it('email-only channel with NO recipient email falls back to the SMS receipt; a transient email error does NOT', async () => {
@@ -1667,7 +1680,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1');
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
 
     // Transient provider failure: stays email-preferring, invoice unstamped
     // for the admin needs-receipt path — no surprise text.

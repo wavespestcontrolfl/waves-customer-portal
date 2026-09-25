@@ -358,6 +358,64 @@ export function PropertyRoleEvidence({ payload }) {
   );
 }
 
+// V1/V2 email disagreement (owner ruling 2026-09-25): the card carries two
+// candidate spellings and no single confirmed address — Resolve/Accept
+// refuse it server-side (EMAIL_DISAGREEMENT_UNCONFIRMED) until this form's
+// "Confirm email" action satisfies it in-band. Controlled: draft state
+// (which radio, the typed value) lives in the parent, keyed by item id, so
+// multiple open disagreement cards never share a draft.
+export function EmailConfirmForm({ itemId, payload, draft, onChange, onConfirm, busy }) {
+  const p = parsePayload(payload);
+  if (!p?.email_disagreement) return null;
+  const candidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
+  const selected = draft?.selected || null;
+  const typed = draft?.typed || "";
+  const canConfirm = selected === "other" ? !!typed.trim() : !!selected;
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2 flex flex-col gap-2">
+      <div className="text-11 text-ink-tertiary font-medium">Confirm the correct spelling</div>
+      <div className="flex flex-col gap-1.5">
+        {candidates.map((c, i) => (
+          <label key={i} className="flex items-center gap-2 text-13 text-ink-secondary cursor-pointer">
+            <input
+              type="radio"
+              name={`email-confirm-${itemId}`}
+              checked={selected === c.value}
+              onChange={() => onChange({ selected: c.value })}
+            />
+            {c.value}
+          </label>
+        ))}
+        <label className="flex items-center gap-2 text-13 text-ink-secondary cursor-pointer">
+          <input
+            type="radio"
+            name={`email-confirm-${itemId}`}
+            checked={selected === "other"}
+            onChange={() => onChange({ selected: "other" })}
+          />
+          Other:
+          <input
+            type="text"
+            value={typed}
+            onFocus={() => onChange({ selected: "other" })}
+            onChange={(e) => onChange({ selected: "other", typed: e.target.value })}
+            placeholder="type the correct address"
+            className="h-7 px-2 rounded-md border-hairline text-13 flex-1 min-w-0"
+          />
+        </label>
+      </div>
+      <Button
+        size="sm"
+        variant="primary"
+        disabled={busy || !canConfirm}
+        onClick={() => onConfirm(selected === "other" ? typed.trim() : selected)}
+      >
+        {busy ? "Confirming…" : "Confirm email"}
+      </Button>
+    </div>
+  );
+}
+
 function VerdictBadge({ verdict, wrongFields }) {
   if (!verdict) return null;
   if (verdict === "accept") return <Badge tone="strong">Accepted</Badge>;
@@ -368,7 +426,11 @@ function VerdictBadge({ verdict, wrongFields }) {
   return <Badge tone="alert">Denied{labels ? ` · ${labels}` : ""}</Badge>;
 }
 
-export default function TriageInboxTabV2() {
+// `isAdmin` is the server-verified role from the shell's Outlet context
+// (CommunicationsPageV2 passes it; never localStorage). Admin-only actions
+// (confirm-email 403s non-admin staff) hide for everyone else — hidden when
+// absent/falsy so a caller that forgets it fails closed.
+export default function TriageInboxTabV2({ isAdmin }) {
   const [mode, setMode] = useState("triage"); // 'triage' | 'auto_routed'
   const [status, setStatus] = useState("open");
   // Terminal tabs only: show just the cards the nightly sweep closed.
@@ -381,6 +443,9 @@ export default function TriageInboxTabV2() {
   const [dismissFor, setDismissFor] = useState(null); // triage item being dismissed (note dialog)
   const [denyFor, setDenyFor] = useState(null); // { item, kind } — field-picker dialog
   const [denyFields, setDenyFields] = useState([]);
+  // Email-disagreement confirm form draft, keyed by item id — which
+  // candidate (or "other") is selected, and the typed value for "other".
+  const [emailConfirmDrafts, setEmailConfirmDrafts] = useState({});
 
   const load = useCallback((nextMode, nextStatus, nextAutoOnly = false) => {
     setLoading(true);
@@ -586,6 +651,53 @@ export default function TriageInboxTabV2() {
   const toggleDenyField = (key) =>
     setDenyFields((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
 
+  const setEmailConfirmDraft = (itemId, patch) =>
+    setEmailConfirmDrafts((prev) => ({
+      ...prev,
+      [itemId]: { selected: null, typed: "", ...(prev[itemId] || {}), ...patch },
+    }));
+
+  // Confirm one of the card's candidates (or a typed address) — the one
+  // in-band way to satisfy the server's EMAIL_DISAGREEMENT_UNCONFIRMED
+  // guard: it retargets the hold, corrects the customer/lead record where
+  // one exists, and resolves the card in the same request.
+  const confirmEmail = (item, email) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/confirm-email`, {
+      method: "POST",
+      body: JSON.stringify({ email, expected_updated_at: item.updated_at || null }),
+    })
+      .then(() => {
+        setActioning(null);
+        setEmailConfirmDrafts((prev) => {
+          const next = { ...prev };
+          delete next[item.id];
+          return next;
+        });
+        load(mode, status, autoOnly);
+      })
+      .catch((err) => {
+        setActioning(null);
+        // Only a stale card version reloads (same split as recordVerdict):
+        // every other 409 (LEAD_NOT_RESOLVED, EMAIL_IN_USE, CALL_RELINKED…)
+        // carries the server's own instruction, which a reload would bury.
+        if (err?.status === 409 && err?.code === "STALE_CARD_VERSION") {
+          load(mode, status, autoOnly);
+          setError("This card changed since it loaded — review the refreshed evidence before confirming.");
+          return;
+        }
+        if (err?.status === 409 && err?.message) {
+          setError(err.message);
+          return;
+        }
+        if (err?.status === 400 && err?.message) {
+          setError(err.message);
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Confirm failed — try again.");
+      });
+  };
+
   const isTriage = mode === "triage";
   const isOpenView = isTriage && (status === "open" || status === "in_progress");
 
@@ -711,6 +823,9 @@ export default function TriageInboxTabV2() {
                 const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
                 const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
+                // V1/V2 email disagreement — Accept/Deny 400/409 on this
+                // card until the confirm-email form below satisfies it.
+                const isEmailDisagreementCard = isTriage && !!parsePayload(item.payload)?.email_disagreement;
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
                 // worker is about to write (the worker reopens a card closed
@@ -844,6 +959,21 @@ export default function TriageInboxTabV2() {
 
                     {isTriage && <ConfirmEvidence payload={item.payload} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
+                    {isEmailDisagreementCard && isOpenView && !isAdmin && (
+                      <div className="mt-2 text-12 text-ink-tertiary">
+                        Confirming the email spelling needs an admin.
+                      </div>
+                    )}
+                    {isEmailDisagreementCard && isOpenView && isAdmin && (
+                      <EmailConfirmForm
+                        itemId={item.id}
+                        payload={item.payload}
+                        draft={emailConfirmDrafts[item.id]}
+                        busy={actioning === item.id}
+                        onChange={(patch) => setEmailConfirmDraft(item.id, patch)}
+                        onConfirm={(email) => confirmEmail(item, email)}
+                      />
+                    )}
 
                     {item.resolution_note && (
                       <div className="text-12 text-ink-tertiary mt-2 italic">Note: {item.resolution_note}</div>

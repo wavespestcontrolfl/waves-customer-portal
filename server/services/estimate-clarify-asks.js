@@ -1551,9 +1551,24 @@ async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
         } else if (voiceCallLogId) {
           const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
           if (estimatorEngineEnabled()) {
+            // Carry the call's SETTLED generation as the pass identity
+            // (codex #4815 r9 P2): without one the row-scoped supersession
+            // runs generation:null, which never retires a generation-stamped
+            // price_agreed_on_call block (e.g. one a spared booking-linked
+            // assessment draft left standing), and the creator's guard then
+            // refuses the replacement. An in-flight claim (or a read
+            // failure) adopts nothing — the live pass owns the identity.
+            let ownerProcGeneration = null;
+            try {
+              const { settledCallGeneration } = require('../utils/estimate-claim-sql');
+              ownerProcGeneration = await settledCallGeneration(db, voiceCallLogId);
+            } catch (genErr) {
+              logger.warn(`[estimate-clarify] call generation resolve skipped for ${voiceCallLogId}: ${genErr.message}`);
+            }
             repriceOutcome = await maybeDraftEstimateForCall({
               callLogId: voiceCallLogId,
               quotePromised: true,
+              ownerProcGeneration,
               supersedeEstimateId,
               supersedeReason: 'clarify_bedroom_reply',
               supersedeAttempt: locked.repriceAttempt,
