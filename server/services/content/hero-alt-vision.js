@@ -384,7 +384,20 @@ const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATI
 // non-Waves brand mentioned on the van (a competitor's mark) still fails —
 // this requires BOTH the Waves words AND the van mention, exactly like
 // isAllowedUniformLogo requires both the Waves words and a garment.
-const isAttributedToPermittedVan = (t, van) => Boolean(van) && van.wrapped && van.body !== 'other' && UNIFORM_LOGO_WORDS.test(t) && /\bvan\b/i.test(t);
+// The detection must be attributable EXCLUSIVELY to that van (Codex r5 P2 on
+// #4785): with the wrap's own strings removed, a joined or second subject
+// ("… on the van and wall", "Waves and Orkin logos on the van") or any other
+// surface keeps the whole detection as a violation.
+const VAN_WRAP_STRING_RE = new RegExp(VAN_WRAP_ALLOWED_TEXT.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
+const MIXED_DETECTION = /\b(and|or|plus|with|also|beside|besides|alongside|next|near|including|both)\b|[,;&+/]/i;
+const isAttributedToPermittedVan = (t, van) => {
+  if (!(Boolean(van) && van.wrapped && van.body !== 'other')) return false;
+  const text = String(t || '');
+  if (!UNIFORM_LOGO_WORDS.test(text) || !/\bvan\b/i.test(text)) return false;
+  const rest = text.replace(VAN_WRAP_STRING_RE, ' ');
+  // Parts of the van itself (its door, rear, hood…) are still the van.
+  return !MIXED_DETECTION.test(rest) && !OTHER_SURFACE.test(rest.replace(/\b(van|vans|door|doors|side|rear|back|hood|panel|panels|roof|windshield)\b/gi, ' '));
+};
 // The words inside the Waves logo. A readable_text entry is dropped only
 // when the model ALSO attributed that same string to the uniform logo under
 // uniform_logo_lettering — the model's own placement, not a blanket filter

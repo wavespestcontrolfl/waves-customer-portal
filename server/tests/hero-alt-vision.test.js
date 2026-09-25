@@ -531,4 +531,20 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(wrongBody.ok).toBe(false);
     expect(wrongBody.reasons).toContain('logo or brand mark: Waves logo on the van');
   });
+
+  test('only a detection attributable EXCLUSIVELY to the permitted van is exempted — a mixed entry naming another surface or brand still fails (Codex r5 P2 on #4785)', async () => {
+    const wrapped = van({ wrap_text: [] });
+    const run = async (mark) => {
+      mockDispatch.mockResolvedValue({ ok: true, text: JSON.stringify({ readable_text: [], logos_or_brand_marks: [mark], van: wrapped, van_wrap_elsewhere: [], forbidden_scenes: [], notes: '' }) });
+      return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true });
+    };
+    for (const ok of ['Waves mascot on the van door', 'WAVES Lawn & Pest wrap on the rear doors of the van']) {
+      expect(await run(ok)).toMatchObject({ ok: true, checked: true, reasons: [] });
+    }
+    for (const mixed of ['Waves logo on the van and wall', 'Waves and Orkin logos on the van', 'Waves logo on the van, Orkin sign']) {
+      const r = await run(mixed);
+      expect(r.ok).toBe(false);
+      expect(r.reasons).toEqual([`logo or brand mark: ${mixed}`]);
+    }
+  });
 });
