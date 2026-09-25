@@ -555,6 +555,22 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(bad.reasons).toContain('readable text: Lawn Pest');
   });
 
+  test('unknown words in a permitted-van detection keep it a violation; wrap text is attributed only to phrases the van itself reported (Codex r7 P2 on #4785)', async () => {
+    const logoRun = async (mark) => {
+      mockDispatch.mockResolvedValue({ ok: true, text: JSON.stringify({ readable_text: [], logos_or_brand_marks: [mark], van: van({ wrap_text: [] }), van_wrap_elsewhere: [], forbidden_scenes: [], notes: '' }) });
+      return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true });
+    };
+    for (const mark of ['Waves Orkin logos on the van', 'Waves Pest Control logo on the van']) {
+      expect((await logoRun(mark)).reasons).toContain(`logo or brand mark: ${mark}`);
+    }
+    expect(await logoRun('WAVES Lawn & Pest wrap painted on the side of the van')).toMatchObject({ ok: true, reasons: [] });
+
+    mockDispatch.mockResolvedValue({ ok: true, text: JSON.stringify({ readable_text: ['GoWavesFL.com'], logos_or_brand_marks: [], van: van({ wrap_text: ['WAVES'] }), van_wrap_elsewhere: [], forbidden_scenes: [], notes: '' }) });
+    const offVan = await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true });
+    expect(offVan.ok).toBe(false);
+    expect(offVan.reasons).toContain('readable text: GoWavesFL.com');
+  });
+
   test('only a detection attributable EXCLUSIVELY to the permitted van is exempted — a mixed entry naming another surface or brand still fails (Codex r5 P2 on #4785)', async () => {
     const wrapped = van({ wrap_text: [] });
     const run = async (mark) => {

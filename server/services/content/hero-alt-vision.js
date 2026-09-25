@@ -332,7 +332,14 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
   // permitted van, any readable_text entry that is itself a valid,
   // punctuation-exact run of a wrap phrase is attributed to the wrap.
   const permittedVan = allowVanWrap && parsed.van && parsed.van.wrapped && parsed.van.body !== 'other';
-  const readable = permittedVan ? parsed.readableText.filter((t) => !matchWrapText([t], VAN_WRAP_ALLOWED_TEXT).matched.length) : parsed.readableText;
+  // Only phrases the van's OWN wrap_text fully and validly reported are
+  // attributable — wrap text elsewhere (the URL on a wall) is still stray
+  // (Codex r7 P2 on #4785).
+  const vanPhrases = permittedVan ? VAN_WRAP_ALLOWED_TEXT.filter((phrase) => {
+    const r = matchWrapText(parsed.van.wrapText || [], [phrase]);
+    return r.matched.length > 0 && r.incomplete.length === 0;
+  }) : [];
+  const readable = vanPhrases.length ? parsed.readableText.filter((t) => !matchWrapText([t], vanPhrases).matched.length) : parsed.readableText;
   const { strayText, incomplete, missing } = matchCaptions(readable, allowedText, attributed);
   const reasons = [...logoReasons, ...vanReasons];
   // misplaced marks are already in logoReasons; the rest are true brand marks
@@ -396,7 +403,18 @@ const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATI
 // ("… on the van and wall", "Waves and Orkin logos on the van") or any other
 // surface keeps the whole detection as a violation.
 const VAN_WRAP_STRING_RE = new RegExp(VAN_WRAP_ALLOWED_TEXT.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
-const MIXED_DETECTION = /\b(and|or|plus|with|also|beside|besides|alongside|next|near|including|both)\b|[,;&+/]/i;
+// After the wrap's own strings are removed, every remaining word must be a
+// plain descriptor of a mark on that van — an unknown word ("Waves Orkin
+// logos on the van", "Waves Pest Control logo on the van") keeps the
+// detection as a violation (Codex r7 P2 on #4785). Connectors ("and",
+// "with", "next to") and other surfaces are simply not on the list.
+const PERMITTED_VAN_WORDS = new Set([
+  'waves', 'ford', 'oval', 'badge', 'emblem', 'logo', 'logos', 'mark', 'marks', 'brand', 'branding', 'wordmark',
+  'lettering', 'text', 'wrap', 'wrapped', 'graphic', 'graphics', 'decal', 'mascot', 'company', 'name',
+  'the', 'a', 'an', 'on', 'of', 'in', 'at', 's',
+  'van', 'vans', 'door', 'doors', 'side', 'rear', 'back', 'hood', 'panel', 'panels', 'roof', 'windshield', 'grille', 'front', 'cargo',
+  'painted', 'printed', 'visible', 'small', 'large', 'blue', 'white', 'yellow', 'red',
+]);
 const isAttributedToPermittedVan = (t, van) => {
   if (!(Boolean(van) && van.wrapped && van.body !== 'other')) return false;
   const text = String(t || '');
@@ -404,9 +422,8 @@ const isAttributedToPermittedVan = (t, van) => {
   // carries (and the screen's own body cue) — on the permitted van it is not
   // a stray brand either (Codex r6 P2 on #4785).
   if (!(UNIFORM_LOGO_WORDS.test(text) || /\bford\b/i.test(text)) || !/\bvan\b/i.test(text)) return false;
-  const rest = text.replace(VAN_WRAP_STRING_RE, ' ');
-  // Parts of the van itself (its door, rear, hood…) are still the van.
-  return !MIXED_DETECTION.test(rest) && !OTHER_SURFACE.test(rest.replace(/\b(van|vans|door|doors|side|rear|back|hood|panel|panels|roof|windshield)\b/gi, ' '));
+  const words = text.replace(VAN_WRAP_STRING_RE, ' ').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  return words.every((w) => PERMITTED_VAN_WORDS.has(w));
 };
 // The words inside the Waves logo. A readable_text entry is dropped only
 // when the model ALSO attributed that same string to the uniform logo under
