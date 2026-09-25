@@ -20,9 +20,22 @@ function isDialablePhone(value) {
 // crm_notes stamp in extraction-compat.js, the CSR-coaching addendum in
 // csr-coach.js) calls this instead of re-deriving the condition, so a
 // future refinement here can't silently desync from the flag.
+//
+// Keyed on caller.phone_e164 presence, NOT phone_source (pre-push review
+// P1): phone_source is the MODEL's claim that the caller uttered SOME
+// number, independent of whether it parsed to a real E.164 — the prompt's
+// own fallback rule ("If no number is spoken, set phone_e164 to null,
+// server will fall back to ANI") means a garbled "spoken" number normalizes
+// phone_e164 to null (normalizeCaller/normalizePhone reject anything that
+// doesn't validate) while phone_source can still read 'spoken'. Trusting
+// phone_source alone would then leave the caller on the very ANI they just
+// disclaimed with no flag, no SMS hold, and no crm_notes stamp — the exact
+// failure this feature exists to catch. A present phone_e164 is real,
+// already-validated evidence of a usable callback number; its absence
+// means there isn't one, whatever phone_source claims.
 function callerIdDisclaimedNeedsCallback(caller) {
   if (!caller || caller.caller_id_disclaimed !== true) return false;
-  return caller.phone_source !== 'spoken' && caller.phone_source !== 'both';
+  return !caller.phone_e164;
 }
 
 // Role/shared mailboxes whose local-part legitimately won't contain a person's

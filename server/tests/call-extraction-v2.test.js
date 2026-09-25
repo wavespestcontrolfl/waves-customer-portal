@@ -1,6 +1,7 @@
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2, normalizePhone, normalizeZip, normalizeState, cleanValidEmail } = require('../utils/normalize-extraction-v2');
-const { isV2Extraction, flatView, mapServiceCategoryToLegacy } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, mapServiceCategoryToLegacy, callerIdDisclaimedNoteText } = require('../utils/extraction-compat');
+const { callerIdDisclaimedNeedsCallback } = require('../services/call-triage-flags');
 
 function validModelOutput() {
   return {
@@ -1155,5 +1156,70 @@ describe('extraction compat adapter', () => {
 
     v2.sentiment_and_lead.lead_quality = 'wrong_number';
     expect(flatView(v2).lead_quality).toBe('spam');
+  });
+
+  // callerIdDisclaimedNeedsCallback (schema 1.14.0, single source of truth
+  // for callback_number_needed / the crm_notes stamp / the CSR coaching
+  // addendum): keyed on phone_e164 presence, not phone_source — a
+  // pre-push review P1 (phone_source alone can lag a garbled "spoken"
+  // number that normalized to a null phone_e164).
+  describe('callerIdDisclaimedNeedsCallback', () => {
+    test('true only when disclaimed AND no phone_e164', () => {
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_e164: null })).toBe(true);
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_e164: '+19415551234' })).toBe(false);
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: false, phone_e164: null })).toBe(false);
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: null, phone_e164: null })).toBe(false);
+      expect(callerIdDisclaimedNeedsCallback(null)).toBe(false);
+      expect(callerIdDisclaimedNeedsCallback(undefined)).toBe(false);
+    });
+
+    // The exact gap the pre-push auditor flagged: phone_source says
+    // 'spoken' but the number never validated, so phone_e164 is null.
+    test('a stale phone_source=spoken claim does not suppress the predicate when phone_e164 is null', () => {
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: null })).toBe(true);
+      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_source: 'both', phone_e164: null })).toBe(true);
+    });
+  });
+
+  // callerIdDisclaimedNoteText (schema 1.14.0, live miss 2026-09-25, call
+  // 6fee5f34): the crm_notes stamp for a customer created off a disclaimed
+  // ANI with no real callback.
+  describe('callerIdDisclaimedNoteText', () => {
+    test('builds the stamp with the caller\'s own words, using the ET calendar date', () => {
+      const note = callerIdDisclaimedNoteText(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_note: 'office line, routes to me' },
+        { now: new Date('2026-09-25T14:00:00Z') }, // 10am ET on 2026-09-25
+      );
+      expect(note).toBe('[2026-09-25] Caller ID number is UNVERIFIED — caller said this is a shared/office line, not their own ("office line, routes to me"). Confirm a personal callback number before relying on this number for texts.');
+    });
+
+    test('stamps the ET calendar date, not a raw UTC one, for a late-evening ET call', () => {
+      // 2026-01-01 21:30 ET (winter, EST = UTC-5) is 2026-01-02 02:30 UTC —
+      // a raw toISOString().slice(0,10) would misdate this one day forward.
+      const note = callerIdDisclaimedNoteText(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_note: null },
+        { now: new Date('2026-01-02T02:30:00Z') },
+      );
+      expect(note).toContain('[2026-01-01]');
+    });
+
+    test('omits the parenthetical when phone_note is absent', () => {
+      const note = callerIdDisclaimedNoteText(
+        { caller_id_disclaimed: true, phone_source: 'unknown', phone_note: null },
+        { now: new Date('2026-09-25T14:00:00Z') },
+      );
+      expect(note).toBe('[2026-09-25] Caller ID number is UNVERIFIED — caller said this is a shared/office line, not their own. Confirm a personal callback number before relying on this number for texts.');
+      expect(note).not.toContain('(');
+    });
+
+    test('returns null when a real callback number was captured', () => {
+      expect(callerIdDisclaimedNoteText({ caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+19415551234' })).toBeNull();
+    });
+
+    test('returns null when caller_id_disclaimed is not true', () => {
+      expect(callerIdDisclaimedNoteText({ caller_id_disclaimed: false })).toBeNull();
+      expect(callerIdDisclaimedNoteText({ caller_id_disclaimed: null })).toBeNull();
+      expect(callerIdDisclaimedNoteText(null)).toBeNull();
+    });
   });
 });

@@ -13,24 +13,34 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { callbackNumberCoachingNote, CALLBACK_NUMBER_COACHING_NOTE } = require('../services/csr/csr-coach');
 
 describe('callbackNumberCoachingNote — deterministic CSR coaching addendum', () => {
-  test('fires when caller_id_disclaimed is true and no cell was captured (phone_source caller_id/unknown)', () => {
+  test('fires when caller_id_disclaimed is true and no phone_e164 was captured', () => {
     for (const phone_source of ['caller_id', 'unknown']) {
-      const note = callbackNumberCoachingNote({ caller: { caller_id_disclaimed: true, phone_source } });
+      const note = callbackNumberCoachingNote({ caller: { caller_id_disclaimed: true, phone_source, phone_e164: null } });
       expect(note).toBe(CALLBACK_NUMBER_COACHING_NOTE);
       expect(note).toBe("Caller said this number isn't theirs — ask for a cell before ending the call.");
     }
   });
 
-  test('does not fire when a cell was captured on the call (phone_source spoken/both)', () => {
+  test('does not fire when a real cell was captured (phone_e164 present)', () => {
     for (const phone_source of ['spoken', 'both']) {
-      expect(callbackNumberCoachingNote({ caller: { caller_id_disclaimed: true, phone_source } })).toBeNull();
+      expect(callbackNumberCoachingNote({ caller: { caller_id_disclaimed: true, phone_source, phone_e164: '+19415551234' } })).toBeNull();
+    }
+  });
+
+  // Pre-push review P1: phone_source alone ("spoken"/"both") is the
+  // model's claim, not proof — a garbled spoken number normalizes
+  // phone_e164 to null. The coaching addendum must still fire in that
+  // case, same as callback_number_needed.
+  test('fires when phone_source claims spoken/both but phone_e164 never validated', () => {
+    for (const phone_source of ['spoken', 'both']) {
+      expect(callbackNumberCoachingNote({ caller: { caller_id_disclaimed: true, phone_source, phone_e164: null } })).toBe(CALLBACK_NUMBER_COACHING_NOTE);
     }
   });
 
   test('does not fire when caller_id_disclaimed is null, false, or absent', () => {
-    expect(callbackNumberCoachingNote({ caller: { caller_id_disclaimed: null, phone_source: 'caller_id' } })).toBeNull();
-    expect(callbackNumberCoachingNote({ caller: { caller_id_disclaimed: false, phone_source: 'caller_id' } })).toBeNull();
-    expect(callbackNumberCoachingNote({ caller: { phone_source: 'caller_id' } })).toBeNull();
+    expect(callbackNumberCoachingNote({ caller: { caller_id_disclaimed: null, phone_e164: null } })).toBeNull();
+    expect(callbackNumberCoachingNote({ caller: { caller_id_disclaimed: false, phone_e164: null } })).toBeNull();
+    expect(callbackNumberCoachingNote({ caller: { phone_e164: null } })).toBeNull();
   });
 
   test('handles a missing extraction or caller gracefully', () => {

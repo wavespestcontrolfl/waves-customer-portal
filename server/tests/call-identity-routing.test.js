@@ -163,23 +163,37 @@ describe('regressions', () => {
 // text" — the caller disclaimed the ANI as not their own and gave no
 // spoken callback.
 describe('callback_number_needed — disclaimed caller ID with no spoken callback', () => {
-  test('fires when caller_id_disclaimed is true and phone_source is caller_id/unknown', () => {
+  test('fires when caller_id_disclaimed is true and no phone_e164 was captured', () => {
     for (const phone_source of ['caller_id', 'unknown']) {
-      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed: true, phone_source } }));
+      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed: true, phone_source, phone_e164: null } }));
       expect(flags).toContain('callback_number_needed');
     }
   });
 
-  test('does not fire when a spoken callback also covers the call (phone_source spoken/both)', () => {
+  test('does not fire when a real callback number was captured (phone_e164 present)', () => {
     for (const phone_source of ['spoken', 'both']) {
-      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed: true, phone_source } }));
+      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed: true, phone_source, phone_e164: '+19415551234' } }));
       expect(flags).not.toContain('callback_number_needed');
+    }
+  });
+
+  // Pre-push review P1: phone_source is the MODEL's claim that SOMETHING
+  // was spoken, independent of whether it parsed to a real E.164 — the
+  // prompt's own documented fallback ("if no number is spoken, set
+  // phone_e164 to null") means a garbled "spoken" number normalizes
+  // phone_e164 to null while phone_source can still read 'spoken'. The flag
+  // must still fire (the caller is left on the disclaimed ANI), not be
+  // silently suppressed by the stale phone_source claim.
+  test('fires when phone_source claims spoken/both but phone_e164 never validated (garbled number)', () => {
+    for (const phone_source of ['spoken', 'both']) {
+      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed: true, phone_source, phone_e164: null } }));
+      expect(flags).toContain('callback_number_needed');
     }
   });
 
   test('does not fire when caller_id_disclaimed is null or false', () => {
     for (const caller_id_disclaimed of [null, undefined, false]) {
-      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed, phone_source: 'caller_id' } }));
+      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed, phone_source: 'caller_id', phone_e164: null } }));
       expect(flags).not.toContain('callback_number_needed');
     }
   });
