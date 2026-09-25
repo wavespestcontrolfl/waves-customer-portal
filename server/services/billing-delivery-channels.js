@@ -39,14 +39,14 @@ function billingChannelAllowed(prefs = {}, category, channel) {
 
 function legacyChannels(prefs = {}, category, emailAvailable) {
   const legacy = prefs[LEGACY_FIELDS[category]];
+  const independentEmail = emailAvailable && prefs.email_enabled !== false;
   if (category === 'billing') {
-    if (legacy === 'email') return ['email'];
-    if (legacy === 'both') return ['email', 'sms'];
+    if (legacy === 'email') return independentEmail ? ['email'] : ['sms'];
+    if (legacy === 'both') return independentEmail ? ['email', 'sms'] : ['sms'];
     if (legacy === 'push') return ['push'];
     return ['sms'];
   }
 
-  const independentEmail = emailAvailable && prefs.email_enabled !== false;
   if (category === 'payment_receipt') {
     if (legacy === 'email') return independentEmail ? ['email'] : ['sms'];
     if (legacy === 'both') return independentEmail ? ['email', 'sms'] : ['sms'];
