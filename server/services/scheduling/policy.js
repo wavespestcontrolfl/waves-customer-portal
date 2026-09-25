@@ -46,4 +46,17 @@ function schedulingPolicyForDisplay() {
   return capacityEnabled() ? { startMinutes: SHIFT.startMinutes, endMinutes: SHIFT.endMinutes } : null;
 }
 
-module.exports = { SHIFT, capacityEnabled, applySchedulingPolicy, placementFitsShift, schedulingPolicyForDisplay };
+// Owner ruling 2026-09-25: self-serve surfaces hide a capacity slot that adds
+// more than this many round-trip drive minutes to the technician's route
+// (staff and phone booking still see every fit). SCHEDULING_MAX_DETOUR_MINUTES
+// overrides the default; an empty day counts the whole trip from HQ.
+const DEFAULT_MAX_DETOUR_MINUTES = 30;
+
+function customerMaxDetourMinutes() {
+  const configured = Number.parseInt(process.env.SCHEDULING_MAX_DETOUR_MINUTES, 10);
+  return Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_MAX_DETOUR_MINUTES;
+}
+
+module.exports = {
+  SHIFT, capacityEnabled, applySchedulingPolicy, placementFitsShift, schedulingPolicyForDisplay, customerMaxDetourMinutes,
+};
