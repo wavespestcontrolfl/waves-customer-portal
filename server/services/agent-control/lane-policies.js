@@ -130,13 +130,17 @@ const LANE_RUNTIME = {
   // direct_sdk: both relay implementations stream through the Anthropic SDK, not llm/call.js (Codex r14).
   // M3 (Codex r19): replies go straight to the caller mid-call; the ordered transcript is written back to call_log on close.
   voice_relay: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
+  // Same runtime shape as voice_relay (same offline direct-SDK stream, same
+  // customer-visible risk, same M3 maturity) — collections-conversation.js
+  // is the other relay implementation the comment above already covers.
+  voice_relay_collections: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
   // Optional manual replay judge: no business writes; ordinary call ledger
   // and traces remain available. Event cadence avoids expected silence alarms.
   voice_relay_judge: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
 
   // ── Photos & property ──
   // direct_sdk: the photo lanes call Anthropic directly and Gemini over raw HTTP, not llm/call.js (Codex r13);
-  // satellite, both property-lookup lanes and turf OCR do the same for every provider arm (Codex r14);
+  // property_trio and turf OCR do the same for every provider arm (Codex r14);
   // treatment_zone (raw Gemini fetch + anthropic.messages.create), lawn_quality_gate (new Anthropic()), the three
   // lawn-diagnostic stages (raw Gemini / OpenAI fetches + the SDK) are direct_sdk too (Codex r15).
   // offline (Codex r15): the pest / lawn / tree-shrub fetches and treatment_zone's Gemini attempts carry no AbortSignal,
@@ -151,11 +155,11 @@ const LANE_RUNTIME = {
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
-  // offline (Codex r17): satellite's Promise.allSettled fetches and turf OCR's Gemini leg carry no AbortSignal, and the OCR reading
+  // offline (Codex r17): satellite's parallel image fetches and turf OCR's Gemini leg carry no AbortSignal, and the OCR reading
   // is a background enrichment left pending for a later retry — neither can honour an interactive hard timeout.
-  satellite: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
+  satellite: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
   property_trio: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
-  property_v2_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
+  property_v2_vision: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
   turf_ocr: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   // draft_for_human + M2 (Codex r20): /photo-analysis/draft installs summary + captions into the tech's editable completion state; the later completion submits them.
   photo_scoring: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },

@@ -1,15 +1,21 @@
-// Owner ruling 2026-09-24: satellite property analysis runs as a ladder —
-// Gemini first, then Claude, then OpenAI as the true last resort — stopping
-// at the first schema-valid result. No more three-way parallel fan-out with
-// agreement-based confidence. A single-source result must never report
-// "high" confidence (that used to require multi-provider agreement).
+// Estimate image analysis is a two-provider ladder: Gemini 3.8 Flash first,
+// then OpenAI Sol. Every provider request is mocked in this file.
 
-process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-gemini-key';
-process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test-anthropic-key';
-process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-openai-key';
-process.env.GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || 'test-maps-key';
+const ORIGINAL_ENV = {
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+  GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
+  OPENAI_MODEL: process.env.OPENAI_MODEL,
+};
+process.env.GEMINI_API_KEY = 'test-gemini-key';
+process.env.OPENAI_API_KEY = 'test-openai-key';
+process.env.GOOGLE_MAPS_API_KEY = 'test-maps-key';
+// A legacy global override must not move the estimate-specific OpenAI rung.
+process.env.OPENAI_MODEL = 'gpt-6-astra';
 
-jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+}));
 
 const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
@@ -27,34 +33,68 @@ const FULL_ANALYSIS = {
   notes: 'Nothing notable.',
 };
 
-const CLAUDE_ANALYSIS = { ...FULL_ANALYSIS, lot_sqft: 9000, notes: 'Claude read.' };
 const OPENAI_ANALYSIS = { ...FULL_ANALYSIS, lot_sqft: 7000, notes: 'OpenAI read.' };
 
-function imageBuffer() {
+function imageResponse() {
   return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) };
 }
-function geminiHttpResponse(body) {
-  return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }) };
+
+function geminiResponse(body) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      modelVersion: 'gemini-3.8-flash',
+      responseId: 'gemini-test-response',
+      candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(body) }] } }],
+    }),
+  };
 }
-function openaiHttpResponse(body) {
-  return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(body) }) };
+
+function openaiResponse(body) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      id: 'openai-test-response',
+      status: 'completed',
+      model: 'gpt-6-sol',
+      output_text: JSON.stringify(body),
+    }),
+  };
 }
 
 function mockFetchRouting({ gemini, openai } = {}) {
   global.fetch = jest.fn((url) => {
-    if (String(url).includes('staticmap')) return Promise.resolve(imageBuffer());
-    if (String(url).includes('generativelanguage.googleapis.com')) {
-      return gemini ? Promise.resolve(geminiHttpResponse(gemini)) : Promise.resolve({ ok: false, status: 500, statusText: 'error' });
+    const target = String(url);
+    if (target.includes('staticmap')) return Promise.resolve(imageResponse());
+    if (target.includes('generativelanguage.googleapis.com')) {
+      return gemini !== undefined
+        ? Promise.resolve(geminiResponse(gemini))
+        : Promise.resolve({ ok: false, status: 500, statusText: 'error' });
     }
-    if (String(url).includes('api.openai.com')) {
-      return openai ? Promise.resolve(openaiHttpResponse(openai)) : Promise.resolve({ ok: false, status: 500, statusText: 'error' });
+    if (target.includes('api.openai.com')) {
+      return openai !== undefined
+        ? Promise.resolve(openaiResponse(openai))
+        : Promise.resolve({ ok: false, status: 500, statusText: 'error' });
     }
     return Promise.reject(new Error(`unexpected fetch: ${url}`));
   });
 }
 
+function providerCalls(fragment) {
+  return global.fetch.mock.calls.filter(([url]) => String(url).includes(fragment));
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+afterAll(() => {
+  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe('isValidSatelliteAnalysis — schema contract validation', () => {
@@ -75,7 +115,7 @@ describe('isValidSatelliteAnalysis — schema contract validation', () => {
     expect(isValidSatelliteAnalysis({ ...FULL_ANALYSIS, property_type: 'single_family' })).toBe(false);
   });
 
-  it('normalizes formatting noise (quoted numbers, stringified booleans, casing) before validation', () => {
+  it('normalizes formatting noise before validation', () => {
     const noisy = {
       ...FULL_ANALYSIS,
       lot_sqft: '8000',
@@ -94,71 +134,69 @@ describe('isValidSatelliteAnalysis — schema contract validation', () => {
   });
 });
 
-describe('analyze() — Gemini → Claude → OpenAI ladder, stopping at first valid result', () => {
-  it('Gemini valid → Claude and OpenAI never called', async () => {
+describe('analyze() — Gemini → OpenAI Sol ladder', () => {
+  it('accepts a valid Gemini result and never calls a fallback provider', async () => {
     mockFetchRouting({ gemini: FULL_ANALYSIS });
 
     const result = await satelliteAnalyzer.analyze('123 Test St', 27.0, -82.5);
 
     expect(result.source).toBe('gemini');
+    expect(result.confidence).toBe('single_model');
+    expect(result.providerStatus).toEqual({ gemini: { configured: true, available: true } });
+    expect(providerCalls('api.openai.com')).toHaveLength(0);
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
-    // Rungs the ladder never reached get no status entry, so the estimate
-    // pages' "ChatGPT skipped" warning (configured === false) cannot fire.
-    expect(result.providerStatus.claude).toBeUndefined();
-    expect(result.providerStatus.gemini).toEqual({ configured: true, available: true });
-    expect(result.providerStatus.openai).toBeUndefined();
-    expect(result.confidence).toBe('single_model');
+
+    const geminiCalls = providerCalls('generativelanguage.googleapis.com');
+    expect(geminiCalls).toHaveLength(1);
+    expect(String(geminiCalls[0][0])).toContain('/gemini-3.8-flash:generateContent');
+    const body = JSON.parse(geminiCalls[0][1].body);
+    expect(body.contents[0].parts.filter((part) => part.inline_data)).toEqual([
+      { inline_data: { mime_type: 'image/png', data: expect.any(String) } },
+      { inline_data: { mime_type: 'image/png', data: expect.any(String) } },
+    ]);
+    expect(body.generationConfig.response_mime_type).toBe('application/json');
+    expect(body.generationConfig.response_json_schema).toMatchObject({
+      type: 'object', additionalProperties: false, required: expect.arrayContaining(['lot_sqft', 'notes']),
+    });
   });
 
-  it('Gemini miss (malformed `{}`) → Claude runs and wins; OpenAI never called', async () => {
-    mockFetchRouting({ gemini: {} });
-    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(CLAUDE_ANALYSIS) }] });
-
-    const result = await satelliteAnalyzer.analyze('123 Test St', 27.0, -82.5);
-
-    expect(result.source).toBe('claude');
-    expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
-    expect(result.providerStatus.openai).toBeUndefined();
-    expect(result.confidence).toBe('single_model');
-  });
-
-  it('a Claude reply that leads with a thinking block still counts (shared extractor)', async () => {
-    mockFetchRouting({ gemini: {} });
-    mockAnthropicCreate.mockResolvedValue({ content: [
-      { type: 'thinking', thinking: 'measuring the roof…' },
-      { type: 'text', text: JSON.stringify(CLAUDE_ANALYSIS) },
-    ] });
-
-    const result = await satelliteAnalyzer.analyze('123 Test St', 27.0, -82.5);
-
-    expect(result.source).toBe('claude');
-    expect(result.providerStatus.openai).toBeUndefined();
-  });
-
-  it('Gemini and Claude both miss → OpenAI runs as the true last resort', async () => {
-    mockFetchRouting({ openai: OPENAI_ANALYSIS });
-    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{}' }] });
+  it('rejects malformed Gemini JSON and accepts the OpenAI Sol fallback', async () => {
+    mockFetchRouting({ gemini: {}, openai: OPENAI_ANALYSIS });
 
     const result = await satelliteAnalyzer.analyze('123 Test St', 27.0, -82.5);
 
     expect(result.source).toBe('openai');
-    expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
     expect(result.confidence).toBe('single_model');
+    expect(result.providerStatus).toEqual({
+      gemini: { configured: true, available: false },
+      openai: { configured: true, available: true },
+    });
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+
+    const openaiCalls = providerCalls('api.openai.com');
+    expect(openaiCalls).toHaveLength(1);
+    const body = JSON.parse(openaiCalls[0][1].body);
+    expect(body.model).toBe('gpt-6-sol');
+    expect(body.store).toBe(false);
+    expect(body.input[0].content.filter((part) => part.type === 'input_image')).toEqual([
+      { type: 'input_image', image_url: expect.stringMatching(/^data:image\/png;base64,/) },
+      { type: 'input_image', image_url: expect.stringMatching(/^data:image\/png;base64,/) },
+    ]);
+    expect(body.text.format).toMatchObject({ type: 'json_schema', strict: true });
   });
 
-  it('a single-source result never reports "high" confidence', async () => {
-    mockFetchRouting({ gemini: FULL_ANALYSIS });
-    const result = await satelliteAnalyzer.analyze('123 Test St', 27.0, -82.5);
-    expect(result.confidence).not.toBe('high');
-    expect(result.confidence).toBe('single_model');
-  });
-
-  it('all three miss → error, and providerStatus reflects real attempts (not false "available:false" on a skipped rung)', async () => {
-    mockFetchRouting({});
-    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{}' }] });
+  it('reports both real attempts when both providers fail, with no Claude call', async () => {
+    mockFetchRouting();
 
     const result = await satelliteAnalyzer.analyze('123 Test St', 27.0, -82.5);
 
     expect(result.error).toBe('All vision models failed');
+    expect(result.providerStatus).toEqual({
+      gemini: { configured: true, available: false },
+      openai: { configured: true, available: false },
+    });
+    expect(providerCalls('generativelanguage.googleapis.com')).toHaveLength(1);
+    expect(providerCalls('api.openai.com')).toHaveLength(1);
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
   });
 });

@@ -15,6 +15,7 @@ const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer, markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
 const { getLeadStatusReconciliation, verifiedContactCallIds } = require('../services/lead-status-reconciliation');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
+const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const logger = require('../services/logger');
 
 // Format/length validation for manual lead creation. Permissive by design — it
@@ -1131,6 +1132,22 @@ router.put('/:id', async (req, res, next) => {
       updates.builder_warranty_expires_on = expires || null;
     }
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
+    // Codex round-6 P2: email_confirmed_at (below) is the sole provenance
+    // signal a customer-less voicemail card's confirmation reads
+    // (admin-triage.js's emailDisagreementConfirmed) — it must never stamp
+    // on an unvalidated value. Clearing to blank stays a real, allowed
+    // change (stores NULL); anything else must normalize to a real
+    // address, or the request 400s before any write.
+    if (updates.email !== undefined) {
+      const rawEmail = String(updates.email || '').trim();
+      if (!rawEmail) {
+        updates.email = null;
+      } else {
+        const normalizedEmail = cleanValidEmailOrNull(rawEmail);
+        if (!normalizedEmail) return res.status(400).json({ error: 'Invalid email address' });
+        updates.email = normalizedEmail;
+      }
+    }
     updates.updated_at = new Date();
 
     const performedBy = [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ');
@@ -1139,6 +1156,20 @@ router.put('/:id', async (req, res, next) => {
       const current = await trx('leads').where('id', req.params.id).whereNull('deleted_at').forUpdate().first();
       if (!current) return null;
       previousStatus = current.status;
+      // Email-specific correction provenance (Codex round-4 P1 on the
+      // V1/V2 email-disagreement hold, PR #4802): stamped ONLY when the
+      // email field itself actually changes, never on an unrelated field
+      // edit (status/notes/assignment/...) that also happens to touch this
+      // row's plain updated_at. admin-triage.js's emailDisagreementConfirmed
+      // reads this for customer-less voicemail leads (no first_touch_holds
+      // row to retarget) as the only available correction signal.
+      // Compared normalized (pre-push audit P1): updates.email is already
+      // trimmed + lowercased, so a legacy mixed-case stored value re-saved
+      // unchanged must not read as a correction and falsely confirm a card.
+      const currentEmailKey = String(current.email || '').trim().toLowerCase() || null;
+      if (updates.email !== undefined && updates.email !== currentEmailKey) {
+        updates.email_confirmed_at = new Date();
+      }
       const statusChanged = updates.status && updates.status !== current.status;
       // Match booking/conversion semantics: first win owns the timestamp.
       // Reopening and retrying a manual win never re-dates earned revenue.

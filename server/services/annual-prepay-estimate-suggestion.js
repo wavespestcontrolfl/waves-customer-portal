@@ -100,7 +100,7 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     if (!db) return blocked('estimate call linkage could not be verified');
     try {
       const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-      const callBlock = await callSideBlockForEstimateData(db, estData);
+      const callBlock = await callSideBlockForEstimateData(db, estData, { estimateStatus: estimate.status });
       if (callBlock) return blocked('estimate is quarantined by a call-linkage correction');
     } catch {
       return blocked('estimate call linkage could not be verified');

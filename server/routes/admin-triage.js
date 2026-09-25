@@ -59,6 +59,96 @@ function sanitizeWrongFields(input) {
   return [...new Set(input.filter((f) => WRONG_FIELDS.includes(f)))];
 }
 
+// Codex round-4 P2 (PR #4807): the ONE place that lifts a
+// callback_number_needed hold — shared by the single-card /resolve
+// transition (transitionCore) and the bulk call-verdict route below, so the
+// two writers can never drift on the update itself the way the two
+// customer-facing clearance writers (admin-triage's own resolve path and
+// customer-contact-fanout.js's phone-edit fanout) once drifted on their
+// status filter (round-3 P2, same PR). CLEARABLE (NONTERMINAL + terminal-
+// but-clearable statuses — round-5 P2), not just pending/confirmed: a
+// visit already en_route/on_site is still live, and a rescheduled row can
+// still be a GROUPED SIBLING of the visit the customer was rebooked onto
+// (see scheduled-service-statuses.js's own doc comment on
+// CLEARABLE_SCHEDULED_SERVICE_STATUSES).
+//
+// Codex round 6 (PR #4807, structural): the SMS hold itself is now keyed on
+// the disclaimed NUMBER (disclaimed_number_holds — every SMS `to` is
+// checked in sendCustomerMessage), so no send decision reads
+// scheduled_services.callback_number_hold_at any more; the per-visit
+// update below survives only for call_sms_cleared_at, the call-level
+// clearance the pre-visit card-request sweep and outbound-review-confirm
+// read (that is also why round-6 P2's "retained terminal member strands
+// its siblings" can no longer happen — the group pre-check resolves the
+// customer's number, not any member's hold column).
+//
+// The NUMBER hold (codex round 7 P1, PR #4807): the two card closures mean
+// different things about the disclaimed number, and only one of them says
+// anything about that number being safe to text:
+//
+//   CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER — the single-card /resolve:
+//     the office's explicit word that the number the caller disclaimed is
+//     actually fine to text. That is the ONE clearance of the number-keyed
+//     row (clear_reason 'verified_same_number').
+//   CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER — the bulk /verdict, whose
+//     prerequisite (CALLBACK_NUMBER_UNVERIFIED pre-check) is that
+//     customers.phone has MOVED OFF the disclaimed number. That verifies
+//     the replacement, not the old destination: the card closes and the
+//     visits' call-level clearance lands, but the number-keyed row for the
+//     OLD number stays ACTIVE — the send predicate checks it globally, so
+//     clearing it would immediately let every duplicate customer, lead, or
+//     queued message addressed to that shared/office line text it again.
+//
+// A customer phone edit on its own clears nothing either
+// (customer-contact-fanout.js leaves the disclaimed number held; the
+// replacement simply has no hold row).
+const CALLBACK_CARD_VERDICT = Object.freeze({
+  VERIFIED_SAME_NUMBER: 'verified_same_number',
+  REPLACEMENT_NUMBER: 'replacement_number',
+});
+async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict } = {}) {
+  if (!Object.values(CALLBACK_CARD_VERDICT).includes(numberVerdict)) {
+    // Explicit by construction: a new caller must say which meaning it is.
+    throw new Error(`clearCallbackNumberHold: unknown numberVerdict ${numberVerdict}`);
+  }
+  const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
+  const visits = await trx('scheduled_services')
+    .where({ source_call_log_id: callLogId })
+    .whereIn('status', CLEARABLE_SCHEDULED_SERVICE_STATUSES)
+    .whereNotNull('callback_number_hold_at')
+    .update({
+      // call_sms_cleared_at >= callback_number_hold_at by construction
+      // (GREATEST) so the call-level clearance post-dates the hold stamp.
+      call_sms_cleared_at: trx.raw('GREATEST(callback_number_hold_at, now())'),
+      updated_at: new Date(),
+    });
+  const numbers = numberVerdict === CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER
+    ? await require('../services/disclaimed-number-holds').clearDisclaimedNumberHoldsForCall({
+      callLogId, clearedBy, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, conn: trx,
+    })
+    : 0;
+  return { visits, numbers, numberVerdict };
+}
+
+// What the route tells the operator about the disclaimed number after the
+// card closes — the two meanings above, spelled out.
+function callbackNumberReply(numberVerdict, numbersCleared) {
+  if (numberVerdict === CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER) {
+    return {
+      verdict: numberVerdict,
+      disclaimed_number_hold: 'cleared',
+      number_holds_cleared: numbersCleared || 0,
+      message: 'Number verified — texts to the number the caller disclaimed are allowed again.',
+    };
+  }
+  return {
+    verdict: numberVerdict,
+    disclaimed_number_hold: 'kept',
+    number_holds_cleared: 0,
+    message: 'Card closed with the replacement number on file. The number the caller disclaimed stays blocked for texts — only the replacement was verified.',
+  };
+}
+
 // Upsert the single current verdict for a call (re-review overwrites). Links to
 // the enforce-mode route_decision when one exists so calibration can attribute
 // the verdict to the flags that drove the gate.
@@ -192,6 +282,70 @@ router.get('/', async (req, res) => {
   }
 });
 
+// V1/V2 email disagreement (owner ruling 2026-09-25, codex rounds 2–3): a
+// card carrying `email_disagreement` evidence has NO single confirmed
+// address — the hold's held_email was deliberately cleared to '' because no
+// candidate was ever chosen. Resolving that card as-is (Resolve, or an
+// Accept call verdict) without first confirming an address closes the card
+// terminally, leaves the customer permanently email-less, and strands the
+// pending hold: the ledger sweep explicitly skips blank-target rows
+// (`.whereNot('held_email', '')` in lead-first-touch-resume.js), and a
+// resolved card is never re-surfaced.
+//
+// Confirmation provenance is narrower than "some email exists somewhere"
+// (codex round-3 P1): a pre-existing customer email is NOT confirmation —
+// resumeHeldFirstTouch sends the HOLD's held_email, never the customer's
+// stored column, so closing the card on that basis still leaves an
+// unsendable blank hold behind. Exactly two shapes count:
+//   (a) a hold row exists for the call, and it was actually RETARGETED by
+//       an operator correction — nonblank held_email AND corrected_at set
+//       (customer-email-fanout's propagateCustomerEmailChange stamps both
+//       together; this is the only writer that ever sets corrected_at).
+//   (b) no hold row exists at all — a customer-less voicemail lead never
+//       gets one — and the call-linked lead has a nonblank email whose
+//       EMAIL-SPECIFIC correction stamp (leads.email_confirmed_at, set only
+//       when the lead's email field itself changes — see admin-leads.js's
+//       PUT /:id) is AFTER this card was filed. Codex round-4 P1: the
+//       lead's plain `updated_at` is generic row provenance — any allowed
+//       field edit (status, notes, assignment, ...) or the voicemail-lead
+//       SMS bookkeeping bumps it, which would falsely confirm an unrelated
+//       touch. The lead itself is resolved by the call's OWN authoritative
+//       stamp (call_log.metadata.lead_id, the same stamp the processor's
+//       reconciliation paths trust) when the call carries one; otherwise by
+//       leads.twilio_call_sid, which is NOT unique (codex round-4 P1) — an
+//       ambiguous multi-lead match fails closed to unconfirmed, mirroring
+//       the processor's own unique-match rule (call-recording-processor.js,
+//       the sid-only repair arm around line 18174).
+// Nothing else counts, so a Resolve/Accept on an unconfirmed disagreement
+// card refuses with 409 EMAIL_DISAGREEMENT_UNCONFIRMED and the card stays
+// open — a live work item, not a silently-stranded hold.
+async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTable) {
+  if (!callLogId) return true;
+  if (holdsTable) {
+    const hold = await trx('first_touch_holds').where({ call_log_id: callLogId }).first('held_email', 'corrected_at');
+    if (hold) return !!(hold.corrected_at && String(hold.held_email || '').trim());
+  }
+  const call = await trx('call_log').where({ id: callLogId }).first('twilio_call_sid', 'metadata');
+  if (!call) return false;
+  const metadata = typeof call.metadata === 'string'
+    ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+    : (call.metadata || {});
+  const stampedLeadId = metadata?.lead_id ? String(metadata.lead_id) : null;
+  let lead = null;
+  if (stampedLeadId) {
+    lead = await trx('leads').where({ id: stampedLeadId }).whereNull('deleted_at').first('email', 'email_confirmed_at');
+  } else if (call.twilio_call_sid) {
+    const sidLeads = await trx('leads')
+      .where({ twilio_call_sid: call.twilio_call_sid })
+      .whereNull('deleted_at')
+      .limit(2)
+      .select('id', 'email', 'email_confirmed_at');
+    if (sidLeads.length === 1) lead = sidLeads[0];
+  }
+  if (!lead || !String(lead.email || '').trim() || !lead.email_confirmed_at) return false;
+  return new Date(lead.email_confirmed_at).getTime() > new Date(cardCreatedAt).getTime();
+}
+
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
@@ -221,6 +375,9 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
   // null = not checked (not resolving an email card); the release below runs
   // only when the check ran inside the transaction and found none live.
   let siblingLive = null;
+  // Set when this transition closed a callback_number_needed card — the
+  // reply says what happened to the disclaimed number (round 7 P1).
+  let callbackNumber = null;
   const holdsTable = emailReviewCard && await conn.schema.hasTable('first_touch_holds');
   const result = await conn.transaction(async (trx) => {
     // GLOBAL LOCK ORDER (owner ruling 2026-08-02, reconciling #3119's
@@ -260,10 +417,30 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // address, retained visit) — a stale click must not close the newer
       // obligation (codex r30 P1).
       || item.reason_code === 'auto_booking_skipped_after_approval'
+      // …and email review cards (codex round-3 P1): the client already
+      // sends expected_updated_at on every resolve/dismiss, so a stale view
+      // of a card whose evidence has since changed refuses instead of
+      // settling evidence the operator never saw.
+      || emailReviewCard
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
         return { outcome: 'stale_version' };
+      }
+    }
+    if (nextStatus === 'resolved' && emailReviewCard) {
+      // Judge the LIVE payload, not the route's pre-lock snapshot — a
+      // force-reprocess can refresh a plain card into a disagreement one
+      // (or the reverse) while this action waited for the lock (the version
+      // check above already refuses a STALE view; this judges the current
+      // one).
+      const livePayloadRaw = live?.payload ?? item.payload;
+      const livePayload = typeof livePayloadRaw === 'string'
+        ? (() => { try { return JSON.parse(livePayloadRaw); } catch { return null; } })()
+        : livePayloadRaw;
+      if (livePayload?.email_disagreement
+          && !(await emailDisagreementConfirmed(trx, item.call_log_id, item.created_at, holdsTable))) {
+        return { outcome: 'email_disagreement_unconfirmed' };
       }
     }
     const updated = await trx('triage_items')
@@ -303,6 +480,24 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // P1 on #3804). Atomic with the dismissal, under the call lock.
       const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
       await clearCallUnitAnswer(trx, item.call_log_id);
+    }
+    if (item.reason_code === 'callback_number_needed' && nextStatus === 'resolved' && item.call_log_id) {
+      // Resolving this card is the office's word that a usable callback
+      // number is now confirmed — lift the SMS hold on every LIVE visit
+      // this call created, in the SAME transaction as the resolve (codex
+      // round-2 finding #2, PR #4807). Dismiss does NOT clear: it means
+      // "leave the note, no verified number" — the hold (and its email
+      // fallback, callbackNumberHoldActiveForVisit) must stand. This
+      // single-card action IS the office's deliberate confirmation (unlike
+      // the bulk call-verdict route below, which gates its own clearing
+      // attempt on an actual phone-on-file check — codex round-4 P2), so it
+      // clears unconditionally on Resolve, unchanged from round 2/3.
+      // Round 7 P1: this is the VERIFIED_SAME_NUMBER meaning — the one
+      // action that lifts the number-keyed row too (see the helper).
+      const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
+        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER,
+      });
+      callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
     }
     if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
       // A promise exception is not closed by generic bookkeeping alone: the
@@ -382,6 +577,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     if (afterTransition) await afterTransition(trx);
     return { outcome: 'ok', item };
   });
+  if (result.outcome === 'ok' && callbackNumber) result.callbackNumber = callbackNumber;
   if (result.outcome !== 'ok') return result;
 
   // Resolving an email read-back card AS-IS ("the spelling was right") is a
@@ -416,7 +612,14 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
     case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
-    default: return res.json({ ok: true, id, status: nextStatus });
+    case 'email_disagreement_unconfirmed': return res.status(409).json({
+      error: 'V1 and V2 disagreed on the spelled email — correct the customer\'s email on the customer record with the confirmed spelling before resolving this card.',
+      code: 'EMAIL_DISAGREEMENT_UNCONFIRMED',
+    });
+    default: return res.json({
+      ok: true, id, status: nextStatus,
+      ...(result.callbackNumber ? { callback_number: result.callbackNumber } : {}),
+    });
   }
 }
 
@@ -463,6 +666,527 @@ router.put('/:id/dismiss', async (req, res) => {
     logger.error(`[admin-triage] dismiss failed: ${err.code || err.name || 'error'}`);
     if (err?.statusCode === 409 && !res.headersSent) return res.status(409).json({ error: err.message, code: err.code || null });
     if (!res.headersSent) res.status(500).json({ error: 'Failed to dismiss item' });
+  }
+});
+
+// POST /api/admin/triage/:id/confirm-email   { email, expected_updated_at }
+// Codex round-5 P1s on the V1/V2 email-disagreement hold (PR #4802): the
+// plain Resolve/Accept paths refuse an unconfirmed disagreement card
+// (emailDisagreementConfirmed), but until now there was no in-band way to
+// actually SATISFY that guard — a customer-less voicemail lead has no
+// existing-lead email editor in the portal, and even a known customer whose
+// on-file address already matches the confirmed spelling could never
+// produce a corrected_at stamp (propagateCustomerEmailChange no-ops when
+// oldEmail === newEmail). This is the one action that closes both gaps: it
+// stamps the hold directly (so confirmation never depends on a diff),
+// writes the customer's email through the CANONICAL operator writer
+// (services/customer-email-write.js applyOperatorCustomerEmail — the
+// Customer 360 edit's own sequence: row lock, address key, cross-account
+// refusal, diff-gated write, fanout; Codex round-8 made this handler
+// delegate rather than hand-roll it), stamps the authoritative lead where
+// there is one, and resolves the card in the same request. `email` must be
+// one of the card's candidates or a syntactically valid typed address
+// (recorded as `confirmed_source: 'operator_typed'` when it differs from a
+// listed candidate) — never blindly picked by the server.
+// emailDisagreementConfirmed itself is untouched: it still guards the plain
+// Resolve/Accept paths exactly as before.
+//
+// LOCK ORDER (Codex rounds 6 and 8). The writers this handler races take:
+//   - Customer 360 edit (admin-customers.js PUT /:id): customers row FOR
+//     UPDATE → address key → (fanout) sorted call advisory locks → call_log
+//     rows (review_status) and hold rows;
+//   - the relink endpoint (admin-call-recordings.js PUT /calls/:id/customer):
+//     the TARGET customers row FOR UPDATE → the call_log row (UPDATE). It
+//     takes no call advisory lock and never locks the previous customer.
+// Both put the customer row before anything call-scoped, so this handler
+// does too — locking the call row first (the literal round-8 suggestion)
+// would invert against both and deadlock. What round 8 actually needs is
+// that the customer this transaction writes is the one the call (or its
+// authoritative lead) points at WHILE we hold a lock the relink honors.
+// So: resolve the target without locks → customers row FOR UPDATE → address
+// key → sorted call advisory locks (the customer's calls ∪ this call) →
+// call_log row FOR UPDATE and the lead row FOR UPDATE → RE-RESOLVE. A relink
+// that committed in between shows up as a different target under the call
+// row lock; the attempt then rolls back (nothing written) and restarts from
+// the top, so the second pass locks the NEW customer first. Once the call
+// row is held, no relink of this call can commit until we do.
+const CONFIRM_EMAIL_ATTEMPTS = 3;
+
+class ConfirmEmailRetry extends Error {}
+class ConfirmEmailRefusal extends Error {
+  constructor(outcome, detail = null) {
+    super(outcome);
+    this.outcome = outcome;
+    this.detail = detail;
+  }
+}
+
+function parseCallMetadata(call) {
+  if (typeof call?.metadata === 'string') {
+    try { return JSON.parse(call.metadata); } catch { return {}; }
+  }
+  return call?.metadata || {};
+}
+
+// The authoritative lead for a call: the processor's own stamp
+// (call_log.metadata.lead_id) first, else a SID match that must be
+// unambiguous — leads.twilio_call_sid is not unique.
+async function resolveAuthoritativeLead(conn, call, { lock }) {
+  const metadata = parseCallMetadata(call);
+  const stampedLeadId = metadata?.lead_id ? String(metadata.lead_id) : null;
+  let leadId = null;
+  if (stampedLeadId) {
+    const found = await conn('leads').where({ id: stampedLeadId }).whereNull('deleted_at').first('id');
+    if (found) leadId = found.id;
+  } else if (call?.twilio_call_sid) {
+    const sidLeads = await conn('leads')
+      .where({ twilio_call_sid: call.twilio_call_sid })
+      .whereNull('deleted_at')
+      .limit(2)
+      .select('id');
+    if (sidLeads.length === 1) leadId = sidLeads[0].id;
+  }
+  if (!leadId) return null;
+  // The live-row predicate is repeated on the (locking) re-read (Codex
+  // round-10 P2): a lead archived between the lookup above and this lock
+  // must read as NO lead, so the target-change retry/refusal path runs and
+  // the card stays open — never a stamp on an archived lead.
+  let leadQuery = conn('leads').where({ id: leadId }).whereNull('deleted_at');
+  if (lock) leadQuery = leadQuery.forUpdate();
+  const lead = await leadQuery.first('id', 'customer_id');
+  return lead || null;
+}
+
+// Who this confirmation writes to. `customerId` is the customer whose email
+// the canonical writer changes: the call's own link, else — Codex round-8
+// P1 — the authoritative lead's customer_id (conversion/booking set
+// leads.customer_id without relinking call_log, so a converted voicemail
+// lead used to be treated as customer-less and only leads.email moved).
+// `callCustomerId` is call_log.customer_id itself, which is what the hold
+// ledger row must carry (resumeHeldFirstTouch compares the hold's customer
+// to the call's). With `lock`, the call row and the lead row are read FOR
+// UPDATE — the relink endpoint's own UPDATE of the call row serializes here.
+async function resolveConfirmTarget(conn, callLogId, { lock }) {
+  let callQuery = conn('call_log').where({ id: callLogId });
+  if (lock) callQuery = callQuery.forUpdate();
+  const call = await callQuery.first('customer_id', 'twilio_call_sid', 'metadata');
+  const callCustomerId = call?.customer_id || null;
+  // Lead FOR UPDATE after call_log in both branches (the documented order).
+  const lead = await resolveAuthoritativeLead(conn, call, { lock });
+  if (callCustomerId) {
+    // A customer-linked call can ALSO have created/reused a lead (Codex
+    // round-10 P2): propagateCustomerEmailChange only syncs leads matching
+    // the customer's OLD email, so when that was blank the lead stayed
+    // email-less. Stamp the authoritative lead too — but only one that
+    // belongs to this customer (or to no one yet): a lead owned by a
+    // different customer (a relink moved the call away from it) is never
+    // written with this call's confirmed address.
+    const leadIsOurs = lead && (!lead.customer_id || String(lead.customer_id) === String(callCustomerId));
+    return {
+      call, callCustomerId, customerId: callCustomerId, customerSource: 'call', leadId: leadIsOurs ? lead.id : null,
+    };
+  }
+  let customerId = null;
+  if (lead?.customer_id) {
+    const customer = await conn('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('id');
+    if (customer) customerId = customer.id;
+  }
+  return {
+    call, callCustomerId: null, customerId, customerSource: customerId ? 'lead' : null, leadId: lead?.id || null,
+  };
+}
+
+function sameConfirmTarget(a, b) {
+  return String(a.customerId || '') === String(b.customerId || '')
+    && String(a.callCustomerId || '') === String(b.callCustomerId || '')
+    && String(a.leadId || '') === String(b.leadId || '');
+}
+
+// Locks, in the documented order, then re-resolves under the call/lead row
+// locks. Throws ConfirmEmailRetry when the target moved since `planned` was
+// read. Returns the LOCKED target.
+async function lockConfirmEmailScope(trx, callLogId, planned, typedEmail) {
+  if (planned.customerId) {
+    await trx('customers').where({ id: planned.customerId }).forUpdate().select('id');
+  }
+  // Address key after the row, before anything call-scoped — the Customer
+  // 360 order (row → key → call locks). Every path takes it: leads.email is
+  // an ownership source too (email-bounce-recovery correctedAddressOwnedByOther).
+  await require('../utils/customer-comms-lock').lockCustomerEmail(trx, typedEmail);
+  let callIds = [callLogId];
+  if (planned.customerId) {
+    // The customer row lock pins the relink-TO side of this set (the relink
+    // endpoint locks its target row), so the snapshot covers every call the
+    // fanout will lock — sorted, and a superset of the fanout's own set, so
+    // its later acquisitions are same-transaction no-ops (Codex round-6 P2).
+    const customerCallRows = await trx('call_log').where({ customer_id: planned.customerId }).select('id');
+    callIds = callIds.concat(customerCallRows.map((r) => r.id));
+  }
+  const sortedCallIds = [...new Set(callIds.filter(Boolean))].sort();
+  for (const callId of sortedCallIds) await lockTriageCall(trx, callId);
+  const locked = await resolveConfirmTarget(trx, callLogId, { lock: true });
+  if (!sameConfirmTarget(planned, locked)) throw new ConfirmEmailRetry('confirm target moved');
+  return locked;
+}
+
+// (a) The hold, unconditionally: this is what emailDisagreementConfirmed
+// actually reads, so confirmation never depends on there ALSO being a
+// customer/lead diff to write. Pending/releasing only — a row that already
+// sent under an earlier cycle's address is a historical fact this must not
+// rewrite. Also repoints the row at the call's customer as read under the
+// call row lock (Codex round-7 P1): a staff relink moves
+// call_log.customer_id, not this ledger row, and leaving the stale
+// customer_id makes resumeHeldFirstTouch's hold_customer_mismatch check
+// reject the hold forever. And clears a prior denial stamp (Codex round-7
+// P1): an explicit operator confirmation IS the "await correction" that
+// stamp is waiting for.
+// Mirrors customer-email-fanout's own retargets EXACTLY (Codex round-8 P2):
+// a PENDING row's retarget bumps updated_at (the fanout's pending retarget
+// does); a RELEASING row's never does — its updated_at is the claimant's
+// lease stamp (resumeHeldFirstTouch settles only while the stamp equals its
+// claim), so bumping it would orphan a live claim and park the row behind
+// the stale-claim timeout. An OWNERLESS deny-stamped releasing row (the
+// deny's own bump already invalidated every lease) flips back to 'pending'
+// without a bump, same as the fanout; a live claim keeps its status and
+// only has its target superseded.
+// call_log_id is unique on this table, so at most one pending/releasing row
+// can ever match — read it under the row lock the caller already holds
+// (first_touch_holds FOR UPDATE) and write it with plain literal values.
+async function retargetConfirmedHold(trx, callLogId, customerId, typedEmail) {
+  const row = await trx('first_touch_holds')
+    .where({ call_log_id: callLogId })
+    .whereIn('status', ['pending', 'releasing'])
+    .first('id', 'status', 'last_error');
+  if (!row) return false;
+  const wasDenied = row.last_error === 'email_denied_await_correction';
+  const now = new Date();
+  await trx('first_touch_holds')
+    .where({ id: row.id })
+    .update({
+      held_email: typedEmail,
+      customer_id: customerId || null,
+      corrected_at: now,
+      ...(row.status === 'pending' ? { updated_at: now } : {}),
+      status: (wasDenied && row.status === 'releasing') ? 'pending' : row.status,
+      last_error: wasDenied ? null : row.last_error,
+    });
+  return true;
+}
+
+async function confirmEmailHold(trx, holdsTable, callLogId, customerId, typedEmail) {
+  if (!holdsTable) return;
+  if (await retargetConfirmedHold(trx, callLogId, customerId, typedEmail)) return;
+  // Pre-Step-6 window (Codex round-6 P1): no hold row exists for this call
+  // yet — the disagreement card committed, but the processor's own
+  // hold-ledger write for THIS run has not landed (mintEmailReviewCardsFenced
+  // and recordFirstTouchHoldOwned are separate transactions in the same
+  // run). Upsert the SAME zero-work correction marker
+  // customer-email-fanout's own propagateCustomerEmailChange uses for
+  // exactly this shape (a correction landing before Step 6) —
+  // recordFirstTouchHold's own ON CONFLICT merge treats a corrected_at
+  // at/after its run's start as an operator assertion and preserves this
+  // held_email instead of overwriting it with the fresh, unconfirmed
+  // extraction. Status 'released'/zero held flags: nothing was ever
+  // actually queued to send from this marker row; the real hold-ledger
+  // write flips it back to 'pending' on merge.
+  await trx('first_touch_holds')
+    .insert({
+      call_log_id: callLogId,
+      customer_id: customerId || null,
+      held_email: typedEmail,
+      held_drip: false,
+      held_newsletter: false,
+      status: 'released',
+      released_at: new Date(),
+      corrected_at: new Date(),
+      created_at: new Date(),
+      updated_at: new Date(),
+    })
+    .onConflict('call_log_id')
+    .ignore();
+  // A real row can race in between the read above and this insert
+  // (recordFirstTouchHoldOwned committing concurrently) — retarget it the
+  // same way, so a genuine pending/releasing row is never left uncorrected
+  // just because the marker insert lost that race. An existing terminal row
+  // (already sent) is left untouched either way — the insert above is then
+  // ignored and nothing carries the confirmed address, which is correct: a
+  // historical send is never rewritten.
+  await retargetConfirmedHold(trx, callLogId, customerId, typedEmail);
+}
+
+// (b) The customer record — DELEGATED to the canonical operator writer
+// (Codex round-8 P1s): it takes the customers row lock and the shared
+// address key, refuses an address another account holds (decided under the
+// key, before any write), writes customers.email diff-gated, and runs the
+// fanout in this transaction. Its unrollbackable sends come back as
+// emailSync for runDeferredEmailSyncCallbacks after commit.
+async function applyCustomerEmailConfirm(trx, customerId, typedEmail) {
+  const result = await require('../services/customer-email-write').applyOperatorCustomerEmail(trx, {
+    customerId, email: typedEmail, source: 'triage_confirm',
+  });
+  if (result.outcome === 'customer_not_found') throw new ConfirmEmailRefusal('customer_not_found');
+  if (result.outcome === 'email_in_use') throw new ConfirmEmailRefusal('email_in_use', result.conflict);
+  return result.emailSync || null;
+}
+
+// (c) The authoritative lead: stamp its email and the email-specific
+// confirmation stamp emailDisagreementConfirmed reads.
+async function stampLeadEmail(trx, leadId, typedEmail) {
+  await trx('leads').where({ id: leadId }).update({
+    email: typedEmail, email_confirmed_at: new Date(), updated_at: new Date(),
+  });
+}
+
+// (d) Stamp the evidence and resolve the card in the same request.
+async function stampAndResolveConfirmedCard(trx, { id, item, livePayload, typedEmail, confirmedSource, technicianId }) {
+  const confirmedPayload = {
+    ...livePayload,
+    confirmed_email: typedEmail,
+    confirmed_by: technicianId || null,
+    confirmed_at: new Date().toISOString(),
+    confirmed_source: confirmedSource,
+  };
+  await trx('triage_items').where({ id }).update({ payload: JSON.stringify(confirmedPayload), updated_at: new Date() });
+  // The customer-email fanout above resolves EVERY open email review card
+  // for that customer as a side effect of the write it just made, which can
+  // already include this exact card — that is success, not a conflict. But
+  // the fanout's close carries no resolution_source, and the reprocess mint
+  // (mintEmailReviewCardsFenced) honors a confirmation only on a card that
+  // is resolved BY A HUMAN with payload.confirmed_email (Codex round-10 P2:
+  // an `OPEN_STATES`-only update here was a no-op after the fanout, so a
+  // reprocess reopened a card staff had just confirmed). So the card ends
+  // human-resolved whoever closed it first: 'resolved' is included because
+  // the version check above proved it was open when this transaction took
+  // the call lock, so a resolved row here can only be the fanout's close in
+  // this same transaction. The mint's predicate stays strict (human source
+  // AND confirmed_email) so an auto-superseded card still never counts.
+  await trx('triage_items')
+    .where({ id })
+    .whereIn('status', [...OPEN_STATES, 'resolved'])
+    .update({
+      status: 'resolved',
+      resolution_source: 'human',
+      resolution_note: `Email confirmed via triage read-back: ${typedEmail}`,
+      assigned_to: technicianId,
+      resolved_at: new Date(),
+      updated_at: new Date(),
+    });
+  // Same call_log.review_status sync as every other card writer.
+  const stillOpen = await trx('triage_items')
+    .where({ call_log_id: item.call_log_id })
+    .whereIn('status', OPEN_STATES)
+    .count({ n: '*' })
+    .first();
+  await trx('call_log')
+    .where({ id: item.call_log_id })
+    .update({ review_status: Number(stillOpen?.n || 0) > 0 ? 'open' : 'resolved', updated_at: new Date() });
+}
+
+// Maps the transaction outcome to its early-exit response, or null when the
+// confirmation succeeded and the handler should continue to the post-commit
+// work (deferred email-sync callbacks + the first-touch release attempt).
+function confirmEmailOutcomeResponse(outcome) {
+  if (outcome === 'stale_version') {
+    return { status: 409, body: { error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' } };
+  }
+  if (outcome === 'not_applicable') {
+    return { status: 400, body: { error: 'This card has no unresolved email disagreement to confirm.' } };
+  }
+  if (outcome === 'lead_not_resolved') {
+    return {
+      status: 409,
+      body: {
+        error: 'Could not identify a single lead for this call — reprocess the call or link it to a customer, then confirm again.',
+        code: 'LEAD_NOT_RESOLVED',
+      },
+    };
+  }
+  if (outcome === 'email_in_use') {
+    return {
+      status: 409,
+      body: {
+        error: 'That address is already on file for a customer on another account. Check the caller in Customer 360 before confirming it here.',
+        code: 'EMAIL_IN_USE',
+      },
+    };
+  }
+  if (outcome === 'customer_not_found') {
+    return { status: 409, body: { error: 'The customer linked to this call no longer exists or is archived — relink the call, then confirm again.', code: 'CUSTOMER_NOT_FOUND' } };
+  }
+  if (outcome === 'target_moved') {
+    return {
+      status: 409,
+      body: {
+        error: 'This call was relinked to a different customer while confirming — reload and confirm again.',
+        code: 'CALL_RELINKED',
+      },
+    };
+  }
+  return null;
+}
+
+// Run the fanout's post-commit email callbacks (Codex round-6 P1): a held
+// newsletter DOI resume and/or a moved pending-confirmation resend are
+// unrollbackable sends, so propagateCustomerEmailChange defers them to the
+// caller instead of firing them inside the transaction. Mirrors the
+// Customer 360 edit path (admin-customers.js) exactly — same
+// fire-and-forget-with-owner contract, sanitized log codes only.
+function runDeferredEmailSyncCallbacks(id, emailSync) {
+  if (emailSync?.heldNewsletterResume) {
+    void require('../services/lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume)
+      .catch((err) => logger.error(`[admin-triage] deferred held-newsletter resume failed after email confirm for item ${id}: ${err.code || err.name || 'resume_failed'}`));
+  }
+  if (emailSync?.pendingConfirmation) {
+    void require('../services/customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation)
+      .catch((err) => logger.error(`[admin-triage] deferred DOI re-send failed after email confirm for item ${id}: ${err.code || err.name || 'resend_failed'}`));
+  }
+}
+
+// Best-effort release, same discipline as transitionCore: only when no
+// OTHER email card is still open for the call (a sibling's own address is
+// still under separate review) and the call has a customer to release for
+// (a customer-less lead has no first-touch hold to release).
+async function resumeFirstTouchAfterConfirmEmail(id, item, resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES) {
+  try {
+    const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+    if (!call?.customer_id) return;
+    const siblingLive = await db('triage_items')
+      .where({ call_log_id: item.call_log_id })
+      .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+      .whereIn('status', OPEN_STATES)
+      .first('id');
+    if (!siblingLive) {
+      await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_confirm_email' });
+    }
+  } catch (resumeErr) {
+    // Code/name only: a knex message embeds bound values (held_email).
+    logger.warn(`[admin-triage] first-touch resume failed after email confirm for item ${id}: ${resumeErr.code || resumeErr.name || 'error'}`);
+  }
+}
+
+// One attempt: plan the target unlocked, then lock and revalidate
+// (lockConfirmEmailScope), then write. Every refusal is thrown so the
+// attempt rolls back — nothing an early exit leaves behind can commit.
+async function runConfirmEmailAttempt({ id, item, typedEmail, expectedUpdatedAt, holdsTable, technicianId }) {
+  const planned = await resolveConfirmTarget(db, item.call_log_id, { lock: false });
+  let confirmedSource = null;
+  let emailSync = null;
+  await db.transaction(async (trx) => {
+    const target = await lockConfirmEmailScope(trx, item.call_log_id, planned, typedEmail);
+    if (holdsTable) {
+      await trx('first_touch_holds').where({ call_log_id: item.call_log_id }).forUpdate().select('id');
+    }
+    // Version-bound like every other single-card action — the client
+    // already sends expected_updated_at.
+    const live = await trx('triage_items').where({ id }).first('updated_at', 'payload', 'status');
+    // Still open under the call lock, too: stampAndResolveConfirmedCard
+    // relies on it to tell the fanout's same-transaction close apart from a
+    // card that was already closed before this request.
+    if (!live || !OPEN_STATES.includes(live.status) || !expectedUpdatedAt
+      || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
+      throw new ConfirmEmailRefusal('stale_version');
+    }
+    const livePayload = typeof live.payload === 'string'
+      ? (() => { try { return JSON.parse(live.payload); } catch { return null; } })()
+      : live.payload;
+    // Applies only to a card with an actual unresolved disagreement — a
+    // plain single-candidate email card already has a working Resolve
+    // path and needs none of this.
+    if (!livePayload?.email_disagreement) throw new ConfirmEmailRefusal('not_applicable');
+    const candidates = Array.isArray(livePayload.email_candidates) ? livePayload.email_candidates : [];
+    const isListedCandidate = candidates.some(
+      (c) => String(c?.value || '').trim().toLowerCase() === typedEmail,
+    );
+    confirmedSource = isListedCandidate ? 'candidate' : 'operator_typed';
+
+    // Codex round-7 P1: with no customer at all, the confirmation requires
+    // an authoritative lead — the hold ledger is a first-touch send record,
+    // not proof a lead exists to carry the confirmed address.
+    if (!target.customerId && !target.leadId) throw new ConfirmEmailRefusal('lead_not_resolved');
+
+    // (b) Canonical customer write first: its refusals (another account
+    // holds the address) land before anything else is written.
+    if (target.customerId) emailSync = await applyCustomerEmailConfirm(trx, target.customerId, typedEmail);
+    // (c) The authoritative lead — the customer-less voicemail lead, and a
+    // converted lead whose customer the canonical write just corrected.
+    if (target.leadId) await stampLeadEmail(trx, target.leadId, typedEmail);
+    // (a) The hold, carrying the call's OWN customer (null for a converted
+    // lead whose call was never relinked — resumeHeldFirstTouch compares
+    // the hold's customer to the call's).
+    await confirmEmailHold(trx, holdsTable, item.call_log_id, target.callCustomerId, typedEmail);
+    // (d)
+    await stampAndResolveConfirmedCard(trx, { id, item, livePayload, typedEmail, confirmedSource, technicianId });
+  });
+  return { confirmedSource, emailSync };
+}
+
+// Bounded retry around runConfirmEmailAttempt: a ConfirmEmailRetry (the
+// target moved under the call row lock) rolled its attempt back with nothing
+// written, so the next attempt re-plans against the committed relink. A
+// call that keeps moving ends as 'target_moved' (409 CALL_RELINKED).
+async function runConfirmEmailWithRetries(args) {
+  for (let attempt = 1; attempt <= CONFIRM_EMAIL_ATTEMPTS; attempt += 1) {
+    try {
+      return { result: await runConfirmEmailAttempt(args), outcome: null };
+    } catch (err) {
+      if (err instanceof ConfirmEmailRefusal) return { result: null, outcome: err.outcome };
+      if (!(err instanceof ConfirmEmailRetry)) throw err;
+    }
+  }
+  return { result: null, outcome: 'target_moved' };
+}
+
+const CUSTOMER_EMAIL_MAX_LENGTH = 150;
+
+router.post('/:id/confirm-email', async (req, res) => {
+  try {
+    // Customer email writes are admin-territory, same rule as
+    // apply-property-roles below: this overwrites a customer's email of
+    // record and triggers token fanout + first-touch comms, so the shared
+    // tech-or-admin router isn't enough here (Codex round-7 P1).
+    if (req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const { id } = req.params;
+    const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
+    const typedEmail = cleanValidEmailOrNull(req.body?.email);
+    if (!typedEmail) {
+      return res.status(400).json({ error: 'A valid email address is required.' });
+    }
+    // customers.email is varchar(150) (initial schema); an over-long address
+    // would otherwise reach the canonical writer and surface as a generic
+    // 500 from Postgres (Codex round-9 P2). Refuse it before any transaction.
+    if (typedEmail.length > CUSTOMER_EMAIL_MAX_LENGTH) {
+      return res.status(400).json({ error: `Email addresses are limited to ${CUSTOMER_EMAIL_MAX_LENGTH} characters.` });
+    }
+    const expectedUpdatedAt = req.body?.expected_updated_at || null;
+
+    const item = await db('triage_items').where({ id }).first();
+    if (!item) return res.status(404).json({ error: 'Triage item not found' });
+    if (!OPEN_STATES.includes(item.status)) {
+      return res.status(409).json({ error: `Item already ${item.status}` });
+    }
+    const { EMAIL_REVIEW_REASON_CODES, resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
+    if (!EMAIL_REVIEW_REASON_CODES.includes(item.reason_code)) {
+      return res.status(400).json({ error: 'This card is not an email read-back card.' });
+    }
+
+    const holdsTable = await db.schema.hasTable('first_touch_holds');
+    const { result, outcome } = await runConfirmEmailWithRetries({
+      id, item, typedEmail, expectedUpdatedAt, holdsTable, technicianId: req.technicianId,
+    });
+    const outcomeResponse = confirmEmailOutcomeResponse(outcome);
+    if (outcomeResponse) return res.status(outcomeResponse.status).json(outcomeResponse.body);
+
+    runDeferredEmailSyncCallbacks(id, result.emailSync);
+    await resumeFirstTouchAfterConfirmEmail(id, item, resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES);
+
+    return res.json({ ok: true, id, status: 'resolved', confirmed_email: typedEmail, confirmed_source: result.confirmedSource });
+  } catch (err) {
+    // Code/name only: a knex message embeds the bound payload, which can
+    // carry the confirmed address.
+    logger.error(`[admin-triage] confirm-email failed: ${err.code || err.name || 'error'}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to confirm email' });
   }
 });
 
@@ -979,6 +1703,8 @@ router.post('/:id/verdict', async (req, res) => {
     if (!OPEN_STATES.includes(item.status)) {
       return res.status(409).json({ error: `Item already ${item.status}` });
     }
+    const { EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
+    const emailReviewCard = EMAIL_REVIEW_REASON_CODES.includes(item.reason_code);
     // Bounce re-verification cards are NOT call-routing judgments — they can
     // arrive DAYS after the call and say nothing about whether the AI routed
     // it correctly. They resolve individually via /resolve; recording an
@@ -1042,6 +1768,21 @@ router.post('/:id/verdict', async (req, res) => {
     let conflictCardSettled = false;
     let staleConflictVersion = false;
     let relinkedRecoveryTask = false;
+    let callbackNumberUnverified = false;
+    // What this verdict did to the disclaimed number (round 7 P1) — echoed
+    // in the reply so the operator knows the old number stays blocked.
+    let callbackNumber = null;
+    // Codex round-4 P2 (PR #4807): TriageInboxTabV2 renders callback_number_
+    // needed as a generic call-verdict card (Accept / Deny), not through the
+    // dedicated single-card actions on_file_house_number_conflict etc. use —
+    // so unlike /resolve (a deliberate, one-card confirmation), Accept here
+    // is a whole-call routing judgment that says nothing on its own about
+    // whether anyone actually got a working number. A Deny that names no
+    // field is the same blanket rejection denyRejectsUnitEvidence treats as
+    // "nothing here is confirmed" for a different card, so it doesn't
+    // attempt to clear either — only Dismiss-equivalent, the hold stands.
+    const attemptsCallbackNumberClear = verdict === 'accept' || (verdict === 'deny' && wrongFields.length > 0);
+    let emailDisagreementUnconfirmed = false;
     await db.transaction(async (trx) => {
       // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
       // first_touch_holds rows → triage_items. The advisory lock is the
@@ -1051,6 +1792,49 @@ router.post('/:id/verdict', async (req, res) => {
       // r33 discipline against the email-correction fanout, which settles
       // holds and cards in one transaction using the same order.
       await lockTriageCall(trx, item.call_log_id);
+      // Codex round-4 P2 (PR #4807): refuse the WHOLE verdict — nothing
+      // resolves, same "refuse-until-corrected" shape as ADDRESS_UNVERIFIED
+      // (booking.js / admin-estimates.js) — when this verdict would clear an
+      // open callback_number_needed card with no actual evidence a working
+      // number exists. The card carries no verified-replacement field of its
+      // own (nothing in this pipeline stamps one), so the only evidence that
+      // counts is a customer phone that has since moved OFF the disclaimed
+      // ANI the call recorded — a human correction, not the AI's own guess.
+      // Checked under the call lock, before the bulk resolve below touches
+      // anything, so a refusal leaves every card on the call exactly as it
+      // was for a retry once the number is actually fixed.
+      if (attemptsCallbackNumberClear) {
+        const openCallbackCard = await trx('triage_items')
+          .where({ call_log_id: item.call_log_id, reason_code: 'callback_number_needed' })
+          .whereIn('status', OPEN_STATES)
+          .first('id');
+        if (openCallbackCard) {
+          const callRow = await trx('call_log').where({ id: item.call_log_id })
+            .first('from_phone', 'to_phone', 'direction', 'metadata', 'source', 'customer_id');
+          const customerRow = callRow?.customer_id
+            ? await trx('customers').where({ id: callRow.customer_id }).first('phone')
+            : null;
+          const { phoneKey } = require('../services/customer-contact-fanout');
+          // Finding #3 (round 4 P1): from_phone is the Waves Twilio number
+          // on an OUTBOUND auto-booking call — the disclaimed destination
+          // there is to_phone (the number Waves dialed, per the processor's
+          // own resolveCallContactPhone). Comparing against a bare
+          // from_phone made an unchanged customer phone look like a
+          // verified replacement for every outbound-call card. Reuse the
+          // processor's direction-aware resolver (no dictated number here —
+          // the card exists BECAUSE none resolved) so this can never drift
+          // from the number the hold was actually placed on.
+          const { resolveCallContactPhone } = require('../services/call-recording-processor');
+          const disclaimedNumber = resolveCallContactPhone(callRow || {}, null);
+          const aniDigits = phoneKey(disclaimedNumber);
+          const customerDigits = phoneKey(customerRow?.phone);
+          const verifiedReplacementNumber = !!aniDigits && !!customerDigits && customerDigits !== aniDigits;
+          if (!verifiedReplacementNumber) {
+            callbackNumberUnverified = true;
+            return;
+          }
+        }
+      }
       // A house-number conflict card is version-bound like the property-
       // role and promise cards: a force-reprocess merges refreshed evidence
       // into the same open row, so a verdict judged on what the inbox
@@ -1059,6 +1843,21 @@ router.post('/:id/verdict', async (req, res) => {
       // …and recovery tasks, whose window / retained visit a settlement
       // refreshes in place (codex r31 P1): Accept / Deny on them is
       // version-bound the same way.
+      // …and email review cards (codex round-3 P1): the client already
+      // sends expected_updated_at on every verdict, so a stale view of a
+      // card whose evidence has since changed refuses instead of settling
+      // evidence the operator never saw. Its own block (same refusal), so
+      // the conflict/recovery block below stays exactly as it was — the
+      // email reason codes never overlap the conflict/recovery codes.
+      if (emailReviewCard) {
+        const liveEmailCard = await trx('triage_items').where({ id }).first('updated_at');
+        const expectedEmailUpdatedAt = req.body?.expected_updated_at || null;
+        if (!liveEmailCard || !expectedEmailUpdatedAt
+          || new Date(expectedEmailUpdatedAt).getTime() !== new Date(liveEmailCard.updated_at).getTime()) {
+          staleConflictVersion = true;
+          return;
+        }
+      }
       if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {
         const liveCard = await trx('triage_items').where({ id }).first('updated_at', 'payload');
         const expectedUpdatedAt = req.body?.expected_updated_at || null;
@@ -1091,6 +1890,45 @@ router.post('/:id/verdict', async (req, res) => {
       if (live?.payload?.reschedule_proposal) {
         throw Object.assign(new Error('Review or dismiss the reschedule proposal instead of recording a call verdict.'), { proposalConflict: true });
       }
+      // Codex round-4 P1 (finding #2): only check (and only sweep, below)
+      // email review cards when THIS verdict's own clicked item IS one —
+      // an Accept on some OTHER card (address, name, ...) must never
+      // silently bulk-resolve a SEPARATE, possibly-superseded email card
+      // and release its hold unseen. The client sends expected_updated_at
+      // for the clicked item only, never for siblings, so there is no
+      // version to bind an unrelated email card to — it is excluded from
+      // the bulk resolve entirely (below) and survives for its own click.
+      // Codex round-6 P1 (finding on the Deny path): denyClearsEmailEarly
+      // ALSO treats the email as approved (it lifts a stale deny stamp and
+      // later triggers the same resumeHeldFirstTouch release as Accept —
+      // see denyClearsEmail below) whenever the operator denies on an
+      // unrelated field (address, service, scheduling, routing) — 'email'
+      // is not even a selectable wrong-field. The confirmation guard must
+      // run for that release path too, not only Accept.
+      if ((verdict === 'accept' || denyClearsEmailEarly) && emailReviewCard) {
+        // Same guard as transitionCore's plain Resolve (codex round-2/3
+        // P1): an Accept (or an email-approving Deny) call verdict
+        // bulk-resolves every open card on the call, including an
+        // email_unverified/invalid card carrying an unresolved V1/V2
+        // disagreement — releasing that without confirmed provenance
+        // strands the hold forever (the sweep skips blank held_email rows)
+        // and the closed card leaves no work item to fix it.
+        const openEmailCards = await trx('triage_items')
+          .where({ call_log_id: item.call_log_id })
+          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+          .whereIn('status', OPEN_STATES)
+          .select('payload', 'created_at');
+        for (const card of openEmailCards) {
+          const payload = typeof card.payload === 'string'
+            ? (() => { try { return JSON.parse(card.payload); } catch { return null; } })()
+            : card.payload;
+          if (payload?.email_disagreement
+              && !(await emailDisagreementConfirmed(trx, item.call_log_id, card.created_at, holdsTable))) {
+            emailDisagreementUnconfirmed = true;
+            return;
+          }
+        }
+      }
       // A house-number conflict card on a CONFIRMED call is that call's
       // only scheduling ask (the processor's booking hold suppressed the
       // fallback card). Read its snapshot under the lock BEFORE the bulk
@@ -1121,9 +1959,16 @@ router.post('/:id/verdict', async (req, res) => {
         // …and a recovery task (its window / retained visit refreshed in
         // place by a settlement) is settled only by ITS OWN version-bound
         // verdict, never swept by a sibling card's verdict (codex r31 P1).
+        // …and an email review card, UNLESS it is itself the clicked item
+        // (codex round-4 P1, finding #2): the client's expected_updated_at
+        // only ever covers the clicked card, so a verdict on some OTHER
+        // card has no version to bind a separate email card to — sweeping
+        // it in would resolve (and release the hold of) evidence the
+        // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
+          ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])
         .modify((q) => { if (conflictLeftForOwnVerdict) q.whereNot({ id: heldConflict.id }); })
         // A verdict ON a recovery task settles that row alone: a reprocess
@@ -1144,6 +1989,25 @@ router.post('/:id/verdict', async (req, res) => {
       emailCardResolved = resolvedRows
         .some((r) => ['email_unverified', 'email_invalid'].includes(r?.reason_code));
       if (resolved === 0) return;
+      // Codex round-4 P2 (PR #4807): only reached when the pre-check above
+      // already confirmed a verified replacement number (or there was no
+      // open callback_number_needed card to clear in the first place) — a
+      // blanket, no-fields-named Deny never reached this far attempting to
+      // clear (attemptsCallbackNumberClear false), matching Dismiss's
+      // "leave the note, no verified number" semantics on the single-card
+      // path. Same shared helper transitionCore's /resolve uses (number
+      // hold included — see the helper).
+      // Round 7 P1: the pre-check only proved customers.phone MOVED OFF the
+      // disclaimed number — the REPLACEMENT_NUMBER meaning. The card closes
+      // and the visits' call-level clearance lands, but the number-keyed
+      // row for the OLD number stays active (only /resolve's explicit
+      // same-number verification lifts that).
+      if (attemptsCallbackNumberClear && resolvedRows.some((r) => r?.reason_code === 'callback_number_needed')) {
+        const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
+          clearedBy: req.technicianId, numberVerdict: CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
+        });
+        callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
+      }
       if (verdict === 'deny' && denyRejectsUnitEvidence(wrongFields) && resolvedRows.some((r) => r?.reason_code === 'missing_unit_number')) {
         // The call-level Deny is the same human verdict the card's Dismiss
         // is (transitionCore above): the texted unit is rejected, so the
@@ -1235,6 +2099,15 @@ router.post('/:id/verdict', async (req, res) => {
     if (relinkedRecoveryTask) {
       return res.status(409).json({ error: 'This call was relinked to another customer since the task was filed — reprocess the call to refresh it, then review it.', code: 'CONFLICT_CUSTOMER_RELINKED' });
     }
+    if (callbackNumberUnverified) {
+      return res.status(409).json({ error: 'The customer phone on file still matches the number the caller disclaimed — enter a verified callback number before accepting this card.', code: 'CALLBACK_NUMBER_UNVERIFIED' });
+    }
+    if (emailDisagreementUnconfirmed) {
+      return res.status(409).json({
+        error: 'V1 and V2 disagreed on the spelled email — correct the customer\'s email on the customer record with the confirmed spelling before recording this verdict.',
+        code: 'EMAIL_DISAGREEMENT_UNCONFIRMED',
+      });
+    }
     if (resolved === 0) {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
     }
@@ -1302,7 +2175,10 @@ router.post('/:id/verdict', async (req, res) => {
       reviewedBy: req.technicianId,
     });
 
-    return res.json({ ok: true, id, status: 'resolved', verdict, resolved_count: resolved });
+    return res.json({
+      ok: true, id, status: 'resolved', verdict, resolved_count: resolved,
+      ...(callbackNumber ? { callback_number: callbackNumber } : {}),
+    });
   } catch (err) {
     if (err.proposalConflict) return res.status(409).json({ error: err.message });
     if (err.statusCode === 409) return res.status(409).json({ error: err.message, code: err.code || null });
@@ -1393,4 +2269,5 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
 module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
-  heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS };
+  heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
+  clearCallbackNumberHold, emailDisagreementConfirmed };

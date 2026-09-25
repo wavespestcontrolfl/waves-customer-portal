@@ -559,3 +559,44 @@ describe('POST /:id/mark-accepted — converter pricing refusals reach the admin
     }));
   });
 });
+
+// codex #4815 r8 P2: the mark-accepted preflight judged the row WITHOUT its
+// status, so a queued row-scoped (agreed-price) verdict — which never blocks
+// a terminal row — could not see that the row was already accepted, and an
+// idempotent retry got a false 409 instead of reaching
+// markEstimateManuallyAccepted's alreadyAccepted result.
+describe('POST /:id/mark-accepted — the preflight passes the row status (codex #4815 r8 P2)', () => {
+  const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+  const QUEUED_AGREED_CALL = {
+    metadata: { estimator_quarantine_queue: { price_agreed_on_call: { reason: 'price_agreed_on_call', at: 'x', generation: 5 } } },
+    processing_token: null,
+    processing_status: 'processed',
+    extraction_attempts: 0,
+    created_at: '2026-09-25T00:00:00.000Z',
+    twilio_call_sid: null,
+  };
+  const dbFor = (estimateRow) => (table) => makeBuilder({ first: table === 'call_log' ? QUEUED_AGREED_CALL : estimateRow });
+  beforeEach(() => { db.mockReset(); markEstimateManuallyAccepted.mockReset(); });
+
+  test('an idempotent retry on an ALREADY-accepted estimate reaches markEstimateManuallyAccepted', async () => {
+    db.mockImplementation(dbFor({ estimate_data: { estimatorEngine: { callLogId: 'call-1' } }, status: 'accepted' }));
+    markEstimateManuallyAccepted.mockResolvedValueOnce({ alreadyAccepted: true });
+    const handler = routeHandler(adminEstimatesRouter, '/:id/mark-accepted', 'post');
+    const res = makeRes();
+    const next = jest.fn();
+    await handler({ params: { id: 'est-1' }, body: {}, technicianId: 'tech-1' }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalledWith(409);
+    expect(markEstimateManuallyAccepted).toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, alreadyAccepted: true }));
+  });
+
+  test('a NON-terminal row under the same queued verdict is still refused with 409', async () => {
+    db.mockImplementation(dbFor({ estimate_data: { estimatorEngine: { callLogId: 'call-1' } }, status: 'sent' }));
+    const handler = routeHandler(adminEstimatesRouter, '/:id/mark-accepted', 'post');
+    const res = makeRes();
+    await handler({ params: { id: 'est-1' }, body: {}, technicianId: 'tech-1' }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(markEstimateManuallyAccepted).not.toHaveBeenCalled();
+  });
+});

@@ -3,6 +3,16 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
+const { customerIntelAiLive } = require('../../config/feature-gates');
+
+// AI sentiment mining is a real per-customer FLAGSHIP call (every customer
+// with inbound SMS in the last 14 days, re-read nightly AND on every inbound
+// event rescore — ~60% of all highStakes volume in the 09-2026 ledger) that
+// feeds the churn/risk signal the owner ruled unusable as a gauge or trigger
+// (2026-08-29). Off by default; read at CALL time so a flip needs no
+// redeploy (customerIntelAiLive — the one reader shared with
+// retention-engine and the admin route). Deterministic signals below are
+// unaffected either way.
 
 // Structured-output contract (llm/call.js jsonSchema). The confidence floor
 // and the type map below still decide which signals are recorded.
@@ -353,9 +363,9 @@ class SignalDetector {
       }
     } catch { /* */ }
 
-    // ── AI Sentiment Mining ────────────────────────────────────────
+    // ── AI Sentiment Mining (GATE_CUSTOMER_INTEL_AI, default off) ────
     try {
-      const aiSignals = await analyzeSentimentBatch(customerId);
+      const aiSignals = customerIntelAiLive() ? await analyzeSentimentBatch(customerId) : [];
       for (const aiSig of aiSignals) {
         if (!existing.has(aiSig.signal_type)) {
           newSignals.push(aiSig);

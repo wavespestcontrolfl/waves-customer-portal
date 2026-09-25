@@ -824,7 +824,18 @@ function initScheduledJobs() {
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const { sweepUngeocodedCustomers } = require('./geocoder');
-      await runExclusive('geocoder-backstop', () => sweepUngeocodedCustomers());
+      await runExclusive('geocoder-backstop', async () => {
+        // Appointment pins are independent of the customer's primary address.
+        // Keep recovery in this job, ahead of the unrelated customer backlog.
+        // A service-query failure must not suppress the existing customer
+        // safety net; both sweeps still share this one exclusive lease.
+        try {
+          await require('./geocoder-service-locations').sweepUngeocodedServices({ dryRun: false });
+        } catch (err) {
+          logger.error(`[geocoder] service-location backstop failed (${err.code || 'service_sweep_error'}): ${err.message}`);
+        }
+        await sweepUngeocodedCustomers();
+      });
     } catch (err) {
       logger.error(`[geocoder] backstop sweep failed: ${err.message}`);
     }
@@ -5248,8 +5259,18 @@ function initScheduledJobs() {
         .whereNull('c.deleted_at')
         .select('chs.customer_id');
 
+      // Retention drafts are a FLAGSHIP customerCopy call per at-risk
+      // customer, keyed on the churn band the owner ruled unusable
+      // (2026-08-29; win-back is a manual send). The engine itself enforces
+      // GATE_CUSTOMER_INTEL_AI (customerIntelAiLive) on every caller; this
+      // skip only saves the per-customer reads and logs the count.
+      const { customerIntelAiLive } = require('../config/feature-gates');
+      const intelAiOn = customerIntelAiLive();
       let outreachGenerated = 0;
-      for (const c of atRisk) {
+      if (!intelAiOn) {
+        logger.info(`[customer-intel] GATE_CUSTOMER_INTEL_AI off — skipped retention drafting for ${atRisk.length} at-risk customers`);
+      }
+      for (const c of intelAiOn ? atRisk : []) {
         const result = await RetentionEngine.generateRetentionOutreach(c.customer_id);
         if (result) outreachGenerated++;
       }

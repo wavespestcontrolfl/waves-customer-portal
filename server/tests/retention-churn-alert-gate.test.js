@@ -53,12 +53,20 @@ jest.mock('../services/llm/call', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  // Drafting path under test — the call-time kill switch itself is covered in
+  // customer-intel-ai-gate.test.js.
+  customerIntelAiLive: () => process.env.GATE_CUSTOMER_INTEL_AI === 'true',
 }));
 
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { isEnabled } = require('../config/feature-gates');
 const RetentionEngine = require('../services/customer-intelligence/retention-engine');
+
+// These tests exercise the drafting path itself; the call-time kill switch
+// (GATE_CUSTOMER_INTEL_AI, default off) is covered in customer-intel-ai-gate.test.js.
+beforeAll(() => { process.env.GATE_CUSTOMER_INTEL_AI = 'true'; });
+afterAll(() => { delete process.env.GATE_CUSTOMER_INTEL_AI; });
 
 const CUSTOMER_ID = 42;
 

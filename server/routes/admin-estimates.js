@@ -2231,7 +2231,7 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
 const { ADDRESS_UNVERIFIED_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
-  const row = await db('estimates').where({ id: estimateId }).first('id', 'estimate_group_id', 'archived_at', 'estimate_data');
+  const row = await db('estimates').where({ id: estimateId }).first('id', 'estimate_group_id', 'archived_at', 'estimate_data', 'status');
   if (!row) return true;
   if (row.archived_at) return true;
   let data;
@@ -2247,7 +2247,7 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
   // A bedroom re-price in flight (estimate-clarify-asks): the draft's
   // dollars are about to be replaced — not sendable meanwhile.
   if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) return true;
-  if (await staleCallLinkageReason(db, data)) return true;
+  if (await staleCallLinkageReason(db, data, { estimateStatus: row.status })) return true;
   // Short-link, template and PDF preparation can carry an immediate send
   // past midnight after the preflight deadline check (GH codex P2 r4 on
   // #4309): re-read every property's fixed hold right before the provider
@@ -2639,7 +2639,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // BEFORE its reconcile archives this draft — the marker check alone
       // misses that window, and stamping the claim below would then defer
       // the very reconcile meant to stop this send.
-      const staleLinkage = await staleCallLinkageReason(trx, data);
+      const staleLinkage = await staleCallLinkageReason(trx, data, { estimateStatus: verdictRow.status });
       if (staleLinkage) return staleLinkage;
       // Unparseable estimate_data: verdict passes (matches the prior
       // read-only behavior) but no claim is stamped — a blind rewrite
@@ -5341,13 +5341,18 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
     // would still convert the customer and mint billing off a
     // wrong-identity or rejected-call estimate.
     {
-      const row = await db('estimates').where({ id: req.params.id }).first('estimate_data');
+      // `status` rides the preflight (codex #4815 r8 P2): a queued
+      // row-scoped (agreed-price) verdict never blocks a terminal row, so an
+      // idempotent retry on an ALREADY-accepted estimate reaches
+      // markEstimateManuallyAccepted's alreadyAccepted result instead of a
+      // false 409. Omitted, the guard could not prove the row terminal.
+      const row = await db('estimates').where({ id: req.params.id }).first('estimate_data', 'status');
       let data = row?.estimate_data;
       if (typeof data === 'string') {
         try { data = JSON.parse(data); } catch { data = null; }
       }
       if (data && typeof data === 'object') {
-        const blocked = await callSideBlockForEstimateData(db, data);
+        const blocked = await callSideBlockForEstimateData(db, data, { estimateStatus: row?.status });
         if (blocked) {
           return res.status(409).json({
             error: 'This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.',

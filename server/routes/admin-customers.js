@@ -2136,12 +2136,10 @@ async function findCrossAccountContactConflict(customerId, accountId, updates) {
   if (updates.email !== undefined) {
     const email = cleanEmail(updates.email);
     if (email) {
-      const rows = await db('customers')
-        .whereNull('deleted_at')
-        .whereNot({ id: customerId })
-        .whereRaw('LOWER(email) = ?', [email])
-        .select('id', 'account_id', 'first_name', 'last_name', 'email');
-      const conflict = rows.find((row) => String(row.account_id || row.id) !== normalizedAccountId);
+      // One predicate for every operator email writer (the triage read-back
+      // confirm reuses it under the address key): services/customer-email-write.js.
+      const conflict = await require('../services/customer-email-write')
+        .findCrossAccountEmailConflict(db, { customerId, accountId: normalizedAccountId, email });
       if (conflict) conflicts.push({ field: 'email', customer: conflict });
     }
   }
