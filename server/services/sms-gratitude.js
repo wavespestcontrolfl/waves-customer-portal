@@ -85,6 +85,14 @@ const MANUAL_QUESTION_RE = /(?:^|[.!,;:\n—-]\s*|\b(?:just|please|also|and|so|t
 // not an answer to close on; another thanks after it is the loop the
 // courtesy guard exists to stop.
 const MANUAL_COURTESY_RE = /^(?:thanks?(?: you)?|thank you|ty|tysm|anytime|any time|happy to help|glad to help|glad (?:i|we) could help|of course|absolutely|sure thing|you got it|you bet|my pleasure|our pleasure|you(?:'re| are|re) (?:very )?welcome|no worries|no problem|np|welcome)(?:[ ,]+[\p{L}\p{M}'’ -]+)?[!.\s]*$/iu;
+// A hand-typed payment request is not a closure either, matching the
+// billing exclusion in AUTOMATED_CLOSURE_TYPES: thanks after "here is your
+// payment link" acknowledges nothing paid.
+const MANUAL_PAYMENT_RE = /\b(?:pay(?:ment)?(?: link| here| online| now| by| via| with)?|invoice|balance(?: due)?|amount due|due today|card on file|autopay|auto-pay|checkout|zelle|venmo|cash ?app|square link|stripe)\b/i;
+// A hand-typed text closes the exchange unless it asks for money.
+const manualCourtesy = (text, manualReply) => manualReply
+  && (MANUAL_COURTESY_RE.test(text) || isCourtesyOnly(text, { awaitingAnswer: false }));
+const manualClosure = (text, manualReply) => manualReply && !MANUAL_PAYMENT_RE.test(text);
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
   || (row.messageType === MANUAL_MESSAGE_TYPE && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text)));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
@@ -124,10 +132,10 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
   const body = withoutOptionalFooter(String(previous.body || ''));
   const bankAcknowledgement = BANK_ACK_RE.test(body);
   const manualReply = previous.messageType === MANUAL_MESSAGE_TYPE;
-  if (manualReply && (MANUAL_COURTESY_RE.test(body) || isCourtesyOnly(body, { awaitingAnswer: false }))) return deny('courtesy_already_sent');
+  if (manualCourtesy(body, manualReply)) return deny('courtesy_already_sent');
   const invalidClosure = [
     [() => !bankAcknowledgement && outboundPending(body, previous), 'outbound_needs_attention'],
-    [() => !bankAcknowledgement && !manualReply && !AUTOMATED_CLOSURE_TYPES.has(previous.messageType)
+    [() => !bankAcknowledgement && !manualClosure(body, manualReply) && !AUTOMATED_CLOSURE_TYPES.has(previous.messageType)
       && !CLOSED_OUTBOUND_RE.test(body), 'closure_not_established'],
   ].find(([invalid]) => invalid());
   if (invalidClosure) return deny(invalidClosure[1]);

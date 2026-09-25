@@ -157,6 +157,16 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     expect(evaluateGratitudeContext({ ...context, history: [report, { ...manual(body), createdAt: '2030-01-10T14:59:30Z' }] }).reason)
       .toBe('courtesy_already_sent');
   });
+  test.each([
+    'Here is your payment link: https://example.invalid/pay/abc',
+    'Please pay your invoice here: https://example.invalid/pay/abc',
+    'Your balance due is on the portal',
+  ])('a hand-typed payment request is not a closure: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(false);
+  });
+  test('a hand-typed receipt link is still a closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Your receipt: https://example.invalid/receipt/abc')] }).eligible).toBe(true);
+  });
   test('a hand-typed reply answers an earlier operational text', () => {
     expect(evaluateGratitudeContext({ ...context, history: [earlierRequest,
       manual('Yes, you can download the Waves app and reschedule appts there.')] }).eligible).toBe(true);
