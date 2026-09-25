@@ -539,6 +539,44 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
 // customerId: the RESOLVED recipient's customer (sms_log linkage included —
 // a draft linked through its SMS row after creation must recheck against
 // that customer, codex #4810 r7).
+// Holds that leave the row exactly as it is — the copy itself is unusable,
+// so nothing stored is patched: a pre-gauge draft (old universal copy,
+// nothing to recheck — the owner revises it, still allowed for these, or
+// rejects it) and an audience change (the copy was chosen for another
+// customer or for a lead).
+const PHOTO_TRIAGE_PLAIN_HOLDS = {
+  pre_gauge: {
+    error: 'This photo-triage draft predates the opportunity check — revise it before sending, or reject it.',
+    code: 'PHOTO_TRIAGE_PRE_GAUGE',
+  },
+  recipient_changed: {
+    error: 'This photo-triage draft was written before the sender was linked to this customer or became a customer — reject it and reply from the conversation.',
+    code: 'PHOTO_TRIAGE_RECIPIENT_CHANGED',
+  },
+};
+
+// Stale pitch holds: the no-pitch reason recorded on the downgraded verdict
+// and the owner-facing explanation, per recheck answer.
+const PHOTO_TRIAGE_STALE_HOLDS = {
+  owned: { reason: 'already_owned', why: (family) => `the customer now has ${family} on their plan` },
+  unavailable: { reason: 'offer_unavailable', why: (family) => `ownership of ${family} could not be confirmed (live plan rate or lookup failure)` },
+  no_longer_priced: { reason: 'quote_needs_review', why: (family) => `${family} can no longer be priced for this customer` },
+};
+
+// The send-time hook form of the recheck (preDispatchCheck/preProviderCheck
+// contract): stale → blocked; an outage → the same retryable code the
+// route-level 503 uses, never a raw exception message.
+function photoTriageLateCheck(recheckDraftOffer, customerId, flags) {
+  return async () => {
+    try {
+      const late = await recheckDraftOffer({ customerId, flags });
+      return late.ok ? { ok: true } : { ok: false, code: 'PHOTO_TRIAGE_OFFER_STALE', reason: 'photo-triage offer changed before dispatch — draft left pending' };
+    } catch {
+      return { ok: false, code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE', reason: 'Photo-triage offer recheck unavailable — draft left pending, try again', retryable: true };
+    }
+  };
+}
+
 async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id } = {}) {
   // Same predicate the /revise refusal claims on (intent), so the two
   // halves of the approve-as-written rule can never disagree on a draft.
@@ -572,35 +610,13 @@ async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id
     // preProviderCheck (at the Twilio handoff, after the provider's own
     // awaits; codex #4810 r13). An outage there answers the same retryable
     // code the route-level 503 uses, never a raw exception message.
-    const resolvedCustomerId = customerId || draft.customer_id;
-    const lateCheck = async () => {
-      try {
-        const late = await recheckDraftOffer({ customerId: resolvedCustomerId, flags });
-        return late.ok ? { ok: true } : { ok: false, code: 'PHOTO_TRIAGE_OFFER_STALE', reason: 'photo-triage offer changed before dispatch — draft left pending' };
-      } catch {
-        return { ok: false, code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE', reason: 'Photo-triage offer recheck unavailable — draft left pending, try again', retryable: true };
-      }
-    };
+    const lateCheck = photoTriageLateCheck(recheckDraftOffer, customerId || draft.customer_id, flags);
     return { blocked: false, preDispatchCheck: lateCheck, preProviderCheck: lateCheck };
   }
-  if (verdict.blocked === 'pre_gauge') {
-    // Old universal copy with nothing to recheck: the owner revises it
-    // (still allowed for these) or rejects it.
+  const plainHold = PHOTO_TRIAGE_PLAIN_HOLDS[verdict.blocked];
+  if (plainHold) {
     await releaseDraftClaim(draft.id);
-    res.status(409).json({
-      error: 'This photo-triage draft predates the opportunity check — revise it before sending, or reject it.',
-      code: 'PHOTO_TRIAGE_PRE_GAUGE',
-    });
-    return { blocked: true };
-  }
-  if (verdict.blocked === 'recipient_changed') {
-    // Nothing stored can be patched into shape: the copy itself (lead
-    // on-site ask, quote ask) was chosen for another audience.
-    await releaseDraftClaim(draft.id);
-    res.status(409).json({
-      error: 'This photo-triage draft was written before the sender was linked to this customer or became a customer — reject it and reply from the conversation.',
-      code: 'PHOTO_TRIAGE_RECIPIENT_CHANGED',
-    });
+    res.status(409).json(plainHold);
     return { blocked: true };
   }
   if (verdict.repriced !== undefined) {
@@ -621,8 +637,8 @@ async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id
   // audit r6): mode → advise, the no-pitch reason recorded, the stale
   // owner-only quote dropped, AND the pitch sentence replaced in the draft
   // text itself — a plain second Approve must not send the stale ask.
-  const heldReason = verdict.blocked === 'owned' ? 'already_owned'
-    : verdict.blocked === 'unavailable' ? 'offer_unavailable' : 'quote_needs_review';
+  const stale = PHOTO_TRIAGE_STALE_HOLDS[verdict.blocked];
+  const heldReason = stale.reason;
   const priorReasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
   const heldFlags = {
     ...flags,
@@ -631,11 +647,7 @@ async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id
     quote: null,
     offer_recheck_held_at: new Date().toISOString(),
   };
-  const why = verdict.blocked === 'owned'
-    ? `the customer now has ${verdict.family} on their plan`
-    : verdict.blocked === 'unavailable'
-      ? `ownership of ${verdict.family} could not be confirmed (live plan rate or lookup failure)`
-      : `${verdict.family} can no longer be priced for this customer`;
+  const why = stale.why(verdict.family);
   await releaseDraftClaim(draft.id, {
     flags: JSON.stringify(heldFlags),
     draft_response: stripQuotePitch(draft.draft_response),
