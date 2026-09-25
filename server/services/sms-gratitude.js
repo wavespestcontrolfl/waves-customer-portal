@@ -89,7 +89,14 @@ const MANUAL_QUESTION_RE = /(?:^|[.!,;:\n—-]\s*|\b(?:just|please|also|and|so|t
 // A hand-typed courtesy ("Thanks, Dana!", "Anytime!", "Happy to help") is
 // not an answer to close on; another thanks after it is the loop the
 // courtesy guard exists to stop.
-const MANUAL_COURTESY_RE = /^(?:thanks?(?: you)?|thank you|ty|tysm|anytime|any time|happy to help|glad to help|glad (?:i|we) could help|of course|absolutely|sure thing|you got it|you bet|my pleasure|our pleasure|you(?:'re| are|re) (?:very )?welcome|no worries|no problem|not a problem|no prob|np|welcome)(?:[ ,]+[\p{L}\p{M}'’-]+(?: [\p{L}\p{M}'’-]+)?)?[!.\s]*$/iu;
+const MANUAL_COURTESY_PREFIX_RE = /^(?:thanks?(?: you)?|thank you|ty|tysm|anytime|any time|happy to help|glad to help|glad (?:i|we) could help|of course|absolutely|sure thing|you got it|you bet|my pleasure|our pleasure|you(?:'re| are|re) (?:very )?welcome|no worries|no problem|not a problem|no prob|np|welcome)(?:[ ,]+(.+?))?[!.\s]*$/iu;
+// Only a name-like suffix (one or two capitalized words) keeps it a courtesy:
+// "Thanks, Dana!" is; "Thanks, address updated." is an answer.
+const MANUAL_COURTESY_SUFFIX_RE = /^\p{Lu}[\p{L}\p{M}'’-]*(?: \p{Lu}[\p{L}\p{M}'’-]*)?$/u;
+const isManualCourtesy = text => {
+  const match = MANUAL_COURTESY_PREFIX_RE.exec(String(text || '').trim());
+  return Boolean(match) && (!match[1] || MANUAL_COURTESY_SUFFIX_RE.test(match[1]));
+};
 // A hand-typed payment request is not a closure either, matching the
 // billing exclusion in AUTOMATED_CLOSURE_TYPES: thanks after "here is your
 // payment link" acknowledges nothing paid.
@@ -97,11 +104,14 @@ const MANUAL_PAYMENT_REQUEST_RE = /\b(?:pay(?:ment)? (?:link|here|online|now|por
 const PAYMENT_SETTLED_RE = /\b(?:(?:payment|invoice|balance|it|that|this)(?: has| was| is)? (?:been )?(?:received|paid|processed|cleared|settled|applied|refunded|waived|credited|zeroed)|already (?:paid|processed|received|refunded)|went through|nothing (?:is )?(?:due|owed)|no (?:balance|charge)|paid in full|all paid|zero balance|thank you for (?:your |the )?payment|we received your payment)\b/i;
 // A hand-typed text closes the exchange unless it asks for money.
 const manualCourtesy = (text, manualReply) => manualReply
-  && (MANUAL_COURTESY_RE.test(text) || isCourtesyOnly(text, { awaitingAnswer: false }));
+  && (isManualCourtesy(text) || isCourtesyOnly(text, { awaitingAnswer: false }));
 // A hand-typed text closes the exchange unless it asks for money; a typed
 // "your payment has been received" is a settlement, not a request.
-const manualClosure = (text, manualReply) => manualReply
-  && !(MANUAL_PAYMENT_REQUEST_RE.test(text) && !PAYMENT_SETTLED_RE.test(text));
+// Judged clause by clause: "your old invoice was paid, but please pay the
+// new one here" still asks for money.
+const asksForMoney = text => String(text || '').split(/[.!?;\n]+|\b(?:but|however|although|though)\b/i)
+  .some(clause => MANUAL_PAYMENT_REQUEST_RE.test(clause) && !PAYMENT_SETTLED_RE.test(clause));
+const manualClosure = (text, manualReply) => manualReply && !asksForMoney(text);
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
   || (row.messageType === MANUAL_MESSAGE_TYPE && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text)));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;

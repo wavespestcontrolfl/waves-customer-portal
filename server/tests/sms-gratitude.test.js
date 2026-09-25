@@ -83,6 +83,8 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
   test.each([
     'Thanks, I updated the address.',
     'Thank you, the report is attached.',
+    'Thanks, address updated.',
+    'Thank you, issue resolved.',
   ])('a typed answer that opens with thanks is still an answer: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
   });
@@ -193,6 +195,8 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Here is your payment link: https://example.invalid/pay/abc',
     'Please pay your invoice here: https://example.invalid/pay/abc',
     'Your balance due is on the portal',
+    'Your old invoice was paid, but please pay your new invoice here',
+    'Payment received for March. The April invoice is due Friday',
   ])('a hand-typed payment request is not a closure: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(false);
   });
