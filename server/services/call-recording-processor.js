@@ -1617,7 +1617,17 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
               // (or its absence, when this cycle carries no arbiter evidence
               // at all) must always win, never the existing row's copy.
               arbiter: payloadObj.arbiter,
-              ...(payloadObj.email_release_target !== undefined ? { email_release_target: payloadObj.email_release_target } : {}),
+              // Codex P1 (round 3): same staleness class as arbiter above —
+              // both real minting call sites always stamp
+              // email_release_target explicitly (a string, or null when
+              // extracted.email is null, as it is on a disagreement card),
+              // but nothing here should DEPEND on every future caller doing
+              // that. Unconditional, like arbiter: this cycle's value (or
+              // its absence) always wins over the existing row's copy, so a
+              // stale release target from a resolved-or-superseded earlier
+              // cycle can never ride along on a fresh, unresolved
+              // two-candidate card.
+              email_release_target: payloadObj.email_release_target,
             };
             await trx('triage_items')
               .where({ id: existing.id })

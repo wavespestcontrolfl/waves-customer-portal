@@ -297,4 +297,52 @@ describe('mintEmailReviewCardsFenced — V1/V2 email disagreement refresh (codex
     const mergedPayload = JSON.parse(payloadUpdateCall[0].payload);
     expect(mergedPayload.arbiter.verdict).toBe('review');
   });
+
+  // Codex r3 P1 (round 3): same staleness class as arbiter — a stale
+  // email_release_target from the existing row must not survive the
+  // refresh either, even on a fixture where this cycle's own card never
+  // set the field at all.
+  test('a stale email_release_target on the EXISTING card does not survive the refresh', async () => {
+    mockFirstResult = {
+      id: 'existing-card-1',
+      payload: JSON.stringify({
+        flag: 'email_unverified',
+        email_release_target: 'stale@example.com',
+      }),
+    };
+    // DISAGREEMENT_CARD's payload never sets email_release_target — this
+    // cycle carries none, so the refresh must clear the existing row's
+    // stale copy rather than preserve it.
+    await mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [DISAGREEMENT_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    const payloadUpdateCall = db._chain.update.mock.calls.find((c) => c[0] && typeof c[0].payload === 'string');
+    const mergedPayload = JSON.parse(payloadUpdateCall[0].payload);
+    expect(mergedPayload.email_release_target).toBeUndefined();
+  });
+
+  test('a fresh email_release_target from THIS cycle overwrites a stale one on the existing card', async () => {
+    mockFirstResult = {
+      id: 'existing-card-1',
+      payload: JSON.stringify({ flag: 'email_unverified', email_release_target: 'stale@example.com' }),
+    };
+    const CARD_WITH_RELEASE_TARGET = {
+      call_log_id: 'call-1',
+      reason_code: 'email_unverified',
+      payload: JSON.stringify({
+        flag: 'email_unverified',
+        email_candidates: [{ value: 'janedoee@example.com' }, { value: 'janedoe@example.com' }],
+        email_disagreement: { v1: 'janedoee@example.com', v2: 'janedoe@example.com' },
+        // A disagreement card's own release target is always null (no
+        // single confirmed address), matching the real minting call sites.
+        email_release_target: null,
+      }),
+    };
+    await mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [CARD_WITH_RELEASE_TARGET], callSid: 'CA1', invalidateClaims: false,
+    });
+    const payloadUpdateCall = db._chain.update.mock.calls.find((c) => c[0] && typeof c[0].payload === 'string');
+    const mergedPayload = JSON.parse(payloadUpdateCall[0].payload);
+    expect(mergedPayload.email_release_target).toBeNull();
+  });
 });
