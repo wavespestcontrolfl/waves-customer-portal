@@ -4,7 +4,9 @@
  * reconcileTermiteAnnualActivations against a scratch schema built by the
  * real 20260925000001..000006 migrations. The candidate scans, the
  * per-customer advisory lock, the installation floor, the overlap check
- * (admin-customers' own status clause) and the stamps all run as real SQL.
+ * (admin-customers' own status clause), the plan-scoped installation rule
+ * (estimate / term link, same property, sole property — codex round 6) and
+ * the stamps all run as real SQL.
  * The term window edit itself is createTermForAnnualPrepay's (covered by
  * its own suites) and is stubbed here to the column move it performs; the
  * admin bell is mocked at its module boundary.
@@ -38,7 +40,8 @@ async function createScratchDb() {
   const schema = `termite_anchor_${randomUUID().replace(/-/g, '')}`;
   const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 6 } });
   await db.raw('CREATE SCHEMA ??', [schema]);
-  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid)');
+  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid)');
+  await db.raw('CREATE TABLE customer_properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL)');
   await db.raw(`CREATE TABLE invoices (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
@@ -61,6 +64,8 @@ async function createScratchDb() {
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
     source_estimate_id uuid,
+    annual_prepay_term_id uuid,
+    property_id uuid,
     status text,
     service_type text,
     scheduled_date date
@@ -146,20 +151,36 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     // Stands in for createTermForAnnualPrepay's window edit: the column move
     // it performs on the matched term (its detach/coverage/renewal-date
     // follow-through is covered by the annual-prepay-renewals suites).
+    // Both record whether the term was already anchored when they ran:
+    // coverage seeding is deferred until the anchor stamp exists, so the
+    // window edit / refresh must run after it.
+    const anchoredWhenRefreshed = [];
     const createTermForAnnualPrepay = jest.fn(async ({
       sourceEstimateId, termStart, termEnd, conn,
     }) => {
+      const before = await conn('annual_prepay_terms').where({ source_estimate_id: sourceEstimateId }).first();
+      anchoredWhenRefreshed.push(Boolean(before.installation_anchored_at));
       const [updated] = await conn('annual_prepay_terms').where({ source_estimate_id: sourceEstimateId })
         .update({ term_start: termStart, term_end: termEnd }).returning('*');
       return updated;
     });
+    const refreshTermSnapshot = jest.fn(async (termId, conn) => {
+      const term = await conn('annual_prepay_terms').where({ id: termId }).first();
+      anchoredWhenRefreshed.push(Boolean(term.installation_anchored_at));
+      return term;
+    });
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
-    jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay }));
+    jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay, refreshTermSnapshot }));
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
     return {
-      sweep: () => reconcileTermiteAnnualActivations({ conn: db }), notifyAdmin, createTermForAnnualPrepay, db,
+      sweep: () => reconcileTermiteAnnualActivations({ conn: db }),
+      notifyAdmin,
+      createTermForAnnualPrepay,
+      refreshTermSnapshot,
+      anchoredWhenRefreshed,
+      db,
     };
   }
 
@@ -167,6 +188,13 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     customer_id: ids.customerId, status: 'completed', service_type: 'Termite Bait Station Installation', ...fields,
   }).returning('*').then(([row]) => row);
   const readTerm = async (db) => db('annual_prepay_terms').where({ id: ids.termId }).first();
+  // A two-property customer whose plan estimate is recorded at property A.
+  const twoProperties = async (db, { estimateAtA = true } = {}) => {
+    const [a] = await db('customer_properties').insert({ customer_id: ids.customerId }).returning('*');
+    const [b] = await db('customer_properties').insert({ customer_id: ids.customerId }).returning('*');
+    if (estimateAtA) await db('estimates').where({ id: ids.estimateId }).update({ property_id: a.id });
+    return { propertyA: a.id, propertyB: b.id };
+  };
 
   test('a completed installation re-anchors the original term to the install date + 12 months, exactly once', async () => {
     const { sweep, createTermForAnnualPrepay, db } = load();
@@ -293,11 +321,14 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     expect((await db('estimates').where({ id: ids.estimateId }).first()).annual_plan_install_handoff_at).toBeInstanceOf(Date);
   });
 
-  test('install handoff: a cancelled booking, or a booking on another estimate, still rings the scheduling bell', async () => {
+  test('install handoff: a cancelled booking, or another property\'s booking on another estimate, still rings the scheduling bell', async () => {
     const { sweep, notifyAdmin, db } = load();
+    const { propertyB } = await twoProperties(db);
     await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
     await addVisit(db, { scheduled_date: '2026-10-14', status: 'cancelled', source_estimate_id: ids.estimateId });
-    await addVisit(db, { scheduled_date: '2026-10-15', status: 'confirmed', source_estimate_id: randomUUID() });
+    await addVisit(db, {
+      scheduled_date: '2026-10-15', status: 'confirmed', source_estimate_id: randomUUID(), property_id: propertyB,
+    });
 
     expect(await sweep()).toMatchObject({ handoffScanned: 1, handedOff: 1 });
     expect(notifyAdmin).toHaveBeenCalledWith('estimate', expect.stringContaining('schedule the installation'), expect.anything(), expect.anything());
@@ -320,5 +351,99 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
 
     expect(counts).toMatchObject({ anchored: 1, handoffScanned: 0 });
     expect(notifyAdmin).not.toHaveBeenCalledWith('estimate', expect.stringContaining('schedule the installation'), expect.anything(), expect.anything());
+  });
+  // ---- codex round 6: the installation is scoped to THIS plan ------------
+
+  test('anchoring stamps the anchor BEFORE the window edit / refresh, so coverage seeding sees an anchored term', async () => {
+    const moved = load();
+    await addVisit(moved.db, { scheduled_date: '2026-10-14' });
+    expect((await moved.sweep()).anchored).toBe(1);
+    expect(moved.createTermForAnnualPrepay).toHaveBeenCalledTimes(1);
+    expect(moved.refreshTermSnapshot).not.toHaveBeenCalled();
+    expect(moved.anchoredWhenRefreshed).toEqual([true]);
+  });
+
+  test('an unmoved anchor still refreshes the term, so its coverage resolves against the anchored window', async () => {
+    const { sweep, createTermForAnnualPrepay, refreshTermSnapshot, anchoredWhenRefreshed, db } = load();
+    await addVisit(db, { scheduled_date: SIGNED_ON });
+    expect((await sweep()).anchored).toBe(1);
+    expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+    expect(refreshTermSnapshot).toHaveBeenCalledWith(ids.termId, expect.anything());
+    expect(anchoredWhenRefreshed).toEqual([true]);
+  });
+
+  test('multi-property: a completed bait installation at property B never anchors property A\'s plan', async () => {
+    const { sweep, createTermForAnnualPrepay, db } = load();
+    const { propertyB } = await twoProperties(db);
+    await addVisit(db, { scheduled_date: '2026-10-14', property_id: propertyB });
+
+    expect((await sweep()).anchorScanned).toBe(0);
+    expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+    expect((await readTerm(db)).installation_anchored_at).toBeNull();
+  });
+
+  test('multi-property: the installation at the estimate\'s property anchors, ignoring an earlier one at property B', async () => {
+    const { sweep, db } = load();
+    const { propertyA, propertyB } = await twoProperties(db);
+    await addVisit(db, { scheduled_date: '2026-10-05', property_id: propertyB });
+    const install = await addVisit(db, { scheduled_date: '2026-10-14', property_id: propertyA });
+
+    expect((await sweep()).anchored).toBe(1);
+    const term = await readTerm(db);
+    expect(ymd(term.term_start)).toBe('2026-10-14');
+    expect(term.installation_anchor_visit_id).toBe(install.id);
+  });
+
+  test('multi-property: an installation booked from the plan estimate anchors even with no property recorded', async () => {
+    const byEstimate = load();
+    await twoProperties(byEstimate.db, { estimateAtA: false });
+    const estimateLinked = await addVisit(byEstimate.db, { scheduled_date: '2026-10-14', source_estimate_id: ids.estimateId });
+    expect((await byEstimate.sweep()).anchored).toBe(1);
+    expect((await readTerm(byEstimate.db)).installation_anchor_visit_id).toBe(estimateLinked.id);
+  });
+
+  test('multi-property: a term-linked installation anchors, but not one recorded at a different property', async () => {
+    const { sweep, db } = load();
+    const { propertyB } = await twoProperties(db);
+    await addVisit(db, { scheduled_date: '2026-10-05', annual_prepay_term_id: ids.termId, property_id: propertyB });
+    const termLinked = await addVisit(db, { scheduled_date: '2026-10-14', annual_prepay_term_id: ids.termId });
+
+    expect((await sweep()).anchored).toBe(1);
+    expect((await readTerm(db)).installation_anchor_visit_id).toBe(termLinked.id);
+  });
+
+  test('multi-property with no property on the estimate: an unlinked installation never anchors (explicit link required)', async () => {
+    const { sweep, createTermForAnnualPrepay, db } = load();
+    const { propertyA } = await twoProperties(db, { estimateAtA: false });
+    await addVisit(db, { scheduled_date: '2026-10-14', property_id: propertyA });
+    await addVisit(db, { scheduled_date: '2026-10-15' });
+
+    expect((await sweep()).anchorScanned).toBe(0);
+    expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+  });
+
+  test('single-property customer: an unlinked installation still anchors (no other site exists)', async () => {
+    const { sweep, db } = load();
+    const [only] = await db('customer_properties').insert({ customer_id: ids.customerId }).returning('*');
+    await addVisit(db, { scheduled_date: '2026-10-14', property_id: only.id });
+    expect((await sweep()).anchored).toBe(1);
+  });
+
+  test('install handoff: a term-linked or same-property booking is the handoff; another property\'s is not', async () => {
+    const { sweep, notifyAdmin, db } = load();
+    const { propertyA, propertyB } = await twoProperties(db);
+    await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
+    const booked = await addVisit(db, { scheduled_date: '2026-10-15', status: 'confirmed', property_id: propertyB });
+
+    expect(await sweep()).toMatchObject({ handoffScanned: 1, handedOff: 1 });
+    expect(notifyAdmin).toHaveBeenCalledWith('estimate', expect.stringContaining('schedule the installation'), expect.anything(), expect.anything());
+
+    for (const link of [{ annual_prepay_term_id: ids.termId }, { property_id: propertyA }]) {
+      notifyAdmin.mockClear();
+      await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
+      await db('scheduled_services').where({ id: booked.id }).update({ annual_prepay_term_id: null, property_id: null, ...link });
+      expect(await sweep()).toMatchObject({ handoffScanned: 1, handedOff: 1 });
+      expect(notifyAdmin).not.toHaveBeenCalledWith('estimate', expect.stringContaining('schedule the installation'), expect.anything(), expect.anything());
+    }
   });
 });

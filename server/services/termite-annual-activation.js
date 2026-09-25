@@ -175,16 +175,19 @@ async function ringActivationBell(NotificationService, {
 // accept-on-book → markEstimateManuallyAccepted) already created the
 // installation and linked it to the estimate by source_estimate_id. That
 // booking IS the handoff — ringing "nothing is booked" would invite a
-// duplicate installation — so it is stamped without a bell. A failed
-// lookup falls through to the bell (a spurious bell beats a lost handoff).
+// duplicate installation — so it is stamped without a bell. Codex round 6:
+// "booked" uses the same plan-scoped installation rule as the anchor
+// (whereInstallationVisitForPlan), so a term-linked or same-property booking
+// counts too and another property's bait visit never does. A failed lookup
+// falls through to the bell (a spurious bell beats a lost handoff).
 const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled'];
 async function hasBookedInstallationVisit(conn, estimateId) {
   try {
-    const row = await whereTermiteInstallationServiceType(
-      conn('scheduled_services as ss')
-        .where('ss.source_estimate_id', estimateId)
-        .whereNotIn('ss.status', DEAD_VISIT_STATUSES),
-      'ss',
+    const plan = await installationPlanForEstimate(conn, estimateId);
+    if (!plan) return false;
+    const row = await whereInstallationVisitForPlan(
+      conn('scheduled_services as ss').whereNotIn('ss.status', DEAD_VISIT_STATUSES),
+      plan,
     ).first('ss.id');
     return Boolean(row);
   } catch (err) {
@@ -734,6 +737,57 @@ function installationFloorFor(term) {
   return activatedOn && activatedOn < provisionalStart ? activatedOn : provisionalStart;
 }
 
+// Codex round-6 P1: THE rule for "this visit is this plan's installation",
+// shared by the anchor, its candidate scan and the install handoff. A termite
+// bait/station visit of the plan's customer, on or after the plan's floor,
+// that belongs to THIS plan:
+//   - booked from the plan's estimate (source_estimate_id), or
+//   - linked to the plan's term (annual_prepay_term_id) and not recorded at
+//     a different property than the estimate, or
+//   - recorded at the estimate's property (property_id), or
+//   - the customer has at most one property on file (no other site exists).
+// A multi-property customer's visit with no link and no matching property
+// never qualifies — a bait visit at property B must never anchor, or stand
+// in as booked for, property A's plan. `plan` values are literals, or
+// knex refs when the caller correlates against apt / e (the candidate scan).
+function whereInstallationVisitForPlan(builder, plan) {
+  whereTermiteInstallationServiceType(builder, 'ss').where('ss.customer_id', plan.customerId);
+  if (plan.floor) builder.whereRaw('ss.scheduled_date >= ?', [plan.floor]);
+  return builder.where(function belongsToPlan() {
+    this.whereRaw('ss.source_estimate_id = ?', [plan.estimateId])
+      .orWhereRaw('(ss.annual_prepay_term_id = ? AND COALESCE(ss.property_id = ?, TRUE))', [plan.termId, plan.estimatePropertyId])
+      .orWhereRaw('ss.property_id = ?', [plan.estimatePropertyId])
+      .orWhereRaw('(SELECT COUNT(*) FROM customer_properties cp WHERE cp.customer_id = ?) <= 1', [plan.customerId]);
+  });
+}
+
+function installationPlanFor(term, estimate) {
+  return {
+    customerId: term.customer_id,
+    estimateId: term.source_estimate_id || null,
+    estimatePropertyId: estimate?.property_id || null,
+    termId: term.id,
+    floor: installationFloorFor(term),
+  };
+}
+
+// The plan behind an estimate: its original (non-renewal) term + property.
+async function installationPlanForEstimate(conn, estimateId) {
+  const estimate = await conn('estimates').where({ id: estimateId }).first('id', 'customer_id', 'property_id');
+  if (!estimate) return null;
+  const term = await conn('annual_prepay_terms')
+    .where({ source_estimate_id: estimateId })
+    .whereNull('renewed_from_term_id')
+    .orderBy('created_at', 'asc')
+    .first('id', 'customer_id', 'source_estimate_id', 'term_start', 'created_at');
+  if (!term) {
+    return {
+      customerId: estimate.customer_id, estimateId: estimate.id, estimatePropertyId: estimate.property_id || null, termId: null, floor: null,
+    };
+  }
+  return installationPlanFor(term, estimate);
+}
+
 async function anchorTermToInstallation({ termId, conn = db }) {
   return conn.transaction(async (trx) => {
     const peek = await trx('annual_prepay_terms').where({ id: termId }).first('customer_id');
@@ -749,11 +803,12 @@ async function anchorTermToInstallation({ termId, conn = db }) {
     }
     if (await trx('annual_prepay_terms').where({ renewed_from_term_id: term.id }).first('id')) return { skipped: 'renewed' };
 
-    const installation = await whereTermiteInstallationServiceType(
-      trx('scheduled_services as ss')
-        .where({ 'ss.customer_id': term.customer_id, 'ss.status': 'completed' })
-        .where('ss.scheduled_date', '>=', installationFloorFor(term)),
-      'ss',
+    const estimate = term.source_estimate_id
+      ? await trx('estimates').where({ id: term.source_estimate_id }).first('property_id')
+      : null;
+    const installation = await whereInstallationVisitForPlan(
+      trx('scheduled_services as ss').where('ss.status', 'completed'),
+      installationPlanFor(term, estimate),
     ).orderBy('ss.scheduled_date', 'asc').first('ss.id', 'ss.scheduled_date');
     if (!installation) return { skipped: 'no_completed_installation' };
 
@@ -768,9 +823,20 @@ async function anchorTermToInstallation({ termId, conn = db }) {
       .first('id');
     if (clash) return { skipped: 'overlap', clashTermId: clash.id, termStart };
 
+    // Stamp the anchor FIRST: coverage seeding is deferred until it exists
+    // (annual-prepay-renewals.js coverageAwaitsInstallation), so the refresh
+    // below must already see it — then the coverage year's visit is resolved
+    // against the anchored window, with the installation itself counting as
+    // that year's visit (installation_anchor_visit_id), never a second seed.
+    await trx('annual_prepay_terms').where({ id: term.id }).update({
+      installation_anchored_at: new Date(),
+      installation_anchor_visit_id: installation.id,
+      updated_at: new Date(),
+    });
     const moved = termStart !== dateOnlyString(term.term_start) || termEnd !== dateOnlyString(term.term_end);
+    const AnnualPrepayRenewals = require('./annual-prepay-renewals');
     if (moved) {
-      await require('./annual-prepay-renewals').createTermForAnnualPrepay({
+      await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: term.customer_id,
         sourceEstimateId: term.source_estimate_id,
         prepayInvoiceId: term.prepay_invoice_id,
@@ -779,12 +845,9 @@ async function anchorTermToInstallation({ termId, conn = db }) {
         termEnd,
         conn: trx,
       });
+    } else {
+      await AnnualPrepayRenewals.refreshTermSnapshot(term.id, trx);
     }
-    await trx('annual_prepay_terms').where({ id: term.id }).update({
-      installation_anchored_at: new Date(),
-      installation_anchor_visit_id: installation.id,
-      updated_at: new Date(),
-    });
     return {
       anchored: true, termId: term.id, termStart, termEnd, moved,
     };
@@ -801,12 +864,15 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
       .whereNull('apt.renewal_decision')
       .whereIn('apt.status', ANCHORABLE_TERM_STATUSES)
       .whereExists(function completedInstallation() {
-        whereTermiteInstallationServiceType(
-          this.select(conn.raw('1')).from('scheduled_services as ss')
-            .whereRaw('ss.customer_id = apt.customer_id')
-            .where('ss.status', 'completed')
-            .whereRaw("ss.scheduled_date >= LEAST(apt.term_start, (apt.created_at AT TIME ZONE 'America/New_York')::date)"),
-          'ss',
+        whereInstallationVisitForPlan(
+          this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),
+          {
+            customerId: conn.ref('apt.customer_id'),
+            estimateId: conn.ref('e.id'),
+            estimatePropertyId: conn.ref('e.property_id'),
+            termId: conn.ref('apt.id'),
+            floor: conn.raw("LEAST(apt.term_start, (apt.created_at AT TIME ZONE 'America/New_York')::date)"),
+          },
         );
       })
       .orderBy('apt.created_at', 'asc', 'first')
