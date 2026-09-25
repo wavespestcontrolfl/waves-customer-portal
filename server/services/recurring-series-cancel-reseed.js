@@ -129,6 +129,16 @@ function termWindowContaining(rootDateStr, dateStr) {
   return { index, start: addYears(root, index), end: addYears(root, index + 1) }; // end exclusive
 }
 
+// The term at a known index — for a cancelled row an earlier reseed added:
+// its stamp says which term it served, and that term (not the one its
+// end-of-series date falls in) is the one now short (fallback auditor P1
+// on 4a67afdc15).
+function termWindowAtIndex(rootDateStr, index) {
+  const root = dateOnly(rootDateStr);
+  if (!root || !Number.isInteger(index) || index < 0 || Number.isNaN(Date.parse(`${root}T00:00:00Z`))) return null;
+  return { index, start: addYears(root, index), end: addYears(root, index + 1) };
+}
+
 // The date a row occupies in its PLAN — a one-occurrence exception keeps
 // its cadence position (date_exception_cadence_date) even when the actual
 // appointment moved across the root anniversary (Codex #4814 r2 P1; the
@@ -196,6 +206,7 @@ module.exports = {
   runPostCancelSeriesReseed,
   plannedVisitsPerYearForSeries,
   termWindowContaining,
+  termWindowAtIndex,
   countTermVisits,
   isBoosterRow,
   isPlanSeriesRow,

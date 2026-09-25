@@ -17959,19 +17959,16 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }
 // reads plan rows only (no boosters) by the same position.
 async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
   const {
-    plannedVisitsPerYearForSeries, termWindowContaining, countTermVisits, planPositionDate, hasUpcomingPlanRow,
+    plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, countTermVisits, planPositionDate, hasUpcomingPlanRow,
   } = require('../services/recurring-series-cancel-reseed');
   const expected = plannedVisitsPerYearForSeries(parent);
   if (!expected) return { skipped: 'no_planned_count' };
-  const window = termWindowContaining(parent.scheduled_date, planPositionDate(cancelled));
-  if (!window) return { skipped: 'no_term_window' };
-  const seriesRows = await trx('scheduled_services')
-    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date');
-  // Visits earlier reseeds added count in the term they REPLACED a visit in
+  // Visits earlier reseeds added belong to the term they REPLACED a visit in
   // (the stamp's term_index), not the term their end-of-series date falls in
   // (fallback auditor P1 on 81e8083efd): otherwise the next term reads one
-  // visit fuller than it is and a cancel there goes unreplaced.
+  // visit fuller than it is and a cancel there goes unreplaced. The same
+  // override picks the term when the cancelled row IS such a visit
+  // (fallback auditor P1 on 4a67afdc15).
   const stamps = await trx('activity_log')
     .where({ customer_id: parent.customer_id, action: 'recurring_cancel_reseed' })
     .whereRaw("metadata->>'recurring_parent_id' = ?", [String(parentId)])
@@ -17982,6 +17979,13 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
     if (!Number.isInteger(meta.term_index)) continue;
     for (const id of meta.added_service_ids || []) termOverrides.set(String(id), meta.term_index);
   }
+  const window = termOverrides.has(String(cancelled.id))
+    ? termWindowAtIndex(parent.scheduled_date, termOverrides.get(String(cancelled.id)))
+    : termWindowContaining(parent.scheduled_date, planPositionDate(cancelled));
+  if (!window) return { skipped: 'no_term_window' };
+  const seriesRows = await trx('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date');
   const counting = countTermVisits(seriesRows, window, termOverrides);
   if (counting >= expected) return { skipped: 'term_still_whole', counting, expected };
   // Nothing left upcoming = the plan ended (its last visit was cancelled, or

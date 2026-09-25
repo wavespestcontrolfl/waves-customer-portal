@@ -24,7 +24,7 @@ jest.mock('../routes/admin-schedule', () => ({
 const adminSchedule = require('../routes/admin-schedule');
 const gates = require('../config/feature-gates');
 const {
-  runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, countTermVisits,
+  runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, countTermVisits,
   isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, planPositionDate, hasUpcomingPlanRow,
   COUNTING_SOURCE_STATUSES,
 } = require('../services/recurring-series-cancel-reseed');
@@ -116,6 +116,13 @@ describe('term / count math (pure)', () => {
     expect(termWindowContaining('2028-02-29', '2029-02-28')).toEqual({ index: 1, start: '2029-02-28', end: '2030-02-28' });
     expect(termWindowContaining('2028-02-29', '2029-02-27')).toEqual({ index: 0, start: '2028-02-29', end: '2029-02-28' });
     expect(termWindowContaining('2028-02-29', '2032-02-29')).toEqual({ index: 4, start: '2032-02-29', end: '2033-02-28' });
+    // a known index (a cancelled row an earlier reseed added — its stamp says which term it served)
+    expect(termWindowAtIndex('2026-07-10', 0)).toEqual({ index: 0, start: '2026-07-10', end: '2027-07-10' });
+    expect(termWindowAtIndex('2026-07-10', 2)).toEqual({ index: 2, start: '2028-07-10', end: '2029-07-10' });
+    expect(termWindowAtIndex('2028-02-29', 1)).toEqual({ index: 1, start: '2029-02-28', end: '2030-02-28' });
+    expect(termWindowAtIndex('2026-07-10', -1)).toBeNull();
+    expect(termWindowAtIndex('2026-07-10', 1.5)).toBeNull();
+    expect(termWindowAtIndex(null, 0)).toBeNull();
     expect(termWindowContaining('2026-07-10', 'not-a-date')).toBeNull();
   });
 
@@ -350,6 +357,9 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(t).toMatch(/whereRaw\("metadata->>'recurring_parent_id' = \?", \[String\(parentId\)\]\)/);
     expect(t).toMatch(/termOverrides\.set\(String\(id\), meta\.term_index\)/);
     expect(t.indexOf("action: 'recurring_cancel_reseed' })")).toBeLessThan(count);
+    // … and pick the term when the CANCELLED row is such a visit (stamps read before the window is chosen)
+    expect(t).toMatch(/const window = termOverrides\.has\(String\(cancelled\.id\)\)\s*\? termWindowAtIndex\(parent\.scheduled_date, termOverrides\.get\(String\(cancelled\.id\)\)\)\s*: termWindowContaining\(parent\.scheduled_date, planPositionDate\(cancelled\)\);/);
+    expect(t.indexOf("action: 'recurring_cancel_reseed' })")).toBeLessThan(t.indexOf('const window = '));
     const guard = t.indexOf("if (!hasUpcomingPlanRow(seriesRows, etDateString())) return { skipped: 'no_live_visits'");
     expect(count).toBeGreaterThan(-1);
     expect(whole).toBeGreaterThan(count);
