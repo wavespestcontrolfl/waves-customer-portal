@@ -14868,17 +14868,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         ...(currentEntry?.propertyId || selectedProperty?.propertyId
           ? { expectedPropertyId: String(currentEntry?.propertyId || selectedProperty.propertyId) } : {}),
       });
-      // The server's 60s dedupe path returns success against the EARLIER
-      // request with photoCount: 0 — if the customer attached photos this
-      // time, say so instead of implying they were received.
-      setSubmittedNote(
-        result?.deduped && photos.length > 0 && !(Number(result.photoCount) > 0)
-          ? 'We already had this request from a moment ago, so your new photos were not attached. Text them to us if they show something new.'
-          : '',
-      );
+      // A retry returns the original request without replacing its photos.
+      // Its count cannot prove that newly selected photos were saved.
+      const hadNote = result?.deduped && photos.length > 0;
+      const existingPhotoCount = Number(result?.request?.photoCount) || 0;
+      setSubmittedNote(hadNote
+        ? `We already received this request${existingPhotoCount > 0 ? ` with ${existingPhotoCount} photo${existingPhotoCount === 1 ? '' : 's'} attached` : ''}. This retry did not change its photos. Text us any additional photos.`
+        : '');
       setSubmitted(true);
       onSubmitted?.();
-      const hadNote = result?.deduped && photos.length > 0 && !(Number(result.photoCount) > 0);
       setTimeout(() => {
         setSubmitted(false);
         setCategory(''); setDescription('');

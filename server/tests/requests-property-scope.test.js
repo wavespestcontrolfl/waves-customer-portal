@@ -177,10 +177,10 @@ test.each([404, 409, 503])('an unavailable Photo ID source (%s) never files a re
 test('an already-filed Photo ID retry succeeds without reading photo storage again', async () => {
   global.__SCOPE__ = SECONDARY;
   const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
-  db.mockImplementation(() => chain([{ id: 'existing-request', category: 'other' }], log));
+  db.mockImplementation(() => chain([{ id: 'existing-request', category: 'other', photos: ['data:image/jpeg;base64,saved'] }], log));
   const res = await post({ category: 'other', subject: 'Photo follow-up', photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
   expect(res.status).toBe(200);
-  expect(res.body).toMatchObject({ deduped: true, request: { id: 'existing-request' } });
+  expect(res.body).toMatchObject({ deduped: true, request: { id: 'existing-request', photoCount: 1 } });
   expect(requestPhotoIdEvidence).not.toHaveBeenCalled();
   expect(notifyAdmin).not.toHaveBeenCalled();
 });

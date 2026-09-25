@@ -196,6 +196,29 @@ describe('ReportIssueOverlay mount safety', () => {
     }));
   });
 
+  it.each([false, true])('reports retained photos truthfully on a saved-source retry (new upload=%s)', async (newUpload) => {
+    echo.value = undefined;
+    const api = (await import('../utils/api')).default;
+    const { fireEvent } = await import('@testing-library/react');
+    api.createRequest.mockResolvedValueOnce({ deduped: true, request: { id: 'r1', photoCount: 1 } });
+    render(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} currentEntry={secondary} savedScope
+        initialValues={{
+          category: 'pest_issue', note: 'Found ants by the sink',
+          photos: [
+            { preview: 'https://signed.example/one.jpg', photoId: 'saved-1', name: 'Saved photo' },
+            ...(newUpload ? [{ preview: 'data:image/jpeg;base64,live', data: 'data:image/jpeg;base64,live', name: 'New photo' }] : []),
+          ],
+          photoIdSource: { type: 'pest', id: 'photo-id-1' },
+        }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /submit request/i }));
+    expect(await screen.findByText(/already received this request with 1 photo attached/)).toHaveTextContent('This retry did not change its photos.');
+    expect(screen.queryByText(/your new photos were not attached/)).not.toBeInTheDocument();
+  });
+
   it('submits a live Photo ID capture with an empty saved-photo id list', async () => {
     echo.value = undefined;
     const api = (await import('../utils/api')).default;

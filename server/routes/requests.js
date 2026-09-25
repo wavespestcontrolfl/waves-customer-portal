@@ -401,7 +401,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           urgency: dupe.urgency,
           locationOnProperty: dupe.location_on_property,
           status: dupe.status,
-          photoCount: 0,
+          photoCount: Array.isArray(dupe.photos) ? dupe.photos.length : 0,
           createdAt: dupe.created_at,
         },
         // A retry is still a truthful outcome (H0): the sweep above is the
