@@ -348,7 +348,6 @@ function suspiciousUnstructured(text) {
   // emoji + currency) — be cautious.
   // We allow common latin + emoji + standard punctuation; flag anything
   // odd by checking presence of unusual private-use / control chars.
-   
   if (/[---]/.test(text)) return true;
   return false;
 }
