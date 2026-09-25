@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
@@ -120,6 +121,8 @@ const gates = {
   customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
   // Customer iOS icon count; opt-in everywhere, with request-time route checks.
   customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
+  // Billing Email/Text/App preference API; opt-in everywhere and read at request time by the route.
+  billingNotificationChannels: gateEnvValue('GATE_BILLING_NOTIFICATION_CHANNELS'),
   // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
   composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
   // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for

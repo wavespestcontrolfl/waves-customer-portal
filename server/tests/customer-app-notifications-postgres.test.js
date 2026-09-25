@@ -88,6 +88,10 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg.schema.hasColumn('service_requests', 'status_version')).toBe(hadVersion);
     await versionMigration.up(mockPg);
     await require('../models/migrations/20260909000064_request_channel_provenance').up(mockPg);
+    const billingChannelsMigration = require('../models/migrations/20260924010200_billing_delivery_channels');
+    await billingChannelsMigration.up(mockPg); await billingChannelsMigration.up(mockPg);
+    await billingChannelsMigration.down(mockPg); await billingChannelsMigration.down(mockPg);
+    await billingChannelsMigration.up(mockPg);
     await mockPg('customers').insert([
       { id: owner, account_id: owner, is_primary_profile: true },
       { id: property, account_id: owner, is_primary_profile: false },
@@ -112,6 +116,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   }, 60000);
   afterAll(async () => {
     delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+    delete process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
     if (server) await new Promise((resolve) => server.close(resolve));
     await mockPg?.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
@@ -119,6 +124,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    process.env.GATE_BILLING_NOTIFICATION_CHANNELS = 'true';
     await mockPg('notifications').del();
     await mockPg('push_subscriptions').del();
     await mockPg('notification_prefs').del();
@@ -496,6 +502,106 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({ en_route_channel: 'push', payment_receipt_channel: 'sms', sms_enabled: true });
     expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({ payment_receipt_channel: 'push', sms_enabled: false, email_enabled: false });
     expect((await put({ billingReminderChannel: 'push' })).status).toBe(400);
+  });
+
+  test.each([
+    [['email']],
+    [['sms']],
+    [['push']],
+    [['sms', 'email']],
+    [['push', 'email']],
+    [['push', 'sms']],
+    [['push', 'email', 'sms']],
+  ])('enabled billing gate accepts and canonicalizes combination %j', async (invoiceChannels) => {
+    await device();
+    const response = await put({ invoiceChannels });
+    expect(response.status).toBe(200);
+    const canonical = ['email', 'sms', 'push'].filter((channel) => invoiceChannels.includes(channel));
+    expect(response.body.preferences.invoiceChannels).toEqual(canonical);
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels).toEqual(canonical);
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).invoice_channels).toBeNull();
+  });
+
+  test.each([
+    [{ invoiceChannels: [] }],
+    [{ invoiceChannels: ['sms', 'sms'] }],
+    [{ invoiceChannels: ['carrier-pigeon'] }],
+  ])('billing API rejects invalid arrays: %j', async (body) => {
+    expect((await put(body)).status).toBe(400);
+  });
+
+  test('billing arrays stay on the charged profile and legacy scalar writes cannot erase them', async () => {
+    const channels = ['email', 'sms'];
+    expect((await put({ paymentConfirmationChannels: channels })).status).toBe(200);
+    expect((await put({ paymentConfirmationChannel: 'sms' })).status).toBe(200);
+    expect((await get()).body).toMatchObject({
+      paymentConfirmationChannels: channels,
+      paymentConfirmationChannel: 'sms',
+      billingChannelsAvailable: true,
+    });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+      payment_receipt_channels: channels,
+      payment_receipt_channel: 'sms',
+    });
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).payment_receipt_channels).toBeNull();
+  });
+
+  test.each([undefined, 'false'])('billing gate %s hides arrays, rejects array writes, and preserves legacy saves', async (gate) => {
+    if (gate === undefined) delete process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
+    else process.env.GATE_BILLING_NOTIFICATION_CHANNELS = gate;
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      billing_channel: 'email', invoice_channels: ['email', 'push'],
+    });
+
+    const hidden = await get();
+    expect(hidden.status).toBe(200);
+    expect(hidden.body.billingReminderChannel).toBe('email');
+    for (const key of ['billingChannelsAvailable', 'invoiceChannels', 'paymentIssueChannels',
+      'billingReminderChannels', 'paymentConfirmationChannels']) expect(hidden.body).not.toHaveProperty(key);
+
+    const rejected = await put({ invoiceChannels: ['sms'] });
+    expect(rejected).toMatchObject({
+      status: 400,
+      body: { error: 'Billing notification channel choices are not available.' },
+    });
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels)
+      .toEqual(['email', 'push']);
+
+    expect((await put({ billingReminderChannel: 'sms', weatherAlerts: false })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+      billing_channel: 'sms', invoice_channels: ['email', 'push'], weather_alerts: false,
+    });
+  });
+
+  test('billing App arrays require the App preferences query handshake', async () => {
+    await device();
+    const response = await put({ invoiceChannels: ['push'] }, '/api/notifications/preferences');
+    expect(response).toMatchObject({
+      status: 400,
+      body: { error: 'Refresh the app to manage app notifications.' },
+    });
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels).toBeNull();
+  });
+
+  test('new Email requires the charged profile or billing address, not the primary profile email', async () => {
+    await mockPg('customers').where({ id: property }).update({ email: null });
+    try {
+      expect((await put({ billingReminderChannels: ['email'] })).status).toBe(409);
+      expect((await put({ billingEmail: 'billing@example.com', billingReminderChannels: ['email'] })).status).toBe(200);
+      expect((await put({ emailEnabled: false, invoiceChannels: ['email', 'sms'] })).status).toBe(409);
+    } finally {
+      await mockPg('customers').where({ id: owner }).update({ email: 'qa-app-0@example.invalid' });
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
+    }
+  });
+
+  test('saved App can be retained or removed during an outage, but cannot be newly added', async () => {
+    await device();
+    expect((await put({ paymentIssueChannels: ['push'] })).status).toBe(200);
+    await mockPg('push_subscriptions').del();
+    expect((await put({ paymentIssueChannels: ['sms', 'push'] })).status).toBe(200);
+    expect((await put({ paymentIssueChannels: ['sms'] })).status).toBe(200);
+    expect((await put({ paymentIssueChannels: ['sms', 'push'] })).status).toBe(409);
   });
 
   test('both reminder choices persist on the primary and survive legacy saves and rollback', async () => {

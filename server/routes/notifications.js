@@ -11,6 +11,10 @@ const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 const { recordServiceContactChanges } = require('../services/service-contact-events');
+const {
+  BILLING_DELIVERY_FIELDS,
+  billingChannelsPayload,
+} = require('../services/billing-delivery-channels');
 
 router.use(authenticate);
 
@@ -190,7 +194,8 @@ function channelValue(value, appPreferences = false) {
 // them (`includeChannels: false`) — otherwise a secondary property's local
 // default channels would clobber the account channels when the client merges a
 // property response into the top-level prefs.
-function preferencePayload(prefs = {}, { includeChannels = true, appPreferences = false } = {}) {
+function preferencePayload(prefs = {}, { includeChannels = true, appPreferences = false, emailAvailable = true } = {}) {
+  const billingChannelsAvailable = gateEnvValue('GATE_BILLING_NOTIFICATION_CHANNELS');
   return {
     appointmentConfirmation: prefs.appointment_confirmation !== false,
     serviceReminder72h: prefs.service_reminder_72h !== false,
@@ -228,6 +233,7 @@ function preferencePayload(prefs = {}, { includeChannels = true, appPreferences 
       // (estimate-deposits / estimate-card-holds) all read ONE preference.
       billingReminderChannel: channelValue(prefs.billing_channel),
       paymentConfirmationChannel: channelValue(prefs.payment_receipt_channel, appPreferences),
+      ...(billingChannelsAvailable ? billingChannelsPayload(prefs, { emailAvailable }) : {}),
       ...(appPreferences ? {
         appPreferencesAvailable: true,
         pushEnabled: prefs.push_enabled !== false,
@@ -248,7 +254,10 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   const dbUpdates = {};
   for (const [key, field] of Object.entries(DB_FIELD_BY_PREF)) {
     if (['seasonalTips', 'billingEmail', 'billingContactName'].includes(key) || updates[key] === undefined) continue;
-    dbUpdates[field] = CHANNEL_PREF_KEYS.has(key)
+    if (BILLING_ARRAY_KEYS.has(key)) {
+      dbUpdates[field] = ['email', 'sms', 'push'].filter((channel) => updates[key].includes(channel));
+    }
+    else dbUpdates[field] = CHANNEL_PREF_KEYS.has(key)
       ? channelValue(updates[key], APP_CHANNEL_KEYS.has(key)) : updates[key];
   }
   if (updates.seasonalTips !== undefined) {
@@ -320,6 +329,10 @@ const ACCOUNT_PREF_LABELS = {
   requestChannel: 'Request Updates — Delivery',
   billingReminderChannel: 'Billing Reminder — Delivery',
   paymentConfirmationChannel: 'Payment Confirmation — Delivery',
+  invoiceChannels: 'Invoices — Delivery',
+  paymentIssueChannels: 'Payment Problems — Delivery',
+  billingReminderChannels: 'Billing Reminder — Delivery',
+  paymentConfirmationChannels: 'Payment Confirmation — Delivery',
 };
 
 // Preference keys whose value is a delivery channel (sms | email | both)
@@ -337,6 +350,8 @@ const CHANNEL_PREF_KEYS = new Set([
   'billingReminderChannel',
   'paymentConfirmationChannel',
 ]);
+
+const BILLING_ARRAY_KEYS = new Set(Object.keys(BILLING_DELIVERY_FIELDS));
 
 const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email', push: 'App' };
 
@@ -369,10 +384,14 @@ const DB_FIELD_BY_PREF = {
   requestChannel: 'request_channel',
   billingReminderChannel: 'billing_channel',
   paymentConfirmationChannel: 'payment_receipt_channel',
+  ...BILLING_DELIVERY_FIELDS,
 };
 
 function prefDisplayValue(key, value) {
   if (key === 'billingEmail' || key === 'billingContactName') return value || 'Not set';
+  if (BILLING_ARRAY_KEYS.has(key)) {
+    return (Array.isArray(value) ? value : []).map((channel) => CHANNEL_DISPLAY[channel]).filter(Boolean).join(', ');
+  }
   if (CHANNEL_PREF_KEYS.has(key)) return CHANNEL_DISPLAY[channelValue(value, true)];
   return value === false ? 'Off' : 'On';
 }
@@ -387,6 +406,9 @@ function preferenceChangeItems(updates = {}, before = {}, afterPrefs = {}, optio
     const oldRaw = dbField ? before?.[dbField] : undefined;
     let oldValue;
     if (key === 'billingEmail' || key === 'billingContactName') oldValue = oldRaw || '';
+    else if (BILLING_ARRAY_KEYS.has(key)) {
+      oldValue = billingChannelsPayload(before, { emailAvailable: options.emailAvailable !== false })[key];
+    }
     else if (CHANNEL_PREF_KEYS.has(key)) oldValue = channelValue(oldRaw, true);
     else oldValue = oldRaw !== false;
     const newValue = afterPrefs?.[key];
@@ -447,6 +469,8 @@ async function loadPreferencePayload(req) {
   const prefs = await ensurePrefs(req.customerId);
   const primaryId = await resolvePrimaryProfileId(req);
   const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
+  const accountHasEmail = await accountEmailAvailable(req.customerId, primaryId);
+  const billingHasEmail = await customerEmailAvailable(req.customerId) || deliverableEmail(prefs.billing_email);
   return {
     ...preferencePayload({
       ...prefs,
@@ -457,13 +481,17 @@ async function loadPreferencePayload(req) {
       tech_arrived_channel: channelPrefs.tech_arrived_channel,
       service_complete_channel: channelPrefs.service_complete_channel,
       push_enabled: channelPrefs.push_enabled,
-    }, { appPreferences: appPreferencesAvailable(req) }),
+    }, { appPreferences: appPreferencesAvailable(req), emailAvailable: billingHasEmail }),
     // Channels are account-level and the senders fall back to the account
     // primary's email on a secondary property (#1995 E), so the portal's
     // Email/Both offer keys on the ACCOUNT having an address — not on the
     // currently-selected property row alone.
-    channelEmailAvailable: await accountEmailAvailable(req.customerId, primaryId),
+    channelEmailAvailable: accountHasEmail,
   };
+}
+
+function deliverableEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
 }
 
 // True when the current profile OR the account primary carries a
@@ -474,7 +502,17 @@ async function accountEmailAvailable(customerId, primaryId) {
   if (!ids.length) return false;
   try {
     const rows = await db('customers').whereIn('id', ids).select('id', 'email');
-    return rows.some((r) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(r.email || '').trim()));
+    return rows.some((r) => deliverableEmail(r.email));
+  } catch {
+    return false;
+  }
+}
+
+async function customerEmailAvailable(customerId) {
+  if (!customerId) return false;
+  try {
+    const customer = await db('customers').where({ id: customerId }).first('email');
+    return deliverableEmail(customer?.email);
   } catch {
     return false;
   }
@@ -656,12 +694,21 @@ router.put('/preferences', async (req, res, next) => {
       requestChannel: Joi.string().valid('email', 'push'),
       billingReminderChannel: Joi.string().valid(...CHANNEL_VALUES),
       paymentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
+      invoiceChannels: Joi.array().items(Joi.string().valid('email', 'sms', 'push')).min(1).max(3).unique(),
+      paymentIssueChannels: Joi.array().items(Joi.string().valid('email', 'sms', 'push')).min(1).max(3).unique(),
+      billingReminderChannels: Joi.array().items(Joi.string().valid('email', 'sms', 'push')).min(1).max(3).unique(),
+      paymentConfirmationChannels: Joi.array().items(Joi.string().valid('email', 'sms', 'push')).min(1).max(3).unique(),
     }).min(1);
 
     const updates = await schema.validateAsync(req.body);
     const appPreferences = appPreferencesAvailable(req);
+    const hasBillingArrayUpdates = [...BILLING_ARRAY_KEYS].some((key) => updates[key] !== undefined);
+    if (hasBillingArrayUpdates && !gateEnvValue('GATE_BILLING_NOTIFICATION_CHANNELS')) {
+      return res.status(400).json({ error: 'Billing notification channel choices are not available.' });
+    }
     if (!appPreferences && (updates.pushEnabled !== undefined || updates.serviceCompleteChannel !== undefined
-      || [...APP_CHANNEL_KEYS].some((key) => updates[key] === 'push'))) {
+      || [...APP_CHANNEL_KEYS].some((key) => updates[key] === 'push')
+      || [...BILLING_ARRAY_KEYS].some((key) => updates[key]?.includes('push')))) {
       return res.status(400).json({ error: 'Refresh the app to manage app notifications.' });
     }
 
@@ -678,8 +725,38 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     // Capture the primary profile's prior channel state before writing.
-    const primaryId = Object.keys(channelDbUpdates).length ? await resolvePrimaryProfileId(req) : req.customerId;
+    const primaryId = (Object.keys(channelDbUpdates).length || hasBillingArrayUpdates)
+      ? await resolvePrimaryProfileId(req)
+      : req.customerId;
     const existingPrimary = String(primaryId) === String(req.customerId) ? existing : await ensurePrefs(primaryId);
+
+    const billingArrayUpdates = Object.entries(BILLING_DELIVERY_FIELDS)
+      .filter(([key]) => updates[key] !== undefined);
+    let billingEmailAvailable = true;
+    let addsBillingPush = false;
+    if (billingArrayUpdates.length) {
+      const currentCustomerHasEmail = await customerEmailAvailable(req.customerId);
+      const effectiveBillingEmail = updates.billingEmail !== undefined ? updates.billingEmail : existing.billing_email;
+      billingEmailAvailable = currentCustomerHasEmail || deliverableEmail(effectiveBillingEmail);
+      const emailEnabled = updates.emailEnabled !== undefined
+        ? updates.emailEnabled
+        : existing.email_enabled !== false;
+      const beforeBilling = billingChannelsPayload(
+        { ...existing, email_enabled: emailEnabled },
+        { emailAvailable: billingEmailAvailable },
+      );
+      const addsBillingEmail = billingArrayUpdates.some(([key]) => (
+        updates[key].includes('email') && !beforeBilling[key].includes('email')
+      ));
+      if (addsBillingEmail) {
+        if (!billingEmailAvailable || !emailEnabled) {
+          return res.status(409).json({ error: 'Add a billing email and enable email notifications before choosing Email.' });
+        }
+      }
+      addsBillingPush = billingArrayUpdates.some(([key]) => (
+        updates[key].includes('push') && !beforeBilling[key].includes('push')
+      ));
+    }
 
     // Older native builds render an unknown channel as Text and may echo it
     // when saving another setting. Their saves must not erase an App choice.
@@ -696,7 +773,7 @@ router.put('/preferences', async (req, res, next) => {
         }
       }
     }
-    if ([...APP_CHANNEL_KEYS].some((key) => updates[key] === 'push'
+    if (addsBillingPush || [...APP_CHANNEL_KEYS].some((key) => updates[key] === 'push'
       && (CHANNEL_DB_COLUMNS.includes(DB_FIELD_BY_PREF[key]) ? existingPrimary : existing)?.[DB_FIELD_BY_PREF[key]] !== 'push')) {
       const status = await require('../services/push-notifications').customerStatus(req.customerId);
       if (!status.fresh || updates.pushEnabled === false || (updates.pushEnabled !== true && !status.enabled)) {
@@ -748,7 +825,7 @@ router.put('/preferences', async (req, res, next) => {
     sendAccountUpdatedForPrefs({
       req,
       targetCustomerId: req.customerId,
-      items: preferenceChangeItems(updates, before, payload, { scope: 'Account' }),
+      items: preferenceChangeItems(updates, before, payload, { scope: 'Account', emailAvailable: billingEmailAvailable }),
       section: 'Notification preferences',
     });
 
@@ -1080,6 +1157,7 @@ router._private = {
   normalizeContactInput,
   loadPreferencePayload,
   accountEmailAvailable,
+  customerEmailAvailable,
   CHANNEL_DB_COLUMNS,
   SERVICE_CONTACT_CONSENT_VERSION,
 };
