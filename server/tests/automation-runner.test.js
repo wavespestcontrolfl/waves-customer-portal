@@ -247,6 +247,59 @@ describe('automation runner suppression guardrails', () => {
       next_send_at: null,
     }));
   });
+
+  test('a queued payment-failed step honors an Email deselection made after enrollment', async () => {
+    const enrollment = {
+      id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
+      current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
+    };
+    const prefsRead = chain({ first: { payment_issue_channels: ['sms', 'push'] } });
+    const sendUpdate = chain();
+    const enrollmentUpdate = chain();
+    setDbQueues({
+      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
+      automation_templates: [chain({ first: { key: 'payment_failed', name: 'Payment Failed', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Payment issue',
+        html_body: '<p>Please update payment.</p>', text_body: 'Please update payment.',
+        from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), sendUpdate],
+      email_suppressions: [chain({ result: [] })],
+      notification_prefs: [prefsRead],
+    });
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({
+      sent: false, blocked: true, reason: 'Billing delivery preference excludes Email',
+    });
+    expect(prefsRead.first).toHaveBeenCalledWith();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked', failure_reason: 'Billing delivery preference excludes Email',
+    }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'cancelled', next_send_at: null,
+    }));
+  });
+
+  test('a legacy NULL payment-issue choice still sends', async () => {
+    const enrollment = {
+      id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
+      current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
+    };
+    setDbQueues({
+      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), chain()],
+      automation_templates: [chain({ first: { key: 'payment_failed', name: 'Payment Failed', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Payment issue',
+        html_body: '<p>Please update payment.</p>', text_body: 'Please update payment.',
+        from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), chain()],
+      email_suppressions: [chain({ result: [] })],
+      notification_prefs: [chain({ first: { payment_issue_channels: null } })],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-legacy' });
+
+    await expect(sendStep('enrollment-1')).resolves.toMatchObject({ sent: true, done: true });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('automation runner prep sequence delivery stamp', () => {

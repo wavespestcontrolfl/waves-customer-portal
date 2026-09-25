@@ -19,6 +19,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -87,15 +88,37 @@ async function activeAutomationSuppressionFor(template, email) {
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
 }
 
-async function cancelEnrollmentForSuppression(enrollment, reason) {
+async function blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason }) {
+  await db('automation_step_sends').where({ id: sendId }).update({
+    status: 'blocked',
+    failure_reason: reason.slice(0, 500),
+    updated_at: new Date(),
+  });
   await db('automation_enrollments').where({ id: enrollment.id }).update({
     status: 'cancelled',
     next_send_at: null,
     completed_at: new Date(),
-    metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify('email_suppressed')]),
+    metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify(cancelReason)]),
     updated_at: new Date(),
   });
   logger.warn(`[automation-runner] cancelled enrollment=${enrollment.id} reason=${reason}`);
+  return { sent: false, blocked: true, reason };
+}
+
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient }) {
+  if (testRecipient) return null;
+  const suppression = await activeAutomationSuppressionFor(template, recipient);
+  if (suppression) {
+    const reason = automationSuppressionReason(suppression);
+    return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason: 'email_suppressed' });
+  }
+  if (template.key !== 'payment_failed' || !enrollment.customer_id) return null;
+  // SELECT * keeps this consumer deployable before the additive foundation
+  // migration; an absent column is the same legacy NULL behavior.
+  const prefs = await db('notification_prefs').where({ customer_id: enrollment.customer_id }).first();
+  if (billingChannelAllowed(prefs, 'payment_issue', 'email') !== false) return null;
+  return blockSendAndCancelEnrollment({ enrollment, sendId,
+    reason: 'Billing delivery preference excludes Email', cancelReason: 'billing_email_deselected' });
 }
 
 function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId }) {
@@ -444,19 +467,9 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
 
-  if (!testRecipient) {
-    const suppression = await activeAutomationSuppressionFor(template, recipient);
-    if (suppression) {
-      const reason = automationSuppressionReason(suppression);
-      await db('automation_step_sends').where({ id: sendRow.id }).update({
-        status: 'blocked',
-        failure_reason: reason.slice(0, 500),
-        updated_at: new Date(),
-      });
-      await cancelEnrollmentForSuppression(enrollment, reason);
-      return { sent: false, blocked: true, reason };
-    }
-  }
+  const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
+    sendId: sendRow.id, testRecipient });
+  if (deliveryBlock) return deliveryBlock;
 
   try {
     const res = await sendgrid.sendOne({
