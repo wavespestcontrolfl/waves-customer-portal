@@ -1,8 +1,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 let mockFrozenRodentSetup = 0;
+let mockTermiteSignBeforePay = false;
 jest.mock('../services/estimate-converter', () => ({
   convertEstimate: jest.fn(),
+  // Sign-before-pay predicate (codex #4819 r7) — tests flip it to exercise
+  // the termite annual Station Setup exemption.
+  isTermiteAnnualSignBeforePayAccept: jest.fn(() => mockTermiteSignBeforePay),
   // Frozen rodent bait-station setup the prepay invoice bills as its own
   // line (codex #3591 r24) — tests set mockFrozenRodentSetup to exercise it.
   frozenRodentBaitSetupAmount: jest.fn(() => mockFrozenRodentSetup),
@@ -1687,6 +1691,45 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     } finally {
       mockFrozenRodentSetup = 0;
     }
+  });
+
+  describe('termite annual plan Station Setup (codex #4819 r7 P1)', () => {
+    const { _private: { manualPrepayBlockingOneTimeCharge } } = require('../services/estimate-manual-acceptance');
+    const annualPlanEstimate = () => ({
+      status: 'sent',
+      annual_total: '300.00',
+      onetime_total: '199.00',
+      estimate_data: {
+        result: {
+          // Mapped-envelope shape (the current production shape).
+          results: { tmBait: { plan: 'annual_protection', annual: 300 } },
+          oneTime: {
+            total: 199,
+            items: [{ service: 'termite_bait_installation', kind: 'setup', name: 'Station Setup', price: 199 }],
+          },
+        },
+      },
+    });
+    afterEach(() => { mockTermiteSignBeforePay = false; });
+
+    test('a sign-before-pay accept does not block on the setup the plan invoice bills', () => {
+      mockTermiteSignBeforePay = true;
+      expect(manualPrepayBlockingOneTimeCharge(annualPlanEstimate())).toBe(false);
+    });
+
+    test('outside sign-before-pay (gate off, never delivered) the setup still blocks', () => {
+      mockTermiteSignBeforePay = false;
+      expect(manualPrepayBlockingOneTimeCharge(annualPlanEstimate())).toBe(true);
+    });
+
+    test('another billable one-time line beside the setup still blocks', () => {
+      mockTermiteSignBeforePay = true;
+      const estimate = annualPlanEstimate();
+      estimate.onetime_total = '349.00';
+      estimate.estimate_data.result.oneTime.total = 349;
+      estimate.estimate_data.result.oneTime.items.push({ service: 'german_roach_cleanout', name: 'German Roach Cleanout', price: 150 });
+      expect(manualPrepayBlockingOneTimeCharge(estimate)).toBe(true);
+    });
   });
 
   test('a POSITIVE one_time_adjustment row blocks (residual charge, not a discount)', async () => {
