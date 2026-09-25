@@ -2130,6 +2130,14 @@ const gates = {
   // Explicit opt-in in every environment.
   routeReorderRepair: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
 
+  // Nightly reorder pass only: on an unfrozen tech-day whose stored
+  // route_order is incomplete (a null or a duplicate position), write any
+  // strictly shorter promise-safe order instead of requiring the 805 m floor.
+  // Complete orders keep the floor. Nested inside GATE_ROUTE_REORDER, read at
+  // call time. Explicit opt-in in every environment. No customer messages.
+  // Kill switch: unset GATE_ROUTE_REORDER_COMPLETE_ORDER.
+  routeReorderCompleteOrder: gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER'),
+
   // Planned route measurements and candidate-specific gap checks in the
   // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
   scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),
