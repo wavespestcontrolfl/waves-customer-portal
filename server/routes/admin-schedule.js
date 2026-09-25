@@ -18084,7 +18084,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
     });
   } catch (e) {
     // The staleness fence fires before any write, so the trx is intact.
-    if (e?.statusCode === 409) return { added: [], skipped: 'series_changed_retry', counting: term.counting, expected: term.expected };
+    if (e?.statusCode === 409) return { added: [], skipped: 'series_changed_retry', counting: term.counting, expected: term.expected, parentId };
     throw e;
   }
   const overlapDates = await probeReseedOverlaps(trx, { parent: reconcileParent, parentId, added: result.added });
@@ -18098,6 +18098,10 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   };
 }
 
+// How many times the writer re-opens its transaction after the baselineCount
+// fence refused a stale live read (see reseedRecurringSeriesAfterCancel).
+const RESEED_STALE_READ_ATTEMPTS = 3;
+
 // The writing wrapper — same shape as topUpRecurringSeries: ALWAYS opens and
 // commits its OWN transaction, then registers a reminder for every added
 // visit once it's visible to a fresh connection (no confirmation SMS, no
@@ -18107,7 +18111,20 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
   if (conn.isTransaction) {
     throw new Error('reseedRecurringSeriesAfterCancel must not be called with an already-open transaction — it registers reminders through a FRESH connection right after its own commit. Call with the plain db handle after the cancel committed.');
   }
-  const result = await conn.transaction((trx) => reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId));
+  // The baselineCount fence inside the locked body refuses (409 →
+  // 'series_changed_retry') when another visit of the series changed
+  // between the live read and the reconciler's own — a concurrent cancel
+  // that does not hold the maintenance lock. That refusal is transient, so
+  // retry the WHOLE locked transaction with fresh reads (Codex #4814 r3 P1:
+  // a terminal skip left the first of two concurrent cancels unreplaced).
+  // Bounded: after the attempts the plan surfaces on the accepted-plan
+  // watchdog like any other failed reseed.
+  let result;
+  for (let attempt = 1; attempt <= RESEED_STALE_READ_ATTEMPTS; attempt += 1) {
+    result = await conn.transaction((trx) => reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId));
+    if (result.skipped !== 'series_changed_retry') break;
+    logger.warn(`[recurring-cancel-reseed] parent=${result.parentId || '?'} changed under the live read (attempt ${attempt}/${RESEED_STALE_READ_ATTEMPTS}) — ${attempt < RESEED_STALE_READ_ATTEMPTS ? 'retrying' : 'giving up'}`);
+  }
   for (const child of result.added) {
     await registerSpawnedVisitReminder({
       scheduledServiceId: child.id,

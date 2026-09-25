@@ -362,6 +362,10 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(body).toMatch(/targetCount: live\.length \+ 1,\s*baselineCount: live\.length,/);
     expect(body).toMatch(/claimToken: null/);
     expect(body).toMatch(/if \(e\?\.statusCode === 409\) return \{ added: \[\], skipped: 'series_changed_retry'/);
+    // the wrapper retries the WHOLE locked transaction on that transient refusal (Codex r3), bounded
+    const wrapper = schedule.slice(schedule.indexOf('async function reseedRecurringSeriesAfterCancel('), schedule.indexOf('async function reseedRecurringSeriesAfterCancelBatch('));
+    expect(schedule).toMatch(/const RESEED_STALE_READ_ATTEMPTS = 3;/);
+    expect(wrapper).toMatch(/for \(let attempt = 1; attempt <= RESEED_STALE_READ_ATTEMPTS; attempt \+= 1\) \{\s*result = await conn\.transaction\(\(trx\) => reseedRecurringSeriesAfterCancelLocked\(trx, cancelledServiceId\)\);\s*if \(result\.skipped !== 'series_changed_retry'\) break;/);
   });
 
   test('legacy off-hour root windows are floored/validated like the top-up; each added row gets the advisory occupancy probe; then the stamp', () => {
