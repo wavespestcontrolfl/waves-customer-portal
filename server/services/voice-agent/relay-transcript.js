@@ -355,6 +355,56 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason, leadCa
 //     SLA (rubric) reads those.
 const LONG_SILENCE_MS = 3000;
 
+// ⭐ TRUSTWORTHY MEASUREMENT (brief §3A). Two real sandbox calls ran untuned
+// (no `<ConversationRelay events="…">` at all — see relay-profiles.js) and
+// every audio field came back null with `audio_metric_turns:0`, and nothing
+// in the stored row said WHY: a reviewer could not tell "the relay never
+// subscribed to these events" from "it subscribed and something broke" from
+// "it worked, but this call just never had a clean pair of stamps". The four
+// fields below are the ones relay-conversation derives from Twilio's speaker
+// events rather than the application's own clocks (prompt_to_first_send and
+// first_token are application clocks and are never null for this reason —
+// they need no subscription at all). Each maps to the RECEIVED event kind(s)
+// its span's two ends come from.
+const AUDIO_METRIC_FIELDS = Object.freeze({
+  endpoint_delay: ['caller_speaking_end'],
+  stop_to_first_send: ['caller_speaking_end'],
+  send_to_first_audio: ['agent_speaking_start'],
+  stop_to_first_audio: ['caller_speaking_end', 'agent_speaking_start'],
+});
+
+// The boundaries doc (brief §3A item 3): each span's start/end clock and
+// whether it is application-observed (our own timestamps) or provider-
+// reported (a Twilio event's arrival is a PROXY for the real-world instant —
+// network/relay latency rides along, it is not exact). Static strings, never
+// bloated into every row — only `boundaries_version` (below) is persisted;
+// this constant is the versioned meaning of that number, for docs and tests.
+const LATENCY_BOUNDARIES_VERSION = 1;
+const LATENCY_BOUNDARIES = Object.freeze({
+  endpoint_delay: 'Twilio caller_speaking_end event received (provider-reported, proxy for when the caller actually stopped talking) → prompt frame received (server clock, application-observed).',
+  prompt_to_first_send: 'prompt frame received (server clock) → first text frame sent to Twilio (server clock). Application-observed on both ends; never needs a subscription.',
+  first_token: 'prompt frame received (server clock) → first streamed model token received from Anthropic (server clock). Application-observed on both ends; never needs a subscription.',
+  stop_to_first_send: 'Twilio caller_speaking_end event received (provider-reported) → first text frame sent to Twilio (server clock).',
+  send_to_first_audio: 'first text frame sent to Twilio (server clock) → Twilio agent_speaking_start event received (provider-reported, proxy for when playback actually began — "first text sent" is not "first audio heard").',
+  stop_to_first_audio: 'Twilio caller_speaking_end event received (provider-reported) → Twilio agent_speaking_start event received (provider-reported). The end-to-end "dead air" span a caller actually experiences.',
+});
+
+/**
+ * Why an audio-derived aggregate is null, for one field. `neededKinds` are
+ * the relay-event kinds that field's span is built from (AUDIO_METRIC_FIELDS
+ * above). Priority: a RECEIVED event outranks a SUBSCRIBED lookup — an event
+ * that actually arrived is proof positive of subscription no profile lookup
+ * can contradict (a sandbox raw-attribute cell's synthesized id resolves as
+ * "unknown" in relay-conversation's lookup; receiving the event settles it
+ * anyway). Only called when the field's own value is already null.
+ */
+function reasonForMissingAudioMetric(neededKinds, { subscribed, counts } = {}) {
+  const received = (counts && neededKinds.some((k) => Number(counts[k]) > 0)) || false;
+  if (received) return 'insufficient_turns'; // events flowed; no turn correlated both stamps
+  if (subscribed && subscribed.speaker === false) return 'events_not_subscribed';
+  return 'no_events_received'; // subscribed (or unknown) but nothing of this kind arrived
+}
+
 function percentile(values, p) {
   const sorted = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
   if (!sorted.length) return null;
@@ -379,7 +429,7 @@ function countBy(values) {
 /** Numeric timing observations only; live stats also contain raw utterance objects. */
 function storedTurnStats(stats = []) {
   const numeric = ['callerSpeechStoppedAt', 'promptAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
-    'modelMs', 'toolMs', 'toolCount', 'rounds', 'partialCount'];
+    'modelMs', 'toolMs', 'toolCount', 'rounds', 'partialCount', 'segmentGeneration'];
   const flags = ['interrupted', 'interruptWithoutFollowupTranscript', 'timedOut'];
   return stats.map((turn) => ({
     ...Object.fromEntries(numeric.map((key) => [key, Number.isFinite(turn[key]) ? turn[key] : null])),
@@ -390,7 +440,17 @@ function storedTurnStats(stats = []) {
   }));
 }
 
-function summarizeTurnStats(stats = []) {
+/**
+ * `meta` is the session-level half of trustworthy measurement
+ * (relay-conversation's `_eventsTelemetry()`): whether speaker-events /
+ * tokens-played were SUBSCRIBED for this session, how many of each kind
+ * actually arrived, and the first redacted shape seen per kind. Optional and
+ * defaulted so every existing caller (a bake-off script, an older test) that
+ * passes only `stats` keeps working — it just gets `subscribed`/`counts` as
+ * unknown, which still yields an honest (if less specific) reason for a null
+ * audio field rather than a wrong one.
+ */
+function summarizeTurnStats(stats = [], meta = {}) {
   const turns = (Array.isArray(stats) ? stats : []).filter((t) => t && typeof t === 'object');
   const nonNull = (arr) => arr.filter((v) => v != null);
   const endpoint = nonNull(turns.map((t) => span(t.callerSpeechStoppedAt, t.promptAt)));
@@ -400,6 +460,26 @@ function summarizeTurnStats(stats = []) {
   const sendToAudio = nonNull(turns.map((t) => span(t.firstSendAt, t.agentSpeakingStartAt)));
   const stopToAudio = nonNull(turns.map((t) => span(t.callerSpeechStoppedAt, t.agentSpeakingStartAt)));
   const toolMs = turns.map((t) => Number(t.toolMs) || 0);
+
+  const subscribed = (meta && meta.subscribed) || { speaker: null, tokensPlayed: null };
+  const counts = (meta && meta.counts) || {};
+  const shapes = (meta && meta.shapes) || {};
+
+  // Sibling reasons for whichever of the four audio-derived fields is null —
+  // never for prompt_to_first_send / first_token, which are application
+  // clocks and always available. Nulls themselves are untouched (never 0);
+  // this only ever ADDS an explanation alongside an already-null value.
+  const audioArrays = { endpoint_delay: endpoint, stop_to_first_send: stopToSend, send_to_first_audio: sendToAudio, stop_to_first_audio: stopToAudio };
+  const missing = {};
+  if (turns.length) {
+    for (const [field, neededKinds] of Object.entries(AUDIO_METRIC_FIELDS)) {
+      if (audioArrays[field].length === 0) missing[field] = reasonForMissingAudioMetric(neededKinds, { subscribed, counts });
+    }
+  }
+  const missingFields = Object.keys(missing);
+  const allAudioFieldsMissing = missingFields.length === Object.keys(AUDIO_METRIC_FIELDS).length;
+  const oneSharedReason = allAudioFieldsMissing && new Set(Object.values(missing)).size === 1;
+
   return {
     turns: turns.length,
     audio_metric_turns: stopToAudio.length,
@@ -428,6 +508,18 @@ function summarizeTurnStats(stats = []) {
     effort_counts: countBy(turns.map((t) => t.effort)),
     // Only turns that actually spoke have a played source worth counting.
     played_sources: countBy(turns.filter((t) => t.firstSendAt != null).map((t) => t.playedSource)),
+    // One shared reason when EVERY audio field is null for the same cause
+    // (the common case — an untuned call, or one that never got a single
+    // event); the per-field map otherwise, so a partial outage (e.g. caller
+    // events arrived but agent ones never did) still names each field.
+    ...(oneSharedReason ? { audio_metrics_reason: missing[missingFields[0]] }
+      : missingFields.length ? { missing } : {}),
+    boundaries_version: LATENCY_BOUNDARIES_VERSION,
+    observability: {
+      events_subscribed: { speaker: subscribed.speaker == null ? null : Boolean(subscribed.speaker), tokens_played: subscribed.tokensPlayed == null ? null : Boolean(subscribed.tokensPlayed) },
+      events_received: { ...counts },
+      event_shapes: { ...shapes },
+    },
   };
 }
 
@@ -441,6 +533,8 @@ module.exports = {
   buildTranscriptUpdate,
   summarizeTurnStats,
   storedTurnStats,
+  LATENCY_BOUNDARIES,
+  LATENCY_BOUNDARIES_VERSION,
   TRANSCRIPTION_PROVIDER,
   MAX_TRANSCRIPT_CHARS,
   CALLER_LABEL,
