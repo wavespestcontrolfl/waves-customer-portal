@@ -69,6 +69,11 @@ const AUTOMATED_CLOSURE_TYPES = new Set([
 // the answer to whatever the customer asked earlier, so the operational-context
 // guard is skipped for it; the earlier-open-context guard still applies.
 const MANUAL_MESSAGE_TYPE = 'manual';
+// 'manual' is also persisted by automated senders and by unchanged AI drafts
+// sent from the composer. Only a row stamped human_authored at send time
+// (services/twilio.js) is a hand-typed reply; anything else keeps needing
+// closure evidence.
+const isHandTyped = row => row?.messageType === MANUAL_MESSAGE_TYPE && row?.humanAuthored === true;
 // Time promises phrased the way hand-typed texts phrase them: "give me a
 // minute", "in 15 minutes", "leaving now", "on my way", "swinging by", "be
 // there by 3". The visit or estimate is still ahead, so thanks in reply is not
@@ -76,7 +81,7 @@ const MANUAL_MESSAGE_TYPE = 'manual';
 // a closure by type.
 const MANUAL_DURATION_NUMBER = String.raw`(?:(?:about|around|roughly|approximately|maybe|like|just|another|at least|up to|only|say|probably|possibly|hopefully|max|a good) )*(?:\d+(?:-\d+)?(?: or \d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|twenty-five|thirty|forty|forty-five|fifty|sixty|ninety|a few|a couple(?: of)?|couple|several|a bit|half an?)`;
 const MANUAL_DURATION_UNIT = String.raw`(?:minutes?|mins?|hours?|hrs?|sec(?:ond)?s?|moments?)`;
-const MANUAL_PROMISE_RE = new RegExp(String.raw`\b(?:give (?:me |us )?(?:${MANUAL_DURATION_NUMBER} )?(?:more )?${MANUAL_DURATION_UNIT}|(?:in|within|for|another|need|needs|take|takes|about|around|roughly) (?:${MANUAL_DURATION_NUMBER} )?(?:more )?${MANUAL_DURATION_UNIT}|in a (?:bit|little (?:bit|while)|while|jiffy)|one (?:moment|minute|min|sec(?:ond)?)|just a (?:moment|minute|min|sec(?:ond)?)|hold on|hang on|bear with (?:me|us)|let me (?:check|look|see|find out|confirm|ask|get back)|checking (?:now|on (?:it|that))|looking into (?:it|that)|get back to you|circle back|follow(?:ing)? up|later (?:today|tonight|this week)|(?:this|by) (?:afternoon|evening|morning|weekend|week)|tonight|tomorrow|next (?:week|month|visit)|(?:mon|tues|wednes|thurs|fri|satur|sun)day|(?:should|will|would|gonna|going to) (?:arrive|be there|be out|be delivered|come|show up|get to you)|expect (?:it|them|me|us)|(?:until|till|by|before) (?:end of (?:the )?(?:day|week|month)|eod|eow|eom|noon|midday|close of business|cob|tonight|tomorrow|next week|\d{1,2}(?::\d{2})? ?(?:am|pm|o'clock)?)|leaving now|on (?:the|my|our) way|swinging by|heading (?:over|out|your way)|be (?:right )?(?:there|over)(?: (?:by|at|around|after|in) \S+)?|there in \d+)\b`, 'i');
+const MANUAL_PROMISE_RE = new RegExp(String.raw`\b(?:give (?:me |us )?(?:${MANUAL_DURATION_NUMBER} )?(?:more )?${MANUAL_DURATION_UNIT}|(?:in|within|for|another|need|needs|take|takes|about|around|roughly) (?:${MANUAL_DURATION_NUMBER} )?(?:more )?${MANUAL_DURATION_UNIT}|in a (?:bit|little (?:bit|while)|while|jiffy)|one (?:moment|minute|min|sec(?:ond)?)|just a (?:moment|minute|min|sec(?:ond)?)|hold on|hang on|bear with (?:me|us)|let me (?:check|look|see|find out|confirm|ask|get back)|checking (?:now|on (?:it|that))|looking into (?:it|that)|get back to you|circle back|follow(?:ing)? up|later (?:today|tonight|this week)|(?:this|by) (?:afternoon|evening|morning|weekend|week)|tonight|tomorrow|next (?:week|month|visit)|(?:still |also |just )?(?:need|needs|needed|require|requires|missing|waiting (?:on|for)|awaiting|haven't (?:received|gotten|heard)|have not (?:received|gotten|heard)|once (?:we|i) (?:get|receive|have|hear)|when (?:we|i|you) (?:get|receive|have|send)|as soon as (?:we|i|you)) (?:your|the|a|an|that|those|it|to hear)\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day|(?:should|will|would|gonna|going to) (?:arrive|be there|be out|be delivered|come|show up|get to you)|expect (?:it|them|me|us)|(?:until|till|by|before) (?:end of (?:the )?(?:day|week|month)|eod|eow|eom|noon|midday|close of business|cob|tonight|tomorrow|next week|\d{1,2}(?::\d{2})? ?(?:am|pm|o'clock)?)|leaving now|on (?:the|my|our) way|swinging by|heading (?:over|out|your way)|be (?:right )?(?:there|over)(?: (?:by|at|around|after|in) \S+)?|there in \d+)\b`, 'i');
 // Hand-typed questions often drop the question mark ("Can you send a
 // picture", "Which day works"). Any sentence that opens with an
 // interrogative, or asks to be told something, still needs an answer.
@@ -84,15 +89,19 @@ const MANUAL_QUESTION_RE = /(?:^|[.!,;:\n—-]\s*|\b(?:just|please|also|and|so|t
 // A hand-typed courtesy ("Thanks, Dana!", "Anytime!", "Happy to help") is
 // not an answer to close on; another thanks after it is the loop the
 // courtesy guard exists to stop.
-const MANUAL_COURTESY_RE = /^(?:thanks?(?: you)?|thank you|ty|tysm|anytime|any time|happy to help|glad to help|glad (?:i|we) could help|of course|absolutely|sure thing|you got it|you bet|my pleasure|our pleasure|you(?:'re| are|re) (?:very )?welcome|no worries|no problem|not a problem|no prob|np|welcome)(?:[ ,]+[\p{L}\p{M}'’ -]+)?[!.\s]*$/iu;
+const MANUAL_COURTESY_RE = /^(?:thanks?(?: you)?|thank you|ty|tysm|anytime|any time|happy to help|glad to help|glad (?:i|we) could help|of course|absolutely|sure thing|you got it|you bet|my pleasure|our pleasure|you(?:'re| are|re) (?:very )?welcome|no worries|no problem|not a problem|no prob|np|welcome)(?:[ ,]+[\p{L}\p{M}'’-]+(?: [\p{L}\p{M}'’-]+)?)?[!.\s]*$/iu;
 // A hand-typed payment request is not a closure either, matching the
 // billing exclusion in AUTOMATED_CLOSURE_TYPES: thanks after "here is your
 // payment link" acknowledges nothing paid.
-const MANUAL_PAYMENT_RE = /\b(?:pay(?:ment)?(?: link| here| online| now| by| via| with)?|invoice|balance(?: due)?|amount due|due today|card on file|autopay|auto-pay|checkout|zelle|venmo|cash ?app|square link|stripe)\b/i;
+const MANUAL_PAYMENT_REQUEST_RE = /\b(?:pay(?:ment)? (?:link|here|online|now|portal|page|request|reminder|is due|due)|please pay|pay (?:your|the|this|it|online|here|now)|(?:can|could|would) you pay|invoice (?:is )?(?:due|ready|attached|link|here|below|for)|(?:your|the|an|this) invoice(?: is)? (?:due|ready|attached|open|outstanding|unpaid)|(?:balance|amount) (?:due|owed|outstanding|remaining)|(?:outstanding|remaining|open|unpaid) (?:balance|invoice|amount)|due today|past due|card on file|update your card|autopay|auto-pay|checkout|zelle|venmo|cash ?app|payment method)\b/i;
+const PAYMENT_SETTLED_RE = /\b(?:(?:payment|invoice|balance|it|that|this)(?: has| was| is)? (?:been )?(?:received|paid|processed|cleared|settled|applied|refunded|waived|credited|zeroed)|already (?:paid|processed|received|refunded)|went through|nothing (?:is )?(?:due|owed)|no (?:balance|charge)|paid in full|all paid|zero balance|thank you for (?:your |the )?payment|we received your payment)\b/i;
 // A hand-typed text closes the exchange unless it asks for money.
 const manualCourtesy = (text, manualReply) => manualReply
   && (MANUAL_COURTESY_RE.test(text) || isCourtesyOnly(text, { awaitingAnswer: false }));
-const manualClosure = (text, manualReply) => manualReply && !MANUAL_PAYMENT_RE.test(text);
+// A hand-typed text closes the exchange unless it asks for money; a typed
+// "your payment has been received" is a settlement, not a request.
+const manualClosure = (text, manualReply) => manualReply
+  && !(MANUAL_PAYMENT_REQUEST_RE.test(text) && !PAYMENT_SETTLED_RE.test(text));
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
   || (row.messageType === MANUAL_MESSAGE_TYPE && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text)));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
@@ -131,7 +140,7 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
       || /^(?:(?:our|my) pleasure|you['’]?re (?:very )?welcome|no problem)(?:[ ,]+[\p{L}\p{M}'’ -]+)?[!.\s]*$/iu.test(row.body || ''))) return deny('courtesy_already_sent');
   const body = withoutOptionalFooter(String(previous.body || ''));
   const bankAcknowledgement = BANK_ACK_RE.test(body);
-  const manualReply = previous.messageType === MANUAL_MESSAGE_TYPE;
+  const manualReply = isHandTyped(previous);
   if (manualCourtesy(body, manualReply)) return deny('courtesy_already_sent');
   const invalidClosure = [
     [() => !bankAcknowledgement && outboundPending(body, previous), 'outbound_needs_attention'],

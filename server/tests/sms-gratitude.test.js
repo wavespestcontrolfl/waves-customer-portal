@@ -72,8 +72,35 @@ describe('automated template closures (owner decision 2026-09-24)', () => {
 });
 
 describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
-  const manual = body => ({ ...report, id: 'manual-1', messageType: 'manual', body });
+  const manual = body => ({ ...report, id: 'manual-1', messageType: 'manual', humanAuthored: true, body });
   const earlierRequest = { ...inbound, id: 'earlier', createdAt: '2030-01-10T14:58:00Z', body: 'Can I move my appointment from the app?' };
+  test.each([
+    { humanAuthored: false }, { humanAuthored: undefined }, { humanAuthored: 'true' },
+  ])("a 'manual' row without the send-time human_authored stamp is not a typed reply: %p", override => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...manual('Yes, you can download the Waves app and reschedule appts there.'), ...override }] }).reason)
+      .toBe('closure_not_established');
+  });
+  test.each([
+    'Thanks, I updated the address.',
+    'Thank you, the report is attached.',
+  ])('a typed answer that opens with thanks is still an answer: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
+  });
+  test.each([
+    'Your payment has been received',
+    'That invoice was already paid',
+    'No balance on your account',
+  ])('a typed payment settlement is a closure: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
+  });
+  test.each([
+    'We still need your gate code',
+    "We're waiting on the photo",
+    'Once we get the signed agreement we can schedule',
+    "Haven't received the pictures yet",
+  ])('a declarative information request still needs an answer: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
+  });
   test('a bare thanks after a hand-typed text qualifies', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Yes, you can download the Waves app and reschedule appts there.')] }))
       .toEqual({ eligible: true, reason: 'gratitude_after_closure', reply: 'Our pleasure, Dana!' });

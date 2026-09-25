@@ -828,6 +828,11 @@ const TwilioService = {
 
       const providerSmsMetadata = () => ({
         pre_handoff_stamp: true,
+        // Durable provenance: the operator typed (or edited) this body in the
+        // Comms composer. message_type 'manual' alone is overloaded across
+        // automated senders, so readers that need "a human wrote this"
+        // (gratitude manual closures) key on this flag, never on the type.
+        ...(options.humanAuthored === true ? { human_authored: true } : {}),
         ...(isKnownOwnerPhone(to) ? { to_owner_phone_at_send: true } : {}),
         ...(options.media ? { media: options.media } : {}),
         ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
@@ -1277,6 +1282,7 @@ const TwilioService = {
           // the carrier verdict).
           metadata: JSON.stringify({
             pre_handoff_stamp: true,
+            ...(options.humanAuthored === true ? { human_authored: true } : {}),
             ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
             ...(options.media ? { media: options.media } : {}),
             ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
