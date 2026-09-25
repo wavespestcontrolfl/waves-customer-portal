@@ -280,6 +280,18 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(seriesStop).toBeLessThan(branch);
   });
 
+  test('PUT /api/admin/schedule/:id/status refuses cancel before any write, so it needs no hook (fallback auditor false positive on 652b7fda26)', () => {
+    const route = schedule.slice(schedule.indexOf("router.put('/:id/status'"), schedule.indexOf("router.put('/:id/status'") + 20000);
+    const refuse = route.indexOf("if (toStatus === 'cancelled') {");
+    const code = route.indexOf("code: 'USE_DISPATCH_CANCEL'");
+    const transition = route.indexOf('transitionJobStatus(');
+    expect(refuse).toBeGreaterThan(-1);
+    expect(code).toBeGreaterThan(refuse);
+    // the refusal comes before this route's own status write
+    expect(transition === -1 || transition > code).toBe(true);
+    expect(route.slice(refuse, code)).toMatch(/return res\.status\(409\)/);
+  });
+
   test('plan-level cancel paths never call the bridge', () => {
     for (const rel of [
       '../services/cancellation-processor.js',
