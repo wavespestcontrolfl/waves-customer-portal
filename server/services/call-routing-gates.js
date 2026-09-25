@@ -187,8 +187,19 @@ function checkTcpaConsent(extraction, opts = {}) {
 // confirmed." already covered, so it no longer poisons on "confirmed"/
 // "appointment". A force-reprocess must write a fresh decision row rather
 // than onConflict-ignore into the stale one either way.
-const V2_DECISION_VERSION = 'v2-1.14.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0'];
+// v2-1.15.0: AUTHORIZATION_NEED_RE's infinitive branch (call-triage-flags.js)
+// covered only THIRD-PARTY authorization parties (him/her/them/someone/the
+// owner/…); the caller themself needing to grant authorization is the same
+// shape with a different pronoun. "I need YOU to okay it." named no party
+// from the original list and no verb match either (a trailing object like
+// "it" wasn't accounted for). Widened the party group to include
+// you/us/me/you guys/y'all and added an optional trailing object after the
+// verb group, same anchored shape. A call whose old pass demoted
+// caller_not_authorized/commercial_requires_quote on this shape now stays
+// blocked, so a force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale one.
+const V2_DECISION_VERSION = 'v2-1.15.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0'];
 
 function buildRouteDecision({
   callLogId,

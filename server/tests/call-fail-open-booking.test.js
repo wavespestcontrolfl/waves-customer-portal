@@ -1245,6 +1245,66 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(hasAgentCommittedEvidence(extraction, futureTranscript, '2026-07-30T15:50:00-04:00')).toBe(false);
   });
 
+  // Codex round 8, P1: AUTHORIZATION_NEED_RE's infinitive branch listed only
+  // THIRD-PARTY parties (him/her/them/someone/the owner/…) — but the CALLER
+  // themself needing to grant authorization is the same shape, just a
+  // different pronoun. "I need YOU to okay it." named no party from the
+  // original list (the caller isn't a third party) and no verb match either
+  // (the trailing "it" wasn't accounted for), so it passed whole. Added
+  // caller-directed parties (you/us/me/you guys/y'all) and an optional
+  // trailing object after the verb, same anchored "need <party> to <verb>"
+  // shape.
+  test('Codex round-8 regression: "I need you to okay it." still poisons (caller-directed party, trailing object)', () => {
+    const turn = "I need you to okay it. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-8 regression: "We\'re going to need you to sign off on it." still poisons (same shape, different trigger/verb/object)', () => {
+    const turn = "We're going to need you to sign off on it. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // The live 17ed9362 single-turn fixture and the round-6/round-7 positive
+  // controls must still pass after widening AUTHORIZATION_NEED_RE's party
+  // and verb-object groups — none of those turns use "need <caller> to
+  // <verb> (it)", so the widened regex should not newly catch them.
+  test('Codex round-8: the live 17ed9362 single-turn fixture still grounds after widening AUTHORIZATION_NEED_RE', () => {
+    const transcript = [
+      'Agent: Waves Pest Control, this is Adam.',
+      'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
+      'Agent: Sure — what area?',
+      'Caller: 100 Example Street in Venice.',
+      "Caller: Please make my client the point of contact so you can reach him with any appointment updates. I'll take the report and invoice.",
+      "Agent: Awesome. Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. But yeah, we'll see him on Monday at 10 o'clock.",
+      "Caller: All right, perfect. I'll let him know. Thank you.",
+      'Agent: Thank you. Bye.',
+    ].join('\n');
+    const extraction = {
+      evidence: [{
+        field_path: '/scheduling/agent_committed_booking',
+        speaker: 'agent',
+        quote: "we'll see him on Monday at 10 o'clock.",
+      }],
+      scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' }, // Monday
+    };
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(true);
+  });
+
+  test('Codex round-8: round-6/round-7 positive controls ("You\'re confirmed.", "We confirmed your appointment.") still pass', () => {
+    for (const turn of ["You're confirmed. We'll see you Sunday at noon.", "We confirmed your appointment. We'll see you Sunday at noon."]) {
+      const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+      const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+      expect(r.allowed).toBe(true);
+      expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    }
+  });
+
   // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
   // history). Round 3 reworded this test from "Adam works Sundays." (out-
   // of-vocabulary words) to "We come out Sunday afternoon." on the theory

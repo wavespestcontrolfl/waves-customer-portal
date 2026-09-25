@@ -1029,9 +1029,15 @@ const UNAVAILABILITY_TERMS = [
 // happened not to overlap with base vocab THEN; "him"/"need"/"confirm" are
 // all base vocab now. Two anchored SHAPES (never an ever-growing word list):
 //   (a) "need(s)"/"going to need" + a PARTY (him/her/them/someone/the
-//       owner/the homeowner/the client) + "to" + an AUTHORIZATION VERB
-//       (confirm/approve/sign off/okay/ok/authorize) — the third-party
-//       INFINITIVE form, "I need him TO confirm".
+//       owner/the homeowner/the client — codex round 8: also the CALLER
+//       themself, you/us/me/you guys/y'all, normalized text strips
+//       apostrophes so "y all" — "I need YOU to okay it." names no party
+//       from the original third-party-only list, since the caller isn't a
+//       third party) + "to" + an AUTHORIZATION VERB (confirm/approve/sign
+//       off/sign/okay/ok/authorize), with an optional trailing object
+//       (codex round 8: "okay IT"/"sign off ON IT"/"confirm IT" are the
+//       same shape as the bare verb, just with a pronoun object) — the
+//       third-party INFINITIVE form, "I need him/you TO confirm (it)".
 //   (b) codex round 6, P1: "We need your okay." names no party/verb pair
 //       from shape (a) either (it's a DIRECT OBJECT, not "him to confirm").
 //       "need(s)/going to need/waiting on/waiting for" + a POSSESSIVE
@@ -1039,7 +1045,7 @@ const UNAVAILABILITY_TERMS = [
 //       normalized text strips apostrophes, so "owner s") + an
 //       AUTHORIZATION NOUN (okay/ok/approval/confirmation/go ahead/sign
 //       off/permission/authorization/blessing) directly, no "to <verb>".
-const AUTHORIZATION_NEED_RE = /\b(?:(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client) to (?:confirm|approve|sign off|okay|ok|authorize)|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing))\b/;
+const AUTHORIZATION_NEED_RE = /\b(?:(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all) to (?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing))\b/;
 // codex round 7, P1(b): AUTHORIZATION_NEED_RE covers "need"/"waiting on"
 // TRIGGERS; this covers the ACT of chasing that authorization down —
 // "should get your okay.", "have to get his sign off.", "once we have your
