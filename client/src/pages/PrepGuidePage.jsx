@@ -40,6 +40,66 @@ const PRINT_STYLE = `
 }
 `;
 
+// Inline markdown links in block prose: [label](https://…) — the public
+// twin of email-template-library's renderInline link support (see the
+// MD_LINK_RE comment block there). Same allowlist (http/https/mailto/tel),
+// same "unusable scheme renders as inert text" fallback, no
+// dangerouslySetInnerHTML: this returns real React nodes.
+//
+// Ordering note vs. the email renderer: email-template-library extracts
+// links from the RAW TEMPLATE text before {{variable}} substitution so a
+// customer-controlled payload value can never itself become a link (codex
+// #3167 P1). This page receives blocks from GET /api/public/prep/:token
+// ALREADY substituted, so the same guarantee is enforced server-side:
+// prep-public.js's interpolate() breaks any `](` inside a substituted VALUE
+// (neutralizeLinkSyntax) before the text reaches this parser. Only
+// author-written markdown in the template can form a link here.
+const SAFE_HREF_RE = /^(https?:|mailto:|tel:)/i;
+const MD_LINK_RE = /\[([^\]\n]+)\]\((\S+?)\)/g;
+
+function isSafeHref(href) {
+  return SAFE_HREF_RE.test(String(href || '').trim());
+}
+
+// text -> array of strings / <a> nodes (React accepts a mixed array of
+// children as long as elements carry keys; bare strings don't need one).
+function renderInlineLinks(text, keyPrefix) {
+  const raw = text == null ? '' : String(text);
+  if (!raw) return raw;
+  MD_LINK_RE.lastIndex = 0;
+  if (!MD_LINK_RE.test(raw)) return raw;
+  MD_LINK_RE.lastIndex = 0;
+  const nodes = [];
+  let lastIndex = 0;
+  let match;
+  let i = 0;
+  while ((match = MD_LINK_RE.exec(raw))) {
+    const [whole, label, href] = match;
+    if (match.index > lastIndex) nodes.push(raw.slice(lastIndex, match.index));
+    if (isSafeHref(href)) {
+      nodes.push(
+        <a
+          key={`${keyPrefix}-lnk-${i}`}
+          href={href.trim()}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: SURFACE.text, fontWeight: FW.medium }}
+        >
+          {label}
+        </a>,
+      );
+    } else {
+      // Unusable scheme (e.g. javascript:/data:) → leave the raw markdown
+      // text on the page rather than linkifying it.
+      nodes.push(whole);
+    }
+    lastIndex = match.index + whole.length;
+    i += 1;
+  }
+  if (lastIndex < raw.length) nodes.push(raw.slice(lastIndex));
+  return nodes;
+}
+
 function BlockRenderer({ blocks }) {
   if (!Array.isArray(blocks) || !blocks.length) return null;
   return blocks.map((block, i) => {
@@ -47,8 +107,24 @@ function BlockRenderer({ blocks }) {
       case 'paragraph':
         return (
           <p key={i} style={{ fontSize: FS.bodyLg, lineHeight: LH.body, color: SURFACE.body, margin: `0 0 ${SP.md}px` }}>
-            {block.content}
+            {renderInlineLinks(block.content, `p${i}`)}
           </p>
+        );
+      case 'list':
+        return (
+          <ul key={i} style={{
+            listStyle: 'none', margin: `0 0 ${SP.lg}px`, padding: 0, display: 'grid', gap: SP.sm,
+          }}>
+            {(Array.isArray(block.items) ? block.items : []).map((item, j) => (
+              <li key={j} style={{
+                display: 'flex', alignItems: 'baseline', gap: SP.sm,
+                fontSize: FS.bodyLg, lineHeight: LH.body, color: SURFACE.body,
+              }}>
+                <span aria-hidden="true" style={{ color: SURFACE.text, fontWeight: FW.semibold, flexShrink: 0 }}>&#10003;</span>
+                <span>{renderInlineLinks(item, `l${i}-${j}`)}</span>
+              </li>
+            ))}
+          </ul>
         );
       case 'heading':
         return (
@@ -75,10 +151,10 @@ function BlockRenderer({ blocks }) {
                   borderBottom: j < block.rows.length - 1 ? `1px solid ${SURFACE.border}` : 'none',
                 }}>
                   <div style={{ fontSize: FS.body, fontWeight: FW.semibold, color: SURFACE.text, lineHeight: LH.body }}>
-                    {row.label}
+                    {renderInlineLinks(row.label, `dr${i}-${j}-l`)}
                   </div>
                   <div style={{ fontSize: FS.body, color: SURFACE.body, lineHeight: LH.body, marginTop: SP.xxs }}>
-                    {row.value}
+                    {renderInlineLinks(row.value, `dr${i}-${j}-v`)}
                   </div>
                 </div>
               ))}
@@ -96,10 +172,10 @@ function BlockRenderer({ blocks }) {
                 padding: `${SP.xxs}px 0`, borderBottom: j < block.rows.length - 1 ? `1px solid ${SURFACE.border}` : 'none',
               }}>
                 <span style={{ fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                  {row.label}
+                  {renderInlineLinks(row.label, `dr${i}-${j}-l`)}
                 </span>
                 <span style={{ fontSize: FS.body, color: SURFACE.text, fontWeight: FW.medium, textAlign: 'right', maxWidth: '60%' }}>
-                  {row.value}
+                  {renderInlineLinks(row.value, `dr${i}-${j}-v`)}
                 </span>
               </div>
             ))}
@@ -115,7 +191,7 @@ function BlockRenderer({ blocks }) {
             margin: `${SP.lg}px 0`,
             fontSize: FS.body, lineHeight: LH.body, color: SURFACE.body,
           }}>
-            {block.content}
+            {renderInlineLinks(block.content, `c${i}`)}
           </div>
         );
       default:
