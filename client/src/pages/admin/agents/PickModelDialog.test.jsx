@@ -47,4 +47,24 @@ describe("PickModelDialog", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Use" })[0]);
     await waitFor(() => expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ id: "m2", unverified: true })));
   });
+
+  // voice_relay's own accepts (model-switchboard.js: E(..., {catalogOnly:true})):
+  // the runtime allowlist-checks the raw env against MODEL_CATALOG, so a
+  // live-discovered id the picker offered here would be silently rejected
+  // after the restart the owner thought would apply it.
+  it("catalogOnly: never calls live search, offers only catalog models, and a query filters them locally", async () => {
+    const catalogOnlyTarget = { ...target, accepts: { ...target.accepts, catalogOnly: true } };
+    const onPick = vi.fn();
+    render(<PickModelDialog target={catalogOnlyTarget} catalog={CATALOG} onClose={() => {}} onPick={onPick} />);
+    expect(await screen.findByText(/live provider search is off here/)).toBeInTheDocument();
+    expect(screen.getByText("Claude Opus 5")).toBeInTheDocument();
+    expect(screen.queryByText("GPT-5.6 Terra")).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText(/fable 5.1/), { target: { value: "opus" } });
+    expect(screen.getByText("Claude Opus 5")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText(/fable 5.1/), { target: { value: "nothing matches this" } });
+    expect(screen.queryByText("Claude Opus 5")).toBeNull();
+    expect(screen.getByText(/No model matches/)).toBeInTheDocument();
+    // Never hit the live search endpoint, in browse mode or once typed.
+    expect(adminFetch).not.toHaveBeenCalled();
+  });
 });

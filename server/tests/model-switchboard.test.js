@@ -418,3 +418,64 @@ describe('model-switchboard', () => {
     expect(lanes.find((l) => l.id === 'tax_advisor').inbound).toBe(false);
   });
 });
+
+describe('voice_relay — picker vs runtime allowlist, and blast-radius attribution', () => {
+  const ENV_KEYS = ['VOICE_RELAY_INBOUND_MODEL', 'VOICE_RELAY_MODEL'];
+  let SAVED;
+  beforeEach(() => {
+    SAVED = {};
+    for (const k of ENV_KEYS) { SAVED[k] = process.env[k]; delete process.env[k]; }
+    jest.resetModules();
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; }
+  });
+
+  it('voice_relay is catalogOnly (the picker must not offer a live-discovered id); collections is not', () => {
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    const collections = lanes.find((l) => l.id === 'voice_relay_collections');
+    expect(inbound.primary.accepts.catalogOnly).toBe(true);
+    expect(collections.primary.accepts.catalogOnly).toBeFalsy();
+  });
+
+  it('with VOICE_RELAY_INBOUND_MODEL unset, voice_relay reports VOICE_RELAY_MODEL as a dependency — the composer must attribute a VOICE_RELAY_MODEL change to BOTH lanes', () => {
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    const collections = lanes.find((l) => l.id === 'voice_relay_collections');
+    expect(inbound.primary.pinEnv).toBe('VOICE_RELAY_INBOUND_MODEL');
+    expect(inbound.primary.dependsOnEnvs).toEqual(['VOICE_RELAY_MODEL']);
+    expect(collections.primary.pinEnv).toBe('VOICE_RELAY_MODEL');
+    // Every lane a change to VOICE_RELAY_MODEL must move — the composer's
+    // blast-radius grouping (modelDraft.js's computeChanges) matches a lane
+    // in by `leg.pinEnv === env || leg.dependsOnEnvs.includes(env)`.
+    const affected = lanes.filter((l) => [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean)
+      .some((leg) => leg.pinEnv === 'VOICE_RELAY_MODEL' || leg.dependsOnEnvs?.includes('VOICE_RELAY_MODEL')));
+    expect(affected.map((l) => l.id).sort()).toEqual(['voice_relay', 'voice_relay_collections']);
+  });
+
+  it('with VOICE_RELAY_INBOUND_MODEL set to a valid override, voice_relay no longer depends on VOICE_RELAY_MODEL — only collections is affected', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.model).toBe('claude-haiku-4-5-20251001');
+    expect(inbound.primary.dependsOnEnvs).toEqual([]);
+    const affected = lanes.filter((l) => [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean)
+      .some((leg) => leg.pinEnv === 'VOICE_RELAY_MODEL' || leg.dependsOnEnvs?.includes('VOICE_RELAY_MODEL')));
+    expect(affected.map((l) => l.id)).toEqual(['voice_relay_collections']);
+  });
+
+  it('an unknown override id still resolves through the fallback — dependsOnEnvs reports the dependency exactly as the runtime falls back', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-nope-9000';
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.model).toBe('claude-sonnet-5');
+    expect(inbound.primary.dependsOnEnvs).toEqual(['VOICE_RELAY_MODEL']);
+  });
+});

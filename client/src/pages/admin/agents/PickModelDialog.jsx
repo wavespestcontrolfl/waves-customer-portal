@@ -57,8 +57,21 @@ export default function PickModelDialog({ target, catalog, onClose, onPick }) {
   }, []);
 
   const suggestions = useMemo(() => optionsFor(catalog, target.accepts, target.current), [catalog, target]);
+  // A lane the runtime allowlist-checks against MODEL_CATALOG (never a bare
+  // pass-through) must never be offered a live-discovered id: it would draft
+  // an env value the call site rejects after the restart the owner thought
+  // would apply it (see model-switchboard.js's E(...,{catalogOnly:true})).
+  // Search stays local to the models already known here — no live search.
+  const catalogOnly = !!target.accepts?.catalogOnly;
+  const catalogMatches = useMemo(() => {
+    if (!catalogOnly) return suggestions;
+    const query = q.trim().toLowerCase();
+    if (!query) return suggestions;
+    return suggestions.filter((m) => (m.label || m.id).toLowerCase().includes(query));
+  }, [catalogOnly, suggestions, q]);
 
   useEffect(() => {
+    if (catalogOnly) return undefined;
     const query = q.trim();
     const browse = query.length < 2;
     if (browse) setResults(null);
@@ -82,7 +95,7 @@ export default function PickModelDialog({ target, catalog, onClose, onPick }) {
       }
     }, browse ? 0 : 300);
     return () => clearTimeout(timer);
-  }, [q, target]);
+  }, [q, target, catalogOnly]);
 
   const deepBlocked = (m) => m.requiresDeep && !target.accepts.deep;
 
@@ -107,8 +120,6 @@ export default function PickModelDialog({ target, catalog, onClose, onPick }) {
   };
 
   const typed = q.trim().length >= 2;
-  // Live results already in the suggestions list are not repeated.
-  const known = new Set(suggestions.map((s) => s.id));
 
   return (
     <Dialog open onClose={onClose} size="md">
@@ -119,7 +130,7 @@ export default function PickModelDialog({ target, catalog, onClose, onPick }) {
       </DialogHeader>
       <DialogBody className="flex flex-col gap-3">
         <label className="flex flex-col gap-1 text-11 u-label text-ink-secondary">
-          Search {target.accepts.providers.map((p) => PROVIDER_LABEL[p] || p).join(" and ")}
+          {catalogOnly ? "Filter" : "Search"} {target.accepts.providers.map((p) => PROVIDER_LABEL[p] || p).join(" and ")}
           <span className="relative block">
             <Search size={14} strokeWidth={2} aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-tertiary" />
             <Input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="fable 5.1, opus 5, gemini 3.8…" className="pl-8" />
@@ -130,56 +141,29 @@ export default function PickModelDialog({ target, catalog, onClose, onPick }) {
             {problem}
           </div>
         )}
-        {unavailable.length > 0 && (
-          <div className="text-13 text-ink-secondary">
-            Not searched live: {unavailable.map((u) => `${PROVIDER_LABEL[u.provider] || u.provider} (${UNAVAILABLE_REASON[u.reason] || u.reason})`).join(", ")}.
-          </div>
-        )}
-        {capUnverified && (results?.length > 0 || newest?.some((g) => g.items.length > 0)) && (
-          <div className="text-13 text-alert-fg" role="alert">
-            This lane needs image input. Provider lists do not say whether a model accepts images, so only pick one you know does.
-          </div>
-        )}
-        {typed ? (
-          searching && !results ? (
-            <div className="text-13 text-ink-secondary" role="status">
-              Searching…
+        {catalogOnly ? (
+          <>
+            <div className="text-13 text-ink-secondary">
+              This lane only runs models already known to this server — the runtime checks a pin against the same list, so live provider search is off here.
             </div>
-          ) : results && results.length === 0 ? (
-            <div className="text-13 text-ink-secondary">No model matches "{q.trim()}".</div>
-          ) : results ? (
-            <ResultList items={results} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
-          ) : null
+            <CatalogOnlyResults q={q} target={target} matches={catalogMatches} probing={probing} choose={choose} deepBlocked={deepBlocked} onPick={onPick} />
+          </>
         ) : (
-          <div className="flex flex-col gap-3">
-            {target.canUnpin && (
-              <Button size="sm" variant="secondary" onClick={() => onPick({ id: UNPIN, label: "Unpinned", provider: null })} className="self-start">
-                {target.unpinLabel}
-              </Button>
-            )}
-            {suggestions.length > 0 && (
-              <div className="flex flex-col gap-1">
-                <span className="text-11 uppercase tracking-label text-ink-secondary">Can run this lane</span>
-                <ResultList items={suggestions} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
-              </div>
-            )}
-            {newest &&
-              newest.map((group) => {
-                const items = group.items.filter((m) => !known.has(m.id) && m.id !== target.current);
-                if (!items.length) return null;
-                return (
-                  <div key={group.provider} className="flex flex-col gap-1">
-                    <span className="text-11 uppercase tracking-label text-ink-secondary">Newest from {PROVIDER_LABEL[group.provider] || group.provider}</span>
-                    <ResultList items={items} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
-                  </div>
-                );
-              })}
-            {searching && !newest && (
-              <div className="text-13 text-ink-tertiary" role="status">
-                Loading the newest models…
-              </div>
-            )}
-          </div>
+          <LiveSearchPanel
+            q={q}
+            target={target}
+            typed={typed}
+            searching={searching}
+            results={results}
+            newest={newest}
+            suggestions={suggestions}
+            unavailable={unavailable}
+            capUnverified={capUnverified}
+            probing={probing}
+            choose={choose}
+            deepBlocked={deepBlocked}
+            onPick={onPick}
+          />
         )}
       </DialogBody>
       <DialogFooter>
@@ -188,6 +172,88 @@ export default function PickModelDialog({ target, catalog, onClose, onPick }) {
         </Button>
       </DialogFooter>
     </Dialog>
+  );
+}
+
+// catalogOnly mode: search is a local filter over `matches` (already
+// restricted to the catalog by `optionsFor` — see the accepts.catalogOnly
+// check in PickModelDialog). No live search, so no "unavailable" / newest UI.
+function CatalogOnlyResults({ q, target, matches, probing, choose, deepBlocked, onPick }) {
+  return (
+    <div className="flex flex-col gap-3">
+      {target.canUnpin && (
+        <Button size="sm" variant="secondary" onClick={() => onPick({ id: UNPIN, label: "Unpinned", provider: null })} className="self-start">
+          {target.unpinLabel}
+        </Button>
+      )}
+      {matches.length > 0 ? (
+        <ResultList items={matches} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
+      ) : (
+        <div className="text-13 text-ink-secondary">No model matches "{q.trim()}".</div>
+      )}
+    </div>
+  );
+}
+
+// Live provider search: browse (this lane's catalog models, then the newest
+// per provider) or, once typed, the search results.
+function LiveSearchPanel({ q, target, typed, searching, results, newest, suggestions, unavailable, capUnverified, probing, choose, deepBlocked, onPick }) {
+  // Live results already in the suggestions list are not repeated.
+  const known = new Set(suggestions.map((s) => s.id));
+  return (
+    <>
+      {unavailable.length > 0 && (
+        <div className="text-13 text-ink-secondary">
+          Not searched live: {unavailable.map((u) => `${PROVIDER_LABEL[u.provider] || u.provider} (${UNAVAILABLE_REASON[u.reason] || u.reason})`).join(", ")}.
+        </div>
+      )}
+      {capUnverified && (results?.length > 0 || newest?.some((g) => g.items.length > 0)) && (
+        <div className="text-13 text-alert-fg" role="alert">
+          This lane needs image input. Provider lists do not say whether a model accepts images, so only pick one you know does.
+        </div>
+      )}
+      {typed ? (
+        searching && !results ? (
+          <div className="text-13 text-ink-secondary" role="status">
+            Searching…
+          </div>
+        ) : results && results.length === 0 ? (
+          <div className="text-13 text-ink-secondary">No model matches "{q.trim()}".</div>
+        ) : results ? (
+          <ResultList items={results} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
+        ) : null
+      ) : (
+        <div className="flex flex-col gap-3">
+          {target.canUnpin && (
+            <Button size="sm" variant="secondary" onClick={() => onPick({ id: UNPIN, label: "Unpinned", provider: null })} className="self-start">
+              {target.unpinLabel}
+            </Button>
+          )}
+          {suggestions.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="text-11 uppercase tracking-label text-ink-secondary">Can run this lane</span>
+              <ResultList items={suggestions} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
+            </div>
+          )}
+          {newest &&
+            newest.map((group) => {
+              const items = group.items.filter((m) => !known.has(m.id) && m.id !== target.current);
+              if (!items.length) return null;
+              return (
+                <div key={group.provider} className="flex flex-col gap-1">
+                  <span className="text-11 uppercase tracking-label text-ink-secondary">Newest from {PROVIDER_LABEL[group.provider] || group.provider}</span>
+                  <ResultList items={items} probing={probing} onChoose={choose} deepBlocked={deepBlocked} />
+                </div>
+              );
+            })}
+          {searching && !newest && (
+            <div className="text-13 text-ink-tertiary" role="status">
+              Loading the newest models…
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 

@@ -124,10 +124,15 @@ const POLICY_SELECTOR = {
 // the raw value (an allowlist, not a bare pass-through) before running it.
 // Called with the raw string; returns the id to report, or null to report the
 // same fallback the call site itself would use for a rejected value.
+// `opts.catalogOnly` marks a leg whose call site allowlist-checks the raw env
+// against config/models.js MODEL_CATALOG (never a live-discovered id) — the
+// picker consults `accepts.catalogOnly` to stop offering a search result the
+// runtime would reject after restart. Only meaningful with `opts.parse`,
+// which is what actually enforces it at read time; this just advertises it.
 const T = (tier) => ({ kind: 'tier', key: tier });
 const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
-const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null });
+const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null, catalogOnly: !!opts.catalogOnly });
 // D(env | [env, ...aliases], literal): the call site reads the first set var
 // in order (satellite: OPENAI_VISION_MODEL || OPENAI_MODEL || 'gpt-5-mini').
 // The composer writes the FIRST (specific) name; aliases only report.
@@ -334,8 +339,13 @@ const LANES = [
   // resolveSessionModel) — a raw value outside config/models.js MODEL_CATALOG
   // never runs. inboundOverrideParse() reuses that same live resolver instead
   // of re-deriving the allowlist here, so this row can never show a model the
-  // runtime would actually refuse.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE')), { parse: inboundOverrideParse }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  // runtime would actually refuse. `catalogOnly: true` carries that same fact
+  // to the Models tab's picker (PickModelDialog.jsx): a live provider search
+  // result that is not in MODEL_CATALOG must not be offered for this lane —
+  // it would draft an env value inboundOverrideParse() (and the runtime's own
+  // resolveSessionModel) reject outright, falling back after the restart the
+  // owner thought would apply it.
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE')), { parse: inboundOverrideParse, catalogOnly: true }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
@@ -818,7 +828,21 @@ function resolveRef(ref) {
       // site itself falls back to, never the rejected string.
       const parsed = raw && ref.parse ? ref.parse(raw) : raw;
       const model = parsed || base.model;
-      return { model, selector: base.selector, via: setName ? `${setName} (pinned)` : `${primaryName} → ${base.via}`, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts: base.accepts };
+      // dependsOnEnvs: env(s) further down the fallback chain the CURRENT
+      // resolution still rides — non-empty exactly when `model` above fell
+      // through to `base.model` (this leg's own override is unset, or set to
+      // a value ref.parse rejected). A single `pinEnv` can only ever name ONE
+      // env (the one THIS leg's own change would write to), so a shared lower
+      // env's change is invisible to a naive `pinEnv === env` match; the
+      // composer's blast-radius grouping (computeChanges in
+      // client/src/pages/admin/agents/modelDraft.js) additionally matches on
+      // this list, so e.g. a VOICE_RELAY_MODEL change is attributed to
+      // voice_relay too whenever VOICE_RELAY_INBOUND_MODEL isn't overriding
+      // it — not just to voice_relay_collections, which reads
+      // VOICE_RELAY_MODEL directly and has no override of its own to unset.
+      const dependsOnEnvs = !parsed ? [...(base.pinEnv ? [base.pinEnv] : []), ...(base.dependsOnEnvs || [])] : [];
+      const accepts = ref.catalogOnly ? { ...base.accepts, catalogOnly: true } : base.accepts;
+      return { model, selector: base.selector, via: setName ? `${setName} (pinned)` : `${primaryName} → ${base.via}`, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts, dependsOnEnvs };
     }
     default:
       return null;

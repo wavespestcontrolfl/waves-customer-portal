@@ -71,6 +71,13 @@ export function effectiveLegFor(draft, selectorDraft) {
     if (leg.pinEnv && draft[leg.pinEnv] === UNPIN) return (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel;
     if (leg.pinEnv && draft[leg.pinEnv]) return draft[leg.pinEnv];
     if (leg.pinEnv && leg.pinned) return leg.model;
+    // No pin of its own (or an unset one): still follows whichever lower env
+    // in its fallback chain the server currently resolved through — e.g.
+    // voice_relay follows VOICE_RELAY_MODEL whenever its own
+    // VOICE_RELAY_INBOUND_MODEL override is unset (server's `dependsOnEnvs`).
+    for (const env of leg.dependsOnEnvs || []) {
+      if (draft[env] && draft[env] !== UNPIN) return draft[env];
+    }
     return (leg.selector && selectorDraft(leg.selector)) || leg.model;
   };
 }
@@ -78,6 +85,14 @@ export function effectiveLegFor(draft, selectorDraft) {
 // Where a leg's model actually comes from: its own env pin, else the shared
 // selector it follows (a change there moves every lane on that selector).
 export const envForLeg = (leg, selectorByKey) => leg.pinEnv || (leg.selector && selectorByKey[leg.selector]?.env) || null;
+
+// Does this leg move when `env` changes — either because it is the leg's own
+// pin, or because (per the server's `dependsOnEnvs`) the leg's resolution
+// currently falls through to `env` whenever its own pin is unset. A leg only
+// ever reports ONE `pinEnv` (the env its own "Change" button writes to), so a
+// shared lower env's change would otherwise be invisible to an exact
+// `pinEnv === env` match — see model-switchboard.js's resolveRef.
+const legFollowsEnv = (leg, env) => leg?.pinEnv === env || !!leg?.dependsOnEnvs?.includes(env);
 
 // Holds that must accompany a selector draft: a LOCKED lane that follows the
 // selector through an unset per-lane env is pinned at its current model, so
@@ -143,8 +158,8 @@ export function computeChanges({ data, draft, selectorDraft }) {
       const next = env && draft[env];
       if (!next || byEnv.has(env)) continue;
       const unpin = next === UNPIN;
-      const sharing = data.lanes.filter((x) => legsOf(x).some((g) => g.pinEnv === env));
-      const legOf = (x) => legsOf(x).find((g) => g.pinEnv === env);
+      const sharing = data.lanes.filter((x) => legsOf(x).some((g) => legFollowsEnv(g, env)));
+      const legOf = (x) => legsOf(x).find((g) => legFollowsEnv(g, env));
       // Unpinning a shared env can land its lanes on different models — and
       // an UNSET shared env's lanes may sit on different models today (one on
       // its selector, one on a literal default), so setting it moves them all.
