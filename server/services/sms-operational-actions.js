@@ -609,8 +609,8 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       continue;
     }
     // R1 (owner ruling 2026-09-24): inside an open window only an event may
-    // act. An admissible visit or payment record (field progress, a move, a
-    // cancellation, money landing) reaches `verify` at once; a message
+    // act. An admissible visit record (field progress, a move, a
+    // cancellation) reaches `verify` at once; a message
     // witness (a staff text, a call) waits for the deadline before it costs
     // a model call, exactly as a stated-deadline row always has. A NULL
     // due_at reads as the epoch, never an open window.

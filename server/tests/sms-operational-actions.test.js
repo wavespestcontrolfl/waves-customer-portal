@@ -828,24 +828,6 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
   });
 
-  test('R2 owner ruling 2026-09-24 (settled r7): a payment is evidence for any "other" ask the model may weigh, and never closes without the model', () => {
-    const invoicePaid = { type: 'payment', payment_source: 'invoice', id: 'invoice-1', ref: 'payment:invoice-1', paid_at: '2040-03-11T15:00:00Z',
-      text: 'Invoice Quarterly paid 2040-03-11' };
-    const smsReceipt = { type: 'payment', payment_source: 'sms', id: 'sms-1', status: 'delivered', message_type: 'receipt' };
-    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
-    const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
-    const nonPaymentOther = { kind: 'other', description: 'My son should be there for the visit', sms_context: ctx };
-    expect(admissibleWitness(invoicePaid, paymentOther)).toBe(true);
-    expect(admissibleWitness(smsReceipt, paymentOther)).toBe(true);
-    expect(admissibleWitness(invoicePaid, nonPaymentOther)).toBe(true);
-    // Payment evidence is `other`-only — even a payment-worded ask of another kind does not admit it.
-    expect(admissibleWitness(invoicePaid, { kind: 'callback', description: 'Call me about my payment' })).toBe(false);
-    // Money going the other way is never answered by money landing (Codex r5).
-    for (const description of ['Where is my refund?', 'I want to dispute this charge', 'You double charged me']) {
-      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
-    }
-  });
-
   test('Codex #4816 r1: a visit never system-closes a schedule_visit or technician_follow_up (service match stays with the model)', () => {
     const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed', property_id: PROPERTY_ID,
       created_at: '2040-03-11T15:00:00Z', booked_at: '2040-03-11T15:00:00Z', completed_at: '2040-03-12T15:00:00Z', transitioned_at: '2040-03-12T15:00:00Z',
@@ -854,27 +836,6 @@ describe('fulfillment proof', () => {
       const commitment = { kind, sms_context: { property_id: PROPERTY_ID, source_at: '2040-03-10T15:00:00Z' } };
       expect(admissibleWitness(visitWitness, commitment)).toBe(true);
     }
-  });
-
-  test('Codex #4816 r2: a payment-method change request is never answered by a payment', () => {
-    const paid = { id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
-      paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11' };
-    const splitBillingAsk = { kind: 'other', description: 'Can you separate the charges under two payment methods?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
-    expect(admissibleWitness(paid, splitBillingAsk)).toBe(false);
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Please update my card on file' })).toBe(false);
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Set up autopay for me' })).toBe(false);
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Can you change the card on the account?' })).toBe(false);
-    // Naming the tender is not a method change (Codex r3).
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Did my card payment go through?' })).toBe(true);
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Was the autopay charged this month?' })).toBe(true);
-    // Codex #4816 r7: bare "split"/"separate" describe a payment, not a method change.
-    expect(admissibleWitness(paid, { kind: 'other', description: 'I split the payment into two charges; did both payments go through?' })).toBe(true);
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Did you receive the separate payment?' })).toBe(true);
-    // Codex #4816 r11: naming the payment method is a settlement question, not a change request.
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Did that payment method work?' })).toBe(true);
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Was this payment method charged?' })).toBe(true);
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Can you bill this across two cards?' })).toBe(false);
-    expect(admissibleWitness(paid, { kind: 'other', description: 'Please change my payment method' })).toBe(false);
   });
 
   test('Codex #4816 r7: a cancellation after the text answers a cancel ask for the model only; it never closes "still coming?"', () => {
@@ -1003,30 +964,17 @@ describe('fulfillment proof', () => {
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
   });
 
-  test('Codex #4816 r7: a staff ledger note never reaches the provider unscrubbed, and only admissible records are offered as witnesses', async () => {
+  test('only admissible records are offered to the model as witness_refs; payment evidence is split out of #4816', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    const note = 'Zelle prepayment — card 4242 4242 4242 4242 CVV 123';
-    const ledger = { ref: 'payment:pay-1', type: 'payment', payment_source: 'ledger', id: 'pay-1', created_at: '2040-03-11T15:00:00Z',
-      description: note, text: `Payment of $200.00 recorded 2040-03-11: ${note}` };
-    const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'Sent you the Zelle number' };
-    const ask = { kind: 'other', description: 'What is the Zelle number?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
-    await verifySmsFulfillment(ask, { records: [ledger, staffSms], failures: [] });
-    const prompt = dispatchWithFallback.mock.calls[0][1].text;
-    expect(prompt).not.toContain('4242 4242 4242 4242');
-    expect(prompt).not.toContain('CVV 123');
-    expect(prompt).not.toContain('"description":"Zelle');
-    expect(prompt).toContain('"witness_refs":["payment:pay-1"]');
-  });
-
-  test('Codex #4816 r12: the prompt lets a delivered receipt text answer a receipt request', async () => {
-    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    const receipt = { ref: 'payment:sms-1', type: 'payment', payment_source: 'sms', id: 'sms-1', status: 'delivered', message_type: 'receipt',
-      created_at: '2040-03-11T15:00:00Z', text: 'Payment received, thank you. Receipt for invoice WPC-1: $125.00' };
-    const ask = { kind: 'other', description: 'Can you send me the receipt?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
-    await verifySmsFulfillment(ask, { records: [receipt], failures: [] });
-    const prompt = dispatchWithFallback.mock.calls[0][1].text;
-    expect(prompt).toContain('a delivered receipt text does answer a request for that receipt');
-    expect(prompt).toContain('"witness_refs":["payment:sms-1"]');
+    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
+    const visit = { ref: 'visit:v-1', type: 'visit', id: 'v-1', status: 'en_route', progressed_at: '2040-03-11T15:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status en_route; en route/on site/completed after the request' };
+    const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'On our way' };
+    const paid = { ref: 'payment:i-1', type: 'payment', id: 'i-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice paid' };
+    const ask = { kind: 'other', description: 'You still coming this morning?', sms_context: ctx };
+    expect(admissibleWitness(paid, ask)).toBe(false);
+    await verifySmsFulfillment(ask, { records: [visit, staffSms], failures: [] });
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"witness_refs":["visit:v-1"]');
   });
 
   test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {

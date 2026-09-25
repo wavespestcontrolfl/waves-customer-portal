@@ -1198,44 +1198,6 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('R2 (settled r7): an invoice paid after a payment "other" question reaches the model at once — money landing never closes an ask on its own', async () => {
-    result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
-      quote: 'What is the Zelle number?', description: 'What is the Zelle number?' };
-    await recordMessageOperations(mockPg, message, result, context);
-    await mockPg('call_commitments').update({ due_at: null, due_basis: null });
-    const after = new Date(message.created_at.getTime() + 1000);
-    const now = new Date(after.getTime() + 1000);
-    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
-      invoice_number: 'WPC-2026-0407', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: after,
-      created_at: new Date(message.created_at.getTime() - 86400000),
-    }).returning('id');
-    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
-      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after });
-    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'model_says_open', evidence_hash: 'x', retry_after: null }));
-    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
-    expect(verify).toHaveBeenCalledTimes(1);
-    expect(verify.mock.calls[0][1].records.find((r) => r.type === 'payment')).toMatchObject({ payment_source: 'invoice', id: invoice.id });
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('Codex #4816 r7: an invoice closed by account credit (paid_at, no payment row) is not payment evidence', async () => {
-    const after = new Date(message.created_at.getTime() + 1000);
-    const [credited] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
-      invoice_number: 'WPC-2026-0501', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: after }).returning('id');
-    const [cash] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
-      invoice_number: 'WPC-2026-0502', title: 'Termite deposit', total: 400, status: 'paid', paid_at: after }).returning('id');
-    // A paid payment row linked to some OTHER invoice cannot vouch for the credited one.
-    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 400, status: 'paid', payment_date: etDateString(after),
-      metadata: JSON.stringify({ invoice_id: cash.id }), created_at: after });
-    const commitment = { kind: 'other', description: 'Did my payment go through?',
-      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
-    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
-    expect(evidence.records.filter((r) => r.type === 'payment' && r.payment_source === 'invoice').map((r) => r.id)).toEqual([cash.id]);
-    expect(evidence.records.some((r) => r.id === credited.id)).toBe(false);
-  });
-
   test('Codex #4816 r2: a logged reschedule inside the 24h window reaches the model at once (service check), no bell', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'schedule_visit', due_at: null,
@@ -1255,63 +1217,6 @@ postgres('SMS commitments on PostgreSQL', () => {
     const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
     expect(verify).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_not_due: 0 });
-    expect((await mockPg('call_commitments').first()).status).toBe('open');
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('Codex #4816 r6: a staff-recorded ledger prepayment after the text is loaded as payment evidence the model may weigh', async () => {
-    result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
-      quote: 'Did you receive my Zelle prepayment?', description: 'Did you receive my Zelle prepayment?' };
-    await recordMessageOperations(mockPg, message, result, context);
-    const after = new Date(message.created_at.getTime() + 1000);
-    const now = new Date(after.getTime() + 1000);
-    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 200, status: 'paid', payment_date: etDateString(after),
-      description: 'Account credit prepayment — zelle', metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'zelle' }), created_at: after });
-    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'model_says_open', evidence_hash: 'x', retry_after: null }));
-    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
-    expect(verify).toHaveBeenCalledTimes(1);
-    const ledger = verify.mock.calls[0][1].records.find((r) => r.type === 'payment');
-    expect(ledger).toMatchObject({ payment_source: 'ledger' });
-    expect(ledger.text).toContain('Payment of $200.00 recorded');
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('R2: a delivered payment-confirmation SMS after a payment "other" question is payment evidence for the model', async () => {
-    result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
-      quote: 'Did my payment go through?', description: 'Did my payment go through?' };
-    await recordMessageOperations(mockPg, message, result, context);
-    await mockPg('call_commitments').update({ due_at: null, due_basis: null });
-    const after = new Date(message.created_at.getTime() + 1000);
-    const now = new Date(after.getTime() + 1000);
-    const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
-      from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Payment received, thank you. Invoice WPC-2026-0409: $125.00',
-      message_type: 'receipt', status: 'delivered', created_at: after }).returning('id');
-    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'model_says_open', evidence_hash: 'x', retry_after: null }));
-    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
-    expect(verify).toHaveBeenCalledTimes(1);
-    expect(verify.mock.calls[0][1].records.find((r) => r.type === 'payment')).toMatchObject({ payment_source: 'sms', id: reply.id });
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
-  });
-
-  test('R2 (settled r5): a non-payment "other" question is never system-closed by an unrelated invoice payment; the model weighs it', async () => {
-    result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
-      quote: 'Can my son be there for the visit?', description: 'Can my son be there for the visit?' };
-    await recordMessageOperations(mockPg, message, result, context);
-    await mockPg('call_commitments').update({ due_at: null, due_basis: null });
-    const after = new Date(message.created_at.getTime() + 1000);
-    const now = new Date(after.getTime() + 1000);
-    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
-      invoice_number: 'WPC-2026-0408', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: after }).returning('id');
-    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
-      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after });
-    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'unrelated_payment', evidence_hash: 'x', retry_after: null }));
-    const outcome = await refreshSmsCommitments({ conn: mockPg, now, verify });
-    expect(verify).toHaveBeenCalledTimes(1);
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_no_witness: 0 });
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
@@ -1336,55 +1241,6 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(cancelled).toMatchObject({ id: visit.id, status: 'cancelled' });
     expect(cancelled.text).toContain('cancelled after the request');
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
-  });
-
-  test('Codex #4816 r9: a partial payment from before the text cannot vouch for a remainder covered by credit after it', async () => {
-    const before = new Date(message.created_at.getTime() - 86400000);
-    const after = new Date(message.created_at.getTime() + 1000);
-    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
-      invoice_number: 'WPC-2026-0701', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: after }).returning('id');
-    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(before),
-      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: before });
-    const commitment = { kind: 'other', description: 'Did you receive my payment?',
-      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
-    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
-    expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
-  });
-
-  test('Codex #4816 r10: money a third-party payer settles is not the customer\'s own payment', async () => {
-    const after = new Date(message.created_at.getTime() + 1000);
-    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 300, status: 'paid', payment_date: etDateString(after),
-      metadata: JSON.stringify({ payer_id: randomUUID() }), created_at: after });
-    const commitment = { kind: 'other', description: 'Did you receive my payment?',
-      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
-    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
-    expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
-  });
-
-  test('Codex #4816 r12: an invoice paid on an Eastern evening reads as that Eastern day, not the next UTC day', async () => {
-    const at = new Date(Math.max(message.created_at.getTime() + 1000, Date.parse('2026-01-01T00:00:00Z')));
-    // 9:30 PM Eastern on the day after the text is already the next UTC day.
-    const evening = new Date(`${etDateString(new Date(at.getTime() + 86400000))}T21:30:00-05:00`);
-    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
-      invoice_number: 'WPC-2026-0801', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: evening }).returning('id');
-    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(evening),
-      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: evening });
-    const commitment = { kind: 'other', description: 'Did you receive my payment?',
-      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
-    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(evening.getTime() + 1000));
-    const row = evidence.records.find((r) => r.type === 'payment' && r.payment_source === 'invoice');
-    expect(row.text).toContain(`paid ${etDateString(evening)}`);
-    expect(row.text).not.toContain(evening.toISOString().slice(0, 10));
-  });
-
-  test('R2: an invoice paid before the request is not payment evidence', async () => {
-    const before = new Date(message.created_at.getTime() - 1000);
-    await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
-      invoice_number: 'WPC-2026-0409', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: before });
-    const commitment = { kind: 'other', description: 'What is the Zelle number?',
-      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
-    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(message.created_at.getTime() + 2000));
-    expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
 
   test('R3 owner ruling 2026-09-24: a delivered staff SMS reply no longer closes an "other" ask (the split-billing ask "separate the charges")', async () => {
