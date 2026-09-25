@@ -573,6 +573,13 @@ async function markCardLinkSendOutcome(visitId, stamp) {
  * Never throws — every trigger path treats this as fire-and-observe.
  */
 async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms', recipientPhone = null }) {
+  // Owner ruling 2026-09-25 (callback_number_needed / disclaimed caller
+  // ID): set below, inside the delivery==='none' branch, when the visit's
+  // SMS leg is held for a disclaimed ANI AND an email invitation might
+  // reach the customer instead. Read much later, at the send boundary —
+  // never dial Twilio for this visit, and send the SAME invitation email
+  // that normally only piggybacks a confirmed text as the PRIMARY leg.
+  let emailOnlyForDisclaimedAni = false;
   try {
     if (!isAppointmentCardRequestEnabled()) return skip('gate_off');
     if (!scheduledServiceId) return skip('no_scheduled_service_id');
@@ -764,7 +771,35 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         }
         return skip('rodent_setup_staff_review');
       }
-      return skip('delivery_suppressed');
+      // Owner ruling 2026-09-25: a plain "no SMS consent" or implied-
+      // consent-non-ANI hold stays exactly delivery_suppressed (unchanged,
+      // untouched by this check) — ONLY the callback_number_needed
+      // disclaimed-ANI hold (a visit-specific, durably-stamped column) is
+      // eligible to fall through and try the customer's email instead of
+      // staying silent. `callbackNumberHoldActiveForVisit` reads
+      // scheduled_services.callback_number_hold_at, which is stamped
+      // ONLY for that hold (call-recording-processor.js P1-C) — a plain
+      // TCPA block never sets it, so this can never widen delivery:'none'
+      // beyond the disclaimed-ANI case it was built for.
+      const holdActive = await require('./appointment-reminders')
+        .callbackNumberHoldActiveForVisit(visit.id)
+        .catch((err) => {
+          logger.warn(`[appt-card-request] callback-number hold read failed for visit ${visit.id} — staying silent (delivery_suppressed): ${err.message}`);
+          return false;
+        });
+      if (holdActive) {
+        // Don't return — fall through to the SAME funnel below (existing-
+        // capture dedupe, token mint, template render, one-text-ever
+        // claim) so the eventual invitation is byte-identical in every
+        // way except which channel actually carries it. The send
+        // boundary below reads this flag and substitutes the email leg
+        // for the SMS leg; a customer with no usable email lands back in
+        // the exact delivery_suppressed outcome (claim released, nothing
+        // sent) that this whole branch would otherwise have returned here.
+        emailOnlyForDisclaimedAni = true;
+      } else {
+        return skip('delivery_suppressed');
+      }
     }
 
     // Owner rule 2026-07-30 (probed above): only the ASK is gated for
@@ -1059,6 +1094,31 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // finalize the same way).
     const markSendOutcome = () => markCardLinkSendOutcome(visit.id, stamp);
 
+    // Owner ruling 2026-09-25: the disclaimed-ANI hold means Twilio must
+    // NEVER be dialed for this visit — the email invitation (normally the
+    // companion that only fires after a CONFIRMED text, runInvitationEmailLeg
+    // below) becomes the PRIMARY and ONLY leg. Same claim, same token, same
+    // idempotency key, same audit stamp (markSendOutcome) as a real text —
+    // only the channel differs. A customer with no usable email (or the
+    // email gate off, or a delivery failure) resolves to the exact same
+    // end state as the ordinary delivery_suppressed skip: the claim and
+    // pending row release, so a later trigger (the hold clearing, or the
+    // previsit backstop sweep) can retry cleanly.
+    if (emailOnlyForDisclaimedAni) {
+      const emailResult = await runInvitationEmailLeg({ visit, secureUrl, planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY })
+        .catch((emailErr) => {
+          logger.warn(`[appt-card-request] email-only invitation failed for visit ${visit.id}: ${emailErr.message}`);
+          return null;
+        });
+      if (!emailResult) {
+        await releaseClaim();
+        return skip('email_only_no_usable_email');
+      }
+      await markSendOutcome();
+      logger.info(`[appt-card-request] secure-card invitation emailed for visit ${visit.id} (trigger ${trigger}) — SMS leg held for a disclaimed caller ID`);
+      return { requested: true, action: 'sent', reason: 'sent_email_only_disclaimed_ani' };
+    }
+
     let result;
     try {
       result = await sendCustomerMessage({
@@ -1265,7 +1325,14 @@ async function runInvitationEmailLeg({ visit, secureUrl, planChoice }) {
       emailFeeDisclosure = null;
     }
   }
-  await sendAutopaySetupInvitation({
+  // Returned (not just awaited) since the callback_number_needed email-only
+  // path above needs to know whether this actually reached anyone — a
+  // falsy/null result (no usable email, the GATE_CARD_ENROLLMENT_EMAILS
+  // gate off, or a send failure) is that caller's "release the claim, stay
+  // silent" signal. Every other caller (the fire-and-forget companion leg,
+  // the deferred-replay finalize) already ignores the return value, so this
+  // is additive.
+  return sendAutopaySetupInvitation({
     customerId: visit.customer_id,
     scheduledServiceId: visit.id,
     serviceType: visit.service_type || 'service',
