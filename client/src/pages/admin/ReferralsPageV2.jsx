@@ -505,49 +505,15 @@ export default function ReferralsPageV2() {
         }}
         ariaLabel="Referrals section"
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
+        secondarySections={
+          activeGroup.tabs.length > 1
+            ? activeGroup.tabs.map((key) => REFERRALS_LEAF_BY_KEY[key])
+            : []
+        }
+        secondaryActiveKey={tab}
+        onSecondaryChange={setTab}
+        secondaryAriaLabel="Referrals sub-section"
       />
-      {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            marginBottom: 16,
-          }}
-        >
-          {activeGroup.tabs.map((key) => {
-            const leaf = REFERRALS_LEAF_BY_KEY[key];
-            const active = tab === key;
-            const LeafIcon = leaf.Icon;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setTab(key)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 14,
-                  fontWeight: 500,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
-                  background: active ? "#18181B" : "#FFFFFF",
-                  color: active ? "#fff" : "#27272A",
-                }}
-              >
-                <LeafIcon size={14} strokeWidth={1.9} />
-                {leaf.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
       {msg && (
         <div
           style={{
