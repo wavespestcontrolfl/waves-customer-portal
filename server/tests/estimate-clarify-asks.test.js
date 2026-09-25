@@ -979,16 +979,18 @@ describe('bedroom_count ask (unit-band lane)', () => {
       flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
     };
     // first() order: awaiting (unlocked), fresh (locked), ask (reprice_pending
-    // stamp), estimate (origin), ask (cleared). The estimate guard is an
-    // atomic UPDATE with no read.
+    // stamp), estimate (origin), call_log (settled generation — codex #4815
+    // r9 P2), ask (cleared). The estimate guard is an atomic UPDATE with no
+    // read.
     const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9', lane: 'yellow' } }) };
-    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow, awaiting];
+    const settledCall = { processing_token: null, processing_status: 'processed', extraction_attempts: 1, created_at: new Date().toISOString(), processing_generation: 7 };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow, settledCall, awaiting];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
     const result = await handleClarifyReply({ phone: '+19415550142', body: 'one bedroom' });
     expect(result.handled).toBe(true);
     await result.repricePromise;
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
-      callLogId: 'call-9', quotePromised: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply',
+      callLogId: 'call-9', quotePromised: true, ownerProcGeneration: 7, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply',
       supersedeAttempt: expect.stringMatching(/^[0-9a-f-]{36}$/), bedroomCountOverride: 1,
     });
     // The same attempt token is what the guard stamp wrote on the estimate.
@@ -1003,6 +1005,30 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(last.reprice_pending).toBeUndefined();
     expect(last.repriced_estimate_id).toBe('est-new');
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // codex #4815 r9 P2: the voice re-price must carry the call's SETTLED
+  // generation, or the row-scoped supersession runs generation:null and a
+  // generation-stamped price_agreed_on_call block refuses the replacement.
+  // An in-flight claim owns the pass identity — adopt nothing then.
+  test.each([
+    ['settled', { processing_token: null, processing_status: 'processed', processing_generation: 4 }, 4],
+    ['claimed by a live pass', { processing_token: 'tok-live', processing_status: 'processing', processing_generation: 5 }, null],
+    ['unstamped', { processing_token: null, processing_status: 'processed', processing_generation: null }, null],
+  ])('a VOICE-origin re-price passes the call\'s settled generation (%s)', async (_label, callRow, expected) => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9', lane: 'yellow' } }) };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow, { extraction_attempts: 1, created_at: new Date().toISOString(), ...callRow }, awaiting];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
+    const result = await handleClarifyReply({ phone: '+19415550142', body: 'one bedroom' });
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({
+      callLogId: 'call-9', supersedeEstimateId: 'est-1', ownerProcGeneration: expected,
+    }));
   });
 
   test('a re-draft that produces NO replacement keeps reprice_pending on the ask row and bells the operator (never silently consumed)', async () => {

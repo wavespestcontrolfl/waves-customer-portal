@@ -3,9 +3,89 @@ const {
   explicitBillingChannels,
   billingChannelAllowed,
   billingChannelsPayload,
+  mergedBillingChannelUpdates,
 } = require('../services/billing-delivery-channels');
 
 describe('billing delivery channel contract', () => {
+  test.each(Object.values(BILLING_DELIVERY_FIELDS))('profile merges preserve native %s choices and their intersection', (column) => {
+    expect(mergedBillingChannelUpdates({}, { [column]: ['push', 'email'] }))
+      .toEqual({ [column]: ['email', 'push'] });
+    expect(mergedBillingChannelUpdates({ [column]: ['email', 'sms'] }, { [column]: ['sms', 'push'] }))
+      .toEqual({ [column]: ['sms'] });
+    expect(() => mergedBillingChannelUpdates({ [column]: ['email'] }, { [column]: ['sms'] }))
+      .toThrow('Billing notification choices conflict');
+  });
+
+  test('merges honor legacy Email/App restrictions without treating untouched Text defaults as consent', () => {
+    expect(() => mergedBillingChannelUpdates({ payment_receipt_channel: 'email', email_enabled: false },
+      { payment_receipt_channels: ['sms'] })).toThrow('Billing notification choices conflict');
+    expect(mergedBillingChannelUpdates({ invoice_channel: 'push' }, { invoice_channels: ['email', 'sms'] }))
+      .toEqual({ invoice_channels: ['email'] });
+    expect(mergedBillingChannelUpdates({ invoice_channel: 'sms' }, { invoice_channels: ['push'] }))
+      .toEqual({ invoice_channels: ['push'] });
+    expect(mergedBillingChannelUpdates(null, null)).toEqual({});
+  });
+
+  test('merges preserve payment issues inherited from the legacy billing App choice', () => {
+    const legacy = { payment_issue_channel: null, billing_channel: 'push', email_enabled: false };
+    expect(mergedBillingChannelUpdates(legacy, { payment_issue_channels: ['sms', 'push'] }))
+      .toMatchObject({ payment_issue_channels: ['push'] });
+    expect(() => mergedBillingChannelUpdates(legacy, { payment_issue_channels: ['sms'] }))
+      .toThrow('Billing notification choices conflict');
+  });
+
+  test.each([
+    ['invoice', 'invoice_channel', 'invoice_channels'],
+    ['payment issue', 'payment_issue_channel', 'payment_issue_channels'],
+  ])('legacy %s scalar Email remains independent Email plus Text in merges', (_label, legacyColumn, arrayColumn) => {
+    expect(mergedBillingChannelUpdates({ [legacyColumn]: 'email' }, { [arrayColumn]: ['sms'] }))
+      .toEqual({ [arrayColumn]: ['sms'] });
+    expect(mergedBillingChannelUpdates({ [legacyColumn]: 'email' }, { [arrayColumn]: ['email'] }))
+      .toEqual({ [arrayColumn]: ['email'] });
+    expect(mergedBillingChannelUpdates({ [legacyColumn]: 'email', email_enabled: false }, { [arrayColumn]: ['sms'] }))
+      .toEqual({ [arrayColumn]: ['sms'] });
+    expect(() => mergedBillingChannelUpdates({ [legacyColumn]: 'email' }, { [arrayColumn]: ['push'] }))
+      .toThrow('Billing notification choices conflict');
+  });
+
+  test('legacy payment issues inherited from billing Email retain an independent Text leg', () => {
+    expect(mergedBillingChannelUpdates({ payment_issue_channel: null, billing_channel: 'email' },
+      { payment_issue_channels: ['sms'] })).toEqual({ payment_issue_channels: ['sms'] });
+  });
+
+  test.each(['email', 'push', 'sms'])('payment_receipt=false rejects merged %s receipts', (channel) => {
+    expect(() => mergedBillingChannelUpdates(
+      { payment_receipt: false, payment_receipt_channels: [channel] },
+      { payment_receipt_channels: [channel] },
+    )).toThrow('Billing notification choices conflict');
+    expect(() => mergedBillingChannelUpdates(
+      { payment_receipt_channels: [channel] },
+      { payment_receipt: false, payment_receipt_channels: [channel] },
+    )).toThrow('Billing notification choices conflict');
+  });
+
+  test('receipt Text opt-out still allows selected Email or App after merge', () => {
+    expect(mergedBillingChannelUpdates(
+      { payment_receipt_channels: ['email', 'sms', 'push'], payment_confirmation_sms: false },
+      { payment_receipt_channels: ['email', 'sms', 'push'] },
+    )).toEqual({});
+  });
+
+  test('merges preserve non-default legacy choices and refuse globally stranded selections', () => {
+    expect(() => mergedBillingChannelUpdates({ billing_channel: 'both' }, { billing_channels: ['push'] }))
+      .toThrow('Billing notification choices conflict');
+    expect(mergedBillingChannelUpdates({ payment_issue_channel: 'sms' }, { payment_issue_channels: ['sms', 'push'] }))
+      .toMatchObject({ payment_issue_channels: ['sms'] });
+    expect(() => mergedBillingChannelUpdates(
+      { invoice_channels: ['email', 'sms'], email_enabled: true, sms_enabled: false },
+      { invoice_channels: ['email', 'sms'], email_enabled: false, sms_enabled: true },
+    )).toThrow('Billing notification choices conflict');
+    expect(() => mergedBillingChannelUpdates(
+      { payment_receipt_channels: ['sms'], payment_confirmation_sms: true },
+      { payment_receipt_channels: ['sms'], payment_confirmation_sms: false },
+    )).toThrow('Billing notification choices conflict');
+  });
+
   test('maps the four API fields to additive nullable array columns', () => {
     expect(BILLING_DELIVERY_FIELDS).toEqual({
       invoiceChannels: 'invoice_channels',

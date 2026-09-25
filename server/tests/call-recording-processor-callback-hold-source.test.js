@@ -279,7 +279,10 @@ describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the
     expect(block.slice(catchAt)).toMatch(/throw failClosed;/);
     expect(block.slice(catchAt)).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
     // The pass's own catch is what turns that throw into the capped retry.
-    expect(src).toMatch(/catch \(procErr\) \{[\s\S]{0,1600}processing_status: 'extraction_failed'/);
+    // (Window widened 1600 -> 2600 on the main merge: #4815 added its
+    // quarantine-queue comment + require inside that same catch, ahead of
+    // the status write; the asserted behavior is unchanged.)
+    expect(src).toMatch(/catch \(procErr\) \{[\s\S]{0,2600}processing_status: 'extraction_failed'/);
   });
 });
 

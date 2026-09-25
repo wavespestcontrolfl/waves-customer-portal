@@ -1337,6 +1337,38 @@ describe('voice relay eval — the harness', () => {
     expect(result.checks.find((c) => c.check === 'no_model_text_before_tool').status).toBe('pass');
   });
 
+  test('the record attributes the model the constructed conversation actually pinned (VOICE_RELAY_INBOUND_MODEL), not the module default', async () => {
+    mockSdk();
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';
+    try {
+      const replay = require('../services/eval/voice-relay-replay');
+      script.push(toolUse('capture_lead', { first_name: 'Sam' }), say('A team member will follow up.'));
+      const result = await replay.runScenario(scenario({ turns: [scenario().turns[0]] }));
+      expect(result.error).toBeUndefined();
+      expect(result.model).toBe('claude-haiku-4-5-20251001');
+      expect(result.modelFallbackReason).toBeNull();
+    } finally {
+      delete process.env.VOICE_RELAY_INBOUND_MODEL;
+    }
+  });
+
+  test('an unknown override id: the record attributes the fallback model that actually ran, and stamps the rejection reason', async () => {
+    mockSdk();
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-nope-9000';
+    try {
+      const replay = require('../services/eval/voice-relay-replay');
+      const defaultModel = replay.installHarness().MODEL;
+      script.push(toolUse('capture_lead', { first_name: 'Sam' }), say('A team member will follow up.'));
+      const result = await replay.runScenario(scenario({ turns: [scenario().turns[0]] }));
+      expect(result.error).toBeUndefined();
+      expect(result.model).toBe(defaultModel);
+      expect(result.model).not.toBe('claude-nope-9000');
+      expect(result.modelFallbackReason).toBe('unknown_model_override:VOICE_RELAY_INBOUND_MODEL=claude-nope-9000');
+    } finally {
+      delete process.env.VOICE_RELAY_INBOUND_MODEL;
+    }
+  });
+
   test('a performed re-service latches capture like the live tool: the session ends after the goodbye and later turns are ignored', async () => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');

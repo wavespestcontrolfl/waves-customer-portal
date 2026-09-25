@@ -650,7 +650,7 @@ describe('version stamps', () => {
     process.env.RAILWAY_GIT_COMMIT_SHA = 'abc123';
     const convo = new RelayConversation({ callSid: 'CA-v-1', from: '+19415551234', send: jest.fn(), relayProfileId: 'flux_balanced_v1', ttsVoice: 'NYC9WEgkq1u4jiqBseQ9-turbo_v2_5-0.8_0.8_0.6', language: 'es-US' });
     expect(convo._versionStamps()).toEqual({
-      git_sha: 'abc123', model: MODEL, effort: 'low',
+      git_sha: 'abc123', model: MODEL, model_fallback_reason: null, effort: 'low',
       prompt_sha: null, context_snapshot_sha: null, tool_schema_sha: null, policy_pack_sha: null,
       relay_profile_id: 'flux_balanced_v1', stt_language: 'es-US', tts_language: 'es-US',
       tts_provider: 'ElevenLabs', voice_id: 'NYC9WEgkq1u4jiqBseQ9', tts_model: 'turbo_v2_5', tts_settings: '0.8_0.8_0.6',

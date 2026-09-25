@@ -741,7 +741,7 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     const source = src('../services/slot-reservation.js');
     const lockAt = source.indexOf("trx('call_log').where({ id: eng.callLogId }).forUpdate()");
     expect(lockAt).toBeGreaterThan(-1);
-    expect(lockAt).toBeLessThan(source.indexOf('callSideBlockForEstimateData(trx, reservationData)'));
+    expect(lockAt).toBeLessThan(source.indexOf('callSideBlockForEstimateData(trx, reservationData, { estimateStatus: estimate.status })'));
   });
 
   test('the reconcile-only entry enumerates EVERY live same-call draft', () => {
@@ -1112,13 +1112,20 @@ describe('completePendingInvalidation — forced verdicts vs a newer generation'
     const source = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
     const fnAt = source.indexOf('async function markQuarantinePending');
     expect(fnAt).toBeGreaterThan(-1);
-    expect(source.indexOf('{ procGeneration = null } = {}', fnAt)).toBeGreaterThan(fnAt);
+    // codex #4815 r5 P1: `trx` joined the options bag so the finalization
+    // transaction can write this marker atomically with the terminal
+    // status it protects (either both commit or neither does).
+    expect(source.indexOf('{ procGeneration = null, trx = null } = {}', fnAt)).toBeGreaterThan(fnAt);
     const stampAt = source.indexOf('generation: Number(procGeneration)', fnAt);
     expect(stampAt).toBeGreaterThan(fnAt);
-    // Both processor call sites forward the pass generation.
+    // Every processor call site forwards the pass generation: 1 original
+    // spam/voicemail site, 1 identity-conflict quarantine catch, 1 in the
+    // finalization transaction (codex #4815 r5 P1 — the price-agreed
+    // pre-write pass's deferred marker write), 1 in the price-agreed
+    // post-finalization sweep.
     const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const sites = proc.split('markQuarantinePending(call.id').slice(1);
-    expect(sites.length).toBe(2);
+    expect(sites.length).toBe(4);
     for (const site of sites) expect(site.slice(0, 160)).toMatch(/procGeneration/);
   });
 

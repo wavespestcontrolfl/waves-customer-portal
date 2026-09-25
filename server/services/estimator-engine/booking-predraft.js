@@ -100,6 +100,46 @@ async function linkEstimateToBooking(estimateId, scheduledServiceId) {
   }
 }
 
+// DURABLE provenance for the assessment exception (codex #4815 r8 P2),
+// written whether or not linkEstimateToBooking can land. That linkage
+// deliberately skips a visit that went terminal during the composition, yet
+// the fresh draft is still returned as the exception's estimate — so the
+// post-finalization price-agreed sweep stands down for it — and the quote
+// was promised on the CALL, so the draft stands. Without this stamp, a later
+// force-reprocess's agreed-price invalidation (which excluded only rows
+// carrying scheduled_service_id) archived that intentionally surviving
+// draft with no replacement. estimate_data.assessment_exception is what the
+// invalidation's exclusion (ASSESSMENT_EXCEPTION_ABSENT_SQL /
+// estimateEarnsAssessmentException) honors alongside the linkage. One atomic
+// jsonb_set guarded by a missing-key predicate — never a whole-blob rewrite,
+// and the FIRST exception's provenance is never overwritten. Retried; a
+// persistent failure is logged (fail-soft like the linkage merge).
+async function stampAssessmentException(estimateId, { callLogId, generation = null, scheduledServiceId }) {
+  const provenance = {
+    call_log_id: String(callLogId),
+    ...(generation != null ? { generation: Number(generation) } : {}),
+    scheduled_service_id: String(scheduledServiceId),
+    at: new Date().toISOString(),
+  };
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await db('estimates')
+        .where({ id: estimateId })
+        .whereRaw("(estimate_data -> 'assessment_exception') is null")
+        .update({
+          estimate_data: db.raw(
+            "jsonb_set(coalesce(estimate_data, '{}'::jsonb), '{assessment_exception}', ?::jsonb)",
+            [JSON.stringify(provenance)],
+          ),
+        });
+      return true;
+    } catch (err) { lastErr = err; }
+  }
+  logger.warn(`[booking-predraft] assessment-exception provenance failed for estimate ${estimateId}: ${lastErr?.message || 'unknown'}`);
+  return false;
+}
+
 async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = null, ownerProcGeneration = null } = {}) {
   try {
     if (!bookingPreDraftsEnabled()) return { drafted: false, skipped: 'gate_off' };
@@ -153,12 +193,8 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
       let passGeneration = ownerProcGeneration;
       if (!passToken && passGeneration == null) {
         try {
-          const liveCall = await db('call_log').where({ id: delegatedCallLogId })
-            .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
-          const { callReprocessInFlight } = require('../../utils/estimate-claim-sql');
-          if (liveCall && !callReprocessInFlight(liveCall) && liveCall.processing_generation != null) {
-            passGeneration = Number(liveCall.processing_generation);
-          }
+          const { settledCallGeneration } = require('../../utils/estimate-claim-sql');
+          passGeneration = await settledCallGeneration(db, delegatedCallLogId);
         } catch (genErr) {
           logger.warn(`[booking-predraft] pass-identity resolve skipped for call ${delegatedCallLogId}: ${genErr.message}`);
         }
@@ -169,7 +205,27 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
         ownerProcToken: passToken || null,
         ownerProcGeneration: passGeneration ?? null,
       });
-      if (outcome?.estimateId) {
+      // codex #4815 r5 P1: a NEWLY created draft is always this pass's own
+      // — safe to link and report as the assessment exception. A RECOVERED
+      // existing draft (outcome.created === false, e.g. a replayed
+      // pre-draft re-finding what it drafted last time) only counts as the
+      // SAME exception when it is already linked to THIS booking —
+      // existingDraftForCall inside the engine returns whatever draft
+      // currently sits open for the CALL, not this booking specifically,
+      // so an untouched pre-existing draft (e.g. one an upstream
+      // agreed-price invalidation failed to archive) must never be
+      // reported, linked, or treated as a valid exception — that would
+      // both wrongly attach a stale/wrong-priced draft to this booking and
+      // tell the post-finalization price-agreed sweep to stand down.
+      let exceptionEstimateId = outcome?.created === true ? outcome.estimateId : null;
+      if (!exceptionEstimateId && outcome?.estimateId) {
+        const alreadyLinked = await db('estimates')
+          .where({ id: outcome.estimateId })
+          .whereRaw("estimate_data ->> 'scheduled_service_id' = ?", [String(booking.id)])
+          .first('id');
+        if (alreadyLinked) exceptionEstimateId = outcome.estimateId;
+      }
+      if (exceptionEstimateId) {
         // The engine stamps its call linkage but not the booking's — merge
         // scheduled_service_id so the draft gets the exact schedule badge
         // and the booking-link collision guard sees it (existing linkage,
@@ -180,13 +236,27 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
         // linked. The draft deliberately stands either way — the quote was
         // promised on the CALL, and cancelling the visit does not cancel
         // the caller's pricing request.
-        await linkEstimateToBooking(outcome.estimateId, booking.id);
+        // Provenance FIRST, unconditionally (codex #4815 r8 P2): the
+        // linkage below may skip a visit that died mid-composition, but
+        // this estimate is still the exception's own and must stay out of
+        // any later agreed-price cleanup.
+        await stampAssessmentException(exceptionEstimateId, {
+          callLogId: delegatedCallLogId,
+          generation: passGeneration ?? null,
+          scheduledServiceId: booking.id,
+        });
+        await linkEstimateToBooking(exceptionEstimateId, booking.id);
       }
       return {
         drafted: outcome?.created === true,
         delegated: 'call_engine',
         lane: outcome?.lane,
-        estimateId: outcome?.estimateId,
+        estimateId: exceptionEstimateId,
+        // The call verdict that refused the delegated insert, if any (codex
+        // #4815 r9 P2): the processor re-runs this pre-draft once when a
+        // QUEUED agreed-price verdict blocked it and its own sweep then
+        // cleared that entry.
+        ...(outcome?.blockedBy ? { blockedBy: outcome.blockedBy } : {}),
       };
     }
 
@@ -338,6 +408,7 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
 }
 
 module.exports = {
+  stampAssessmentException,
   bookingPreDraftsEnabled,
   maybePreDraftForBooking,
   _private: { isAssessmentBooking, TERMINAL_BOOKING_STATUSES },

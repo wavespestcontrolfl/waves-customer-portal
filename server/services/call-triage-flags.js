@@ -1671,6 +1671,67 @@ function deriveEmailReview(extracted = {}) {
 }
 
 /**
+ * V1/V2 email disagreement hold (owner ruling, 2026-09-25). adoptV2PrimaryFields
+ * (server/utils/extraction-compat.js) nulls extracted.email and stamps BOTH
+ * raw candidates onto extracted.email_candidates when the two call extractors
+ * captured normalized-DIFFERENT emails — neither spelled-letter guess is
+ * trustworthy over the other (call 78798d5c: a one-letter-dropped spelled
+ * email, e.g. V1 "janedoee@example.com" vs V2's correct "janedoe@example.com";
+ * V1 won under the old fill-gap rule and wrote the wrong address to the
+ * customer record).
+ *
+ * This runs LAST in the call processor's email pipeline, after the transcript
+ * dictation decoder and its quarantine arbiter have had their turn — neither
+ * of those gets to settle the disagreement either: this call re-nulls
+ * extracted.email (undoing any adopt either pass may have made) and folds
+ * both original candidates into the SAME dictationEmailPayload shape the
+ * processor's decoder-only forced-card path already reads, so the office
+ * sees both spellings on ONE card and resolves it exactly like a single
+ * unverified email today — the standard triage resolve, or a customer-record
+ * edit through the email-correction fanout (customer-email-fanout.js).
+ *
+ * Pure; no side effects. A no-op (returns the inputs unchanged) when
+ * extracted.email_candidates does not carry the two-candidate disagreement
+ * shape.
+ *
+ * @param {object} extracted — the call's canonical (legacy-flat) extraction.
+ * @param {object|null} dictationEmailPayload — the processor's in-flight
+ *   decoder/arbiter payload (may be null — no dictation ran).
+ * @returns {{extracted: object, dictationEmailPayload: object|null}}
+ */
+function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
+  const candidates = Array.isArray(extracted?.email_candidates)
+    ? extracted.email_candidates.filter((v) => v != null && String(v).trim())
+    : [];
+  if (candidates.length < 2) return { extracted, dictationEmailPayload };
+  const [v1Email, v2Email] = candidates;
+  const nextExtracted = { ...extracted, email: null };
+  const payload = { ...(dictationEmailPayload || {}) };
+  const existing = Array.isArray(payload.email_candidates) ? payload.email_candidates.slice() : [];
+  const seen = new Set(existing.map((c) => String(c?.value || '').trim().toLowerCase()));
+  for (const val of [v1Email, v2Email]) {
+    const key = String(val || '').trim().toLowerCase();
+    if (key && !seen.has(key)) {
+      existing.push({ value: val });
+      seen.add(key);
+    }
+  }
+  payload.email_candidates = existing;
+  if (!payload.email_as_heard) payload.email_as_heard = v1Email;
+  if (!payload.confirmation_question) {
+    payload.confirmation_question = `The call's two extraction passes heard different emails — read it back and confirm which is right: "${v1Email}" or "${v2Email}"?`;
+  }
+  payload.email_disagreement = { v1: v1Email, v2: v2Email };
+  // A decisive-sounding arbiter verdict must not silently settle a
+  // disagreement the owner ruled always needs a human — demote it to a
+  // review verdict on the card without discarding its evidence.
+  if (payload.arbiter && (payload.arbiter.verdict === 'adopt' || payload.arbiter.verdict === 'adopt_with_confirmation')) {
+    payload.arbiter = { ...payload.arbiter, verdict: 'review' };
+  }
+  return { extracted: nextExtracted, dictationEmailPayload: payload };
+}
+
+/**
  * Merge needs_confirmation reasons across calls on the same lead. Reasons are
  * read-back reminders that persist until the office confirms them — a later
  * call that never restates the address/email must not erase the earlier call's
@@ -2012,6 +2073,7 @@ module.exports = {
   recordCarriesUnit,
   deriveCallReviewBridge,
   deriveEmailReview,
+  applyEmailDisagreementHold,
   mergeNeedsConfirmation,
   detectRentalSignal,
   streetCompareKey,

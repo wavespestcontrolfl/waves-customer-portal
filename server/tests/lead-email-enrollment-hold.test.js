@@ -31,6 +31,9 @@ jest.mock('../models/db', () => {
     }),
     forUpdate: jest.fn(() => chain),
     select: jest.fn(() => chain),
+    // The round-4 review_status sync counts remaining live cards after the
+    // mint's close/insert step.
+    count: jest.fn(() => ({ first: jest.fn(async () => ({ n: 0 })) })),
     insert: jest.fn(() => { if (mockInsertError) throw mockInsertError; return chain; }),
     onConflict: jest.fn(() => chain),
     ignore: jest.fn(async () => 1),

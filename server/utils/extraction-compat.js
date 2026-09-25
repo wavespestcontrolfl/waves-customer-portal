@@ -301,6 +301,17 @@ function mapCallNatureToLegacy(nature) {
 //     matched_service is fill-gap ON PURPOSE — the deterministic
 //     recurring-intent backstop (owner rule) already ran on the V1 value,
 //     and the enforce path re-adopts + re-asserts it for approved bookings.
+//   • email DISAGREEMENT is the one exception to fill-gap's "V1 present
+//     wins" rule (owner ruling, 2026-09-25 — call 78798d5c: a spelled-out
+//     email had one letter drop between the two legs, e.g. V1 heard
+//     "janedoee@example.com", V2 heard the correct "janedoe@example.com",
+//     and plain fill-gap let V1's wrong spelling win onto the customer
+//     record — a same-day call had the reverse, V1 right and V2 wrong).
+//     Neither extractor's spelled-letter guess is trustworthy over the
+//     other, so when BOTH are present and normalize (trim + lowercase) to
+//     DIFFERENT values, merged.email is nulled and BOTH raw candidates ride
+//     on merged.email_candidates for the read-back card — never picked
+//     here. Equal-normalized values, V1-only, and V2-only are unaffected.
 function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock, callerPhone = null } = {}) {
   const adoptedFields = [];
   if (!isV2Extraction(v2Extraction)) return { merged: extracted, adoptedFields };
@@ -539,8 +550,18 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   const VOICEMAIL_CALL_NATURES = new Set(['voicemail_message', 'silent_or_noise']);
   if (VOICEMAIL_CALL_NATURES.has(v2Extraction.call_nature) && merged.is_voicemail !== true) adopt('is_voicemail', true);
 
-  // Fill-gap tier.
-  filler('email', caller.email);
+  // Fill-gap tier, except email disagreement (see the comment block above
+  // adoptV2PrimaryFields): a normalized-different V1/V2 pair is held for
+  // the read-back card, not fill-gapped.
+  if (has(merged.email) && has(caller.email) && norm(merged.email) !== norm(caller.email)) {
+    const v1Email = merged.email;
+    const v2Email = caller.email;
+    merged.email = null;
+    merged.email_candidates = [v1Email, v2Email];
+    adoptedFields.push('email_disagreement');
+  } else {
+    filler('email', caller.email);
+  }
   // A V2 SPOKEN callback number replaces an empty V1 phone OR a V1 phone that
   // is just the caller-ID echo: normalizeCallExtraction backfills
   // extracted.phone from the Twilio ANI even when V1 heard no callback, so a
