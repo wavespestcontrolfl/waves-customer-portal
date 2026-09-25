@@ -42,7 +42,11 @@ const REQUIRED_TYPES = {
 const ANSWER_TYPES = ['sms', 'call', 'email_delivery'];
 const HUMAN_SMS_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 const SMS_TYPES = { send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirmation'] };
-const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'], technician_follow_up: ['completed'] };
+// Owner ruling 2026-09-24: an "are you still coming" (other) or "call me
+// back" (callback) ask is nullified once the tech is actually moving on the
+// job — en route, on site, or completed all count as visible progress.
+const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'],
+  technician_follow_up: ['completed'], other: ['en_route', 'on_site', 'completed'], callback: ['en_route', 'on_site', 'completed'] };
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
@@ -89,7 +93,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .orWhere((q) => q.where('completed_at', '>', after).where('completed_at', '<=', now))
           .orWhereExists(conn('job_status_history as h').select(conn.raw('1'))
             .whereRaw('h.job_id = scheduled_services.id')
-            .whereIn('h.to_status', ['confirmed', 'rescheduled', 'completed'])
+            .whereIn('h.to_status', ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'])
             .where('h.transitioned_at', '>', after).where('h.transitioned_at', '<=', now))
           // A same-status move writes no status transition; reschedule_log
           // holds the authoritative before/after dates and windows for it.
@@ -105,6 +109,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
           WHERE h.job_id = scheduled_services.id AND h.to_status IN ('confirmed', 'rescheduled')
             AND h.transitioned_at > ? AND h.transitioned_at <= ?) as booked_at`, [after, now]),
+        // Visible field progress on the visit (en route, on site, or
+        // completed) after the request — evidence for an "other"/"callback"
+        // ask like "are you still coming" or "call me back", never a
+        // booking act on its own.
+        conn.raw(`(SELECT MIN(h.transitioned_at) FROM job_status_history h
+          WHERE h.job_id = scheduled_services.id AND h.to_status IN ('en_route', 'on_site', 'completed')
+            AND h.transitioned_at > ? AND h.transitioned_at <= ?) as progressed_at`, [after, now]),
         // A move chain proves a move only when its net result is the visit's
         // current date: the latest logged new date must be that date and the
         // earliest logged original date must not be (a reverted chain). The
@@ -137,7 +148,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     if (result.status === 'rejected') { failures.push(type); return; }
     if (result.value.length > LIMIT) failures.push(`${type}_truncated`);
     for (const row of result.value.slice(0, LIMIT)) {
-      const visitText = type === 'visit' ? `${row.service_type} on ${row.scheduled_date} at ${row.window_start}; status ${row.status}${row.moved_at ? '; moved after the request' : ''}` : '';
+      const visitText = type === 'visit' ? `${row.service_type} on ${row.scheduled_date} at ${row.window_start}; status ${row.status}${row.moved_at ? '; moved after the request' : ''}${row.progressed_at ? '; en route/on site/completed after the request' : ''}` : '';
       const text = row.message_body || row.transcription || row.body_text || row.text_snapshot || row.service_interest || row.title || visitText;
       if (text.length > 16000) failures.push(`${type}_body_truncated`);
       records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, 16000) });
@@ -164,6 +175,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
 
 function visitWitnessAt(record, commitment) {
   const after = new Date(commitment.sms_context?.source_at);
+  // An "are you still coming" (other) or "call me back" (callback) ask is
+  // answered by the tech actually moving on the job, never by a visit that
+  // was merely created or (re)booked after the request — that proves a new
+  // appointment exists, not that anyone showed up or acted on it.
+  if (['other', 'callback'].includes(commitment.kind)) {
+    const progressed = record.progressed_at && new Date(record.progressed_at);
+    return progressed && !Number.isNaN(progressed.getTime()) && progressed > after ? progressed : null;
+  }
   const activity = commitment.kind === 'technician_follow_up' ? record.completed_at : record.created_at;
   // Progress alone does not prove a new booking. For scheduling requests,
   // only creation, a confirmed/rescheduled transition, or a logged date
@@ -187,6 +206,13 @@ function recipientSpecificEstimate(commitment) {
 function scopedToProperty(record, commitment) {
   const propertyId = commitment.sms_context?.property_id;
   const witnessProperty = record.property_id || record.address_property_id;
+  if (!propertyId && record.type === 'visit' && ['other', 'callback'].includes(commitment.kind)) {
+    // The request never named a property (e.g. "you still coming this
+    // morning?" with one active property, or an ambiguous property at
+    // extraction time). Any of this customer's own visits — the evidence
+    // query is already customer-scoped — can still answer it.
+    return true;
+  }
   return !!propertyId && witnessProperty === propertyId;
 }
 
@@ -238,7 +264,11 @@ function witnessTypes(commitment) {
   if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
   // An EMPTY allowlist (reports, paperwork) is deliberate: no channel is a
   // witness until the artifact/recipient proof exists.
-  return REQUIRED_TYPES[commitment.kind] ?? ANSWER_TYPES;
+  const base = REQUIRED_TYPES[commitment.kind] ?? ANSWER_TYPES;
+  // Owner ruling 2026-09-24: visible field progress also nullifies an
+  // "other" or "callback" ask — added on top of whatever channels already
+  // apply (callback: ['call'] → ['call', 'visit']; other: ANSWER_TYPES → +visit).
+  return ['other', 'callback'].includes(commitment.kind) ? [...base, 'visit'] : base;
 }
 // The estimate an estimate-delivery email names, when that estimate is
 // itself admissible post-request evidence for the requested property.
