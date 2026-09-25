@@ -75,10 +75,19 @@ const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'a
 // 'check' is deliberately absent: "please check whether the tech is coming"
 // is not a payment question (Codex #4816 r1). A payment by check reads as
 // "pay"/"paid"/"payment" in practice.
-const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay|card)\b/i;
-function mentionsPayment(commitment) {
+const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay)\b/i;
+// A request to change HOW the customer pays (Lisa Reed: "separate the
+// charges under two payment methods", "update my card", "set up autopay") is
+// not answered by money landing, so a payment is never a witness for it
+// (Codex #4816 r2). 'card' left PAYMENT_MENTION for the same reason.
+const METHOD_CHANGE = /\b(?:method|methods|card|split|separate|update|change|switch|set ?up|cancel|remove|add)\b/i;
+function askText(commitment) {
   const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((item) => item?.quote || '');
-  return PAYMENT_MENTION.test([commitment.description || '', ...quotes].join(' '));
+  return [commitment.description || '', ...quotes].join(' ');
+}
+function mentionsPayment(commitment) {
+  const text = askText(commitment);
+  return PAYMENT_MENTION.test(text) && !METHOD_CHANGE.test(text);
 }
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
@@ -128,6 +137,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       conn('invoices').where({ customer_id: customerId }).where('paid_at', '>', after).where('paid_at', '<=', now)
         .orderBy('paid_at', 'desc').limit(LIMIT + 1)
         .select('id', 'title', 'invoice_number', 'paid_at'),
+      // How many invoices could the question have been about: every invoice
+      // of the customer's that was still unpaid at the moment of the text.
+      // With exactly one, the payment that followed can only be that one and
+      // may close the ask deterministically; with more, which charge the
+      // customer meant is a semantic question for the model (Codex #4816 r2).
+      conn('invoices').where({ customer_id: customerId }).whereNotIn('status', ['draft', 'void', 'cancelled'])
+        .where((q) => q.whereNull('paid_at').orWhere('paid_at', '>', after)).count({ n: 'id' }).first(),
       conn('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'delivered' })
         .whereIn('message_type', PAYMENT_SMS_TYPES)
         .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
@@ -138,10 +154,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // own overflow always trips the shared LIMIT check the generic loop
       // already runs on `payment` — a mixed-source customer can over-flag as
       // truncated (fails closed to review) but never under-flags.
-    ]).then(([invoicesPaid, paymentSms]) => [
-      ...invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice' })),
-      ...paymentSms.map((row) => ({ ...row, payment_source: 'sms' })),
-    ]),
+    ]).then(([invoicesPaid, candidates, paymentSms]) => {
+      const candidate_invoices = Number(candidates?.n || 0);
+      return [
+        ...invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice', candidate_invoices })),
+        ...paymentSms.map((row) => ({ ...row, payment_source: 'sms', candidate_invoices })),
+      ];
+    }),
     visit: conn('scheduled_services').where({ customer_id: customerId })
       .where('created_at', '<=', now)
       .modify((q) => { if (commitment.sms_context?.property_id) q.where({ property_id: commitment.sms_context.property_id }); })
@@ -414,8 +433,12 @@ const SYSTEM_EVENT_TYPES = ['visit', 'payment'];
 const SYSTEM_EVENT_KINDS = ['other', 'callback'];
 function systemEventFulfillment(evidence, commitment) {
   if (!SYSTEM_EVENT_KINDS.includes(commitment.kind)) return null;
+  // A payment closes without the model only when it is the only charge the
+  // question could have been about (one unpaid invoice at the time of the
+  // text). An ambiguous payment stays an admissible witness for the model.
+  const unambiguous = (record) => record.type !== 'payment' || Number(record.candidate_invoices) <= 1;
   const witness = evidence.records.find((record) => SYSTEM_EVENT_TYPES.includes(record.type)
-    && admissibleWitness(record, commitment, evidence.records));
+    && unambiguous(record) && admissibleWitness(record, commitment, evidence.records));
   if (!witness) return null;
   const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
   if (grounded.verdict !== 'fulfilled') return null;
@@ -531,4 +554,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, truncated_channels: ev
   return groundFulfillment(result.json, evidence, commitment);
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, systemEventFulfillment, FULFILLMENT_POLICY, PAYMENT_SMS_TYPES };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, systemEventFulfillment, FULFILLMENT_POLICY, PAYMENT_SMS_TYPES, SYSTEM_EVENT_TYPES };

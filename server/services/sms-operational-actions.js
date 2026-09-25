@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, systemEventFulfillment } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, systemEventFulfillment, SYSTEM_EVENT_TYPES } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -294,6 +294,10 @@ const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 // (legacy behavior — refreshSmsCommitments' null-due branch still applies).
 function resolveDueDeadline(item, messageCreatedAt) {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
+  // Defaults are Waves' own service windows. A customer-owned promise ("I'll
+  // send photos") keeps the legacy undated behavior; a 48h stamp would show
+  // the customer's own action as an overdue follow-up (Codex #4816 r2).
+  if (item.party !== 'waves') return { due_at: null, due_basis: null };
   // The customer DID state a time ("tomorrow at 9 or 10", "mid Oct") that the
   // extractor could not resolve to a clock instant: leave it undated rather
   // than manufacture a per-kind deadline that contradicts what was said
@@ -598,10 +602,15 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     // already answers this ask closes it deterministically — no model call,
     // and `verify` is never invoked for it.
     const systemVerdict = systemEventFulfillment(evidence, current);
-    // Inside an open window only a system event may act; a message witness
-    // (a staff text, a call) waits for the deadline before it costs a model
-    // call, exactly as a stated-deadline row always has.
-    if (!systemVerdict && hasDueDate && !deadlinePassed) {
+    // Inside an open window only a system event may act. For a kind whose
+    // event needs the model's service/scope check (schedule_visit,
+    // technician_follow_up, an ambiguous payment) an admissible visit or
+    // payment record reaches `verify` at once (Codex #4816 r2); a message
+    // witness (a staff text, a call) waits for the deadline before it costs
+    // a model call, exactly as a stated-deadline row always has.
+    const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
+      && admissibleWitness(record, current, evidence.records));
+    if (!systemVerdict && !eventWitness && hasDueDate && !deadlinePassed) {
       skippedNotDue += 1;
       continue;
     }

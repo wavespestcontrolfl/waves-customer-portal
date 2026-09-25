@@ -1193,6 +1193,50 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('Codex #4816 r2: with two unpaid invoices at the time of the text, the later payment reaches the model instead of closing on its own', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+      quote: 'Did my payment go through?', description: 'Did my payment go through?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    await mockPg('invoices').insert([
+      { customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0501', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: after },
+      { customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0502', title: 'Termite deposit', total: 400, status: 'sent', sent_at: new Date(message.created_at.getTime() - 86400000) },
+    ]);
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'different_charge', evidence_hash: 'x', retry_after: null }));
+    // Inside the default 24h window: the admissible payment still reaches the model at once.
+    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(verify.mock.calls[0][1].records.find((r) => r.type === 'payment')).toMatchObject({ candidate_invoices: 2 });
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_not_due: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('Codex #4816 r2: a logged reschedule inside the 24h window reaches the model at once (service check), no bell', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'schedule_visit', due_at: null,
+      quote: 'Can we move to next week?', description: 'Can we move to next week?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const nextWeek = etDateString(new Date(after.getTime() + 7 * 86400000));
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Lawn',
+      scheduled_date: nextWeek, window_start: '09:00:00', status: 'confirmed',
+      created_at: new Date(message.created_at.getTime() - 1000), updated_at: after,
+    }).returning('id');
+    await mockPg('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: etDateString(message.created_at), new_date: nextWeek, initiated_by: 'admin', created_at: after });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'different_service', evidence_hash: 'x', retry_after: null }));
+    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_not_due: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('R2: a delivered payment-confirmation SMS after a payment "other" question closes it', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,

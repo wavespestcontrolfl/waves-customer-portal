@@ -698,37 +698,44 @@ describe('private profile writes', () => {
 describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
   const at = new Date('2040-03-10T15:00:00Z');
   test.each(Object.entries(DEFAULT_DEADLINE_HOURS))('a %s request with no stated due_at defaults to +%ih (due_basis default_kind)', (kind, hours) => {
-    const item = { kind, basis: 'request', due_at: null };
+    const item = { party: 'waves', kind, basis: 'request', due_at: null };
     expect(resolveDueDeadline(item, at)).toEqual({
       due_at: new Date(at.getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind',
     });
   });
 
-  test('any basis=promise obligation defaults to +48h regardless of kind', () => {
-    for (const kind of [...Object.keys(DEFAULT_DEADLINE_HOURS), 'call_back', 'make_payment']) {
-      expect(resolveDueDeadline({ kind, basis: 'promise', due_at: null }, at)).toEqual({
+  test('any Waves basis=promise obligation defaults to +48h regardless of kind', () => {
+    for (const kind of [...Object.keys(DEFAULT_DEADLINE_HOURS), 'send_reschedule_link']) {
+      expect(resolveDueDeadline({ party: 'waves', kind, basis: 'promise', due_at: null }, at)).toEqual({
         due_at: new Date(at.getTime() + PROMISE_DEFAULT_DEADLINE_HOURS * 3600000).toISOString(), due_basis: 'default_kind',
       });
     }
   });
 
+  test('Codex #4816 r2: a customer-owned obligation never gets a default deadline', () => {
+    for (const kind of ['send_photos', 'call_back', 'make_payment', 'other']) {
+      expect(resolveDueDeadline({ party: 'customer', kind, basis: 'promise', due_at: null }, at)).toEqual({ due_at: null, due_basis: null });
+    }
+    expect(resolveDueDeadline({ party: 'customer', kind: 'other', basis: 'request', due_at: null }, at)).toEqual({ due_at: null, due_basis: null });
+  });
+
   test('a stated due_at is kept verbatim with due_basis "stated", never replaced by a default', () => {
     const stated = '2040-03-11T09:00:00.000Z';
-    expect(resolveDueDeadline({ kind: 'callback', basis: 'promise', due_at: stated }, at))
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'promise', due_at: stated }, at))
       .toEqual({ due_at: stated, due_basis: 'stated' });
   });
 
   test('a kind outside the table with no stated due_at falls back to the legacy null-due behavior', () => {
-    expect(resolveDueDeadline({ kind: 'not_a_kind', basis: 'request', due_at: null }, at))
+    expect(resolveDueDeadline({ party: 'waves', kind: 'not_a_kind', basis: 'request', due_at: null }, at))
       .toEqual({ due_at: null, due_basis: null });
   });
 
   test('Codex #4816 r1: a stated-but-unresolved time never gets a manufactured default deadline', () => {
-    expect(resolveDueDeadline({ kind: 'callback', basis: 'request', due_at: null, due_text: 'tomorrow at 9 or 10', timing_unverified: true }, at))
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: 'tomorrow at 9 or 10', timing_unverified: true }, at))
       .toEqual({ due_at: null, due_basis: null });
-    expect(resolveDueDeadline({ kind: 'schedule_visit', basis: 'request', due_at: null, due_text: 'mid Oct' }, at))
+    expect(resolveDueDeadline({ party: 'waves', kind: 'schedule_visit', basis: 'request', due_at: null, due_text: 'mid Oct' }, at))
       .toEqual({ due_at: null, due_basis: null });
-    expect(resolveDueDeadline({ kind: 'callback', basis: 'promise', due_at: null, due_text: 'tomorrow' }, at))
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'promise', due_at: null, due_text: 'tomorrow' }, at))
       .toEqual({ due_at: null, due_basis: null });
   });
 
@@ -847,6 +854,20 @@ describe('fulfillment proof', () => {
       expect(admissibleWitness(visitWitness, commitment)).toBe(true);
       expect(systemEventFulfillment({ records: [visitWitness], failures: [] }, commitment)).toBeNull();
     }
+  });
+
+  test('Codex #4816 r2: a payment-method change request is never answered by a payment; an ambiguous payment waits for the model', () => {
+    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
+    const paid = (candidate_invoices) => ({ id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
+      paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11', candidate_invoices });
+    const lisa = { kind: 'other', description: 'Can you separate the charges under two payment methods?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    expect(admissibleWitness(paid(1), lisa)).toBe(false);
+    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Please update my card on file' })).toBe(false);
+    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Set up autopay for me' })).toBe(false);
+    const francisco = { kind: 'other', description: 'What is the Zelle number?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    expect(admissibleWitness(paid(2), francisco)).toBe(true);
+    expect(systemEventFulfillment({ records: [paid(2)], failures: [] }, francisco)).toBeNull();
+    expect(systemEventFulfillment({ records: [paid(1)], failures: [] }, francisco)).toMatchObject({ reason: 'system_event', record_id: 'invoice-1' });
   });
 
   test('Codex #4816 r1: "check" alone is not a payment question; production confirmation/reschedule-link sends are admissible for their kinds', () => {
