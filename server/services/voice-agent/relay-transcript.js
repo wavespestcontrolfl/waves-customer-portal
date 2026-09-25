@@ -398,9 +398,11 @@ const LATENCY_BOUNDARIES = Object.freeze({
  * "unknown" in relay-conversation's lookup; receiving the event settles it
  * anyway). Only called when the field's own value is already null.
  */
-function reasonForMissingAudioMetric(neededKinds, { subscribed, counts } = {}) {
-  const received = (counts && neededKinds.some((k) => Number(counts[k]) > 0)) || false;
-  if (received) return 'insufficient_turns'; // events flowed; no turn correlated both stamps
+function reasonForMissingAudioMetric(neededKinds, { subscribed, counts, unknown } = {}) {
+  const got = (k) => Number(counts?.[k]) > 0;
+  if (neededKinds.every(got)) return 'insufficient_turns'; // every boundary kind flowed; no turn correlated both stamps
+  if (neededKinds.some(got)) return 'partial_events_received'; // one boundary stream arrived, the other never did (codex r2)
+  if (unknown === true) return 'instrumentation_unknown'; // a leg predates this instrumentation; no observations ≠ zero events
   if (subscribed && subscribed.speaker === false) return 'events_not_subscribed';
   return 'no_events_received'; // subscribed (or unknown) but nothing of this kind arrived
 }
@@ -464,6 +466,7 @@ function summarizeTurnStats(stats = [], meta = {}) {
   const subscribed = (meta && meta.subscribed) || { speaker: null, tokensPlayed: null };
   const counts = (meta && meta.counts) || {};
   const shapes = (meta && meta.shapes) || {};
+  const unknown = Boolean(meta && meta.unknown === true); // a leg with no observability at all (pre-instrumentation record)
 
   // Sibling reasons for whichever of the four audio-derived fields is null —
   // never for prompt_to_first_send / first_token, which are application
@@ -473,7 +476,7 @@ function summarizeTurnStats(stats = [], meta = {}) {
   const missing = {};
   if (turns.length) {
     for (const [field, neededKinds] of Object.entries(AUDIO_METRIC_FIELDS)) {
-      if (audioArrays[field].length === 0) missing[field] = reasonForMissingAudioMetric(neededKinds, { subscribed, counts });
+      if (audioArrays[field].length === 0) missing[field] = reasonForMissingAudioMetric(neededKinds, { subscribed, counts, unknown });
     }
   }
   const missingFields = Object.keys(missing);
@@ -519,6 +522,7 @@ function summarizeTurnStats(stats = [], meta = {}) {
       events_subscribed: { speaker: subscribed.speaker == null ? null : Boolean(subscribed.speaker), tokens_played: subscribed.tokensPlayed == null ? null : Boolean(subscribed.tokensPlayed) },
       events_received: { ...counts },
       event_shapes: { ...shapes },
+      ...(unknown ? { instrumentation_unknown: true } : {}),
     },
   };
 }

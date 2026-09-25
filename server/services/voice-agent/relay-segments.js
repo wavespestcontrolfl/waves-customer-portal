@@ -176,7 +176,14 @@ function hasCompleteSegments(meta, excludedOwner = null) {
  * unioned, first-seen wins per kind (never overwritten by a later leg).
  */
 function aggregateObservability(legs) {
-  const observations = legs.map((leg) => leg?.latency?.observability).filter((o) => o && typeof o === 'object');
+  // Generation order, not close/append order: a resumed socket can append
+  // before the older one drains, and "first-seen wins" for shapes must mean
+  // first in the CALL (codex r2).
+  const ordered = [...legs].sort(compareSegments);
+  const observations = ordered.map((leg) => leg?.latency?.observability).filter((o) => o && typeof o === 'object');
+  // A leg that persisted latency without any observability block predates
+  // this instrumentation: its silence is unknown, never zero events (codex r2).
+  const unknown = observations.length < ordered.filter((leg) => leg?.latency && typeof leg.latency === 'object').length;
   const aggFlag = (key) => {
     const values = observations.map((o) => o.events_subscribed?.[key]);
     if (values.some((v) => v === true)) return true;
@@ -195,7 +202,7 @@ function aggregateObservability(legs) {
       if (!(kind in shapes)) shapes[kind] = shape;
     }
   }
-  return { subscribed: { speaker: aggFlag('speaker'), tokensPlayed: aggFlag('tokens_played') }, counts, shapes };
+  return { subscribed: { speaker: aggFlag('speaker'), tokensPlayed: aggFlag('tokens_played') }, counts, shapes, unknown };
 }
 
 /** Recompute percentiles from observations, never from per-socket percentiles. */

@@ -176,7 +176,9 @@ Reasons:
 | --- | --- |
 | `events_not_subscribed` | The session's relay profile never rendered the needed `events` attribute. |
 | `no_events_received` | Subscribed (or unknown), but not one relevant event arrived this call. |
-| `insufficient_turns` | An event of the needed kind DID arrive this session, but no turn ever carried both boundary stamps together. |
+| `insufficient_turns` | EVERY boundary kind the span needs arrived this session, but no turn ever carried both stamps together. |
+| `partial_events_received` | One boundary stream arrived and the other never did (e.g. `caller_speaking_end` events but no `agent_speaking_start`) — a partial provider-event outage, not a pairing problem. |
+| `instrumentation_unknown` | At least one relay leg was persisted before this instrumentation existed (no `observability` block), so its silence cannot be read as zero events. `observability.instrumentation_unknown: true` marks the row. |
 
 `latency.observability` carries the session-level evidence behind those
 reasons, so a single stored row is enough to diagnose it without pulling

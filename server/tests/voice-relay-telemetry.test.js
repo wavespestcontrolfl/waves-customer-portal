@@ -594,6 +594,27 @@ describe('summarizeTurnStats — every null audio field is explainable (brief §
     expect(s.audio_metrics_reason).toBeUndefined(); // partial, not all four ⇒ the map, not the single reason
   });
 
+  test('partial_events_received — one boundary stream never arrived, so the two-event span is an outage, not a pairing miss (codex r2)', () => {
+    const stats = [turn({ promptAt: 0, firstSendAt: 500 })];
+    const meta = { subscribed: { speaker: true, tokensPlayed: true }, counts: { caller_speaking_end: 3 } };
+    const s = summarizeTurnStats(stats, meta);
+    expect(s.missing).toEqual({
+      endpoint_delay: 'insufficient_turns', // its only kind arrived; no turn carried the stamp
+      stop_to_first_send: 'insufficient_turns',
+      send_to_first_audio: 'no_events_received', // needs agent_speaking_start alone; none came
+      stop_to_first_audio: 'partial_events_received', // needs both; only caller events came
+    });
+  });
+
+  test('instrumentation_unknown — a pre-instrumentation leg makes silence unknown, never zero events (codex r2)', () => {
+    const stats = [turn({ promptAt: 0, firstSendAt: 500 })];
+    const s = summarizeTurnStats(stats, { subscribed: { speaker: null, tokensPlayed: null }, counts: {}, shapes: {}, unknown: true });
+    expect(s.audio_metrics_reason).toBe('instrumentation_unknown');
+    expect(s.observability.instrumentation_unknown).toBe(true);
+    const known = summarizeTurnStats(stats, { subscribed: { speaker: null, tokensPlayed: null }, counts: {} });
+    expect(known.observability.instrumentation_unknown).toBeUndefined();
+  });
+
   test('a received event count is persisted as observability evidence a call row can be diagnosed from alone', () => {
     const meta = {
       subscribed: { speaker: true, tokensPlayed: true },
