@@ -52,7 +52,7 @@ function readContextDb({
   });
   const inbound = {
     id: 'sms-1', customer_id: 'customer-1', direction: 'inbound',
-    from_phone: inboundFrom, to_phone: '+19413529161',
+    from_phone: inboundFrom, to_phone: '+19413187612',
     message_body: 'Thank you!', metadata: { media: [] }, created_at: inboundCreatedAt,
   };
   const rows = [
@@ -197,7 +197,7 @@ test('thread advancement normalizes formatted endpoints and excludes only anchor
   const { dbh, queries } = compilingDb();
   await expect(gratitudeThreadAdvanced(dbh, {
     inboundId: '00000000-0000-4000-8000-000000000002',
-    fromPhone: '+19415550100', toPhone: '+19413529161',
+    fromPhone: '+19415550100', toPhone: '+19413187612',
     skipReservationId: '00000000-0000-4000-8000-000000000099',
   })).resolves.toBe(false);
   expect(queries).toHaveLength(1);
@@ -213,9 +213,9 @@ test('thread advancement normalizes formatted endpoints and excludes only anchor
     '00000000-0000-4000-8000-000000000002',
     '00000000-0000-4000-8000-000000000099',
     '9415550100',
-    '9413529161',
+    '9413187612',
   ]));
-  expect(queries[0].bindings.filter((value) => value === '9413529161')).toHaveLength(3);
+  expect(queries[0].bindings.filter((value) => value === '9413187612')).toHaveLength(3);
 });
 
 test('read context rejects when authoritative queues contain pending work', async () => {

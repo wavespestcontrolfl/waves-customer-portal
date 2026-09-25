@@ -49,9 +49,8 @@ const {
 const {
   jsonObject,
   gratitudeActivation,
-  pendingGratitudeWork,
   readGratitudeContext,
-  gratitudeThreadAdvanced,
+  gratitudeFinalState,
   gratitudeRolloutSettled,
 } = require('./sms-gratitude-context');
 
@@ -624,8 +623,9 @@ async function pinDraftVoiceProfile({ intent, voiceProfileVersion = null }) {
  */
 function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
   return async ({ dbi = db } = {}) => {
-    // Shared readiness first; the mutable thread reads are the LAST awaits
-    // before provider entry, because inbound webhooks do not take the lock.
+    // Shared readiness first; the mutable thread state is the LAST await
+    // before provider entry, read as one statement, because inbound webhooks
+    // and work writers do not take the lock.
     const modeRow = await dbi('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
     const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
       intent: GRATITUDE_INTENT,
@@ -633,16 +633,14 @@ function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
       voiceProfileVersion: eligibilityPin.voiceProfileVersion ?? null,
       gratitudeSourceDigest: eligibilityPin.sourceDigest,
     });
-    const pendingWork = await pendingGratitudeWork(dbi, {
-      customerId: claim.customerId,
-      threadKey: claim.threadKey,
-      excludeDecisionId: claim.decisionId,
-    });
-    const advanced = await gratitudeThreadAdvanced(dbi, {
-      inboundId: claim.inboundId,
-      fromPhone: claim.inboundFromPhone,
-      toPhone: claim.inboundToPhone,
-      skipReservationId: claim.reservationId,
+    const { pendingWork, threadAdvanced: advanced } = await gratitudeFinalState(dbi, {
+      pending: { customerId: claim.customerId, threadKey: claim.threadKey, excludeDecisionId: claim.decisionId },
+      thread: {
+        inboundId: claim.inboundId,
+        fromPhone: claim.inboundFromPhone,
+        toPhone: claim.inboundToPhone,
+        skipReservationId: claim.reservationId,
+      },
     });
     const timing = gratitudeTimingReason({
       inboundCreatedAt: claim.inboundCreatedAt,

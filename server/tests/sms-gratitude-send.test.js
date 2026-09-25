@@ -132,6 +132,15 @@ jest.mock('../models/db', () => {
   });
   db.transaction = jest.fn(async (work) => work(db));
   db.raw = jest.fn(() => ({}));
+  // gratitudeFinalState: every open-work source and thread advancement in
+  // one statement, answered from the same fixture flags.
+  db.first = jest.fn(async () => ({
+    pending_work: [
+      mockState.openRequest, mockState.openCallCommitment, mockState.openSmsCommitment,
+      mockState.openTriage, mockState.openOperatorItem, mockState.pendingDecision,
+    ].some(Boolean),
+    thread_advanced: mockState.threadAdvanced,
+  }));
   return db;
 });
 
@@ -218,7 +227,7 @@ function resetFixture() {
   mockState.customers = [{ id: ID.customer, first_name: 'Dana', phone: '+19415550100' }];
   mockState.inbound = {
     id: ID.inbound, customer_id: ID.customer, direction: 'inbound',
-    from_phone: '+19415550100', to_phone: '+19413529161', message_body: 'Thank you!',
+    from_phone: '+19415550100', to_phone: '+19413187612', message_body: 'Thank you!',
     metadata: { media: [] }, created_at: received,
   };
   mockState.draft = {
@@ -590,6 +599,13 @@ test.each([
   }));
 });
 
+test('thanks sent to a technician line are refused instead of rerouted to the location line', async () => {
+  const techLine = require('../config/twilio-numbers').fieldTech[0].number;
+  mockState.inbound.to_phone = techLine;
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'tech_line_thread' });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
 test('a freshly started instance makes no gratitude claim until the rollout settles', async () => {
   uptime.mockReturnValue(14 * 60);
   mockState.candidateRows = [sweepCandidate()];
@@ -705,6 +721,7 @@ test.each([
   const provider = jest.fn();
   const heldDbi = jest.fn((...args) => db(...args));
   heldDbi.raw = (...args) => db.raw(...args);
+  heldDbi.first = (...args) => db.first(...args);
   sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
     openWork();
     const verdict = await providerPreSendCheck({ dbi: heldDbi });
@@ -719,44 +736,53 @@ test.each([
   expect(suggest.settleReplyHoldingReservation).toHaveBeenLastCalledWith({ reservationId: 'reservation-1' });
 });
 
-test.each([
-  ['thread activity', () => { mockState.threadAdvanced = true; }, 'thread_advanced'],
-  ['gate disable', () => { mockState.gratitudeGate = false; }, 'gate_off'],
-])('%s landing during the pending-work await is caught by the later final checks', async (_label, change, reason) => {
-  const provider = jest.fn();
-  const heldDbi = jest.fn((...args) => {
-    const query = db(...args);
-    if (args[0] === 'service_requests') {
-      const first = query.first;
-      query.first = jest.fn(async (...firstArgs) => {
-        const result = await first(...firstArgs);
-        change();
-        return result;
-      });
-    }
-    return query;
-  });
+test('open work and thread advancement are read in ONE statement, after shared readiness', async () => {
+  const order = [];
+  const heldDbi = jest.fn((...args) => db(...args));
   heldDbi.raw = (...args) => db.raw(...args);
+  heldDbi.first = jest.fn(async (...args) => { order.push('final_state'); return db.first(...args); });
+  graduation.evaluateAutoSendEligibility.mockImplementation(async () => {
+    order.push('eligibility');
+    return { eligible: true, blockers: [] };
+  });
+  sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
+    const verdict = await providerPreSendCheck({ dbi: heldDbi });
+    return verdict.ok
+      ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'d'.repeat(32)}` }
+      : { sent: false, deliveryOutcome: 'not_sent', code: verdict.code };
+  });
+  try {
+    await expect(attempt()).resolves.toMatchObject({ sent: true });
+    expect(heldDbi.first).toHaveBeenCalledTimes(1);
+    expect(order.slice(-2)).toEqual(['eligibility', 'final_state']);
+  } finally {
+    graduation.evaluateAutoSendEligibility.mockImplementation(async () => ({ eligible: true, blockers: [] }));
+  }
+});
+
+test('gate disable landing during the final-state read is caught by the synchronous gate check', async () => {
+  const heldDbi = jest.fn((...args) => db(...args));
+  heldDbi.raw = (...args) => db.raw(...args);
+  heldDbi.first = jest.fn(async (...args) => {
+    const row = await db.first(...args);
+    mockState.gratitudeGate = false;
+    return row;
+  });
+  const provider = jest.fn();
   sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
     const verdict = await providerPreSendCheck({ dbi: heldDbi });
     if (!verdict.ok) return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code };
     provider();
     return { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'d'.repeat(32)}` };
   });
-
-  await expect(attempt()).resolves.toMatchObject({ sent: false, reason });
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'gate_off' });
   expect(provider).not.toHaveBeenCalled();
 });
 
 test('a boundary query failure before provider entry clears the armed reservation', async () => {
   suggest.settleReplyHoldingReservation.mockImplementationOnce(async () => {
     mockState.threadAdvanced = false;
-    const implementation = db.getMockImplementation();
-    db.mockImplementation((table) => {
-      const query = implementation(table);
-      if (table === 'sms_log') query.first = jest.fn(async () => { throw new Error('boundary read failed'); });
-      return query;
-    });
+    db.first.mockImplementationOnce(async () => { throw new Error('boundary read failed'); });
     return true;
   });
   const implementation = db.getMockImplementation();

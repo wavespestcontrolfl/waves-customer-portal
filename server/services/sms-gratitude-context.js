@@ -101,10 +101,13 @@ function mediaCountFromMetadata(value) {
   return metadata && Array.isArray(metadata.media) ? metadata.media.length : null;
 }
 
-async function pendingGratitudeWork(dbh, { customerId, threadKey, excludeDecisionId = null }) {
-  const openRequest = await dbh('service_requests').where({ customer_id: customerId })
-    .whereNotIn(dbh.raw("COALESCE(status, 'new')"), ['resolved', 'closed', 'cancelled']).first('id');
-  if (openRequest) return true;
+// Every open-work source that must keep a courtesy closer from concealing
+// operational work, as [query, id column] pairs. Built fresh per call so the
+// same definitions serve the sequential reader and the one-statement final
+// boundary read.
+function pendingWorkQueries(dbh, { customerId, threadKey, excludeDecisionId = null }) {
+  const openRequest = dbh('service_requests').where({ customer_id: customerId })
+    .whereNotIn(dbh.raw("COALESCE(status, 'new')"), ['resolved', 'closed', 'cancelled']);
 
   const openCallCommitment = dbh('call_commitments as cc')
     .join('call_log as cl', 'cc.call_log_id', 'cl.id')
@@ -118,7 +121,6 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey, excludeDecisio
         )`, [threadKey, threadKey]);
       }
     });
-  if (await openCallCommitment.first('cc.id')) return true;
   const openSmsCommitment = dbh('call_commitments as cc_sms')
     .join('sms_log as s_commitment', 'cc_sms.sms_log_id', 's_commitment.id')
     .where({ 'cc_sms.status': 'open' })
@@ -131,7 +133,6 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey, excludeDecisio
         )`, [threadKey, threadKey]);
       }
     });
-  if (await openSmsCommitment.first('cc_sms.id')) return true;
 
   const triage = dbh('triage_items as ti')
     .leftJoin('call_log as ti_call', 'ti.call_log_id', 'ti_call.id')
@@ -150,7 +151,6 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey, excludeDecisio
         )`, [threadKey, threadKey, threadKey, threadKey]);
       }
     });
-  if (await triage.first('ti.id')) return true;
 
   const operatorItem = dbh('operator_inbox_items as oi')
     .leftJoin('sms_log as oi_sms', function joinSmsSource() {
@@ -166,7 +166,6 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey, excludeDecisio
         )`, [threadKey, threadKey]);
       }
     });
-  if (await operatorItem.first('oi.id')) return true;
 
   const decision = dbh('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
@@ -186,14 +185,30 @@ async function pendingGratitudeWork(dbh, { customerId, threadKey, excludeDecisio
   } else {
     decision.where('ad.customer_id', customerId);
   }
-  return Boolean(await decision.first('ad.id'));
+  return [
+    [openRequest, 'id'],
+    [openCallCommitment, 'cc.id'],
+    [openSmsCommitment, 'cc_sms.id'],
+    [triage, 'ti.id'],
+    [operatorItem, 'oi.id'],
+    [decision, 'ad.id'],
+  ];
 }
 
-async function gratitudeThreadAdvanced(dbh, { inboundId, fromPhone, toPhone, skipReservationId = null }) {
+async function pendingGratitudeWork(dbh, options) {
+  for (const [query, column] of pendingWorkQueries(dbh, options)) {
+    if (await query.first(column)) return true;
+  }
+  return false;
+}
+
+// Any later exchange on the exact endpoint pair, or null when the endpoints
+// cannot be identified (callers treat that as advanced, fail closed).
+function threadAdvancedQuery(dbh, { inboundId, fromPhone, toPhone, skipReservationId = null }) {
   const fromKey = phoneIdentityKey(fromPhone);
   const toKey = phoneIdentityKey(toPhone);
   if (!inboundId || !phoneMatchDigits(fromPhone).length || !phoneMatchDigits(toPhone).length
-      || !fromKey || !toKey) return true;
+      || !fromKey || !toKey) return null;
   const query = dbh('sms_log').whereNot('id', inboundId)
     // Any still-pending outbound owns the exchange, even if queued before
     // this inbound. Only the caller's exact reservation may be excluded.
@@ -217,7 +232,32 @@ async function gratitudeThreadAdvanced(dbh, { inboundId, fromPhone, toPhone, ski
         AND status IN ('accepted','queued','sent','delivered','scheduled','sending'))
     )`, [fromKey, toKey, toKey, toKey, fromKey]);
   if (skipReservationId) query.whereNot('id', skipReservationId);
-  return Boolean(await query.first('id'));
+  return query;
+}
+
+async function gratitudeThreadAdvanced(dbh, options) {
+  const query = threadAdvancedQuery(dbh, options);
+  return !query || Boolean(await query.first('id'));
+}
+
+/**
+ * The final provider-boundary read of mutable thread state as ONE statement:
+ * open work and thread advancement are evaluated against a single snapshot,
+ * so work that commits between two separate reads cannot be missed. Writers
+ * of those tables do not take the thread lock.
+ */
+async function gratitudeFinalState(dbh, { pending, thread }) {
+  const threadQuery = threadAdvancedQuery(dbh, thread);
+  if (!threadQuery) return { pendingWork: false, threadAdvanced: true };
+  const pendingQueries = pendingWorkQueries(dbh, pending);
+  const row = await dbh.first(
+    dbh.raw(
+      `(${pendingQueries.map(() => 'EXISTS (?)').join(' OR ')}) AS pending_work`,
+      pendingQueries.map(([query, column]) => query.select(column)),
+    ),
+    dbh.raw('EXISTS (?) AS thread_advanced', [threadQuery.select('id')]),
+  );
+  return { pendingWork: row?.pending_work === true, threadAdvanced: row?.thread_advanced !== false };
 }
 
 async function readGratitudeContext({
@@ -242,6 +282,10 @@ async function readGratitudeContext({
     [() => !inbound?.created_at || !inbound.from_phone || !inbound.to_phone, 'inbound_unavailable'],
     [() => draft.customer_id !== inbound.customer_id
       || draft.inbound_message !== inbound.message_body, 'immutable_source_mismatch'],
+    // Automated texts never originate from a technician's own line, and
+    // rerouting the reply to the location number would start a separate,
+    // unsolicited thread. Thanks sent to a tech line stay with the tech.
+    [() => require('../config/twilio-numbers').isTechLine(inbound.to_phone), 'tech_line_thread'],
   ].find(([rejected]) => rejected());
   if (sourceFailure) return { ok: false, reason: sourceFailure[1] };
   const timing = gratitudeTimingReason({ inboundCreatedAt: inbound.created_at, now, activatedAt });
@@ -319,5 +363,6 @@ module.exports = {
   mediaCountFromMetadata,
   pendingGratitudeWork,
   gratitudeThreadAdvanced,
+  gratitudeFinalState,
   readGratitudeContext,
 };
