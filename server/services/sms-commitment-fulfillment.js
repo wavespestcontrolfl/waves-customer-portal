@@ -167,7 +167,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         .where('created_at', '>', after).where('created_at', '<=', now)
         .orderBy('created_at', 'desc').limit(LIMIT + 1)
         .select('id', 'amount', 'description', 'payment_date', 'created_at'),
-      conn('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'delivered' })
+      excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'delivered' }))
         .whereIn('message_type', PAYMENT_SMS_TYPES)
         .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
         .where('created_at', '>', after).where('created_at', '<=', now)
