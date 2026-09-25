@@ -192,7 +192,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// V1/V2 email disagreement (owner ruling 2026-09-25, codex round-2 P1): a
+// V1/V2 email disagreement (owner ruling 2026-09-25, codex rounds 2–3): a
 // card carrying `email_disagreement` evidence has NO single confirmed
 // address — the hold's held_email was deliberately cleared to '' because no
 // candidate was ever chosen. Resolving that card as-is (Resolve, or an
@@ -200,24 +200,39 @@ router.get('/', async (req, res) => {
 // terminally, leaves the customer permanently email-less, and strands the
 // pending hold: the ledger sweep explicitly skips blank-target rows
 // (`.whereNot('held_email', '')` in lead-first-touch-resume.js), and a
-// resolved card is never re-surfaced. The correction path that DOES work is
-// editing the customer's email record — customer-email-fanout's
-// propagateCustomerEmailChange retargets the hold and resolves the card
-// itself. Refuse the bare resolution instead of resuming an unconfirmed
-// target: true once EITHER the hold's held_email or the customer's own
-// email is a real, non-blank address.
-async function emailDisagreementConfirmed(trx, callLogId, holdsTable) {
+// resolved card is never re-surfaced.
+//
+// Confirmation provenance is narrower than "some email exists somewhere"
+// (codex round-3 P1): a pre-existing customer email is NOT confirmation —
+// resumeHeldFirstTouch sends the HOLD's held_email, never the customer's
+// stored column, so closing the card on that basis still leaves an
+// unsendable blank hold behind. Exactly two shapes count:
+//   (a) a hold row exists for the call, and it was actually RETARGETED by
+//       an operator correction — nonblank held_email AND corrected_at set
+//       (customer-email-fanout's propagateCustomerEmailChange stamps both
+//       together; this is the only writer that ever sets corrected_at).
+//   (b) no hold row exists at all — a customer-less voicemail lead never
+//       gets one — and the call-linked lead (leads.twilio_call_sid) has a
+//       nonblank email touched AFTER this card was filed (the only
+//       correction path available when there is no customer record to
+//       edit).
+// Nothing else counts, so a Resolve/Accept on an unconfirmed disagreement
+// card refuses with 409 EMAIL_DISAGREEMENT_UNCONFIRMED and the card stays
+// open — a live work item, not a silently-stranded hold.
+async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTable) {
   if (!callLogId) return true;
   if (holdsTable) {
-    const hold = await trx('first_touch_holds').where({ call_log_id: callLogId }).first('held_email');
-    if (String(hold?.held_email || '').trim()) return true;
+    const hold = await trx('first_touch_holds').where({ call_log_id: callLogId }).first('held_email', 'corrected_at');
+    if (hold) return !!(hold.corrected_at && String(hold.held_email || '').trim());
   }
-  const call = await trx('call_log').where({ id: callLogId }).first('customer_id');
-  if (call?.customer_id) {
-    const cust = await trx('customers').where({ id: call.customer_id }).first('email');
-    if (String(cust?.email || '').trim()) return true;
-  }
-  return false;
+  const call = await trx('call_log').where({ id: callLogId }).first('twilio_call_sid');
+  if (!call?.twilio_call_sid) return false;
+  const lead = await trx('leads')
+    .where({ twilio_call_sid: call.twilio_call_sid })
+    .orderBy('updated_at', 'desc')
+    .first('email', 'updated_at');
+  if (!lead || !String(lead.email || '').trim() || !lead.updated_at) return false;
+  return new Date(lead.updated_at).getTime() > new Date(cardCreatedAt).getTime();
 }
 
 // Status transition WITHOUT touching res, so callers can gate side effects (like
@@ -288,6 +303,11 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // address, retained visit) — a stale click must not close the newer
       // obligation (codex r30 P1).
       || item.reason_code === 'auto_booking_skipped_after_approval'
+      // …and email review cards (codex round-3 P1): the client already
+      // sends expected_updated_at on every resolve/dismiss, so a stale view
+      // of a card whose evidence has since changed refuses instead of
+      // settling evidence the operator never saw.
+      || emailReviewCard
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
@@ -297,13 +317,15 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     if (nextStatus === 'resolved' && emailReviewCard) {
       // Judge the LIVE payload, not the route's pre-lock snapshot — a
       // force-reprocess can refresh a plain card into a disagreement one
-      // (or the reverse) while this action waited for the lock.
+      // (or the reverse) while this action waited for the lock (the version
+      // check above already refuses a STALE view; this judges the current
+      // one).
       const livePayloadRaw = live?.payload ?? item.payload;
       const livePayload = typeof livePayloadRaw === 'string'
         ? (() => { try { return JSON.parse(livePayloadRaw); } catch { return null; } })()
         : livePayloadRaw;
       if (livePayload?.email_disagreement
-          && !(await emailDisagreementConfirmed(trx, item.call_log_id, holdsTable))) {
+          && !(await emailDisagreementConfirmed(trx, item.call_log_id, item.created_at, holdsTable))) {
         return { outcome: 'email_disagreement_unconfirmed' };
       }
     }
@@ -1024,6 +1046,8 @@ router.post('/:id/verdict', async (req, res) => {
     if (!OPEN_STATES.includes(item.status)) {
       return res.status(409).json({ error: `Item already ${item.status}` });
     }
+    const { EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
+    const emailReviewCard = EMAIL_REVIEW_REASON_CODES.includes(item.reason_code);
     // Bounce re-verification cards are NOT call-routing judgments — they can
     // arrive DAYS after the call and say nothing about whether the AI routed
     // it correctly. They resolve individually via /resolve; recording an
@@ -1105,8 +1129,13 @@ router.post('/:id/verdict', async (req, res) => {
       // …and recovery tasks, whose window / retained visit a settlement
       // refreshes in place (codex r31 P1): Accept / Deny on them is
       // version-bound the same way.
-      if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {
-        const liveCard = await trx('triage_items').where({ id }).first('updated_at', 'payload');
+      // …and email review cards (codex round-3 P1): the client already
+      // sends expected_updated_at on every verdict, so a stale view of a
+      // card whose evidence has since changed refuses instead of settling
+      // evidence the operator never saw.
+      if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval'
+        || emailReviewCard) {
+        const liveCard = await trx('triage_items').where({ id }).first('updated_at', 'payload', 'created_at');
         const expectedUpdatedAt = req.body?.expected_updated_at || null;
         if (!liveCard || !expectedUpdatedAt
           || new Date(expectedUpdatedAt).getTime() !== new Date(liveCard.updated_at).getTime()) {
@@ -1138,23 +1167,24 @@ router.post('/:id/verdict', async (req, res) => {
         throw Object.assign(new Error('Review or dismiss the reschedule proposal instead of recording a call verdict.'), { proposalConflict: true });
       }
       if (verdict === 'accept') {
-        // Same guard as transitionCore's plain Resolve (codex round-2 P1):
-        // an Accept call verdict bulk-resolves every open card on the call,
-        // including an email_unverified/invalid card carrying an unresolved
-        // V1/V2 disagreement — releasing that without a confirmed address
-        // strands the hold forever (the sweep skips blank held_email rows)
-        // and the closed card leaves no work item to fix it.
-        const { EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
+        // Same guard as transitionCore's plain Resolve (codex round-2/3
+        // P1): an Accept call verdict bulk-resolves every open card on the
+        // call, including an email_unverified/invalid card carrying an
+        // unresolved V1/V2 disagreement — releasing that without confirmed
+        // provenance strands the hold forever (the sweep skips blank
+        // held_email rows) and the closed card leaves no work item to fix
+        // it.
         const openEmailCards = await trx('triage_items')
           .where({ call_log_id: item.call_log_id })
           .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
           .whereIn('status', OPEN_STATES)
-          .select('payload');
+          .select('payload', 'created_at');
         for (const card of openEmailCards) {
           const payload = typeof card.payload === 'string'
             ? (() => { try { return JSON.parse(card.payload); } catch { return null; } })()
             : card.payload;
-          if (payload?.email_disagreement && !(await emailDisagreementConfirmed(trx, item.call_log_id, holdsTable))) {
+          if (payload?.email_disagreement
+              && !(await emailDisagreementConfirmed(trx, item.call_log_id, card.created_at, holdsTable))) {
             emailDisagreementUnconfirmed = true;
             return;
           }
