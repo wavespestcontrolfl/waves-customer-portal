@@ -282,6 +282,47 @@ describe('mintEmailReviewCardsFenced — supersession (codex round 3)', () => {
 // 'open' when the pass has confirmation reasons, so a full-agreement pass
 // never re-closes it, and call-intelligence keeps telling staff to clear a
 // card that no longer exists.
+// Pre-push audit P1 on 77294c72e2: a 'releasing' hold's updated_at is the
+// claimant's lease stamp (resumeHeldFirstTouch settles only while it equals
+// its claim). A full-agreement reconcile (invalidateClaims false) retargets
+// the row without bumping it — same rule as customer-email-fanout's
+// releasing retarget. A pending row still bumps.
+describe('mintEmailReviewCardsFenced — hold retarget leaves a live claim\'s lease stamp alone', () => {
+  const LEASE = new Date('2026-09-24T12:00:00.000Z');
+
+  test('a live releasing row is retargeted without touching updated_at', async () => {
+    const { conn, tables } = fixture({
+      first_touch_holds: [{
+        id: 'hold-1', call_log_id: CALL_ID, customer_id: 'cust-1', status: 'releasing', held_email: '', updated_at: LEASE,
+      }],
+    });
+    wireDb(db, { conn });
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [], callSid: 'CA1', invalidateClaims: false,
+      resolvedEmail: 'janedoe@example.com',
+    });
+    expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+    expect(tables.first_touch_holds[0].updated_at).toBe(LEASE);
+    expect(tables.first_touch_holds[0].status).toBe('releasing');
+  });
+
+  test('a pending row\'s retarget still bumps updated_at', async () => {
+    const { conn, tables } = fixture({
+      first_touch_holds: [{
+        id: 'hold-1', call_log_id: CALL_ID, customer_id: 'cust-1', status: 'pending', held_email: '', updated_at: LEASE,
+      }],
+    });
+    wireDb(db, { conn });
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [], callSid: 'CA1', invalidateClaims: false,
+      resolvedEmail: 'janedoe@example.com',
+    });
+    expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+    expect(tables.first_touch_holds[0].updated_at).not.toBe(LEASE);
+    expect(tables.first_touch_holds[0].updated_at).toBeInstanceOf(Date);
+  });
+});
+
 describe('mintEmailReviewCardsFenced — call_log.review_status sync (codex round 4, finding #4)', () => {
   test('the last live card is superseded with NO replacement → review_status clears to resolved', async () => {
     const { conn, tables } = fixture(); // call_log seeded review_status: 'open'

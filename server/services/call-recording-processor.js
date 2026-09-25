@@ -1749,10 +1749,20 @@ async function mintEmailReviewCardsFenced({
       if (holdsTable) {
         const holdRow = await trx('first_touch_holds').where({ call_log_id: callLogId }).first('held_email', 'corrected_at');
         const target = deriveEmailHoldTarget(emailPassEvidence(cards, resolvedEmail), holdRow);
+        // A PENDING row's retarget bumps updated_at; a RELEASING row's never
+        // does here (pre-push audit P1 on 77294c72e2, same rule as
+        // customer-email-fanout's releasing retarget and admin-triage's
+        // retargetConfirmedHold): its updated_at is the claimant's lease
+        // stamp, and resumeHeldFirstTouch settles only while the stamp still
+        // equals its claim. A full-agreement reconcile (invalidateClaims
+        // false) must leave that claim alone; when the pass DOES invalidate
+        // claims, repenHoldsForFreshEmailReview below does it deliberately.
         await trx('first_touch_holds')
-          .where({ call_log_id: callLogId })
-          .whereIn('status', ['pending', 'releasing'])
+          .where({ call_log_id: callLogId, status: 'pending' })
           .update({ held_email: target.held_email, updated_at: new Date() });
+        await trx('first_touch_holds')
+          .where({ call_log_id: callLogId, status: 'releasing' })
+          .update({ held_email: target.held_email });
       }
       // Mirror admin-triage transitionCore's / triage-auto-resolve's
       // review_status sync (Codex round-4 P1, finding #4): superseding the
