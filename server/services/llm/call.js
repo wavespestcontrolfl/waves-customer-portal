@@ -512,8 +512,20 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
   // are silently not cached — harmless.
   if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
   if (tools) req.tools = tools;
-  if (jsonMode && jsonSchema) req.output_config = { format: { type: 'json_schema', schema: jsonSchema } };
+  if (jsonMode && jsonSchema) req.output_config = { format: { type: 'json_schema', schema: anthropicSchema(jsonSchema) } };
   return req;
+}
+
+// Anthropic's structured-output grammar rejects array cardinality keywords
+// (`For 'array' type, property 'maxItems' is not supported`, a 400 on EVERY
+// call — the SMS operational-actions lane failed 36/36 on 2026-09-24 before
+// its gate was ever on). OpenAI strict mode and Gemini accept them, and the
+// lanes' own Ajv validators still enforce the full schema on the answer, so
+// only the wire copy sent to Anthropic drops them. Deep copy; the caller's
+// schema object is never mutated.
+const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set(['minItems', 'maxItems']);
+function anthropicSchema(schema) {
+  return JSON.parse(JSON.stringify(schema, (key, value) => (ANTHROPIC_UNSUPPORTED_KEYWORDS.has(key) ? undefined : value)));
 }
 
 // The provider's own verdict on a Message, or null when the answer stands.
@@ -706,6 +718,7 @@ function recordDispatchOutcome(policy, outcome) {
 
 module.exports = {
   anthropicText,
+  anthropicSchema,
   // Exported so a caller reasoning about how long one pass can run reads the
   // dispatcher's REAL budget instead of mirroring the number (see
   // utils/claim-ceiling.js).
