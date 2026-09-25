@@ -554,7 +554,22 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
     });
     return { blocked: true };
   }
-  await releaseDraftClaim(draft.id, releaseFields);
+  // Downgrade the stored gauge verdict on the released row so the owner's
+  // rewrite (revise) passes the recheck instead of being held forever
+  // (pre-push audit r6): mode → advise, the no-pitch reason recorded, the
+  // stale owner-only quote dropped. The customer text is untouched — the
+  // owner rewrites it.
+  const heldReason = verdict.blocked === 'owned' ? 'already_owned'
+    : verdict.blocked === 'unavailable' ? 'offer_unavailable' : 'quote_needs_review';
+  const priorReasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
+  const heldFlags = {
+    ...flags,
+    opportunity_mode: 'advise',
+    opportunity_reasons: priorReasons.includes(heldReason) ? priorReasons : [...priorReasons, heldReason],
+    quote: null,
+    offer_recheck_held_at: new Date().toISOString(),
+  };
+  await releaseDraftClaim(draft.id, { ...releaseFields, flags: JSON.stringify(heldFlags) });
   const why = verdict.blocked === 'owned'
     ? `the customer now has ${verdict.family} on their plan`
     : verdict.blocked === 'unavailable'

@@ -68,10 +68,6 @@ const express = require('express');
 const db = require('../models/db');
 const draftsRouter = require('../routes/admin-drafts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const {
-  claimClarifyDispatch,
-  reopenClarifyAfterFailedSend,
-} = require('../services/estimate-clarify-asks');
 
 // Table-keyed queue of chainable builders (house pattern — see
 // admin-drafts-campaign-approve.test.js).
@@ -192,6 +188,13 @@ describe('approve — photo-triage offer recheck wiring', () => {
     expect(release.table).toBe('message_drafts');
     expect(release.payload.status).toBe('pending');
     expect(release.payload.approved_by).toBeNull();
+    // The stored verdict is downgraded so the owner's rewrite passes the
+    // recheck: advise + already_owned, no stale quote.
+    const flags = JSON.parse(release.payload.flags);
+    expect(flags.opportunity_mode).toBe('advise');
+    expect(flags.opportunity_reasons).toContain('already_owned');
+    expect(flags.quote).toBeNull();
+    expect(flags.offer_recheck_held_at).toBeTruthy();
   });
 
   test('figure drifted → 409 PHOTO_TRIAGE_REPRICED and the released row carries the refreshed owner-only figure', async () => {
@@ -262,5 +265,26 @@ describe('revise — photo-triage offer recheck wiring', () => {
     const release = updates[updates.length - 1];
     expect(release.payload.status).toBe('pending');
     expect(release.payload).toMatchObject({ revised_response: null, final_response: null });
+    expect(JSON.parse(release.payload.flags).opportunity_reasons).toContain('offer_unavailable');
+  });
+
+  test('after a hold, the rewritten draft (flags now advise + no-pitch reason) sends without asking the offer core', async () => {
+    const heldFlags = { ...PHOTO_FLAGS, opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null };
+    enqueue('message_drafts', { returning: [photoDraft({ flags: JSON.stringify(heldFlags) })] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
+    enqueue('message_drafts', { update: 1 });
+    // The real recheck short-circuits on a no-pitch reason; here the mock
+    // pins that the route hands it the downgraded flags.
+    mockRecheck.mockImplementation(async ({ flags }) => (flags.opportunity_reasons.includes('already_owned') ? { ok: true } : { blocked: 'owned', family: 'tree_shrub' }));
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM3' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/revise`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Thanks for the photo. Reply if you have questions.' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 });
