@@ -17,7 +17,7 @@ describe('estimate converter termite annual-plan sign-before-pay deferral', () =
     jest.dontMock('../services/estimate-termite-program-rows');
   });
 
-  function makeDb(recurringServices, { annualTotal = 250, estimateUpdate, priorActivationStatus = null } = {}) {
+  function makeDb(recurringServices, { annualTotal = 250, estimateUpdate, priorActivationStatus = null, priorDeferredInvoice = null } = {}) {
     const estimate = {
       id: 'estimate-1',
       status: 'accepted',
@@ -25,6 +25,7 @@ describe('estimate converter termite annual-plan sign-before-pay deferral', () =
       monthly_total: 0,
       annual_total: annualTotal,
       annual_plan_activation_status: priorActivationStatus,
+      annual_plan_deferred_invoice: priorDeferredInvoice,
       estimate_data: {
         recurring: { services: recurringServices },
       },
@@ -41,6 +42,7 @@ describe('estimate converter termite annual-plan sign-before-pay deferral', () =
       if (table === 'estimates') {
         return {
           where: jest.fn().mockReturnThis(),
+          whereNull: jest.fn().mockReturnThis(),
           forUpdate: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue(estimate),
           update: estimateUpdate,
@@ -77,8 +79,9 @@ describe('estimate converter termite annual-plan sign-before-pay deferral', () =
     annualTotal = 250,
     estimateUpdate = jest.fn().mockRejectedValue(new Error('stamp-forced-stop')),
     priorActivationStatus = null,
+    priorDeferredInvoice = null,
   } = {}) {
-    const db = makeDb(recurringServices, { annualTotal, estimateUpdate, priorActivationStatus });
+    const db = makeDb(recurringServices, { annualTotal, estimateUpdate, priorActivationStatus, priorDeferredInvoice });
     const invoiceTrx = jest.fn((table) => db(table));
     invoiceTrx.raw = jest.fn().mockResolvedValue(undefined);
     invoiceTrx.isTransaction = true;
@@ -161,6 +164,26 @@ describe('estimate converter termite annual-plan sign-before-pay deferral', () =
       (call) => call[0] && Object.hasOwn(call[0], 'annual_plan_activation_status'),
     );
     expect(activationStampCalls.length).toBe(0);
+  });
+
+  test('pre-push P1: re-run while still awaiting_signature keeps the ORIGINAL deferred snapshot — no re-snapshot at current pricing, no term, no invoice', async () => {
+    const estimateUpdate = jest.fn().mockResolvedValue(1);
+    const original = { amountCents: 48000, setupFeeCents: 90000, lines: [{ description: 'orig', quantity: 1, unit_price: 480 }], at: '2026-09-01T00:00:00.000Z' };
+    const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+      gateOn: true,
+      estimateUpdate,
+      priorActivationStatus: 'awaiting_signature',
+      priorDeferredInvoice: original,
+    });
+
+    await EstimateConverter.convertEstimate('estimate-1', convertOpts);
+
+    expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+    expect(invoiceService.create).not.toHaveBeenCalled();
+    const snapshotWrites = estimateUpdate.mock.calls.filter(
+      (call) => call[0] && Object.hasOwn(call[0], 'annual_plan_deferred_invoice'),
+    );
+    expect(snapshotWrites.length).toBe(0);
   });
 
   test('gate off: an otherwise-annual-plan estimate converts through the ordinary prepay path unchanged', async () => {

@@ -6914,6 +6914,16 @@ const EstimateConverter = {
               // activation mint a SECOND term/invoice against the same
               // signed agreement (codex P1).
               annualPlanActivationStatus = 'activated';
+            } else if (estimate.annual_plan_activation_status === 'awaiting_signature'
+              && estimate.annual_plan_deferred_invoice) {
+              // Re-run while the customer has not signed yet: the first
+              // snapshot is what the customer accepted and what activation
+              // will bill. Re-snapshotting at CURRENT pricing (a later
+              // WaveGuard/tax/catalog change) would silently change the
+              // amount owed under an agreement already sent for signature
+              // (pre-push P1). Keep the original; the write below is also
+              // guarded on annual_plan_deferred_invoice IS NULL.
+              annualPlanActivationStatus = 'awaiting_signature';
             } else {
               const deferredInvoiceSnapshot = {
                 amountCents: Math.round(annualAmount * 100),
@@ -6946,10 +6956,13 @@ const EstimateConverter = {
                 // function and this write.
                 await database('estimates')
                   .where({ id: estimateId })
-                  .where(function guardNotActivated() {
+                  .where(function guardFirstDeferralOnly() {
                     this.whereNull('annual_plan_activation_status')
                       .orWhereNot('annual_plan_activation_status', 'activated');
                   })
+                  // First snapshot wins (see the awaiting_signature branch
+                  // above): a concurrent re-run must not overwrite it either.
+                  .whereNull('annual_plan_deferred_invoice')
                   .update({
                     annual_plan_activation_status: 'awaiting_signature',
                     annual_plan_deferred_invoice: JSON.stringify(deferredInvoiceSnapshot),
