@@ -134,6 +134,14 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(left.violations).toBe(1);
   });
 
+  test('a missing (null or empty) placket or badge position never fakes a side verdict — Number(null) is 0 (pre-push fallback P1 on 199826df78)', async () => {
+    for (const extra of [{ placket_x: null, chest_badge_x: 440 }, { placket_x: 500, chest_badge_x: null }, { placket_x: '', chest_badge_x: 440 }, { placket_x: '500', chest_badge_x: 560 }]) {
+      const r = await screen({ technicians: [tech(extra)] });
+      expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
+      expect(r.placements).toEqual(['cap', 'chest']);
+    }
+  });
+
   test('a side-facing technician with no chest badge is not flagged, and a side-facing badge\'s side is never judged (facing gates the chest requirement and chestSide)', async () => {
     const sideNoBadge = await screen({ technicians: [tech({ facing: 'side', logo_on: ['cap'] })] });
     expect(sideNoBadge.ok).toBe(true);

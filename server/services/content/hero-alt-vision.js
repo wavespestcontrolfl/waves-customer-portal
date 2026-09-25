@@ -229,7 +229,7 @@ function parseScreen(text, { requireForbidden = false, requirePlacements = false
     if (requirePlacements && !placementsWellFormed(obj)) return null;
     const strings = (v) => (Array.isArray(v) ? v.map((t) => String(t || '').trim()).filter(Boolean) : []);
     return {
-      technicians: Array.isArray(obj.technicians) ? obj.technicians.map((p) => ({ facing: p.facing, placketX: Number(p.placket_x), badgeX: Number(p.chest_badge_x), capVisible: p.cap_front_visible === true, chestVisible: p.chest_visible === true, logoOn: strings(p.logo_on) })) : [],
+      technicians: Array.isArray(obj.technicians) ? obj.technicians.map((p) => ({ facing: p.facing, placketX: position(p.placket_x), badgeX: position(p.chest_badge_x), capVisible: p.cap_front_visible === true, chestVisible: p.chest_visible === true, logoOn: strings(p.logo_on) })) : [],
       elsewhere: strings(obj.waves_logo_elsewhere),
       // Lettering the model attributes to the uniform logo itself — only the
       // logo's own words count (a model cannot launder arbitrary text here).
@@ -252,6 +252,9 @@ const normalizeText = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g
 // away is not a missing chest logo; one branded tech beside an unbranded one
 // is a failure — pre-push P1 on f3efa39462, Codex r3 P2 on #4761).
 const FACING_VALUES = new Set(['camera', 'side', 'away']);
+// An x-position the model actually measured, else NaN (never judged):
+// Number(null) and Number('') are 0, which would fake a side verdict.
+const position = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
 function placementsWellFormed(obj) {
   if (!Array.isArray(obj.technicians) || !Array.isArray(obj.waves_logo_elsewhere)) return false;
   return obj.technicians.every((p) => p && typeof p === 'object' && FACING_VALUES.has(p.facing) && typeof p.cap_front_visible === 'boolean' && typeof p.chest_visible === 'boolean' && Array.isArray(p.logo_on));
