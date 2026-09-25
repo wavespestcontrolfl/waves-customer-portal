@@ -166,6 +166,10 @@ export default function AgentModelsTab() {
     // the whole selector to the registry default (every follower moves).
     const selector = !leg.pinEnv && leg.selector ? selectorByKey[leg.selector] : null;
     const selectorUnpin = selector?.overridden ? selectorUnpinnedModel(selector, selectorByKey) : null;
+    // Unpin deletes THIS lane's own env var, so it is offered whenever that var
+    // is set — including a value the server rejected (`pinned` is false then) —
+    // and not when only a lower env in the chain pins the leg (`pinned` true).
+    const ownPinSet = leg.setEnv !== undefined ? !!leg.setEnv : !!leg.pinned;
     setFind({
       envs: [env],
       accepts: leg.accepts,
@@ -174,9 +178,9 @@ export default function AgentModelsTab() {
       subtitle: siblings.length
         ? `This lane shares its model with ${siblings.length} other${siblings.length === 1 ? "" : "s"}. A change moves all of them.`
         : lane.describe,
-      canUnpin: !!leg.pinned || !!selectorUnpin,
-      unpinLabel: leg.pinned
-        ? `Unpin · follow ${leg.selector || "code default"} (${modelLabel(catalog, leg.unpinnedModel)})`
+      canUnpin: ownPinSet || !!selectorUnpin,
+      unpinLabel: ownPinSet
+        ? `Unpin · follow ${(leg.fallbackPinned && leg.fallbackEnvs?.[0]) || leg.selector || "code default"} (${modelLabel(catalog, leg.unpinnedModel)})`
         : selectorUnpin
           ? `Remove the ${leg.selector} override · back to ${selector.derivesFrom ? `following ${selector.derivesFrom}` : "the registry default"} (${modelLabel(catalog, selectorUnpin)})`
           : null,

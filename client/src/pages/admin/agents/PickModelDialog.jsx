@@ -143,7 +143,7 @@ export default function PickModelDialog({ target, catalog, onClose, onPick }) {
         )}
         {catalogOnly ? (
           <>
-            <div className="text-13 text-ink-secondary">
+            <div className="text-14 text-ink-secondary">
               This lane only runs models already known to this server — the runtime checks a pin against the same list, so live provider search is off here.
             </div>
             <CatalogOnlyResults q={q} target={target} matches={catalogMatches} probing={probing} choose={choose} deepBlocked={deepBlocked} onPick={onPick} />

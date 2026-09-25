@@ -63,21 +63,36 @@ export const selectorUnpinnedModel = (s, selectorByKey) => s.unpinnedModel || (s
 // the composer writes new values to.
 const deleteEnvOf = (c) => c.deleteEnv || c.env;
 
+// Where a leg lands once the draft DELETES its own pin: a lower env in its
+// fallback chain the same draft sets (the server's `fallbackEnvs` —
+// voice_relay's VOICE_RELAY_MODEL under VOICE_RELAY_INBOUND_MODEL), else that
+// chain's current env value when it is set (`fallbackPinned`), else the
+// drafted selector or the server's after-unpin model.
+function unpinnedLegModel(leg, draft, selectorDraft) {
+  for (const env of leg.fallbackEnvs || []) {
+    if (draft[env] && draft[env] !== UNPIN) return draft[env];
+  }
+  if (leg.fallbackPinned) return leg.unpinnedModel;
+  return (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel;
+}
+
 // Effective model for a leg after the draft: a lane pin wins over its
 // selector, exactly as `process.env.PIN || MODELS.TIER` does at boot.
 export function effectiveLegFor(draft, selectorDraft) {
   return (leg) => {
     if (!leg) return null;
-    if (leg.pinEnv && draft[leg.pinEnv] === UNPIN) return (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel;
+    if (leg.pinEnv && draft[leg.pinEnv] === UNPIN) return unpinnedLegModel(leg, draft, selectorDraft);
     if (leg.pinEnv && draft[leg.pinEnv]) return draft[leg.pinEnv];
-    if (leg.pinEnv && leg.pinned) return leg.model;
-    // No pin of its own (or an unset one): still follows whichever lower env
-    // in its fallback chain the server currently resolved through — e.g.
-    // voice_relay follows VOICE_RELAY_MODEL whenever its own
-    // VOICE_RELAY_INBOUND_MODEL override is unset (server's `dependsOnEnvs`).
+    // Its own pin not in effect (unset, or set to a value the server
+    // rejected): still follows whichever lower env in its fallback chain the
+    // server currently resolved through — e.g. voice_relay follows
+    // VOICE_RELAY_MODEL whenever its own VOICE_RELAY_INBOUND_MODEL override is
+    // unset (server's `dependsOnEnvs`). Checked before `pinned`, which is also
+    // true when that lower env is what pins the leg.
     for (const env of leg.dependsOnEnvs || []) {
       if (draft[env] && draft[env] !== UNPIN) return draft[env];
     }
+    if (leg.pinEnv && leg.pinned) return leg.model;
     return (leg.selector && selectorDraft(leg.selector)) || leg.model;
   };
 }
@@ -92,7 +107,17 @@ export const envForLeg = (leg, selectorByKey) => leg.pinEnv || (leg.selector && 
 // ever reports ONE `pinEnv` (the env its own "Change" button writes to), so a
 // shared lower env's change would otherwise be invisible to an exact
 // `pinEnv === env` match — see model-switchboard.js's resolveRef.
-const legFollowsEnv = (leg, env) => leg?.pinEnv === env || !!leg?.dependsOnEnvs?.includes(env);
+// Draft-aware: a leg whose own pin the draft SETS stops following anything
+// below it, and one whose pin the draft DELETES follows its whole fallback
+// chain (the server's `dependsOnEnvs` only describes the pre-draft state).
+const legFollowsEnv = (leg, env, draft = {}) => {
+  if (!leg) return false;
+  if (leg.pinEnv === env) return true;
+  const own = leg.pinEnv && draft[leg.pinEnv];
+  if (own === UNPIN) return !!leg.fallbackEnvs?.includes(env);
+  if (own) return false;
+  return !!leg.dependsOnEnvs?.includes(env);
+};
 
 // Holds that must accompany a selector draft: a LOCKED lane that follows the
 // selector through an unset per-lane env is pinned at its current model, so
@@ -115,8 +140,14 @@ export function holdsFor(data, selectorKey) {
 // derived aliases and locked holds), then pins aggregated by env.
 export function computeChanges({ data, draft, selectorDraft }) {
   if (!data) return [];
-  const pinnedAfterDraft = (leg) => (leg.pinEnv && draft[leg.pinEnv] ? draft[leg.pinEnv] !== UNPIN : !!leg.pinned);
-  const baseAfterDraft = (leg) => (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel || leg.model;
+  const pinnedAfterDraft = (leg) => {
+    const own = leg.pinEnv && draft[leg.pinEnv];
+    if (!own) return !!leg.pinned;
+    if (own !== UNPIN) return true;
+    return !!leg.fallbackPinned || (leg.fallbackEnvs || []).some((e) => draft[e] && draft[e] !== UNPIN);
+  };
+  const baseAfterDraft = (leg) => (leg.pinEnv && draft[leg.pinEnv] === UNPIN ? unpinnedLegModel(leg, draft, selectorDraft) : null)
+    || (leg.selector && selectorDraft(leg.selector)) || leg.unpinnedModel || leg.model;
   const byEnv = new Map();
   for (const s of data.selectors) {
     const drafted = draft[s.env];
@@ -158,8 +189,8 @@ export function computeChanges({ data, draft, selectorDraft }) {
       const next = env && draft[env];
       if (!next || byEnv.has(env)) continue;
       const unpin = next === UNPIN;
-      const sharing = data.lanes.filter((x) => legsOf(x).some((g) => legFollowsEnv(g, env)));
-      const legOf = (x) => legsOf(x).find((g) => legFollowsEnv(g, env));
+      const sharing = data.lanes.filter((x) => legsOf(x).some((g) => legFollowsEnv(g, env, draft)));
+      const legOf = (x) => legsOf(x).find((g) => legFollowsEnv(g, env, draft));
       // Unpinning a shared env can land its lanes on different models — and
       // an UNSET shared env's lanes may sit on different models today (one on
       // its selector, one on a literal default), so setting it moves them all.

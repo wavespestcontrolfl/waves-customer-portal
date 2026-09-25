@@ -478,4 +478,44 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
     expect(inbound.primary.model).toBe('claude-sonnet-5');
     expect(inbound.primary.dependsOnEnvs).toEqual(['VOICE_RELAY_MODEL']);
   });
+
+  it('a rejected override with VOICE_RELAY_MODEL unset is NOT a pin — voice_relay follows the VOICE selector, so a MODEL_VOICE change lists it', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-nope-9000';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.pinned).toBe(false);
+    expect(inbound.primary.selector).toBe('VOICE');
+    // Still deletable from the tab: setEnv names the rejected var.
+    expect(inbound.primary.setEnv).toBe('VOICE_RELAY_INBOUND_MODEL');
+    expect(inbound.primary.via).toMatch(/VOICE_RELAY_INBOUND_MODEL rejected/);
+    // The Models tab's selector-follower filter (`g.selector === key && !g.pinned`).
+    const followers = lanes.filter((l) => [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean)
+      .some((leg) => leg.selector === 'VOICE' && !leg.pinned)).map((l) => l.id);
+    expect(followers).toEqual(expect.arrayContaining(['voice_relay', 'voice_relay_collections']));
+  });
+
+  it('with only VOICE_RELAY_MODEL set, voice_relay is env-pinned (not a VOICE selector follower) and has no own pin to delete', () => {
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.pinned).toBe(true);
+    expect(inbound.primary.setEnv).toBeNull();
+  });
+
+  it('reports the chain below the override (fallbackEnvs / fallbackPinned) even while the override is active, so the composer can resolve an unpin', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.fallbackEnvs).toEqual(['VOICE_RELAY_MODEL']);
+    expect(inbound.primary.fallbackPinned).toBe(true);
+    expect(inbound.primary.unpinnedModel).toBe('claude-sonnet-5');
+    delete process.env.VOICE_RELAY_MODEL;
+    const after = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+    expect(after.primary.fallbackEnvs).toEqual(['VOICE_RELAY_MODEL']);
+    expect(after.primary.fallbackPinned).toBe(false);
+  });
 });

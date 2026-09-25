@@ -78,7 +78,9 @@ function slotStartMinutes(slot) {
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 
-// Env names for the two inbound-only override levers (see the file header).
+// Env names for the two inbound-only override levers (see the file header),
+// used in log/stamp text. The reads below name process.env.VOICE_RELAY_* directly
+// so the switchboard drift guard (model-switchboard-callsites.test.js) sees them.
 // Never read by collections-conversation.js — it keeps reading VOICE_RELAY_MODEL
 // directly, so these two vars have no effect on that flow.
 const INBOUND_MODEL_ENV = 'VOICE_RELAY_INBOUND_MODEL';
@@ -121,10 +123,10 @@ function isAllowedOverrideModel(id) {
 function resolveSessionModel({ sandbox } = {}) {
   const candidates = [];
   if (sandbox === true) {
-    const sandboxRaw = process.env[SANDBOX_MODEL_ENV];
+    const sandboxRaw = process.env.VOICE_RELAY_SANDBOX_MODEL;
     if (sandboxRaw) candidates.push({ source: SANDBOX_MODEL_ENV, value: sandboxRaw });
   }
-  const inboundRaw = process.env[INBOUND_MODEL_ENV];
+  const inboundRaw = process.env.VOICE_RELAY_INBOUND_MODEL;
   if (inboundRaw) candidates.push({ source: INBOUND_MODEL_ENV, value: inboundRaw });
 
   let fallbackReason = null;
@@ -151,7 +153,7 @@ function resolveSessionModel({ sandbox } = {}) {
  * silently diverge on what a real inbound call would pin.
  */
 function resolveInboundModelForReporting() {
-  const raw = process.env[INBOUND_MODEL_ENV];
+  const raw = process.env.VOICE_RELAY_INBOUND_MODEL;
   if (!raw) return { model: MODEL, fallbackReason: null };
   if (isAllowedOverrideModel(raw)) return { model: raw, fallbackReason: null };
   return { model: MODEL, fallbackReason: `unknown_model_override:${INBOUND_MODEL_ENV}=${raw}` };

@@ -841,8 +841,19 @@ function resolveRef(ref) {
       // it — not just to voice_relay_collections, which reads
       // VOICE_RELAY_MODEL directly and has no override of its own to unset.
       const dependsOnEnvs = !parsed ? [...(base.pinEnv ? [base.pinEnv] : []), ...(base.dependsOnEnvs || [])] : [];
+      // `pinned` = the model comes from an env rather than the selector, which
+      // is what the Models tab's selector-follower lists key on (`!g.pinned`).
+      // An override ref.parse REJECTED is set but not in effect: the leg rides
+      // its base, so it is pinned exactly when the base is (VOICE_RELAY_MODEL
+      // set) and otherwise follows the VOICE selector like any unpinned leg.
+      // `setEnv` still names the rejected var so the tab can offer to delete it.
+      const effectivePin = setName ? !!parsed : false;
+      // fallbackEnvs / fallbackPinned: the chain BELOW this leg's own pin,
+      // reported whether or not the pin is active, so the composer can resolve
+      // where the leg lands when a draft DELETES the pin (modelDraft.js).
+      const fallbackEnvs = [...(base.pinEnv ? [base.pinEnv] : []), ...(base.fallbackEnvs || [])];
       const accepts = ref.catalogOnly ? { ...base.accepts, catalogOnly: true } : base.accepts;
-      return { model, selector: base.selector, via: setName ? `${setName} (pinned)` : `${primaryName} → ${base.via}`, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts, dependsOnEnvs };
+      return { model, selector: base.selector, via: effectivePin ? `${setName} (pinned)` : setName ? `${setName} rejected → ${base.via}` : `${primaryName} → ${base.via}`, pinEnv: primaryName, setEnv: setName, pinned: effectivePin || !!base.pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts, dependsOnEnvs, fallbackEnvs, fallbackPinned: !!base.pinned };
     }
     default:
       return null;
