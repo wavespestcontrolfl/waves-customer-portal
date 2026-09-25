@@ -112,14 +112,15 @@ describe('admin requests routes', () => {
       });
       expect(res.status).toBe(200);
       expect(res.headers.get('cache-control')).toBe('private, no-store');
-      expect(await res.json()).toEqual({ photos });
+      expect(await res.json()).toEqual({ photos, unavailableCount: 1 });
     });
   });
 
   test('lists service requests for a technician', async () => {
+    const listQuery = makeChain({ rows: [{ id: 'req-1', status: 'new', subject: 'Ants in kitchen' }] });
     setDb({
       service_requests: [
-        makeChain({ rows: [{ id: 'req-1', status: 'new', subject: 'Ants in kitchen', photoCount: 2 }] }),
+        listQuery,
         makeChain({ first: { count: '1' } }),
       ],
     });
@@ -128,8 +129,9 @@ describe('admin requests routes', () => {
       const res = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer tech' } });
       const body = await res.json();
       expect(res.status).toBe(200);
-      expect(body.requests).toEqual([{ id: 'req-1', status: 'new', subject: 'Ants in kitchen', photoCount: 2 }]);
+      expect(body.requests).toEqual([{ id: 'req-1', status: 'new', subject: 'Ants in kitchen' }]);
       expect(body.total).toBe(1);
+      expect(JSON.stringify(listQuery.select.mock.calls)).not.toMatch(/photos|photoCount/);
     });
   });
 

@@ -97,7 +97,6 @@ router.get('/', async (req, res, next) => {
         'customers.phone as customerPhone',
         'technicians.name as assignedTechnician',
         'service_requests.metadata',
-        db.raw('COALESCE(jsonb_array_length(service_requests.photos), 0)::int as "photoCount"'),
       );
     if (status) query = query.where('service_requests.status', status);
     if (openOnly) query = query.whereNotIn('service_requests.status', TERMINAL_STATUSES);
@@ -146,7 +145,7 @@ router.get('/:id/photos', async (req, res, next) => {
       ? photos.filter((photo) => typeof photo === 'string' && REQUEST_PHOTO_RE.test(photo))
       : [];
     res.set('Cache-Control', 'private, no-store');
-    res.json({ photos: viewable });
+    res.json({ photos: viewable, unavailableCount: Array.isArray(photos) ? photos.length - viewable.length : 0 });
   } catch (err) { next(err); }
 });
 

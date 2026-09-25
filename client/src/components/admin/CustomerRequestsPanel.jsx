@@ -23,12 +23,10 @@ function fmtDate(d) {
 
 function RequestPhotos({ request, detail, onLoad }) {
   const [selectedPhoto, setSelectedPhoto] = useState("");
-  const count = Math.max(0, Number(request.photoCount) || 0);
-  if (count === 0) return null;
   if (!detail) {
     return (
       <Button className="mt-2" variant="secondary" size="sm" onClick={() => onLoad(request.id)}>
-        View {count} {count === 1 ? "photo" : "photos"}
+        Check photos
       </Button>
     );
   }
@@ -41,23 +39,26 @@ function RequestPhotos({ request, detail, onLoad }) {
       </div>
     );
   }
-  if (!detail.photos?.length) return <div className="text-12 text-ink-tertiary mt-2">No request photos are available.</div>;
+  const unavailableCount = Math.max(0, Number(detail.unavailableCount) || 0);
   return (
     <>
-      {detail.photos.length < count && <div className="text-12 text-ink-tertiary mt-2">Some attached photos are unavailable.</div>}
+      {unavailableCount > 0 && <div className="text-12 text-ink-tertiary mt-2">Some attached photos are unavailable.</div>}
+      {!detail.photos?.length && <div className="text-12 text-ink-tertiary mt-2">No request photos are available.</div>}
       {selectedPhoto && (
         <div className="mt-2">
           <img src={selectedPhoto} alt={`Expanded request evidence for ${request.subject}`} className="w-full max-h-[420px] object-contain bg-zinc-50 rounded-sm border-hairline border-zinc-200" />
           <Button className="mt-1.5" variant="secondary" size="sm" onClick={() => setSelectedPhoto("")}>Close photo</Button>
         </div>
       )}
-      <div className="grid grid-cols-3 gap-2 mt-2" aria-label={`Photos for ${request.subject}`}>
-        {detail.photos.map((photo, index) => (
-          <button key={index} type="button" onClick={() => setSelectedPhoto(photo)} aria-label={`Expand photo ${index + 1} for ${request.subject}`}>
-            <img src={photo} alt={`Photo ${index + 1} for ${request.subject}`} className="w-full aspect-square object-cover rounded-sm border-hairline border-zinc-200" />
-          </button>
-        ))}
-      </div>
+      {detail.photos?.length > 0 && (
+        <div className="grid grid-cols-3 gap-2 mt-2" aria-label={`Photos for ${request.subject}`}>
+          {detail.photos.map((photo, index) => (
+            <button key={index} type="button" onClick={() => setSelectedPhoto(photo)} aria-label={`Expand photo ${index + 1} for ${request.subject}`}>
+              <img src={photo} alt={`Photo ${index + 1} for ${request.subject}`} className="w-full aspect-square object-cover rounded-sm border-hairline border-zinc-200" />
+            </button>
+          ))}
+        </div>
+      )}
     </>
   );
 }
@@ -120,7 +121,7 @@ export default function CustomerRequestsPanel({ customerId }) {
   const loadPhotos = useCallback(async (requestId) => {
     setPhotoDetails((current) => ({
       ...current,
-      [requestId]: { loading: true, photos: [], error: "" },
+      [requestId]: { loading: true, photos: [], unavailableCount: 0, error: "" },
     }));
     try {
       const res = await adminFetch(`/admin/requests/${requestId}/photos`);
@@ -128,12 +129,17 @@ export default function CustomerRequestsPanel({ customerId }) {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setPhotoDetails((current) => ({
         ...current,
-        [requestId]: { loading: false, photos: Array.isArray(data.photos) ? data.photos : [], error: "" },
+        [requestId]: {
+          loading: false,
+          photos: Array.isArray(data.photos) ? data.photos : [],
+          unavailableCount: Math.max(0, Number(data.unavailableCount) || 0),
+          error: "",
+        },
       }));
     } catch (e) {
       setPhotoDetails((current) => ({
         ...current,
-        [requestId]: { loading: false, photos: [], error: e?.message || "Could not load photos" },
+        [requestId]: { loading: false, photos: [], unavailableCount: 0, error: e?.message || "Could not load photos" },
       }));
     }
   }, []);
