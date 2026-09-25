@@ -3,6 +3,8 @@
 `GATE_CUSTOMER_PHOTO_ID_ISSUES=true` enables the pest-only issue contract on
 the authenticated `/api/photo-id` API. It is strict opt-in in every
 environment and also requires the existing `GATE_CUSTOMER_PHOTO_ID` surface.
+It requires `GATE_APP_PROPERTY_SCOPE=true`; while that gate is off or no saved
+property resolves, pest submissions return 503 before analysis or persistence.
 
 While enabled, `POST /api/photo-id/pest` accepts optional `issue_id` and
 `observed_on` (`YYYY-MM-DD` or `null`). Omitting `issue_id` creates an issue

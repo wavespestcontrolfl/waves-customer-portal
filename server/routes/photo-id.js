@@ -988,16 +988,10 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
     if (!handler) return res.status(400).json({ error: 'Unknown assessment type' });
 
     const body = req.body || {};
-    let issueAssociation;
-    try {
-      issueAssociation = parseIssueFields(body, {
-        enabled: isEnabled('customerPhotoIdIssues'),
-        type,
-      });
-    } catch (err) {
-      if (err instanceof PhotoIdIssueError) return res.status(err.status).json({ error: err.message });
-      throw err;
-    }
+    const issueAssociation = parseIssueFields(body, {
+      enabled: isEnabled('customerPhotoIdIssues'),
+      type,
+    });
     const validated = validateRequestPhotos(body.photos);
     if (!validated.ok) return res.status(validated.status || 400).json({ error: validated.error });
     if (!validated.photos.length) return res.status(400).json({ error: `Attach at least one photo (up to ${MAX_PHOTOS}).` });
@@ -1064,27 +1058,29 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
     if (scope.closed) {
       return res.status(409).json({ error: `We couldn't find an active property on your account. Please call our office at ${OFFICE_PHONE} and we'll get that fixed.` });
     }
+    // Durable issues require the canonical saved-property identity. Pause all
+    // gate-on pest writes while GATE_APP_PROPERTY_SCOPE is off or cannot
+    // resolve a property, so a nullable issue cannot become unreachable after
+    // a later property-scope rollout.
+    if (issueAssociation.enabled && (!scope.enabled || !scope.property)) {
+      return res.status(503).json({ error: `We couldn't confirm which property this is for right now. Please try again in a few minutes or call our office at ${OFFICE_PHONE}.` });
+    }
     // An issue keeps the resolved property identity even for today's
     // single-property/unscoped session. If that account later gains another
     // property, selecting the original property must still match this issue.
     // Gate off preserves the legacy nullable submission stamp exactly.
-    const propertyId = issueAssociation.enabled && scope.property
+    const propertyId = issueAssociation.enabled
       ? scope.property.id
       : (scope.scoped && scope.property ? scope.property.id : null);
 
     // Existing issues are checked before the paid model call, then locked and
     // checked again in savePestSubmission's transaction before append.
     if (issueAssociation.issueId) {
-      try {
-        await requireOwnedIssue({
-          issueId: issueAssociation.issueId,
-          customerId: req.customer.id,
-          propertyId,
-        });
-      } catch (err) {
-        if (err instanceof PhotoIdIssueError) return res.status(err.status).json({ error: err.message });
-        throw err;
-      }
+      await requireOwnedIssue({
+        issueId: issueAssociation.issueId,
+        customerId: req.customer.id,
+        propertyId,
+      });
     }
 
     return await handler(req, res, {

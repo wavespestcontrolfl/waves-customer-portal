@@ -334,7 +334,12 @@ describe('gate contract', () => {
 });
 
 describe('pest issue association', () => {
-  beforeEach(() => { mockGateState.customerPhotoIdIssues = true; });
+  beforeEach(() => {
+    mockGateState.customerPhotoIdIssues = true;
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: false, scoped: false, closed: false, property: { id: 'prop-primary', is_primary: true },
+    });
+  });
 
   test('creates an issue atomically and keeps a missing observation date unknown', async () => {
     await withServer(async (base) => {
@@ -344,9 +349,59 @@ describe('pest issue association', () => {
       expect(body).toMatchObject({ issue_id: expect.any(String), observed_on: null });
       expect(TABLES.photo_id_issues).toHaveLength(1);
       expect(TABLES.photo_id_issues[0]).toMatchObject({
-        id: body.issue_id, customer_id: mockScopeCustomerId, property_id: null, area: 'front_yard',
+        id: body.issue_id, customer_id: mockScopeCustomerId, property_id: 'prop-primary', area: 'front_yard',
       });
-      expect(TABLES.pest_identifications[0]).toMatchObject({ issue_id: body.issue_id, observed_on: null });
+      expect(TABLES.pest_identifications[0]).toMatchObject({
+        issue_id: body.issue_id, property_id: 'prop-primary', observed_on: null,
+      });
+    });
+  });
+
+  test('blocks issue creation before analysis while property scope is disabled', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: false, multi: false, scoped: false, closed: false, property: null,
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(503);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.photo_id_issues).toHaveLength(0);
+      expect(TABLES.pest_identifications).toHaveLength(0);
+    });
+  });
+
+  test('blocks issue creation before analysis when no saved property resolves', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: false, scoped: false, closed: false, property: null,
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(503);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.photo_id_issues).toHaveLength(0);
+      expect(TABLES.pest_identifications).toHaveLength(0);
+    });
+  });
+
+  test('a scope-gate outage pauses append and re-enable resumes the existing issue', async () => {
+    await withServer(async (base) => {
+      const first = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      mockIdentifyPest.mockClear();
+      mockResolveSessionScope.mockResolvedValue({
+        enabled: false, multi: false, scoped: false, closed: false, property: null,
+      });
+      const paused = await post(base, '/api/photo-id/pest', photoBody({ issue_id: first.issue_id }));
+      expect(paused.status).toBe(503);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.pest_identifications).toHaveLength(1);
+
+      mockResolveSessionScope.mockResolvedValue({
+        enabled: true, multi: false, scoped: false, closed: false, property: { id: 'prop-primary', is_primary: true },
+      });
+      const resumed = await post(base, '/api/photo-id/pest', photoBody({ issue_id: first.issue_id }));
+      expect(resumed.status).toBe(200);
+      expect((await resumed.json()).issue_id).toBe(first.issue_id);
+      expect(TABLES.pest_identifications).toHaveLength(2);
     });
   });
 
