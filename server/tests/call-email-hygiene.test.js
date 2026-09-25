@@ -31,7 +31,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
-const { deriveCallReviewBridge, deriveEmailReview } = require('../services/call-triage-flags');
+const { deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold } = require('../services/call-triage-flags');
 const { alertBouncedContactAddress } = require('../services/email-bounce-recovery');
 
 describe('deriveCallReviewBridge — email', () => {
@@ -107,6 +107,87 @@ describe('deriveEmailReview (mode-independent — enforce/V2-off fallback uses i
       .toEqual({ normalizedEmail: null, needsConfirmation: ['email_invalid'] });
     expect(deriveEmailReview({}))
       .toEqual({ normalizedEmail: null, needsConfirmation: [] });
+  });
+});
+
+// V1/V2 email disagreement hold (owner ruling, 2026-09-25). Gillett call
+// 78798d5c: caller spelled "G-I-L-L-E-T-T, no E at the end, Cole at gmail" —
+// V2 heard it correctly (gillettcole@gmail.com), V1 misheard an extra E
+// (gillettecole@gmail.com), and the OLD fill-gap merge let V1's wrong
+// spelling win onto customer 2234d8e1. Same day, call 6fee5f34 had the
+// reverse (V1 right, V2 wrong) — walshjamie96@ vs jamiewalsh96@gmail.com.
+// adoptV2PrimaryFields (extraction-compat.js) is what detects the
+// disagreement and stamps extracted.email_candidates; this function is the
+// processor-side hold that runs after the transcript dictation decoder.
+describe('applyEmailDisagreementHold', () => {
+  test('no-op when there are fewer than two candidates', () => {
+    expect(applyEmailDisagreementHold({ email: 'a@x.com' }, null))
+      .toEqual({ extracted: { email: 'a@x.com' }, dictationEmailPayload: null });
+    expect(applyEmailDisagreementHold({ email: 'a@x.com', email_candidates: ['a@x.com'] }, null).extracted.email)
+      .toBe('a@x.com');
+  });
+
+  test('Gillett case: nulls extracted.email and files both candidates on a fresh card', () => {
+    const extracted = { email: null, email_candidates: ['gillettecole@gmail.com', 'gillettcole@gmail.com'] };
+    const { extracted: out, dictationEmailPayload } = applyEmailDisagreementHold(extracted, null);
+    expect(out.email).toBeNull();
+    expect(dictationEmailPayload.email_candidates).toEqual([
+      { value: 'gillettecole@gmail.com' },
+      { value: 'gillettcole@gmail.com' },
+    ]);
+    expect(dictationEmailPayload.email_as_heard).toBe('gillettecole@gmail.com');
+    expect(dictationEmailPayload.confirmation_question).toEqual(expect.stringContaining('gillettecole@gmail.com'));
+    expect(dictationEmailPayload.email_disagreement).toEqual({ v1: 'gillettecole@gmail.com', v2: 'gillettcole@gmail.com' });
+  });
+
+  test('Jamie case (reverse): same hold shape regardless of which leg was right', () => {
+    const extracted = { email: null, email_candidates: ['walshjamie96@gmail.com', 'jamiewalsh96@gmail.com'] };
+    const { extracted: out, dictationEmailPayload } = applyEmailDisagreementHold(extracted, null);
+    expect(out.email).toBeNull();
+    expect(dictationEmailPayload.email_candidates.map((c) => c.value))
+      .toEqual(['walshjamie96@gmail.com', 'jamiewalsh96@gmail.com']);
+  });
+
+  test('re-nulls extracted.email even when the dictation decoder already adopted one of the two candidates', () => {
+    // The decoder ran on the transcript and confidently adopted the V1
+    // spelling BEFORE this guard runs — the owner rule still applies: no
+    // heuristic gets to pick when the two extractors disagreed.
+    const extracted = {
+      email: 'gillettecole@gmail.com', // decoder's adopt
+      email_candidates: ['gillettecole@gmail.com', 'gillettcole@gmail.com'],
+    };
+    const priorPayload = { email_candidates: [{ value: 'gillettecole@gmail.com', confidence: 0.9 }] };
+    const { extracted: out, dictationEmailPayload } = applyEmailDisagreementHold(extracted, priorPayload);
+    expect(out.email).toBeNull();
+    // The decoder's own candidate is kept and the V2 candidate is added
+    // (deduped, not duplicated).
+    expect(dictationEmailPayload.email_candidates).toEqual([
+      { value: 'gillettecole@gmail.com', confidence: 0.9 },
+      { value: 'gillettcole@gmail.com' },
+    ]);
+  });
+
+  test('a decisive arbiter verdict is demoted to review, evidence kept', () => {
+    const extracted = { email: null, email_candidates: ['gillettecole@gmail.com', 'gillettcole@gmail.com'] };
+    const priorPayload = { arbiter: { verdict: 'adopt', chosen_value: 'gillettecole@gmail.com', confidence: 0.95 } };
+    const { dictationEmailPayload } = applyEmailDisagreementHold(extracted, priorPayload);
+    expect(dictationEmailPayload.arbiter.verdict).toBe('review');
+    expect(dictationEmailPayload.arbiter.chosen_value).toBe('gillettecole@gmail.com');
+
+    const priorPayload2 = { arbiter: { verdict: 'adopt_with_confirmation', chosen_value: 'gillettecole@gmail.com' } };
+    expect(applyEmailDisagreementHold(extracted, priorPayload2).dictationEmailPayload.arbiter.verdict).toBe('review');
+
+    // A non-decisive verdict (already 'review') is left as-is.
+    const priorPayload3 = { arbiter: { verdict: 'review', chosen_value: null } };
+    expect(applyEmailDisagreementHold(extracted, priorPayload3).dictationEmailPayload.arbiter.verdict).toBe('review');
+  });
+
+  test('does not overwrite an existing email_as_heard / confirmation_question from the decoder', () => {
+    const extracted = { email: null, email_candidates: ['gillettecole@gmail.com', 'gillettcole@gmail.com'] };
+    const priorPayload = { email_as_heard: 'decoder-heard@example.com', confirmation_question: 'Already asking something?' };
+    const { dictationEmailPayload } = applyEmailDisagreementHold(extracted, priorPayload);
+    expect(dictationEmailPayload.email_as_heard).toBe('decoder-heard@example.com');
+    expect(dictationEmailPayload.confirmation_question).toBe('Already asking something?');
   });
 });
 

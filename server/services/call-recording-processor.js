@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -8759,6 +8759,23 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
     }
 
+    // ── V1/V2 email disagreement hold (owner ruling, 2026-09-25) ─────────
+    // adoptV2PrimaryFields already nulled extracted.email and stamped both
+    // raw candidates onto extracted.email_candidates when the legs disagreed
+    // (see extraction-compat.js). Runs LAST — after the dictation decoder and
+    // its quarantine arbiter above, which read a NULL extracted.email and may
+    // have confidently adopted one of the two candidates from transcript
+    // evidence alone. Neither gets final say here: re-null and fold both
+    // candidates into dictationEmailPayload so the standard decoder-only
+    // forced-card path below files ONE card with both spellings for the
+    // office to read back, instead of either extractor's guess winning.
+    if (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2) {
+      const held = applyEmailDisagreementHold(extracted, dictationEmailPayload);
+      extracted = held.extracted;
+      dictationEmailPayload = held.dictationEmailPayload;
+      logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+    }
+
     // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
     // Runs before the routing gate: in enforce mode a recovered street must
     // reach canAutoRoute as the validated verdict it is, or the very garble
@@ -17104,7 +17121,9 @@ const CallRecordingProcessor = {
         { callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt },
         procToken,
       );
-    } else if (customerId && !extracted.email && extracted.email_raw && !v2EmailBlocked
+    } else if (customerId && !extracted.email
+        && (extracted.email_raw || (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2))
+        && !v2EmailBlocked
         && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
       // A DEMOTED address (dictation policy moved the unconfirmed guess to
       // email_raw) still owes this customer the first-touch drip once the
@@ -17113,7 +17132,10 @@ const CallRecordingProcessor = {
       // newsletter hold Step 8 records. The EMPTY held address is inert to
       // every automated release — the invalid-address guard blocks sends
       // and the sweep skips empty-address rows — so only the correction's
-      // explicit address releases it.
+      // explicit address releases it. A V1/V2 email DISAGREEMENT (owner
+      // ruling 2026-09-25) is the same "owed drip, no address to send to"
+      // shape — extracted.email_candidates carries the evidence instead of
+      // email_raw, so it takes the same branch.
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email was demoted to read-back review`);
       beehiivResult = { skipped: 'email_under_review' };
       // Token-fenced through the merge (r44/r45) — see the primary

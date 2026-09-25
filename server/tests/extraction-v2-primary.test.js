@@ -338,11 +338,48 @@ describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
     expect(still.is_spam).toBe(true);
   });
 
-  test('email fills only a gap; a V1-captured email is left for the arbiter lanes', () => {
-    const v1 = { ...v1Stub(), email: 'v1heard@example.com' };
-    const { merged } = adoptV2PrimaryFields(v1, v2Fixture());
-    expect(merged.email).toBe('v1heard@example.com');
+  test('email fills only a gap when V1 has none; V2-only and V1-only are each left alone', () => {
+    // V2-only: V1 empty, V2 fills the gap.
     expect(adoptV2PrimaryFields(v1Stub(), v2Fixture()).merged.email).toBe('rita.example@example.com');
+    // V1-only: V2 absent, V1 stands untouched, no disagreement flagged.
+    const v1Only = { ...v1Stub(), email: 'v1heard@example.com' };
+    const v2NoEmail = v2Fixture({ caller: { ...v2Fixture().caller, email: null } });
+    const { merged: v1OnlyMerged, adoptedFields: v1OnlyFields } = adoptV2PrimaryFields(v1Only, v2NoEmail);
+    expect(v1OnlyMerged.email).toBe('v1heard@example.com');
+    expect(v1OnlyMerged.email_candidates).toBeUndefined();
+    expect(v1OnlyFields).not.toContain('email_disagreement');
+  });
+
+  test('equal-normalized email (case/whitespace only) is left as V1 wrote it, no disagreement', () => {
+    const v1 = { ...v1Stub(), email: ' Rita.Example@Example.com ' };
+    const { merged, adoptedFields } = adoptV2PrimaryFields(v1, v2Fixture());
+    expect(merged.email).toBe(' Rita.Example@Example.com ');
+    expect(merged.email_candidates).toBeUndefined();
+    expect(adoptedFields).not.toContain('email_disagreement');
+  });
+
+  test('email DISAGREEMENT: normalized-different V1/V2 emails hold for the read-back card — neither wins (owner ruling 2026-09-25)', () => {
+    // Gillett call 78798d5c: V1 misheard an extra E, V2 heard it correctly.
+    const v1 = { ...v1Stub(), email: 'gillettecole@gmail.com' };
+    const v2 = v2Fixture({ caller: { ...v2Fixture().caller, email: 'gillettcole@gmail.com' } });
+    const { merged, adoptedFields } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.email).toBeNull();
+    expect(merged.email_candidates).toEqual(['gillettecole@gmail.com', 'gillettcole@gmail.com']);
+    expect(adoptedFields).toContain('email_disagreement');
+
+    // Same-day call 6fee5f34: the reverse — V1 right, V2 wrong. Still holds
+    // both candidates rather than trusting either extractor by default.
+    const v1b = { ...v1Stub(), email: 'walshjamie96@gmail.com' };
+    const v2b = v2Fixture({ caller: { ...v2Fixture().caller, email: 'jamiewalsh96@gmail.com' } });
+    const out2 = adoptV2PrimaryFields(v1b, v2b);
+    expect(out2.merged.email).toBeNull();
+    expect(out2.merged.email_candidates).toEqual(['walshjamie96@gmail.com', 'jamiewalsh96@gmail.com']);
+    expect(out2.adoptedFields).toContain('email_disagreement');
+
+    // Disagreement is normalized (trim + lowercase) — mere case/whitespace
+    // differences must NOT trip this path (covered above), only a genuine
+    // spelling difference does.
+    expect(merged.email_candidates).not.toContain(null);
   });
 
   test('phone adopts only a SPOKEN callback number, never a caller-ID echo', () => {
