@@ -60,13 +60,49 @@ function customerDisplayName(row) {
   return first || null;
 }
 
+/**
+ * Live count of stops still parked for this tech-day — the number of
+ * OPEN tech_out_overflow alerts' units, counted by stop (a grouped unit's
+ * payload.visit_member_ids all count, matching how the stored
+ * redistribution.parked snapshot always counted — one entry per member),
+ * not by card. Read fresh on every call: unlike the stored
+ * `redistribution.parked` summary (frozen at mark-out time, only amended by
+ * the late-arrival sweep), this reflects a dispatcher resolving cards by
+ * hand or an auto-move run resolving them since — a Codex r8 P2 on #4678
+ * (TechOutSection was showing a permanently stale count).
+ */
+async function openParkedStopCount({ technicianId, date, conn = db }) {
+  const rows = await conn('dispatch_alerts')
+    .where({ type: ALERT_TYPE, tech_id: technicianId })
+    .whereNull('resolved_at')
+    .whereRaw("payload->>'date' = ?", [date])
+    .select('job_id', 'payload');
+  if (!rows.length) return 0;
+  // Count STOPS that still need a decision: a card's members (or its own
+  // job) that are still open on the absent tech-day. A grouped card whose
+  // non-representative member was reassigned / completed stays open (its
+  // representative is still parked) but must not keep counting that member.
+  const openIds = new Set((await openStopsForTechDay(conn, { technicianId, date })).map((s) => String(s.id)));
+  const parked = new Set();
+  for (const row of rows) {
+    const payload = (typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload) || {};
+    const ids = Array.isArray(payload.visit_member_ids) && payload.visit_member_ids.length
+      ? payload.visit_member_ids
+      : [row.job_id];
+    for (const id of ids) if (id && openIds.has(String(id))) parked.add(String(id));
+  }
+  return parked.size;
+}
+
 /** The uncleared technician_absences row for a tech+date, or null. */
 async function getTechOut({ technicianId, date, conn = db }) {
   const row = await conn('technician_absences')
     .where({ technician_id: technicianId, absence_date: date })
     .whereNull('cleared_at')
     .first();
-  return row || null;
+  if (!row) return null;
+  const parked_open_count = await openParkedStopCount({ technicianId, date, conn });
+  return { ...row, parked_open_count };
 }
 
 /**
@@ -149,10 +185,13 @@ async function openStopsForTechDay(trx, { technicianId, date }) {
       'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.is_recurring', 'scheduled_services.visit_id',
       'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at',
+      'scheduled_services.track_state',
       'customers.first_name', 'customers.last_name',
     ],
   }).orderBy('scheduled_services.window_start', 'asc');
-  return rows.filter((row) => !isUncommittedHold(row));
+  // A tracker-complete row (geofence auto-completion leaves status as-is) is
+  // a finished visit: never parked, and its open card reconciles away.
+  return rows.filter((row) => !isUncommittedHold(row) && row.track_state !== 'complete');
 }
 
 /**
@@ -299,6 +338,30 @@ async function sweepAbsentTechDays({ now } = {}) {
 }
 
 /** One absence's sweep transaction — see sweepAbsentTechDays. */
+/**
+ * Reconcile (inside the sweep's fenced transaction): an OPEN overflow card
+ * whose stop is no longer an open stop on the absent tech-day — reassigned
+ * by hand, moved, completed, cancelled — is stale, and nothing else closes
+ * it (a manual reassignment never resolves tech_out_overflow). Closed as a
+ * systemic resolution, which covers nothing, so a grouped card's siblings
+ * still on the absent tech are re-parked as their own unit in the same
+ * tick. Mutates the passed alert rows to their resolved state; returns the
+ * number closed.
+ */
+async function closeStaleOverflowCards(trx, alerts, stops) {
+  const openStopIds = new Set(stops.map((s) => String(s.id)));
+  let closed = 0;
+  for (const alert of alerts) {
+    if (alert.resolved_at || !alert.job_id || openStopIds.has(String(alert.job_id))) continue;
+    const row = await resolveAlert({ id: alert.id, resolvedBy: null, trx, auto: true });
+    if (!row) continue;
+    alert.resolved_at = row.resolved_at;
+    alert.payload = row.payload;
+    closed += 1;
+  }
+  return closed;
+}
+
 async function sweepOneAbsence({ absence, technicianId, date }) {
   return db.transaction(async (trx) => {
       // Fence first, same order as every assignment writer (markTechOut's
@@ -316,14 +379,17 @@ async function sweepOneAbsence({ absence, technicianId, date }) {
       if (!stillOut) return { total: 0, units: 0, skipped: 'cleared' };
 
       const stops = await openStopsForTechDay(trx, { technicianId, date });
-      if (stops.length === 0) return { total: 0, units: 0 };
 
       // Open AND resolved alerts for this tech-day: the resolved ones are
       // kept only when a human dismissed them for THIS absence (header).
       const alerts = await trx('dispatch_alerts')
         .where({ type: ALERT_TYPE, tech_id: technicianId })
         .whereRaw("payload->>'date' = ?", [date])
-        .select('job_id', 'payload', 'resolved_at');
+        .select('id', 'job_id', 'payload', 'resolved_at');
+
+      const reconciled = await closeStaleOverflowCards(trx, alerts, stops);
+      if (stops.length === 0) return { total: 0, units: 0, reconciled };
+
       const covered = new Set();
       for (const alert of alerts) {
         const payload = (typeof alert.payload === 'string' ? JSON.parse(alert.payload) : alert.payload) || {};
@@ -343,7 +409,7 @@ async function sweepOneAbsence({ absence, technicianId, date }) {
       }
 
       const uncovered = stops.filter((s) => !covered.has(s.id));
-      if (uncovered.length === 0) return { total: 0, units: 0 };
+      if (uncovered.length === 0) return { total: 0, units: 0, reconciled };
 
       const tech = await trx('technicians').where({ id: technicianId }).first('id', 'name');
       const swept = await parkStops(trx, {
@@ -503,6 +569,7 @@ async function clearTechOut({ technicianId, date, actorId }) {
 module.exports = {
   REASONS,
   ALERT_TYPE,
+  ABSENT_STOP_EXCLUDE_STATUSES,
   ABSENCE_EVENT,
   techOutEnabled,
   getTechOut,
@@ -511,5 +578,7 @@ module.exports = {
   parkTechDay,
   sweepAbsentTechDays,
   rankBumpOrder,
-  _test: { unitsOf, customerDisplayName, isUncommittedHold, unitRankingFields },
+  _test: {
+    unitsOf, customerDisplayName, isUncommittedHold, unitRankingFields, openParkedStopCount,
+  },
 };

@@ -2784,6 +2784,14 @@ const gates = {
   // (services/tech-out.js, routes/admin-tech-out.js) read gateEnvValue at
   // CALL time.
   techOutRedistribute: gateEnvValue('GATE_TECH_OUT_REDISTRIBUTE'),
+  // Tech-out AUTO-MOVE (PR B, on top of the park-only foundation above):
+  // takes one open tech_out_overflow alert and tries the canonical rebooker
+  // (SmartRebooker.reschedule) at the SAME date + window before leaving it
+  // parked for a human. Requires GATE_TECH_OUT_REDISTRIBUTE ON too (checked
+  // together by techOutAutoMoveEnabled() in services/tech-out-auto-move.js —
+  // the canonical CALL-TIME reader); this entry is for logGateStatus only.
+  // Sends no customer communication (see that file's header).
+  techOutAutoMove: gateEnvValue('GATE_TECH_OUT_AUTO_MOVE'),
   // Nightly recurring-series top-up: keeps every ongoing recurring plan
   // booked out to RECURRING_TOPUP_HORIZON_DAYS (default 365) instead of
   // relying solely on the completion-time auto-extend (which only fires when

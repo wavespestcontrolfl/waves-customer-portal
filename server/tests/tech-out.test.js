@@ -110,7 +110,7 @@ jest.mock('../models/db', () => {
           && (dateFilter === undefined || (a.payload && a.payload.date === dateFilter))
         ));
         const shaped = wantsPayload
-          ? rows.map((a) => ({ job_id: a.job_id, payload: a.payload, resolved_at: a.resolved_at || null }))
+          ? rows.map((a) => ({ id: a.id, job_id: a.job_id, payload: a.payload, resolved_at: a.resolved_at || null }))
           : rows.map((a) => ({ id: a.id }));
         return Promise.resolve(shaped).then(res, rej);
       };
@@ -394,6 +394,36 @@ describe('getTechOut / clearTechOut', () => {
     expect(await getTechOut({ technicianId: TECH.id, date: DATE })).toBeNull();
     await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
     expect(await getTechOut({ technicianId: TECH.id, date: DATE })).toMatchObject({ technician_id: TECH.id, absence_date: DATE });
+  });
+
+  // Codex r8 P2 on #4678: the drawer's parked count must reflect a
+  // dispatcher (or an auto-move run) resolving cards by hand, not just the
+  // frozen mark-out snapshot — parked_open_count is read fresh every call.
+  test('parked_open_count is a live read of OPEN overflow alerts, one stop per visit_member_ids entry (or 1 for an ungrouped card)', async () => {
+    await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'j1' }), stop({ id: 'm1', visit_id: 'v' }), stop({ id: 'm2', visit_id: 'v' })]));
+    db.__state.alerts.push(
+      { id: 'a1', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'j1', resolved_at: null, payload: { date: DATE } },
+      { id: 'a2', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'm1', resolved_at: null, payload: { date: DATE, visit_member_ids: ['m1', 'm2'] } },
+      // Resolved already — never counted.
+      { id: 'a3', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: 'now', payload: { date: DATE } },
+      // A different date's card for the same tech — never counted.
+      { id: 'a4', type: ALERT_TYPE, tech_id: TECH.id, resolved_at: null, payload: { date: '2099-01-01' } },
+    );
+    expect((await getTechOut({ technicianId: TECH.id, date: DATE })).parked_open_count).toBe(3);
+
+    db.__state.alerts.find((a) => a.id === 'a1').resolved_at = 'now';
+    expect((await getTechOut({ technicianId: TECH.id, date: DATE })).parked_open_count).toBe(2);
+  });
+
+  test('parked_open_count drops a grouped member that left the absent day while its card stays open', async () => {
+    await markTechOut({ technicianId: TECH.id, date: DATE, reason: 'sick', actorId: ACTOR });
+    db.__state.alerts.push(
+      { id: 'g', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'm1', resolved_at: null, payload: { date: DATE, visit_member_ids: ['m1', 'm2', 'm3'] } },
+    );
+    // m3 was reassigned by hand; m1 (the representative) and m2 remain.
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'm1', visit_id: 'v' }), stop({ id: 'm2', visit_id: 'v' })]));
+    expect((await getTechOut({ technicianId: TECH.id, date: DATE })).parked_open_count).toBe(2);
   });
 
   test('clearTechOut locks the row, stamps cleared_at/by, and resolves that day\'s open overflow alerts on the same trx (auto: true)', async () => {
@@ -722,7 +752,9 @@ describe('sweepAbsentTechDays', () => {
     db.__state.absences['absence-1'] = {
       id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
     };
-    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'member-b', visit_id: 'v1' })]));
+    // The card's own stop (member-a) is still open on the absent day, so the
+    // card stands and keeps covering its sibling.
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'member-a', visit_id: 'v1' }), stop({ id: 'member-b', visit_id: 'v1' })]));
     db.__state.alerts.push({
       id: 'alert-x',
       type: ALERT_TYPE,
@@ -736,6 +768,58 @@ describe('sweepAbsentTechDays', () => {
 
     expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
     expect(createAlert).not.toHaveBeenCalled();
+    expect(resolveAlert).not.toHaveBeenCalled();
+  });
+
+  test('a tracker-complete stop (status still confirmed) is never parked, and its open card reconciles away', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'done-by-geofence', track_state: 'complete' })]));
+    db.__state.alerts.push({
+      id: 'alert-done', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'done-by-geofence', resolved_at: null, payload: { date: DATE },
+    });
+
+    const result = await sweepAbsentTechDays();
+
+    expect(result).toEqual({ absences: 1, parked: 0, failed: 0 });
+    expect(createAlert).not.toHaveBeenCalled();
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-done', auto: true }));
+  });
+
+  test('reconcile: an open card whose stop left the absent day is closed systemically, never left as a phantom', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([]));
+    db.__state.alerts.push({
+      id: 'alert-gone', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'reassigned-by-hand', resolved_at: null, payload: { date: DATE },
+    });
+
+    await sweepAbsentTechDays();
+
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-gone', auto: true }));
+    expect(createAlert).not.toHaveBeenCalled();
+  });
+
+  test('reconcile: a grouped card whose representative left is closed and its sibling still on the absent tech is re-parked as its own unit, same tick', async () => {
+    process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+    db.__state.absences['absence-1'] = {
+      id: 'absence-1', technician_id: TECH.id, absence_date: DATE, reason: 'sick', cleared_at: null,
+    };
+    dayStopsQuery.mockImplementation(() => fakeQuery([stop({ id: 'member-b', visit_id: 'v1' })]));
+    db.__state.alerts.push({
+      id: 'alert-x', type: ALERT_TYPE, tech_id: TECH.id, job_id: 'member-a', resolved_at: null,
+      payload: { date: DATE, visit_member_ids: ['member-a', 'member-b'] },
+    });
+
+    const result = await sweepAbsentTechDays();
+
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-x', auto: true }));
+    expect(result).toEqual({ absences: 1, parked: 1, failed: 0 });
+    expect(createAlert.mock.calls[0][0]).toMatchObject({ jobId: 'member-b' });
   });
 
   test('an alert open on a DIFFERENT date does not cover a same-id stop (payload->>date scoping)', async () => {

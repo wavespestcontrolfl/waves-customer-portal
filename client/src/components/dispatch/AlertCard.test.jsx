@@ -135,6 +135,40 @@ describe('tech_out_overflow alert', () => {
     expect(screen.getByText(/is out \(emergency\)/)).toBeTruthy();
     expect(screen.getByText(/Demo Customer/)).toBeTruthy();
   });
+
+  it('shows payload.auto_attempt.reason in plain words when present (PR B, GATE_TECH_OUT_AUTO_MOVE)', () => {
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_out_overflow', severity: 'warn', created_at: new Date().toISOString(),
+      tech_name: 'Tech One',
+      payload: {
+        date: '2026-09-24', reason: 'sick', absent_tech_name: 'Tech One',
+        auto_attempt: { at: new Date().toISOString(), reason: 'no_eligible_candidate' },
+      },
+    }} />);
+    expect(screen.getByText('No eligible technician was free to take it automatically')).toBeTruthy();
+  });
+
+  it('shows a plain-words line for a grouped-visit auto-attempt reason', () => {
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_out_overflow', severity: 'warn', created_at: new Date().toISOString(),
+      tech_name: 'Tech One',
+      payload: {
+        date: '2026-09-24', reason: 'sick', absent_tech_name: 'Tech One',
+        auto_attempt: { at: new Date().toISOString(), reason: 'grouped_visit_manual' },
+      },
+    }} />);
+    expect(screen.getByText('Part of a grouped visit — needs a manual decision')).toBeTruthy();
+  });
+
+  it('renders no auto_attempt line when the payload carries none', () => {
+    render(<AlertCard alert={{
+      id: 'alert', type: 'tech_out_overflow', severity: 'warn', created_at: new Date().toISOString(),
+      tech_name: 'Tech One',
+      payload: { date: '2026-09-24', reason: 'sick', absent_tech_name: 'Tech One' },
+    }} />);
+    expect(screen.queryByText(/needs a manual decision/)).toBeNull();
+    expect(screen.queryByText(/automatically/)).toBeNull();
+  });
 });
 
 describe('Open job action', () => {

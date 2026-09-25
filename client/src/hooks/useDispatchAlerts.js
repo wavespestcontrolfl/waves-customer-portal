@@ -28,7 +28,7 @@
  * socket connection routes through the same socketAuth middleware
  * (PR #279/#284) and joins dispatch:admins automatically.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -56,6 +56,46 @@ function socketOrigin() {
 
 // Same-timestamp tie-break (one tech-out batch): lower bump_order first;
 // rows without one keep their relative order.
+// Window event the tech-out drawer listens to: an overflow card for
+// detail.tech_id appeared, changed, or resolved (any dispatcher).
+export const TECH_OUT_ALERTS_EVENT = 'waves:tech-out-alerts-changed';
+const TECH_OUT_ALERT_TYPE = 'tech_out_overflow';
+
+function relayTechOutAlertChange(alert) {
+  if (!alert || alert.type !== TECH_OUT_ALERT_TYPE) return;
+  try { window.dispatchEvent(new CustomEvent(TECH_OUT_ALERTS_EVENT, { detail: { tech_id: alert.tech_id } })); } catch { /* non-DOM env */ }
+}
+
+// dispatch:alert for an unknown id prepends a new card; for a card already on
+// screen it is an update, merged over the existing card so hydrated join
+// fields (customer / tech names) survive.
+// Initial GET merged with live rows. The fetched row supplies enriched
+// fields (tech_name, customer, address); a live row that arrived while the
+// GET was in flight is newer and its own fields win; a card that resolved
+// meanwhile is not resurrected. Newest first; a tech-out batch shares one
+// created_at (one transaction), so its cards fall back to bump_order.
+export function mergeHydration(prev, fetched, resolvedIds = null) {
+  const byId = new Map();
+  for (const a of prev) byId.set(a.id, a);
+  for (const a of fetched) {
+    if (resolvedIds && resolvedIds.has(a.id)) continue;
+    const live = byId.get(a.id);
+    byId.set(a.id, live ? { ...a, ...live } : a);
+  }
+  return Array.from(byId.values()).sort(
+    (a, b) => (new Date(b.created_at) - new Date(a.created_at)) || bumpOrderTieBreak(a, b)
+  );
+}
+
+// A broadcast for an id this board already saw resolve (or a row that is
+// itself resolved) is stale — e.g. an auto-move annotation delivered after a
+// concurrent dispatcher resolve — and must never resurrect a phantom card.
+export function mergeAlertBroadcast(prev, payload, resolvedIds = null) {
+  if (payload.resolved_at || (resolvedIds && resolvedIds.has(payload.id))) return prev;
+  if (!prev.some((a) => a.id === payload.id)) return [payload, ...prev];
+  return prev.map((a) => (a.id === payload.id ? { ...a, ...payload } : a));
+}
+
 export function bumpOrderTieBreak(a, b) {
   const ao = Number(a?.payload?.bump_order);
   const bo = Number(b?.payload?.bump_order);
@@ -67,6 +107,30 @@ export function bumpOrderTieBreak(a, b) {
 
 export function useDispatchAlerts() {
   const [alerts, setAlerts] = useState([]);
+  // Mirror for socket handlers (type / tech_id of a card being resolved —
+  // the resolved broadcast carries only the id) and the ids seen resolving.
+  const alertsRef = useRef(alerts);
+  alertsRef.current = alerts;
+  const resolvedIdsRef = useRef(new Set());
+
+  // Every way a card resolves — the socket broadcast, this tab's own PATCH,
+  // resolve-all — records the tombstone (so a late dispatch:alert cannot
+  // resurrect it, even if the socket packet was lost) and relays a tech-out
+  // card change to the drawer, then drops the cards.
+  const markResolved = useCallback((ids) => {
+    const gone = new Set(ids);
+    if (!gone.size) return;
+    for (const id of gone) {
+      resolvedIdsRef.current.add(id);
+      const known = alertsRef.current.find((a) => a.id === id);
+      // A card this board never saw (resolved before hydration landed) could
+      // be anyone's tech-out card: relay it as tech_id null so an open drawer
+      // re-reads its count rather than keep a stale one.
+      if (known) relayTechOutAlertChange(known);
+      else relayTechOutAlertChange({ type: TECH_OUT_ALERT_TYPE, tech_id: null });
+    }
+    setAlerts((prev) => prev.filter((a) => !gone.has(a.id)));
+  }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -90,20 +154,9 @@ export function useDispatchAlerts() {
         // row gets dropped — the GET response was generated from an
         // earlier DB snapshot. Codex P1 on PR #306.
         //
-        // Dedupe by id. Hydration row wins on conflict because it
-        // carries enriched fields (tech_name, customer, address) that
-        // the bare broadcast row doesn't have. Live rows whose ids
-        // aren't in the hydration response are preserved as-is.
-        setAlerts((prev) => {
-          const byId = new Map();
-          for (const a of prev) byId.set(a.id, a);
-          for (const a of fetched) byId.set(a.id, a);
-          return Array.from(byId.values()).sort(
-            // Newest first; a tech-out batch shares one created_at (one
-            // transaction), so its cards fall back to bump_order (#1 first).
-            (a, b) => (new Date(b.created_at) - new Date(a.created_at)) || bumpOrderTieBreak(a, b)
-          );
-        });
+        // Dedupe by id — see mergeHydration (live fields win over the
+        // enriched snapshot; resolved cards stay gone).
+        setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current));
         setLoading(false);
       } catch (err) {
         if (cancelled) return;
@@ -128,21 +181,21 @@ export function useDispatchAlerts() {
 
     function handleAlert(payload) {
       if (!payload || !payload.id) return;
-      // Prepend new alert to the top of the list. Dedupe by id in
-      // case a hydration response and a broadcast race for the same
-      // row.
-      setAlerts((prev) => {
-        if (prev.some((a) => a.id === payload.id)) return prev;
-        return [payload, ...prev];
-      });
+      // Prepend new alert to the top of the list. A broadcast for a card
+      // already on screen is an UPDATE (e.g. tech-out auto-assign stamping
+      // payload.auto_attempt): merge it over the existing card so hydrated
+      // join fields (customer/tech names) survive — which also dedupes a
+      // hydration response racing the create broadcast for the same row.
+      if (payload.resolved_at || resolvedIdsRef.current.has(payload.id)) return;
+      setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
+      relayTechOutAlertChange(payload);
     }
 
     function handleResolved(payload) {
       if (!payload || !payload.id) return;
-      // Drop the resolved alert by id. The PATCH caller already did
-      // the same removal optimistically, so this is a no-op for that
-      // session and the actual drop for every other dispatcher.
-      setAlerts((prev) => prev.filter((a) => a.id !== payload.id));
+      // The PATCH caller already dropped it optimistically, so this is a
+      // no-op for that session and the actual drop for everyone else.
+      markResolved([payload.id]);
     }
 
     socket.on('dispatch:alert', handleAlert);
@@ -171,9 +224,9 @@ export function useDispatchAlerts() {
       { method: 'PATCH', headers: adminAuthHeaders() }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    setAlerts((prev) => prev.filter((a) => a.id !== id));
+    markResolved([id]);
     return res.json();
-  }, []);
+  }, [markResolved]);
 
   const clearAlerts = useCallback(async () => {
     const res = await fetch(
@@ -182,12 +235,9 @@ export function useDispatchAlerts() {
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    const clearedIds = new Set(Array.isArray(data.alert_ids) ? data.alert_ids : []);
-    setAlerts((prev) => (
-      clearedIds.size > 0 ? prev.filter((a) => !clearedIds.has(a.id)) : prev
-    ));
+    markResolved(Array.isArray(data.alert_ids) ? data.alert_ids : []);
     return data;
-  }, []);
+  }, [markResolved]);
 
   return { alerts, loading, error, resolveAlert, clearAlerts };
 }
