@@ -149,6 +149,33 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('notification_prefs').where({ customer_id: outsider }).first()).toBeUndefined();
   });
 
+  test('billing profile merge stores native arrays and rolls back conflicting explicit or legacy choices', async () => {
+    const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
+    const dedupe = require('../services/customer-dedupe');
+    const merge = () => mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
+    const columns = Object.values(require('../services/billing-delivery-channels').BILLING_DELIVERY_FIELDS);
+    await mockPg('notification_prefs').where({ customer_id: outsider })
+      .update(Object.fromEntries(columns.map((column) => [column, ['push', 'email']])));
+    await merge();
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first())
+      .toMatchObject(Object.fromEntries(columns.map((column) => [column, ['email', 'push']])));
+    await mockPg('notification_prefs').insert({ customer_id: outsider, invoice_channels: ['sms', 'push'] });
+    await merge();
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).invoice_channels).toEqual(['push']);
+    await mockPg('notification_prefs').insert({ customer_id: outsider, invoice_channels: ['email'] });
+    expect(await dedupe.dbLevelMergeConflict(mockPg, { id: owner }, { id: outsider }))
+      .toMatchObject({ code: 'billing_delivery_channels_conflict' });
+    await expect(merge()).rejects.toMatchObject({ statusCode: 409 });
+    expect(await mockPg('notification_prefs').whereIn('customer_id', [owner, outsider])).toHaveLength(2);
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ invoice_channels: null,
+      payment_receipt_channel: 'email', payment_receipt_channels: null });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ invoice_channels: null, payment_receipt_channels: ['sms'] });
+    await expect(merge()).rejects.toMatchObject({ statusCode: 409 });
+    await mockPg('notification_prefs').where({ customer_id: owner }).del();
+    await merge();
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).payment_receipt_channels).toEqual(['sms']);
+  });
+
   test.each([['email', 'push'], ['push', 'email']])('profile merge preserves a request Email choice: %s + %s', async (winner, loser) => {
     await mockPg('notification_prefs').where({ customer_id: owner }).update({ request_channel: winner, request_channel_explicit: true });
     await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel: loser, request_channel_explicit: true });

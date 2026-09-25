@@ -534,6 +534,21 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.deleted).toBe(true);
   });
 
+  it('notification_prefs: billing arrays stay native and incompatible choices refuse before writes', async () => {
+    const rows = { winnerRow: { customer_id: 'W', invoice_channels: null },
+      loserRow: { customer_id: 'L', invoice_channels: ['email', 'push'] } };
+    const allowed = stubTrx(rows);
+    await mergeSingletonPrefRow(allowed.trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(allowed.state.updated.invoice_channels).toEqual(['email', 'push']);
+    const refused = stubTrx({ ...rows, winnerRow: { customer_id: 'W', invoice_channels: ['sms'] } });
+    await expect(mergeSingletonPrefRow(refused.trx, 'notification_prefs', 'customer_id', 'W', 'L'))
+      .rejects.toMatchObject({ mergeConflictCode: 'billing_delivery_channels_conflict', statusCode: 409 });
+    expect(refused.state).toEqual({ updated: null, deleted: false });
+    const moved = stubTrx({ ...rows, winnerRow: null });
+    await mergeSingletonPrefRow(moved.trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(moved.state.updated).toEqual({ customer_id: 'W' });
+  });
+
   it('notification_prefs: never widens — winner email-only keeps email over loser both', async () => {
     const { trx, state } = stubTrx({
       winnerRow: { id: 'p1', customer_id: 'W', billing_channel: 'email', created_at: 'x', updated_at: 'x' },

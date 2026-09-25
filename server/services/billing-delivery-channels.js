@@ -68,9 +68,32 @@ function billingChannelsPayload(prefs = {}, { emailAvailable = true } = {}) {
   return payload;
 }
 
+// Explicit choices outrank untouched legacy defaults. Known Email/App
+// restrictions still participate so a profile merge cannot resume Text.
+function mergedBillingChannelUpdates(winner = {}, loser = {}) {
+  const updates = {};
+  for (const [category, apiField] of Object.entries(CATEGORY_FIELDS)) {
+    const column = BILLING_DELIVERY_FIELDS[apiField];
+    if (![winner, loser].some((row) => Array.isArray(row?.[column]))) continue;
+    const choices = [winner, loser].map((row) => explicitBillingChannels(row, category)
+      || (row?.[LEGACY_FIELDS[category]] === 'email' ? ['email']
+        : row?.[LEGACY_FIELDS[category]] === 'push' ? legacyChannels(row, category, true) : null));
+    const [left, right] = choices;
+    const channels = left && right ? left.filter((channel) => right.includes(channel)) : left || right;
+    if (!channels.length) {
+      throw Object.assign(new Error('Billing notification choices conflict. Choose a common delivery method before merging these profiles.'), {
+        mergeConflictCode: 'billing_delivery_channels_conflict', statusCode: 409,
+      });
+    }
+    if (channels.join() !== (winner?.[column] || []).join()) updates[column] = channels;
+  }
+  return updates;
+}
+
 module.exports = {
   BILLING_DELIVERY_FIELDS,
   explicitBillingChannels,
   billingChannelAllowed,
   billingChannelsPayload,
+  mergedBillingChannelUpdates,
 };
