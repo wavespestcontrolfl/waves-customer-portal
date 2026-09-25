@@ -25,6 +25,7 @@ const adminSchedule = require('../routes/admin-schedule');
 const gates = require('../config/feature-gates');
 const {
   runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, countTermVisits,
+  isBoosterRow, isPlanSeriesRow, COUNTING_SOURCE_STATUSES,
 } = require('../services/recurring-series-cancel-reseed');
 
 const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
@@ -108,6 +109,10 @@ describe('term / count math (pure)', () => {
     // calendar years, not 365-day blocks: no leap-year drift across 2028
     expect(termWindowContaining('2027-07-10', '2028-07-09')).toEqual({ index: 0, start: '2027-07-10', end: '2028-07-10' });
     expect(termWindowContaining('2028-02-29', '2029-03-01')).toEqual({ index: 1, start: '2029-02-28', end: '2030-02-28' });
+    // Codex #4814 P2: the CLAMPED anniversary (Feb 28 in a non-leap year) opens the new term
+    expect(termWindowContaining('2028-02-29', '2029-02-28')).toEqual({ index: 1, start: '2029-02-28', end: '2030-02-28' });
+    expect(termWindowContaining('2028-02-29', '2029-02-27')).toEqual({ index: 0, start: '2028-02-29', end: '2029-02-28' });
+    expect(termWindowContaining('2028-02-29', '2032-02-29')).toEqual({ index: 4, start: '2032-02-29', end: '2033-02-28' });
     expect(termWindowContaining('2026-07-10', 'not-a-date')).toBeNull();
   });
 
@@ -139,6 +144,23 @@ describe('term / count math (pure)', () => {
     expect(countTermVisits(rows, null)).toBe(0);
     expect(countTermVisits([], window)).toBe(0);
   });
+
+  test('boosters never count toward the plan; legacy null-flagged children do (Codex #4814)', () => {
+    const window = { index: 0, start: '2026-07-10', end: '2027-07-10' };
+    const base = Array.from({ length: 8 }, (_, i) => ({ scheduled_date: `2026-0${8}-${String(10 + i).padStart(2, '0')}`, status: 'pending', is_recurring: true, recurring_parent_id: 'root' }));
+    const booster = { scheduled_date: '2026-09-01', status: 'pending', is_recurring: false, recurring_parent_id: 'root' };
+    const legacyChild = { scheduled_date: '2026-09-02', status: 'pending', is_recurring: null, recurring_parent_id: 'root' };
+    expect(countTermVisits([...base, booster], window)).toBe(8);
+    expect(countTermVisits([...base, legacyChild], window)).toBe(9);
+    expect(isBoosterRow(booster)).toBe(true);
+    expect(isBoosterRow(legacyChild)).toBe(false);
+    expect(isPlanSeriesRow(booster)).toBe(false);
+    expect(isPlanSeriesRow(legacyChild)).toBe(true);
+    expect(isPlanSeriesRow({ is_recurring: true, recurring_parent_id: null })).toBe(true); // the root
+    expect(isPlanSeriesRow({ is_recurring: null, recurring_parent_id: null })).toBe(false); // a plain one-off
+    expect(isPlanSeriesRow({ is_recurring: false, recurring_parent_id: null })).toBe(false);
+    expect(COUNTING_SOURCE_STATUSES).toEqual(['pending', 'confirmed', 'en_route', 'on_site']);
+  });
 });
 
 describe('cancel surfaces wire the hook (source guards)', () => {
@@ -155,9 +177,17 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(count(ib, '../recurring-series-cancel-reseed')).toBe(1);
   });
 
-  test('bulk cancel: collects real transitions during the loop and calls the bridge ONCE after the batch settled', () => {
+  test('bulk cancel: collects real transitions right after the commit (before fallible post-commit work) and calls the bridge ONCE after the batch settled', () => {
     const route = schedule.slice(schedule.indexOf("router.post('/bulk-action'"));
     const collect = route.indexOf("if (fromStatus !== 'cancelled') cancelReseedIds.push(id);");
+    const cancelCase = route.indexOf("case 'cancel': {");
+    const notify = route.indexOf('AppointmentReminders.handleCancellation(id, {', cancelCase);
+    const voidCall = route.indexOf('await voidOpenInvoicesForCancelledService(id);', cancelCase);
+    // exactly one collection point, after the transaction and before the reminder/void/fee rails
+    expect(route.split("cancelReseedIds.push(id)").length - 1).toBe(1);
+    expect(collect).toBeGreaterThan(cancelCase);
+    expect(collect).toBeLessThan(notify);
+    expect(collect).toBeLessThan(voidCall);
     const flush = route.indexOf('await flushDispatchQualityDates(qualityDates);');
     const call = route.indexOf("serviceIds: cancelReseedIds, source: 'admin-schedule-bulk-cancel'");
     const respond = route.indexOf('res.json({');
@@ -175,6 +205,9 @@ describe('cancel surfaces wire the hook (source guards)', () => {
       schedule.indexOf('// PUT /api/admin/schedule/:id/status'),
     );
     expect(body).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?skipped: 'batch_series_cancel'/);
+    // legacy null-flagged children reach the writer; explicit boosters do not
+    expect(body).toMatch(/if \(!isPlanSeriesRow\(row\)\) continue;/);
+    expect(body).not.toMatch(/row\.is_recurring !== true/);
     expect(body).toMatch(/results\.push\(await reseedRecurringSeriesAfterCancel\(conn, cancelledIds\[0\], \{ source \}\)\)/);
     expect(schedule).toMatch(/module\.exports\.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfterCancelBatch;/);
     // per-root isolation: one failing series never aborts the rest of the batch
@@ -192,6 +225,50 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(live).toBeGreaterThan(-1);
     expect(guard).toBeGreaterThan(live);
     expect(reconcile).toBeGreaterThan(guard);
+  });
+
+  test('locked body: only an audited counting→cancelled transition of a plan row earns a replacement (Codex #4814)', () => {
+    const body = schedule.slice(
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancelLocked('),
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancel('),
+    );
+    const planRow = body.indexOf("if (!isPlanSeriesRow(cancelled)) return { added: [], skipped: 'not_plan_visit' };");
+    const history = body.indexOf("trx('job_status_history')");
+    const noRecord = body.indexOf("skipped: 'no_transition_record'");
+    const nonCounting = body.indexOf("skipped: 'non_counting_transition'");
+    const lock = body.indexOf('acquireRecurringSeriesMaintenanceLock(trx, parentId)');
+    expect(planRow).toBeGreaterThan(-1);
+    expect(history).toBeGreaterThan(planRow);
+    expect(noRecord).toBeGreaterThan(history);
+    expect(nonCounting).toBeGreaterThan(noRecord);
+    expect(lock).toBeGreaterThan(nonCounting);
+    expect(body).toMatch(/\.where\(\{ job_id: cancelledServiceId, to_status: 'cancelled' \}\)[\s\S]*?\.orderBy\('transitioned_at', 'desc'\)/);
+    expect(body).toMatch(/COUNTING_SOURCE_STATUSES\.includes\(String\(transition\.from_status\)\)/);
+    expect(body).not.toMatch(/cancelled\.is_recurring !== true/);
+    // the term count reads the recurrence fields the booster rule needs
+    expect(body).toMatch(/\.select\('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id'\)/);
+  });
+
+  test('locked body: legacy off-hour root windows are floored/validated like the top-up, and each added row gets the advisory occupancy probe (Codex #4814)', () => {
+    const body = schedule.slice(
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancelLocked('),
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancel('),
+    );
+    const normalize = body.indexOf('normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end)');
+    const unplaceable = body.indexOf("skipped: 'window_unplaceable'");
+    const reconcile = body.indexOf('reconcileRecurringSeriesVisitCount(trx, {');
+    const probe = body.indexOf('findConflictingVisits({');
+    const stamp = body.indexOf("action: 'recurring_cancel_reseed',");
+    expect(normalize).toBeGreaterThan(-1);
+    expect(unplaceable).toBeGreaterThan(normalize);
+    expect(reconcile).toBeGreaterThan(unplaceable);
+    expect(body).toMatch(/parentId, parent: reconcileParent, cols,/);
+    expect(probe).toBeGreaterThan(reconcile);
+    expect(stamp).toBeGreaterThan(probe);
+    expect(body).toMatch(/excludeServiceIds: \[child\.id\], excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,/);
+    // advisory: a clash is logged and recorded, never thrown
+    expect(body.slice(probe, stamp)).not.toMatch(/throw /);
+    expect(body).toMatch(/overlap_dates: overlapWarnings/);
   });
 
   test('dispatch: the hook sits in the single-visit cancelled branch, not the series-scope cancel', () => {

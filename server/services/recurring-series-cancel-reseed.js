@@ -34,6 +34,30 @@ const logger = require('./logger');
 // classifier in recurring-schedule-audit.js): everything but the four
 // "this occurrence did not / will not happen" statuses.
 const NON_COUNTING_STATUSES = Object.freeze(['cancelled', 'rescheduled', 'skipped', 'no_show']);
+// A cancel only removes a visit from the plan when the row it left was one
+// that still counted (Codex #4814 P1): a 'rescheduled' placeholder flipped
+// to 'cancelled' removed nothing, so it earns no replacement.
+const COUNTING_SOURCE_STATUSES = Object.freeze(['pending', 'confirmed', 'en_route', 'on_site']);
+
+// Booster months are deliberately non-recurring rows hanging off a
+// recurring root (is_recurring === false + recurring_parent_id): paid
+// extras, never part of the accepted cadence (Codex #4814 P1 — counting one
+// let 8 base visits + 1 booster read as a whole 9). The contract is an
+// EXPLICIT false, same as recurring-schedule-audit.js#isBoosterVisit: a
+// legacy child whose flag is NULL is still a plan visit.
+function isBoosterRow(row) {
+  return !!row && row.is_recurring === false && !!row.recurring_parent_id;
+}
+
+// A row the plan counts: the recurring root or a child (explicitly recurring
+// OR legacy null-flagged) — never an explicit booster (Codex #4814 P1: the
+// is_recurring column is nullable and legacy children were dropped by an
+// `=== true` test before the root could be inspected).
+function isPlanSeriesRow(row) {
+  if (!row || isBoosterRow(row)) return false;
+  if (row.is_recurring === true) return true;
+  return row.is_recurring == null && !!row.recurring_parent_id;
+}
 
 function dateOnly(value) {
   if (!value) return null;
@@ -52,11 +76,16 @@ function addYears(dateStr, years) {
 
 // Whole plan years from the root to `dateStr` (0 for anything before the
 // root's first anniversary, clamped at 0 for a date before the root).
+// Compared against the CLAMPED anniversary addYears produces (Codex #4814
+// P2): a Feb 29 root's anniversary in a non-leap year is Feb 28, and Feb 28
+// must land in the NEW term — a month/day compare against the raw root
+// (28 < 29) put it in the previous term, whose end-exclusive window did not
+// even contain it.
 function wholeYearsBetween(rootStr, dateStr) {
-  const [ry, rm, rd] = String(rootStr).split('-').map(Number);
-  const [dy, dm, dd] = String(dateStr).split('-').map(Number);
+  const [ry] = String(rootStr).split('-').map(Number);
+  const [dy] = String(dateStr).split('-').map(Number);
   let years = dy - ry;
-  if (dm < rm || (dm === rm && dd < rd)) years -= 1;
+  if (years > 0 && String(dateStr) < addYears(rootStr, years)) years -= 1;
   return Math.max(0, years);
 }
 
@@ -87,11 +116,13 @@ function termWindowContaining(rootDateStr, dateStr) {
   return { index, start: addYears(root, index), end: addYears(root, index + 1) }; // end exclusive
 }
 
-// Rows (root + children) that still count toward the term: not cancelled/
-// rescheduled/skipped/no_show, dated inside [start, end).
+// Rows (root + children) that still count toward the term: plan rows only
+// (no boosters), not cancelled/rescheduled/skipped/no_show, dated inside
+// [start, end).
 function countTermVisits(rows, window) {
   if (!window) return 0;
   return (rows || []).filter((row) => {
+    if (isBoosterRow(row)) return false;
     const d = dateOnly(row.scheduled_date);
     return d && d >= window.start && d < window.end && !NON_COUNTING_STATUSES.includes(String(row.status));
   }).length;
@@ -127,5 +158,8 @@ module.exports = {
   plannedVisitsPerYearForSeries,
   termWindowContaining,
   countTermVisits,
+  isBoosterRow,
+  isPlanSeriesRow,
   NON_COUNTING_STATUSES,
+  COUNTING_SOURCE_STATUSES,
 };

@@ -9838,6 +9838,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 qualityDates,
               });
             });
+            // Counted-plan reseed candidate — collected the instant the
+            // cancel committed, BEFORE any fallible post-commit work below
+            // (Codex #4814 P1): a rejected invoice void used to jump to the
+            // per-item catch past the collection, and the retry could not
+            // recover it (fromStatus is 'cancelled' by then). Only a real
+            // transition qualifies; see cancelReseedIds above.
+            if (fromStatus !== 'cancelled') cancelReseedIds.push(id);
             try {
               const AppointmentReminders = require('../services/appointment-reminders');
               // payload.notifyCustomer === false (the list view's bulk
@@ -9870,8 +9877,6 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // the voids restore any applied credit) — shared hook across
             // every cancellation path, so none can forget it.
             await voidOpenInvoicesForCancelledService(id);
-            // Counted-plan reseed candidate — see cancelReseedIds above.
-            if (fromStatus !== 'cancelled') cancelReseedIds.push(id);
             // One-time card-on-file hold: charge in-window late-cancel fee or
             // release outside it — same as the single-cancel paths.
             // payload.waiveCardHoldFee = business-initiated cancel, release
@@ -17870,8 +17875,11 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 //   - the series was STOPPED (recurring_plan_alerts ledger: cancel_series /
 //     let_lapse — readStoppedRecurringRoots, the same reader the accepted-
 //     plan audit and the converter consult);
+//   - not a plan row (explicit booster) or no audited cancel transition, or
+//     the transition left a non-counting status ('rescheduled' → cancelled);
 //   - this cancelled visit already produced a reseed (activity_log
 //     'recurring_cancel_reseed' stamp, written in the adding transaction);
+//   - the root's window is unplaceable even after the top-up's floor;
 //   - the customer is deleted / held / inactive / churned
 //     (TOPUP_CUSTOMER_INELIGIBILITY_RULES, FOR UPDATE like the top-up);
 //   - annual-prepay series, family on plan hold, duplicate series
@@ -17885,13 +17893,28 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 // series adds a non-ongoing row, exactly as the visit-count editor does.
 async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const {
-    plannedVisitsPerYearForSeries, termWindowContaining, countTermVisits,
+    plannedVisitsPerYearForSeries, termWindowContaining, countTermVisits, isPlanSeriesRow, COUNTING_SOURCE_STATUSES,
   } = require('../services/recurring-series-cancel-reseed');
   const cols = await trx('scheduled_services').columnInfo();
   const cancelled = await trx('scheduled_services').where({ id: cancelledServiceId }).first();
   if (!cancelled) return { added: [], skipped: 'not_found' };
   if (cancelled.status !== 'cancelled') return { added: [], skipped: 'not_cancelled' };
-  if (cancelled.is_recurring !== true) return { added: [], skipped: 'not_recurring' };
+  // Plan rows only — the root, an explicitly recurring child, or a legacy
+  // null-flagged child; never an explicit booster (Codex #4814 P1).
+  if (!isPlanSeriesRow(cancelled)) return { added: [], skipped: 'not_plan_visit' };
+  // Only a transition that REMOVED a counting visit earns a replacement
+  // (Codex #4814 P1): every surface wired to this bridge cancels through
+  // transitionJobStatus, whose audit row records the status the row left.
+  // A 'rescheduled' placeholder flipped to cancelled removed nothing; a row
+  // with no audit row at all was not cancelled by a wired surface.
+  const transition = await trx('job_status_history')
+    .where({ job_id: cancelledServiceId, to_status: 'cancelled' })
+    .orderBy('transitioned_at', 'desc')
+    .first('from_status');
+  if (!transition) return { added: [], skipped: 'no_transition_record' };
+  if (!COUNTING_SOURCE_STATUSES.includes(String(transition.from_status))) {
+    return { added: [], skipped: 'non_counting_transition', fromStatus: transition.from_status };
+  }
   const parentId = cancelled.recurring_parent_id || cancelled.id;
   await acquireRecurringSeriesMaintenanceLock(trx, parentId);
   await lockCustomerComms(trx, cancelled.customer_id);
@@ -17933,7 +17956,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   if (!window) return { added: [], skipped: 'no_term_window' };
   const seriesRows = await trx('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-    .select('id', 'status', 'scheduled_date');
+    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id');
   const counting = countTermVisits(seriesRows, window);
   if (counting >= expected) return { added: [], skipped: 'term_still_whole', counting, expected };
 
@@ -17944,8 +17967,17 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   if (live.length === 0) return { added: [], skipped: 'no_live_visits', counting, expected };
   if (live.length >= MAX_SERIES_VISIT_COUNT) return { added: [], skipped: 'at_max_visit_count', counting, expected };
   const ongoingSeries = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
+  // Legacy off-hour template (Codex #4814 P1): the reconciler copies the
+  // root's window verbatim, so a "09:15" root would mint an invalid
+  // appointment from this unattended path. Same floor + validator the
+  // nightly top-up applies; an unplaceable window refuses, never inserts.
+  const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
+  if (normalizedWindow?.unplaceable) return { added: [], skipped: 'window_unplaceable', counting, expected };
+  const reconcileParent = normalizedWindow
+    ? { ...parent, window_start: normalizedWindow.start, window_end: normalizedWindow.end }
+    : parent;
   const result = await reconcileRecurringSeriesVisitCount(trx, {
-    parentId, parent, cols,
+    parentId, parent: reconcileParent, cols,
     targetCount: live.length + 1,
     actorId: null,
     // Extend-only by construction (target = live + 1): the trim branch, the
@@ -17954,6 +17986,27 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
     baselineCount: null,
     ongoingSeries,
   });
+  // Tech-blind occupancy probe on each added row (Codex #4814 P1) — the
+  // same predicate + status exclusions the parent move probe and the
+  // top-up's advisory probe use. ADVISORY (owner ruling 2026-08-25: admin
+  // writes never block on a clash; the operator stacks/resolves on the
+  // calendar). Probe-only for the same lock-contract reason as
+  // seriesCandidateDateClashes: the date is only known mid-trx, after the
+  // rung-6 comms lock, so rung 1 cannot be taken here. Excludes the row it
+  // just inserted; a hit names the date only.
+  const overlapWarnings = [];
+  const block = occupancyBlockFor(reconcileParent);
+  for (const child of result.added) {
+    if (!block) break;
+    const clash = await findConflictingVisits({
+      db: trx, date: child.date, windowStart: block.start, windowEnd: block.end,
+      excludeServiceIds: [child.id], excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+    });
+    if (clash.length) {
+      overlapWarnings.push(child.date);
+      logger.warn(`[recurring-cancel-reseed] parent=${parentId} re-added visit on ${child.date} overlaps an existing visit on the calendar — kept (advisory only)`);
+    }
+  }
   if (result.added.length) {
     // The idempotency stamp — same trx as the insert, so a rolled-back add
     // leaves no stamp and a committed add can never be repeated.
@@ -17966,14 +18019,14 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
         recurring_parent_id: String(parentId),
         added_service_ids: result.added.map((c) => String(c.id)),
         term_index: window.index, term_start: window.start, term_end: window.end,
-        counting, expected,
+        counting, expected, overlap_dates: overlapWarnings,
       }),
     });
   }
   return {
     added: result.added,
     skipped: result.added.length ? null : 'not_placed',
-    counting, expected, parentId, customerId: parent.customer_id,
+    counting, expected, parentId, customerId: parent.customer_id, overlapWarnings,
   };
 }
 
@@ -18012,11 +18065,14 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
 async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source = 'cancel' } = {}) {
   const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
   if (!ids.length) return { results: [], skippedRoots: [] };
+  const { isPlanSeriesRow } = require('../services/recurring-series-cancel-reseed');
   const rows = await conn('scheduled_services').whereIn('id', ids)
     .select('id', 'is_recurring', 'recurring_parent_id');
   const byRoot = new Map();
   for (const row of rows) {
-    if (row.is_recurring !== true) continue;
+    // Plan rows only: explicit recurring, or a legacy null-flagged child of
+    // a series; explicit boosters never reach the writer (Codex #4814 P1).
+    if (!isPlanSeriesRow(row)) continue;
     const rootId = String(row.recurring_parent_id || row.id);
     if (!byRoot.has(rootId)) byRoot.set(rootId, []);
     byRoot.get(rootId).push(String(row.id));
