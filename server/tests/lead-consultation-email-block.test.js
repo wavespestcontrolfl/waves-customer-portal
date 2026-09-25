@@ -211,6 +211,29 @@ describe('buildConsultationEmailBlock — full block', () => {
     expect(result.text).toContain('Pick a time for us to stop by for a free consultation:');
   });
 
+  test('linked customer archived → empty (same refusal rule as the text link)', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, customer_id: 'cust-1' } });
+    mockBuilders.customers = chainBuilder({ firstRow: null });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    expect(result).toEqual({ html: '', text: '' });
+    expect(mockCreateShortCode).not.toHaveBeenCalled();
+  });
+
+  test('linked customer now on a different phone → empty', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, customer_id: 'cust-1' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415559999' } });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    expect(result).toEqual({ html: '', text: '' });
+    expect(mockCreateShortCode).not.toHaveBeenCalled();
+  });
+
+  test('linked customer live and on the lead\'s phone → full block', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, customer_id: 'cust-1' } });
+    mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415551234' } });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    expect(shortLinksIn(result.html)).toHaveLength(4);
+  });
+
   test('short-wrap failure renders EMPTY — the raw token never falls through', async () => {
     mockCreateShortCode.mockRejectedValueOnce(new Error('short_codes insert failed'));
     const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });

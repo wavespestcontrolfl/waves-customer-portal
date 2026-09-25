@@ -27,8 +27,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
-const { isOpenLeadRow } = require('./lead-statuses');
-const { isUsPhone } = require('./lead-consultation-link');
+const { leadLinkRefusal } = require('./lead-consultation-link');
 const { leadWantsRecurringPlan } = require('./lead-recurring-intent');
 const { mintLeadConsultationToken, TTL_SECONDS } = require('../utils/lead-consultation-token');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -92,15 +91,19 @@ function renderText(baseUrl) {
 }
 
 // The lead row this block needs, or null when it isn't eligible for the
-// block at all (gate handled by the caller — this only checks the lead
-// itself). Kept separate from slot computation so an ineligible lead never
-// spends a DB round-trip on availability.
+// block at all (gate handled by the caller). Refusal is the SAME rule set
+// the text link's mint/probe/send share — leadLinkRefusal in
+// lead-consultation-link.js (open lead, US phone, linked customer live and
+// still on the lead's phone by full phone identity) — so the email never
+// mints a bearer the text path would refuse (pre-push audit P1). Recurring
+// intent is the email-only narrowing on top. Kept separate from slot
+// computation so an ineligible lead never spends a round-trip on
+// availability.
 async function eligibleLead(leadId) {
   const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
-    .first('id', 'phone', 'service_interest', 'status', 'converted_at');
+    .first('id', 'phone', 'service_interest', 'status', 'converted_at', 'customer_id');
   if (!lead) return null;
-  if (!isOpenLeadRow(lead)) return null;
-  if (!isUsPhone(lead.phone)) return null;
+  if (await leadLinkRefusal(lead)) return null;
   if (!leadWantsRecurringPlan(lead)) return null;
   return lead;
 }
