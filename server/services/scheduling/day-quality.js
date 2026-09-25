@@ -11,6 +11,7 @@ const { isHoldStop } = require('./travel-gap');
 // location, duration, grouping or lateness cards (codex #4295 r3 P2).
 const QUALITY_EXCLUDED_STATUSES = [...require('../stops-ahead').NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 const { parseHHMM } = require('./window-rules');
+const { plannedWorkMinutes } = require('./planning-minutes');
 
 // Two customers promised the same technician at the same time. Staff and
 // phone-reschedule saves commit through such a clash by owner ruling
@@ -56,6 +57,13 @@ function doubleBookedPairs(stops) {
     }
   }
   return pairs;
+}
+
+// workDuration reads owner planning minutes for recognized stops under the
+// capacity gate; report that provenance instead of the legacy basis.
+function durationBasis(stops) {
+  return stops.some(stop => plannedWorkMinutes(stop) != null)
+    ? 'owner_planning_minutes_or_stored_window_or_estimate' : 'stored_window_or_estimate';
 }
 
 function measureDayQuality(RouteOptimizer, stops, {
@@ -113,7 +121,7 @@ function measureDayQuality(RouteOptimizer, stops, {
     feasibleInsertionWindows: null,
     insertionStatus: simulation?.arrivals.some(row => row.lateMinutes > 0) ? 'current_route_infeasible' : 'candidate_location_and_duration_required',
     uncertaintyReasons: unknown,
-    assumptions: { departureMinutes: modeledDeparture, departureProvided: departureMinutes != null, targetReturnMinutes, breakMinutes, durationBasis: 'stored_window_or_estimate',
+    assumptions: { departureMinutes: modeledDeparture, departureProvided: departureMinutes != null, targetReturnMinutes, breakMinutes, durationBasis: durationBasis(stops),
       modelBasis: 'shared_fallback_leg_model', currentTraffic: false, gapsDeductTravelAndBreaks: false },
     // IDs, promises and durations allow later comparisons without persisting
     // customer identity, addresses or GPS coordinates in the planner ledger.

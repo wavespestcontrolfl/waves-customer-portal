@@ -162,5 +162,20 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     // A recognized recurring-pest row plans at owner minutes (25), not the
     // legacy 60 its stored estimate/window would otherwise charge.
     expect(result.days[0].byTech[0].serviceMinutes).toBe(25);
+    // Codex r2 P2: the reported provenance names the planning basis.
+    expect(result.days[0].byTech[0].assumptions.durationBasis).toBe('owner_planning_minutes_or_stored_window_or_estimate');
+  });
+
+  test('gate off keeps the stored window/estimate minutes and says so', async () => {
+    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve([{
+      id: 'v1', technician_id: 'tech1', route_order: 1, customer_id: 'cust', scheduled_date: DATE,
+      window_start: '09:00', window_end: '10:00', time_window: null, status: 'confirmed',
+      reservation_expires_at: null, created_at: '2020-01-01T00:00:00Z', visit_id: null,
+      estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control Service', is_recurring: true,
+      is_callback: false, lat: 27.4, lng: -82.4,
+    }]) }));
+    const result = await getScheduleQualityMeasurements({ date: DATE }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(result.days[0].byTech[0].serviceMinutes).toBe(60);
+    expect(result.days[0].byTech[0].assumptions.durationBasis).toBe('stored_window_or_estimate');
   });
 });
