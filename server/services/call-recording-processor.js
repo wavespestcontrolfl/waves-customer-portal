@@ -11481,16 +11481,24 @@ const CallRecordingProcessor = {
     // this row, so the hold no longer depends on a booking existing.
     // customerId may still be null (shared-phone ambiguity, explicit
     // unlink) — the hold is number-scoped either way. The booking
-    // transaction writes the same row again (idempotent) and aborts on
-    // failure; a failure HERE is logged loudly and retried by that write
-    // when a booking follows.
+    // transaction writes the same row again (idempotent). A failure HERE
+    // aborts the pass (fail closed) rather than continue unheld: a call
+    // that books nothing has no later write to fall back on, and the
+    // pass's own catch already turns a throw into the capped
+    // extraction_failed retry (reprocessing is idempotent) with a blocking
+    // card at the cap. The rethrown error carries code/name only — a Knex
+    // message can render the bound phone number into the log.
     if (callbackNumberNeededHoldActive) {
       try {
         await require('./disclaimed-number-holds').recordDisclaimedNumberHold({
           phone: contactPhone, customerId: customerId || call.customer_id || null, callLogId: call.id,
         });
       } catch (holdErr) {
-        logger.error(`[call-proc] disclaimed-number hold write failed for ${maskSid(callSid)}: ${holdErr.code || holdErr.name || 'db_error'}`);
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] disclaimed-number hold write failed for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
       }
     }
 

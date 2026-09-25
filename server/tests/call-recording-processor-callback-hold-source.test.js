@@ -268,4 +268,15 @@ describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the
     expect(block).toMatch(/holdErr\.code \|\| holdErr\.name/);
     expect(block).not.toMatch(/holdErr\.message/);
   });
+
+  test('a failed non-booking write FAILS CLOSED — the pass aborts (capped extraction_failed retry) instead of continuing unheld', () => {
+    const write = src.indexOf("callback_number_needed — NUMBER-keyed hold (codex round 6");
+    const block = src.slice(write, src.indexOf('// Secondary-contact persistence', write));
+    const catchAt = block.indexOf('catch (holdErr)');
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(block.slice(catchAt)).toMatch(/throw failClosed;/);
+    expect(block.slice(catchAt)).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
+    // The pass's own catch is what turns that throw into the capped retry.
+    expect(src).toMatch(/catch \(procErr\) \{[\s\S]{0,1600}processing_status: 'extraction_failed'/);
+  });
 });
