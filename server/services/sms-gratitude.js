@@ -63,6 +63,20 @@ const AUTOMATED_CLOSURE_TYPES = new Set([
   'reminder_72h', 'reminder_24h', 'appointment_reminder', 'appointment_confirmation',
   'tech_en_route', 'tech_arrived', 'estimate_sent', 'review_request',
 ]);
+// Owner decision 2026-09-24 (follow-up): thanks in reply to a hand-typed staff
+// text is a closure too, as long as that text made no promise and asked no
+// question (the needs-attention guard still runs first). A typed reply is also
+// the answer to whatever the customer asked earlier, so the operational-context
+// guard is skipped for it; the earlier-open-context guard still applies.
+const MANUAL_MESSAGE_TYPE = 'manual';
+// Time promises phrased the way hand-typed texts phrase them: "give me a
+// minute", "in 15 minutes", "leaving now", "on my way", "swinging by", "be
+// there by 3". The visit or estimate is still ahead, so thanks in reply is not
+// a closure. Manual texts only: our en-route template says "on the way" and is
+// a closure by type.
+const MANUAL_PROMISE_RE = /\b(?:give (?:me )?a (?:minute|min|sec|second|moment)|in \d+(?:-\d+)? ?(?:minutes|mins|min)|leaving now|on (?:the|my) way|swinging by|heading (?:over|your way)|be there (?:by|at|around|after))\b/i;
+const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
+  || (row.messageType === MANUAL_MESSAGE_TYPE && MANUAL_PROMISE_RE.test(text));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
 const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! We got your bank payment for invoice [\w-]+\. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does\.$/u;
 
@@ -99,21 +113,23 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
       || /^(?:(?:our|my) pleasure|you['’]?re (?:very )?welcome|no problem)(?:[ ,]+[\p{L}\p{M}'’ -]+)?[!.\s]*$/iu.test(row.body || ''))) return deny('courtesy_already_sent');
   const body = withoutOptionalFooter(String(previous.body || ''));
   const bankAcknowledgement = BANK_ACK_RE.test(body);
+  const manualReply = previous.messageType === MANUAL_MESSAGE_TYPE;
   const invalidClosure = [
-    [() => !bankAcknowledgement && (outboundAsksForReply(body) || PENDING_OUTBOUND_RE.test(body)), 'outbound_needs_attention'],
-    [() => !bankAcknowledgement && !AUTOMATED_CLOSURE_TYPES.has(previous.messageType)
+    [() => !bankAcknowledgement && outboundPending(body, previous), 'outbound_needs_attention'],
+    [() => !bankAcknowledgement && !manualReply && !AUTOMATED_CLOSURE_TYPES.has(previous.messageType)
       && !CLOSED_OUTBOUND_RE.test(body), 'closure_not_established'],
   ].find(([invalid]) => invalid());
   if (invalidClosure) return deny(invalidClosure[1]);
   // A later template cannot erase an earlier unanswered operational message.
   // This deliberately gives up some valid thanks instead of inferring that a
-  // report/reminder satisfied a separate request or a promised follow-up.
-  if (recent.some(row => row.direction === 'inbound'
+  // report/reminder satisfied a separate request or a promised follow-up. A
+  // hand-typed staff reply IS that answer, so the guard does not apply to it.
+  if (!manualReply && recent.some(row => row.direction === 'inbound'
       && (row.mediaCount !== 0 || !(isCourtesyOnly(row.body, { awaitingAnswer: false })
         || isGratitudeOnly(row.body))))) return deny('operational_context');
   if (outgoing.slice(0, -1).some(row => {
     const text = withoutOptionalFooter(String(row.body || ''));
-    return !BANK_ACK_RE.test(text) && (outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text));
+    return !BANK_ACK_RE.test(text) && outboundPending(text, row);
   })) return deny('earlier_open_context');
   return { eligible: true, reason: 'gratitude_after_closure', reply: buildGratitudeReply(firstName) };
 }

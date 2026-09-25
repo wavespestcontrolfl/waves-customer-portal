@@ -58,7 +58,6 @@ describe('automated template closures (owner decision 2026-09-24)', () => {
       .toEqual({ eligible: true, reason: 'gratitude_after_closure', reply: 'Our pleasure, Jeanette!' });
   });
   test.each([
-    ['manual', 'Hello Jeanette! Your appointment is tomorrow.'],
     ['billing_reminder', 'Hello Jeanette! Your invoice is ready.'],
     [undefined, 'Hello Jeanette! Your appointment is tomorrow.'],
   ])('other outbound types still need closure evidence: %s', (messageType, body) => {
@@ -69,6 +68,55 @@ describe('automated template closures (owner decision 2026-09-24)', () => {
     expect(evaluateGratitudeContext({ ...context, history: [
       template('appointment_reminder', 'Hello Jeanette! Can you confirm 9 AM tomorrow?'),
     ] }).reason).toBe('outbound_needs_attention');
+  });
+});
+
+describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
+  const manual = body => ({ ...report, id: 'manual-1', messageType: 'manual', body });
+  const earlierRequest = { ...inbound, id: 'earlier', createdAt: '2030-01-10T14:58:00Z', body: 'Can I move my appointment from the app?' };
+  test('a bare thanks after a hand-typed text qualifies', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Yes, you can download the Waves app and reschedule appts there.')] }))
+      .toEqual({ eligible: true, reason: 'gratitude_after_closure', reply: 'Our pleasure, Dana!' });
+  });
+  test('a hand-typed text that asks a question still abstains', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Does Friday at 9 work for you?')] }).reason)
+      .toBe('outbound_needs_attention');
+  });
+  test.each([
+    'Let me adjust, give a minute',
+    'Give me a minute and I will resend it',
+    'Have it to you in 15 minutes',
+    'On the way, 15-20 min',
+    'On my way now',
+    'Leaving now',
+    'Swinging by now to take a look',
+    'Heading over shortly',
+    'Should be there by 3',
+  ])('a hand-typed time promise abstains: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
+  });
+  test('a hand-typed reply answers an earlier operational text', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [earlierRequest,
+      manual('Yes, you can download the Waves app and reschedule appts there.')] }).eligible).toBe(true);
+  });
+  test('a template after an earlier operational text still abstains', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [earlierRequest,
+      { ...report, messageType: 'appointment_reminder', body: 'Hello Dana! Reminder: your appointment is tomorrow between 8 and 10 AM.' }] }).reason)
+      .toBe('operational_context');
+  });
+  test('our en-route template stays a closure even though it says on the way', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...report, messageType: 'tech_en_route',
+      body: 'Hello Dana! Your technician Adam is on the way.' }] }).eligible).toBe(true);
+  });
+  test('a hand-typed refund or apology text still needs attention', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Yes, that refund already went through.')] }).reason)
+      .toBe('outbound_needs_attention');
+  });
+  test('an earlier promise of ours still holds before a hand-typed reply', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...report, id: 'promise', createdAt: '2030-01-10T14:58:00Z', body: 'I will send the estimate tonight.' },
+      manual('Advent pest control, based out of Palmetto'),
+    ] }).reason).toBe('earlier_open_context');
   });
 });
 
