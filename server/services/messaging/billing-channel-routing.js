@@ -60,6 +60,10 @@ function isReplayHold(result) {
   return result.deferred === true && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(result.code);
 }
 
+function needsRetry(result) {
+  return result?.retryable || result?.deliveryOutcome === 'uncertain';
+}
+
 async function dispatchBillingChannels(input, prefs, sendLeg) {
   const category = billingDeliveryCategory(input);
   const selected = explicitBillingChannels(prefs, category);
@@ -87,9 +91,11 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
     try {
       const metadata = { ...input.metadata, billingDeliveryLeg: channel,
         billingDeliveryCategory: category, notificationEventKey };
-      // App acceptance is not proof that a selected Text was sent. Its event
-      // key dedupes a replay if the process stops before the final Text leg.
-      if (channel === 'push' && channels.includes('sms')) delete metadata.scheduled_sms_log_id;
+      // App acceptance cannot settle pending Email or Text. Its event key
+      // dedupes a replay while those selected channels remain unfinished.
+      if (channel === 'push' && (channels.includes('sms') || needsRetry(channelResults.email))) {
+        delete metadata.scheduled_sms_log_id;
+      }
       channelResults[channel] = await sendLeg({
         ...input, channel: channel === 'push' ? 'sms' : channel,
         metadata,
@@ -105,10 +111,11 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
   }
   const results = Object.values(channelResults);
   const accepted = [...results].reverse().find((result) => result.sent && result.deliveryOutcome === 'accepted');
-  const retry = results.find((result) => result.retryable || result.deliveryOutcome === 'uncertain');
+  const retry = results.find(needsRetry);
+  const textRetry = needsRetry(channelResults.sms) && channelResults.sms;
   const textAccepted = channelResults.sms?.sent && channelResults.sms.deliveryOutcome === 'accepted';
   const outcome = results.find(isReplayHold)
-    || (!textAccepted && retry) || accepted || retry
+    || (!textAccepted && (textRetry || retry)) || accepted || retry
     || results[results.length - 1];
   return { ...outcome, channelResults };
 }

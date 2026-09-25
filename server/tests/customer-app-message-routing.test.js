@@ -590,6 +590,28 @@ describe('explicit billing channel combinations', () => {
       channelResults: { push: { sent: true }, sms: { sent: false } } });
   });
 
+  test('an earlier Email failure cannot hide uncertain Text delivery', async () => {
+    const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
+    const result = await dispatchBillingChannels(input, { payment_receipt_channels: ['email', 'sms'] }, async (leg) =>
+      leg.metadata.billingDeliveryLeg === 'email'
+        ? { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_EMAIL_PREPARATION_FAILED' }
+        : { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'TEXT_OUTCOME_UNCERTAIN' });
+    expect(result).toMatchObject({ sent: false, retryable: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCERTAIN' });
+  });
+
+  test('App proof cannot settle an Email leg that still needs retry', async () => {
+    prefs.payment_receipt_channels = ['email', 'push'];
+    sendBillingChannelEmail.mockResolvedValue({ sent: false, provider: 'email',
+      deliveryOutcome: 'not_sent', retryable: true, error: 'provider unavailable' });
+    const result = await sendCustomerMessage({ ...input, metadata: { ...input.metadata,
+      scheduled_sms_log_id: 'queue-1', notificationEventKey: 'receipt:queue-1' } });
+    expect(result).toMatchObject({ sent: false, retryable: true,
+      channelResults: { email: { sent: false }, push: { sent: true } } });
+    const appOptions = Twilio.sendSMS.mock.calls[0][2];
+    expect(appOptions.scheduledSmsLogId).toBeUndefined();
+    expect(appOptions.notificationEventKey).toBe('receipt:queue-1');
+  });
+
   test('separate payments with identical receipt copy have separate event identities', () => {
     const { billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
     expect(billingNotificationEventKey({ ...input, paymentId: 'payment-one' }))
