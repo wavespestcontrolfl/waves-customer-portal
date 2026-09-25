@@ -300,6 +300,21 @@ function matchExclusion(detection, exclusions) {
   const words = new Set(contentWords(detection));
   return exclusions.find((x) => normalizeText(x) === norm || (contentWords(x).length && contentWords(x).every((w) => words.has(w)))) || null;
 }
+// The same valid wrap lettering can come back segmented differently in
+// van.wrap_text and readable_text ("Lawn &" + "Pest" vs "Lawn & Pest") —
+// exact-string attribution missed that (Codex r6 P2 on #4785). On the
+// permitted van, a readable_text entry that is a valid, punctuation-exact
+// run of a phrase the van's OWN wrap_text fully reported is attributed to
+// the wrap; wrap text elsewhere (the URL on a wall) stays stray (Codex r7).
+function readableOffPermittedVan(parsed) {
+  const v = parsed.van;
+  if (!(v && v.wrapped && v.body !== 'other')) return parsed.readableText;
+  const vanPhrases = VAN_WRAP_ALLOWED_TEXT.filter((phrase) => {
+    const r = matchWrapText(v.wrapText || [], [phrase]);
+    return r.matched.length > 0 && r.incomplete.length === 0;
+  });
+  return vanPhrases.length ? parsed.readableText.filter((t) => !matchWrapText([t], vanPhrases).matched.length) : parsed.readableText;
+}
 // The verdict from a parsed answer — pure, so the screen itself stays the
 // guard + dispatch + parse (Codex r3 P2 on #4761: complexity).
 function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false } = {}) {
@@ -326,20 +341,7 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
   // this punctuation-stripped set — "Lawn Pest" must not pass as
   // "Lawn & Pest"; Codex r6 on #4785.)
   const attributed = new Set(allowUniformLogo ? parsed.uniformLettering.filter(isLogoWord).map(normalizeText) : []);
-  // The same valid wrap lettering can come back segmented differently in
-  // van.wrap_text and readable_text ("Lawn &" + "Pest" vs "Lawn & Pest") —
-  // exact-string attribution missed that (Codex r6 P2 on #4785). On the
-  // permitted van, any readable_text entry that is itself a valid,
-  // punctuation-exact run of a wrap phrase is attributed to the wrap.
-  const permittedVan = allowVanWrap && parsed.van && parsed.van.wrapped && parsed.van.body !== 'other';
-  // Only phrases the van's OWN wrap_text fully and validly reported are
-  // attributable — wrap text elsewhere (the URL on a wall) is still stray
-  // (Codex r7 P2 on #4785).
-  const vanPhrases = permittedVan ? VAN_WRAP_ALLOWED_TEXT.filter((phrase) => {
-    const r = matchWrapText(parsed.van.wrapText || [], [phrase]);
-    return r.matched.length > 0 && r.incomplete.length === 0;
-  }) : [];
-  const readable = vanPhrases.length ? parsed.readableText.filter((t) => !matchWrapText([t], vanPhrases).matched.length) : parsed.readableText;
+  const readable = allowVanWrap ? readableOffPermittedVan(parsed) : parsed.readableText;
   const { strayText, incomplete, missing } = matchCaptions(readable, allowedText, attributed);
   const reasons = [...logoReasons, ...vanReasons];
   // misplaced marks are already in logoReasons; the rest are true brand marks
@@ -538,7 +540,10 @@ function matchWrapText(fragments, allowedText) {
   const matched = [];
   const strayText = [];
   for (const raw of fragments) {
-    const chunks = canonicalChunks(raw);
+    // The side panel may read "Lawn & Pest!" where the rear reads "Lawn &
+    // Pest" — a trailing "!" on "Pest" (never "Pests!") is the same wrap
+    // lettering (Codex r8 P2 on #4785).
+    const chunks = canonicalChunks(String(raw || '').replace(/(\bpest)!(?=\s*$)/i, '$1'));
     if (!chunks.length) { strayText.push(raw); continue; }
     let ok = false;
     allowedSeqs.forEach((seq, c) => {

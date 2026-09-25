@@ -550,6 +550,9 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     };
     expect(await run(['Lawn &', 'Pest'], ['Lawn & Pest'])).toMatchObject({ ok: true, checked: true, reasons: [] });
     expect(await run(['Lawn & Pest'], ['Lawn &', 'Pest'])).toMatchObject({ ok: true, checked: true, reasons: [] });
+    // The side panel's "Lawn & Pest!" is the same wrap lettering (Codex r8 P2 on #4785).
+    expect(await run(['Lawn & Pest!'], ['Lawn & Pest!'])).toMatchObject({ ok: true, checked: true, reasons: [] });
+    expect(await run(['Lawn &', 'Pest!'], [])).toMatchObject({ ok: true, checked: true, reasons: [] });
     const bad = await run(['Lawn & Pest'], ['Lawn Pest']);
     expect(bad.ok).toBe(false);
     expect(bad.reasons).toContain('readable text: Lawn Pest');
