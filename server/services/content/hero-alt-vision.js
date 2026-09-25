@@ -281,7 +281,10 @@ function vanWrapWellFormed(obj) {
   // #4785).
   if (!Object.prototype.hasOwnProperty.call(obj, 'van')) return false;
   if (obj.van === null) return true;
-  return typeof obj.van === 'object' && typeof obj.van.present === 'boolean' && VAN_BODY_VALUES.has(obj.van.body) && typeof obj.van.wrapped === 'boolean' && Array.isArray(obj.van.wrap_text) && typeof obj.van.wrap_mascot === 'boolean';
+  // A non-null van object must be a van actually in frame: `present: false`
+  // alongside a body/wrap verdict is contradictory, and parseScreen would
+  // fold it into a clean "no van" (Codex r4 P2 on #4785). No van = null.
+  return typeof obj.van === 'object' && obj.van.present === true && VAN_BODY_VALUES.has(obj.van.body) && typeof obj.van.wrapped === 'boolean' && Array.isArray(obj.van.wrap_text) && typeof obj.van.wrap_mascot === 'boolean';
 }
 // A detection names an exclusion when it is its 1-based id, the same text,
 // or a paraphrase carrying every content word of it ("an irrigation repair

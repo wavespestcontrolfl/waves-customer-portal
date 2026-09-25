@@ -384,6 +384,9 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(await screen({ van: { present: true } })).toMatchObject({ ok: true, checked: false });
     expect(await screen({ van: { present: true, wrapped: true } })).toMatchObject({ ok: true, checked: false });
     expect(await screen({ van_wrap_elsewhere: 'none' })).toMatchObject({ ok: true, checked: false });
+    // A schema-shaped van object claiming present: false is contradictory —
+    // it must fail open, never fold into a clean "no van" (Codex r4 P2 on #4785).
+    expect(await screen({ van: van({ present: false, body: 'other', wrapped: false, wrap_mascot: false, wrap_text: [] }) })).toMatchObject({ ok: true, checked: false });
   });
 
   test('the `van` key must be PRESENT — an OMITTED key (van_wrap_elsewhere answered, van left out entirely) is unusable, never treated as an explicit "no van" (Codex r1 P2 on #4785)', async () => {
