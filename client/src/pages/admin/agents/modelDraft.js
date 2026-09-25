@@ -121,6 +121,17 @@ const legFollowsEnv = (leg, env, draft) => {
   return false;
 };
 
+// The env a bulk move sets to move this leg: the chain link supplying it
+// today, else its own pin when nothing but a code default sits below it.
+// null = the leg moves through its selector.
+function supplyingEnv(leg) {
+  if (!leg.pinEnv) return null;
+  if (!leg.chain) return leg.pinned || !leg.selector ? leg.pinEnv : null;
+  const supplied = walkChain(leg, {}, () => undefined).env;
+  if (supplied) return supplied;
+  return leg.chainBase?.selector ? null : leg.pinEnv;
+}
+
 // Is the leg held by an env (not its selector) once the draft applies?
 function pinnedAfterDraft(leg, draft, selectorDraft) {
   if (leg.chain) return walkChain(leg, draft, selectorDraft).env !== null;
@@ -256,15 +267,46 @@ export function envBlockOf(changes, catalog) {
 }
 
 // Can the target model serve what this env feeds (provider, modality, deep-only)?
-function incompatibility(accepts, target) {
+// A catalog-only env (voice_relay's inbound override) takes only the ids its
+// runtime allowlist names (`accepts.allowedIds`) — anything else is rejected
+// at the call site after the restart.
+function incompatibility(accepts, target, targetId) {
   if (!target) return "unknown model";
   if (!accepts) return null;
+  if (accepts.catalogOnly && !accepts.allowedIds?.includes(targetId)) return "not on this lane's model allowlist";
   if (!accepts.providers.includes(target.provider)) return "different provider";
   // Empty caps = the server only knows the id (audio / embedding / image
   // models the registry resolves to), not a model that serves every modality.
   if (!target.caps?.includes(accepts.cap)) return `no ${accepts.cap} support`;
   if (target.requires === "deep" && !accepts.deep) return "deep-audit only";
   return null;
+}
+
+// Per-lane envs: set pins, plus unset envs whose code default is the source
+// (LAWN_WRITER_MODEL unset → gpt-5.5 still moves by setting it). An unset
+// env over a SELECTOR is not listed — that leg moves through its selector.
+// A chained leg is grouped under the link that SUPPLIES its model (Sandy on
+// VOICE_RELAY_MODEL while its inbound override is unset), never its own
+// unset pin — setting that would silently decouple it from the shared env.
+function pinMigrationEntries(data, fromId, seen) {
+  const out = [];
+  const follows = (g, env) => legFollowsEnv(g, env, {});
+  for (const l of data.lanes) {
+    if (!movesOnEnv(l)) continue;
+    for (const leg of legsOf(l)) {
+      const env = leg.model === fromId ? supplyingEnv(leg) : null;
+      if (!env || seen.has(env)) continue;
+      seen.add(env);
+      const lanes = data.lanes.filter((x) => legsOf(x).some((g) => follows(g, env)));
+      const collateral = lanes.flatMap((x) => legsOf(x).filter((g) => follows(g, env) && g.model !== fromId).map((g) => ({ lane: x, model: g.model })));
+      const label = lanes.length > 1 ? `${lanes.length} lanes on one pin` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
+      const accepts = lanes.flatMap(legsOf).find((g) => g.pinEnv === env)?.accepts || leg.accepts;
+      // A pin that belongs to a locked lane is the lock itself.
+      const blockedBy = lanes.every((x) => x.lock) ? l.lock?.label || "locked" : null;
+      out.push({ entry: { env, kind: "pin", label, lanes, accepts, ...(blockedBy ? {} : { collateral }) }, blockedBy });
+    }
+  }
+  return out;
 }
 
 // Whole-model migration: every env that currently resolves to `fromId`,
@@ -306,12 +348,12 @@ export function buildMigrationSet({ data, catalog, fromId, toId }) {
       if (GROUP_RANK.approval > GROUP_RANK[group]) group = "approval";
       reasons.add(`also moves ${entry.collateral.map((c) => c.lane.name).join(", ")} off ${[...new Set(entry.collateral.map((c) => modelLabel(catalog, c.model)))].join(", ")}`);
     }
-    const bad = toId ? incompatibility(entry.accepts, target) : null;
+    const bad = toId ? incompatibility(entry.accepts, target, toId) : null;
     if (bad) {
       group = "blocked";
       reasons.add(bad);
     }
-    const { collateral, ...rest } = entry;
+    const { collateral: _collateral, ...rest } = entry;
     groups[group].push({ ...rest, reasons: [...reasons] });
   };
   const seen = new Set();
@@ -335,25 +377,9 @@ export function buildMigrationSet({ data, catalog, fromId, toId }) {
       groups.blocked.push({ env: null, kind: "fixed", label: `${l.name}${leg === l.primary ? "" : " · backup"}`, lanes: [l], accepts: leg.accepts, reasons: ["fixed in code"] });
     }
   }
-  // Per-lane envs: set pins, plus unset envs whose code default is the source
-  // (LAWN_WRITER_MODEL unset → gpt-5.5 still moves by setting it). An unset
-  // env over a SELECTOR is not listed — that leg moves through its selector.
-  for (const l of data.lanes) {
-    if (!movesOnEnv(l)) continue;
-    for (const leg of legsOf(l)) {
-      if (leg.model !== fromId || !leg.pinEnv || seen.has(leg.pinEnv)) continue;
-      if (!leg.pinned && leg.selector) continue;
-      seen.add(leg.pinEnv);
-      const lanes = data.lanes.filter((x) => legsOf(x).some((g) => g.pinEnv === leg.pinEnv));
-      const collateral = lanes.flatMap((x) => legsOf(x).filter((g) => g.pinEnv === leg.pinEnv && g.model !== fromId).map((g) => ({ lane: x, model: g.model })));
-      const label = lanes.length > 1 ? `${lanes.length} lanes on one pin` : `${l.name}${leg === l.primary ? "" : " · backup"}`;
-      // A pin that belongs to a locked lane is the lock itself.
-      if (lanes.every((x) => x.lock)) {
-        groups.blocked.push({ env: leg.pinEnv, kind: "pin", label, lanes, accepts: leg.accepts, reasons: [l.lock?.label || "locked"] });
-        continue;
-      }
-      push({ env: leg.pinEnv, kind: "pin", label, lanes, accepts: leg.accepts, collateral });
-    }
+  for (const entry of pinMigrationEntries(data, fromId, seen)) {
+    if (entry.blockedBy) groups.blocked.push({ ...entry.entry, reasons: [entry.blockedBy] });
+    else push(entry.entry);
   }
   return groups;
 }

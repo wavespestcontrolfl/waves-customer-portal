@@ -208,6 +208,25 @@ describe("walkChain · a leg whose env pin falls back to another env (voice_rela
     expect(changesFor(data, draft).find((c) => c.env === "SHARED_MODEL").lanes).toBe(2);
   });
 
+  it("bulk move: Sandy riding the shared env is grouped under it with collections — never its own unset override", () => {
+    const { data } = chainData({ shared: "m2" });
+    const set = buildMigrationSet({ data, catalog: CATALOG, fromId: "m2", toId: "m1" });
+    const all = [...set.eligible, ...set.shadow, ...set.approval, ...set.blocked];
+    expect(all.map((e) => e.env)).not.toContain("INBOUND_MODEL");
+    const shared = all.find((e) => e.env === "SHARED_MODEL");
+    expect(shared.lanes.map((l) => l.name).sort()).toEqual(["Collections calls", "Inbound Sandy"]);
+  });
+
+  it("bulk move: a catalog-only override cannot take an id outside its allowlist (e.g. one discovered for another lane)", () => {
+    const { data, sandy } = chainData({ inbound: "m2" });
+    sandy.primary.accepts = { ...sandy.primary.accepts, catalogOnly: true, allowedIds: ["m1", "m2"] };
+    const catalog = { ...CATALOG, m9: { label: "Claude Discovered 9", provider: "anthropic", caps: ["text"], status: "current" } };
+    const blocked = buildMigrationSet({ data, catalog, fromId: "m2", toId: "m9" }).blocked.find((e) => e.env === "INBOUND_MODEL");
+    expect(blocked.reasons).toContain("not on this lane's model allowlist");
+    const allowed = buildMigrationSet({ data, catalog, fromId: "m2", toId: "m1" });
+    expect(allowed.blocked.find((e) => e.env === "INBOUND_MODEL")).toBeUndefined();
+  });
+
   it("a deleted alias falls to the next still-set alias, which keeps the leg on that env", () => {
     const { data, sandy } = chainData({ inbound: "m2" });
     sandy.primary.chain[0] = { ...sandy.primary.chain[0], setEnv: "INBOUND_MODEL_LEGACY", afterUnpin: "m4" };
