@@ -239,7 +239,7 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
 describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks/text allowed ON the van only)', () => {
   const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
   const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
-  const van = (extra = {}) => ({ present: true, wrapped: true, wrap_text: ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'], wrap_mascot: true, ...extra });
+  const van = (extra = {}) => ({ present: true, body: 'ford_transit_medium_roof', wrapped: true, wrap_text: ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'], wrap_mascot: true, ...extra });
   const branded = (extra = {}) => answer({ readable_text: [], logos_or_brand_marks: [], van: van(), van_wrap_elsewhere: [], forbidden_scenes: [], notes: '', ...extra });
   const screen = (extra) => { mockDispatch.mockResolvedValue(branded(extra)); return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true }); };
   beforeEach(() => mockDispatch.mockReset());
@@ -248,8 +248,10 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     const plain = buildScreenPrompt({});
     expect(plain).not.toMatch(/van_wrap_elsewhere|"van":/);
     const p = buildScreenPrompt({ allowVanWrap: true });
-    expect(p).toMatch(/"van": \{"present": boolean, "wrapped": boolean, "wrap_text": string\[\], "wrap_mascot": boolean\} \| null, "van_wrap_elsewhere": string\[\]/);
+    expect(p).toMatch(/"van": \{"present": boolean, "body": "ford_transit_medium_roof" \| "other" \| "unsure", "wrapped": boolean, "wrap_text": string\[\], "wrap_mascot": boolean\} \| null, "van_wrap_elsewhere": string\[\]/);
     expect(p).toMatch(/EXCEPTION: that one van's own wrap graphics and its own wrap text are expected/);
+    expect(p).toMatch(/Transit cues: a short hood, a black hexagon-mesh grille with a Ford oval badge/);
+    expect(p).toMatch(/Mercedes Sprinter's long sloped nose/);
   });
 
   test('the wrap on the van, nothing off it, exact wrap strings → clean', async () => {
@@ -279,8 +281,52 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(split.ok).toBe(true);
   });
 
+  test('PUNCTUATION-SENSITIVE wrap text: the right words with the WRONG punctuation still fail, even though matchCaptions would have called them equal (Codex r2 P2 on #4785)', async () => {
+    const noAmpersand = await screen({ van: van({ wrap_text: ['Lawn Pest'] }) });
+    expect(noAmpersand.ok).toBe(false);
+    expect(noAmpersand.reasons).toEqual(['garbled van wrap text: Lawn Pest']);
+    const wrongPunct1 = await screen({ van: van({ wrap_text: ['Lawn-Pest'] }) });
+    expect(wrongPunct1.ok).toBe(false);
+    expect(wrongPunct1.reasons).toEqual(['garbled van wrap text: Lawn-Pest']);
+    const wrongPunct2 = await screen({ van: van({ wrap_text: ['GoWavesFL-com'] }) });
+    expect(wrongPunct2.ok).toBe(false);
+    expect(wrongPunct2.reasons).toEqual(['garbled van wrap text: GoWavesFL-com']);
+    // the exact wrap strings (correct punctuation) still pass, including the
+    // "!" after Pests and the split phone number from the test above.
+    const exact = await screen({ van: van({ wrap_text: ['Lawn & Pest', 'Wave Goodbye to Pests!'] }) });
+    expect(exact.ok).toBe(true);
+  });
+
+  test('a valid wrap fragment duplicated in readable_text does not double-fail as stray OCR — but a GARBLED one still does (Codex r2 P2 on #4785, fix 2)', async () => {
+    const validEcho = await screen({ readable_text: ['WAVES'], van: van({ wrap_text: ['WAVES'] }) });
+    expect(validEcho).toMatchObject({ ok: true, reasons: [] });
+    const garbledEcho = await screen({ readable_text: ['Lawn-Pest'], van: van({ wrap_text: ['Lawn-Pest'] }) });
+    expect(garbledEcho.ok).toBe(false);
+    // the garbled fragment fails BOTH the van-wrap check and the general
+    // readable-text check — it was never added to the attribution set.
+    expect(garbledEcho.reasons).toEqual(['garbled van wrap text: Lawn-Pest', 'readable text: Lawn-Pest']);
+  });
+
+  test('van.body conformance: a Sprinter/other body fails even when correctly wrapped; "unsure" passes; a missing/invalid body is malformed (Codex r2 P2 on #4785)', async () => {
+    const other = await screen({ van: van({ body: 'other' }) });
+    expect(other.ok).toBe(false);
+    expect(other.reasons).toEqual(['van body is not a Ford Transit medium-roof cargo van']);
+    expect(other.logos).toEqual(['van body is not a Ford Transit medium-roof cargo van']);
+    const unsure = await screen({ van: van({ body: 'unsure' }) });
+    expect(unsure).toMatchObject({ ok: true, reasons: [] });
+    const transit = await screen({ van: van({ body: 'ford_transit_medium_roof' }) });
+    expect(transit).toMatchObject({ ok: true, reasons: [] });
+    // combines with an independent violation (wrong body AND missing mascot)
+    const both = await screen({ van: van({ body: 'other', wrap_mascot: false }) });
+    expect(both.ok).toBe(false);
+    expect(both.reasons).toEqual(['van body is not a Ford Transit medium-roof cargo van', 'van wrap missing the mascot']);
+    // missing or invalid body → malformed, fail-open unchecked (never clean)
+    expect(await screen({ van: van({ body: undefined }) })).toMatchObject({ ok: true, checked: false });
+    expect(await screen({ van: van({ body: 'sprinter' }) })).toMatchObject({ ok: true, checked: false });
+  });
+
   test('a van present WITHOUT the wrap fails (the editor kept the van but dropped the reference) — no van at all stays clean (Codex r1 P2 on #4784)', async () => {
-    const unwrapped = await screen({ van: { present: true, wrapped: false, wrap_text: [], wrap_mascot: false } });
+    const unwrapped = await screen({ van: { present: true, body: 'ford_transit_medium_roof', wrapped: false, wrap_text: [], wrap_mascot: false } });
     expect(unwrapped.ok).toBe(false);
     expect(unwrapped.reasons).toEqual(['van present without the wrap']);
     expect(unwrapped.logos).toEqual(['van present without the wrap']);
@@ -370,7 +416,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
       text: JSON.stringify({
         readable_text: [], logos_or_brand_marks: [],
         technicians: [tech], waves_logo_elsewhere: [], uniform_logo_lettering: [],
-        van: { present: true, wrapped: true, wrap_text: ['WAVES', 'Lawn & Pest'], wrap_mascot: true },
+        van: { present: true, body: 'ford_transit_medium_roof', wrapped: true, wrap_text: ['WAVES', 'Lawn & Pest'], wrap_mascot: true },
         van_wrap_elsewhere: [], forbidden_scenes: [], notes: '',
       }),
     });
