@@ -651,8 +651,14 @@ function turnHasUnresolvedConditional(normalizedTurn) {
 // The negation/conditional screens above stay as defense in depth.
 const COMMITMENT_TURN_VOCAB = new Set([
   'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
-  'good', 'yep', 'yes', 'and', 'then', 'all', 'set', 'right',
+  'good', 'yep', 'yes', 'yeah', 'but', 'and', 'then', 'all', 'set', 'right',
   'we', 'i', 'll', 'will', 're', 'are', 'you', 'your', 'it', 'that', 's',
+  // Third-party point-of-contact commitments ("we'll see him Monday", a
+  // booking made for someone other than the caller — codex P1, live miss
+  // 17ed9362, a lender scheduling a WDO inspection for the homeowner) use
+  // the ordinary object pronoun in place of "you"; the closed vocabulary
+  // must carry it too.
+  'him', 'her', 'them',
   'see', 'confirm', 'confirmed', 'confirming', 'book', 'booked', 'booking',
   'schedule', 'scheduled', 'have', 'put', 'get', 'got', 'be', 'come',
   'coming', 'out', 'there', 'down', 'visit', 'appointment', 'inspection',
@@ -681,14 +687,19 @@ function commitmentTurnVocabularyOk(normalizedTurn) {
 // leading) never match and fail closed.
 const COMMITMENT_OPENER_TOKENS = new Set([
   'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
-  'good', 'yep', 'yes', 'and', 'then', 'all', 'right',
+  'good', 'yep', 'yes', 'yeah', 'but', 'and', 'then', 'all', 'right',
 ]);
 // Full head+predicate templates (codex P0, round 7f): a bare first-person
 // prefix accepted non-commitments ("we will NEED YOU TO CONFIRM…"). The
 // commitment PREDICATE is part of the template — anything after the subject
-// that isn't an explicit commitment verb phrase fails closed.
+// that isn't an explicit commitment verb phrase fails closed. "See him"/
+// "see her"/"see them" (codex P1, live miss 17ed9362) cover a booking made
+// for a third-party point of contact, not the caller.
 const COMMITMENT_HEADS = [
   'we ll see you ', 'we will see you ', 'i ll see you ', 'i will see you ',
+  'we ll see him ', 'we will see him ', 'i ll see him ', 'i will see him ',
+  'we ll see her ', 'we will see her ', 'i ll see her ', 'i will see her ',
+  'we ll see them ', 'we will see them ', 'i ll see them ', 'i will see them ',
   'we ll confirm ', 'we will confirm ', 'i ll confirm ', 'i will confirm ',
   'we ll be there ', 'we will be there ', 'we ll be out ', 'we will be out ',
   'we ll come ', 'we will come ',
@@ -755,11 +766,38 @@ function normalizeCommitmentText(s) {
 // you Tuesday at 10 AM. Are you booked Sunday at noon?" with the second
 // sentence pinned passed the form check via the first. Sentence boundaries
 // are preserved (split on .!?; after collapsing "a.m."/"p.m." so the
-// abbreviation dots don't split), and the SAME sentence must: contain the
-// pinned quote, pass the negation/conditional screens, satisfy the closed
-// vocabulary AND the affirmative commitment form, and bind the slot. A quote
-// spanning sentences grounds nowhere and fails closed; if the quote appears
-// in several sentences, EVERY one must pass (ambiguity fails closed).
+// abbreviation dots don't split), and the PINNED sentence (the one
+// containing the quote) must: pass the negation/conditional screens,
+// satisfy the closed vocabulary AND the affirmative commitment form, and
+// bind the slot. A quote spanning sentences grounds nowhere and fails
+// closed; if the quote appears in several sentences, EVERY one must pass
+// (ambiguity fails closed).
+//
+// OTHER sentences of the same turn (codex P1, live miss 17ed9362: Adam's
+// turn was "Awesome. Yep, it should go to him, the notification. It's
+// autonomously done, so if it goes to you, I'll make sure that's rectified.
+// But yeah, we'll see him on Monday at 10 o'clock." — the pinned quote was
+// the last sentence, and an earlier round's turn-wide vocabulary/conditional
+// screen poisoned it over a CONDITIONAL ABOUT WHICH INBOX GETS THE EMAIL
+// NOTIFICATION, not about the booking) no longer need the closed commitment
+// vocabulary. Instead an other-sentence poisons the pinned commitment only
+// when it itself:
+//   (a) contains a question mark (still asking, not committing — codex P1,
+//       round 7o, the tag-question case: "You're booked Sunday at noon.
+//       Right?"),
+//   (b) contains a negation/retraction/hedge (turnHasNegationOrHedge), or
+//   (c) is a conditional that references authorization/approval/decision
+//       terms or scheduling terms (sentenceHasAuthOrSchedulingConditional,
+//       below) — this is what still fails closed the two Codex regressions
+//       "If the homeowner approves. We will see you Sunday at noon." and
+//       "Subject to homeowner approval. We will see you Sunday at noon.":
+//       both adjacent sentences are conditionals that name the homeowner's
+//       approval, which is exactly the authorization the commitment can't
+//       yet have.
+// A conditional about anything else in the turn (notifications, texts,
+// emails, invoices) no longer poisons — multi-sentence turns that discuss
+// unrelated logistics alongside a clean commitment sentence are the
+// supported shape now, not just the single-sentence turn.
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);
   if (!q || q.length < 12) return false;
@@ -773,45 +811,32 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
     else sawCaller = true;
   }
   if (!agentTurns.length || !sawCaller) return false;
-  // Negation/conditional screens run on the WHOLE TURN (codex P0, round 7l:
-  // "If the homeowner approves. We will see you Sunday at noon." — an
-  // adjacent conditional sentence must poison the commitment sentence next
-  // to it); vocabulary, affirmative form, and slot binding stay scoped to
-  // the single sentence containing the pinned quote.
-  // Terminal closure for adjacent-sentence bypasses (codex P0, round 7m:
-  // "Subject to homeowner approval. We will see you Sunday at noon."):
-  // EVERY sentence of the grounding turn must itself pass the closed
-  // commitment vocabulary — which cannot express conditions, approvals, or
-  // retractions — so any surrounding sentence with out-of-vocabulary words
-  // poisons the whole turn. Multi-sentence turns discussing anything beyond
-  // the commitment (SMS logistics, addresses, names) fail closed to triage;
-  // the pinned single-sentence commitment turn is the supported shape.
   const containing = [];
   for (const turn of agentTurns) {
-    const wholeTurn = normalizeCommitmentText(turn);
     // Sentence chunks KEEP their terminator (codex P0, round 7n): splitting
     // on [.!?;]+ discarded the "?" that makes "So we will confirm it for
     // noon on Sunday?" a QUESTION — an interrogative sentence can never be
     // the commitment sentence.
     const chunks = (String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
-    // ANY question mark in the turn poisons it (codex P1, round 7o: a tag
-    // question — "You're booked Sunday at noon. Right?" — means the agent is
-    // ASKING, not committing, even when the pinned sentence is declarative).
-    const turnHasQuestion = String(turn).includes('?');
     const sentences = chunks
       .map((c) => ({ ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
       .filter((s) => s.ns);
-    const turnFullyInVocabulary = sentences.every((s) => commitmentTurnVocabularyOk(s.ns));
-    for (const s of sentences) {
-      if (s.ns.includes(q)) containing.push({ ...s, wholeTurn, turnFullyInVocabulary, turnHasQuestion });
+    for (let i = 0; i < sentences.length; i += 1) {
+      const s = sentences[i];
+      if (!s.ns.includes(q)) continue;
+      const otherSentencesClean = sentences.every((other, j) => j === i
+        || (!other.interrogative
+          && !turnHasNegationOrHedge(other.ns)
+          && !sentenceHasAuthOrSchedulingConditional(other.ns)));
+      containing.push({ ...s, otherSentencesClean });
     }
   }
   if (!containing.length) return false;
-  return containing.every(({ ns, interrogative, wholeTurn, turnFullyInVocabulary, turnHasQuestion }) => !interrogative
-    && !turnHasQuestion
-    && turnFullyInVocabulary
-    && !turnHasNegationOrHedge(wholeTurn)
-    && !turnHasUnresolvedConditional(wholeTurn)
+  return containing.every(({ ns, interrogative, otherSentencesClean }) => !interrogative
+    && otherSentencesClean
+    && commitmentTurnVocabularyOk(ns)
+    && !turnHasNegationOrHedge(ns)
+    && !turnHasUnresolvedConditional(ns)
     && turnHasAffirmativeCommitmentForm(ns)
     && quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt));
 }
@@ -829,6 +854,43 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
   'august', 'september', 'october', 'november', 'december'];
+
+// Other-sentence poison list for agentCommitmentSentenceVerified (codex P1,
+// live miss 17ed9362): a conditional elsewhere in the grounding turn only
+// poisons the pinned commitment when it references authorization/approval
+// language ("if the HOMEOWNER approves", "subject to APPROVAL"), whether the
+// SLOT ITSELF exists ("if we HAVE SPACE", "if we have ROOM" — the visit
+// isn't certain until that resolves, same shape as an approval conditional:
+// see call-reschedule-apply.test.js "agent evidence must ground..."), or the
+// scheduling itself (a weekday/month/time, or "see you"/"book"/"schedule"/
+// "appointment") — a conditional about something else entirely (which inbox
+// a notification lands in, an email, a text, an invoice) does not.
+const AUTH_OR_SCHEDULING_TERMS = [
+  ' homeowner ', ' owner ', ' approve ', ' approves ', ' approved ', ' approval ',
+  ' authorize ', ' authorizes ', ' authorized ', ' authorization ',
+  ' permission ', ' subject to ', ' confirm with ', ' check with ',
+  ' decision ', ' okay with ', ' ok with ',
+  ' see you ', ' book ', ' booked ', ' booking ', ' schedule ', ' scheduled ',
+  ' scheduling ', ' appointment ',
+  ' space ', ' room ', ' availability ', ' available ', ' capacity ',
+  ' opening ', ' openings ', ' fit you in ', ' squeeze you in ', ' slot ',
+  ' noon ', ' midnight ', ' am ', ' pm ', ' o clock ', ' oclock ',
+];
+// "Subject to homeowner approval." (codex round 7m regression) is a
+// conditional with no "if"/"unless"/etc. trigger word — turnHasUnresolvedConditional
+// alone would call it clean. "subject to" is added here as an additional
+// conditional trigger, scoped to this other-sentence screen only (it stays
+// out of CONDITIONAL_TOKENS/turnHasUnresolvedConditional so quoteBindsConfirmedSlot's
+// own "subject to" is never touched).
+function sentenceHasAuthOrSchedulingConditional(ns) {
+  const padded = ` ${ns} `;
+  const isConditional = turnHasUnresolvedConditional(ns) || padded.includes(' subject to ');
+  if (!isConditional) return false;
+  if (AUTH_OR_SCHEDULING_TERMS.some((t) => padded.includes(t))) return true;
+  if (WEEKDAY_NAMES.some((w) => padded.includes(` ${w} `))) return true;
+  if (MONTH_NAMES.some((m) => padded.includes(` ${m} `))) return true;
+  return /(?:^| )\d{1,2}(?: 00)? ?(am|pm)(?= |$)/.test(padded);
+}
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves
 // the LITERAL wall clock of an ET-offset timestamp even when the seasonal
@@ -952,6 +1014,21 @@ function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStart
   // Negations can't be parsed deterministically, so ANY second time or
   // weekday mention fails closed — the extraction prompt directs the model
   // to pin the single final commitment sentence.
+  //
+  // "N o'clock" and a bare "at N" (live miss, call 17ed9362: "we'll see him
+  // on Monday at 10 o'clock" never grounded because neither form carries an
+  // am/pm marker) are also period-less time mentions — normalizeCommitmentText
+  // leaves "o'clock"/"o clock" as the two tokens "o clock" and a written
+  // "oclock" as one, so the same regex covers both. A bare "at N" is
+  // accepted ONLY when it is immediately followed by the end of the
+  // sentence or "on <weekday>" — anywhere else "at 10" is too likely to be
+  // an address or an unrelated number. Neither form states a period, so it
+  // is INFERRED from the Waves business day (7am–6pm): 7–11 reads as
+  // morning, 12 as noon, 1–6 as afternoon. That inferred period must still
+  // equal the confirmed slot's period and N must still equal the slot's
+  // 12-hour number through the same `mentions` check below — "10 o'clock"
+  // (inferred am) binds a 10:00 slot and does NOT bind a 22:00 one, whose
+  // 12-hour form is also "10" but whose period is pm.
   const mentions = new Set();
   for (const m of q.matchAll(/(?:^| )(\d{1,2})(?: 00)? (am|pm)(?= |$)/g)) {
     const h = String(Number(m[1]));
@@ -960,6 +1037,23 @@ function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStart
   }
   if (q.includes(' noon ')) mentions.add('12 pm');
   if (q.includes(' midnight ')) mentions.add('12 am');
+  const inferPeriodFromBusinessHours = (n) => {
+    if (n >= 7 && n <= 11) return 'am';
+    if (n === 12) return 'pm';
+    if (n >= 1 && n <= 6) return 'pm';
+    return null;
+  };
+  for (const m of q.matchAll(/(?:^| )(\d{1,2}) o ?clock(?= |$)/g)) {
+    const n = Number(m[1]);
+    const period = inferPeriodFromBusinessHours(n);
+    mentions.add(period ? `${n} ${period}` : `invalid ${m[1]} oclock`);
+  }
+  const AT_WEEKDAY_RE = new RegExp(`(?:^| )at (\\d{1,2})(?= $| on (?:${WEEKDAY_NAMES.join('|')})(?= |$))`, 'g');
+  for (const m of q.matchAll(AT_WEEKDAY_RE)) {
+    const n = Number(m[1]);
+    const period = inferPeriodFromBusinessHours(n);
+    mentions.add(period ? `${n} ${period}` : `invalid at ${m[1]}`);
+  }
   const weekdaysInQuote = WEEKDAY_NAMES.filter((w) => q.includes(` ${w} `));
   return mentions.size === 1
     && mentions.has(`${Number(hour12)} ${dayPeriod}`)

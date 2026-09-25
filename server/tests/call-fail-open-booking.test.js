@@ -4,6 +4,7 @@
 // garbled-email name_email_mismatch; low confidence on a short familiar call).
 const {
   canAutoRoute, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, SMS_ONLY_FLAGS,
+  hasAgentCommittedEvidence,
 } = require('../services/call-triage-flags');
 const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-gates');
 
@@ -361,13 +362,48 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(am.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
-  test("a period-less \"10 o'clock\" commitment is ambiguous and fails closed (round-4 P1)", () => {
+  // Superseded (codex P1, live miss 17ed9362, 2026-09-25): a period-less
+  // "N o'clock" used to be treated as irreducibly ambiguous. It now infers
+  // its day period from the Waves business day (7am–6pm: 7–11 → am, 12 →
+  // pm, 1–6 → pm) and binds when that inferred period AND hour match the
+  // confirmed slot — see quoteBindsConfirmedSlot. A period that does NOT
+  // match the slot still fails closed.
+  test('a period-less "10 o\'clock" commitment infers "am" from business hours and binds a 10 AM slot', () => {
     const bare = "So we'll see you Sunday at 10 o'clock, and just let us know if anything changes.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, bare);
     const ex = agentCommitted(['caller_not_authorized'], { quote: bare });
     ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
     const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('the same "10 o\'clock" quote does NOT bind a 10 PM (22:00) slot — the inferred period must match, not just the hour', () => {
+    const bare = "So we'll see you Sunday at 10 o'clock, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, bare);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: bare });
+    ex.scheduling.confirmed_start_at = '2026-08-02T22:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
     expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('"8 o\'clock" infers "am" and binds an 8 AM slot', () => {
+    const eight = "So we'll see you Sunday at 8 o'clock, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, eight);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: eight });
+    ex.scheduling.confirmed_start_at = '2026-08-02T08:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
+  test('"1 o\'clock" infers "pm" and binds a 1 PM slot', () => {
+    const one = "So we'll see you Sunday at 1 o'clock, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, one);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: one });
+    ex.scheduling.confirmed_start_at = '2026-08-02T13:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
   });
 
   test('a multi-slot turn never binds — rejected 10 AM + committed 11 AM fails for BOTH slots (round-5 P1)', () => {
@@ -725,6 +761,86 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     const r = canAutoRoute(ex, opts({ failOpen: true, callerAni: '+19415550100' }));
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized', 'caller_phone_missing']));
+  });
+
+  // Sentence-scoped poisoning (codex P1, live miss 17ed9362): a conditional
+  // ELSEWHERE in the grounding turn only poisons the pinned commitment
+  // sentence when it references authorization/approval or the scheduling
+  // itself — a conditional about something unrelated (here, which inbox a
+  // notification lands in) does not.
+  test('a conditional about NOTIFICATION ROUTING elsewhere in the turn does not poison the pinned commitment', () => {
+    const turn = "Yep, it should go to him, the notification. If it goes to you, I'll make sure that gets figured out. "
+      + "But yeah, we'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "But yeah, we'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('a conditional about HOMEOWNER APPROVAL elsewhere in the turn still poisons the pinned commitment', () => {
+    const turn = "If the homeowner is not okay with it, we will have to reschedule. But yeah, we'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "But yeah, we'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Live miss 2026-09-24, call 17ed9362: a lender booking a WDO inspection
+  // for a homeowner ("Manuel Costa", the point of contact) on behalf of the
+  // caller ("Hannah"). The model pinned the closing agent sentence — a
+  // third-party "see him", a bare "o'clock", and an adjacent conditional
+  // about which inbox gets the notification email — and the OLD grounding
+  // rejected all three; hasAgentCommittedEvidence must now ground it.
+  // Real transcript, synthetic ids only.
+  test('the real Hannah transcript grounds "we\'ll see him on Monday at 10 o\'clock" (live miss 17ed9362)', () => {
+    const transcript = [
+      'Agent: Waves Pest Control, this is Adam.',
+      'Caller: Hi, my name is Hannah. Do you guys do wood destroying insect reports?',
+      'Agent: Yes.',
+      "Caller: Okay, fantastic. I'm helping a client in your area with a refinance, and I need to set up one. How much do you charge?",
+      'Agent: Two fifty.',
+      'Caller: Okay, and do you require that be in a time of service, or are you okay being paid escrow?',
+      "Agent: Yes, it's fine escrow.",
+      'Caller: Escrow is okay?',
+      'Agent: Yep.',
+      'Caller: Okay. Do you have availability for Monday or Tuesday of next week?',
+      "Agent: Uh, yeah. Where's the location?",
+      "Caller: It's in Bradenton, Florida.",
+      'Agent: Yep.',
+      "Caller: Okay, so I'd like to schedule with you for Monday or Tuesday.",
+      'Agent: Okay. Let me pop to my calendar real quick. Just give me half a second. Do you have a preference on time frames, in terms of morning, afternoon?',
+      "Caller: Let's do morning.",
+      'Agent: Okay. And what zip code is that? Just give me the full address, please.',
+      'Caller: 11813 Mallory Park Ave in Bradenton, Florida. Three four two one one.',
+      "Agent: Great, yep, we have a location there. So we can actually do 10 o'clock on Monday, September 28th.",
+      'Caller: Okay.',
+      'Agent: That work for you?',
+      'Caller: That works.',
+      "Agent: Awesome. So point of contact will be yourself. So it's your first, last name and your best email address, and then I'll send you a confirmation text for 10 o'clock on Monday.",
+      "Caller: If you could give my client the point of contact, just I'll let him know. You can take my number and my email. I want the report and the invoice emails over to me, but we'll make him point of contact just so you can reach him with any appointment updates.",
+      'Agent: Okay.',
+      'Caller: So his name is Manuel Costa, C-O-S-T-A.',
+      'Agent: Okay.',
+      'Caller: And his phone number is 732-910-8191.',
+      "Agent: Okay, and then I just need his email address, and then it should, the notification should go to him. If it does go to you, I'll make sure that gets figured out for Monday.",
+      'Caller: Okay, so you want his email address and mine?',
+      'Agent: Yes.',
+      'Caller: Okay, his email is Hatch, H-A-T-C-H, Boss, B-O-S-S, 76 at gmail dot com.',
+      'Agent: Awesome.',
+      "Caller: My email address is H Muller, M-U-L-L-E-R, at— Independence, I-N-D-E-P-E-N-D-E-N-C-E, H-L as in home loans dot com.",
+      "Agent: Awesome. Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. But yeah, we'll see him on Monday at 10 o'clock.",
+      "Caller: All right, perfect. I'll let him know. Thank you. Bye-bye.",
+      'Agent: Thank you. Bye.',
+    ].join('\n');
+    const extraction = {
+      evidence: [{
+        field_path: '/scheduling/agent_committed_booking',
+        speaker: 'agent',
+        quote: "But yeah, we'll see him on Monday at 10 o'clock.",
+      }],
+      scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' },
+    };
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:06.711Z')).toBe(true);
   });
 });
 
