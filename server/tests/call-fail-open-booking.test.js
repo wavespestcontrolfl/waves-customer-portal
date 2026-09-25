@@ -1071,6 +1071,86 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Codex round 6, P1 (:1029): AUTHORIZATION_NEED_RE only covered the
+  // third-party INFINITIVE shape ("need him TO confirm"). "We need your
+  // okay." is a DIRECT OBJECT shape ("need YOUR okay", no "to <verb>") and
+  // named no term from AUTHORIZATION_PARTY_OR_ACT_TERMS either, so it
+  // passed whole. The regex gained a second anchored alternative for this
+  // shape.
+  test('Codex round-6 regression: "We need your okay." still poisons (direct-object authorization shape)', () => {
+    const turn = "We need your okay. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-6 regression: "We\'re waiting on his approval." still poisons (same shape, different trigger/party)', () => {
+    const turn = "We're waiting on his approval. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 6, P2 (:1234): a purely REINFORCING affirmative ("You're
+  // confirmed.") was getting caught by SCHEDULING_PREDICATE_TERMS on
+  // "confirmed" even though it states no new scheduling fact — it only
+  // echoes the pinned sentence. REINFORCING_AFFIRMATION_RE recognizes this
+  // as a narrow, whole-sentence-anchored shape, checked before the
+  // scheduling-predicate screen; anything longer than the exact shape still
+  // falls through to the ordinary screens.
+  test('Codex round-6 regression: "You\'re confirmed." (reinforcing affirmative) does not poison the pinned commitment', () => {
+    const turn = "You're confirmed. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('Codex round-6: "You\'re confirmed once he approves." still poisons — a reason clause is not the reinforcing shape', () => {
+    const turn = "You're confirmed once he approves. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Accepted strictness (per the coordinator's instruction): a weekday
+  // tacked onto an otherwise-reinforcing affirmative is new scheduling
+  // information the narrow REINFORCING_AFFIRMATION_RE shape was never meant
+  // to cover, so it still falls through to SCHEDULING_PREDICATE_TERMS and
+  // poisons on "sunday" — even though the sentence never actually commits
+  // to a DIFFERENT day.
+  test('Codex round-6: "You\'re confirmed for Sunday." still poisons — a weekday is outside the reinforcing shape (accepted strictness)', () => {
+    const turn = "You're confirmed for Sunday. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 6, P2 (:1179): bare ' may ' in SCHEDULING_PREDICATE_TERMS
+  // collided with the MODAL verb — "it may go to him" poisoned on the month
+  // name. "may" is now recognized only in genuine date-shaped usage
+  // (MAY_DATE_RE, a day number/ordinal immediately adjacent).
+  test('Codex round-6 regression: modal "may" no longer collides with the month name — the notification-routing turn still grounds', () => {
+    const turn = "Yep, it may go to him, the notification. If it goes to you, I'll make sure that gets figured out. "
+      + "But yeah, we'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "But yeah, we'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('Codex round-6: a genuine date-shaped "May" mention in an OTHER sentence still poisons', () => {
+    const turn = "That's set for May 3rd. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
   // history). Round 3 reworded this test from "Adam works Sundays." (out-
   // of-vocabulary words) to "We come out Sunday afternoon." on the theory

@@ -1021,12 +1021,19 @@ const UNAVAILABILITY_TERMS = [
 // round 3's assumption that these two lists are "by construction" excluded
 // from the base vocabulary was true only because the words each list uses
 // happened not to overlap with base vocab THEN; "him"/"need"/"confirm" are
-// all base vocab now. One regex for the SHAPE (someone still has to sign
-// off on this) rather than an ever-growing word list: "need(s)"/"going to
-// need" + a PARTY (him/her/them/someone/the owner/the homeowner/the
-// client) + "to" + an AUTHORIZATION VERB (confirm/approve/sign off/okay/ok/
-// authorize).
-const AUTHORIZATION_NEED_RE = /\b(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client) to (?:confirm|approve|sign off|okay|ok|authorize)\b/;
+// all base vocab now. Two anchored SHAPES (never an ever-growing word list):
+//   (a) "need(s)"/"going to need" + a PARTY (him/her/them/someone/the
+//       owner/the homeowner/the client) + "to" + an AUTHORIZATION VERB
+//       (confirm/approve/sign off/okay/ok/authorize) — the third-party
+//       INFINITIVE form, "I need him TO confirm".
+//   (b) codex round 6, P1: "We need your okay." names no party/verb pair
+//       from shape (a) either (it's a DIRECT OBJECT, not "him to confirm").
+//       "need(s)/going to need/waiting on/waiting for" + a POSSESSIVE
+//       (your/his/her/their/the owner's/the homeowner's/the client's —
+//       normalized text strips apostrophes, so "owner s") + an
+//       AUTHORIZATION NOUN (okay/ok/approval/confirmation/go ahead/sign
+//       off/permission/authorization/blessing) directly, no "to <verb>".
+const AUTHORIZATION_NEED_RE = /\b(?:(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client) to (?:confirm|approve|sign off|okay|ok|authorize)|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing))\b/;
 // Unconditional declarative-poison check (codex rounds 2 and 4): either
 // term list, or the anchored "need <party> to <authorize>" shape, anywhere
 // in the sentence poisons regardless of conditional structure. Restored as
@@ -1167,6 +1174,12 @@ function clauseIsBenign(clauseNs, prevNs) {
 // never trips it) — one list, whole-token/phrase matched, that needs no
 // growth for a "confirm"/"appointment"/"book"/"schedule" shape ever again,
 // regardless of what other vocabulary exists.
+// codex round 6, P2 (:1179): bare ' may ' collided with the MODAL verb —
+// "Yep, it may go to him, the notification." poisoned on the month name.
+// "may" is deliberately ABSENT from this list; MAY_DATE_RE below recognizes
+// it only in genuine date-shaped usage (adjacent to a day number), leaving
+// the modal use alone. Every other month name stays a plain phrase entry —
+// none of them collide with an ordinary English word the way "may" does.
 const SCHEDULING_PREDICATE_TERMS = [
   ' confirm ', ' confirms ', ' confirmed ', ' confirmation ',
   ' appointment ', ' appointments ',
@@ -1176,7 +1189,7 @@ const SCHEDULING_PREDICATE_TERMS = [
   ' see you ', ' see him ', ' see her ', ' see them ',
   ' be there ', ' be out ', ' come out ',
   ' sunday ', ' monday ', ' tuesday ', ' wednesday ', ' thursday ', ' friday ', ' saturday ',
-  ' january ', ' february ', ' march ', ' april ', ' may ', ' june ', ' july ',
+  ' january ', ' february ', ' march ', ' april ', ' june ', ' july ',
   ' august ', ' september ', ' october ', ' november ', ' december ',
   ' tomorrow ', ' today ', ' tonight ', ' next week ',
   ' am ', ' pm ', ' clock ', ' noon ', ' midnight ',
@@ -1184,15 +1197,37 @@ const SCHEDULING_PREDICATE_TERMS = [
   ' available ', ' availability ', ' unavailable ',
   ' quote ', ' estimate ', ' price ',
 ];
+// "May" recognized ONLY in date-shaped usage — a day number or ordinal
+// immediately adjacent, either order ("May 3rd" / "3rd of May" / "3 May").
+const MAY_DATE_RE = /\bmay (?:\d{1,2}(?:st|nd|rd|th)?)\b|\b\d{1,2}(?:st|nd|rd|th)? (?:of )?may\b/;
+// codex round 6, P2 (:1234): a purely REINFORCING affirmative in an OTHER
+// sentence ("You're confirmed.") was getting caught by the
+// SCHEDULING_PREDICATE_TERMS screen on "confirmed" — but it adds no new
+// scheduling FACT (no day, no time, no place), it only echoes agreement
+// with whatever the pinned sentence already states. Recognized as a narrow,
+// WHOLE-SENTENCE anchored shape only — never via vocabulary, and never
+// allowed to grow past this exact structure: an optional single opener,
+// then a subject ("you're"/"we're"/"it's"/"that's"), then an optional
+// "all", then one closing affirmative verb, and NOTHING else. Anything
+// longer — a reason clause, a weekday, a condition — falls through to the
+// ordinary screens below and is judged on its own content, same as any
+// other sentence ("You're confirmed once he approves." still poisons via
+// the declarative-poison screen on "approves"; "You're confirmed for
+// Sunday." still poisons via SCHEDULING_PREDICATE_TERMS on "sunday" — a
+// weekday is new scheduling information this narrow shape was never meant
+// to cover).
+const REINFORCING_AFFIRMATION_RE = /^(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:you re|you are|we re|we are|it s|it is|that s|that is) (?:all )?(?:confirmed|set|booked|good to go|on the books|locked in)$/;
 // True when a normalized sentence (already run through
 // stripBenignTopicPhrases) still talks about scheduling — either a term
-// from the phrase list above, or a bare 1-2 digit "time-looking" token
-// (an hour, a bare date number). Deliberately broad on the digit check:
-// fails closed to triage on any short number (an address, a price without
-// cents) rather than risk missing a real time mention — the safe direction
-// for an OTHER sentence, which is never the one that needs to state a time.
+// from the phrase list above, the date-shaped "May" regex, or a bare 1-2
+// digit "time-looking" token (an hour, a bare date number). Deliberately
+// broad on the digit check: fails closed to triage on any short number (an
+// address, a price without cents) rather than risk missing a real time
+// mention — the safe direction for an OTHER sentence, which is never the
+// one that needs to state a time.
 function sentenceHasSchedulingPredicate(strippedNs) {
   const padded = ` ${strippedNs} `;
+  if (MAY_DATE_RE.test(strippedNs)) return true;
   if (SCHEDULING_PREDICATE_TERMS.some((t) => padded.includes(t))) return true;
   return strippedNs.split(' ').some((tok) => /^\d{1,2}$/.test(tok));
 }
@@ -1207,13 +1242,19 @@ function sentenceHasSchedulingPredicate(strippedNs) {
 //      checked before anything below ever runs, because a closed vocabulary
 //      of ordinary words — "him"/"need"/"confirm"/"the"/"appointment" — can
 //      never express that SHAPE on its own).
-//   4. No SCHEDULING_PREDICATE_TERM in the sentence once benign topic
+//   4. A purely REINFORCING affirmative ("You're confirmed.") passes
+//      immediately, checked as a narrow whole-sentence ANCHORED shape
+//      (REINFORCING_AFFIRMATION_RE, codex round 6 — never via vocabulary),
+//      before the scheduling-predicate screen ever sees "confirmed"/
+//      "booked"/etc. Anything longer than the exact shape falls through to
+//      the ordinary screens below.
+//   5. No SCHEDULING_PREDICATE_TERM in the sentence once benign topic
 //      phrases are stripped out (codex round 5, above) — "We should confirm
 //      the appointment.", "We need your confirmation of the appointment.",
 //      and "If you need it, we will book the appointment." all poison here,
 //      on "confirm"/"confirmation"/"book"+"appointment", regardless of
 //      conditional structure or vocabulary membership.
-//   5. A CONDITIONAL sentence gets ONE further requirement ON TOP of (not
+//   6. A CONDITIONAL sentence gets ONE further requirement ON TOP of (not
 //      instead of) the STRIPPED-text vocabulary check below: every
 //      extracted clause must be benign (clauseIsBenign — unchanged: still
 //      runs the authorization/unavailability/scheduling-staffing poison-term
@@ -1222,7 +1263,7 @@ function sentenceHasSchedulingPredicate(strippedNs) {
 //      bare-pronoun clause). A conditional sentence can only pass through
 //      this carve-out — vocabulary-only clearance is never enough for it,
 //      unlike a non-conditional declarative.
-//   6. Whatever remains of the STRIPPED text must be built from the base
+//   7. Whatever remains of the STRIPPED text must be built from the base
 //      COMMITMENT_TURN_VOCAB plus the small BENIGN_CONDITIONAL_GLUE_WORDS
 //      filler set (never the raw, unstripped text — the benign topic words
 //      are gone by now and never need to sit in any vocabulary Set at all).
@@ -1230,6 +1271,7 @@ function otherSentenceIsClean(other, prevNs) {
   if (other.interrogative) return false;
   if (turnHasNegationOrHedge(other.ns)) return false;
   if (sentenceHasDeclarativePoisonVocabulary(other.ns)) return false;
+  if (REINFORCING_AFFIRMATION_RE.test(other.ns)) return true;
   const stripped = stripBenignTopicPhrases(other.ns);
   if (sentenceHasSchedulingPredicate(stripped)) return false;
   if (turnHasUnresolvedConditional(other.ns)) {

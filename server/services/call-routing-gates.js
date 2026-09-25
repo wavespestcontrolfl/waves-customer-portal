@@ -156,8 +156,24 @@ function checkTcpaConsent(extraction, opts = {}) {
 // stays blocked instead — again strictly MORE conservative, never less —
 // so a force-reprocess must write a fresh decision row rather than
 // onConflict-ignore into the stale auto-routed one.
-const V2_DECISION_VERSION = 'v2-1.12.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0'];
+// v2-1.13.0: otherSentenceIsClean (call-triage-flags.js) picked up three
+// codex round-6 fixes that change canAutoRoute's decision surface both
+// ways. STRICTER: AUTHORIZATION_NEED_RE gained a second anchored
+// alternative for the direct-object authorization shape ("need your okay"/
+// "waiting on his approval" — no third-party "to <verb>" infinitive), so a
+// call that used to demote caller_not_authorized/commercial_requires_quote
+// on that shape now stays blocked. MORE PERMISSIVE (both narrow, anchored
+// shapes, never open vocabulary growth): (1) REINFORCING_AFFIRMATION_RE
+// recognizes a purely reinforcing other-sentence ("You're confirmed.") as
+// clean before the scheduling-predicate screen, since it states no new
+// scheduling fact; (2) the bare ' may ' entry in SCHEDULING_PREDICATE_TERMS
+// (colliding with the modal verb) is replaced by MAY_DATE_RE, which
+// recognizes "May" only in genuine date-shaped usage, so a benign aside
+// using "may" as a modal ("it may go to him") no longer poisons the turn.
+// A force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale one either way.
+const V2_DECISION_VERSION = 'v2-1.13.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0'];
 
 function buildRouteDecision({
   callLogId,
