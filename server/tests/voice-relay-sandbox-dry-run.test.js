@@ -198,7 +198,6 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/call-field-candidates.js': 'keyed by id',
     'services/estimator-engine/index.js': 'keyed by id / markers the estimator stamps',
     'services/estimator-engine/draft-builder.js': 'keyed by id',
-    'services/estimator-engine/booking-predraft.js': 'keyed by id',
     'services/knowledge-index/resolution-sync.js': 'requires ai_extraction_enriched, which the relay never writes',
     'services/ai-assistant/assistant.js': 'writer keyed by CallSid',
     'routes/admin-triage.js': 'keyed by id',
