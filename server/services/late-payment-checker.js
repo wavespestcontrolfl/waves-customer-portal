@@ -56,6 +56,14 @@ function emailEpisodeNeedsRetry(smsMeta, emailMeta) {
     && emailMeta.delivered !== true && emailMeta.resolved !== true;
 }
 
+function isTerminalEmailRefusal(result) {
+  return result?.ok === false && result.retryable !== true && result.deferred !== true
+    && result.deliveryOutcome !== 'uncertain' && (
+    (result.skipped === true && ['missing_email', 'billing_email_not_selected', 'template_unavailable'].includes(result.reason))
+    || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
+  );
+}
+
 async function recoverPendingEmailEpisode(invoiceId, { microdeposit = false } = {}) {
   const prefix = `late_payment_checker:${microdeposit ? 'microdeposit:' : ''}${invoiceId}:`;
   try {
@@ -93,12 +101,18 @@ async function recoverPendingEmailEpisode(invoiceId, { microdeposit = false } = 
 }
 
 async function resolvePendingEmailEpisode(episode, reason) {
-  if (!episode?.emailLedgerId) return;
-  await db('collections_contact_ledger').where({ id: episode.emailLedgerId }).update({
-    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
-      JSON.stringify({ resolved: true, resolution: reason }),
-    ]),
-  }).catch((err) => logger.warn(`[late-payment] could not resolve pending Email ledger ${episode.emailLedgerId}: ${err.message}`));
+  if (!episode?.emailLedgerId) return true;
+  try {
+    await db('collections_contact_ledger').where({ id: episode.emailLedgerId }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
+        JSON.stringify({ resolved: true, resolution: reason }),
+      ]),
+    });
+    return true;
+  } catch (err) {
+    logger.warn(`[late-payment] could not resolve pending Email ledger ${episode.emailLedgerId}: ${err.message}`);
+    return false;
+  }
 }
 
 async function claimReservedEmail(ContactLedger, ledger) {
@@ -226,6 +240,10 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     }).catch((e) => ({ ok: false, error: e.message }));
     if (result?.ok !== true) {
       await ContactLedger.markSendFailed(emailLedger, { error: result?.reason || 'sidecar_failed' });
+      if (isTerminalEmailRefusal(result)
+        && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger.id }, 'email_terminal_refusal')) {
+        await completePendingEmail(pendingEmailActivity, 'sms');
+      }
       return 'skip';
     }
     await ContactLedger.markDelivered(emailLedger);
@@ -250,6 +268,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     let emailAttempted = false;
     let emailDelivered = false;
     let emailLedger = null;
+    let emailResult = null;
     const attemptEmail = async () => {
       if (emailAttempted || !emailPermitted) return;
       emailAttempted = true;
@@ -273,7 +292,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
         return;
       }
       if (!claim.allowed) return;
-      const emailResult = await sendMicrodepositVerificationEmail({
+      emailResult = await sendMicrodepositVerificationEmail({
         invoice: inv,
         customer,
         touchKey: `${tierDays}d`,
@@ -319,20 +338,23 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     await attemptEmail();
     if (isTransientSmsResult(sendResult)) return 'skip';
     if (!sendResult.sent && !emailDelivered) return 'skip';
+    const terminalEmailResolved = sendResult.sent && isTerminalEmailRefusal(emailResult)
+      && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal');
+    const pendingEmail = sendResult.sent && explicitEmailSelected && !emailDelivered && !terminalEmailResolved;
     const activityInsert = db('activity_log').insert({
       customer_id: customer.id,
       action: 'microdeposit_verification_reminder',
       description: `Micro-deposit verification re-nudge (${tierDays}-day): ${inv.title || 'invoice'} ${invoiceRef}`,
       metadata: JSON.stringify({
         dedupeKey, invoiceId: inv.id, tierDays, daysOverdue: daysSince,
-        ...(explicitEmailSelected && !emailDelivered ? {
+        ...(pendingEmail ? {
           pendingEmail: true, channel: 'sms',
           ledgerIds: [smsLedger?.id, emailLedger?.id].filter(Boolean),
           emailLedgerId: emailLedger?.id || null,
         } : {}),
       }),
     });
-    if (explicitEmailSelected && !emailDelivered) await activityInsert;
+    if (pendingEmail) await activityInsert;
     else await activityInsert.catch(() => {});
     return 'sent';
   } catch (e) {
@@ -651,6 +673,10 @@ const LatePaymentService = {
           if (emailResult?.ok === true) {
             await completePendingEmail(pendingEmailActivity);
             notified++;
+          } else if (isTerminalEmailRefusal(emailResult)
+            && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')) {
+            await completePendingEmail(pendingEmailActivity, 'sms');
+            skipped++;
           } else skipped++;
           continue;
         }
@@ -731,6 +757,9 @@ const LatePaymentService = {
         await attemptEmail();
 
         const emailDelivered = emailResult?.ok === true;
+        const terminalEmailResolved = smsSent && isTerminalEmailRefusal(emailResult)
+          && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal');
+        const pendingEmail = smsSent && explicitEmailSelected && !emailDelivered && !terminalEmailResolved;
 
         if (smsSent) {
           // SMS reached the customer; the email is a bonus. The reminder landed,
@@ -762,14 +791,14 @@ const LatePaymentService = {
             invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince,
             tierDays,
             channel: smsSent ? (emailDelivered ? 'sms+email' : 'sms') : 'email_only',
-            ...(smsSent && explicitEmailSelected && !emailDelivered ? {
+            ...(pendingEmail ? {
               pendingEmail: true,
               ledgerIds: [smsLedger?.id, emailLedger?.id].filter(Boolean),
               emailLedgerId: emailLedger?.id || null,
             } : {}),
           }),
         });
-        if (smsSent && explicitEmailSelected && !emailDelivered) await activityInsert;
+        if (pendingEmail) await activityInsert;
         else await activityInsert.catch(() => {});
       } catch (smsErr) {
         logger.error(`[late-payment] SMS failed for customer ${customer.id}: ${smsErr.message}`);

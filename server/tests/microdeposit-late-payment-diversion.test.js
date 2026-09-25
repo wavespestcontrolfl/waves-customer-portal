@@ -199,7 +199,7 @@ describe('late-payment micro-deposit diversion', () => {
   test('retries only the pending verification Email after accepted Text', async () => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
     sendMicrodepositVerificationEmail
-      .mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable' })
+      .mockResolvedValueOnce({ ok: false, skipped: true, reason: 'template_unavailable', deliveryOutcome: 'uncertain' })
       .mockResolvedValueOnce({ ok: true });
     const activityInsert = chain();
     setDbQueues({
@@ -283,5 +283,95 @@ describe('late-payment micro-deposit diversion', () => {
     expect(ContactLedger.recordContact).toHaveBeenLastCalledWith(expect.objectContaining({
       channel: 'email', idempotencyKey: 'late_payment_checker:microdeposit:inv-1:14:email',
     }));
+  });
+
+  test.each([
+    ['missing address', { ok: false, skipped: true, reason: 'missing_email' }],
+    ['unavailable template', { ok: false, skipped: true, reason: 'template_unavailable' }],
+  ])('resolves a verification Email with %s and advances Text from day 14 to day 30 once', async (_label, refusal) => {
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    ContactLedger.recordContact.mockImplementation(async ({ idempotencyKey }) => ({
+      id: idempotencyKey.endsWith(':email') ? `email-${idempotencyKey.split(':').at(-2)}` : `sms-${idempotencyKey.split(':').at(-2)}`,
+      metadata: { send_failed: true },
+    }));
+    sendMicrodepositVerificationEmail
+      .mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable' })
+      .mockResolvedValueOnce(refusal)
+      .mockResolvedValueOnce(refusal);
+    const invoiceReads = () => [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })];
+    const prefs = () => [chain({ first: { payment_issue_channels: ['email', 'sms'] } })];
+    const firstInsert = chain();
+    setDbQueues({
+      invoices: invoiceReads(), activity_log: [chain({ first: null }), firstInsert],
+      customers: [chain({ first: customer })], notification_prefs: prefs(),
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    const pending = JSON.parse(firstInsert.insert.mock.calls[0][0].metadata);
+    expect(pending).toMatchObject({ pendingEmail: true, tierDays: 14, emailLedgerId: 'email-14' });
+
+    jest.setSystemTime(new Date('2026-06-15T14:00:00.000Z'));
+    const ledgerResolution = chain();
+    const activityCompletion = chain();
+    setDbQueues({
+      invoices: invoiceReads(),
+      activity_log: [chain({ first: { id: 'activity-14', metadata: pending } }), activityCompletion],
+      collections_contact_ledger: [chain({ result: [
+        { id: 'sms-14', channel: 'sms', idempotency_key: 'late_payment_checker:microdeposit:inv-1:14:sms', metadata: { delivered: true } },
+        { id: 'email-14', channel: 'email', idempotency_key: 'late_payment_checker:microdeposit:inv-1:14:email', metadata: { send_failed: true } },
+      ] }), ledgerResolution],
+      customers: [chain({ first: customer })], notification_prefs: prefs(),
+    });
+    await LatePaymentChecker.checkAndNotify();
+    expect(ledgerResolution.where).toHaveBeenCalledWith({ id: 'email-14' });
+    expect(ledgerResolution.update).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ bindings: [JSON.stringify({ resolved: true, resolution: 'email_terminal_refusal' })] }),
+    }));
+    expect(activityCompletion.update).toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+
+    const tier30Insert = chain();
+    setDbQueues({
+      invoices: invoiceReads(), activity_log: [chain({ first: null }), tier30Insert],
+      collections_contact_ledger: [chain({ result: [] })],
+      customers: [chain({ first: customer })], notification_prefs: prefs(),
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(sendMicrodepositVerificationEmail.mock.calls.map(([args]) => args.touchKey)).toEqual(['14d', '14d', '30d']);
+    const tier30 = JSON.parse(tier30Insert.insert.mock.calls[0][0].metadata);
+    expect(tier30).toMatchObject({ tierDays: 30, dedupeKey: 'WPC-2026-1042|30 DAYS|microdeposit' });
+    expect(tier30.pendingEmail).toBeUndefined();
+
+    setDbQueues({
+      invoices: invoiceReads(), activity_log: [chain({ first: { id: 'activity-30', metadata: tier30 } })],
+      collections_contact_ledger: [chain({ result: [] })],
+      customers: [chain({ first: customer })], notification_prefs: prefs(),
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test('does not hold the first verification Text when its selected Email is suppressed', async () => {
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    sendMicrodepositVerificationEmail.mockResolvedValueOnce({
+      ok: false, blocked: true, reason: 'Suppressed: bounce',
+    });
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+    const activityInsert = chain();
+    const ledgerResolution = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: null }), activityInsert],
+      collections_contact_ledger: [chain({ result: [] }), ledgerResolution],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    const activity = JSON.parse(activityInsert.insert.mock.calls[0][0].metadata);
+    expect(activity).toMatchObject({ tierDays: 14 });
+    expect(activity.pendingEmail).toBeUndefined();
+    expect(ledgerResolution.where).toHaveBeenCalledWith({ id: 'email-14' });
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }));
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'email-14' }));
   });
 });

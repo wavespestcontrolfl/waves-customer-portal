@@ -69,4 +69,12 @@ describe('sendMicrodepositVerificationEmail', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/sendgrid down/);
   });
+
+  test.each(['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'])(
+    'reports %s as a definite template refusal', async (code) => {
+      EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('template unavailable'), { code }));
+      const result = await sendMicrodepositVerificationEmail({ invoice, customer, touchKey: '14d' });
+      expect(result).toEqual({ ok: false, skipped: true, reason: 'template_unavailable' });
+    },
+  );
 });

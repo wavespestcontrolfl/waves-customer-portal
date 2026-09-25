@@ -283,6 +283,26 @@ describe('late-payment email sidecar', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test.each(['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'])(
+    'reports %s as a definite template refusal', async (code) => {
+      EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('template unavailable'), { code }));
+      setDbQueues({
+        invoices: [chain({ first: invoice() })],
+        notification_prefs: [chain({ first: { email_enabled: true } })],
+        customer_interactions: [chain()],
+      });
+      const result = await BalanceReminder.sendLatePaymentEmail({
+        customer: customer(), invoice: invoice(),
+        balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
+        smsTemplateKey: 'late_payment_14d',
+        invoiceTitle: 'Quarterly Pest Control',
+        serviceDateClause: '',
+        payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
+      });
+      expect(result).toEqual({ ok: false, skipped: true, reason: 'template_unavailable' });
+    },
+  );
+
   test('still sends required late-payment email when general customer email is disabled', async () => {
     setDbQueues({
       invoices: [chain({ first: invoice() })],

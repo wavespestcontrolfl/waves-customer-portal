@@ -313,7 +313,7 @@ describe('late-payment checker email sidecar', () => {
     };
     const customer = { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' };
     BalanceReminder.sendLatePaymentEmail
-      .mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable' })
+      .mockResolvedValueOnce({ ok: false, skipped: true, reason: 'template_unavailable', retryable: true })
       .mockResolvedValueOnce({ ok: true });
     const activityInsert = chain();
     setDbQueues({
@@ -409,6 +409,116 @@ describe('late-payment checker email sidecar', () => {
     expect(ContactLedger.recordContact).toHaveBeenLastCalledWith(expect.objectContaining({
       channel: 'email', idempotencyKey: 'late_payment_checker:inv-1:14:email',
     }));
+  });
+
+  test.each([
+    ['missing address with an activity row', { ok: false, skipped: true, reason: 'missing_email' }, true],
+    ['suppressed address without an activity row', { ok: false, blocked: true, reason: 'Suppressed: bounce' }, false],
+    ['unavailable template with an activity row', { ok: false, skipped: true, reason: 'template_unavailable' }, true],
+  ])('resolves a pending 14-day Email refused for %s and sends 30-day Text once', async (_label, refusal, hasActivity) => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00.000Z',
+    };
+    const customer = { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' };
+    const invoiceReads = () => [
+      chain({ result: [invoice] }),
+      ...Array(3).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } })),
+    ];
+    ContactLedger.recordContact.mockImplementation(async ({ idempotencyKey }) => ({
+      id: idempotencyKey.endsWith(':email') ? `email-${idempotencyKey.split(':').at(-2)}` : `sms-${idempotencyKey.split(':').at(-2)}`,
+      metadata: { send_failed: true },
+    }));
+    BalanceReminder.sendLatePaymentEmail
+      .mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable' })
+      .mockResolvedValueOnce(refusal)
+      .mockResolvedValueOnce(refusal);
+
+    const firstInsert = chain();
+    if (!hasActivity) firstInsert.insert.mockRejectedValueOnce(new Error('activity write unavailable'));
+    setDbQueues({
+      invoices: invoiceReads(),
+      activity_log: [chain({ first: null }), chain({ result: [] }), firstInsert],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    const pending = JSON.parse(firstInsert.insert.mock.calls[0][0].metadata);
+    expect(pending).toMatchObject({ pendingEmail: true, tierDays: 14, emailLedgerId: 'email-14' });
+
+    jest.setSystemTime(new Date('2026-06-15T14:00:00.000Z'));
+    const ledgerResolution = chain();
+    const activityCompletion = chain();
+    setDbQueues({
+      invoices: invoiceReads(),
+      activity_log: hasActivity
+        ? [chain({ first: { id: 'activity-14', metadata: pending } }), activityCompletion]
+        : [chain({ first: null }), chain({ result: [] })],
+      collections_contact_ledger: [chain({ result: [
+        { id: 'sms-14', channel: 'sms', idempotency_key: 'late_payment_checker:inv-1:14:sms', metadata: { delivered: true } },
+        { id: 'email-14', channel: 'email', idempotency_key: 'late_payment_checker:inv-1:14:email', metadata: { send_failed: true } },
+      ] }), ledgerResolution],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+    });
+    await LatePaymentChecker.checkAndNotify();
+    expect(ledgerResolution.where).toHaveBeenCalledWith({ id: 'email-14' });
+    expect(ledgerResolution.update).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ bindings: [JSON.stringify({ resolved: true, resolution: 'email_terminal_refusal' })] }),
+    }));
+    if (hasActivity) expect(activityCompletion.update).toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+
+    const tier30Insert = chain();
+    setDbQueues({
+      invoices: invoiceReads(),
+      activity_log: [chain({ first: null }), chain({ result: [] }), tier30Insert],
+      collections_contact_ledger: [chain({ result: [] })],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(renderSmsTemplate.mock.calls.map(([key]) => key)).toEqual(['late_payment_14d', 'late_payment_30d']);
+    const tier30 = JSON.parse(tier30Insert.insert.mock.calls[0][0].metadata);
+    expect(tier30).toMatchObject({ tierDays: 30, invoiceKey: 'WPC-2026-1042|30 DAYS' });
+    expect(tier30.pendingEmail).toBeUndefined();
+
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: { id: 'activity-30', metadata: tier30 } })],
+      collections_contact_ledger: [chain({ result: [] })],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test('does not create a pending Email obligation when the first selected Email has no address', async () => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00.000Z',
+    };
+    BalanceReminder.sendLatePaymentEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'missing_email' });
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+    const activityInsert = chain();
+    const ledgerResolution = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), ...Array(3).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
+      activity_log: [chain({ first: null }), chain({ result: [] }), activityInsert],
+      collections_contact_ledger: [chain({ result: [] }), ledgerResolution],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' } })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    expect(JSON.parse(activityInsert.insert.mock.calls[0][0].metadata)).toMatchObject({ channel: 'sms', tierDays: 14 });
+    expect(JSON.parse(activityInsert.insert.mock.calls[0][0].metadata).pendingEmail).toBeUndefined();
+    expect(ledgerResolution.where).toHaveBeenCalledWith({ id: 'email-14' });
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }));
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'email-14' }));
   });
 
   test('a failed ledger recovery read cannot open a new reminder tier', async () => {

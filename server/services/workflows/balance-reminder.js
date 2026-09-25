@@ -532,6 +532,7 @@ class BalanceReminder {
           ok: !!result.sent,
           deduped: true,
           blocked: !!result.blocked,
+          reason: result.reason || null,
           messageId: result.message?.provider_message_id || null,
         };
       }
@@ -568,6 +569,9 @@ class BalanceReminder {
         failureReason: err.message,
       });
       logger.error(`[balance-reminder] late-payment ${config.stageDays}d email failed for invoice ${latestInvoice.id}: ${err.message}`);
+      if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
+        return { ok: false, skipped: true, reason: 'template_unavailable' };
+      }
       return { ok: false, error: err.message };
     }
   }

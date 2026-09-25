@@ -82,6 +82,9 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
     };
   } catch (e) {
     logger.warn(`[microdeposit-email] send failed for invoice ${invoice.id}: ${e.message}`);
+    if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(e.code)) {
+      return { ok: false, skipped: true, reason: 'template_unavailable' };
+    }
     return { ok: false, error: e.message };
   }
 }

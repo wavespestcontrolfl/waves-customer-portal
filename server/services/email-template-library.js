@@ -1031,7 +1031,7 @@ async function sendTemplate({
         automationRunId,
         idempotencyKey,
       });
-      throw new Error('template version not found');
+      throw Object.assign(new Error('template version not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
     }
     template = row.template;
     version = row;
@@ -1048,7 +1048,7 @@ async function sendTemplate({
         automationRunId,
         idempotencyKey,
       });
-      throw new Error('template not found');
+      throw Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
     }
     template = loaded.template;
     version = loaded.activeVersion;
@@ -1084,7 +1084,7 @@ async function sendTemplate({
       automationRunId,
       idempotencyKey,
     });
-    throw new Error('active template not found');
+    throw Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
   }
 
   let retryMessage = null;
