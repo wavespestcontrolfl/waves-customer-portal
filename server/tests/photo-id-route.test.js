@@ -14,14 +14,18 @@ const CUSTOMER_ID = 'cccccccc-1111-4222-8333-444444444444';
 const OTHER_CUSTOMER_ID = 'dddddddd-1111-4222-8333-444444444444';
 
 // ── In-memory fake db ───────────────────────────────────────────────────────
-const TABLES = { pest_identifications: [], lawn_diagnostics: [], tree_shrub_assessments: [] };
+const TABLES = {
+  pest_identifications: [], lawn_diagnostics: [], tree_shrub_assessments: [], photo_id_issues: [],
+};
 let idCounter = 0;
+let mockDropIssueOnTransactionStart = false;
 
 function resetTables() {
   for (const table of Object.keys(TABLES)) TABLES[table] = [];
   TABLES.pest_identifications = [];
   TABLES.lawn_diagnostics = [];
   TABLES.tree_shrub_assessments = [];
+  TABLES.photo_id_issues = [];
   idCounter = 0;
 }
 
@@ -51,6 +55,7 @@ function makeQuery(table) {
   let limitN = null;
   const q = {
     where(cond) { Object.assign(filters, cond || {}); return q; },
+    forUpdate() { return q; },
     whereNull() { return q; },
     whereNotNull() { return q; },
     orderBy(col, dir = 'asc') { orderCol = col; orderDir = dir; return q; },
@@ -89,8 +94,15 @@ function makeQuery(table) {
 }
 
 const mockDb = jest.fn((table) => makeQuery(table));
+mockDb.transaction = jest.fn(async (callback) => {
+  if (mockDropIssueOnTransactionStart) {
+    TABLES.photo_id_issues = [];
+    mockDropIssueOnTransactionStart = false;
+  }
+  return callback(mockDb);
+});
 
-const mockGateState = { customerPhotoId: true };
+const mockGateState = { customerPhotoId: true, customerPhotoIdIssues: false };
 const mockIdentifyPest = jest.fn();
 const mockLawnAnalyzePhoto = jest.fn();
 const mockTreeAnalyzePhoto = jest.fn();
@@ -188,6 +200,7 @@ jest.mock('../services/tree-shrub-assessment', () => {
 });
 
 const express = require('express');
+const { addETDays, etDateString } = require('../utils/datetime-et');
 const { PEST_LIBRARY } = jest.requireActual('../services/pest-identification');
 const photoIdRouter = require('../routes/photo-id');
 // The REAL (unmocked) dual-model merges — used only by the "real
@@ -268,6 +281,8 @@ beforeEach(() => {
   testCounter += 1;
   mockScopeCustomerId = `auto-customer-${testCounter}`;
   mockGateState.customerPhotoId = true;
+  mockGateState.customerPhotoIdIssues = false;
+  mockDropIssueOnTransactionStart = false;
   mockReserviceAccess.mockResolvedValue(null);
   mockResolveSessionScope.mockResolvedValue({
     enabled: false, multi: false, scoped: false, closed: false, property: null,
@@ -299,6 +314,202 @@ describe('gate contract', () => {
       expect(mockIdentifyPest).not.toHaveBeenCalled();
       const detail = await fetch(`${base}/api/photo-id/pest/${'a'.repeat(8)}-1111-4222-8333-444444444444`);
       expect(detail.status).toBe(404);
+    });
+  });
+
+  test('issue/date fields are rejected before analysis while the issue gate is off', async () => {
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody({ observed_on: '2026-09-20' }));
+      expect(res.status).toBe(400);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.pest_identifications).toHaveLength(0);
+    });
+  });
+
+  test('ordinary gate-off responses keep the legacy shape', async () => {
+    await withServer(async (base) => {
+      const created = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(created).not.toHaveProperty('issue_id');
+      expect(created).not.toHaveProperty('observed_on');
+      const list = await fetch(`${base}/api/photo-id`).then((res) => res.json());
+      expect(list.items[0]).not.toHaveProperty('issue_id');
+      expect(list.items[0]).not.toHaveProperty('observed_on');
+      const detail = await fetch(`${base}/api/photo-id/pest/${created.id}`).then((res) => res.json());
+      expect(detail).not.toHaveProperty('issue_id');
+      expect(detail).not.toHaveProperty('observed_on');
+    });
+  });
+});
+
+describe('pest issue association', () => {
+  beforeEach(() => {
+    mockGateState.customerPhotoIdIssues = true;
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: false, scoped: false, closed: false, property: { id: 'prop-primary', is_primary: true },
+    });
+  });
+
+  test('creates an issue atomically and keeps a missing observation date unknown', async () => {
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ issue_id: expect.any(String), observed_on: null });
+      expect(TABLES.photo_id_issues).toHaveLength(1);
+      expect(TABLES.photo_id_issues[0]).toMatchObject({
+        id: body.issue_id, customer_id: mockScopeCustomerId, property_id: 'prop-primary', area: 'front_yard',
+      });
+      expect(TABLES.pest_identifications[0]).toMatchObject({
+        issue_id: body.issue_id, property_id: 'prop-primary', observed_on: null,
+      });
+    });
+  });
+
+  test('blocks issue creation before analysis while property scope is disabled', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: false, multi: false, scoped: false, closed: false, property: null,
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(503);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.photo_id_issues).toHaveLength(0);
+      expect(TABLES.pest_identifications).toHaveLength(0);
+    });
+  });
+
+  test('blocks issue creation before analysis when no saved property resolves', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: false, scoped: false, closed: false, property: null,
+    });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(503);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.photo_id_issues).toHaveLength(0);
+      expect(TABLES.pest_identifications).toHaveLength(0);
+    });
+  });
+
+  test('a scope-gate outage pauses append and re-enable resumes the existing issue', async () => {
+    await withServer(async (base) => {
+      const first = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      mockIdentifyPest.mockClear();
+      mockResolveSessionScope.mockResolvedValue({
+        enabled: false, multi: false, scoped: false, closed: false, property: null,
+      });
+      const paused = await post(base, '/api/photo-id/pest', photoBody({ issue_id: first.issue_id }));
+      expect(paused.status).toBe(503);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.pest_identifications).toHaveLength(1);
+
+      mockResolveSessionScope.mockResolvedValue({
+        enabled: true, multi: false, scoped: false, closed: false, property: { id: 'prop-primary', is_primary: true },
+      });
+      const resumed = await post(base, '/api/photo-id/pest', photoBody({ issue_id: first.issue_id }));
+      expect(resumed.status).toBe(200);
+      expect((await resumed.json()).issue_id).toBe(first.issue_id);
+      expect(TABLES.pest_identifications).toHaveLength(2);
+    });
+  });
+
+  test('appends an immutable submission to an owned same-property issue', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-1', is_primary: true },
+    });
+    await withServer(async (base) => {
+      const first = await post(base, '/api/photo-id/pest', photoBody({ observed_on: '2026-09-20' })).then((res) => res.json());
+      const secondRes = await post(base, '/api/photo-id/pest', photoBody({
+        issue_id: first.issue_id, observed_on: '2026-09-22',
+      }));
+      expect(secondRes.status).toBe(200);
+      expect(await secondRes.json()).toMatchObject({ issue_id: first.issue_id, observed_on: '2026-09-22' });
+      expect(TABLES.photo_id_issues).toHaveLength(1);
+      expect(TABLES.pest_identifications).toHaveLength(2);
+    });
+  });
+
+  test('a single primary keeps its property identity when the account later becomes scoped', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: false, scoped: false, closed: false, property: { id: 'prop-primary', is_primary: true },
+    });
+    await withServer(async (base) => {
+      const first = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(TABLES.photo_id_issues[0].property_id).toBe('prop-primary');
+      expect(TABLES.pest_identifications[0].property_id).toBe('prop-primary');
+
+      mockResolveSessionScope.mockResolvedValue({
+        enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-primary', is_primary: true },
+      });
+      const second = await post(base, '/api/photo-id/pest', photoBody({ issue_id: first.issue_id }));
+      expect(second.status).toBe(200);
+      expect((await second.json()).issue_id).toBe(first.issue_id);
+    });
+  });
+
+  test('rejects another property before the paid model call', async () => {
+    mockResolveSessionScope.mockResolvedValue({
+      enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-1', is_primary: true },
+    });
+    await withServer(async (base) => {
+      const first = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      mockIdentifyPest.mockClear();
+      mockResolveSessionScope.mockResolvedValue({
+        enabled: true, multi: true, scoped: true, closed: false, property: { id: 'prop-2', is_primary: false },
+      });
+      const res = await post(base, '/api/photo-id/pest', photoBody({ issue_id: first.issue_id }));
+      expect(res.status).toBe(404);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(TABLES.pest_identifications).toHaveLength(1);
+    });
+  });
+
+  test.each(['2026-02-30', '09/20/2026', '', 20260920])('rejects invalid observed_on %p before analysis', async (observed_on) => {
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody({ observed_on }));
+      expect(res.status).toBe(400);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+    });
+  });
+
+  test('rejects a future observation date before analysis', async () => {
+    const future = etDateString(addETDays(new Date(), 1));
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody({ observed_on: future }));
+      expect(res.status).toBe(400);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+    });
+  });
+
+  test('rejects an explicitly empty issue_id before analysis', async () => {
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody({ issue_id: '' }));
+      expect(res.status).toBe(400);
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+    });
+  });
+
+  test('returns 409 when the transactional ownership recheck no longer finds the issue', async () => {
+    await withServer(async (base) => {
+      const first = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      mockIdentifyPest.mockClear();
+      mockDropIssueOnTransactionStart = true;
+      const res = await post(base, '/api/photo-id/pest', photoBody({ issue_id: first.issue_id }));
+      expect(res.status).toBe(409);
+      expect(mockIdentifyPest).toHaveBeenCalledTimes(1);
+      expect(TABLES.pest_identifications).toHaveLength(1);
+    });
+  });
+
+  test('list and detail preserve issue fields alongside saved photo evidence', async () => {
+    await withServer(async (base) => {
+      const created = await post(base, '/api/photo-id/pest', photoBody({ observed_on: '2026-09-20' })).then((res) => res.json());
+      const list = await fetch(`${base}/api/photo-id`).then((res) => res.json());
+      expect(list.items[0]).toMatchObject({ issue_id: created.issue_id, observed_on: '2026-09-20' });
+      TABLES.pest_identification_photos = [{ id: 'issue-photo', identification_id: created.id, customer_visible: true, s3_key: 'issue-photo-key', mime_type: 'image/jpeg', photo_index: 0 }];
+      const detail = await fetch(`${base}/api/photo-id/pest/${created.id}`).then((res) => res.json());
+      expect(detail).toMatchObject({ issue_id: created.issue_id, observed_on: '2026-09-20' });
+      expect(detail.photos).toEqual([{ id: 'issue-photo', mime_type: 'image/jpeg', url: 'https://private.example/issue-photo-key' }]);
     });
   });
 });

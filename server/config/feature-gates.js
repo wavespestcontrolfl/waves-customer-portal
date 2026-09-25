@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
@@ -41,6 +42,7 @@
  *   GATE_CLOSEOUT_MONEY_COMMS_ALERTS=true (closeout alerts also map the comms / invoice / invoiceDelivery facts — failed completion notice, invoice owed but not minted, invoice or receipt delivery incomplete — as per-visit cards + closeout_gaps_today members; their outage holds the floor; read-only, no comms; dark in dev AND prod)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_CUSTOMER_PHOTO_ID=true (authenticated customer Photo ID API — POST/GET /api/photo-id/*, comms-free; dark: every handler 404s while off)
+ *   GATE_CUSTOMER_PHOTO_ID_ISSUES=true (customer pest Photo ID issue association + observation dates; strict opt-in in every environment; requires GATE_APP_PROPERTY_SCOPE)
  *   GATE_PHOTO_TRIAGE=true      (inbound photo texts that read like a lawn/plant/pest "what is this" run the admin photo assessment and park ONE pending reply draft for owner approval — never sends; paid vision capped by PHOTO_TRIAGE_DAILY_CAP per ET day, default 20, and the paid caption classifier by PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP, default = the vision cap; a triage candidate skips the legacy AI draft; read at call time; dark in dev AND prod)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -120,6 +122,8 @@ const gates = {
   customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
   // Customer iOS icon count; opt-in everywhere, with request-time route checks.
   customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
+  // Billing Email/Text/App preference API; opt-in everywhere and read at request time by the route.
+  billingNotificationChannels: gateEnvValue('GATE_BILLING_NOTIFICATION_CHANNELS'),
   // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
   composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
   // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
@@ -630,6 +634,10 @@ const gates = {
   // {error:'Not found'} while off, including GET /, so the client can hide
   // the feature entirely off a single 404.
   customerPhotoId: process.env.GATE_CUSTOMER_PHOTO_ID === 'true',
+  // Pest-only issue association for Customer Photo ID. Strict opt-in in every
+  // environment; requires appPropertyScope so every issue has a durable saved-
+  // property identity. Gate off keeps existing payloads and writes unchanged.
+  customerPhotoIdIssues: process.env.GATE_CUSTOMER_PHOTO_ID_ISSUES === 'true',
   // Public careers application funnel (POST /api/public/careers/apply).
   // Dark until the owner turns hiring on; the admin recruiting queue works
   // at any setting (it only reads/updates existing rows).

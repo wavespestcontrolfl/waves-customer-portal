@@ -59,6 +59,13 @@ const { reserviceStreamlineAccess } = require('../services/reservice-link');
 const { resolveSessionScope, applyPropertyPredicate, isSecondarySelection } = require('../services/account-properties');
 const { etDateString } = require('../utils/datetime-et');
 const { customerPhotoViews } = require('../services/customer-photo-id-evidence');
+const {
+  PhotoIdIssueError,
+  parseIssueFields,
+  requireOwnedIssue,
+  savePestSubmission,
+  serializeObservedOn,
+} = require('../services/photo-id-issues');
 
 const OFFICE_PHONE = '(941) 297-5749';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -381,7 +388,9 @@ function pestReserviceLane(contract) {
   return line === 'pest' || line === 'lawn' ? line : null;
 }
 
-async function handlePest(req, res, { note, location, propertyId, isSecondary }) {
+async function handlePest(req, res, {
+  note, location, propertyId, isSecondary, issueAssociation,
+}) {
   const photoInputs = req._photoInputs;
   const result = await identifyPest(photoInputs);
   if (!result.ok) {
@@ -390,7 +399,7 @@ async function handlePest(req, res, { note, location, propertyId, isSecondary })
   const partial = result.perPhoto.length < photoInputs.length;
 
   const contract = buildPestReportContract(result);
-  const [row] = await db('pest_identifications').insert({
+  const submission = {
     mode: 'customer',
     status: 'analyzed',
     source: 'portal',
@@ -415,7 +424,17 @@ async function handlePest(req, res, { note, location, propertyId, isSecondary })
     ai_summary: (result.observations || []).join(' ').slice(0, 2000) || null,
     note,
     location,
-  }).returning(['id', 'created_at']);
+  };
+  const row = issueAssociation.enabled
+    ? await savePestSubmission({
+      issueId: issueAssociation.issueId,
+      customerId: req.customer.id,
+      propertyId,
+      area: location,
+      observedOn: issueAssociation.observedOn,
+      submission,
+    })
+    : (await db('pest_identifications').insert(submission).returning(['id', 'created_at']))[0];
 
   await storeFunnelPhotos({
     table: 'pest_identification_photos',
@@ -436,8 +455,12 @@ async function handlePest(req, res, { note, location, propertyId, isSecondary })
   });
   const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partial, build: () => pestResult });
 
+  const issueFields = issueAssociation.enabled
+    ? { issue_id: row.issue_id, observed_on: serializeObservedOn(row.observed_on) }
+    : {};
   return res.status(200).json({
     id: row.id, type: 'pest', created_at: row.created_at, result: finalPestResult, next_step: nextStep,
+    ...issueFields,
   });
 }
 
@@ -966,6 +989,10 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
     if (!handler) return res.status(400).json({ error: 'Unknown assessment type' });
 
     const body = req.body || {};
+    const issueAssociation = parseIssueFields(body, {
+      enabled: isEnabled('customerPhotoIdIssues'),
+      type,
+    });
     const validated = validateRequestPhotos(body.photos);
     if (!validated.ok) return res.status(validated.status || 400).json({ error: validated.error });
     if (!validated.photos.length) return res.status(400).json({ error: `Attach at least one photo (up to ${MAX_PHOTOS}).` });
@@ -1032,12 +1059,36 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
     if (scope.closed) {
       return res.status(409).json({ error: `We couldn't find an active property on your account. Please call our office at ${OFFICE_PHONE} and we'll get that fixed.` });
     }
-    const propertyId = scope.scoped && scope.property ? scope.property.id : null;
+    // Durable issues require the canonical saved-property identity. Pause all
+    // gate-on pest writes while GATE_APP_PROPERTY_SCOPE is off or cannot
+    // resolve a property, so a nullable issue cannot become unreachable after
+    // a later property-scope rollout.
+    if (issueAssociation.enabled && (!scope.enabled || !scope.property)) {
+      return res.status(503).json({ error: `We couldn't confirm which property this is for right now. Please try again in a few minutes or call our office at ${OFFICE_PHONE}.` });
+    }
+    // An issue keeps the resolved property identity even for today's
+    // single-property/unscoped session. If that account later gains another
+    // property, selecting the original property must still match this issue.
+    // Gate off preserves the legacy nullable submission stamp exactly.
+    const propertyId = issueAssociation.enabled
+      ? scope.property.id
+      : (scope.scoped && scope.property ? scope.property.id : null);
+
+    // Existing issues are checked before the paid model call, then locked and
+    // checked again in savePestSubmission's transaction before append.
+    if (issueAssociation.issueId) {
+      await requireOwnedIssue({
+        issueId: issueAssociation.issueId,
+        customerId: req.customer.id,
+        propertyId,
+      });
+    }
 
     return await handler(req, res, {
-      note, location, propertyId, isSecondary: scope.isSecondary,
+      note, location, propertyId, isSecondary: scope.isSecondary, issueAssociation,
     });
   } catch (err) {
+    if (err instanceof PhotoIdIssueError) return res.status(err.status).json({ error: err.message });
     return next(err);
   }
 });
@@ -1110,6 +1161,7 @@ function treeNextStepKindFromRow(row, access, isSecondary) {
 router.get('/', async (req, res, next) => {
   try {
     const customerId = req.customer.id;
+    const issuesEnabled = isEnabled('customerPhotoIdIssues');
     const scope = await resolvePropertyScope(req);
     const pestQuery = db('pest_identifications').where({ customer_id: customerId, mode: 'customer' });
     const lawnQuery = db('lawn_diagnostics').where({ customer_id: customerId, mode: 'customer' });
@@ -1118,7 +1170,10 @@ router.get('/', async (req, res, next) => {
     applyPropertyPredicate(lawnQuery, scope, 'lawn_diagnostics');
     applyPropertyPredicate(treeQuery, scope, 'tree_shrub_assessments');
     const [pestRows, lawnRows, treeRows] = await Promise.all([
-      pestQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract', 'ai_analysis'),
+      pestQuery.orderBy('created_at', 'desc').limit(20).select(
+        'id', 'created_at', 'report_contract', 'ai_analysis',
+        ...(issuesEnabled ? ['issue_id', 'observed_on'] : []),
+      ),
       lawnQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract'),
       treeQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'overall_score', 'composite_scores'),
     ]);
@@ -1128,6 +1183,7 @@ router.get('/', async (req, res, next) => {
       ...pestRows.map((row) => ({
         id: row.id, type: 'pest', created_at: row.created_at, headline: pestHeadline(row),
         next_step_kind: pestNextStepKindFromRow(row, access, scope.isSecondary),
+        ...(issuesEnabled ? { issue_id: row.issue_id, observed_on: serializeObservedOn(row.observed_on) } : {}),
       })),
       ...lawnRows.map((row) => ({
         id: row.id, type: 'lawn', created_at: row.created_at, headline: lawnHeadline(row),
@@ -1164,6 +1220,7 @@ router.get('/:type/:id', async (req, res, next) => {
     const access = await reserviceStreamlineAccess(req.customer.id);
 
     if (type === 'pest') {
+      const issuesEnabled = isEnabled('customerPhotoIdIssues');
       const contract = parseJsonSafe(row.report_contract);
       const pestResult = pestPublicResult(contract);
       const idLabel = publicIdentificationLabel(contract);
@@ -1177,6 +1234,7 @@ router.get('/:type/:id', async (req, res, next) => {
       const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partial, build: () => pestResult });
       return res.status(200).json({
         id: row.id, type: 'pest', created_at: row.created_at, result: finalPestResult, next_step: nextStep, photos,
+        ...(issuesEnabled ? { issue_id: row.issue_id, observed_on: serializeObservedOn(row.observed_on) } : {}),
       });
     }
 
