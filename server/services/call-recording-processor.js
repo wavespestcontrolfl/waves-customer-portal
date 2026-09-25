@@ -2560,20 +2560,40 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   // atomic write can never be skipped by a crash between commit and this
   // post-commit helper. This write is the FALLBACK for paths that reach
   // registerScheduleSideEffects without going through that transaction (the
-  // replay-repair self-heal below); whereNull makes it a harmless no-op
-  // (0 rows) when the in-transaction write already landed. Nulling
-  // call_sms_cleared_at (+ recipient) in the SAME update closes finding #1's
-  // atomicity half — a fresh hold must never read as already-cleared by a
-  // stale clearance a reused/reprocessed row still carries from an earlier
-  // call. Round-3 P1: a THROWN failure here must refuse to arm messaging —
-  // proceeding to registerAppointment on an unconfirmed hold is exactly the
-  // gap this hardening closes, so skip it and log code/name only.
+  // replay-repair self-heal below). Nulling call_sms_cleared_at (+
+  // recipient) in the SAME update closes finding #1's atomicity half — a
+  // fresh hold must never read as already-cleared by a stale clearance a
+  // reused/reprocessed row still carries from an earlier call. Round-3 P1:
+  // a THROWN failure here must refuse to arm messaging — proceeding to
+  // registerAppointment on an unconfirmed hold is exactly the gap this
+  // hardening closes, so skip it and log code/name only.
+  //
+  // Round-5 P1: a bare whereNull('callback_number_hold_at') no-ops on
+  // FORCE-REPROCESS of a call that was already cleared — the row still
+  // carries the OLD hold_at (non-null) from the first pass, so the guard
+  // blocks the write even though this pass just re-raised
+  // callback_number_needed, and the stale call_sms_cleared_at (>= the old
+  // hold_at) keeps reading as cleared while a new review card opens. Fixed
+  // by widening the guard to "install a fresh hold whenever this row is not
+  // CURRENTLY held" — null hold_at (never held) OR a hold_at that the
+  // row's own cleared_at already satisfies (callbackNumberHoldFromRow's
+  // predicate, inverted) — so a reprocess that raises the flag again always
+  // gets a hold_at newer than any leftover clearance. Idempotent WITHIN one
+  // pass on purpose, not on every retry: once this update lands, hold_at is
+  // non-null and cleared_at is null, so the widened guard reads "currently
+  // held" and a second call in the SAME pass (there is exactly one path
+  // that can call this more than once per call — see
+  // stampCallbackNumberHoldForCall below) is a genuine no-op instead of
+  // pointlessly bumping the timestamp again.
   let holdStampFailed = false;
   if (scheduledServiceId && callbackNumberHoldActive) {
     try {
       await db('scheduled_services')
         .where({ id: scheduledServiceId })
-        .whereNull('callback_number_hold_at')
+        .where((qb) => {
+          qb.whereNull('callback_number_hold_at')
+            .orWhereRaw('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at');
+        })
         .update({
           callback_number_hold_at: new Date(),
           call_sms_cleared_at: null,
@@ -14821,11 +14841,27 @@ const CallRecordingProcessor = {
                 // let a booking the caller disclaimed their number on commit
                 // unheld — the outer catch's "no booking, no SMS, office
                 // reviews" outcome is the correct fail-closed answer.
+                // Round-5 P1: widened past a bare whereNull the same way and
+                // for the same reason as registerScheduleSideEffects's
+                // fallback writer above — a force-reprocess of a previously
+                // CLEARED call must still install a fresh hold_at (newer
+                // than the leftover cleared_at) when callback_number_needed
+                // is raised again, or the stale clearance keeps satisfying
+                // cleared_at >= hold_at while a new review card opens.
+                // Idempotent within THIS pass (not across retries) for the
+                // same reason: once landed, hold_at is non-null and
+                // cleared_at is null, so a second call in the same pass (the
+                // primary row, then again for a follow-up row sharing this
+                // source_call_log_id) reads "currently held" and no-ops
+                // rather than bumping the timestamp a second time.
                 const stampCallbackNumberHoldForCall = async () => {
                   if (!callbackNumberNeededHoldActive) return;
                   await trx('scheduled_services')
                     .where({ source_call_log_id: call.id })
-                    .whereNull('callback_number_hold_at')
+                    .where((qb) => {
+                      qb.whereNull('callback_number_hold_at')
+                        .orWhereRaw('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at');
+                    })
                     .update({
                       callback_number_hold_at: new Date(),
                       call_sms_cleared_at: null,

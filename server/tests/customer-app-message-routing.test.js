@@ -9,6 +9,25 @@ jest.mock('../services/messaging/validators/line-type', () => ({
 jest.mock('../services/appointment-email', () => ({ sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/reschedule-link', () => ({ buildRescheduleLink: jest.fn(async () => ({ url: null })) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+// callback_number_needed hold (round 5, PR #4807) — the canonical
+// chokepoint now runs this check unconditionally whenever a send carries
+// an appointmentId (the 72h/24h reminder tests below do), right beside
+// every other boundary this file's own bespoke `db` double answers. This
+// file exercises a lot of REAL appointment-reminders.js surface
+// (safeSendAppointment, _test.deliverAppointmentNotice, ...) so only
+// callbackNumberHoldActiveForVisit is stubbed (never held) — everything
+// else stays the real module. safeSendAppointment's own entry-level hold
+// check calls the function's LOCAL binding, not this exported reference, so
+// it is unaffected and still exercised for real; only the NEW chokepoint
+// call inside sendCustomerMessage (which reads the exported reference) is
+// stubbed, so this file's own customers/notification_prefs/
+// messaging_suppression query double is never also asked to answer
+// resolveCallbackNumberHoldRows's queries. The callback-hold chokepoint
+// itself is covered by send-customer-message-callback-number-hold.test.js.
+jest.mock('../services/appointment-reminders', () => ({
+  ...jest.requireActual('../services/appointment-reminders'),
+  callbackNumberHoldActiveForVisit: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
 const Twilio = require('../services/twilio');

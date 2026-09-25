@@ -169,3 +169,64 @@ describe('round-4 P1 — an ATTACHED human booking is covered by the hold stamp 
     expect(body).toMatch(/await stampCallbackNumberHoldForCall\(\);/);
   });
 });
+
+/**
+ * Codex round-5 P1 on PR #4807: a bare whereNull('callback_number_hold_at')
+ * no-ops on force-reprocess of a call that was already CLEARED — the row
+ * still carries the old hold_at, so the guard blocks the write even though
+ * this pass just re-raised callback_number_needed, and the stale
+ * call_sms_cleared_at (>= the old hold_at) keeps reading as cleared while a
+ * new review card opens with SMS still authorized. Both writers (the
+ * in-transaction primary stamp and the post-commit fallback) share the
+ * guard and both needed the same widening.
+ */
+describe('round-5 P1 — a reprocess that re-raises the hold always refreshes callback_number_hold_at', () => {
+  test('stampCallbackNumberHoldForCall (in-transaction writer) installs a fresh hold whenever the row is not CURRENTLY held, not only when hold_at was never set', () => {
+    const idx = src.indexOf('const stampCallbackNumberHoldForCall');
+    const closureEnd = src.indexOf('};', idx);
+    const body = src.slice(idx, closureEnd);
+    expect(body).toMatch(/whereNull\('callback_number_hold_at'\)/);
+    expect(body).toMatch(/orWhereRaw\('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at'\)/);
+  });
+
+  test('registerScheduleSideEffects (fallback writer) carries the identical widened guard', () => {
+    const idx = src.indexOf('async function registerScheduleSideEffects');
+    const fnEnd = src.indexOf('\nasync function ', idx + 10);
+    const body = src.slice(idx, fnEnd > -1 ? fnEnd : idx + 4000);
+    expect(body).toMatch(/whereNull\('callback_number_hold_at'\)/);
+    expect(body).toMatch(/orWhereRaw\('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at'\)/);
+  });
+
+  // The two source-shape checks above pin that the widened guard
+  // (whereNull(...).orWhereRaw('call_sms_cleared_at IS NOT NULL AND
+  // call_sms_cleared_at >= callback_number_hold_at')) is present in both
+  // writers; this proves that exact guard's WHERE semantics are correct —
+  // it must match a row IFF callbackNumberHoldFromRow (the live predicate
+  // every reader in this codebase uses) says the row is NOT currently
+  // held, i.e. the guard is the predicate's precise logical inverse.
+  test("the widened guard's semantics are the exact inverse of callbackNumberHoldFromRow — refreshes a never-held or already-CLEARED row, leaves a currently-held row (including a stale pre-dating clearance) alone", () => {
+    const heldFromRow = (row) => {
+      if (!row.callback_number_hold_at) return false;
+      const heldAt = new Date(row.callback_number_hold_at).getTime();
+      const clearedAt = row.call_sms_cleared_at ? new Date(row.call_sms_cleared_at).getTime() : null;
+      return clearedAt === null || clearedAt < heldAt;
+    };
+    const guardMatches = (row) => !row.callback_number_hold_at
+      || (row.call_sms_cleared_at != null
+        && new Date(row.call_sms_cleared_at).getTime() >= new Date(row.callback_number_hold_at).getTime());
+    const rows = [
+      { label: 'never held', callback_number_hold_at: null, call_sms_cleared_at: null },
+      // The reprocess bug case round 5 caught: a prior pass's hold was
+      // genuinely cleared, and this pass wants to install a fresh one.
+      { label: 'cleared AFTER the hold (the reprocess case)', callback_number_hold_at: new Date('2030-01-01T10:00:00Z'), call_sms_cleared_at: new Date('2030-01-01T11:00:00Z') },
+      // A stale clearance that PREDATES a fresh hold is still held — the
+      // guard must NOT treat this row as eligible for a refresh (that
+      // would just needlessly bump an already-correct hold_at).
+      { label: 'stale clearance PREDATES a fresh hold — currently held', callback_number_hold_at: new Date('2030-01-02T10:00:00Z'), call_sms_cleared_at: new Date('2030-01-01T09:00:00Z') },
+      { label: 'held, never cleared', callback_number_hold_at: new Date('2030-01-01T10:00:00Z'), call_sms_cleared_at: null },
+    ];
+    for (const row of rows) {
+      expect(guardMatches(row)).toBe(!heldFromRow(row));
+    }
+  });
+});

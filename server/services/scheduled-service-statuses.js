@@ -19,7 +19,29 @@
 const TERMINAL_SCHEDULED_SERVICE_STATUSES = ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show'];
 const NONTERMINAL_SCHEDULED_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 
+/**
+ * CLEARABLE = the status set the callback_number_needed clearance writers
+ * (admin-triage.js's card resolve, customer-contact-fanout.js's phone-edit
+ * fan-out — the same two NONTERMINAL_SCHEDULED_SERVICE_STATUSES consumes)
+ * are willing to lift the hold on: NONTERMINAL plus 'rescheduled' (codex
+ * round-5 P2). 'rescheduled' is genuinely terminal for the row it's
+ * stamped on (no further work happens on THAT row) and reminders treat it
+ * as pending-rebook, not "still working" — so it correctly stays OUT of
+ * NONTERMINAL, whose "still a live, working visit" meaning a future
+ * consumer may reasonably rely on. But a rescheduled row can still be a
+ * GROUPED SIBLING of the row the customer was actually rebooked onto
+ * (resolveCallbackNumberHoldRows checks every row sharing visit_id, not
+ * just the id a caller happens to hold) — if the clearance writers skip it
+ * for being terminal, its callback_number_hold_at never gets cleared, and
+ * the group-wide hold predicate keeps reading the NEW row as held too,
+ * even after the number was verified. A dedicated set here — rather than
+ * widening NONTERMINAL itself — keeps NONTERMINAL's own semantics correct
+ * for any other consumer.
+ */
+const CLEARABLE_SCHEDULED_SERVICE_STATUSES = [...NONTERMINAL_SCHEDULED_SERVICE_STATUSES, 'rescheduled'];
+
 module.exports = {
   TERMINAL_SCHEDULED_SERVICE_STATUSES,
   NONTERMINAL_SCHEDULED_SERVICE_STATUSES,
+  CLEARABLE_SCHEDULED_SERVICE_STATUSES,
 };

@@ -65,13 +65,17 @@ function sanitizeWrongFields(input) {
 // two writers can never drift on the update itself the way the two
 // customer-facing clearance writers (admin-triage's own resolve path and
 // customer-contact-fanout.js's phone-edit fanout) once drifted on their
-// status filter (round-3 P2, same PR). NONTERMINAL, not just
-// pending/confirmed: a visit already en_route/on_site is still live.
+// status filter (round-3 P2, same PR). CLEARABLE (NONTERMINAL + terminal-
+// but-clearable statuses — round-5 P2), not just pending/confirmed: a
+// visit already en_route/on_site is still live, and a rescheduled row can
+// still be a GROUPED SIBLING of the visit the customer was rebooked onto
+// (see scheduled-service-statuses.js's own doc comment on
+// CLEARABLE_SCHEDULED_SERVICE_STATUSES).
 async function clearCallbackNumberHold(trx, callLogId) {
-  const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
+  const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
   return trx('scheduled_services')
     .where({ source_call_log_id: callLogId })
-    .whereIn('status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .whereIn('status', CLEARABLE_SCHEDULED_SERVICE_STATUSES)
     .whereNotNull('callback_number_hold_at')
     .update({
       // call_sms_cleared_at >= callback_number_hold_at by construction

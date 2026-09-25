@@ -14,7 +14,7 @@ const {
   nameKey,
   phoneKey,
 } = require('../services/customer-contact-fanout');
-const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
+const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
 
 /**
  * Minimal knex-shaped stub (mirrors customer-email-fanout.test.js). Per-table
@@ -366,16 +366,22 @@ describe('propagateCustomerPhoneChange', () => {
   // codex round-3 P2, PR #4807: this writer used to filter on a bare
   // ['pending', 'confirmed'] literal — excluding an en_route/on_site visit,
   // so a tech already rolling never got the arrival text unheld even after
-  // the number was verified. It must now share the ONE nonterminal-status
+  // the number was verified. It must now share the ONE clearable-status
   // constant with admin-triage.js's clearance writer.
-  test('the status filter is the shared NONTERMINAL_SCHEDULED_SERVICE_STATUSES constant (includes en_route/on_site)', async () => {
+  test('the status filter is the shared CLEARABLE_SCHEDULED_SERVICE_STATUSES constant (includes en_route/on_site/rescheduled)', async () => {
     const conn = makeConn();
     await propagateCustomerPhoneChange({ before: PHONE_BEFORE, after: PHONE_AFTER }, conn);
     const svcCalls = conn.__calls.filter((c) => c.table === 'scheduled_services');
     const whereInStatus = svcCalls.find((c) => c.op === 'whereIn' && c.arg.col === 'status');
     expect(whereInStatus).toBeDefined();
-    expect(whereInStatus.arg.vals.slice().sort()).toEqual(NONTERMINAL_SCHEDULED_SERVICE_STATUSES.slice().sort());
+    expect(whereInStatus.arg.vals.slice().sort()).toEqual(CLEARABLE_SCHEDULED_SERVICE_STATUSES.slice().sort());
     expect(whereInStatus.arg.vals).toEqual(expect.arrayContaining(['en_route', 'on_site']));
+    // codex round-5 P2: 'rescheduled' must be clearable too — a rescheduled
+    // row can still be a grouped sibling of the visit the customer was
+    // rebooked onto, and skipping it for being terminal left the group-wide
+    // hold predicate reading the new row as held even after the number was
+    // verified.
+    expect(whereInStatus.arg.vals).toEqual(expect.arrayContaining(['rescheduled']));
   });
 
   test('no-op phone edits never touch scheduled_services at all', async () => {

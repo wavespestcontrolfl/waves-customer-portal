@@ -1609,32 +1609,17 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     return typeof preDispatchCheck === 'function' ? preDispatchCheck() : { ok: true };
   } : preDispatchCheck;
 
-  // Finding #2 (Codex round-4 P1): safeSendAppointment's entry check reads
-  // the callback-number hold ONCE, before the contact fan-out starts. A
-  // disclaimed-ANI call that attaches to a pre-existing, already-armed
-  // reminder can commit callback_number_hold_at AFTER that entry read but
-  // before THIS contact's provider handoff — the loop never rereads it, so
-  // the race wins and the disclaimed number gets texted anyway. Recheck the
-  // SAME predicate right here, at the last checkpoint before the provider
-  // call, composed ahead of any caller-supplied preDispatchCheck. Fail
-  // CLOSED (callbackNumberHoldActiveForVisit's default): this is an SMS
-  // leg, and every caller already has (or degrades gracefully without) an
-  // email fallback for a visit that turns out to be genuinely held.
-  const dispatchCheck = (metaExtra?.scheduled_service_id || metaExtra?.visit_id)
-    ? async (...args) => {
-      const callbackHeld = await callbackNumberHoldActiveForVisit({
-        scheduledServiceId: metaExtra.scheduled_service_id,
-        ...(metaExtra.visit_id !== undefined ? { visitId: metaExtra.visit_id } : {}),
-      });
-      if (callbackHeld) {
-        // retryable: true mirrors the entry check above — the hold can
-        // clear later, so a caller with no email fallback must not
-        // finalize this as a permanent suppression.
-        return { ok: false, code: 'CALLBACK_NUMBER_HOLD', reason: 'Caller disclaimed this number (callback_number_needed)', retryable: true };
-      }
-      return typeof dispatchCheckBase === 'function' ? dispatchCheckBase(...args) : { ok: true };
-    }
-    : dispatchCheckBase;
+  // Finding #2 (round-4 P1) used to recheck the callback-number hold here,
+  // composed into dispatchCheck ahead of any caller preDispatchCheck, to
+  // close a race between safeSendAppointment's one-time entry read and this
+  // contact's provider handoff. Round 5 found the SAME race shape in
+  // twilio.js's en-route/arrival senders (which never went through here at
+  // all) — a structural signal that per-sender rechecks would keep needing
+  // chasing. The recheck now lives ONCE, inside sendCustomerMessage itself
+  // (the actual provider chokepoint every one of these sends passes),
+  // keyed on the appointmentId this call already threads below. This
+  // dispatchCheckBase (the landline recheck) is passed straight through —
+  // sendCustomerMessage's own boundary covers the callback hold.
 
   // (The grouped-move hold for appointment notices is enforced inside
   // sendCustomerMessage itself — the canonical path every SMS leg passes,
@@ -1669,8 +1654,12 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     ...(Number.isFinite(metaExtra.rendered_slot_ms) ? { renderedSlotMs: metaExtra.rendered_slot_ms } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
-    // the appointment moved or went terminal while validators ran.
-    ...(typeof dispatchCheck === 'function' ? { preDispatchCheck: dispatchCheck } : {}),
+    // the appointment moved or went terminal while validators ran. (The
+    // callback-number-hold recheck this used to also carry — round-4
+    // finding #2 — now lives inside sendCustomerMessage itself, keyed on
+    // the appointmentId passed above; see the comment near
+    // dispatchCheckBase.)
+    ...(typeof dispatchCheckBase === 'function' ? { preDispatchCheck: dispatchCheckBase } : {}),
   });
   } catch (sendErr) {
     // Only a throw AFTER the provider handoff began is dispatch-uncertain

@@ -485,14 +485,19 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
   // which visit's call disclaimed the old one. call_sms_cleared_at >=
   // callback_number_hold_at by construction (GREATEST), matching the
   // timestamp rule the hold predicate reads (callbackNumberHoldFromRow).
-  // NONTERMINAL, not just pending/confirmed (codex round-3 P2, shared with
+  // CLEARABLE, not just pending/confirmed (codex round-3 P2, shared with
   // admin-triage.js's clearance writer so the two can never drift): a
   // visit already en_route/on_site is still live and its arrival text must
-  // not stay withheld after the customer's number is corrected.
-  const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('./scheduled-service-statuses');
+  // not stay withheld after the customer's number is corrected. Also
+  // 'rescheduled' (round-5 P2) — a rescheduled row can still be a GROUPED
+  // SIBLING of the visit the customer was rebooked onto; skipping it for
+  // being terminal left the group-wide hold predicate reading the NEW row
+  // as held too, even after the number was verified (see
+  // scheduled-service-statuses.js's CLEARABLE_SCHEDULED_SERVICE_STATUSES).
+  const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('./scheduled-service-statuses');
   counts.callbackNumberHoldsCleared = await conn('scheduled_services')
     .where({ customer_id: customerId })
-    .whereIn('status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .whereIn('status', CLEARABLE_SCHEDULED_SERVICE_STATUSES)
     .whereNotNull('callback_number_hold_at')
     .update({
       call_sms_cleared_at: conn.raw('GREATEST(callback_number_hold_at, now())'),
@@ -511,7 +516,17 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
 // render THIS string, so the disclosure can never silently drift from the
 // service's actual side effects — extend it in the same commit that adds a
 // new synced surface.
-const CONTACT_FANOUT_DISCLOSURE = 'a name or phone change also updates every open copy still carrying the old value (leads, estimates, contracts, referral promoter, booking recovery, active automations, newsletter greeting, queued template sends, scheduled SMS) and lifts any disclaimed-caller-ID SMS hold on the customer\'s live visits';
+//
+// codex round-5 P2 (PR #4807): the callback-number-hold clause only
+// describes what propagateCustomerPhoneChange does — a name-only edit never
+// touches callback_number_hold_at. Both confirmation-card consumers used to
+// append the FULL string (including this clause) for a first_name/last_name
+// -only update too, promising a hold lift that never happens. Split so
+// callers append the clause ONLY when the update actually includes a phone
+// change; CONTACT_FANOUT_DISCLOSURE alone stays accurate for a name-only
+// edit.
+const CONTACT_FANOUT_DISCLOSURE = 'a name or phone change also updates every open copy still carrying the old value (leads, estimates, contracts, referral promoter, booking recovery, active automations, newsletter greeting, queued template sends, scheduled SMS)';
+const CONTACT_FANOUT_PHONE_HOLD_CLAUSE = 'and lifts any disclaimed-caller-ID SMS hold on the customer\'s live visits';
 
 module.exports = {
   propagateCustomerNameChange,
@@ -519,4 +534,5 @@ module.exports = {
   nameKey,
   phoneKey,
   CONTACT_FANOUT_DISCLOSURE,
+  CONTACT_FANOUT_PHONE_HOLD_CLAUSE,
 };

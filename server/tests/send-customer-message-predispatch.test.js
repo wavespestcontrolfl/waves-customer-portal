@@ -58,6 +58,17 @@ jest.mock('../services/estimate-annual-guard', () => ({
   // scheduled-retry test.
   withheldLinkPolicyForSmsPurpose: jest.fn(() => 'refuse'),
 }));
+// callback_number_needed hold (round 5, PR #4807) — the canonical chokepoint
+// now runs this check unconditionally whenever a send carries an
+// appointmentId, right beside the MOVE_HOLD check this file's own describe
+// block exercises. Mocked out (default: never held) so this file's plain
+// `db` doubles — built for MOVE_HOLD's own where/first query shape — are
+// never asked to also answer resolveCallbackNumberHoldRows's queries; the
+// callback-hold chokepoint itself is covered by
+// send-customer-message-callback-number-hold.test.js.
+jest.mock('../services/appointment-reminders', () => ({
+  callbackNumberHoldActiveForVisit: jest.fn(async () => false),
+}));
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { persistAudit } = require('../services/messaging/audit');

@@ -169,6 +169,7 @@ const HELD_VISIT_ID = 'svc-held';
 const OTHER_CALL_VISIT_ID = 'svc-other-call';
 const CANCELLED_VISIT_ID = 'svc-cancelled';
 const EN_ROUTE_VISIT_ID = 'svc-en-route';
+const RESCHEDULED_VISIT_ID = 'svc-rescheduled';
 const CUSTOMER_ID = 'cust-1';
 // The number the caller disclaimed (call_log.from_phone) — the /verdict
 // route's phone-verification gate (codex round-4 P2) compares the
@@ -196,6 +197,13 @@ function fixture(extra = {}) {
       // Same call, tech already rolling — codex round-3 P2: this is still a
       // LIVE (nonterminal) visit and must clear along with 'confirmed'.
       { id: EN_ROUTE_VISIT_ID, source_call_log_id: CALL_ID, status: 'en_route', callback_number_hold_at: new Date('2030-01-07T10:00:00Z'), call_sms_cleared_at: null },
+      // Same call, rebooked to a new date (status flips to 'rescheduled') —
+      // codex round-5 P2: this row can still be a GROUPED SIBLING of the
+      // visit the customer was rebooked onto (resolveCallbackNumberHoldRows
+      // checks every row sharing visit_id), so it must clear too, or the
+      // group-wide hold predicate keeps reading the new row as held even
+      // after the office confirms the number here.
+      { id: RESCHEDULED_VISIT_ID, source_call_log_id: CALL_ID, status: 'rescheduled', callback_number_hold_at: new Date('2030-01-07T10:00:00Z'), call_sms_cleared_at: null },
     ],
     ...extra,
   });
@@ -231,6 +239,17 @@ describe('PUT /admin/triage/:id/resolve on a callback_number_needed card', () =>
     });
     const enRoute = tables.scheduled_services.find((s) => s.id === EN_ROUTE_VISIT_ID);
     expect(enRoute.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
+  });
+
+  test('codex round-5 P2: a rescheduled visit (rebooked, grouped sibling) still clears — CLEARABLE, not just NONTERMINAL', async () => {
+    const { conn, tables } = fixture();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Confirmed her cell — texts should go there now.' });
+      expect(res.status).toBe(200);
+    });
+    const rescheduled = tables.scheduled_services.find((s) => s.id === RESCHEDULED_VISIT_ID);
+    expect(rescheduled.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
   });
 
   test('a card with no held visit is a no-op on scheduled_services (nothing to clear)', async () => {

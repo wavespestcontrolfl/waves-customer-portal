@@ -105,6 +105,37 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
+// callback_number_needed hold — STRUCTURAL fix (round 5, PR #4807). Rounds
+// 2 and 4 patched this per sender (safeSendAppointment's one-time entry
+// read, then safeSend's own provider-handoff recheck composed into
+// dispatchCheck) and round 5 caught ANOTHER path doing the same
+// read-once-then-text-later thing (twilio.js's en-route/arrival senders,
+// which dispatch outside safeSend entirely). Rather than keep chasing
+// senders one at a time, the recheck now lives HERE — the one place every
+// appointment-linked SMS passes immediately before the provider handoff —
+// keyed on whichever shape the caller carries the visit id in:
+// appointmentId (en-route, arrival, safeSend/safeSendAppointment) or
+// metadata.scheduled_service_id / metadata.visit_id (appointment-card-
+// request, which never sets a top-level appointmentId at all). A caller
+// that supplies neither has no visit context to check, same as the move
+// hold above.
+function callbackNumberHoldKeyForSend(input) {
+  const scheduledServiceId = input.appointmentId || input.metadata?.scheduled_service_id || null;
+  const visitIdSupplied = input.metadata && Object.prototype.hasOwnProperty.call(input.metadata, 'visit_id');
+  if (!scheduledServiceId && !visitIdSupplied) return null;
+  return visitIdSupplied ? { scheduledServiceId, visitId: input.metadata.visit_id } : scheduledServiceId;
+}
+async function callbackNumberHoldBlocksSend(input) {
+  const key = callbackNumberHoldKeyForSend(input);
+  if (!key) return false;
+  const AppointmentReminders = require('../appointment-reminders');
+  // Defensive only: every real caller gets the function from the actual
+  // module — a test double that mocks appointment-reminders.js without it
+  // degrades to "not held", the pre-round-5 behavior.
+  if (typeof AppointmentReminders.callbackNumberHoldActiveForVisit !== 'function') return false;
+  return AppointmentReminders.callbackNumberHoldActiveForVisit(key);
+}
+
 // Annual-offer delivery guard (delivery-guards slice, re-cut of #4569): no
 // sender rechecks annual-plan eligibility itself — it passes estimateId(s)
 // through to this send library. Codex round 3 on #4608 (structural move,
@@ -613,6 +644,40 @@ async function sendCustomerMessageCore(input) {
         encoding: segmentMeta.encoding,
       };
     }
+  }
+
+  // 6.45 callback_number_needed hold (see callbackNumberHoldBlocksSend
+  //      above for why this lives here, not in each sender). SMS only —
+  //      channel may already have flipped to 'push' above, and push never
+  //      dials the disclaimed number. Fails CLOSED like the underlying
+  //      predicate: a read error blocks the SMS leg, never clears it —
+  //      every caller here already has (or degrades gracefully without) an
+  //      email fallback for the true-held case. retryable: true because the
+  //      hold is durable-but-liftable (call_sms_cleared_at), matching the
+  //      posture every prior per-sender check already used.
+  if (sendInput.channel === 'sms' && await callbackNumberHoldBlocksSend(sendInput)) {
+    const blocked = { code: 'CALLBACK_NUMBER_HOLD', reason: 'Caller disclaimed this number (callback_number_needed)' };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['callback_number_hold'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
+      retryable: true,
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
   }
 
   // 6.5 Caller-supplied recheck before provider preparation. Assigned lead

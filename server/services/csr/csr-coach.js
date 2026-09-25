@@ -121,7 +121,19 @@ class CSRCoach {
     try {
       const scoreResult = await this.scoreCall({
         stillOwnsClaim, csrName, customerId, callDirection: 'inbound', callSource, transcript, metadata,
-        v2Extraction: v2Valid ? v2Extraction : null,
+        // Codex round-5 P2: v2Extraction is used inside scoreCall for
+        // exactly one thing — callbackNumberCoachingNote, the deterministic
+        // "ask for a cell" coaching addendum. v2Valid alone (shadow mode
+        // included) let a shadow-only extraction's signal reach
+        // csr_call_scores.coaching_notes even while V2 has no operational
+        // authority anywhere else (the same v2Promoted gate this function's
+        // own rubric-applicability check already honors above). Gate the
+        // extraction on v2Promoted too, so the coaching note stays shadow-
+        // mode-inert like everything else V2 hasn't been promoted to drive
+        // — the SMS safety hold itself (callbackNumberHoldActiveForVisit /
+        // call-recording-processor.js) is untouched by this and still arms
+        // in shadow mode, as it must.
+        v2Extraction: (v2Valid && v2Promoted) ? v2Extraction : null,
         contactPhone,
       });
       // The scorer's own post-await check found the claim gone. That is not
