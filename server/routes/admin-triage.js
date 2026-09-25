@@ -620,7 +620,7 @@ async function confirmEmailHold(trx, holdsTable, callLogId, customerId, typedEma
   // extraction. Status 'released'/zero held flags: nothing was ever
   // actually queued to send from this marker row; the real hold-ledger
   // write flips it back to 'pending' on merge.
-  await trx('first_touch_holds')
+  const inserted = await trx('first_touch_holds')
     .insert({
       call_log_id: callLogId,
       customer_id: customerId || null,
@@ -634,16 +634,20 @@ async function confirmEmailHold(trx, holdsTable, callLogId, customerId, typedEma
       updated_at: new Date(),
     })
     .onConflict('call_log_id')
-    .ignore();
+    .ignore()
+    .returning('call_log_id');
   // A real row can race in between the update above and this insert
   // (recordFirstTouchHoldOwned committing concurrently) — retarget it the
   // same way, so a genuine pending/releasing row is never left uncorrected
   // just because the marker insert lost that race.
-  await trx('first_touch_holds')
+  const retargeted = await trx('first_touch_holds')
     .where({ call_log_id: callLogId })
     .whereIn('status', ['pending', 'releasing'])
     .update({ held_email: typedEmail, corrected_at: new Date(), updated_at: new Date() });
-  return true;
+  // An existing terminal row (already sent) is left untouched above — the
+  // insert is then ignored and nothing carries the confirmed address, so
+  // this must report false rather than claim a durable confirmation.
+  return (Array.isArray(inserted) ? inserted.length > 0 : Number(inserted) > 0) || retargeted > 0;
 }
 
 // (b) The customer record, through the normal channel — diff-gated (a

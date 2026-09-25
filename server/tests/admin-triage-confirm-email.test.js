@@ -111,7 +111,17 @@ function makeFakeDb(seed = {}) {
         rows.push(row);
         return {
           then: (resolve) => resolve([row]),
-          onConflict: () => ({ ignore: async () => 1, merge: async () => 1 }),
+          onConflict: (col) => {
+            // ON CONFLICT DO NOTHING: drop the new row when one with the same
+            // conflict key already existed, and report no inserted rows.
+            const dup = typeof col === 'string' && rows.some((r) => r !== row && r[col] === row[col]);
+            if (dup) rows.splice(rows.indexOf(row), 1);
+            const ignored = dup ? [] : [row];
+            return {
+              ignore: () => ({ then: (resolve) => resolve(ignored.length), returning: async () => ignored }),
+              merge: async () => 1,
+            };
+          },
           returning: async () => [row],
         };
       },
@@ -462,6 +472,26 @@ describe('POST /admin/triage/:id/confirm-email', () => {
         expect(res.status).toBe(409);
         expect((await res.json()).code).toBe('LEAD_NOT_RESOLVED');
       });
+      expect(tables.triage_items[0].status).toBe('open');
+    });
+
+    test('refuses with 409 LEAD_NOT_RESOLVED when the only hold row is terminal (already sent) and nothing was retargeted', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [],
+        first_touch_holds: [{ id: 'hold-1', call_log_id: CALL_ID, customer_id: null, status: 'sent', held_email: 'old@example.com' }],
+        leads: [],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('LEAD_NOT_RESOLVED');
+      });
+      expect(tables.first_touch_holds).toHaveLength(1);
+      expect(tables.first_touch_holds[0].held_email).toBe('old@example.com');
       expect(tables.triage_items[0].status).toBe('open');
     });
 
