@@ -31,12 +31,14 @@ async function pruneUnresolved(conn) {
 }
 
 function candidatesQuery(conn, now) {
+  // Canonical unclaimed holds have customer_id NULL, so this inner join is
+  // their discriminator. Do not filter reservation_expires_at: a committed
+  // customer visit can carry a stray expiry and still needs its route pin.
   const stops = conn('scheduled_services')
     .join('customers', 'customers.id', 'scheduled_services.customer_id')
     .whereNull('customers.deleted_at')
     .whereIn('scheduled_services.status', ['pending', 'confirmed'])
     .whereBetween('scheduled_services.scheduled_date', [etDateString(now), etDateString(addETDays(now, 30))])
-    .whereNull('scheduled_services.reservation_expires_at')
     .whereRaw('NOT COALESCE(scheduled_services.auto_dispatch_locked, false) AND NOT COALESCE(scheduled_services.auto_dispatch_excluded, false)')
     .whereRaw('(scheduled_services.lat IS NULL OR scheduled_services.lng IS NULL OR scheduled_services.lat = 0 OR scheduled_services.lng = 0)')
     .whereRaw("NULLIF(btrim(scheduled_services.service_address_line1), '') IS NOT NULL")

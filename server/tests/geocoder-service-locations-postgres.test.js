@@ -124,7 +124,9 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
     await insertService(id(2), { status: 'completed' });
     await insertService(id(3), { auto_dispatch_locked: true });
     await insertService(id(4), { auto_dispatch_excluded: true });
-    await insertService(id(5), { reservation_expires_at: '2026-09-25T15:00:00Z' });
+    // Canonical estimate holds are unclaimed (customer_id NULL), so the
+    // customer join excludes them independently of their expiry timestamp.
+    await insertService(id(5), { customer_id: null, reservation_expires_at: '2026-09-25T15:00:00Z' });
     await insertService(id(6), { scheduled_date: OUTSIDE_DAY });
     delete process.env.GATE_ROUTE_REORDER;
     delete process.env.GATE_ROUTE_REORDER_REPAIR;
@@ -175,6 +177,24 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
     expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: serviceId, qualityDates: new Set([NEXT_DAY]) });
     expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
     expect(refreshScheduleQualityAfterChange.mock.calls[0][0]).toEqual({ dates: [NEXT_DAY], now: NOW });
+  });
+
+  test('a committed appointment with a stray reservation expiry remains eligible and preserves that snapshot field', async () => {
+    const serviceId = id(11);
+    await insertService(serviceId, {
+      service_address_line1: '211 Committed Fixture Way',
+      reservation_expires_at: '2026-09-25T15:00:00Z',
+    });
+    const before = await mockConnection('scheduled_services').where({ id: serviceId }).first();
+
+    const result = await sweepUngeocodedServices({ now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ status: 'completed', checked: 1, geocoded: 1, stale: 0, failed: 0 });
+    const after = await mockConnection('scheduled_services').where({ id: serviceId }).first();
+    expect({ lat: Number(after.lat), lng: Number(after.lng) }).toEqual(PIN);
+    expect(after.reservation_expires_at).toEqual(before.reservation_expires_at);
+    const withoutCoordinateWrite = ({ lat: _lat, lng: _lng, updated_at: _updatedAt, ...row }) => row;
+    expect(withoutCoordinateWrite(after)).toEqual(withoutCoordinateWrite(before));
   });
 
   test('matching primary-address coordinates are a valid shared fallback and are not geocoded', async () => {
