@@ -5248,8 +5248,18 @@ function initScheduledJobs() {
         .whereNull('c.deleted_at')
         .select('chs.customer_id');
 
+      // Retention drafts are a FLAGSHIP customerCopy call per at-risk
+      // customer, keyed on the churn band the owner ruled unusable
+      // (2026-08-29; win-back is a manual send). The engine itself enforces
+      // GATE_CUSTOMER_INTEL_AI (customerIntelAiLive) on every caller; this
+      // skip only saves the per-customer reads and logs the count.
+      const { customerIntelAiLive } = require('../config/feature-gates');
+      const intelAiOn = customerIntelAiLive();
       let outreachGenerated = 0;
-      for (const c of atRisk) {
+      if (!intelAiOn) {
+        logger.info(`[customer-intel] GATE_CUSTOMER_INTEL_AI off — skipped retention drafting for ${atRisk.length} at-risk customers`);
+      }
+      for (const c of intelAiOn ? atRisk : []) {
         const result = await RetentionEngine.generateRetentionOutreach(c.customer_id);
         if (result) outreachGenerated++;
       }

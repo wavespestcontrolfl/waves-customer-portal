@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SignalDetector = require('../services/customer-intelligence/signal-detector');
+const { customerIntelAiLive } = require('../config/feature-gates');
 const HealthScorer = require('../services/customer-intelligence/health-scorer');
 const RetentionEngine = require('../services/customer-intelligence/retention-engine');
 const logger = require('../services/logger');
@@ -149,6 +150,11 @@ router.get('/:id/health', async (req, res, next) => {
 // POST /api/admin/customers/intelligence/:id/retention-outreach — generate outreach
 router.post('/:id/retention-outreach', async (req, res, next) => {
   try {
+    // The engine refuses when GATE_CUSTOMER_INTEL_AI is off; surface that as a
+    // 409 rather than an indistinguishable `outreach: null`.
+    if (!customerIntelAiLive()) {
+      return res.status(409).json({ error: 'Customer-intelligence AI drafting is off (GATE_CUSTOMER_INTEL_AI)' });
+    }
     const result = await RetentionEngine.generateRetentionOutreach(req.params.id);
     res.json({ outreach: result });
   } catch (err) { next(err); }
