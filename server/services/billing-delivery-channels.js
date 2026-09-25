@@ -38,7 +38,8 @@ function billingChannelAllowed(prefs = {}, category, channel) {
 }
 
 function legacyChannels(prefs = {}, category, emailAvailable) {
-  const legacy = prefs[LEGACY_FIELDS[category]];
+  const legacy = category === 'payment_issue' && prefs.payment_issue_channel == null
+    ? prefs.billing_channel : prefs[LEGACY_FIELDS[category]];
   const independentEmail = emailAvailable && prefs.email_enabled !== false;
   if (category === 'billing') {
     if (legacy === 'email') return independentEmail ? ['email'] : ['sms'];
