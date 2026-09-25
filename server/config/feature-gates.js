@@ -1422,6 +1422,10 @@ const gates = {
   rescheduleProposalCard: gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD'),
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
+  // Customer-intelligence AI legs (nightly sentiment mining + retention
+  // drafts). Read at CALL time inside signal-detector / the 3 AM pipeline;
+  // this entry is for logGateStatus only. Dark by default (owner 2026-09-25).
+  customerIntelAi: gateEnvValue('GATE_CUSTOMER_INTEL_AI'),
   // Missing-departure/arrival tracking: flags a scheduled_services row whose
   // promised window (the last communicated arrival window — SMS/email/call
   // evidence, never the raw schedule) has passed with no en_route/arrived
