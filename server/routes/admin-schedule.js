@@ -7234,7 +7234,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
         if (recurringTreeShrubRowAtRetiredCadence(data)) {
           return res.status(409).json({
-            error: 'This estimate’s tree & shrub plan uses a retired schedule (quarterly). Requote it with the 6x or 9x program before booking from it.',
+            error: 'This estimate’s tree & shrub plan uses a retired schedule. Requote it with the 6x or 9x program before booking from it.',
             code: 'RETIRED_TREE_SHRUB_CADENCE',
           });
         }

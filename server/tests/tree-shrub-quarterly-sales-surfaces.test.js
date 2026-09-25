@@ -212,6 +212,11 @@ describe('new-appointment write boundary (codex r12)', () => {
     expect(await ids(['Tree & Shrub 4-visit program'])).toEqual([RETIRED_ID]);
     expect(await ids(['Tree & Shrub Care every 90 days'])).toEqual([RETIRED_ID]);
     expect(await ids(['Tree & Shrub Care every 60 days', 'Light Pest Control', 'Tree & Shrub Care (Standard)'])).toEqual([]);
+    // "Ornamental" is the same family (serviceCatalogMatch) — codex r21.
+    expect(await ids(['Quarterly Ornamental Care'])).toEqual([RETIRED_ID]);
+    expect(await ids(['Ornamentals (Light)'])).toEqual([RETIRED_ID]);
+    expect(await ids(['Ornamental Care', 'Bi-Monthly Ornamental Care'])).toEqual([]);
+    expect((await run({ customerId: OTHER, serviceTypes: ['Ornamental Care'], recurrence: { pattern: 'quarterly' } })).map((r) => r.id)).toEqual([RETIRED_ID]);
   });
 
   test('a structured cadence names the retired plan just as the label would (codex r20)', async () => {

@@ -17,6 +17,7 @@ jest.mock('../models/db', () => {
     for (const m of ['select', 'where', 'whereNull', 'whereExists', 'havingRaw', 'orderByRaw', 'clone']) {
       builder[m] = () => builder;
     }
+    builder.orderByRaw = (sql) => { state.orderBy = String(sql); return builder; };
     builder.limit = (n) => { limitN = n; return builder; };
     builder.offset = (n) => { offsetN = n; state.pages = (state.pages || 0) + 1; return builder; };
     builder.then = (resolve, reject) => Promise.resolve(
@@ -32,7 +33,13 @@ jest.mock('../models/db', () => {
 const db = require('../models/db');
 const { executeTool } = require('../services/intelligence-bar/tools');
 
-const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().split('T')[0];
+// Noon ET on a fixed day: the UTC and Eastern calendars agree, so the
+// day-count fixtures below are deterministic (only Date is faked).
+const NOW = new Date('2026-09-25T16:00:00Z');
+beforeEach(() => { jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] }).setSystemTime(NOW); });
+afterAll(() => { jest.useRealTimers(); });
+
+const daysAgo = (n) => new Date(NOW.getTime() - n * 86400000).toISOString().split('T')[0];
 const row = (id, serviceType, days) => ({
   id, first_name: id, last_name: '', active: true,
   last_service_date: daysAgo(days), last_service_type: serviceType, next_scheduled: null,
@@ -143,4 +150,23 @@ test('other categories still read one page at the requested limit', async () => 
   const result = await executeTool('find_overdue_customers', { service_category: 'pest', limit: 10 });
   expect(result.overdue_customers).toHaveLength(10);
   expect(db.__state.pages).toBe(1);
+});
+
+test('days since the last visit are counted on the Eastern calendar, not the UTC clock (codex r21)', async () => {
+  // 21:00 ET on Sept 25 is already Sept 26 in UTC. A bi-monthly customer last
+  // served on July 28 is 59 Eastern days out (not due); July 27 is 60 (due).
+  jest.setSystemTime(new Date('2026-09-26T01:00:00Z'));
+  db.__state.rows = [
+    { ...row('fifty-nine', 'Bi-Monthly Tree & Shrub Care Service', 0), last_service_date: '2026-07-28' },
+    { ...row('sixty', 'Bi-Monthly Tree & Shrub Care Service', 0), last_service_date: new Date('2026-07-27T00:00:00Z') },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.days_since_last_service, c.days_overdue])).toEqual([['sixty', 60, 0]]);
+});
+
+test('the paged T&S read orders by a unique tie-breaker after the last-service date (codex r21)', async () => {
+  db.__state.rows = [];
+  db.__state.orderBy = null;
+  await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(db.__state.orderBy).toMatch(/\) ASC, customers\.id ASC$/);
 });

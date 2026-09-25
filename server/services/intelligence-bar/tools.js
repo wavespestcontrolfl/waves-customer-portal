@@ -16,7 +16,7 @@ const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const {
-  etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
+  etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
 const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps } = require('../customer-stages');
@@ -629,7 +629,9 @@ async function findOverdueCustomers(input) {
           .whereRaw('service_type ~* ?', [patterns[cat]]);
       })
       .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) < ?", [patterns[cat], cutoff.toISOString().split('T')[0]])
-      .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC", [patterns[cat]]);
+      // customers.id breaks last-service-date ties so the paged read below
+      // sees each row exactly once (codex r21 on #4786).
+      .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC, customers.id ASC", [patterns[cat]]);
     // T&S: the 42-day prefilter admits not-yet-due 60/90-day customers, and
     // they sort oldest-first — ANY SQL cap would let them crowd out a truly
     // overdue 6-week customer with a newer last visit (codex r11/r19 on
@@ -643,10 +645,17 @@ async function findOverdueCustomers(input) {
       if (cat !== 'tree_shrub' || page.length < pageSize) break;
     }
 
+    // Days on the Eastern calendar (codex r21 on #4786): service_date is a
+    // date-only column, so the count is between two calendar days — never
+    // Date.now() in the process's UTC clock, which runs a day ahead of the
+    // office every evening and returned a 60/90-day customer a day early.
+    const todayEt = etDateString();
+    const calendarDaysSince = (dateOnly) => Math.round(
+      (Date.parse(`${todayEt}T00:00:00Z`) - Date.parse(`${dateOnlyString(dateOnly)}T00:00:00Z`)) / 86400000,
+    );
     for (const c of customers) {
-      const daysSince = c.last_service_date
-        ? Math.floor((Date.now() - new Date(c.last_service_date)) / 86400000)
-        : null;
+      const daysSince = c.last_service_date ? calendarDaysSince(c.last_service_date) : null;
+      if (daysSince != null && Number.isNaN(daysSince)) continue;
       const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type, c.active_plan_service_key) : baseFreq;
       if (daysSince != null && daysSince < freq + overdue_days) continue;
 

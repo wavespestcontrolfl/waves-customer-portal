@@ -595,7 +595,7 @@ async function markEstimateManuallyAccepted({
     {
       const { recurringTreeShrubRowAtRetiredCadence } = require('../routes/estimate-public');
       if (recurringTreeShrubRowAtRetiredCadence(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
-        throw httpError('This estimate’s tree & shrub plan uses a retired schedule (quarterly). Requote it with the 6x or 9x program before accepting.', 409);
+        throw httpError('This estimate’s tree & shrub plan uses a retired schedule. Requote it with the 6x or 9x program before accepting.', 409);
       }
     }
 
