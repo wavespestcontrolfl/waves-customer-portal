@@ -1361,6 +1361,22 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
 
+  test('Codex #4816 r12: an invoice paid on an Eastern evening reads as that Eastern day, not the next UTC day', async () => {
+    const at = new Date(Math.max(message.created_at.getTime() + 1000, Date.parse('2026-01-01T00:00:00Z')));
+    // 9:30 PM Eastern on the day after the text is already the next UTC day.
+    const evening = new Date(`${etDateString(new Date(at.getTime() + 86400000))}T21:30:00-05:00`);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
+      invoice_number: 'WPC-2026-0801', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: evening }).returning('id');
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(evening),
+      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: evening });
+    const commitment = { kind: 'other', description: 'Did you receive my payment?',
+      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(evening.getTime() + 1000));
+    const row = evidence.records.find((r) => r.type === 'payment' && r.payment_source === 'invoice');
+    expect(row.text).toContain(`paid ${etDateString(evening)}`);
+    expect(row.text).not.toContain(evening.toISOString().slice(0, 10));
+  });
+
   test('R2: an invoice paid before the request is not payment evidence', async () => {
     const before = new Date(message.created_at.getTime() - 1000);
     await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),

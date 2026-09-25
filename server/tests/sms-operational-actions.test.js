@@ -1018,6 +1018,17 @@ describe('fulfillment proof', () => {
     expect(prompt).toContain('"witness_refs":["payment:pay-1"]');
   });
 
+  test('Codex #4816 r12: the prompt lets a delivered receipt text answer a receipt request', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const receipt = { ref: 'payment:sms-1', type: 'payment', payment_source: 'sms', id: 'sms-1', status: 'delivered', message_type: 'receipt',
+      created_at: '2040-03-11T15:00:00Z', text: 'Payment received, thank you. Receipt for invoice WPC-1: $125.00' };
+    const ask = { kind: 'other', description: 'Can you send me the receipt?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    await verifySmsFulfillment(ask, { records: [receipt], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls[0][1].text;
+    expect(prompt).toContain('a delivered receipt text does answer a request for that receipt');
+    expect(prompt).toContain('"witness_refs":["payment:sms-1"]');
+  });
+
   test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     // Roughly one UUID in 500 hides a Luhn-valid 13-19 digit run. This one
