@@ -231,6 +231,11 @@ jest.mock('../models/db', () => {
         if (table === 'email_suppressions' && mockSuppressionQueue && mockSuppressionQueue.length) {
           return Promise.resolve(mockSuppressionQueue.shift()).then(resolve, reject);
         }
+        // resolveFirstTouchLeadId's phone fallback now selects candidate
+        // rows (id, phone) and picks by phoneIdentityKey in JS.
+        if (table === 'leads') {
+          return Promise.resolve(mockLeadByPhoneRow ? [mockLeadByPhoneRow] : []).then(resolve, reject);
+        }
         return Promise.resolve(
           table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : [])
             : table === 'first_touch_holds' ? (mockHolds || (mockHold ? [mockHold] : []))

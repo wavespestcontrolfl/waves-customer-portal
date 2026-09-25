@@ -13,16 +13,16 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { resolveFirstTouchLeadId } = require('../services/lead-first-touch-resume');
 
-function chainBuilder({ firstRow = null, firstError = null } = {}) {
+function chainBuilder({ rows = [], firstError = null } = {}) {
   const b = { wheres: [], whereRaws: [] };
   b.where = jest.fn((arg) => { b.wheres.push(arg); return b; });
   b.whereRaw = jest.fn((sql, bindings) => { b.whereRaws.push([sql, bindings]); return b; });
   b.whereIn = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
-  b.first = jest.fn(async () => {
+  b.select = jest.fn(async () => {
     if (firstError) throw firstError;
-    return firstRow;
+    return rows;
   });
   return b;
 }
@@ -35,7 +35,7 @@ describe('resolveFirstTouchLeadId', () => {
   });
 
   test('no metadata stamp, a matching open lead by phone → that lead id', async () => {
-    const leadsBuilder = chainBuilder({ firstRow: { id: 'lead-by-phone-1' } });
+    const leadsBuilder = chainBuilder({ rows: [{ id: 'lead-by-phone-1', phone: '+19415551234' }] });
     const dbh = jest.fn((table) => {
       expect(table).toBe('leads');
       return leadsBuilder;
@@ -46,9 +46,23 @@ describe('resolveFirstTouchLeadId', () => {
   });
 
   test('no metadata stamp, no matching open lead by phone → null', async () => {
-    const dbh = jest.fn(() => chainBuilder({ firstRow: null }));
+    const dbh = jest.fn(() => chainBuilder({ rows: [] }));
     const leadId = await resolveFirstTouchLeadId({ metadataLeadId: null, fromPhone: '9415551234', dbh });
     expect(leadId).toBeNull();
+  });
+
+  test('a foreign number sharing the US lead\'s last ten digits is NOT it (full phone identity, Codex #4709 r19 P1)', async () => {
+    const leadsBuilder = chainBuilder({ rows: [{ id: 'us-lead', phone: '+19415551234' }] });
+    const dbh = jest.fn(() => leadsBuilder);
+    const leadId = await resolveFirstTouchLeadId({ metadataLeadId: null, fromPhone: '+449415551234', dbh });
+    expect(leadId).toBeNull();
+  });
+
+  test('among suffix candidates, only the full-identity match is picked', async () => {
+    const leadsBuilder = chainBuilder({ rows: [{ id: 'foreign-lead', phone: '+529415551234' }, { id: 'us-lead', phone: '9415551234' }] });
+    const dbh = jest.fn(() => leadsBuilder);
+    const leadId = await resolveFirstTouchLeadId({ metadataLeadId: null, fromPhone: '+19415551234', dbh });
+    expect(leadId).toBe('us-lead');
   });
 
   test('no metadata stamp and no phone at all → null without querying', async () => {

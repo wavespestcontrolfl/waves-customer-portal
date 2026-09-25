@@ -49,6 +49,13 @@ const RESUME_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 // or fails the drip release itself.
 async function resolveFirstTouchLeadId({ metadataLeadId, fromPhone, dbh }) {
   if (metadataLeadId) return metadataLeadId;
+  // Full phone identity, never a last-10 suffix (Codex #4709 r19 P1, same
+  // rule as lead-consultation-link.js): an international number sharing a
+  // US number's last ten digits is not it. The suffix SQL below is only a
+  // candidate prefilter; phoneIdentityKey decides.
+  const { phoneIdentityKey } = require('../utils/phone');
+  const callKey = phoneIdentityKey(fromPhone);
+  if (!callKey) return null;
   const digits = String(fromPhone || '').replace(/\D/g, '').slice(-10);
   if (digits.length !== 10) return null;
   try {
@@ -56,7 +63,8 @@ async function resolveFirstTouchLeadId({ metadataLeadId, fromPhone, dbh }) {
     const query = dbh('leads')
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
       .whereNull('deleted_at');
-    const lead = await applyOpenLeadPredicate(query).orderBy('created_at', 'desc').first('id');
+    const candidates = await applyOpenLeadPredicate(query).orderBy('created_at', 'desc').select('id', 'phone');
+    const lead = (candidates || []).find((row) => phoneIdentityKey(row.phone) === callKey);
     return lead?.id || null;
   } catch (err) {
     logger.warn(`[first-touch-resume] lead-by-phone lookup failed: ${err.message}`);
