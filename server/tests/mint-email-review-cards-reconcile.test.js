@@ -197,6 +197,51 @@ describe('mintEmailReviewCardsFenced — supersession (codex round 3)', () => {
     expect(tables.triage_items[0].payload).toBe(JSON.stringify(DISAGREEMENT_PAYLOAD));
   });
 
+  test('codex round 9: a human-confirmed card with identical evidence is NOT reopened by a force-reprocess', async () => {
+    const confirmed = { ...DISAGREEMENT_PAYLOAD, confirmed_email: 'janedoe@example.com', confirmed_source: 'candidate' };
+    const { conn, tables } = fixture({
+      triage_items: [disagreementCardRow({ status: 'resolved', resolution_source: 'human', payload: JSON.stringify(confirmed) })],
+      first_touch_holds: [{
+        id: 'hold-1', call_log_id: CALL_ID, customer_id: 'cust-1', status: 'pending',
+        held_email: 'janedoe@example.com', corrected_at: '2026-09-24T09:05:00.000Z',
+      }],
+    });
+    wireDb(db, { conn });
+    const SAME_CARD = { call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open', payload: JSON.stringify(DISAGREEMENT_PAYLOAD) };
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [SAME_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    expect(tables.triage_items).toHaveLength(1);
+    expect(tables.triage_items[0].status).toBe('resolved');
+    expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+    expect(tables.call_log[0].review_status).toBe('resolved');
+  });
+
+  test('codex round 9: an auto-superseded card (no read-back confirmation) never satisfies the pass — the card is reopened', async () => {
+    const { conn, tables } = fixture({
+      triage_items: [disagreementCardRow({ status: 'resolved', resolution_source: 'auto' })],
+    });
+    wireDb(db, { conn });
+    const SAME_CARD = { call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open', payload: JSON.stringify(DISAGREEMENT_PAYLOAD) };
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [SAME_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    expect(tables.triage_items.filter((c) => c.status === 'open')).toHaveLength(1);
+  });
+
+  test('codex round 9: a confirmed card with DIFFERENT evidence does not satisfy a new disagreement', async () => {
+    const OTHER = { ...DISAGREEMENT_PAYLOAD, email_candidates: [{ value: 'other@example.com' }, { value: 'others@example.com' }], confirmed_email: 'other@example.com' };
+    const { conn, tables } = fixture({
+      triage_items: [disagreementCardRow({ status: 'resolved', resolution_source: 'human', payload: JSON.stringify(OTHER) })],
+    });
+    wireDb(db, { conn });
+    const SAME_CARD = { call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open', payload: JSON.stringify(DISAGREEMENT_PAYLOAD) };
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [SAME_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    expect(tables.triage_items.filter((c) => c.status === 'open')).toHaveLength(1);
+  });
+
   test('two live sibling cards (email_unverified AND email_invalid) are BOTH superseded when neither matches this pass', async () => {
     const { conn, tables } = fixture({
       triage_items: [

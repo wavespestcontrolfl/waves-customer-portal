@@ -104,6 +104,13 @@ describe('applyOperatorCustomerEmail', () => {
       .resolves.toEqual({ outcome: 'customer_not_found' });
   });
 
+  test('codex round 9: an archived (soft-deleted) customer reports customer_not_found and is never written', async () => {
+    const { trx } = fakeTrx([{ id: 'c1', email: null, account_id: 'a1', deleted_at: '2026-01-01' }]);
+    await expect(applyOperatorCustomerEmail(trx, { customerId: 'c1', email: 'x@example.com' }))
+      .resolves.toEqual({ outcome: 'customer_not_found' });
+    expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
+  });
+
   test('refuses to run outside a transaction, and refuses an invalid address', async () => {
     const outside = fakeTrx([{ id: 'c1', email: null }], { isTransaction: false });
     await expect(applyOperatorCustomerEmail(outside.trx, { customerId: 'c1', email: 'x@example.com' }))

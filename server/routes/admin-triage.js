@@ -873,7 +873,7 @@ function confirmEmailOutcomeResponse(outcome) {
     };
   }
   if (outcome === 'customer_not_found') {
-    return { status: 409, body: { error: 'The customer linked to this call no longer exists — relink the call, then confirm again.', code: 'CUSTOMER_NOT_FOUND' } };
+    return { status: 409, body: { error: 'The customer linked to this call no longer exists or is archived — relink the call, then confirm again.', code: 'CUSTOMER_NOT_FOUND' } };
   }
   if (outcome === 'target_moved') {
     return {
@@ -895,11 +895,11 @@ function confirmEmailOutcomeResponse(outcome) {
 // fire-and-forget-with-owner contract, sanitized log codes only.
 function runDeferredEmailSyncCallbacks(id, emailSync) {
   if (emailSync?.heldNewsletterResume) {
-    require('../services/lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume)
+    void require('../services/lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume)
       .catch((err) => logger.error(`[admin-triage] deferred held-newsletter resume failed after email confirm for item ${id}: ${err.code || err.name || 'resume_failed'}`));
   }
   if (emailSync?.pendingConfirmation) {
-    require('../services/customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation)
+    void require('../services/customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation)
       .catch((err) => logger.error(`[admin-triage] deferred DOI re-send failed after email confirm for item ${id}: ${err.code || err.name || 'resend_failed'}`));
   }
 }
@@ -994,6 +994,8 @@ async function runConfirmEmailWithRetries(args) {
   return { result: null, outcome: 'target_moved' };
 }
 
+const CUSTOMER_EMAIL_MAX_LENGTH = 150;
+
 router.post('/:id/confirm-email', async (req, res) => {
   try {
     // Customer email writes are admin-territory, same rule as
@@ -1008,6 +1010,12 @@ router.post('/:id/confirm-email', async (req, res) => {
     const typedEmail = cleanValidEmailOrNull(req.body?.email);
     if (!typedEmail) {
       return res.status(400).json({ error: 'A valid email address is required.' });
+    }
+    // customers.email is varchar(150) (initial schema); an over-long address
+    // would otherwise reach the canonical writer and surface as a generic
+    // 500 from Postgres (Codex round-9 P2). Refuse it before any transaction.
+    if (typedEmail.length > CUSTOMER_EMAIL_MAX_LENGTH) {
+      return res.status(400).json({ error: `Email addresses are limited to ${CUSTOMER_EMAIL_MAX_LENGTH} characters.` });
     }
     const expectedUpdatedAt = req.body?.expected_updated_at || null;
 

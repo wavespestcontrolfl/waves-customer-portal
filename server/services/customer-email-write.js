@@ -66,7 +66,12 @@ async function applyOperatorCustomerEmail(trx, { customerId, email, source = 'op
   }
   const newEmail = cleanValidEmailOrNull(email);
   if (!newEmail) throw new Error('applyOperatorCustomerEmail requires a valid email');
-  const before = await trx('customers').where({ id: customerId }).forUpdate().first();
+  // Archived (soft-deleted) rows count as not found (Codex round-9 P2): the
+  // post-commit first-touch release refuses an archived customer, so writing
+  // here would resolve the only review card while the confirmed address
+  // never reaches a live contact. customer_not_found leaves the card open
+  // for relinking.
+  const before = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
   if (!before) return { outcome: 'customer_not_found' };
   await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { email: newEmail });
   const conflict = await findCrossAccountEmailConflict(trx, {

@@ -1738,6 +1738,33 @@ async function mintEmailReviewCardsFenced({
           }),
         });
       }
+      // A disagreement an operator already confirmed by read-back (Codex
+      // round-9 P2): a force-reprocess that yields the SAME evidence must not
+      // reopen it. liveCards above only sees open/in_progress rows, so without
+      // this the pass re-inserted an identical open card and staff had to
+      // repeat the confirmation after every reprocess — and for a
+      // customer-less lead the earlier email_confirmed_at predates the new
+      // card, so emailDisagreementConfirmed rejected it outright. Only a
+      // human read-back confirmation (payload.confirmed_email) counts; an
+      // auto-superseded card never does. The hold itself already keeps the
+      // confirmed address (retargetConfirmedHold stamps corrected_at, which
+      // deriveEmailHoldTarget honors).
+      const pendingCards = cards.filter((c) => !satisfiedReasonCodes.has(c.reason_code));
+      if (pendingCards.length) {
+        const confirmedCards = await trx('triage_items')
+          .where({ call_log_id: callLogId, status: 'resolved', resolution_source: 'human' })
+          .whereIn('reason_code', pendingCards.map((c) => c.reason_code))
+          .select('reason_code', 'payload');
+        for (const done of confirmedCards) {
+          const donePayload = safeParseJsonPayload(done.payload);
+          if (!String(donePayload?.confirmed_email || '').trim()) continue;
+          const desired = pendingCards.find((c) => c.reason_code === done.reason_code);
+          if (desired && emailCardSignature(done.reason_code, donePayload)
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload))) {
+            satisfiedReasonCodes.add(desired.reason_code);
+          }
+        }
+      }
       for (const card of cards) {
         if (satisfiedReasonCodes.has(card.reason_code)) continue;
         await trx('triage_items')

@@ -89,7 +89,9 @@ function makeFakeDb(seed = {}) {
       },
       whereIn(col, vals) { whereInClauses.push({ col, vals }); return api; },
       whereNotIn(col, vals) { whereNotInClauses.push({ col, vals }); return api; },
-      whereNull(col) { eq[col] = null; return api; },
+      // SQL semantics: an absent column reads as NULL (fixture rows omit
+      // deleted_at), so match == null rather than strict === null.
+      whereNull(col) { rawPredicates.push((row) => row[col] == null); return api; },
       whereNot(obj) {
         for (const [k, v] of Object.entries(obj)) rawPredicates.push((row) => row[k] !== v);
         return api;
@@ -335,6 +337,21 @@ describe('POST /admin/triage/:id/confirm-email', () => {
     const payload = JSON.parse(tables.triage_items[0].payload);
     expect(payload.confirmed_source).toBe('operator_typed');
     expect(payload.confirmed_email).toBe('completely.different@example.com');
+  });
+
+  test('codex round 9: an address longer than customers.email (varchar 150) refuses with 400 and touches nothing', async () => {
+    const { conn, tables } = fixture();
+    wireDb(db, { conn });
+    const longEmail = `${'a'.repeat(140)}@example.com`; // 152 chars
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+        email: longEmail, expected_updated_at: CARD_UPDATED_AT,
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/150 characters/);
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+    expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
   });
 
   test('an invalid email format refuses with 400 and touches nothing', async () => {
