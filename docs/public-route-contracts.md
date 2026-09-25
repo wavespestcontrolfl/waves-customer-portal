@@ -274,7 +274,6 @@ row still resolves to a retired lawn cadence — any tier hidden via
 removed 4x/quarterly — by explicit cadence, visit count, or the cadence's
 catalog key (`lawn_care_recurring` for 6x). The customer picks a current lawn
 option or the office requotes; the accept never silently reprices at 9x.
-option or the office requotes; the accept never silently reprices at 9x.
 
 Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
 or an annual-plan offer already delivered before the gate turned off): a
