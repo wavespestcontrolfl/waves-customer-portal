@@ -204,15 +204,17 @@ async function sendLifecycleTemplate({
   beforeProviderHandoff = null,
 }) {
   const customer = await loadCustomer(customerId);
-  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found',
+    ...(billingDeliveryCategory ? { deliveryOutcome: 'not_sent' } : {}),
+  };
 
   const prefs = await loadPrefs(customer.id);
   if (billingDeliveryCategory) {
     if (prefs === PREFS_UNAVAILABLE) {
-      return { ok: false, skipped: true, reason: 'billing_prefs_unavailable', retryable: true };
+      return { ok: false, skipped: true, reason: 'billing_prefs_unavailable', retryable: true, deliveryOutcome: 'not_sent' };
     }
     if (billingChannelAllowed(prefs || {}, billingDeliveryCategory, 'email') === false) {
-      return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
+      return { ok: false, skipped: true, reason: 'billing_email_not_selected', deliveryOutcome: 'not_sent' };
     }
   }
 
@@ -231,7 +233,9 @@ async function sendLifecycleTemplate({
       status: 'skipped',
       failureReason: 'missing_email',
     });
-    return { ok: false, skipped: true, reason: 'missing_email' };
+    return { ok: false, skipped: true, reason: 'missing_email',
+      ...(billingDeliveryCategory ? { deliveryOutcome: 'not_sent' } : {}),
+    };
   }
 
   const firstName = firstToken(recipient.name) || firstToken(customer.first_name) || 'there';
@@ -262,33 +266,40 @@ async function sendLifecycleTemplate({
       suppressionGroupKey: TRANSACTIONAL_GROUP,
       ...(billingDeliveryCategory ? {
         withProviderHandoff: async (dispatch) => {
-          if (invoiceId) {
-            const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoiceId, db)();
-            if (ownership.ok !== true) return ownership;
-          }
-          const [freshCustomer, freshPrefs] = await Promise.all([
-            loadCustomer(customer.id),
-            loadPrefs(customer.id),
-          ]);
-          if (!freshCustomer || freshPrefs === PREFS_UNAVAILABLE
-            || billingChannelAllowed(freshPrefs || {}, billingDeliveryCategory, 'email') === false) {
-            return { ok: false };
-          }
-          const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
-            .filter((entry) => isEmailLike(entry.email));
-          if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
-          if (beforeProviderHandoff) {
-            try {
+          try {
+            if (invoiceId) {
+              const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoiceId, db)();
+              if (ownership.ok !== true) {
+                handoffGuardFailed = ownership.retryable === true;
+                return ownership;
+              }
+            }
+            const [freshCustomer, freshPrefs] = await Promise.all([
+              loadCustomer(customer.id),
+              loadPrefs(customer.id),
+            ]);
+            if (freshPrefs === PREFS_UNAVAILABLE) handoffGuardFailed = true;
+            if (!freshCustomer || freshPrefs === PREFS_UNAVAILABLE
+              || billingChannelAllowed(freshPrefs || {}, billingDeliveryCategory, 'email') === false) {
+              return { ok: false };
+            }
+            const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
+              .filter((entry) => isEmailLike(entry.email));
+            if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) {
+              handoffGuardFailed = true;
+              return { ok: false };
+            }
+            if (beforeProviderHandoff) {
               const guard = await beforeProviderHandoff();
               if (guard === false || guard?.ok === false) throw new Error('Delivery handoff was not acquired');
-            } catch (err) {
-              handoffGuardFailed = true;
-              throw err;
             }
+            providerStarted = true;
+            await dispatch();
+            return { ok: true };
+          } catch (err) {
+            if (!providerStarted) handoffGuardFailed = true;
+            throw err;
           }
-          providerStarted = true;
-          await dispatch();
-          return { ok: true };
         },
       } : {}),
     });
@@ -319,7 +330,10 @@ async function sendLifecycleTemplate({
       failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
     });
 
-    const outcome = billingDeliveryCategory ? { deliveryOutcome: result.sent ? 'accepted' : 'not_sent' } : {};
+    const outcome = billingDeliveryCategory ? {
+      deliveryOutcome: result.sent ? 'accepted' : 'not_sent',
+      ...(!result.sent && handoffGuardFailed ? { retryable: true, reason: 'pre_provider_handoff_failed' } : {}),
+    } : {};
     return result.sent
       ? { ok: true, messageId: result.message?.provider_message_id || null, ...outcome }
       : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent', ...outcome };

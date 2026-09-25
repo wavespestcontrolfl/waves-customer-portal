@@ -315,7 +315,7 @@ describe('payment lifecycle email sender', () => {
     }));
   });
 
-  test.each(['preparation', 'refused guard', 'failed guard', 'provider'])('retry notice preserves %s failure evidence for its durable owner', async (failure) => {
+  test.each(['preparation', 'refused guard', 'failed guard', 'aborted guard', 'provider'])('retry notice preserves %s failure evidence for its durable owner', async (failure) => {
     const prefs = { payment_issue_channels: ['email'] };
     setDbQueues({
       payments: [chain({ first: payment() })],
@@ -325,12 +325,18 @@ describe('payment lifecycle email sender', () => {
       customer_interactions: [chain()],
     });
     const beforeProviderHandoff = jest.fn(async () => {
-      if (failure === 'failed guard') throw new Error('queue write failed');
+      if (failure === 'failed guard' || failure === 'aborted guard') throw new Error('queue write failed');
       return failure !== 'refused guard';
     });
     const provider = jest.fn(async () => { throw new Error('provider response unavailable'); });
     EmailTemplates.sendTemplate.mockImplementationOnce(async (input) => {
       if (failure === 'preparation') throw new Error('template unavailable');
+      if (failure === 'aborted guard') {
+        // The template library catches a handoff failure before dispatch
+        // and returns an ordinary aborted result instead of rethrowing.
+        try { await input.withProviderHandoff(provider); } catch { /* before-provider refusal */ }
+        return { sent: false, aborted: true, reason: 'provider_handoff_aborted' };
+      }
       await input.withProviderHandoff(provider);
     });
     const result = await PaymentLifecycleEmail.sendPaymentRetryNotice({
@@ -345,6 +351,21 @@ describe('payment lifecycle email sender', () => {
     if (failure.includes('guard')) expect(result.reason).toBe('pre_provider_handoff_failed');
     if (failure === 'provider') expect(beforeProviderHandoff.mock.invocationCallOrder[0])
       .toBeLessThan(provider.mock.invocationCallOrder[0]);
+  });
+
+  test('a retry notice preference lookup failure is explicitly known not sent', async () => {
+    const failedPrefs = chain();
+    failedPrefs.first.mockRejectedValueOnce(new Error('preferences unavailable'));
+    setDbQueues({
+      payments: [chain({ first: payment() })],
+      payment_methods: [chain({ first: paymentMethod() })],
+      customers: [chain({ first: customer() })],
+      notification_prefs: [failedPrefs],
+    });
+    await expect(PaymentLifecycleEmail.sendPaymentRetryNotice({
+      customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23',
+    })).resolves.toMatchObject({ ok: false, retryable: true, deliveryOutcome: 'not_sent' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('retry and failure notices name a removed bank method from the payment snapshot (GH codex r6 P2)', async () => {
