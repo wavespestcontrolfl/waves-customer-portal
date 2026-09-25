@@ -198,8 +198,27 @@ function checkTcpaConsent(extraction, opts = {}) {
 // caller_not_authorized/commercial_requires_quote on this shape now stays
 // blocked, so a force-reprocess must write a fresh decision row rather than
 // onConflict-ignore into the stale one.
-const V2_DECISION_VERSION = 'v2-1.15.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0'];
+// v2-1.16.0: two codex round-9 P1s (call-triage-flags.js). (1) Neither
+// AUTHORIZATION_NEED_RE nor APPROVAL_REQUEST_RE covered a DIRECTIVE to a
+// third party to grant approval — "I will tell him to okay it." named no
+// "need"/"waiting"/"get...your" trigger, and "tell" only reached the
+// sentence because BENIGN_CONDITIONAL_GLUE_WORDS is consulted for every
+// OTHER sentence, not just a conditional one. Added
+// THIRD_PARTY_APPROVAL_DIRECTIVE_RE, the same anchored "(tell/ask/have/get)
+// <party> (to)? <authorization verb> (<object>)?" shape. (2) Ordinal date
+// tokens ("3rd") were admitted by the final vocabulary whitelist but never
+// recognized as scheduling CONTENT by sentenceHasSchedulingPredicate, so
+// "We're set for the 3rd." (a bare date, no weekday/month/"confirm" term)
+// cleared every OTHER-sentence screen; the bare-digit fallback now also
+// matches an ordinal suffix. MAY_DATE_RE also widened to accept "May the
+// 3rd" (an optional "the" between month and day), the other common spoken
+// order. Both are MORE RESTRICTIVE — they poison shapes the previous
+// version let ground — so a call whose old pass demoted
+// caller_not_authorized on either shape now stays blocked, and a
+// force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale one.
+const V2_DECISION_VERSION = 'v2-1.16.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0'];
 
 function buildRouteDecision({
   callLogId,

@@ -1305,6 +1305,106 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     }
   });
 
+  // Codex round 9, P1 (:713): neither AUTHORIZATION_NEED_RE nor
+  // APPROVAL_REQUEST_RE covers a DIRECTIVE the agent gives to have a third
+  // party grant approval — "I will tell him to okay it." named no "need"/
+  // "waiting"/"get...your" trigger, and every word (i/will/him/to/okay/it)
+  // was ordinary COMMITMENT_TURN_VOCAB; "tell" reached the sentence only
+  // because BENIGN_CONDITIONAL_GLUE_WORDS is consulted for every OTHER
+  // sentence, not just a conditional one. Added THIRD_PARTY_APPROVAL_DIRECTIVE_RE,
+  // the same anchored "(tell/ask/have/get) <party> (to)? <authorization
+  // verb> (<object>)?" shape as the existing two authorization-need checks.
+  test('Codex round-9 regression: "I will tell him to okay it." still poisons (third-party approval directive)', () => {
+    const turn = "I will tell him to okay it. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-9 regression: "Ask her to approve it." still poisons (same shape, different trigger/party)', () => {
+    const turn = "Ask her to approve it. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-9 regression: "We\'ll have him sign off on it." still poisons (causative trigger, no "to", trailing "on it")', () => {
+    const turn = "We'll have him sign off on it. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 9, P1 (:1263): an ordinal date token ("3rd") is admitted by
+  // the final vocabulary whitelist (turnVocabularyTokenOk already has to
+  // allow it so the PINNED sentence can state a date), but
+  // sentenceHasSchedulingPredicate never recognized that same token as
+  // scheduling CONTENT — so an OTHER sentence naming a bare date, with no
+  // weekday/month/"confirm" term, cleared every screen even though it names
+  // a DIFFERENT date than the pinned Sunday-noon slot. Widened the bare-digit
+  // fallback to also match the ordinal suffix.
+  test('Codex round-9 regression: "We\'re set for the 3rd." still poisons (bare ordinal date, no weekday/month term)', () => {
+    const turn = "We're set for the 3rd. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 9, P1 (:1263): MAY_DATE_RE's alternation required the day
+  // number to sit directly after "may" ("may 3rd") or before it ("3rd of
+  // may") — "May the 3rd", the other common spoken order, matched neither
+  // branch. Widened with an optional "the" between month and day. (The
+  // ordinal-token fallback above also independently catches "3rd" here, so
+  // this sentence poisons either way — this test pins the MAY_DATE_RE fix
+  // specifically, per the finding.)
+  test('Codex round-9 regression: "That\'s set for May the 3rd." still poisons (MAY_DATE_RE with "the" between month and day)', () => {
+    const turn = "That's set for May the 3rd. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // The live 17ed9362 single-turn fixture and the round-6/round-7 positive
+  // controls must still pass after adding THIRD_PARTY_APPROVAL_DIRECTIVE_RE
+  // and widening the ordinal-date checks — none of those turns use a
+  // "tell/ask/have/get <party> <verb>" directive or an ordinal date token,
+  // so neither change should newly catch them.
+  test('Codex round-9: the live 17ed9362 single-turn fixture still grounds after the round-9 fixes', () => {
+    const transcript = [
+      'Agent: Waves Pest Control, this is Adam.',
+      'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
+      'Agent: Sure — what area?',
+      'Caller: 100 Example Street in Venice.',
+      "Caller: Please make my client the point of contact so you can reach him with any appointment updates. I'll take the report and invoice.",
+      "Agent: Awesome. Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. But yeah, we'll see him on Monday at 10 o'clock.",
+      "Caller: All right, perfect. I'll let him know. Thank you.",
+      'Agent: Thank you. Bye.',
+    ].join('\n');
+    const extraction = {
+      evidence: [{
+        field_path: '/scheduling/agent_committed_booking',
+        speaker: 'agent',
+        quote: "we'll see him on Monday at 10 o'clock.",
+      }],
+      scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' }, // Monday
+    };
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(true);
+  });
+
+  test('Codex round-9: round-6/round-7 positive controls ("You\'re confirmed.", "We confirmed your appointment.") still pass', () => {
+    for (const turn of ["You're confirmed. We'll see you Sunday at noon.", "We confirmed your appointment. We'll see you Sunday at noon."]) {
+      const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+      const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+      expect(r.allowed).toBe(true);
+      expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    }
+  });
+
   // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
   // history). Round 3 reworded this test from "Adam works Sundays." (out-
   // of-vocabulary words) to "We come out Sunday afternoon." on the theory

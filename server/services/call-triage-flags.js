@@ -1054,7 +1054,24 @@ const AUTHORIZATION_NEED_RE = /\b(?:(?:need|needs|going to need) (?:him|her|them
 // for) + a POSSESSIVE (your/his/her/their/the owner's/the homeowner's/the
 // client's — normalized text strips apostrophes) + an AUTHORIZATION NOUN.
 const APPROVAL_REQUEST_RE = /\b(?:get|getting|obtain|secure|have|wait for|waiting for) (?:your|his|her|their|the (?:owner|homeowner|client) s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing)\b/;
-// Unconditional declarative-poison check (codex rounds 2, 4 and 7): either
+// Codex round 9, P1 (:713): neither AUTHORIZATION_NEED_RE nor
+// APPROVAL_REQUEST_RE covers a DIRECTIVE the agent gives to have a third
+// party grant approval — "I will tell him to okay it." names no "need"/
+// "waiting"/"get...your" trigger, and every one of its words
+// (i/will/him/to/okay/it) is ordinary COMMITMENT_TURN_VOCAB; "tell" itself
+// only reached the sentence because BENIGN_CONDITIONAL_GLUE_WORDS is passed
+// to turnVocabularyTokenOk for EVERY other sentence in otherSentenceIsClean,
+// not just a conditional one (see that Set's comment) — so the whole
+// sentence read as clean. A third anchored SHAPE, same family as (a)/(b)
+// above: (tell/ask/have/get) + a PARTY (the same third-party/caller set as
+// AUTHORIZATION_NEED_RE) + an optional "to" + an AUTHORIZATION VERB
+// (confirm/approve/sign off/sign/okay/ok/authorize), with the same optional
+// trailing object ("it"/"on it") — "tell him to okay it", "ask her to
+// approve it", "have him sign off on it". "to" is optional because the
+// causative forms ("have"/"get") read naturally without it ("have him sign
+// off"); being lenient here only widens what poisons, never what grounds.
+const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = /\b(?:tell|ask|have|get) (?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all) (?:to )?(?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?\b/;
+// Unconditional declarative-poison check (codex rounds 2, 4, 7 and 9): either
 // term list, or either anchored shape, anywhere in the sentence poisons
 // regardless of conditional structure. Restored as a real function and run
 // FIRST in otherSentenceIsClean's whitelist (codex round 4, finding 1) —
@@ -1074,7 +1091,8 @@ function sentenceHasDeclarativePoisonVocabulary(ns) {
   return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
     || UNAVAILABILITY_TERMS.some((t) => padded.includes(t))
     || AUTHORIZATION_NEED_RE.test(ns)
-    || APPROVAL_REQUEST_RE.test(ns);
+    || APPROVAL_REQUEST_RE.test(ns)
+    || THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(ns);
 }
 // These two lists (and the regex above) ALSO do their work inside
 // clauseIsBenign, below, where they matter for a different reason: a
@@ -1176,6 +1194,7 @@ function clauseIsBenign(clauseNs, prevNs) {
   if (UNAVAILABILITY_TERMS.some((t) => padded.includes(t))) return false;
   if (AUTHORIZATION_NEED_RE.test(clauseNs)) return false;
   if (APPROVAL_REQUEST_RE.test(clauseNs)) return false;
+  if (THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(clauseNs)) return false;
   if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
   if (BENIGN_NON_BOOKING_TOPICS.some((t) => padded.includes(t))) return true;
   if (prevNs && isBarePronounClause(clauseNs)) {
@@ -1219,8 +1238,13 @@ const SCHEDULING_PREDICATE_TERMS = [
   ' quote ', ' estimate ', ' price ',
 ];
 // "May" recognized ONLY in date-shaped usage — a day number or ordinal
-// immediately adjacent, either order ("May 3rd" / "3rd of May" / "3 May").
-const MAY_DATE_RE = /\bmay (?:\d{1,2}(?:st|nd|rd|th)?)\b|\b\d{1,2}(?:st|nd|rd|th)? (?:of )?may\b/;
+// immediately adjacent, either order ("May 3rd" / "3rd of May" / "3 May"),
+// or with "the" between month and day ("May the 3rd" — codex round 9, P1
+// :1263: the original alternation required the day number to sit directly
+// after "may", so "That's set for May the 3rd." bypassed it entirely; an
+// optional "the " between the month and the day covers the same date shape
+// spoken the other common way).
+const MAY_DATE_RE = /\bmay (?:the )?\d{1,2}(?:st|nd|rd|th)?\b|\b\d{1,2}(?:st|nd|rd|th)? (?:of )?may\b/;
 // codex round 6, P2 (:1234): a purely REINFORCING affirmative in an OTHER
 // sentence ("You're confirmed.") was getting caught by the
 // SCHEDULING_PREDICATE_TERMS screen on "confirmed" — but it adds no new
@@ -1251,16 +1275,24 @@ const REINFORCING_AFFIRMATION_RE = /^(?:(?:ok|okay|awesome|perfect|great|alright
 // True when a normalized sentence (already run through
 // stripBenignTopicPhrases) still talks about scheduling — either a term
 // from the phrase list above, the date-shaped "May" regex, or a bare 1-2
-// digit "time-looking" token (an hour, a bare date number). Deliberately
-// broad on the digit check: fails closed to triage on any short number (an
-// address, a price without cents) rather than risk missing a real time
-// mention — the safe direction for an OTHER sentence, which is never the
-// one that needs to state a time.
+// digit "time-looking" token (an hour, a bare date number, OR — codex round
+// 9, P1 :1263 — that same date number spelled as an ORDINAL, "3rd"/"31st").
+// turnVocabularyTokenOk (the final whitelist check every OTHER sentence's
+// stripped text still has to pass) already admits a bare `\d{1,2}(st|nd|rd|
+// th)` token as ordinary vocabulary — it has to, so the PINNED sentence can
+// state "the 3rd" — but this predicate screen never recognized that same
+// token as scheduling CONTENT, so "We're set for the 3rd." (an OTHER
+// sentence naming a date with no weekday/month/"confirm" term at all)
+// cleared every check and never poisoned. Deliberately broad on the digit
+// check: fails closed to triage on any short number (an address, a price
+// without cents) rather than risk missing a real time or date mention — the
+// safe direction for an OTHER sentence, which is never the one that needs to
+// state a time.
 function sentenceHasSchedulingPredicate(strippedNs) {
   const padded = ` ${strippedNs} `;
   if (MAY_DATE_RE.test(strippedNs)) return true;
   if (SCHEDULING_PREDICATE_TERMS.some((t) => padded.includes(t))) return true;
-  return strippedNs.split(' ').some((tok) => /^\d{1,2}$/.test(tok));
+  return strippedNs.split(' ').some((tok) => /^\d{1,2}(?:st|nd|rd|th)?$/.test(tok));
 }
 // Top-level CLEARANCE test for ONE sentence OTHER than the pinned
 // commitment sentence (agentCommitmentSentenceVerified calls this for every
