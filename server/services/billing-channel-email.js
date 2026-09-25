@@ -3,6 +3,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 
 const CATEGORY_LABELS = Object.freeze({
   invoice: 'Invoice update',
@@ -40,18 +41,21 @@ function blocked(code, reason, { retryable = false } = {}) {
   };
 }
 
-async function loadContext(input) {
+async function loadContext(input, database = db) {
   const category = clean(input?.metadata?.billingDeliveryCategory);
   if (!CATEGORY_LABELS[category]) return { error: blocked('INVALID_BILLING_CATEGORY', 'Unknown billing delivery category') };
   if (!input?.customerId) return { error: blocked('CUSTOMER_REQUIRED', 'Billing email requires a customer') };
 
   const [customer, prefs, invoice] = await Promise.all([
-    db('customers').where({ id: input.customerId }).first(),
-    db('notification_prefs').where({ customer_id: input.customerId }).first(),
-    input.invoiceId ? db('invoices').where({ id: input.invoiceId }).first() : null,
+    database('customers').where({ id: input.customerId }).first(),
+    database('notification_prefs').where({ customer_id: input.customerId }).first(),
+    input.invoiceId ? database('invoices').where({ id: input.invoiceId }).first() : null,
   ]);
   if (!customer || customer.deleted_at) return { error: blocked('CUSTOMER_NOT_FOUND', 'Customer is unavailable') };
   if (!prefs) return { error: blocked('BILLING_PREFS_UNAVAILABLE', 'Billing delivery preferences are unavailable', { retryable: true }) };
+  if (prefs.email_enabled === false) {
+    return { error: blocked('BILLING_EMAIL_DISABLED', 'Email notifications are disabled for this customer') };
+  }
   if (billingChannelAllowed(prefs, category, 'email') !== true) {
     return { error: blocked('BILLING_EMAIL_NOT_SELECTED', 'Email is not selected for this billing category') };
   }
@@ -59,7 +63,7 @@ async function loadContext(input) {
     if (!invoice || String(invoice.customer_id) !== String(customer.id)) {
       return { error: blocked('INVOICE_CUSTOMER_MISMATCH', 'Invoice does not belong to this customer') };
     }
-    const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
+    const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, database)();
     if (ownership.ok !== true) {
       return { error: blocked(ownership.code || 'INVOICE_NOT_SELF_PAY', ownership.reason || 'Invoice is not eligible for customer delivery') };
     }
@@ -105,41 +109,57 @@ async function sendBillingChannelEmail(input, { preSendCheck } = {}) {
       idempotencyKey: `billing_channel_email:${notificationEventKey}:email`,
       categories: ['billing', context.category],
       suppressionGroupKey: 'transactional_required',
+      suppressProviderErrorLog: true,
       withProviderHandoff: async (dispatch) => {
-        let fresh;
+        let providerAccepted = false;
         try {
-          fresh = await loadContext(input);
+          const verifiedDispatch = async (trx) => {
+            const fresh = await loadContext(input, trx);
+            if (fresh.error) {
+              boundaryBlock = fresh.error;
+              return { ok: false };
+            }
+            if (cleanEmail(fresh.recipient.email) !== recipientEmail) {
+              boundaryBlock = blocked('EMAIL_RECIPIENT_CHANGED', 'Billing email recipient changed before delivery', { retryable: true });
+              return { ok: false };
+            }
+            if (typeof preSendCheck === 'function') {
+              let verdict;
+              try {
+                verdict = await preSendCheck({ channel: 'email' });
+              } catch (err) {
+                verdict = { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
+              }
+              if (verdict?.ok !== true) {
+                boundaryBlock = blocked(
+                  verdict?.code || 'PRE_SEND_CHECK_FAILED',
+                  verdict?.reason || 'Pre-send check did not pass',
+                  { retryable: verdict?.retryable === true },
+                );
+                return { ok: false };
+              }
+            }
+            handoffStarted = true;
+            await dispatch();
+            providerAccepted = true;
+            return { ok: true };
+          };
+          const outcome = await withCustomerCommsLock(db, input.customerId, (trx) => (
+            input.invoiceId
+              ? require('./estimate-deposits').withInvoiceDepositSettlement(input.invoiceId, verifiedDispatch, trx)
+              : verifiedDispatch(trx)
+          ));
+          if (!outcome && input.invoiceId) {
+            boundaryBlock = blocked('INVOICE_CUSTOMER_MISMATCH', 'Invoice does not belong to this customer');
+            return { ok: false };
+          }
+          return outcome;
         } catch (err) {
+          if (providerAccepted) return { ok: true };
+          if (handoffStarted) throw err;
           boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED', err.message, { retryable: true });
           return { ok: false };
         }
-        if (fresh.error) {
-          boundaryBlock = fresh.error;
-          return { ok: false };
-        }
-        if (cleanEmail(fresh.recipient.email) !== recipientEmail) {
-          boundaryBlock = blocked('EMAIL_RECIPIENT_CHANGED', 'Billing email recipient changed before delivery', { retryable: true });
-          return { ok: false };
-        }
-        if (typeof preSendCheck === 'function') {
-          let verdict;
-          try {
-            verdict = await preSendCheck({ channel: 'email' });
-          } catch (err) {
-            verdict = { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
-          }
-          if (verdict?.ok !== true) {
-            boundaryBlock = blocked(
-              verdict?.code || 'PRE_SEND_CHECK_FAILED',
-              verdict?.reason || 'Pre-send check did not pass',
-              { retryable: verdict?.retryable === true },
-            );
-            return { ok: false };
-          }
-        }
-        handoffStarted = true;
-        await dispatch();
-        return { ok: true };
       },
     });
 

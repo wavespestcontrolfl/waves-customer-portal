@@ -66,12 +66,17 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
     expect(versions).toHaveLength(1);
     expect(versions[0]).toMatchObject({
       version_number: 1, status: 'active', subject: '{{category_label}} from Waves',
+      blocks: [
+        { type: 'heading', content: '{{category_label}}' },
+        { type: 'paragraph', content: '{{notification_body}}' },
+        { type: 'cta', label: 'Open billing', url_variable: 'billing_url' },
+      ],
     });
     expect(fixtures).toHaveLength(1);
     expect(fixtures[0]).toMatchObject({
       name: 'Billing reminder', is_default: true,
       payload: { first_name: 'Customer', category_label: 'Billing reminder',
-        notification_body: 'Please review the billing update in your customer portal.',
+        notification_body: 'Hi Customer, please review the billing update in your customer portal.',
         billing_url: 'https://portal.wavespestcontrol.com/?tab=billing' },
     });
     expect(audits).toHaveLength(1);

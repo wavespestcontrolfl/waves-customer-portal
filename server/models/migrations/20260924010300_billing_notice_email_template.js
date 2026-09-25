@@ -43,7 +43,6 @@ exports.up = async function up(knex) {
     preview_text: '{{notification_body}}',
     blocks: JSON.stringify([
       { type: 'heading', content: '{{category_label}}' },
-      { type: 'paragraph', content: 'Hi {{first_name}},' },
       { type: 'paragraph', content: '{{notification_body}}' },
       { type: 'cta', label: 'Open billing', url_variable: 'billing_url' },
     ]),
@@ -63,7 +62,7 @@ exports.up = async function up(knex) {
     payload: JSON.stringify({
       first_name: 'Customer',
       category_label: 'Billing reminder',
-      notification_body: 'Please review the billing update in your customer portal.',
+      notification_body: 'Hi Customer, please review the billing update in your customer portal.',
       billing_url: 'https://portal.wavespestcontrol.com/?tab=billing',
     }),
     created_at: new Date(),
