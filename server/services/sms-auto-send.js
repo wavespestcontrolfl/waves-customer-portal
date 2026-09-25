@@ -633,7 +633,7 @@ function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
       voiceProfileVersion: eligibilityPin.voiceProfileVersion ?? null,
       gratitudeSourceDigest: eligibilityPin.sourceDigest,
     });
-    const { pendingWork, threadAdvanced: advanced } = await gratitudeFinalState(dbi, {
+    const { pendingWork, threadAdvanced: advanced, customerChanged } = await gratitudeFinalState(dbi, {
       pending: { customerId: claim.customerId, threadKey: claim.threadKey, excludeDecisionId: claim.decisionId },
       thread: {
         inboundId: claim.inboundId,
@@ -641,13 +641,15 @@ function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
         toPhone: claim.inboundToPhone,
         skipReservationId: claim.reservationId,
       },
+      customer: { id: claim.customerId, threadKey: claim.threadKey, reply: claim.reply },
     });
     const timing = gratitudeTimingReason({
       inboundCreatedAt: claim.inboundCreatedAt,
       now: new Date(),
       activatedAt: gratitudeActivation(),
     });
-    const reason = pendingWork ? 'pending_work'
+    const reason = customerChanged ? 'customer_changed'
+      : pendingWork ? 'pending_work'
       : advanced ? 'thread_advanced'
       : timing || (!isEnabled('smsGratitudeReplies') ? 'gate_off' : null)
         || (modeRow?.mode !== AUTOSEND_MODE ? 'mode_not_autosend' : null)
@@ -669,17 +671,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
       await dispatch(trx);
       return { ok: true };
     }),
-    providerHandoffReservation: null,
-  } : {
-    providerHandoffReservation: require('./messaging/provider-handoff-reservation')
-      .borrowProviderHandoffReservation({
-        reservationId: claim.reservationId,
-        to: claim.toPhone,
-        fromNumber: claim.fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
-        body: reply,
-        messageType: AUTOSEND_MESSAGE_TYPE,
-      }),
-  };
+  } : {};
   return {
     to: claim.toPhone,
     body: reply,
@@ -690,6 +682,18 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'sms_auto_send_executor',
     ...laneFields,
+    // Both lanes lend the claim's own reservation to the provider layer, so an
+    // accepted send whose ordinary sms_log insert fails is promoted with the
+    // provider's real context. Borrowing never creates a second reservation;
+    // gratitude ownership of the handoff still comes from its trusted input.
+    providerHandoffReservation: require('./messaging/provider-handoff-reservation')
+      .borrowProviderHandoffReservation({
+        reservationId: claim.reservationId,
+        to: claim.toPhone,
+        fromNumber: claim.fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+        body: reply,
+        messageType: gratitudeLane ? 'ai_gratitude' : AUTOSEND_MESSAGE_TYPE,
+      }),
     // Send-window inbound-reply provenance: the auto-send executor only
     // dispatches green-judged replies to a message the customer just
     // texted into an active thread — the send class the window

@@ -67,15 +67,23 @@ test('gratitude runs on its own locked cron, not inside the scheduled-SMS sweep'
     callback.toString().includes('processGratitudeAutoSendCandidates'));
   expect(registration[0]).toBe('1-59/5 * * * *');
   expect(registration[2]).toEqual({ timezone: 'America/New_York' });
-  expect(registration[1].toString()).toContain("runExclusive('sms-gratitude-replies'");
 
   isEnabled.mockImplementation(() => false);
   await registration[1]();
   expect(processGratitudeAutoSendCandidates).not.toHaveBeenCalled();
 
+  // No cron lease (it would pin a pool connection under every send); an
+  // in-process guard skips only an overlapping tick.
   const { runExclusive } = require('../utils/cron-lock');
   isEnabled.mockImplementation(name => name === 'smsGratitudeReplies');
+  let finish;
+  processGratitudeAutoSendCandidates.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const first = registration[1]();
   await registration[1]();
-  expect(runExclusive).toHaveBeenCalledWith('sms-gratitude-replies', expect.any(Function));
   expect(processGratitudeAutoSendCandidates).toHaveBeenCalledTimes(1);
+  finish({ sent: 0 });
+  await first;
+  await registration[1]();
+  expect(processGratitudeAutoSendCandidates).toHaveBeenCalledTimes(2);
+  expect(runExclusive).not.toHaveBeenCalledWith('sms-gratitude-replies', expect.anything());
 });

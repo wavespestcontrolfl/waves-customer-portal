@@ -474,6 +474,7 @@ describe('sms gratitude qualification', () => {
     'server/routes/tech-line.js',
     'server/services/intelligence-bar/comms-tools.js',
     'server/config/feature-gates.js',
+    'server/config/twilio-numbers.js',
     'server/services/messaging/policy.js',
     'server/services/messaging/validators/consent.js',
     'server/services/messaging/validators/suppression.js',

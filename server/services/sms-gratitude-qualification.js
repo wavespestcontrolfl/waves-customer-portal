@@ -59,6 +59,7 @@ const SOURCE_FILES = Object.freeze([
   'server/services/sms-gratitude-qualification.js',
   'server/config/models.js',
   'server/config/feature-gates.js',
+  'server/config/twilio-numbers.js',
 ]);
 // Every module on the canonical send pipeline (router, policy, validators,
 // providers, reservations) is pinned as a tree rather than file by file, so a

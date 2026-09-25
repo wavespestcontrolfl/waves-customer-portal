@@ -140,6 +140,7 @@ jest.mock('../models/db', () => {
       mockState.openTriage, mockState.openOperatorItem, mockState.pendingDecision,
     ].some(Boolean),
     thread_advanced: mockState.threadAdvanced,
+    customers: mockState.customers.slice(0, 2),
   }));
   return db;
 });
@@ -597,6 +598,40 @@ test.each([
   expect(graduation.evaluateAutoSendEligibility).toHaveBeenLastCalledWith(expect.objectContaining({
     intent: GRATITUDE_INTENT, dbi: db, voiceProfileVersion: null,
   }));
+});
+
+test.each([
+  ['deactivated', () => { mockState.customers = []; }],
+  ['renamed', () => { mockState.customers = [{ ...mockState.customers[0], first_name: 'Morgan' }]; }],
+  ['phone moved to another customer', () => { mockState.customers = [{ ...mockState.customers[0], id: '00000000-0000-4000-8000-0000000000ff' }]; }],
+  ['phone now shared', () => { mockState.customers = [mockState.customers[0], { ...mockState.customers[0], id: '00000000-0000-4000-8000-0000000000fe' }]; }],
+])('a customer %s during provider preparation blocks the final handoff', async (_label, change) => {
+  const provider = jest.fn();
+  sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
+    change();
+    const verdict = await providerPreSendCheck({ dbi: db });
+    if (!verdict.ok) return { sent: false, deliveryOutcome: 'not_sent', code: verdict.code };
+    provider();
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'2'.repeat(32)}` };
+  });
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'customer_changed' });
+  expect(provider).not.toHaveBeenCalled();
+});
+
+test('gratitude lends its claim reservation to the provider layer as an ai_gratitude handle', async () => {
+  const reservationId = '55555555-5555-4555-8555-555555555555';
+  suggest.createReplyHoldingReservation.mockResolvedValueOnce(reservationId);
+  await expect(attempt()).resolves.toMatchObject({ sent: true });
+  const [input] = sendCustomerMessage.mock.calls.at(-1);
+  const providerCoordination = require('../services/messaging/provider-handoff-reservation');
+  expect(providerCoordination.isProviderHandoffHandle(input.providerHandoffReservation)).toBe(true);
+  expect(input.providerHandoffReservation).toMatchObject({
+    reservationId, callerOwned: true,
+    context: expect.objectContaining({ messageType: 'ai_gratitude', body: buildGratitudeReply('Dana') }),
+  });
+  // Ownership still comes from the trusted gratitude input, so the canonical
+  // router borrows this handle instead of preparing a second reservation.
+  expect(providerCoordination.trustedGratitudeOwnsReservation(input, input)).toBe(true);
 });
 
 test('thanks sent to a technician line are refused instead of rerouted to the location line', async () => {

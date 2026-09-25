@@ -202,6 +202,13 @@ async function pendingGratitudeWork(dbh, options) {
   return false;
 }
 
+// Live customers on the thread phone (two rows are enough to detect ambiguity).
+function threadCustomersQuery(dbh, customerPhoneDigits) {
+  return dbh('customers').where({ active: true }).whereNull('deleted_at')
+    .whereIn(dbh.raw("REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g')"), customerPhoneDigits)
+    .limit(2).select('id', 'first_name', 'phone');
+}
+
 // Any later exchange on the exact endpoint pair, or null when the endpoints
 // cannot be identified (callers treat that as advanced, fail closed).
 function threadAdvancedQuery(dbh, { inboundId, fromPhone, toPhone, skipReservationId = null }) {
@@ -246,9 +253,9 @@ async function gratitudeThreadAdvanced(dbh, options) {
  * so work that commits between two separate reads cannot be missed. Writers
  * of those tables do not take the thread lock.
  */
-async function gratitudeFinalState(dbh, { pending, thread }) {
+async function gratitudeFinalState(dbh, { pending, thread, customer }) {
   const threadQuery = threadAdvancedQuery(dbh, thread);
-  if (!threadQuery) return { pendingWork: false, threadAdvanced: true };
+  if (!threadQuery) return { pendingWork: false, threadAdvanced: true, customerChanged: true };
   const pendingQueries = pendingWorkQueries(dbh, pending);
   const row = await dbh.first(
     dbh.raw(
@@ -256,8 +263,25 @@ async function gratitudeFinalState(dbh, { pending, thread }) {
       pendingQueries.map(([query, column]) => query.select(column)),
     ),
     dbh.raw('EXISTS (?) AS thread_advanced', [threadQuery.select('id')]),
+    dbh.raw("(SELECT COALESCE(json_agg(c), '[]'::json) FROM (?) c) AS customers", [
+      threadCustomersQuery(dbh, phoneMatchDigits(thread.fromPhone)),
+    ]),
   );
-  return { pendingWork: row?.pending_work === true, threadAdvanced: row?.thread_advanced !== false };
+  // The same identity the claim trusted: exactly one live customer on this
+  // phone, the claimed id, the same phone, and the same fixed name reply.
+  const customers = Array.isArray(row?.customers) ? row.customers : [];
+  const current = customers.length === 1 ? customers[0] : null;
+  const customerChanged = ![
+    current,
+    current?.id === customer.id,
+    phoneIdentityKey(current?.phone) === customer.threadKey,
+    buildGratitudeReply(current?.first_name) === customer.reply,
+  ].every(Boolean);
+  return {
+    pendingWork: row?.pending_work === true,
+    threadAdvanced: row?.thread_advanced !== false,
+    customerChanged,
+  };
 }
 
 async function readGratitudeContext({
@@ -297,9 +321,7 @@ async function readGratitudeContext({
   if (![threadKey, endpointKey, customerPhoneDigits.length, phoneMatchDigits(inbound.to_phone).length].every(Boolean)) {
     return { ok: false, reason: 'invalid_thread' };
   }
-  const customers = await dbh('customers').where({ active: true }).whereNull('deleted_at')
-    .whereIn(dbh.raw("REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g')"), customerPhoneDigits)
-    .limit(2).select('id', 'first_name', 'phone');
+  const customers = await threadCustomersQuery(dbh, customerPhoneDigits);
   const customer = customers.length === 1 ? customers[0] : null;
   if (![customer, customer?.id === draft.customer_id, customer?.id === inbound.customer_id,
     phoneIdentityKey(customer?.phone) === threadKey].every(Boolean)) {
