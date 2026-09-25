@@ -1062,6 +1062,25 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
         q.where('processing_generation', procGeneration);
       }
       const stamp = "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)";
+      const markerJson = JSON.stringify({ reason, at: new Date().toISOString(), ...(procGeneration != null ? { generation: procGeneration } : {}) });
+      // A same-reason re-stamp by a pass NO NEWER than the one that
+      // SUPERSEDED the standing row-scoped marker keeps that supersession
+      // (codex #4815 r7, the drainer-replay residual): the generation that
+      // re-qualified past the agreed price (the Waves Assessment exception)
+      // already decided new drafts may land, and a replay of its OWN — or an
+      // older — verdict (the quarantine drainer's settled replay, a
+      // same-pass sweep racing the exception's composer) must not silently
+      // revoke that. The replay's scan still marks every stale row. A NEWER
+      // generation's verdict is a fresh decision and rewrites the marker,
+      // dropping superseded_at with it. Generation-less writers cannot prove
+      // they are no newer, so they keep the plain rewrite.
+      // Both values are INLINED so the marker JSON stays the one binding:
+      // the reason is a ROW_SCOPED_DRAFT_BLOCK_REASONS constant ([a-z_]
+      // only, sanitized like SCOPED_REASON_SQL_LIST) and the generation a
+      // validated integer.
+      const keepSupersession = isRowScopedDraftBlockReason(reason)
+        && procGeneration != null && Number.isSafeInteger(Number(procGeneration));
+      const scopedReasonSql = `'${String(reason).replace(/[^a-z_]/g, '')}'`;
       const wrote = await q.update({
         metadata: db.raw(
           // A ROW-SCOPED verdict never DOWNGRADES a standing call-wide one
@@ -1071,13 +1090,20 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
           // call. The call-wide verdict stays; the scoped scan still runs.
           isRowScopedDraftBlockReason(reason)
             ? `CASE WHEN COALESCE(metadata->'estimator_draft_block'->>'reason', '') NOT IN ('', ${SCOPED_REASON_SQL_LIST})
-                    THEN COALESCE(metadata, '{}'::jsonb) ELSE ${stamp} END`
+                    THEN COALESCE(metadata, '{}'::jsonb)
+                    ${keepSupersession ? `WHEN COALESCE(metadata->'estimator_draft_block'->>'reason', '') = ${scopedReasonSql}
+                     AND COALESCE(metadata->'estimator_draft_block'->>'superseded_at', '') <> ''
+                     AND (CASE WHEN (metadata->'estimator_draft_block'->>'superseded_by_generation') ~ '^[0-9]+$'
+                               THEN (metadata->'estimator_draft_block'->>'superseded_by_generation')::bigint
+                               ELSE -1 END) >= ${Number(procGeneration)}
+                    THEN COALESCE(metadata, '{}'::jsonb)` : ''}
+                    ELSE ${stamp} END`
             : stamp,
           // The marker records its writer's generation so a later pass's
           // clear can distinguish "older verdict, mine to retire" from "a
           // concurrent NEWER verdict I must not delete" without trusting
           // wall clocks (PR #3304 — same doctrine as leads.lead_stamp_seq).
-          [JSON.stringify({ reason, at: new Date().toISOString(), ...(procGeneration != null ? { generation: procGeneration } : {}) })],
+          [markerJson],
         ),
         updated_at: new Date(),
       });
@@ -1244,9 +1270,23 @@ async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = nul
 // pass falls through to the ordinary extraction_failed retry accounting
 // instead of a parallel one. Every other caller (no `trx`) keeps the
 // original best-effort, log-and-return-false contract.
+//
+// OWNERSHIP (codex #4815 r7 P1): the write carries the SAME live-generation
+// predicate the invalidation's ownership fence uses. A generation-N pass
+// whose detached invalidation failed can reach this write AFTER generation
+// N+1 claimed and re-qualified the call; an unconditional write planted N's
+// stale price_agreed_on_call entry under N+1, whose creators' in-lock guard
+// then refused N+1's valid draft (and a later clear never restarted that
+// composer). A generation mismatch is an OWNERSHIP LOSS, not a failure:
+// nothing is written, the peer owns the verdict, and the call returns
+// 'ownership_lost' — truthy, so no caller escalates it into the retry-lane
+// fallback a genuinely failed write needs. A generation-less caller (legacy)
+// keeps the unconditional write.
 async function markQuarantinePending(callLogId, reason, { procGeneration = null, trx = null } = {}) {
   try {
-    await (trx || db)('call_log').where({ id: callLogId }).update({
+    const q = (trx || db)('call_log').where({ id: callLogId });
+    if (procGeneration != null) q.where('processing_generation', Number(procGeneration));
+    const wrote = await q.update({
       metadata: db.raw(
         "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_quarantine_pending}', ?::jsonb, true)",
         [JSON.stringify({
@@ -1257,12 +1297,45 @@ async function markQuarantinePending(callLogId, reason, { procGeneration = null,
       ),
       updated_at: new Date(),
     });
+    if (procGeneration != null && !Number(wrote)) {
+      logger.info(`[estimator-engine] quarantine retry for call ${callLogId} (${reason}) NOT queued — generation ${procGeneration} no longer owns the call (a newer pass re-decides)`);
+      return 'ownership_lost';
+    }
     logger.warn(`[estimator-engine] queued a DURABLE quarantine retry for call ${callLogId} (${reason})`);
     return true;
   } catch (markErr) {
     logger.error(`[estimator-engine] could not queue the quarantine retry for call ${callLogId}: ${markErr.message}`);
     if (trx) throw markErr;
     return false;
+  }
+}
+
+// A LANDED invalidation retires its OWN queued retry (codex #4815 r7 P0):
+// when the pre-finalization pass could not invalidate, finalization queued
+// estimator_quarantine_pending for generation N; if N's detached fallback
+// sweep then lands the very invalidation that entry exists to replay, the
+// entry has nothing left to do — but left in place it kept every creator
+// refusing new drafts (and, before callDraftVerdict scoped it, every
+// accepted or booking-linked estimate 404ing) until the scheduler drained
+// it, indefinitely if that job was down. GENERATION-MATCHED: only the entry
+// generation N itself wrote, with the same reason, is removed — a newer
+// pass's entry (generation N+1) or a different verdict's (identity
+// conflict) never is. A generation-less entry cannot be proven N's and is
+// left to the drainer. Returns the rows cleared; never throws (the drainer
+// is still the backstop).
+async function clearOwnQuarantinePending(callLogId, { reason, generation }) {
+  if (generation == null) return 0;
+  try {
+    return await db('call_log').where({ id: callLogId })
+      .whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') = ?", [String(reason)])
+      .whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'generation', '') = ?", [String(Number(generation))])
+      .update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_quarantine_pending'"),
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[estimator-engine] could not retire the landed quarantine retry for call ${callLogId}: ${err.message} — the drainer retires it`);
+    return 0;
   }
 }
 
@@ -3045,6 +3118,7 @@ module.exports = {
   reconcileDraftLinksForCall,
   invalidateDraftForCall: invalidateDraftForCallWithRetry,
   markQuarantinePending,
+  clearOwnQuarantinePending,
   sweepPendingQuarantines,
   markReconcilePending,
   sweepPendingReconciles,

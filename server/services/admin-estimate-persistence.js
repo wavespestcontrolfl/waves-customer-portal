@@ -217,6 +217,7 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
     if (!(await staleCallLinkageReason(trx, data, {
       lockCallRow: true,
       supersededBelowGeneration: forcedSuperseded ? liveGenForRecheck : null,
+      estimateStatus: rowStatus,
     }))) {
       await trx('estimates').where({ id: estimateId })
         .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
@@ -458,9 +459,12 @@ async function callRejectedForDrafting(dbc, callLogId, {
 // 'call_draft_block', the obsolete test would fail, and the valid draft
 // would be archived anyway. Only LEAD-LESS drafts took the caller's early
 // return, so the linked-draft path — the production shape — still lost.
+// `estimateStatus` (codex #4815 r7 P0): the judged row's status column,
+// when the caller has it — a queued row-scoped (agreed-price) verdict never
+// blocks a terminal row (callDraftVerdict). Omitted = fail closed.
 async function staleCallLinkageReason(dbc, data, {
   lockCallRow = false, ownerProcToken = null, ownerProcGeneration = null,
-  supersededBelowGeneration = null,
+  supersededBelowGeneration = null, estimateStatus = null,
 } = {}) {
   const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
   const draftCallLogId = data?.estimatorEngine?.callLogId || null;
@@ -510,7 +514,7 @@ async function staleCallLinkageReason(dbc, data, {
   // estimate's token survives an agreed-price reprocess of its call.
   try {
     const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : callRow.metadata;
-    const verdict = callDraftVerdict(md, { estimateData: data, supersededBelowGeneration });
+    const verdict = callDraftVerdict(md, { estimateData: data, estimateStatus, supersededBelowGeneration });
     if (verdict?.marker === 'draft_block') return 'call_draft_block';
     if (verdict?.marker === 'quarantine_pending') return 'call_quarantine_pending';
   } catch { /* unparseable metadata: fall through to the linkage compare */ }

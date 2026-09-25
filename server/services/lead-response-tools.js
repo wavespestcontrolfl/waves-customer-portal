@@ -150,7 +150,7 @@ async function executeLeadTool(toolName, input, context) {
         if (!isEstimateCustomerViewable(row)) return false;
         try {
           const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
-          return !(await callSideBlockForEstimateData(db, data));
+          return !(await callSideBlockForEstimateData(db, data, { estimateStatus: row.status }));
         } catch (err) {
           logger.warn('[lead-tools] check_existing_estimates: call-side verdict unavailable, row hidden', { estimateId: row.id, error: err.message });
           return false;

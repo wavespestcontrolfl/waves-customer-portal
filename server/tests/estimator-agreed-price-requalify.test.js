@@ -112,9 +112,14 @@ describe('P0 — an agreed-price marker never blocks rows it did not mark', () =
     await expect(staleCallLinkageReason(db, engineData())).resolves.toBe('call_draft_block');
   });
 
-  test('a QUEUED agreed-price quarantine (the invalidation never landed) still fails closed for every row', () => {
+  test('a QUEUED agreed-price quarantine (the invalidation never landed) still fails closed for every row it could mark', () => {
     const md = { estimator_quarantine_pending: { reason: 'price_agreed_on_call', at: 'x', generation: 5 } };
     expect(callDraftVerdict(md, { estimateData: engineData() })).toEqual({ marker: 'quarantine_pending', reason: 'price_agreed_on_call' });
+    // codex #4815 r7 P0: but never a terminal or booking-linked row — the
+    // invalidation it queues could never mark those either.
+    expect(callDraftVerdict(md, { estimateData: engineData(), estimateStatus: 'accepted' })).toBeNull();
+    expect(callDraftVerdict(md, { estimateData: { ...engineData(), scheduled_service_id: 'svc-1' }, estimateStatus: 'sent' })).toBeNull();
+    expect(callDraftVerdict(md, { forNewDraft: true })).toEqual({ marker: 'quarantine_pending', reason: 'price_agreed_on_call' });
   });
 
   test('a deferred agreed-price invalidation meeting a row the customer ACCEPTED in the meantime is dropped, never stamped', async () => {

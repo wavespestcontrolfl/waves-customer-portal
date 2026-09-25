@@ -187,6 +187,19 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(block).toContain('await pushCallToRetryLaneAfterQuarantineFailure({');
   });
 
+  test('a sweep that LANDS the invalidation retires its own generation\'s queued retry, never on an ownership loss (codex #4815 r7 P0)', () => {
+    const block = priceAgreedSweepBlock();
+    const successAt = block.indexOf('} else {', block.indexOf('if (!sweepInvalidation.ok) {'));
+    expect(successAt).toBeGreaterThan(-1);
+    const success = block.slice(successAt);
+    const guardAt = success.indexOf('if (!sweepInvalidation.ownershipLost) {');
+    const clearAt = success.indexOf("await clearOwnQuarantinePending(call.id, { reason: 'price_agreed_on_call', generation: procGeneration });");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(clearAt).toBeGreaterThan(guardAt);
+    // Only the success branch clears — the failure branch QUEUES.
+    expect(block.slice(0, successAt)).not.toContain('clearOwnQuarantinePending');
+  });
+
   test('the sweep delegates bell retirement to the shared helper on success, same contract as the pre-write pass (codex #4815 r2 P2, refined r3 P1)', () => {
     const block = priceAgreedSweepBlock();
     expect(block).toContain('await retirePriceAgreedEstimatorBell({');

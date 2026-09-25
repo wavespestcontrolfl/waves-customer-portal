@@ -18456,6 +18456,9 @@ const CallRecordingProcessor = {
             // stale draft if this LAST attempt also failed.
             logger.warn(`[call-proc] post-finalization price-agreed draft sweep did not land for ${maskSid(callSid)} — queuing a durable retry`);
             const { markQuarantinePending } = require('./estimator-engine');
+            // Generation-fenced (codex #4815 r7 P1): 'ownership_lost' (a
+            // newer pass claimed the call before this detached write) is
+            // truthy — nothing queued, and nothing to escalate.
             const queued = await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });
             if (!queued) {
               // codex #4815 r3 P1 (r5 P1: now routes through the bounded
@@ -18471,6 +18474,18 @@ const CallRecordingProcessor = {
               });
             }
           } else {
+            // This sweep LANDED the invalidation (codex #4815 r7 P0): when
+            // the pre-write pass failed, finalization queued this
+            // generation's durable retry — and that entry's whole job is
+            // the invalidation that just committed. Retire it now,
+            // generation-matched (never a newer pass's entry, never a
+            // different verdict's), instead of leaving it to block new
+            // drafts until the scheduler drains it. An ownership loss
+            // landed nothing, so its entry stays for the drainer.
+            if (!sweepInvalidation.ownershipLost) {
+              const { clearOwnQuarantinePending } = require('./estimator-engine');
+              await clearOwnQuarantinePending(call.id, { reason: 'price_agreed_on_call', generation: procGeneration });
+            }
             // Same bell retirement as the pre-write pass (codex #4815 r2
             // P2, refined r3 P1) — covers the case where THAT attempt
             // failed (queued above) and this sweep is the one that

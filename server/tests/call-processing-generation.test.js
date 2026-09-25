@@ -741,7 +741,7 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     const source = src('../services/slot-reservation.js');
     const lockAt = source.indexOf("trx('call_log').where({ id: eng.callLogId }).forUpdate()");
     expect(lockAt).toBeGreaterThan(-1);
-    expect(lockAt).toBeLessThan(source.indexOf('callSideBlockForEstimateData(trx, reservationData)'));
+    expect(lockAt).toBeLessThan(source.indexOf('callSideBlockForEstimateData(trx, reservationData, { estimateStatus: estimate.status })'));
   });
 
   test('the reconcile-only entry enumerates EVERY live same-call draft', () => {

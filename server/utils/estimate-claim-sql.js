@@ -124,12 +124,36 @@ function isRowScopedDraftBlockReason(reason) {
 //   forNewDraft  — true when the caller (a draft creator's in-lock guard)
 //                  is deciding whether a NEW draft may be inserted;
 //   estimateData — otherwise, the judged EXISTING row's estimate_data.
+//   estimateStatus — the judged EXISTING row's `status` column, when the
+//                  caller has it (it is not part of estimate_data). Unknown
+//                  (undefined) never proves a row terminal — fail closed.
 //   supersededBelowGeneration — ignore a marker whose recorded writer
 //                  generation is OLDER than this (see callRejectedForDrafting).
-// The QUEUED marker stays call-wide for both purposes: it means the
-// invalidation itself has not landed, so no row can be proven unaffected —
-// the drainer lands (or retires) it on its next sweep.
-function callDraftVerdict(md, { forNewDraft = false, estimateData = null, supersededBelowGeneration = null } = {}) {
+// The QUEUED marker (the invalidation itself has not landed yet, so the
+// verdict's own per-row stamps do not exist) follows the SAME row scoping as
+// the landed one, derived from the verdict's SCAN scope instead of its
+// stamps (codex #4815 r7 P0): a queued ROW-SCOPED (agreed-price) entry keeps
+// refusing new drafts and every existing row the landed invalidation WOULD
+// mark — but never a terminal (accepted / declined / expired) or
+// booking-linked row, which that invalidation's scope excludes
+// (invalidateDraftForCall scope 'nonterminal_drafts') and so could never
+// mark. Blocking those rows until the drainer ran made every accepted or
+// booking-linked estimate for the call 404 on its permanent public token,
+// indefinitely whenever the drain job was down. A queued CALL-WIDE entry
+// (identity conflict, spam / voicemail / no-attribution) still blocks every
+// row: its landed form marks terminal rows too.
+function scopedVerdictExcludesRow(estimateData, estimateStatus) {
+  if (estimateStatus != null
+    && TERMINAL_ESTIMATE_STATUSES.includes(String(estimateStatus).toLowerCase())) return true;
+  // The exact stamp linkEstimateToBooking writes for the assessment
+  // pre-draft exception — the scan's excludeBookingLinked predicate
+  // ("estimate_data ->> 'scheduled_service_id' IS NULL"), mirrored.
+  return estimateData?.scheduled_service_id != null;
+}
+
+function callDraftVerdict(md, {
+  forNewDraft = false, estimateData = null, estimateStatus = null, supersededBelowGeneration = null,
+} = {}) {
   const current = (marker) => marker?.reason && (supersededBelowGeneration == null
     || marker.generation == null
     || Number(marker.generation) >= Number(supersededBelowGeneration));
@@ -148,7 +172,13 @@ function callDraftVerdict(md, { forNewDraft = false, estimateData = null, supers
     if (applies) return { marker: 'draft_block', reason };
   }
   const queued = md?.estimator_quarantine_pending;
-  if (current(queued)) return { marker: 'quarantine_pending', reason: String(queued.reason) };
+  if (current(queued)) {
+    const reason = String(queued.reason);
+    const applies = forNewDraft
+      || !isRowScopedDraftBlockReason(reason)
+      || !scopedVerdictExcludesRow(estimateData, estimateStatus);
+    if (applies) return { marker: 'quarantine_pending', reason };
+  }
   return null;
 }
 
@@ -159,7 +189,10 @@ function callDraftVerdict(md, { forNewDraft = false, estimateData = null, supers
 // its bearer token until the scheduler drained the queue (codex P1, PR
 // #3304 GH r9). Returns the blocking reason, or null. Cheap: one indexed
 // lookup, and only for engine-drafted rows.
-async function callSideBlockForEstimateData(dbc, data) {
+// `estimateStatus` (codex #4815 r7 P0): the row's status column — lets a
+// queued row-scoped verdict spare a terminal row (see callDraftVerdict).
+// Omitted, the row is judged as possibly non-terminal (fail closed).
+async function callSideBlockForEstimateData(dbc, data, { estimateStatus = null } = {}) {
   const callLogId = data?.estimatorEngine?.callLogId || null;
   if (!callLogId) return null;
   try {
@@ -170,7 +203,7 @@ async function callSideBlockForEstimateData(dbc, data) {
     // call is gone has no provenance left to validate.
     if (!row) return 'call_missing';
     const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    const verdict = callDraftVerdict(md, { estimateData: data });
+    const verdict = callDraftVerdict(md, { estimateData: data, estimateStatus });
     if (verdict) return verdict.reason;
     // An IN-FLIGHT call — a held claim token OR a queued retry lane — is
     // mid-decision: its block marker may be milliseconds (or one sweep)
