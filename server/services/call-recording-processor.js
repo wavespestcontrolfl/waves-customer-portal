@@ -1852,19 +1852,46 @@ async function bookingPreDraftAssessmentDrafted(bookingPreDraftPromise) {
   }
 }
 
-// codex #4815 r3 P1: shared last-resort fallback when a durable quarantine-
-// retry queue write (markQuarantinePending) itself fails to land — reused
-// by the identity-conflict quarantine catch AND both price_agreed_on_call
-// invalidation call sites, so this fallback lives in exactly one place
-// rather than three near-identical copies drifting apart. Pushes the call
-// into the retry lane (extraction_failed) under the SAME generation fence
-// every other post-claim write here uses: a newer pass may have already
-// claimed and finalized the call, and this must never overwrite that
-// pass's settled status with a stale failure.
-async function pushCallToRetryLaneAfterQuarantineFailure({ call, callSid, procGeneration, reason }) {
+// codex #4815 r3 P1 (live-owner mode added r4 P1): shared last-resort
+// fallback when a durable quarantine-retry queue write (markQuarantinePending)
+// itself fails to land — reused by the identity-conflict quarantine catch
+// AND both price_agreed_on_call invalidation call sites, so this fallback
+// lives in exactly one place rather than three near-identical copies
+// drifting apart.
+//
+// TWO fence modes, because the callers sit on opposite sides of
+// finalization:
+//   - mode: 'settled' (default) — the identity-conflict catch and the
+//     price-agreed POST-finalization sweep are both DETACHED continuations
+//     that typically run AFTER finalization already cleared
+//     processing_token to null; whereNull matches the settled row (or
+//     correctly no-ops with "a newer pass owns it" if a peer genuinely
+//     reclaimed since).
+//   - mode: 'liveOwner' — the price-agreed PRE-finalization (sync) call
+//     site calls this WHILE STILL HOLDING its own claim: finalization has
+//     not run yet, so whereNull would ALWAYS match zero rows here and
+//     silently misreport "a newer pass owns the call" when actually nobody
+//     did — this pass just had the wrong fence (codex #4815 r4 P1: the
+//     exact bug). Fences on processing_token = procToken (own current
+//     claim) instead, and deliberately never touches processing_token
+//     itself — stillOwnsClaim() and every downstream check in this pass
+//     key off that column alone, so leaving it alone means the rest of
+//     this pass's OWN legitimate processing (booking, SMS, lead work) is
+//     completely unaffected. This closes the crash window early: the
+//     caller must ALSO set its local finalStatus so the natural,
+//     already-atomic finalization transaction (which DOES clear
+//     processing_token) commits the SAME retry-eligible status instead of
+//     overwriting this back to 'processed' when it runs — this function
+//     cannot do that itself, since finalStatus is processRecording's own
+//     local variable.
+async function pushCallToRetryLaneAfterQuarantineFailure({
+  call, callSid, procToken = null, procGeneration, reason, mode = 'settled',
+}) {
   try {
-    let lastResortQ = db('call_log').where({ id: call.id })
-      .whereNull('processing_token');
+    let lastResortQ = db('call_log').where({ id: call.id });
+    lastResortQ = mode === 'liveOwner'
+      ? lastResortQ.where('processing_token', procToken)
+      : lastResortQ.whereNull('processing_token');
     if (procGeneration != null) {
       lastResortQ = lastResortQ.where('processing_generation', procGeneration);
     }
@@ -13996,11 +14023,30 @@ const CallRecordingProcessor = {
               // codex #4815 r3 P1: markQuarantinePending's own boolean was
               // previously ignored here — a false left the call finalized
               // with NEITHER the block (which invalidation.ok:false already
-              // means never landed) NOR a queued retry. Same last-resort
-              // fallback the identity-conflict quarantine catch uses.
+              // means never landed) NOR a queued retry.
+              //
+              // LIVE-OWNER mode (codex #4815 r4 P1): unlike the identity-
+              // conflict catch (a detached continuation that runs AFTER
+              // finalization), THIS call site is still mid-pass — this
+              // pass still holds procToken, finalization hasn't run yet.
+              // The settled-mode (whereNull) fence would always match zero
+              // rows here and silently claim "a newer pass owns the call"
+              // when nobody did. Fence on our OWN current token instead
+              // (never touching processing_token, so the rest of this
+              // pass's own processing is unaffected), AND flip finalStatus
+              // so the natural finalization transaction below — which DOES
+              // atomically clear processing_token — commits the SAME
+              // retry-eligible status instead of silently overwriting this
+              // back to 'processed'. Without both halves, a worker restart
+              // anywhere between here and that natural finalize (or between
+              // finalize and the detached post-finalization sweep, which is
+              // purely in-memory and lost on restart) left the call cleanly
+              // 'processed' with NEITHER the block nor a queued retry —
+              // nothing left to ever revisit it.
               await pushCallToRetryLaneAfterQuarantineFailure({
-                call, callSid, procGeneration, reason: 'price_agreed_on_call',
+                call, callSid, procToken, procGeneration, reason: 'price_agreed_on_call', mode: 'liveOwner',
               });
+              finalStatus = 'extraction_failed';
             }
           } else {
             // Retire the earlier engine run's "draft ready" bell — or the
@@ -14038,7 +14084,10 @@ const CallRecordingProcessor = {
     // clean 'processed' with no lead and nothing for a human to look at.
     // Same flag and lane: the lead this call needed is not available.
     if ((workableUnnamedLead || sameCallOwnershipRejected) && !leadId) {
-      finalStatus = 'lead_creation_failed';
+      // An earlier live-owner retry-lane push (price_agreed_on_call, codex
+      // #4815 r4 P1) keeps the call retry-eligible — the retry re-runs lead
+      // creation too; the triage card below still surfaces it now.
+      if (finalStatus !== 'extraction_failed') finalStatus = 'lead_creation_failed';
       logger.error(`[call-proc] Customer-less recovery lead did not persist for ${callSid} — flagged lead_creation_failed`);
       try {
         const failTriageItem = buildTriageItem({

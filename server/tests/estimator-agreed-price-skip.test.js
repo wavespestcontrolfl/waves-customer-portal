@@ -140,16 +140,24 @@ describe('maybeDraftEstimateForCall — agreed-price refusal (owner ruling 2026-
     expect(mockBuildCallContext).toHaveBeenCalledWith('call-1');
   });
 
-  test('default quotePromised (true) ⇒ refusal never even runs the pre-check', async () => {
+  test('omitted quotePromised is NOT the written-quote exception (codex #4815 r4 P2) — the replay CLI\'s dry run is skipped like the live processor', async () => {
     mockExtractionFromCall.mockReturnValue({
       source: 'enriched',
       extraction: { service_request: { price: { amount_usd: 300, accepted: true } } },
     });
 
-    const result = await maybeDraftEstimateForCall({ callLogId: 'call-1' });
+    const result = await maybeDraftEstimateForCall({ callLogId: 'call-1', dryRun: true });
+
+    expect(result.skipped).toBe('price_agreed_on_call');
+    expect(mockBuildCallContext).not.toHaveBeenCalled();
+  });
+
+  test('omitted quotePromised with no agreed price still drafts', async () => {
+    mockExtractionFromCall.mockReturnValue({ source: 'enriched', extraction: { service_request: {} } });
+
+    const result = await maybeDraftEstimateForCall({ callLogId: 'call-1', dryRun: true });
 
     expect(result.skipped).not.toBe('price_agreed_on_call');
-    expect(mockExtractionFromCall).not.toHaveBeenCalled();
     expect(mockBuildCallContext).toHaveBeenCalledWith('call-1');
   });
 

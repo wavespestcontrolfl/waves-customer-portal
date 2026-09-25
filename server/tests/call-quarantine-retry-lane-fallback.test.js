@@ -65,6 +65,20 @@ describe('pushCallToRetryLaneAfterQuarantineFailure', () => {
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('pushed to the retry lane'));
   });
 
+  test('liveOwner mode (codex #4815 r4 P1) fences on THIS pass\'s own token, never IS NULL, and never clears the token', async () => {
+    await pushCallToRetryLaneAfterQuarantineFailure({
+      call: CALL, callSid: CALL.twilio_call_sid, procToken: 'tok-live', procGeneration: 7,
+      reason: 'price_agreed_on_call', mode: 'liveOwner',
+    });
+
+    const write = mockCalls[0];
+    expect(write.wheres).toContainEqual(['where', 'processing_token', 'tok-live']);
+    expect(write.wheres.some(([m]) => m === 'whereNull')).toBe(false);
+    expect(write.wheres).toContainEqual(['where', 'processing_generation', 7]);
+    expect(write.row).toEqual({ processing_status: 'extraction_failed', updated_at: expect.any(Date) });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('pushed to the retry lane'));
+  });
+
   test('with no generation, the write is NOT generation-fenced (legacy shape)', async () => {
     await pushCallToRetryLaneAfterQuarantineFailure({
       call: CALL, callSid: CALL.twilio_call_sid, procGeneration: null, reason: 'price_agreed_on_call',

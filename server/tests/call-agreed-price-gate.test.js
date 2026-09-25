@@ -106,6 +106,18 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(notOkBody).toContain("reason: 'price_agreed_on_call',");
   });
 
+  test('the pre-finalization fallback runs in liveOwner mode AND flips finalStatus so finalization keeps the call retry-eligible (codex #4815 r4 P1)', () => {
+    const block = priceAgreedSyncBlock();
+    const notOkAt = block.indexOf('if (!invalidation.ok) {');
+    const notOkBody = block.slice(notOkAt, block.indexOf('} else {', notOkAt));
+    expect(notOkBody).toContain("procToken, procGeneration, reason: 'price_agreed_on_call', mode: 'liveOwner',");
+    expect(notOkBody).toContain("finalStatus = 'extraction_failed';");
+  });
+
+  test('a later lead-creation failure never overwrites the retry-eligible status (codex #4815 r4 P1)', () => {
+    expect(source).toContain("if (finalStatus !== 'extraction_failed') finalStatus = 'lead_creation_failed';");
+  });
+
   test('a successful pre-write invalidation delegates bell retirement to the shared helper, passing invalidated + callQuotePromised through (codex #4815 r2 P2, refined r3 P1)', () => {
     const block = priceAgreedSyncBlock();
     const elseAt = block.indexOf('} else {');

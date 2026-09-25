@@ -1540,7 +1540,7 @@ function formatAgreedPriceLabel(agreed) {
 }
 
 async function maybeDraftEstimateForCall({
-  callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null, ownerProcGeneration = null,
+  callLogId, dryRun = false, refreshLookup = false, quotePromised: quotePromisedArg, ownerProcToken = null, ownerProcGeneration = null,
   // Clarify-reply re-draft for a VOICE-origin draft: re-run from the
   // original call context (enriched extraction + transcript — the quote
   // evidence lives there, not in the SMS thread) with the customer's
@@ -1548,6 +1548,8 @@ async function maybeDraftEstimateForCall({
   supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
 }) {
   const result = { callLogId, dryRun, lane: null, created: false };
+  // Downstream notify/draft branches keep the historical default (true)…
+  const quotePromised = quotePromisedArg ?? true;
   // Owner ruling 2026-09-24 (the $300 flea call — a price agreed live on
   // the call still spawned a $387 estimator draft two minutes later): a
   // call that already carries an agreed price refuses to draft here UNLESS
@@ -1558,7 +1560,10 @@ async function maybeDraftEstimateForCall({
   // already makes before invoking this function at all, so every OTHER
   // caller — booking-predraft, admin re-draft, the replay CLI — gets the
   // same refusal without having to duplicate the check itself.
-  if (quotePromised !== true && !supersedeEstimateId) {
+  // …but the written-quote exception below needs an EXPLICIT assertion
+  // (codex #4815 r4 P2): the replay CLI omits the flag, and inheriting the
+  // default let a dry-run compose a price the live processor never would.
+  if (quotePromisedArg !== true && !supersedeEstimateId) {
     const agreedPrice = await resolveAgreedPriceForCall(callLogId);
     // Fail OPEN on a READ ERROR here (codex #4815 r3 P1, made explicit):
     // this check is a BACKSTOP behind the call-recording-processor's own
