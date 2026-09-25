@@ -940,6 +940,8 @@ module.exports = {
   getServices,
   retiredServicesNotHeldBy,
   ADDON_LINE_IS_PLAN_SQL,
+  HOLDER_VISIT_IS_SERVICE_SQL,
+  HOLDER_ADDON_IS_SERVICE_SQL,
   getServiceById,
   getServiceByKey,
   createService,

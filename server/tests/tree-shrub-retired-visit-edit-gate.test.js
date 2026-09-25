@@ -1,4 +1,4 @@
-// Codex r17/r18/r19/r20/r22/r23/r24 on #4786: the visit-edit retired-for-sale gate must see every
+// Codex r17/r18/r19/r20/r22/r23/r24/r25 on #4786: the visit-edit retired-for-sale gate must see every
 // line the save ADDS — catalog ids, a changed primary label, and the name of
 // an ID-less add-on line (normalizeUpdateDetailsAddons keeps an unresolved
 // serviceName and persists it by name alone) — and nothing the visit already
@@ -57,7 +57,7 @@ describe('retiredGateInputsForVisitEdit', () => {
     const oneOff = { ...current, service_id: RETIRED_ID, service_type: 'Quarterly Tree & Shrub Care' };
     expect(retiredGateInputsForVisitEdit({
       current: oneOff, currentAddons: [{ service_id: LIVE_ID, service_name: 'Quarterly Pest Control' }, { service_id: null, service_name: 'Mosquito add-on' }],
-      postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care', plansRetainedLines: true,
+      postedServiceId: RETIRED_ID, postedAddons: null, serviceType: 'Quarterly Tree & Shrub Care', plansRetainedLines: true,
     })).toEqual({
       serviceIds: [RETIRED_ID, LIVE_ID],
       serviceTypes: ['Quarterly Tree & Shrub Care', { label: 'Quarterly Pest Control', recurrence: null }, { label: 'Mosquito add-on', recurrence: null }],
@@ -123,7 +123,7 @@ describe('retiredGateInputsForVisitEdit', () => {
       { service_id: RETIRED_ID, service_name: 'Quarterly T&S', recurring_pattern: 'custom', recurring_interval_days: 90 },
     ];
     expect(retiredGateInputsForVisitEdit({
-      current: recurring, currentAddons: stored, postedServiceId: null, postedAddons: [], serviceType: 'Monthly Lawn Care', plansRetainedLines: true,
+      current: recurring, currentAddons: stored, postedServiceId: null, postedAddons: null, serviceType: 'Monthly Lawn Care', plansRetainedLines: true,
     })).toEqual({
       serviceIds: [LIVE_ID, RETIRED_ID],
       serviceTypes: [
@@ -161,8 +161,33 @@ describe('retiredGateInputsForVisitEdit', () => {
         { service_id: RETIRED_ID, service_name: 'Quarterly T&S', recurring_pattern: 'one_time', recurring_interval_days: null },
         { service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: null, recurring_interval_days: null },
       ],
-      postedAddons: [],
+      postedAddons: null,
     })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: ['Monthly Lawn Care', { label: 'Bi-Monthly Tree & Shrub Care', recurrence: null }] });
+  });
+
+  // codex r25 P2: only lines that remain after the save are retained — an
+  // explicit add-on replacement drops the stored lines it omits, and a
+  // replaced primary service is not retained (the new id is gated as added).
+  test('a parent cadence change gates only the lines that remain in the posted state', () => {
+    const recurring = { ...current, is_recurring: true, service_type: 'Monthly Lawn Care', recurring_pattern: 'monthly' };
+    const stored = [
+      { service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: null, recurring_interval_days: null },
+      { service_id: null, service_name: 'Mosquito add-on', recurring_pattern: null, recurring_interval_days: null },
+    ];
+    // Explicit replacement that removes the T&S add-on: it is not gated.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: stored, postedServiceId: null, serviceType: 'Monthly Lawn Care', plansRetainedLines: true,
+      postedAddons: [{ serviceId: null, serviceName: 'Mosquito add-on', recurringPattern: null }],
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: ['Monthly Lawn Care', { label: 'Mosquito add-on', recurrence: null }] });
+    // Explicit empty replacement: no add-on survives.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: stored, postedServiceId: null, postedAddons: [], serviceType: 'Monthly Lawn Care', plansRetainedLines: true,
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: ['Monthly Lawn Care'] });
+    // Replaced primary: the old id and label are not retained; the new id is gated as added.
+    expect(retiredGateInputsForVisitEdit({
+      current: { ...recurring, service_id: LIVE_ID }, currentAddons: [], postedServiceId: RETIRED_ID, postedAddons: null,
+      serviceType: 'Quarterly Tree & Shrub Care', plansRetainedLines: true,
+    })).toEqual({ serviceIds: [RETIRED_ID], serviceTypes: ['Quarterly Tree & Shrub Care'] });
   });
 
   test('addonLineRecurrence reads a line\'s own pattern or interval, else null', () => {
@@ -176,7 +201,8 @@ describe('retiredGateInputsForVisitEdit', () => {
 
   test('the route hands every posted add-on line, with the stored pattern, to the helper', () => {
     const source = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
-    expect(source).toMatch(/const postedAddons = Array\.isArray\(replaceAddons\) \? replaceAddons\.filter\(Boolean\) : \[\];/);
+    // null when the save posted no add-ons (every stored line stays); an array is an explicit replacement (codex r25).
+    expect(source).toMatch(/const postedAddons = Array\.isArray\(replaceAddons\) \? replaceAddons\.filter\(Boolean\) : null;/);
     expect(source).toMatch(/current, currentAddons, postedServiceId: updates\.service_id, postedAddons, serviceType, plansRetainedLines,/);
     // Activation / cadence change is confirmed against the row's own flag and
     // stored pattern, never the posted values alone (codex r18/r20).

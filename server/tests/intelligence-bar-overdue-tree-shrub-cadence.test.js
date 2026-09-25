@@ -123,11 +123,16 @@ test('a one_time T&S add-on line is not the customer\'s active plan (codex r18)'
   } finally {
     db.raw = original;
   }
-  const { ADDON_LINE_IS_PLAN_SQL } = require('../services/service-library');
+  const { ADDON_LINE_IS_PLAN_SQL, HOLDER_VISIT_IS_SERVICE_SQL, HOLDER_ADDON_IS_SERVICE_SQL } = require('../services/service-library');
   const planSql = seen.find((sql) => /as active_plan_service_key/.test(sql));
   expect(planSql).toBeDefined();
   expect(planSql).toContain('FROM scheduled_service_addons');
   expect(planSql).toContain(ADDON_LINE_IS_PLAN_SQL);
+  // The plan row joins its catalog row by id, key snapshot or label — the
+  // same identity the holder gate reads (codex r25).
+  expect(planSql).toContain(`JOIN services ON ${HOLDER_VISIT_IS_SERVICE_SQL}`);
+  expect(planSql).toContain(`JOIN services ON ${HOLDER_ADDON_IS_SERVICE_SQL}`);
+  expect(planSql).not.toMatch(/JOIN services ON services\.id = scheduled_service/);
 });
 
 test('every prefiltered T&S row is paged through before the limit applies (codex r19)', async () => {

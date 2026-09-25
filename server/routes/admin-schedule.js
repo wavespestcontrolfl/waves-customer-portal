@@ -11796,10 +11796,14 @@ function addonLineRecurrence(line) {
 // than its stored one (one_time promoted to the plan, or a plan pattern
 // changed) — gated by id and by name with the new cadence.
 function retiredGateInputsForVisitEdit({
-  current, currentAddons = [], postedServiceId = null, postedAddons = [], serviceType, plansRetainedLines = false,
+  current, currentAddons = [], postedServiceId = null, postedAddons = null, serviceType, plansRetainedLines = false,
 }) {
+  // `postedAddons` null = the save did not post add-ons (every stored line
+  // stays); an array = an explicit replacement (a stored line absent from
+  // it is being removed and is not retained — codex r25 on #4786).
+  const addonsReplaced = Array.isArray(postedAddons);
   const norm = (v) => String(v || '').trim().toLowerCase();
-  const lines = postedAddons.filter(Boolean);
+  const lines = (postedAddons || []).filter(Boolean);
   const named = (l) => typeof l.serviceName === 'string' && !!l.serviceName.trim();
   const labelOf = (l) => ({ label: l.serviceName.trim(), recurrence: addonLineRecurrence(l) });
   const postedCatalogIds = [postedServiceId, ...lines.map((l) => l.serviceId)].filter(Boolean).map(String);
@@ -11822,13 +11826,18 @@ function retiredGateInputsForVisitEdit({
   // Every retained add-on name — catalog-backed or not (codex r23: a live
   // 6x T&S add-on riding a parent that just turned quarterly is the retired
   // plan by name + cadence, while its id stays live).
+  // Lines that remain after this save: a stored add-on survives an explicit
+  // replacement only when reposted; the primary line survives unless a
+  // different service id is posted (the new one is gated as added).
+  const retainedAddons = currentAddons.filter((a) => ridesPlan(a) && (!addonsReplaced || postedFor(a)));
+  const primaryRetained = !postedServiceId || String(postedServiceId) === String(current.service_id || '');
   const retainedIds = plansRetainedLines
-    ? [current.service_id, ...currentAddons.filter(ridesPlan).map((a) => a?.service_id)].filter(Boolean).map(String)
+    ? [primaryRetained ? current.service_id : null, ...retainedAddons.map((a) => a?.service_id)].filter(Boolean).map(String)
     : [];
   const retainedNames = plansRetainedLines
     ? [
-      ...(typeof current.service_type === 'string' && current.service_type.trim() ? [current.service_type] : []),
-      ...currentAddons.filter((a) => ridesPlan(a) && typeof a?.service_name === 'string' && a.service_name.trim())
+      ...(primaryRetained && !renamed && typeof current.service_type === 'string' && current.service_type.trim() ? [current.service_type] : []),
+      ...retainedAddons.filter((a) => typeof a?.service_name === 'string' && a.service_name.trim())
         .map((a) => ({ label: a.service_name, recurrence: effectiveRecurrence(a) })),
     ]
     : [];
@@ -12438,7 +12447,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // ID-less (normalizeUpdateDetailsAddons keeps an unresolved serviceName
     // and persists it by name alone — codex r17), and with its own
     // recurringPattern (a one_time line promoted to the plan — codex r19).
-    const postedAddons = Array.isArray(replaceAddons) ? replaceAddons.filter(Boolean) : [];
+    const postedAddons = Array.isArray(replaceAddons) ? replaceAddons.filter(Boolean) : null;
     // service_type and service_id are written independently, so a changed
     // label goes through the gate by name whether or not an id rides along.
     const labelPosted = typeof serviceType === 'string' && !!serviceType.trim();
@@ -12446,7 +12455,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // recurs, sells its retained lines as a plan (codex r18/r20 P1):
     // confirmed against the row's own is_recurring / recurring_pattern below.
     const recurrencePosted = !!isRecurring;
-    if (updates.service_id || labelPosted || postedAddons.length || recurrencePosted) {
+    if (updates.service_id || labelPosted || postedAddons?.length || recurrencePosted) {
       const current = await db('scheduled_services').where({ id: req.params.id })
         .first('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_interval_days');
       if (current) {
@@ -12457,7 +12466,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           && postedInterval !== Number.parseInt(current.recurring_interval_days, 10);
         const plansRetainedLines = recurrencePosted
           && (!current.is_recurring || (!!recurringPattern && recurringPattern !== current.recurring_pattern) || intervalChanged);
-        const currentAddons = updates.service_id || postedAddons.length || plansRetainedLines
+        const currentAddons = updates.service_id || postedAddons?.length || plansRetainedLines
           ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
             .select('service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days')
           : [];

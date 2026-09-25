@@ -601,9 +601,12 @@ async function findOverdueCustomers(input) {
         'customers.monthly_rate', 'customers.active',
         db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) as last_service_date", [patterns[cat]]),
         db.raw("(SELECT service_type FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ? ORDER BY service_date DESC LIMIT 1) as last_service_type", [patterns[cat]]),
+        // The plan row is matched to its catalog row by id, key snapshot or
+        // label (service-library's holder identity predicates — an ID-less
+        // legacy row still resolves its cadence, codex r25 on #4786).
         db.raw(`(SELECT plan.service_key FROM (
           SELECT services.service_key, scheduled_services.scheduled_date FROM scheduled_services
-            JOIN services ON services.id = scheduled_services.service_id
+            JOIN services ON ${require('../service-library').HOLDER_VISIT_IS_SERVICE_SQL}
             WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
           UNION ALL
@@ -612,7 +615,7 @@ async function findOverdueCustomers(input) {
           -- ADDON_LINE_IS_PLAN_SQL, codex r18 on #4786).
           SELECT services.service_key, scheduled_services.scheduled_date FROM scheduled_service_addons
             JOIN scheduled_services ON scheduled_services.id = scheduled_service_addons.scheduled_service_id
-            JOIN services ON services.id = scheduled_service_addons.service_id
+            JOIN services ON ${require('../service-library').HOLDER_ADDON_IS_SERVICE_SQL}
             WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
               AND ${require('../service-library').ADDON_LINE_IS_PLAN_SQL}
