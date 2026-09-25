@@ -44,9 +44,14 @@ function candidatesQuery(conn, now) {
     .whereRaw("NULLIF(btrim(scheduled_services.service_address_line1), '') IS NOT NULL")
     .select([...SNAPSHOT_COLUMNS.map(column => ['lat', 'lng'].includes(column)
       ? { [`stored_${column}`]: `scheduled_services.${column}` } : `scheduled_services.${column}`), ...guardedCoordSelects(conn)]);
-  // A matching primary-address fallback already gives the route a usable pin.
-  // Recover only locations the shared route reader actually considers missing.
-  return conn.from(stops.as('stops')).whereRaw('(lat IS NULL OR lng IS NULL OR lat = 0 OR lng = 0)');
+  // A matching primary fallback covers both stored coordinates missing.
+  // Recover half-pairs together instead of mixing service and primary pins.
+  // Group the OR so the caller's permanent-failure exclusions cover both.
+  return conn.from(stops.as('stops'))
+    .whereRaw(`(
+      (lat IS NULL OR lng IS NULL OR lat = 0 OR lng = 0)
+      OR ((stored_lat IS NULL OR stored_lat = 0) <> (stored_lng IS NULL OR stored_lng = 0))
+    )`);
 }
 
 async function persistServicePin(conn, snapshot, location) {

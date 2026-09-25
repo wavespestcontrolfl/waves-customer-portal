@@ -213,6 +213,28 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
     expect(await mockConnection('scheduled_services').where({ id: serviceId }).first('lat', 'lng')).toEqual({ lat: null, lng: null });
   });
 
+  test.each([
+    ['latitude only', id(21), { lat: 26.75, lng: null }],
+    ['longitude only', id(22), { lat: null, lng: -81.75 }],
+    ['zero-valued latitude half-pair', id(23), { lat: 0, lng: -81.5 }],
+    ['zero-valued longitude half-pair', id(24), { lat: 26.5, lng: 0 }],
+  ])('matching-primary %s is fully replaced instead of becoming a mixed fallback pin', async (_label, serviceId, stored) => {
+    await insertService(serviceId, {
+      ...stored,
+      service_address_line1: '100 Primary Fixture Way',
+      service_address_city: 'Bradenton',
+      service_address_state: 'FL',
+      service_address_zip: '34205',
+    });
+
+    const result = await sweepUngeocodedServices({ now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ checked: 1, geocoded: 1, stale: 0, failed: 0 });
+    expect(geocodeAddressWithStatus).toHaveBeenCalledTimes(1);
+    const recovered = await mockConnection('scheduled_services').where({ id: serviceId }).first('lat', 'lng');
+    expect({ lat: Number(recovered.lat), lng: Number(recovered.lng) }).toEqual(PIN);
+  });
+
   test('incomplete, provider-partial, and out-of-area service addresses are rejected without writes', async () => {
     const incomplete = id(30);
     const partial = id(31);
