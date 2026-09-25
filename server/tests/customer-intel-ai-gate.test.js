@@ -14,6 +14,8 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 const db = require('../models/db');
 const { dispatchWithFallback } = require('../services/llm/call');
 const signalDetector = require('../services/customer-intelligence/signal-detector');
+const RetentionEngine = require('../services/customer-intelligence/retention-engine');
+const { customerIntelAiLive } = require('../config/feature-gates');
 
 // Minimal chainable query: every table reads as "one recent inbound SMS with
 // a body" so the sentiment step has something to send if it runs, and
@@ -44,7 +46,7 @@ describe('GATE_CUSTOMER_INTEL_AI', () => {
 
   test('unset (default): detectSignals makes NO provider call', async () => {
     delete process.env.GATE_CUSTOMER_INTEL_AI;
-    expect(signalDetector.aiSignalsEnabled()).toBe(false);
+    expect(customerIntelAiLive()).toBe(false);
     await signalDetector.detectSignals('c1');
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
@@ -57,7 +59,7 @@ describe('GATE_CUSTOMER_INTEL_AI', () => {
 
   test('"true": the sentiment step runs against the highStakes policy', async () => {
     process.env.GATE_CUSTOMER_INTEL_AI = 'true';
-    expect(signalDetector.aiSignalsEnabled()).toBe(true);
+    expect(customerIntelAiLive()).toBe(true);
     await signalDetector.detectSignals('c1');
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     expect(dispatchWithFallback.mock.calls[0][0].name).toBe('highStakes');
@@ -70,5 +72,23 @@ describe('GATE_CUSTOMER_INTEL_AI', () => {
     process.env.GATE_CUSTOMER_INTEL_AI = 'true';
     await signalDetector.detectSignals('c1');
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex #4825 P1: the guarantee must hold in the SHARED engine, not only
+  // the scheduler loop — the admin retention-outreach route calls it directly.
+  test('unset: generateRetentionOutreach refuses before any DB read or provider call', async () => {
+    delete process.env.GATE_CUSTOMER_INTEL_AI;
+    expect(await RetentionEngine.generateRetentionOutreach('c1')).toBeNull();
+    expect(db).not.toHaveBeenCalled();
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('"true": generateRetentionOutreach proceeds to the health-score read', async () => {
+    process.env.GATE_CUSTOMER_INTEL_AI = 'true';
+    // No at-risk health row → the engine returns null AFTER reading, proving
+    // the gate let it through.
+    db.mockImplementation(() => query([]));
+    expect(await RetentionEngine.generateRetentionOutreach('c1')).toBeNull();
+    expect(db).toHaveBeenCalledWith('customer_health_scores');
   });
 });

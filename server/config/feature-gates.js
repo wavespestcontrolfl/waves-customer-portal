@@ -2835,6 +2835,17 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
+// point into the customer-intelligence AI legs (nightly sentiment mining in
+// signal-detector, retention drafting in retention-engine, and the admin
+// route that triggers drafting by hand), so the documented "unset = no
+// provider call" guarantee holds on every path, not just the scheduler
+// (Codex #4825 P1). The `customerIntelAi` gates-map entry is for
+// logGateStatus only.
+function customerIntelAiLive() {
+  return gateEnvValue('GATE_CUSTOMER_INTEL_AI');
+}
+
 // GATE_LEAD_INSPECTION_LINK read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The `leadInspectionLink` gates-map
 // entry above is for logGateStatus only; this is the one canonical reader
@@ -2915,5 +2926,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive };
 // gates 1775330914
