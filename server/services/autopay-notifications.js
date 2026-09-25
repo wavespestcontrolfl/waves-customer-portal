@@ -288,7 +288,8 @@ async function sendCardExpiryWarnings() {
 
       if (!r.phone) {
         const prefs = await db('notification_prefs').where({ customer_id: r.customer_id }).first();
-        if (billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; skipped++; continue; }
+        const routesEmail = reminderStage === '60_day' && billingChannelAllowed(prefs || {}, 'billing', 'email') === true;
+        if (!routesEmail && billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; skipped++; continue; }
       }
 
       // Dedup: one per card per 30 days

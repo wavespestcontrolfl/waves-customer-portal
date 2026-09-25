@@ -278,7 +278,8 @@ class PaymentExpiry {
 
         if (!customer.phone) {
           const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-          if (billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; continue; }
+          const routesEmail = reminderStage === '60_day' && billingChannelAllowed(prefs || {}, 'billing', 'email') === true;
+          if (!routesEmail && billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; continue; }
         }
 
         // 30-day cooldown per customer

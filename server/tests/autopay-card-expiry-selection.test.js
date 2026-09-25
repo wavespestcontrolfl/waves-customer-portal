@@ -93,6 +93,26 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([[['email'], true], [['push'], true], [null, false], [['sms'], false]])(
+    'no-phone 60-day warning routes only explicit Email/App choices: %j', async (channels, shouldSend) => {
+      getCardExpiryExemptions.mockResolvedValueOnce(exemptions());
+      getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+      wireDb({
+        customers: [thenable([{ ...CUSTOMER, phone: null }])],
+        payment_methods: [thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa',
+          last_four: '4242', exp_month: '9', exp_year: '26' }])],
+        notification_prefs: [thenable([{ billing_channels: channels }])],
+      });
+      const result = await sendCardExpiryWarnings();
+      expect(result.sent).toBe(shouldSend ? 1 : 0);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(shouldSend ? 1 : 0);
+      if (shouldSend) expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        to: null, hasEmailLeg: false,
+        metadata: expect.objectContaining({ notificationEventKey: 'payment-expiry:pm-cur:9:2026:60_day' }),
+      }));
+      expect(require('../services/payment-lifecycle-email').sendPaymentMethodExpiring).not.toHaveBeenCalled();
+    });
+
   test('chargeable current method is a BANK → no card notice (ACH customers are not texted about cards)', async () => {
     getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-bank', method_type: 'us_bank_account' });
     wireDb({ customers: [thenable([CUSTOMER])] });
