@@ -29,7 +29,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
+const { formatDisplayDate, dateOnlyString, addMonthsSameDay } = require('../utils/date-only');
 const { selectedTermiteAnnualPlanRows, authoritativeMappedTermiteEnvelope } = require('./estimate-termite-program-rows');
 
 const PURCHASE_TEMPLATE_KEY = 'service_agreement.termite_bait_program_purchase';
@@ -283,26 +283,6 @@ function estimateMayDiscount(estimate = {}, estData = null) {
   return !!(data.manualDiscount || data.manual_discount || data.result?.manualDiscount);
 }
 
-// Calendar-exact "+ N months" on a YYYY-MM-DD string, clamped to the target
-// month's last day (mirrors annual-prepay-renewals.js#addMonthsSameDay —
-// reimplemented locally rather than reaching into that module's internals
-// for a one-line date add). Returns null for an unparseable input.
-function daysInMonthUTC(year, month1) {
-  return new Date(Date.UTC(year, month1, 0)).getUTCDate();
-}
-function addYmdMonths(ymd, months) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const totalMonths = (month - 1) + Number(months || 0);
-  const targetYear = year + Math.floor(totalMonths / 12);
-  const targetMonth = (((totalMonths % 12) + 12) % 12) + 1;
-  const targetDay = Math.min(day, daysInMonthUTC(targetYear, targetMonth));
-  return `${targetYear}-${String(targetMonth).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
-}
-
 // Build the Annual Protection plan's template values (setup fee, annual fee,
 // 12-month coverage window), or null when the figures can't be resolved.
 // Same fail-closed posture as the quarterly builder below: an unresolvable
@@ -322,7 +302,7 @@ function buildAnnualProgramAgreementValues(estimate = {}, data = null, { startDa
 
   const rawStart = dateOnlyString(startDateRaw);
   const endDateLabel = rawStart
-    ? (formatDisplayDate(addYmdMonths(rawStart, 12), { fallback: '' }) || null)
+    ? (formatDisplayDate(addMonthsSameDay(rawStart, 12), { fallback: '' }) || null)
     : null;
 
   return {
