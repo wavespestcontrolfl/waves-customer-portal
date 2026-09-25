@@ -77,7 +77,9 @@ function mergedBillingChannelUpdates(winner = {}, loser = {}) {
     if (![winner, loser].some((row) => Array.isArray(row?.[column]))) continue;
     const choices = [winner, loser].map((row) => explicitBillingChannels(row, category)
       || (row?.[LEGACY_FIELDS[category]] === 'email' ? ['email']
-        : row?.[LEGACY_FIELDS[category]] === 'push' ? legacyChannels(row, category, true) : null));
+        : (row?.[LEGACY_FIELDS[category]] === 'push'
+          || (category === 'payment_issue' && row?.payment_issue_channel == null && row?.billing_channel === 'push'))
+          ? legacyChannels(row, category, true) : null));
     const [left, right] = choices;
     const channels = left && right ? left.filter((channel) => right.includes(channel)) : left || right;
     if (!channels.length) {

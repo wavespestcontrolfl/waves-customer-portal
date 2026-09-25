@@ -26,6 +26,14 @@ describe('billing delivery channel contract', () => {
     expect(mergedBillingChannelUpdates(null, null)).toEqual({});
   });
 
+  test('merges preserve payment issues inherited from the legacy billing App choice', () => {
+    const legacy = { payment_issue_channel: null, billing_channel: 'push', email_enabled: false };
+    expect(mergedBillingChannelUpdates(legacy, { payment_issue_channels: ['sms', 'push'] }))
+      .toMatchObject({ payment_issue_channels: ['push'] });
+    expect(() => mergedBillingChannelUpdates(legacy, { payment_issue_channels: ['sms'] }))
+      .toThrow('Billing notification choices conflict');
+  });
+
   test('maps the four API fields to additive nullable array columns', () => {
     expect(BILLING_DELIVERY_FIELDS).toEqual({
       invoiceChannels: 'invoice_channels',
