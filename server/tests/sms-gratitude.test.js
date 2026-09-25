@@ -111,6 +111,11 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Should have it in six minutes',
     'Give me a couple minutes',
     'In a bit',
+    'Give me about twenty minutes',
+    'Give us roughly ten minutes',
+    'Give me maybe another 5 mins',
+    'It will take about half an hour',
+    'Need a few more minutes',
     'On the way, 15-20 min',
     'On my way now',
     'Leaving now',
@@ -130,6 +135,12 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Just let me know what day works',
     'Feel free to let us know',
     'Sounds good and lmk if anything changes',
+    'I was wondering if Friday works for you',
+    'Wanted to see whether Friday works',
+    'Does Friday work for you',
+    'Just checking if 9am is still good for you',
+    'Friday at 9 works for you',
+    'Curious what time is best',
   ])('a hand-typed question without a question mark still needs an answer: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
   });
