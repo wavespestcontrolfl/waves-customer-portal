@@ -185,8 +185,19 @@ describe('new-appointment write boundary (codex r12)', () => {
     expect(await ids(['  quarterly tree & SHRUB care '])).toEqual([RETIRED_ID]);
     expect(await ids(['Quarterly T&S'])).toEqual([RETIRED_ID]);
     expect(await ids(['tree shrub quarterly'])).toEqual([RETIRED_ID]);
-    expect(await ids(['Tree & Shrub Care', 'Quarterly Tree & Shrub Care visit'])).toEqual([]);
+    expect(await ids(['Tree & Shrub Care', 'Bi-Monthly Tree & Shrub Care visit'])).toEqual([]);
     expect(await run({ customerId: CUSTOMER, serviceTypes: ['Quarterly T&S'], heldBy: [CUSTOMER] })).toEqual([]);
+  });
+
+  test('loose free-text variants of the retired plan are recognized (codex r16)', async () => {
+    const ids = async (serviceTypes) => (await run({ customerId: OTHER, serviceTypes })).map((r) => r.id);
+    expect(await ids(['Quarterly Tree & Shrub'])).toEqual([RETIRED_ID]);
+    expect(await ids(['tree and shrub - quarterly'])).toEqual([RETIRED_ID]);
+    expect(await ids(['T&S 4x'])).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub Care  4x'])).toEqual([RETIRED_ID]);
+    // Live cadences and other quarterly services are untouched.
+    expect(await ids(['Bi-Monthly Tree & Shrub Care Service', 'Tree & Shrub 6x', 'Quarterly Pest Control', 'Tree & Shrub bimonthly '])).toEqual([]);
+    expect(await run({ customerId: CUSTOMER, serviceTypes: ['Quarterly Tree & Shrub'], heldBy: [CUSTOMER] })).toEqual([]);
   });
 
   test('sellable picker results flag the retired row', async () => {

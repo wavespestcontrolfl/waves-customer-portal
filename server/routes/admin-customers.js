@@ -4827,6 +4827,24 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
+    // Retired-for-sale plans (quarterly T&S) prepay only for a customer
+    // already on that plan — the shared booking gate (codex r16 on #4786).
+    {
+      const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
+        customerId: req.params.id,
+        serviceTypes: [
+          coverageServiceType, planLabel,
+          // The posted count only — visitCount defaults to 4 when omitted.
+          `${coverageServiceType} ${coverageCadence || ''} ${req.body?.visitCount != null ? `${parsedVisitCount.visitCount}x` : ''}`,
+        ],
+      });
+      if (notHeldRetired.length) {
+        return res.status(409).json({
+          error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+          code: 'RETIRED_SERVICE_NOT_SELLABLE',
+        });
+      }
+    }
     // Omission is not a waiver (codex #3591 r37 P1): whenever no setup is
     // BILLED — including an anchor supplied with a zero/absent amount (codex
     // #3591 r43 P2) — derive the setup a LIVE direct rodent series matching
@@ -5345,6 +5363,24 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
+    // Retired-for-sale plans (quarterly T&S) prepay only for a customer
+    // already on that plan — the shared booking gate (codex r16 on #4786).
+    {
+      const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
+        customerId: req.params.id,
+        serviceTypes: [
+          coverageServiceType, planLabel,
+          // The posted count only — visitCount defaults to 4 when omitted.
+          `${coverageServiceType} ${coverageCadence || ''} ${req.body?.visitCount != null ? `${parsedVisitCount.visitCount}x` : ''}`,
+        ],
+      });
+      if (notHeldRetired.length) {
+        return res.status(409).json({
+          error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+          code: 'RETIRED_SERVICE_NOT_SELLABLE',
+        });
+      }
+    }
 
     const method = cleanText(req.body?.method || 'card_present').toLowerCase();
     if (!ANNUAL_PREPAY_PAYMENT_METHODS.has(method)) {

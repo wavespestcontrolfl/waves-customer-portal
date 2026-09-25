@@ -84,6 +84,16 @@ test('the plan\'s catalog key beats a generic "Tree & Shrub" label (codex r15)',
   expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['engine-9x', 42]]);
 });
 
+test('an add-on-line plan key drives the cadence the same way (codex r16)', async () => {
+  // The SQL resolves active_plan_service_key across primary AND add-on lines;
+  // here the combined visit's generic label would otherwise default to 60.
+  db.__state.rows = [
+    { ...row('addon-quarterly', 'Pest + Tree & Shrub', 70), active_plan_service_type: 'Pest + Tree & Shrub', active_plan_service_key: 'tree_shrub_quarterly' },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers).toEqual([]);
+});
+
 test('other categories keep their fixed interval', async () => {
   db.__state.rows = [{ ...row('pest', 'Quarterly Pest Control Service', 100) }];
   const result = await executeTool('find_overdue_customers', { service_category: 'pest' });

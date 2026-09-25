@@ -409,17 +409,21 @@ async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes }
   // Free-text bookings (Intelligence Bar, lead booking without a catalog
   // pick): exact key / name / short_name only, the first tier of
   // resolveServiceType — a partial match would refuse unrelated services.
+  const { RETIRED_SALE_SERVICE_KEYS, retiredSaleKeyForLabel, labelMayNameRetiredSale } = require('./pricing-engine/retired-sale-catalog');
+  // Only names that could be a retired row cost a catalog read.
   const names = new Set((serviceTypes || [])
-    .filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().toLowerCase()));
+    .filter(labelMayNameRetiredSale).map((t) => t.trim().toLowerCase()));
   if (!ids.size && !names.size) return [];
-  const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
+  // Loose variants ("Quarterly Tree & Shrub", "T&S 4x") name the row too.
+  const labelKeys = new Set([...names].map(retiredSaleKeyForLabel).filter(Boolean));
   const retiredRows = await db('services')
     .whereIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
     .select('id', 'service_key', 'name', 'short_name');
   const lower = (v) => String(v || '').trim().toLowerCase();
   const retired = (Array.isArray(retiredRows) ? retiredRows : []).filter((r) => ids.has(String(r.id))
     || names.has(lower(r.name)) || (r.short_name && names.has(lower(r.short_name)))
-    || [...names].some((n) => n.replace(/\s+/g, '_') === r.service_key));
+    || [...names].some((n) => n.replace(/\s+/g, '_') === r.service_key)
+    || labelKeys.has(r.service_key));
   if (!retired.length) return [];
   const retiredIds = retired.map((r) => r.id);
   const held = customerId && UUID_RE.test(String(customerId))

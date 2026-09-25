@@ -105,7 +105,38 @@ function isSellableTreeShrubTier(tier) {
   return !!(entry && !entry.hidden);
 }
 
+// Free-text labels that name a retired row without its exact catalog name
+// ("Quarterly Tree & Shrub", "T&S 4x", "tree and shrub - quarterly"), keyed
+// by the retired service_key they mean. Used by the shared booking gate
+// (service-library retiredServicesNotHeldBy) for id-less writes.
+const TREE_SHRUB_LABEL_RE = /\btree\s*(?:&|and|\+|\/)?\s*shrubs?\b|\bt\s*&\s*s\b/i;
+const QUARTERLY_CADENCE_RE = /\bquarterly\b|\b4\s*x\b|\b4\s*visits?\b|\bevery\s+(?:3|three)\s+months?\b/i;
+const RETIRED_SALE_LABEL_MATCHERS = {
+  tree_shrub_quarterly: (text) => TREE_SHRUB_LABEL_RE.test(text) && QUARTERLY_CADENCE_RE.test(text),
+};
+
+function retiredSaleKeyForLabel(text) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+  for (const [key, matches] of Object.entries(RETIRED_SALE_LABEL_MATCHERS)) {
+    if (RETIRED_SALE_SERVICE_KEYS.has(key) && matches(text)) return key;
+  }
+  return null;
+}
+
+// Cheap pre-check before a catalog read: can this free text name a retired
+// row at all? True for a matcher hit or a retired key spelled out, and always
+// true while any retired key lacks a label matcher (its exact name could be
+// anything).
+function labelMayNameRetiredSale(text) {
+  if (typeof text !== 'string' || !text.trim()) return false;
+  if ([...RETIRED_SALE_SERVICE_KEYS].some((key) => !RETIRED_SALE_LABEL_MATCHERS[key])) return true;
+  return !!retiredSaleKeyForLabel(text)
+    || RETIRED_SALE_SERVICE_KEYS.has(text.trim().toLowerCase().replace(/\s+/g, '_'));
+}
+
 module.exports = {
+  labelMayNameRetiredSale,
+  retiredSaleKeyForLabel,
   RETIRED_SALE_SERVICE_KEYS,
   isRetiredTreeShrubTier,
   isSellableTreeShrubTier,
