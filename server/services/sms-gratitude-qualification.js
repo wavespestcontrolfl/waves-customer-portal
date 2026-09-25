@@ -60,7 +60,23 @@ const SOURCE_FILES = Object.freeze([
   'server/config/models.js',
   'server/config/feature-gates.js',
 ]);
+// Every module on the canonical send pipeline (router, policy, validators,
+// providers, reservations) is pinned as a tree rather than file by file, so a
+// new or changed delivery guard always invalidates an old pass.
+const SOURCE_DIRS = Object.freeze(['server/services/messaging']);
 const ROOT = path.join(__dirname, '..', '..');
+
+function listSources(relativeDir) {
+  return fs.readdirSync(path.join(ROOT, relativeDir), { withFileTypes: true }).flatMap((entry) => {
+    const relative = `${relativeDir}/${entry.name}`;
+    if (entry.isDirectory()) return listSources(relative);
+    return entry.isFile() && entry.name.endsWith('.js') ? [relative] : [];
+  });
+}
+
+function pinnedSourceFiles() {
+  return [...new Set([...SOURCE_FILES, ...SOURCE_DIRS.flatMap(listSources)])].sort();
+}
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -86,7 +102,7 @@ function same(left, right) {
 
 function sourceSha256() {
   const hash = crypto.createHash('sha256');
-  for (const relative of SOURCE_FILES) {
+  for (const relative of pinnedSourceFiles()) {
     hash.update(relative).update('\0').update(fs.readFileSync(path.join(ROOT, relative))).update('\0');
   }
   return hash.digest('hex');
@@ -125,7 +141,7 @@ async function readCurrent({ dbi, sourceDigest }) {
     voiceProfileTextSha256: appliedVoiceProfile
       ? sha256(String(appliedVoiceProfile.profile_text || '')) : null,
     sourceSha256: sourceDigest,
-    sourceFiles: [...SOURCE_FILES],
+    sourceFiles: pinnedSourceFiles(),
   };
   return {
     pins,
