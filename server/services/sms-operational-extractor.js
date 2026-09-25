@@ -21,7 +21,10 @@ const SCHEMA = {
     additional_properties: {
       type: 'array', maxItems: 8,
       items: { type: 'object', additionalProperties: false,
-        required: ['address_line1', 'address_line2', 'city', 'state', 'zip', 'quote'],
+        // OpenAI strict mode requires EVERY property key in `required`
+        // (nullable optionals are expressed as type ['string','null']); a
+        // missing key is a 400 on every call, so `label` is listed too.
+        required: ['address_line1', 'address_line2', 'city', 'state', 'zip', 'quote', 'label'],
         properties: { ...Object.fromEntries(['address_line1', 'address_line2', 'city', 'state', 'zip', 'quote']
           .map((field) => [field, { type: field === 'address_line1' || field === 'quote' ? 'string' : ['string', 'null'], maxLength: 900 }])),
           label: { type: ['string', 'null'], maxLength: 100 },
