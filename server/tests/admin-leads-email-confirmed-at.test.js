@@ -103,6 +103,16 @@ describe('PUT /admin/leads/:id stamps email_confirmed_at only on a real email ch
     expect(captured.update.email_confirmed_at).toBeUndefined();
   });
 
+  test('a legacy mixed-case stored address re-saved unchanged does not stamp it (normalized compare)', async () => {
+    const captured = {};
+    primeUpdate(captured, { id: 'lead-1', status: 'new', email: ' Same@Example.com ' });
+    await withServer(async (baseUrl) => {
+      const res = await putLead(baseUrl, { email: 'same@example.com' });
+      expect(res.status).toBe(200);
+    });
+    expect(captured.update.email_confirmed_at).toBeUndefined();
+  });
+
   test('an unrelated field edit (status/notes) never stamps it — the whole point of the fix', async () => {
     const captured = {};
     primeUpdate(captured, { id: 'lead-1', status: 'new', email: 'original@example.com' });

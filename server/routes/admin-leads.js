@@ -1163,7 +1163,11 @@ router.put('/:id', async (req, res, next) => {
       // row's plain updated_at. admin-triage.js's emailDisagreementConfirmed
       // reads this for customer-less voicemail leads (no first_touch_holds
       // row to retarget) as the only available correction signal.
-      if (updates.email !== undefined && updates.email !== current.email) {
+      // Compared normalized (pre-push audit P1): updates.email is already
+      // trimmed + lowercased, so a legacy mixed-case stored value re-saved
+      // unchanged must not read as a correction and falsely confirm a card.
+      const currentEmailKey = String(current.email || '').trim().toLowerCase() || null;
+      if (updates.email !== undefined && updates.email !== currentEmailKey) {
         updates.email_confirmed_at = new Date();
       }
       const statusChanged = updates.status && updates.status !== current.status;
