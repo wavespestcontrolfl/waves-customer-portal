@@ -226,6 +226,19 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
       report,
     ] }).reason).toBe('earlier_open_context');
   });
+  test.each([
+    'Your receipt: https://example.invalid/receipt/abc',
+    'Payment received',
+    "We've completed your service",
+  ])('a hand-typed closure caption with media still abstains: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...manual(body), mediaCount: 1 }] }).reason).toBe('media_or_unknown');
+  });
+  test("an automated row stored as 'manual' is not held to the hand-typed pending rules", () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...manual('Your appointment is Friday'), humanAuthored: false, createdAt: '2030-01-10T14:58:00Z' },
+      report,
+    ] }).eligible).toBe(true);
+  });
   test('a hand-typed receipt link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Your receipt: https://example.invalid/receipt/abc')] }).eligible).toBe(true);
   });

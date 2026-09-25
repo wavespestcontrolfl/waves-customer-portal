@@ -121,7 +121,7 @@ const asksForMoney = text => maskLinks(String(text || '')).split(/[.,!?;\n]+|\s[
 const manualClosure = (text, manualReply, row) => manualReply && row.mediaCount === 0
   && text.trim() !== '' && !asksForMoney(text);
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
-  || (row.messageType === MANUAL_MESSAGE_TYPE && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text) || asksForMoney(text)));
+  || (isHandTyped(row) && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text) || asksForMoney(text)));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
 const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! We got your bank payment for invoice [\w-]+\. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does\.$/u;
 
@@ -161,6 +161,9 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
   const manualReply = isHandTyped(previous);
   if (manualCourtesy(body, manualReply)) return deny('courtesy_already_sent');
   const invalidClosure = [
+    // Checked before every closure fallback: a typed caption such as "Your
+    // receipt: <link>" says nothing about what the attachment asks for.
+    [() => manualReply && previous.mediaCount !== 0, 'media_or_unknown'],
     [() => !bankAcknowledgement && outboundPending(body, previous), 'outbound_needs_attention'],
     [() => !bankAcknowledgement && !manualClosure(body, manualReply, previous) && !AUTOMATED_CLOSURE_TYPES.has(previous.messageType)
       && !CLOSED_OUTBOUND_RE.test(body), 'closure_not_established'],
