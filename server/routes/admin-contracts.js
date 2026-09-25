@@ -672,6 +672,79 @@ router.post('/:id/cancel', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Certified-operator countersignature on a signed termite annual protection
+// agreement (owner ruling 2026-09-25, A-14): a RECORD step after the
+// customer signs. It never gates activation, charging, or visit creation —
+// those stay entirely on the customer's own e-signature (the sign-before-pay
+// activation slice is #4819 and is untouched here). Restricted to the
+// annual key, only after the customer has signed, idempotent under the row
+// lock (a second attempt 409s rather than silently no-opping, so the admin
+// UI can tell the difference between "just countersigned" and "already
+// was"). Admin-only via this router's router.use(adminAuthenticate,
+// requireAdmin).
+router.post('/:id/countersign', async (req, res, next) => {
+  try {
+    const now = new Date();
+    const { ANNUAL_TEMPLATE_KEY } = require('../services/termite-program-agreement');
+    let response;
+    let countersignedId = null;
+
+    await db.transaction(async (trx) => {
+      const contract = await trx('customer_contracts')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!contract) {
+        response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (contract.contract_type !== 'document_template' || contract.document_template_key !== ANNUAL_TEMPLATE_KEY) {
+        response = { status: 400, body: { error: 'Only the Waves Subterranean Termite Protection annual agreement can be countersigned.' } };
+        return;
+      }
+      if (contract.status !== 'signed') {
+        response = { status: 409, body: { error: 'This agreement has not been signed by the customer yet.' } };
+        return;
+      }
+      if (contract.countersigned_at) {
+        response = { status: 409, body: { error: 'This agreement has already been countersigned.', countersignedAt: contract.countersigned_at } };
+        return;
+      }
+
+      // Typed-name evidence, validated exactly like the customer's typed
+      // signature (contracts-public.js /:token/sign) — the certified
+      // operator types their own name; it is never filled in for them.
+      const countersignerName = String(req.body?.name || '').trim();
+      if (countersignerName.length < 2 || countersignerName.length > 180) {
+        response = { status: 400, body: { error: 'Type your full name (2–180 characters) to countersign.' } };
+        return;
+      }
+
+      const updated = await trx('customer_contracts')
+        .where({ id: contract.id, status: 'signed' })
+        .whereNull('countersigned_at')
+        .update({
+          countersigned_at: now,
+          countersigned_by: req.technicianId || null,
+          countersigner_name: countersignerName,
+          countersigner_ip: req.ip || null,
+          countersigner_user_agent: req.get('user-agent') || null,
+          updated_at: now,
+        });
+      if (updated !== 1) {
+        response = { status: 409, body: { error: 'This agreement was just countersigned or changed — refresh and try again.' } };
+        return;
+      }
+      countersignedId = contract.id;
+      await insertEvent(trx, contract.id, contract.customer_id, 'countersigned', req, { countersignerName });
+    });
+
+    if (response) return res.status(response.status).json(response.body);
+    const updated = await loadContract(countersignedId);
+    res.json({ contract: serializeContract(updated), updated: true });
+  } catch (err) { next(err); }
+});
+
 router.post('/:id/renewal-notice', async (req, res, next) => {
   try {
     const contract = await loadContract(req.params.id);

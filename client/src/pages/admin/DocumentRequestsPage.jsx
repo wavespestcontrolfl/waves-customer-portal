@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Bell,
   FileClock,
   Link2,
   Mail,
   MessageSquare,
+  PenLine,
   RotateCcw,
   XCircle,
 } from "lucide-react";
@@ -62,12 +63,74 @@ function canAct(request) {
   return request?.contractType === "document_template" && !["signed", "cancelled", "voided"].includes(request.status);
 }
 
+// Waves Subterranean Termite Protection — annual agreement template key
+// (server/services/termite-program-agreement.js ANNUAL_TEMPLATE_KEY). Owner
+// ruling 2026-09-25 (A-14): a certified-operator countersignature is a
+// RECORD step after the customer signs — never a gate on activation/billing.
+const TERMITE_ANNUAL_TEMPLATE_KEY = "service_agreement.termite_annual_protection";
+
+function canCountersign(request) {
+  return request?.contractType === "document_template"
+    && request?.documentTemplateKey === TERMITE_ANNUAL_TEMPLATE_KEY
+    && request?.status === "signed"
+    && !request?.countersignedAt;
+}
+
+function CountersignBadge({ request }) {
+  if (request.countersignedAt) return <Badge tone="strong" className="ml-1">Countersigned</Badge>;
+  if (canCountersign(request)) return <Badge tone="alert" className="ml-1">Needs countersignature</Badge>;
+  return null;
+}
+
+function CountersignButton({ request, disabled, onClick }) {
+  if (!canCountersign(request)) return null;
+  return (
+    <Button size="sm" variant="primary" disabled={disabled} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); onClick(request); }}>
+      <PenLine size={13} className="mr-1" />
+      Countersign
+    </Button>
+  );
+}
+
+// The certified operator types their own name — evidence mirroring the
+// customer's typed e-signature; never pre-filled from the logged-in account.
+function CountersignDialog({ request, onClose, onConfirm }) {
+  const [name, setName] = useState("");
+  useEffect(() => { setName(""); }, [request]);
+  const ready = name.trim().length >= 2;
+  return (
+    <Dialog open={Boolean(request)} onClose={onClose} size="sm">
+      <DialogHeader><DialogTitle>Countersign agreement</DialogTitle></DialogHeader>
+      <DialogBody>
+        <p>
+          Countersign {request?.title || "this agreement"} for {customerName(request)} as the certified operator on
+          record? This records your countersignature only — it does not change billing, scheduling, or activation.
+        </p>
+        <Field label="Type your full name" className="mt-3">
+          <Input value={name} maxLength={180} autoComplete="name" onChange={(event) => setName(event.target.value)} />
+        </Field>
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose}>Not yet</Button>
+        <Button variant="primary" disabled={!ready} onClick={() => onConfirm(request, name)}>Countersign</Button>
+      </DialogFooter>
+    </Dialog>
+  );
+}
+
 // `embedded` (under ContractsPage): the hub owns the header card, so this
 // page hands its status tabs up via `onSecondaryNav` instead of rendering its
 // own header. Standalone rendering is unchanged.
 export default function DocumentRequestsPage({ embedded = false, onSecondaryNav } = {}) {
   const [cancelTarget, setCancelTarget] = useState(null);
-  const [status, setStatus] = useState("open");
+  const [countersignTarget, setCountersignTarget] = useState(null);
+  // ?status=<tab> preselects a tab (the countersign-needed bell links to
+  // ?tab=requests&status=signed); anything unrecognised falls back to Open.
+  const [searchParams] = useSearchParams();
+  const [status, setStatus] = useState(() => {
+    const requested = searchParams.get("status");
+    return STATUS_TABS.some((tab) => tab.key === requested) ? requested : "open";
+  });
   const [search, setSearch] = useState("");
   const [requests, setRequests] = useState([]);
   const [stats, setStats] = useState(null);
@@ -188,6 +251,23 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
     }
   };
 
+  const countersignRequest = async (request, name) => {
+    if (!request?.id || name.trim().length < 2) return;
+    setCountersignTarget(null);
+    setActionKey(`${request.id}:countersign`);
+    setError("");
+    setToast("");
+    try {
+      await api(`/admin/contracts/${request.id}/countersign`, { method: "POST", body: { name: name.trim() } });
+      setToast("Countersigned");
+      await loadRequests();
+    } catch (err) {
+      setError(err.message || "Could not countersign this agreement");
+    } finally {
+      setActionKey("");
+    }
+  };
+
   const copyLatestLink = async () => {
     if (!latestLink) return;
     await navigator.clipboard?.writeText(latestLink).catch(() => {});
@@ -294,6 +374,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
                         <Badge tone={statusTone(request.requestStatus || request.status)}>
                           {statusLabel(request.requestStatus || request.status)}
                         </Badge>
+                        <CountersignBadge request={request} />
                       </TD>
                       <TD data-label="Document">
                         <div className="min-w-0">
@@ -356,6 +437,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
                               </Button>
                             </>
                           )}
+                          <CountersignButton request={request} disabled={acting} onClick={setCountersignTarget} />
                         </div>
                       </TD>
                     </TR>
@@ -384,6 +466,11 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
           <Button variant="danger" onClick={() => cancelRequest(cancelTarget)}>Cancel request</Button>
         </DialogFooter>
       </Dialog>
+      <CountersignDialog
+        request={countersignTarget}
+        onClose={() => setCountersignTarget(null)}
+        onConfirm={countersignRequest}
+      />
     </UiSurface>
   );
 }

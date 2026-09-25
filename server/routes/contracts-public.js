@@ -319,6 +319,29 @@ router.post('/:token/sign', async (req, res, next) => {
       });
     }
 
+    // Termite annual protection agreements get a certified-operator
+    // countersignature as a RECORD step after the customer signs (owner
+    // ruling 2026-09-25, A-14) — ring the admin bell so Adam knows to
+    // countersign on the Contracts page. Staff-only; no customer comms, and
+    // this never gates activation/charging (that stays on the customer's
+    // own signature above). Fire-and-forget, deduped per contract.
+    const signedContract = response.body.contract;
+    if (signedContract.documentTemplateKey === require('../services/termite-program-agreement').ANNUAL_TEMPLATE_KEY) {
+      const NotificationService = require('../services/notification-service');
+      void NotificationService.notifyAdmin(
+        'document',
+        'Termite annual agreement signed — countersign needed',
+        `${signedContract.signedName} signed the Waves Subterranean Termite Protection annual agreement. Add your certified-operator countersignature on the Contracts page.`,
+        {
+          link: '/admin/contracts?tab=requests&status=signed',
+          dedupeKey: `termite-annual-countersign:${signedContract.id}`,
+          metadata: { customerId: signedContract.customerId, contractId: signedContract.id },
+        },
+      ).catch((notifyErr) => {
+        logger.warn(`[contracts-public] countersign bell failed for contract ${signedContract.id}: ${notifyErr.message}`);
+      });
+    }
+
     res.json(response.body);
   } catch (err) {
     // A locked re-verify inside the signing transaction rolled it back
