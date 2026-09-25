@@ -202,6 +202,10 @@ describe('service report — every shipped chip answers its own category (AW-06)
     const answer = answerServiceReportQuestion({ question: 'When is my next service?', data: pestData, nextAppointment });
     expect(answer).toMatch(/Your next appointment is/);
   });
+  test('"When will you come back?" is a scheduling question, not re-entry', () => {
+    const answer = answerServiceReportQuestion({ question: 'When will you come back?', data: pestData, nextAppointment });
+    expect(answer).toMatch(/Your next appointment is/);
+  });
 
   // --- Lawn V2 insight chips (category-specific, ReportViewPage.jsx QUESTION_BY_CATEGORY) ---
   test('chip "Am I watering the right amount?" answers with the weekly watering plan', () => {

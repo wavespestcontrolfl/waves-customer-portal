@@ -213,15 +213,20 @@ const reportLimiter = rateLimit({
 // Ask Waves privacy headers (audit "Additional gaps"): both report ask
 // endpoints answer with recorded-but-sensitive service/project facts and
 // must never be cached or indexed. Global Helmet already sets
-// Referrer-Policy — do not duplicate it here. Registered as router-level
-// middleware BEFORE the rate limiter below so it always runs on these two
-// paths, including on a 429 response.
+// Referrer-Policy — do not duplicate it here. Registered path-less, BEFORE
+// the rate limiter below, and matched on req.path instead of a `:token`
+// route path: a `:token` path would fire router.param('token') (the
+// suppression DB read) ahead of both this and the limiter, and a param-gate
+// 404 would then go out without these headers.
+const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/;
 function reportsAskPrivacyHeaders(req, res, next) {
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  if (REPORT_ASK_PATH_RE.test(req.path || '')) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  }
   next();
 }
-router.use(['/project/:token/ask', '/:token/ask'], reportsAskPrivacyHeaders);
+router.use(reportsAskPrivacyHeaders);
 
 router.use(reportLimiter);
 

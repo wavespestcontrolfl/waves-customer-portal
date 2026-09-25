@@ -9,7 +9,9 @@ const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../cons
 // affected) always win regardless of the rest of the wording, and their
 // plural forms are included (the old matcher had "pet" but missed "pets").
 const SAFETY_SUBJECT_RE = /\b(pets?|dogs?|cats?|kids?|child(?:ren)?)\b/;
-const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b|\bwait\b|\bgo(?:ing)?\s*back\b|\bcome\s*back\b|\bback\s*(?:out|outside|in|inside)\b/;
+// Bare "come back" / "go back" / "wait" are NOT cues: "When will you come
+// back?" is a scheduling question.
+const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b|\bback\s*(?:out|outside|in|inside)\b/;
 function isReentryIntent(q) {
   return SAFETY_SUBJECT_RE.test(q) || REENTRY_PHRASE_RE.test(q);
 }

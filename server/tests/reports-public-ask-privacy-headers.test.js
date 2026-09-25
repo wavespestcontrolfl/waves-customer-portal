@@ -137,6 +137,34 @@ describe('Ask Waves privacy headers on both report ask endpoints (AW-06 addition
     });
   });
 
+  test('the headers are set even when the router.param suppression gate itself answers 404', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'service_records') {
+        return chain({ first: jest.fn().mockResolvedValue({ id: 'sr-1', structured_notes: { typedReportDelivery: 'manual_review' } }) });
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/0123456789abcdef0123456789abcdef/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'What was applied today?' }),
+      });
+      expect(res.status).toBe(404);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    });
+  });
+
+  test('non-ask report routes do not get the ask privacy headers', async () => {
+    db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(undefined) }));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/0123456789abcdef0123456789abcdef/asking`, { method: 'POST' });
+      expect(res.headers.get('x-robots-tag')).toBeNull();
+    });
+  });
+
   test('a whitelisted explicit intent on the project ask route short-circuits free-text routing', async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
