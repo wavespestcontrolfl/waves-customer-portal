@@ -310,7 +310,9 @@ function readableOffPermittedVan(parsed) {
   const v = parsed.van;
   if (!(v && v.wrapped && v.body !== 'other')) return parsed.readableText;
   const vanPhrases = matchWrapText(v.wrapText || [], VAN_WRAP_ALLOWED_TEXT).complete;
-  return vanPhrases.length ? parsed.readableText.filter((t) => !matchWrapText([t], vanPhrases).matched.length) : parsed.readableText;
+  // The permitted van's own Ford oval reads as the word "Ford" — the same
+  // manufacturer badge the brand check already allows (Codex r11 P2 on #4785).
+  return parsed.readableText.filter((t) => !/^\s*ford\s*$/i.test(String(t || '')) && !(vanPhrases.length && matchWrapText([t], vanPhrases).matched.length));
 }
 // The verdict from a parsed answer — pure, so the screen itself stays the
 // guard + dispatch + parse (Codex r3 P2 on #4761: complexity).

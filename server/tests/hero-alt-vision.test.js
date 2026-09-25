@@ -586,6 +586,13 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(await screen({ van: van({ body: 'unsure', wrap_text: [] }) })).toMatchObject({ ok: true, reasons: [] });
   });
 
+  test('the word "Ford" read off the permitted van\'s badge is not stray OCR; on a wrong-body van it still is (Codex r11 P2 on #4785)', async () => {
+    const ok = await screen({ readable_text: ['Ford'], van: van({ wrap_text: [] }) });
+    expect(ok).toMatchObject({ ok: true, reasons: [] });
+    const wrong = await screen({ readable_text: ['Ford'], van: van({ wrap_text: [], body: 'other' }) });
+    expect(wrong.reasons).toContain('readable text: Ford');
+  });
+
   test('only a detection attributable EXCLUSIVELY to the permitted van is exempted — a mixed entry naming another surface or brand still fails (Codex r5 P2 on #4785)', async () => {
     const wrapped = van({ wrap_text: [] });
     const run = async (mark) => {
