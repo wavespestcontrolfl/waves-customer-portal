@@ -181,6 +181,15 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniform
   const vanExceptionClause = allowVanWrap ? ', and on the one wrapped van described below,' : '';
   const vanExceptionListClause = allowVanWrap ? ' or waves_logo_elsewhere' : '';
   const vanOtherPlaceClause = allowVanWrap ? ', chest or that one van' : ' or chest';
+  // The mirror image of vanExemptionClause: van_wrap_elsewhere's own
+  // definition ("WAVES"/"Lawn & Pest" anywhere other than the van) would
+  // otherwise also catch the technician's PERMITTED cap/chest logo — that
+  // exception lives in the uniform-logo rule above, which van_wrap_elsewhere
+  // knows nothing about, so a fully compliant answer describing a correctly
+  // branded technician there too would make vanWrapReasons reject the image
+  // (Codex r3 P2 on #4785). Only inserted when the uniform logo is ALSO
+  // allowed; van-wrap-only prompts are unaffected.
+  const vanElsewhereLogoExemptionClause = allowUniformLogo ? ' or on the technician\'s permitted cap/chest logo (already covered above)' : '';
   const uniformLogoRule = allowUniformLogo
     ? `
 - technicians: one entry PER uniformed technician in frame (empty array if none). For that person: cap_front_visible is true only if their cap FRONT is in frame and legible enough to judge for a logo (false when the head is cropped, from behind, or too small); chest_visible is true only if their shirt chest is in frame and legible enough to judge (false when turned away, cropped, or covered); logo_on lists where ${UNIFORM_LOGO_DESCRIPTION} appears on THAT person, each as exactly "cap", "right chest" (the wearer's right side, i.e. the side of their right arm) or "left chest".
@@ -191,7 +200,7 @@ EXCEPTION: that Waves logo on a technician's cap or shirt chest${vanExceptionCla
   const vanWrapRule = allowVanWrap
     ? `
 - van: null if there is NO van of any kind in the frame; otherwise an object describing THAT ONE van (there should be at most one): present is true; body judges the van's make/roof against a Ford Transit medium-roof cargo van specifically — Transit cues: a short hood, a black hexagon-mesh grille with a Ford oval badge, and a MEDIUM roof (taller than a car, shorter than a walk-in van) — report "ford_transit_medium_roof" only when those cues are clearly visible, "other" when the van is clearly a DIFFERENT body (e.g. a Mercedes Sprinter's long sloped nose and no Ford grille, a noticeably taller high-roof, or a different make entirely), and "unsure" when the van is too small, distant, angled, or obscured in the background to judge either way; wrapped is true only if that van visibly carries the graphic wrap (a light-colored cargo van with a sky-blue gradient, halftone dots, and a cartoon wave-character mascot) rather than a plain, unmarked body — false if the van is there but plain; wrap_text lists every distinct string of readable text painted on it (each as its own array entry, listed here and NOT under readable_text; empty if wrapped is false); wrap_mascot is true only if the wave mascot character (a blue wave shape wearing a red cap and overalls) is painted on it.
-- van_wrap_elsewhere: any of these Waves van-wrap elements — the wave mascot character, "WAVES", "Lawn & Pest", "Wave Goodbye to Pests!", a phone number, or "GoWavesFL.com" — appearing anywhere OTHER than on that one van (a second vehicle, a sign, a building, equipment, floating on its own), each named. Empty array if none.
+- van_wrap_elsewhere: any of these Waves van-wrap elements — the wave mascot character, "WAVES", "Lawn & Pest", "Wave Goodbye to Pests!", a phone number, or "GoWavesFL.com" — appearing anywhere OTHER than on that one van${vanElsewhereLogoExemptionClause} (a second vehicle, a sign, a building, equipment, floating on its own), each named. Empty array if none.
 EXCEPTION: that one van's own wrap graphics and its own wrap text are expected — do not list them under logos_or_brand_marks.`
     : '';
   return `Inspect this generated blog image and answer as strict JSON only, shape ${shape}.
@@ -292,8 +301,18 @@ function matchExclusion(detection, exclusions) {
 // guard + dispatch + parse (Codex r3 P2 on #4761: complexity).
 function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false } = {}) {
   const { reasons: logoReasons, misplaced } = allowUniformLogo ? uniformLogoReasons(parsed) : { reasons: [], misplaced: [] };
-  const { reasons: vanReasons, flagged: vanFlagged, matchedWrapText } = allowVanWrap ? vanWrapReasons(parsed) : { reasons: [], flagged: [], matchedWrapText: [] };
-  const rawLogos = allowUniformLogo ? [...misplaced, ...parsed.logos.filter((t) => !isAllowedUniformLogo(t))] : parsed.logos;
+  const { reasons: vanReasons, flagged: vanFlagged, matchedWrapText } = allowVanWrap ? vanWrapReasons(parsed, { allowUniformLogo }) : { reasons: [], flagged: [], matchedWrapText: [] };
+  // A generic brand-mark detection that explicitly names the one PERMITTED
+  // wrapped van (the model reported the van's own legitimate branding under
+  // logos_or_brand_marks too, instead of only under `van`) must not count
+  // as a violation either — the same double-report ambiguity fix 2 on
+  // #4785 already applies. Gated on allowVanWrap alone (independent of
+  // allowUniformLogo, unlike the misplaced-uniform-logo filter above), so
+  // the logo-only and no-allowance paths are byte-identical to before this
+  // fix — `isAttributedToPermittedVan` returns false whenever `allowVanWrap`
+  // never even ran vanWrapReasons and parsed.van stays whatever it parsed to.
+  const filterLogo = (t) => !(allowUniformLogo && isAllowedUniformLogo(t)) && !(allowVanWrap && isAttributedToPermittedVan(t, parsed.van));
+  const rawLogos = allowUniformLogo ? [...misplaced, ...parsed.logos.filter(filterLogo)] : parsed.logos.filter(filterLogo);
   // Text the model ALSO listed under the general readable_text (the same
   // on-van lettering reported twice) must not double-fail as stray OCR —
   // but only when it is VALID wrap text (matchWrapText already rejected
@@ -353,6 +372,16 @@ const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|
 // A LEFT-chest detection is never allowed: it is a misplaced mark, kept for
 // the reasons and the ranking (Codex r4 P2 on #4761).
 const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t) && !/\bleft\b/i.test(t);
+// Same belt, for the van: a generic logos_or_brand_marks detection that
+// EXPLICITLY names the van (the model reported the van's own legitimate
+// branding there too, instead of only under `van`) must not count as a
+// brand-mark violation — but only when the van wrap reference was actually
+// attached AND the van the model described really is the permitted one
+// (present, wrapped, and not a wrong body — Codex r3 P2 on #4785). A
+// non-Waves brand mentioned on the van (a competitor's mark) still fails —
+// this requires BOTH the Waves words AND the van mention, exactly like
+// isAllowedUniformLogo requires both the Waves words and a garment.
+const isAttributedToPermittedVan = (t, van) => Boolean(van) && van.wrapped && van.body !== 'other' && UNIFORM_LOGO_WORDS.test(t) && /\bvan\b/i.test(t);
 // The words inside the Waves logo. A readable_text entry is dropped only
 // when the model ALSO attributed that same string to the uniform logo under
 // uniform_logo_lettering — the model's own placement, not a blanket filter
@@ -409,7 +438,8 @@ function uniformLogoReasons({ technicians, elsewhere }) {
 //     caption matcher an infographic's caption gets (Codex r1 P2 on #4784 —
 //     a truncated match was previously discarded as "incomplete" and never
 //     consumed here, so it read as clean).
-// ── dedicated van-wrap text validator (Codex r2 P2 on #4785) ──────────
+// ── dedicated van-wrap text validator (Codex r2 P2, then Codex r3 P2, on
+// #4785) ────────────────────────────────────────────────────────────
 //
 // The generic matchCaptions() normalizer strips ALL punctuation before
 // comparing words, which is right for a caption but wrong for the wrap:
@@ -417,94 +447,85 @@ function uniformLogoReasons({ technicians, elsewhere }) {
 // "GoWavesFL-com" would read as "GoWavesFL.com". The wrap's five exact
 // strings need PUNCTUATION-SENSITIVE matching — case- and
 // whitespace-insensitive, but &, -, ., and ! must appear exactly where the
-// real wrap has them — while still accepting a caption legitimately split
-// across multiple OCR fragments (a distant phone number reported as
-// "941-241" + "2459" is still exactly right; "941-241" alone is a
-// TRUNCATION and still fails, same as before this fix).
+// real wrap has them.
 //
-// wrapSegments() decomposes a string into its alphanumeric WORDS and the
-// exact punctuation "gap" before/between/after each one (whitespace
-// collapsed out of the gap — only & - . ! are significant). gaps.length is
-// always words.length + 1: gaps[0] precedes the first word, gaps[i]
-// (0<i<words.length) sits between word i-1 and word i, and
-// gaps[words.length] follows the last word (e.g. the "!" after "Pests").
-function wrapSegments(str) {
-  const tokens = String(str || '').match(/[a-z0-9]+|[^a-z0-9]+/gi) || [];
-  const words = [];
-  const gaps = [];
-  let acc = '';
-  for (const t of tokens) {
-    if (/^[a-z0-9]+$/i.test(t)) {
-      gaps.push(acc.replace(/\s+/g, ''));
-      words.push(t.toLowerCase());
-      acc = '';
-    } else {
-      acc += t;
-    }
-  }
-  gaps.push(acc.replace(/\s+/g, ''));
-  return { words, gaps };
+// A first version (Codex r2 P2) validated punctuation only WITHIN each
+// individual reported fragment, never at the boundary BETWEEN two
+// fragments — so ['Lawn','Pest'], ['GoWavesFL','com'] and
+// ['941','241','2459'] all still passed, silently dropping the required
+// &, ., and hyphens exactly at the cut points (Codex r3 P2). The fix:
+// a split is legitimate ONLY at a place the canonical string actually has
+// WHITESPACE — never inside a run of non-space characters. Concretely,
+// canonicalChunks() splits a string on whitespace ONLY, so "Lawn & Pest"
+// becomes ["lawn","&","pest"] (three space-delimited chunks — the & has
+// space on both sides) while "941-241-2459" and "GoWavesFL.com" are each
+// ONE chunk (no whitespace inside them at all, so no split of either is
+// ever legitimate — a "941-241" + "2459" report now fails, exactly like
+// "GoWavesFL" + "com" always did). Each chunk keeps 100% of its own
+// characters (case aside), so an exact chunk-for-chunk, in-order match
+// (any number of REPORTED fragments, each itself split into chunks —
+// "Lawn &" + "Pest" and "Lawn" + "& Pest" both still legitimately place
+// the ampersand on one side of the space) is required; anything else,
+// including a chunk boundary that silently drops a required punctuation
+// character, fails.
+function canonicalChunks(str) {
+  return String(str || '').trim().split(/\s+/).filter(Boolean).map((c) => c.toLowerCase());
 }
 // matchWrapText(fragments, allowedText) → { strayText, incomplete, matched }
-//   strayText — fragments matching no allowed string's words in order at
-//   all, INCLUDING the right words with wrong punctuation between them
-//   (e.g. "Lawn-Pest", "GoWavesFL-com");
-//   incomplete — an allowed string some fragment(s) partially covered but
-//   never completed (a truncation, e.g. "941-241" alone);
+//   strayText — fragments matching no allowed string's chunks in order at
+//   all, INCLUDING the right words with wrong/dropped punctuation (e.g.
+//   "Lawn-Pest", "GoWavesFL-com", or "GoWavesFL" reported alone since
+//   "GoWavesFL.com" is a single, unsplittable chunk);
+//   incomplete — an allowed string some fragment(s) validly, partially
+//   covered but never completed (e.g. "Lawn" alone, or "Lawn" + "Pest"
+//   with the & silently dropped at their boundary);
 //   matched — the fragments (subset of the input) that DID validly match —
 //   consumed by screenVerdict to exempt the same string from the generic
 //   readable-text OCR check when it appears there too (fix 2 on #4785).
-// A fragment matches a canonical at word-offset `at` only when: its own
-// words equal the canonical's words there, in order; every gap STRICTLY
-// BETWEEN its own words matches the canonical's gap there exactly
-// (punctuation-sensitive); and — only when this fragment reaches the very
-// start or very end of the canonical — its own leading/trailing gap
-// matches the canonical's leading/trailing gap too. A gap that falls
-// entirely BETWEEN two separately-reported fragments (the hyphen between
-// "941-241" and "2459") is never required, exactly like a space between
-// two caption fragments was never required before this fix.
 function matchWrapText(fragments, allowedText) {
-  const allowed = allowedText.map(wrapSegments);
-  const covered = allowed.map(() => new Set());
-  const cursor = allowed.map(() => 0);
+  const allowedSeqs = allowedText.map(canonicalChunks).filter((seq) => seq.length);
+  const covered = allowedSeqs.map(() => new Set());
+  const cursor = allowedSeqs.map(() => 0);
+  const runAt = (chunks, seq, from) => {
+    for (let i = from; i + chunks.length <= seq.length; i += 1) {
+      if (chunks.every((c, j) => seq[i + j] === c)) return i;
+    }
+    return -1;
+  };
   const matched = [];
   const strayText = [];
   for (const raw of fragments) {
-    const frag = wrapSegments(raw);
-    if (!frag.words.length) { strayText.push(raw); continue; }
+    const chunks = canonicalChunks(raw);
+    if (!chunks.length) { strayText.push(raw); continue; }
     let ok = false;
-    allowed.forEach((canon, c) => {
-      const len = frag.words.length;
-      for (let at = cursor[c]; at + len <= canon.words.length; at += 1) {
-        let good = true;
-        for (let j = 0; j < len && good; j += 1) {
-          if (canon.words[at + j] !== frag.words[j]) good = false;
-        }
-        for (let j = 1; j < len && good; j += 1) {
-          if (canon.gaps[at + j] !== frag.gaps[j]) good = false;
-        }
-        if (good && at === 0 && frag.gaps[0] !== canon.gaps[0]) good = false;
-        if (good && at + len === canon.words.length && frag.gaps[len] !== canon.gaps[at + len]) good = false;
-        if (!good) continue;
-        ok = true;
-        for (let j = 0; j < len; j += 1) covered[c].add(at + j);
-        cursor[c] = at + len;
-        break;
-      }
+    allowedSeqs.forEach((seq, c) => {
+      const at = runAt(chunks, seq, cursor[c]);
+      if (at < 0) return;
+      ok = true;
+      for (let j = 0; j < chunks.length; j += 1) covered[c].add(at + j);
+      cursor[c] = at + chunks.length;
     });
     if (ok) matched.push(raw);
     else strayText.push(raw);
   }
-  const incomplete = allowed.map((canon, c) => (covered[c].size && covered[c].size < canon.words.length ? allowedText[c] : null)).filter(Boolean);
+  const incomplete = allowedSeqs.map((seq, c) => (covered[c].size && covered[c].size < seq.length ? allowedText[c] : null)).filter(Boolean);
   return { strayText, incomplete, matched };
 }
-function vanWrapReasons({ van, vanWrapElsewhere }) {
+// allowUniformLogo: a defensive belt matching the prompt's own exemption
+// (Codex r3 P2 on #4785) — an entry that is actually describing the
+// technician's PERMITTED cap/chest logo (the same isAllowedUniformLogo test
+// the general logos_or_brand_marks filter already uses) must not count as
+// "off the van" just because the model reported it here too, but only when
+// the uniform logo is allowed at all; without that allowance such a mark
+// would never be permitted anywhere, so it stays a genuine violation.
+function vanWrapReasons({ van, vanWrapElsewhere }, { allowUniformLogo = false } = {}) {
   const reasons = [];
   const flagged = [];
   let matchedWrapText = [];
-  if (vanWrapElsewhere.length) {
-    reasons.push(`van wrap off the van: ${vanWrapElsewhere.slice(0, 3).join(', ')}`);
-    flagged.push(...vanWrapElsewhere.map((t) => `van wrap off the van: ${t}`));
+  const elsewhere = allowUniformLogo ? vanWrapElsewhere.filter((t) => !isAllowedUniformLogo(t)) : vanWrapElsewhere;
+  if (elsewhere.length) {
+    reasons.push(`van wrap off the van: ${elsewhere.slice(0, 3).join(', ')}`);
+    flagged.push(...elsewhere.map((t) => `van wrap off the van: ${t}`));
   }
   // The wrap on the WRONG vehicle shape (a Sprinter, a high-roof, any
   // generic cargo body) is a violation independent of everything else —
@@ -622,6 +643,7 @@ module.exports._internals = {
   SCREEN_MAX_TOKENS_WITH_LOGO_AND_VAN_WRAP,
   screenMaxTokens,
   isAllowedUniformLogo,
+  isAttributedToPermittedVan,
   classifyPlacement,
   uniformLogoReasons,
   vanWrapReasons,
@@ -629,7 +651,7 @@ module.exports._internals = {
   VAN_BODY_VALUES,
   matchCaptions,
   matchWrapText,
-  wrapSegments,
+  canonicalChunks,
   isLogoWord,
   UNIFORM_LOGO_DESCRIPTION,
 };
