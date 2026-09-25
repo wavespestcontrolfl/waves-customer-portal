@@ -4,7 +4,7 @@
 // the consistency layer must never fabricate a "Follow-up already planned"
 // card from routine sign-off prose.
 
-const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
+const { answerServiceReportQuestion, answerAppliedToday } = require('../services/service-report/report-assistant');
 const { reconcileLawnReport } = require('../services/service-report/report-consistency');
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 
@@ -194,5 +194,127 @@ describe('watering questions answer with the weekly plan when the report carries
   test('no plan → existing routing (irrigation → re-entry) is unchanged', () => {
     const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: null } } };
     expect(answerServiceReportQuestion({ question: 'What is my irrigation plan?', data })).not.toMatch(/This week:/);
+  });
+});
+
+// AW-03 (ask-waves-audit-20260925): the "What was applied today?" answer must
+// come from data.applications[].product — the same approved/frozen facts
+// report-data.js's attachApprovedReportProductFacts already resolved for the
+// report display — and never a second, ungated live products_catalog lookup.
+// These fixtures mirror exactly what buildServiceReportV1ResponseData
+// attaches to each application's `product` (server/services/service-report/
+// report-data.js ~L3616-3651) for the three cases report-data.js
+// distinguishes: frozen-at-completion, explicitly unapproved (frozen null or
+// live-unapproved), and a genuinely pre-freeze/legacy report resolved live.
+describe('service report answers only approved/frozen product facts (AW-03)', () => {
+  function appliedTodayData(product) {
+    return {
+      serviceDisplayName: 'Pest Control',
+      applications: [{
+        id: 'app-1',
+        product,
+        applicationArea: 'Exterior perimeter',
+        method: 'perimeter_spray',
+      }],
+      dynamicContext: {},
+    };
+  }
+
+  test('a frozen REI survives a later, unapproved catalog edit', () => {
+    // At completion the catalog said REI 4 and was approved, so
+    // reportIdentitySnapshot.productFacts froze reentry_hours at 4. A later
+    // catalog edit to REI 24 (even if also marked unapproved) must never
+    // change what this report says, because attachApprovedReportProductFacts
+    // never re-consults the live catalog for a frozen product id.
+    const answer = answerAppliedToday({
+      data: appliedTodayData({
+        name: 'Audit Product',
+        active_ingredient: 'Frozen ingredient',
+        epa_reg: 'synthetic-epa',
+        reentry_hours: 4,
+        facts_approved: true,
+      }),
+    });
+    expect(answer).toContain('label REI 4 hr');
+    expect(answer).not.toMatch(/label REI 24 hr/);
+  });
+
+  test('an explicitly unapproved product never falls back to a live value', () => {
+    // report-data.js leaves reentry_hours/rainfast_minutes/epa/active
+    // ingredient null for a product that is not approved for the report
+    // (frozen-null at completion, or live-unapproved on a legacy report) —
+    // the assistant must render nothing rather than invent a value.
+    const answer = answerAppliedToday({
+      data: appliedTodayData({
+        name: 'Unapproved Product',
+        active_ingredient: '',
+        epa_reg: '',
+        reentry_hours: null,
+        rainfast_minutes: null,
+        facts_approved: false,
+      }),
+    });
+    expect(answer).not.toMatch(/label REI/i);
+    expect(answer).not.toMatch(/rainfast/i);
+    expect(answer).not.toMatch(/EPA Reg\./);
+    expect(answer).not.toMatch(/active ingredient/i);
+  });
+
+  test('a genuinely pre-freeze/legacy report still shows the currently-approved facts', () => {
+    // No reportIdentitySnapshot ever existed for this report, so
+    // attachApprovedReportProductFacts falls back to the CURRENT approved
+    // catalog row (report-data.js's documented legacy-compatibility path).
+    // The assistant treats this exactly like a frozen product — it only
+    // reads whatever report-data.js already resolved onto app.product.
+    const answer = answerAppliedToday({
+      data: appliedTodayData({
+        name: 'Legacy Approved Product',
+        active_ingredient: 'Bifenthrin',
+        epa_reg: 'legacy-epa-1',
+        reentry_hours: 12,
+        rainfast_minutes: 60,
+        facts_approved: true,
+      }),
+    });
+    expect(answer).toContain('label REI 12 hr');
+    expect(answer).toContain('rainfast about 1 hr');
+    expect(answer).toContain('EPA Reg. legacy-epa-1');
+  });
+});
+
+// AW-07 (ask-waves-audit-20260925): the product insight matcher must not use
+// a brand name alone as chemistry/category evidence — a LESCO fertilizer
+// must never be described as a spray adjuvant, and with no verified
+// ingredient/category match, no explanation is offered at all.
+describe('product insight matcher classifies from approved facts, not brand name (AW-07)', () => {
+  test('a LESCO fertilizer is not described as a spray adjuvant', () => {
+    const answer = answerAppliedToday({
+      data: {
+        serviceDisplayName: 'Lawn Care',
+        applications: [{
+          id: 'fertilizer-app',
+          product: { name: 'LESCO 20-0-0 60% CRN Plus Micros Turfgrass Liquid Fertilizer', active_ingredient: 'Nitrogen 20-0-0 + micros' },
+          method: 'broadcast_spray',
+        }],
+        dynamicContext: {},
+      },
+    });
+    expect(answer).not.toMatch(/spray adjuvant/i);
+    expect(answer).not.toMatch(/not the insecticide/i);
+  });
+
+  test('an approved-catalog adjuvant is still classified from its category, not its name', () => {
+    const answer = answerAppliedToday({
+      data: {
+        serviceDisplayName: 'Pest Control',
+        applications: [{
+          id: 'adjuvant-app',
+          product: { name: 'LESCO Wetting Concentrate', product_type: 'wetting_agent', category: 'surfactant' },
+          method: 'perimeter_spray',
+        }],
+        dynamicContext: {},
+      },
+    });
+    expect(answer).toMatch(/spray adjuvant/i);
   });
 });

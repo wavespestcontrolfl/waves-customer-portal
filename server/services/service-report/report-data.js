@@ -196,6 +196,9 @@ function approvedReportProductFacts(catalog = {}) {
     precautionSummary: catalog.customer_precaution_summary || catalog.customer_safety_summary || catalog.pet_kid_guidance_text || null,
     reentrySummary: catalog.reentry_summary || catalog.reentry_text || null,
     reentryHours: Number.isFinite(Number(catalog.rei_hours)) ? Number(catalog.rei_hours) : null,
+    // Same approval/freeze gate as reentryHours (AW-03): the report Q&A
+    // assistant reads this frozen value instead of a live catalog lookup.
+    rainfastMinutes: Number.isFinite(Number(catalog.rainfast_minutes)) ? Number(catalog.rainfast_minutes) : null,
     irrigationNotes: catalog.irrigation_notes || null,
     // Tri-state: true = water in after application (e.g. fertilizer), false =
     // keep off / do not water in (e.g. Celsius WG post-emergent), null = unknown.
@@ -276,6 +279,7 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
         'reentry_text',
         'reentry_summary',
         'rei_hours',
+        'rainfast_minutes',
         'irrigation_notes',
         'irrigation_required',
         'label_verified_at',
@@ -3632,6 +3636,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         precaution_summary: product.approved_report_product_facts?.precautionSummary || null,
         reentry_summary: product.approved_report_product_facts?.reentrySummary || null,
         reentry_hours: product.approved_report_product_facts?.reentryHours ?? null,
+        rainfast_minutes: product.approved_report_product_facts?.rainfastMinutes ?? null,
         irrigation_notes: product.approved_report_product_facts?.irrigationNotes || null,
         irrigation_required: product.approved_report_product_facts?.irrigationRequired ?? null,
         label_verified_at: product.approved_report_product_facts?.labelVerifiedAt || null,
