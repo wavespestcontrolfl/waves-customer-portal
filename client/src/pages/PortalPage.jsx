@@ -5770,7 +5770,7 @@ function BillingChannelFieldset({ field, channels, available, saving, onToggle, 
         ].map((option) => {
           const checked = channels.includes(option.value);
           const unavailable = !available[option.value];
-          const lastSelected = checked && channels.length === 1;
+          const lastSelected = checked && !channels.some((channel) => channel !== option.value && available[channel]);
           const disabled = saving || lastSelected || (unavailable && !checked);
           return (
             <label key={option.value} style={{ minHeight: 44, display: 'inline-flex', alignItems: 'center', gap: 8, color: B.glassNavy, cursor: disabled ? 'not-allowed' : 'pointer', opacity: unavailable ? 0.58 : 1 }}>
@@ -6646,8 +6646,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     setBillingChannels((previous) => {
       const current = previous[fieldKey] || [];
       if (current.includes(channel)) {
-        if (current.length === 1) return previous;
-        return { ...previous, [fieldKey]: current.filter((value) => value !== channel) };
+        const next = current.filter((value) => value !== channel);
+        if (!next.some((value) => billingChannelAvailability[value]
+          && (fieldKey !== 'paymentConfirmationChannels' || value !== 'sms' || !paymentSmsOff))) return previous;
+        return { ...previous, [fieldKey]: next };
       }
       if (!billingChannelAvailability[channel]) return previous;
       return { ...previous, [fieldKey]: BILLING_CHANNEL_ORDER.filter((value) => current.includes(value) || value === channel) };
@@ -6657,6 +6659,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 
   const saveBillingPrefs = () => {
     if (billingPrefsSaving) return;
+    const changedBillingFields = billingChannelsAvailable
+      ? BILLING_CHANNEL_FIELDS.filter((field) => !sameBillingChannels(billingChannels[field.key], savedBillingChannels[field.key]))
+      : [];
     const leavesEmailWithoutRecipient = BILLING_CHANNEL_FIELDS.some((field) => {
       const channels = billingChannels[field.key] || [];
       return channels.includes('email') && !channels.some((channel) => channel !== 'email'
@@ -6671,11 +6676,13 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       setBillingPrefsStatus('error');
       return;
     }
+    if (changedBillingFields.some((field) => !billingChannels[field.key].some((channel) => billingChannelAvailability[channel]
+      && (field.key !== 'paymentConfirmationChannels' || channel !== 'sms' || !paymentSmsOff)))) {
+      setBillingPrefsStatus('channel-required');
+      return;
+    }
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
-    const changedBillingFields = billingChannelsAvailable
-      ? BILLING_CHANNEL_FIELDS.filter((field) => !sameBillingChannels(billingChannels[field.key], savedBillingChannels[field.key]))
-      : [];
     const requestedBillingChannels = Object.fromEntries(changedBillingFields.map((field) => [field.key, [...billingChannels[field.key]]]));
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
@@ -7643,9 +7650,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           </details>
         )}
 
-        {(billingPrefsStatus === 'error' || billingPrefsStatus === 'email-required') && (
+        {['error', 'email-required', 'channel-required'].includes(billingPrefsStatus) && (
           <div role="alert" style={{ marginBottom: 10, fontSize: 14, fontWeight: 700, color: B.red, background: `${B.red}12`, borderRadius: 8, padding: '10px 14px' }}>
-            {billingPrefsStatus === 'email-required'
+            {billingPrefsStatus === 'channel-required' ? 'Choose at least one available delivery method for each changed category.' : billingPrefsStatus === 'email-required'
               ? 'Add an available Text or App option to each Email-only category before clearing this address.'
               : 'Couldn’t save your billing preferences. Please try again.'}
           </div>

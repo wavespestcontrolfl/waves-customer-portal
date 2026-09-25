@@ -149,6 +149,22 @@ it('prevents removing the final channel with mouse or keyboard activation', asyn
   expect(text).toBeChecked();
 });
 
+it.each([
+  ['Payment receipts', 'paymentConfirmationChannels', ['sms', 'push'], 'App', { paymentConfirmationSms: false }],
+  ['Invoices', 'invoiceChannels', ['email', 'sms'], 'Text', { emailEnabled: false }],
+])('keeps the last usable channel in %s when another selected channel is unavailable', async (group, key, channels, usable, overrides) => {
+  prefs = { ...prefs, smsEnabled: true, emailEnabled: true, [key]: channels, ...overrides };
+  render(<BillingTab customer={customer} />);
+  await screen.findByRole('group', { name: group });
+  const lastUsable = billingChannel(group, usable);
+  expect(lastUsable).toBeDisabled();
+  fireEvent.click(lastUsable);
+  expect(lastUsable).toBeChecked();
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await screen.findByRole('button', { name: 'Saved', exact: true });
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty(key);
+});
+
 it('rolls billing choices back when saving fails', async () => {
   prefs.smsEnabled = true;
   prefs.emailEnabled = true;
