@@ -6,7 +6,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null,
   isEnabled: (gate) => gate === 'composerReceiptLinks',
   gateEnvValue: () => false,
 }));

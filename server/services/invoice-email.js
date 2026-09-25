@@ -25,6 +25,7 @@ const PayerService = require('./payer');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 const { isEnabled } = require('../config/feature-gates');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -148,7 +149,17 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   if (!customer) return { ok: false, error: 'Customer not found' };
-  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
+  let prefsLookupFailed = false;
+  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
+    prefsLookupFailed = true;
+    return null;
+  });
+  if (options.billingDeliveryCategory && !invoice.payer_id) {
+    if (prefsLookupFailed) return { ok: false, error: 'Invoice delivery preferences unavailable', code: 'billing_prefs_unavailable' };
+    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
+      return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
+    }
+  }
 
   // Third-party Bill-To reroute. When this invoice carries a payer snapshot,
   // attach the payer (for the PDF bill-to block) and — unless the operator
@@ -383,6 +394,19 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
             const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
             if (ownership.ok !== true) return ownership;
           }
+          if (options.billingDeliveryCategory && !current.payer_id) {
+            let freshPrefs;
+            try {
+              freshPrefs = await trx('notification_prefs').where({ customer_id: current.customer_id }).first();
+            } catch {
+              boundaryRefusal = { code: 'billing_prefs_unavailable',
+                reason: 'Invoice delivery preferences unavailable', retryable: true };
+              return { ok: false, ...boundaryRefusal };
+            }
+            if (billingChannelAllowed(freshPrefs || {}, options.billingDeliveryCategory, 'email') === false) {
+              return { ok: false, reason: 'billing_email_not_selected' };
+            }
+          }
           providerStarted = true;
           await dispatch();
           providerAccepted = true;
@@ -404,6 +428,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       // provider-error recovery run instead of reporting a pre-dispatch guard
       // refusal and making the queued attempt immediately retryable.
       if (providerStarted) throw err;
+      if (boundaryRefusal) return { ok: false, ...boundaryRefusal };
       return { ok: false, reason: err.message, code: err.code };
     }
   };
@@ -458,6 +483,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${refusal.reason || 'blocked/suppressed'})`);
         return { ok: false, blocked: !!result.blocked, error: refusal.reason || 'Email suppressed',
           code: refusal.code, deliveryOutcome: boundaryRefusal ? 'not_sent' : result.deliveryOutcome,
+          ...(refusal.retryable ? { retryable: true } : {}),
           recipient: recipientPayload };
       }
       await markEmailDelivered();
@@ -494,7 +520,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       }],
     }));
     if (verdict.ok !== true) return { ok: false, error: verdict.reason, code: verdict.code,
-      deliveryOutcome: verdict.code === 'INVOICE_VISIT_TERMINAL' ? 'not_sent' : undefined,
+      deliveryOutcome: boundaryRefusal ? 'not_sent' : undefined,
+      ...(verdict.retryable ? { retryable: true } : {}),
       recipient: recipientPayload };
     await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
@@ -583,7 +610,17 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
-  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
+  let prefsLookupFailed = false;
+  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
+    prefsLookupFailed = true;
+    return null;
+  });
+  if (options.billingDeliveryCategory && !invoice.payer_id) {
+    if (prefsLookupFailed) return { ok: false, error: 'Receipt delivery preferences unavailable', code: 'billing_prefs_unavailable' };
+    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
+      return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
+    }
+  }
   // Third-party Bill-To: a payer-billed receipt may go ONLY to the payer's AP
   // inbox — the receipt PDF/page exposes the payer's payment-method last4, so we
   // never fall back to the homeowner. No usable AP email => no recipient
@@ -706,9 +743,27 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         idempotencyKey,
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
+        ...(options.billingDeliveryCategory && !invoice.payer_id ? {
+          withProviderHandoff: async (dispatch) => {
+            const current = await db('invoices').where({ id: invoice.id }).first();
+            if (!current || current.status !== 'paid' || current.payer_id) return { ok: false };
+            const freshPrefs = await db('notification_prefs').where({ customer_id: current.customer_id }).first();
+            if (billingChannelAllowed(freshPrefs || {}, options.billingDeliveryCategory, 'email') === false) {
+              return { ok: false };
+            }
+            const freshCustomer = await db('customers').where({ id: current.customer_id }).first();
+            const [freshRecipient] = getReceiptEmailRecipients(freshCustomer, freshPrefs || {});
+            if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
+            await dispatch();
+            return { ok: true };
+          },
+        } : {}),
       });
       if (result?.blocked) {
         return { ok: false, error: result.reason || 'Email suppressed', blocked: true };
+      }
+      if (result?.sent === false) {
+        return { ok: false, error: result.reason || 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' };
       }
       if (result?.deduped) {
         logger.info(`[invoice-email] Receipt email deduped for ${invoice.invoice_number} (idempotencyKey=${idempotencyKey})`);

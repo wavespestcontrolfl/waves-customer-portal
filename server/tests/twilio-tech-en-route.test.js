@@ -44,6 +44,7 @@ jest.mock("../services/appointment-reminders", () => ({
   // Channel resolution defaults to the prefs row the sender loaded — tests set
   // en_route_channel / tech_arrived_channel directly on that row.
   resolveChannelPrefsRow: jest.fn(async (customerId, prefs) => prefs),
+  buildServiceLabel: jest.fn(async (scheduledServiceId, parentName) => parentName || "service"),
   apptChannel: (value) => (value === "email" || value === "both" ? value : "sms"),
 }));
 
@@ -334,6 +335,7 @@ describe("TwilioService.sendTechEnRoute", () => {
       {
         first_name: "Sam",
         tech_name: "Bryan",
+        service_type: "service",
       },
       { workflow: "tech_arrived", entity_type: "customer", entity_id: "cust-1" },
     );

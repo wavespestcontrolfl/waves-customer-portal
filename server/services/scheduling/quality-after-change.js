@@ -15,7 +15,7 @@ function repairEnabled() {
 }
 const enabled = () => gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS') || repairEnabled();
 
-async function refreshScheduleQualityAfterChange({ jobId, dates = [], trx = null, now } = {}, conn = db) {
+async function refreshScheduleQualityAfterChange({ jobId, customerIds = [], dates = [], trx = null, now } = {}, conn = db) {
   if (!enabled()) return { status: 'gate_off' };
   // Transactional writers call this without awaiting it inside their write.
   // A released savepoint is not a commit; a rollback creates no snapshot.
@@ -31,7 +31,12 @@ async function refreshScheduleQualityAfterChange({ jobId, dates = [], trx = null
     const lastDate = etDateString(addETDays(changedAt, 30));
     const affectedDates = await conn.transaction(async snapshot => {
       const job = jobId ? await snapshot('scheduled_services').where('id', jobId).first('scheduled_date') : null;
-      return [...new Set([...dates, job?.scheduled_date].map(toDateStr))]
+      const customerStops = customerIds.length ? await snapshot('scheduled_services')
+        .whereIn('customer_id', customerIds)
+        .whereBetween('scheduled_date', [today, lastDate])
+        .whereNotIn('status', require('./day-quality').QUALITY_EXCLUDED_STATUSES)
+        .distinct('scheduled_date') : [];
+      return [...new Set([...dates, job?.scheduled_date, ...customerStops.map(row => row.scheduled_date)].map(toDateStr))]
         .filter(date => validCalendarDate(date) && date > today && date <= lastDate).sort();
     });
     if (!affectedDates.length) return { status: 'outside_planning_horizon' };

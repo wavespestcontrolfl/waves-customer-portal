@@ -35,6 +35,7 @@ const StripeService = require('./stripe');
 const { CARD_HOLD } = require('./pricing-engine/constants');
 const { isInvoiceCollectibleStatus } = require('./invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
+const { explicitBillingChannels } = require('./billing-delivery-channels');
 
 function isCardHoldEnabled() {
   const flag = process.env.ONE_TIME_CARD_HOLD;
@@ -2340,6 +2341,11 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // every-channel kill switch.
   const smsOptedOut = prefs?.payment_confirmation_sms === false || prefs?.sms_enabled === false;
   const smsChannel = ['sms', 'both', 'push'].includes(channel);
+  const explicitChannels = explicitBillingChannels(prefs || {}, 'payment_receipt');
+  const wantsEmail = explicitChannels ? explicitChannels.includes('email') : null;
+  const wantsRoutedMessage = explicitChannels
+    ? (explicitChannels.includes('sms') || explicitChannels.includes('push'))
+    : null;
 
   // Emailed PDF receipt — attempted FIRST so an email-only channel whose
   // email leg deterministically can't deliver (portal-wide email opt-out or
@@ -2348,17 +2354,31 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // the consent gate / deposit twin). A transient provider error does NOT
   // fall back — the invoice stays unstamped for the admin needs-receipt path.
   let emailDeterministicMiss = prefs?.email_enabled === false;
+  let emailAttempted = false;
   let emailDelivered = false;
-  if (!receiptOptOut && !emailDeterministicMiss && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))) {
+  if (!receiptOptOut && !emailDeterministicMiss && (wantsEmail === true
+    || (wantsEmail === null && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))))) {
+    emailAttempted = true;
     try {
       // Same idempotency key as the receipt-delivery queue's email leg — a
       // held SMS below hands this invoice to that queue, and its 8:00 AM
       // job re-attempts BOTH legs; the shared key makes its email leg
       // dedupe against this delivered one instead of emailing a second
       // copy of the receipt.
-      const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `receipt_email_auto:${invoice.id}` });
+      const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, {
+        idempotencyKey: `receipt_email_auto:${invoice.id}`,
+        billingDeliveryCategory: 'payment_receipt',
+      });
       if (emailResult?.ok) {
         emailDelivered = true;
+      } else if (wantsRoutedMessage === false
+        && ['billing_email_not_selected', 'receipt_handoff_aborted'].includes(emailResult?.code)) {
+        // The choice changed after our first read. Let the durable receipt
+        // owner reload it instead of losing this one-shot fee receipt.
+        await require('./receipt-delivery-queue').enqueueReceiptDelivery({
+          invoiceId: invoice.id,
+          source: 'no_show_fee_preference_change',
+        });
       } else if (emailResult?.error === 'No receipt recipient email') {
         emailDeterministicMiss = true;
       }
@@ -2369,9 +2389,10 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // opt-out — a texts opt-out is enforced by the policy, so the doomed
   // fallback attempt for an opted-out customer is skipped up-front).
   let smsQueuedForWindow = false;
-  if (!receiptOptOut && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))) {
+  if (!receiptOptOut && (wantsRoutedMessage === true
+    || (wantsRoutedMessage === null && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))))) {
     try {
-      await require('./invoice').sendReceipt(invoice.id);
+      await require('./invoice').sendReceipt(invoice.id, { hasEmailLeg: emailAttempted });
     } catch (e) {
       // Send-window hold: the money and paid invoice are already committed
       // and this path has no retry — hand the receipt to the durable

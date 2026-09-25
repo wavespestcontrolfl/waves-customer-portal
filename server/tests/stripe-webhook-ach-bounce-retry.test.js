@@ -355,6 +355,10 @@ describe('payment_failed durable notification enqueue', () => {
       message: 'declined', code: 'card_declined', payment_method: { type: 'card' },
     } });
     await expect(handlePaymentIntentFailed(cardFailure, 'evt_card')).rejects.toThrow('enqueue outage');
-    expect(lifecycleEmail.sendPaymentFailed).toHaveBeenCalledWith({ paymentIntentId: 'pi_ach_1', attemptId: 'ch_1' });
+    expect(lifecycleEmail.sendPaymentFailed).toHaveBeenCalledWith(expect.objectContaining({
+      paymentIntentId: 'pi_ach_1',
+      attemptId: 'ch_1',
+      customerInitiated: true,
+    }));
   });
 });

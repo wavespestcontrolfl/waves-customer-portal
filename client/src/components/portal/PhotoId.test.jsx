@@ -203,6 +203,7 @@ describe('identify flow', () => {
     expect(prefill.note).toBe('Found it by the AC unit');
     expect(prefill.photos).toHaveLength(1);
     expect(prefill.photos[0].data).toMatch(/^data:image\/jpeg;base64,/);
+    expect(prefill.photoIdSource).toEqual({ type: 'pest', id: 'r1' });
   });
 
   it('shows the server 429 message and returns to the photos step so the customer can retry', async () => {
@@ -355,6 +356,15 @@ describe('result rendering per type + next-step CTAs', () => {
 });
 
 describe('stale-flow safety (Codex r1 P1s)', () => {
+  it('warns when a saved identification has no persisted photo rows', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [{ id: 'p1', type: 'pest', headline: 'Ants', created_at: '2026-09-02T00:00:00Z' }] });
+    api.getPhotoId.mockResolvedValue({ id: 'p1', type: 'pest', result: { label: 'Ants' }, photos: [], next_step: { kind: 'none', title: 'Result' } });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(await screen.findByText('Ants'));
+    expect(await screen.findByRole('status')).toHaveTextContent('Original photos are unavailable. Add a new photo to your request.');
+  });
+
   it('closing the sheet mid-identify discards a late response instead of resurrecting it on reopen', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
     let resolvePost;
@@ -394,6 +404,11 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
       id: 'l1', type: 'lawn', created_at: '2026-09-02T00:00:00Z',
       result: { grass_type: 'St. Augustine', scores: { turf_density: 70, weed_coverage: 10, color_health: 7 }, signals: [], observations: 'x' },
       next_step: { kind: 'request', title: 'Send this in', body: 'y', request_prefill: { category: 'lawn_concern', location: 'front_yard', note: 'z' } },
+      photos: [
+        { id: 'saved-1', url: 'https://signed.example/photo-1.jpg', mime_type: 'image/jpeg' },
+        { id: 'saved-2', url: null, mime_type: 'image/jpeg' },
+        { id: 'saved-3', url: 'https://signed.example/broken.jpg', mime_type: 'image/jpeg' },
+      ],
     });
     const onOpenRequest = vi.fn();
     render(<Harness onOpenRequest={onOpenRequest} />);
@@ -414,10 +429,21 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     fireEvent.click(await screen.findByText('Front lawn'));
     await screen.findByText('Send this in');
+    expect(screen.getByAltText('Saved photo 1')).toHaveAttribute('src', 'https://signed.example/photo-1.jpg');
+    expect(screen.getByRole('status')).toHaveTextContent('One saved photo could not be loaded.');
+    fireEvent.error(screen.getByAltText('Saved photo 2'));
+    await waitFor(() => expect(screen.queryByAltText('Saved photo 2')).not.toBeInTheDocument());
+    expect(screen.getByRole('status')).toHaveTextContent('2 saved photos could not be loaded.');
+    expect(screen.queryByAltText('Saved photo 1')).not.toHaveAttribute('src', expect.stringContaining('data:image/jpeg'));
     fireEvent.click(screen.getByRole('button', { name: 'Request service' }));
 
     expect(onOpenRequest).toHaveBeenCalledTimes(1);
-    expect(onOpenRequest.mock.calls[0][0].photos).toHaveLength(0);
+    expect(onOpenRequest.mock.calls[0][0].photos).toEqual([
+      { preview: 'https://signed.example/photo-1.jpg', photoId: 'saved-1', name: 'Photo ID photo 1' },
+      { preview: null, photoId: 'saved-2', name: 'Photo ID photo 2' },
+      { preview: null, photoId: 'saved-3', name: 'Photo ID photo 3' },
+    ]);
+    expect(onOpenRequest.mock.calls[0][0].photoIdSource).toEqual({ type: 'lawn', id: 'l1' });
   });
 
   it('switching type mid photo-read resets the busy flag instead of leaving Add stuck disabled', async () => {
@@ -630,5 +656,6 @@ describe('request handoff falls back to live inputs (Codex r7 P2)', () => {
     expect(call.location).toBe('');
     expect(call.note).toBe('');
     expect(call.photos).toHaveLength(0);
+    expect(call.photoIdSource).toEqual({ type: 'pest', id: 'h1' });
   });
 });

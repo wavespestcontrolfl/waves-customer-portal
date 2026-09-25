@@ -17133,6 +17133,10 @@ const CallRecordingProcessor = {
             last_name: capitalizeName(extracted.last_name),
             id: customerId,
           },
+          // Consultation-booking email block (dark behind
+          // GATE_LEAD_INSPECTION_LINK) needs a lead id to render; `leadId`
+          // is this same call's own leads-table row, already resolved above.
+          context: { leadId: leadId || undefined },
         });
         beehiivResult = { local: r };
       } catch (err) {

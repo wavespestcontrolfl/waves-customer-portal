@@ -252,10 +252,20 @@ async function generateFeaturedImage({ title, topic, keyword, slug }) {
     if (hero.screen?.checked && !hero.screen.ok) {
       logger.warn(`[content] Featured image for "${title}" still failed the text/logo screen after a retry (${hero.screen.reasons.join('; ')}) — operator review`);
     }
-    // The row keeps only the data URL: stamp the logo-reference marker on it
-    // so the publish-time re-screen allows the uniform logo (see
-    // astro-publisher stampLogoReference).
-    return hero.logoReference ? AstroPublisher._internals.stampLogoReference(hero.dataUrl) : hero.dataUrl;
+    // The row keeps only the data URL: stamp the logo-reference and/or
+    // van-wrap-reference markers on it so the publish-time re-screen allows
+    // the uniform logo and/or the van wrap (see astro-publisher
+    // stampLogoReference / stampVanWrapReference). generatePlannedImage
+    // opts every yard-plan hero into both references, so a plan that places
+    // a van in frame can come back with vanWrapReference: true here just
+    // like an autonomous hero (Codex r2 P2 on #4785 — this marker was
+    // previously dropped, so an admin-generated van-wrap hero re-screened
+    // at publish time without allowVanWrap and its own legitimate branding
+    // was reported as forbidden).
+    let dataUrl = hero.dataUrl;
+    if (hero.logoReference) dataUrl = AstroPublisher._internals.stampLogoReference(dataUrl);
+    if (hero.vanWrapReference) dataUrl = AstroPublisher._internals.stampVanWrapReference(dataUrl);
+    return dataUrl;
   } catch (err) {
     // Match the legacy throw contract — single-line Error the
     // /blog/:id/regenerate-image handler stores against the post.
@@ -1525,3 +1535,4 @@ module.exports.CONTENT_LIMITS = CONTENT_LIMITS;
 module.exports.parseBoundedInt = parseBoundedInt;
 module.exports.normalizeGenerateBody = normalizeGenerateBody;
 module.exports.normalizeBlogUpdates = normalizeBlogUpdates;
+module.exports._internals = { generateFeaturedImage };

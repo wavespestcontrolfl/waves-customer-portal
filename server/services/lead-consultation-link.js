@@ -295,4 +295,5 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
 
 module.exports = {
   isUsPhone,
+  leadLinkRefusal,
   buildLeadConsultationLink, buildLeadConsultationSmsLine, consultationUrlForLead, consultationSmsLineFor, consultationLinkAvailable };

@@ -458,6 +458,28 @@ describe('sms gratitude qualification', () => {
     'server/services/sms-response-policy.js',
     'server/utils/phone.js',
     'server/services/sms-suggest-mode.js',
+    'server/services/sms-graduation.js',
+    'server/services/scheduler.js',
+    'server/services/messaging/send-customer-message.js',
+    'server/services/messaging/providers/twilio-sms.js',
+    'server/services/twilio.js',
+    'server/services/messaging/push-channel-routing.js',
+    'server/services/push-notifications.js',
+    'server/services/notification-service.js',
+    'server/services/messaging/send-manual-customer-sms.js',
+    'server/services/messaging/review-ask-reservation.js',
+    'server/services/messaging/provider-handoff-reservation.js',
+    'server/routes/admin-drafts.js',
+    'server/routes/admin-communications.js',
+    'server/routes/tech-line.js',
+    'server/services/intelligence-bar/comms-tools.js',
+    'server/config/feature-gates.js',
+    'server/config/twilio-numbers.js',
+    'server/services/messaging/policy.js',
+    'server/services/messaging/validators/consent.js',
+    'server/services/messaging/validators/suppression.js',
+    'server/services/messaging/validators/line-type.js',
+    'server/services/messaging/validators/identity.js',
   ])('changes to direct safety dependency %s invalidate a pass', async (relative) => {
     const store = memoryDb();
     const { qualification } = loadQualification({ dbi: store });
@@ -476,6 +498,35 @@ describe('sms gratitude qualification', () => {
         .resolves.toMatchObject({ qualified: false, reason: 'pins_changed' });
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  test('a new module on the canonical send pipeline invalidates a pass', async () => {
+    const store = memoryDb();
+    const { qualification } = loadQualification({ dbi: store });
+    const { id } = await qualification.createGratitudeQualification({ dbi: store.dbi });
+    await qualification.runGratitudeQualification({ dbi: store.dbi, runId: id });
+    const fs = require('fs');
+    const path = require('path');
+    const validators = path.resolve(__dirname, '../services/messaging/validators');
+    const added = path.join(validators, 'new-guard.js');
+    const readdir = fs.readdirSync.bind(fs);
+    const read = fs.readFileSync.bind(fs);
+    const dirSpy = jest.spyOn(fs, 'readdirSync').mockImplementation((dir, ...args) => {
+      const entries = readdir(dir, ...args);
+      return String(dir) === validators
+        ? [...entries, { name: 'new-guard.js', isDirectory: () => false, isFile: () => true }]
+        : entries;
+    });
+    const fileSpy = jest.spyOn(fs, 'readFileSync').mockImplementation((filename, ...args) => (
+      String(filename) === added ? Buffer.from('module.exports = {};') : read(filename, ...args)
+    ));
+    try {
+      await expect(qualification.evaluateGratitudeQualification({ dbi: store.dbi }))
+        .resolves.toMatchObject({ qualified: false, reason: 'pins_changed' });
+    } finally {
+      dirSpy.mockRestore();
+      fileSpy.mockRestore();
     }
   });
 
