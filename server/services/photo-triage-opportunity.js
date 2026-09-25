@@ -365,7 +365,8 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
   // priced offer to quote mode; a watch-level finding keeps advice.
   const priced = await priceForCustomer(target, customer, { lead: signals.lead }).catch((err) => {
     logger.error(`[photo-triage-opportunity] pricing failed for customer ${customer?.id || 'none'}: ${err.message}`);
-    return { reason: 'no_offer' };
+    // Fail closed: ownership is unknown, so no quote ask (pre-push audit).
+    return { reason: 'offer_unavailable' };
   });
   if (!priced.quote) {
     reasons.push(priced.reason || 'no_offer');

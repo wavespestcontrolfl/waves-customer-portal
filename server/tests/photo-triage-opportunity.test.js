@@ -317,7 +317,7 @@ describe('gaugeOpportunity', () => {
     expect(result.reasons).toContain('quote_needs_review');
   });
 
-  test('offer core throws → advise (fail closed), never onsite, never a quote', async () => {
+  test('offer core throws → advise with offer_unavailable (fail closed, no quote ask), never onsite, never a quote', async () => {
     mockBuildOffer.mockRejectedValueOnce(new Error('boom'));
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
@@ -327,7 +327,7 @@ describe('gaugeOpportunity', () => {
       images: [],
     });
     expect(result.mode).toBe('advise');
-    expect(result.reasons).toContain('no_offer');
+    expect(result.reasons).toContain('offer_unavailable');
   });
 
   test('an active pest customer\'s bug photo runs the ownership check → owned → advise with no pitch', async () => {
