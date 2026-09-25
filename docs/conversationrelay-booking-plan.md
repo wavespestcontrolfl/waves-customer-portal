@@ -234,7 +234,10 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    just holds a little longer — never a guess.
 2. **Hold a sentence** — never send it progressively — when it contains a
    dollar amount (reusing `eval/voice-relay-spoken-checks`'s
-   `amountMentions`), a date/time expression, a negation, or a
+   `amountMentions`), ANY digit, a date/time expression (weekday/month
+   names, relative days and parts of day, week/month, spoken clock times like
+   "at nine" or "two o'clock", ordinals like "the fifteenth" — `DATE_TIME_RE`),
+   a negation, or a
    **commitment-or-success claim**: an explicit commitment verb
    (booked/scheduled/sent/charged/refunded/confirmed/reserved/created/
    completed/done/processed/…) OR a success phrase that asserts the same

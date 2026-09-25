@@ -17,7 +17,7 @@
  *   2. A completed sentence is HELD (never sent as a progressive chunk) when
  *      it contains a dollar amount (reusing eval/voice-relay-spoken-checks's
  *      amountMentions — the one regex bank this repo already trusts to
- *      recognize digit and spelled-out amounts, EN + ES), a date/time
+ *      recognize digit and spelled-out amounts, EN + ES), ANY digit or a date/time
  *      expression, a negation, or a COMMITMENT-OR-SUCCESS CLAIM: an explicit
  *      commitment verb (booked / scheduled / sent / charged / refunded /
  *      confirmed / ...) OR a success phrase that asserts the same thing
@@ -75,13 +75,31 @@ const BOUNDARY_RE = /[.!?]["'’)\]]?\s+/g;
 
 const NEGATION_RE = /\b(no|not|never|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|don['’]t|doesn['’]t|didn['’]t|won['’]t|wouldn['’]t|can['’]t|cannot|couldn['’]t|shouldn['’]t|nobody|nothing|none|without|no longer|not yet)\b/i;
 
+// Date/time: deliberately STRUCTURAL rather than a phrase list, since a
+// scheduling claim can be phrased endless ways. ANY digit holds (times,
+// ordinals like "the 15th", counts, addresses — a false hold only costs
+// latency). Beyond digits: weekday/month names, relative day/part-of-day and
+// calendar-unit words, and spelled-out clock times ("at nine", "two
+// o'clock", "nine thirty", "on the fifteenth"). Bare "one" is NOT matched on
+// its own so the "one moment" filler still streams.
+const HOUR_WORDS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
+const ORDINAL_WORDS = 'first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|'
+  + 'thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|thirtieth|'
+  + 'twenty[- ](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirty[- ]first';
 const DATE_TIME_RE = new RegExp(
-  '\\b('
-  + 'sunday|monday|tuesday|wednesday|thursday|friday|saturday|'
+  '\\d'
+  + '|\\b(?:'
+  + 'sunday|monday|tuesday|wednesday|thursday|friday|saturday|weekday|weekend|'
   + 'january|february|march|april|may|june|july|august|september|october|november|december|'
-  + 'today|tomorrow|tonight|yesterday|'
-  + '\\d{1,2}:\\d{2}\\s*(?:am|pm)?|\\d{1,2}\\s?(?:am|pm|a\\.m\\.|p\\.m\\.)'
-  + ')\\b',
+  + 'today|tomorrow|tonight|yesterday|morning|afternoon|evening|noon|midday|midnight|overnight|'
+  + 'week|weeks|month|months|asap|a\\.m\\.|p\\.m\\.|am|pm|o[\'’]clock|'
+  + `(?:at|by|around|until|till|after|before|from|between)\\s+(?:${HOUR_WORDS})\\b|`
+  + `(?:${HOUR_WORDS})\\s+(?:thirty|fifteen|forty[- ]five|o[\'’]clock)|`
+  // An ordinal is a date when it closes a phrase ("how about the fifteenth?")
+  // or follows on/by/for/until/after/before the — not "the first question".
+  + `the\\s+(?:${ORDINAL_WORDS})(?=\\s*(?:[.,!?;]|$|of\\b|at\\b|in\\b))|`
+  + `(?:on|by|for|until|till|after|before|from)\\s+the\\s+(?:${ORDINAL_WORDS})\\b`
+  + ')',
   'i',
 );
 

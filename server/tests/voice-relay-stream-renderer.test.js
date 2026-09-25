@@ -103,6 +103,27 @@ describe('relay-stream-renderer — pure chunking + hold policy', () => {
     expect(needsHold(sentence)).toBe(true);
   });
 
+  test.each([
+    'We can get you in next week.',
+    'How about the 15th?',
+    'How about the fifteenth?',
+    'We have a slot on the twenty-first at noon.',
+    'I have this afternoon open.',
+    'Tomorrow morning is free.',
+    'We could do it at noon.',
+    "Two o'clock is open.",
+    'I can have someone there at nine.',
+    'Nine thirty is available.',
+    'Unit 4B is on file.',
+  ])('a date/time or digit sentence is held: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(true);
+  });
+
+  test("the 'one moment' / 'the first thing' fillers still stream (bare spelled numbers and ordinals do not hold)", () => {
+    expect(needsHold('One moment while I pull that up. ')).toBe(false);
+    expect(needsHold('The first thing I will check is your account. ')).toBe(false);
+  });
+
   test('plain English filler is not caught by the Spanish hint', () => {
     expect(needsHold('Sure, let me check that for you. ')).toBe(false);
     expect(needsHold('One moment please. ')).toBe(false);
