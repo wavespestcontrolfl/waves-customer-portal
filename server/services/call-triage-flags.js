@@ -1050,6 +1050,11 @@ const UNAVAILABILITY_TERMS = [
   ' fully booked ', ' no openings ', ' no opening ', ' cant make ', ' can t make ',
   ' cannot make ', ' cannot ', ' unable ', ' not free ', ' has no time ',
   ' doesn t have time ', ' does not have time ',
+  // Codex round 11, P1 (:1331): "We are (all) booked." is the business
+  // stating it has NO capacity — the same meaning as "booked up"/"fully
+  // booked". Anchored to the first-person-plural subject so "You're all
+  // booked." / "It's booked." (the caller's slot) are untouched.
+  ' we are booked ', ' we re booked ', ' we are all booked ', ' we re all booked ',
 ];
 // Anchored companion to AUTHORIZATION_PARTY_OR_ACT_TERMS (codex round 4,
 // finding 1): "I need him to confirm the appointment." names no term from
@@ -1123,7 +1128,13 @@ const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = /\b(?:tell|ask|have|get) (?:him|her|th
 // sign off", "they must approve it", "you guys gotta authorize it". Also
 // covers the phrase-verb "give the go ahead" (no trailing-object variant
 // needed; the phrase already ends the verb).
-const SUBJECT_LED_APPROVAL_NEED_RE = /\b(?:you|he|she|they|someone|the owner|the homeowner|the client|y all|you guys) (?:need|needs|have|has|got|gotta|must)(?: to)? (?:confirm|approve|sign off|sign|okay|ok|authorize|give the go ahead)(?: it| on it)?\b/;
+// Codex round 11, P1 (:1126): FIRST-PERSON subjects — "I need to okay
+// it." / "We need to okay it." — are the same outstanding-approval shape
+// (the agent's side still has to authorize), so "i"/"we" join the subject
+// set. The auxiliary + authorization-verb anchor is unchanged: "We have
+// confirmed" / "I have okayed it" never match ("confirm"/"okay" must end at
+// a word boundary), so the past-tense reinforcement forms still ground.
+const SUBJECT_LED_APPROVAL_NEED_RE = /\b(?:i|we|you|he|she|they|someone|the owner|the homeowner|the client|y all|you guys) (?:need|needs|have|has|got|gotta|must)(?: to)? (?:confirm|approve|sign off|sign|okay|ok|authorize|give the go ahead)(?: it| on it)?\b/;
 // Unconditional declarative-poison check (codex rounds 2, 4, 7, 9 and this
 // round): either term list, or any anchored shape, anywhere in the sentence
 // poisons regardless of conditional structure. Restored as a real function
@@ -1328,7 +1339,12 @@ const MAY_DATE_RE = /\bmay (?:the )?\d{1,2}(?:st|nd|rd|th)?\b|\b\d{1,2}(?:st|nd|
 // appointment." uses "confirm", not "confirmed", so it never matches
 // either alternative — and as a PINNED sentence it fails
 // turnHasAffirmativeCommitmentForm regardless, since it states no slot).
-const REINFORCING_AFFIRMATION_RE = /^(?:(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:you re|you are|we re|we are|it s|it is|that s|that is) (?:all )?(?:confirmed|set|booked|good to go|on the books|locked in)|(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:we|i) (?:have )?(?:confirmed|booked|scheduled|got you (?:down|booked|scheduled)) (?:your|the|that|this) (?:appointment|visit|service|slot)(?: for you)?)$/;
+// Codex round 11, P1 (:1331): "booked" is accepted ONLY after a subject
+// that names the caller's slot (you/it/that). After "we re"/"we are" it is
+// a capacity statement ("We are all booked." = no openings), which also
+// poisons via UNAVAILABILITY_TERMS; the we-subject alternative keeps the
+// other completions ("We're all set.").
+const REINFORCING_AFFIRMATION_RE = /^(?:(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:(?:you re|you are|it s|it is|that s|that is) (?:all )?(?:confirmed|set|booked|good to go|on the books|locked in)|(?:we re|we are) (?:all )?(?:confirmed|set|good to go|on the books|locked in))|(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:we|i) (?:have )?(?:confirmed|booked|scheduled|got you (?:down|booked|scheduled)) (?:your|the|that|this) (?:appointment|visit|service|slot)(?: for you)?)$/;
 // True when a normalized sentence (already run through
 // stripBenignTopicPhrases) still talks about scheduling — either a term
 // from the phrase list above, the date-shaped "May" regex, or a bare 1-2
@@ -1532,15 +1548,38 @@ function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStart
   // [month, day] · [month, day, year] with a 2- or 4-digit slot year ·
   // [day] alone. Anything else — extra components, stray street numbers,
   // prices — fails closed.
+  //
+  // Date POSITION (codex round 11, P1 :1605): a lone number can read as
+  // either the hour or the day, but not when its position says which. For
+  // a 2026-08-02 10:00 slot, "Sunday the 10 at 10 o'clock" used to pass —
+  // each standalone 10 matched the hour, and the o'clock branch supplied
+  // the one time mention, so the cardinal DATE "the 10" was never checked
+  // against the slot's day. A lone number directly after "the", a weekday
+  // name, or a month name is a date and must equal the slot's day — unless
+  // the very next token marks it as an hour (am/pm/o'clock: "the 10 o'clock
+  // slot", "Sunday 10 am"). Ordinal forms ("the 10th") are validated by the
+  // ordinal loop above.
+  const DATE_POSITION_PREV = new Set(['the', ...WEEKDAY_NAMES, ...MONTH_NAMES]);
+  const HOUR_MARKER_NEXT = new Set(['am', 'pm', 'o', 'oclock']);
+  const toks = q.split(' ');
   const runs = [];
   let run = [];
-  for (const tok of q.split(' ')) {
-    if (/^\d{1,4}$/.test(tok)) run.push(Number(tok));
-    else if (run.length) { runs.push(run); run = []; }
-  }
-  if (run.length) runs.push(run);
+  let runStart = -1;
+  const closeRun = (endIdx) => {
+    runs.push({ nums: run, prev: toks[runStart - 1] || '', next: toks[endIdx] || '' });
+    run = [];
+  };
+  toks.forEach((tok, i) => {
+    if (/^\d{1,4}$/.test(tok)) {
+      if (!run.length) runStart = i;
+      run.push(Number(tok));
+    } else if (run.length) closeRun(i);
+  });
+  if (run.length) closeRun(toks.length);
   const h12 = Number(hour12);
-  for (const r of runs) {
+  for (const { nums: r, prev, next } of runs) {
+    const datePosition = r.length === 1 && DATE_POSITION_PREV.has(prev) && !HOUR_MARKER_NEXT.has(next);
+    if (datePosition && r[0] !== slotDay) return false;
     const ok = (r.length === 1 && (r[0] === h12 || r[0] === slotDay))
       || (r.length === 2 && r[0] === h12 && r[1] === 0)
       || (r.length === 2 && r[0] === wallMo && r[1] === slotDay)

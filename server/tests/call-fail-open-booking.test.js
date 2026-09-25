@@ -1457,6 +1457,62 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Codex round 11 (review of 73953c1db3): three P1s.
+  test.each([
+    "I need to okay it. We'll see you Sunday at noon.",
+    "We need to okay it. We'll see you Sunday at noon.",
+  ])('Codex round-12 regression: first-person approval requirement poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "We'll see you Sunday at noon. We are all booked.",
+    "We'll see you Sunday at noon. We're booked.",
+  ])('Codex round-12 regression: "We are (all) booked." is a capacity statement and poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "You're all booked. We'll see you Sunday at noon.",
+    "We're all set. We'll see you Sunday at noon.",
+    "You're confirmed. We'll see you Sunday at noon.",
+    "We confirmed your appointment. We'll see you Sunday at noon.",
+  ])('Codex round-12: reinforcing affirmations still ground — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('Codex round-12 regression: a cardinal date equal to the hour ("Sunday the 10 at 10 o\'clock") must match the slot day', () => {
+    const turn = "We'll see you Sunday the 10 at 10 o'clock.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: turn });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "We'll see you Sunday the 2 at 10 o'clock.",
+    "We'll see you Sunday at 10 o'clock.",
+    "We'll see you Sunday for the 10 o'clock.",
+  ])('Codex round-12: date-position numbers that match the slot (or are hour-marked) still bind — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: turn });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test('Codex round-10 regression: "Yeah, but no." still poisons (explicit rejection must not launder through shared vocabulary)', () => {
     const turn = "We'll see you Sunday at noon. Yeah, but no.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
