@@ -1081,7 +1081,7 @@ async function markEstimateManuallyAccepted({
           const { maybeCreateTermiteProgramAgreement } = require('./termite-program-agreement');
           const { formatDisplayDate } = require('../utils/date-only');
           const agreementStartLabel = agreementStartDate ? (formatDisplayDate(agreementStartDate, { fallback: '' }) || null) : null;
-          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: normalizedBillingTerm, startDateLabel: agreementStartLabel })
+          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: normalizedBillingTerm, startDateLabel: agreementStartLabel, startDateRaw: agreementStartDate })
             .catch((err) => logger.warn(`[estimate-manual-acceptance] termite agreement prep failed for estimate ${acceptedEstimate.id}: ${err.message}`));
         } catch (err) {
           logger.warn(`[estimate-manual-acceptance] termite agreement prep setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
