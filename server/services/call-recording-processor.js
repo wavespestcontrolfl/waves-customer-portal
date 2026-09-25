@@ -9674,6 +9674,15 @@ const CallRecordingProcessor = {
           callLogId: call.id,
           procToken,
           callSid,
+          // Codex round-6 P1: this call site never set invalidateClaims,
+          // silently defaulting to true — a full-agreement reconcile
+          // (cards: [], nothing live minted this pass) still ran
+          // repenHoldsForFreshEmailReview, converting an unmarked
+          // 'releasing' row and letting a provider call that ALREADY
+          // succeeded this pass be force-sent again. Same predicate as the
+          // enforce branch below: only invalidate when this pass actually
+          // mints a live email card.
+          invalidateClaims: needsConfirmation.includes('email_unverified') || needsConfirmation.includes('email_invalid'),
           cards: needsConfirmation.slice(0, 10)
             .filter((flag) => flag === 'email_unverified' || flag === 'email_invalid')
             .map((flag) => buildTriageItem({

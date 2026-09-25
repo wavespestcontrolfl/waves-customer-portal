@@ -42,6 +42,7 @@ const express = require('express');
 const db = require('../models/db');
 const triageRouter = require('../routes/admin-triage');
 const { resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
+const { lockTriageCall } = require('../utils/triage-locks');
 
 // Same generic in-memory table simulator as admin-triage-email-disagreement-resolve.test.js.
 function makeFakeDb(seed = {}) {
@@ -337,5 +338,108 @@ describe('POST /admin/triage/:id/confirm-email', () => {
     expect(resumeHeldFirstTouch).toHaveBeenCalledWith(expect.objectContaining({
       customerId: CUSTOMER_ID, callLogId: CALL_ID, source: 'triage_confirm_email',
     }));
+  });
+
+  // Codex round-6 P1 (finding at admin-triage.js:638): pre-Step-6 window —
+  // the disagreement card committed, but the processor's own hold-ledger
+  // write for this run has not landed yet (mintEmailReviewCardsFenced and
+  // recordFirstTouchHoldOwned are separate transactions in the same run).
+  describe('pre-Step-6 window: no hold row exists yet when the operator confirms', () => {
+    test('a zero-work correction marker is upserted, carrying the confirmed target and corrected_at', async () => {
+      const { conn, tables } = fixture({ first_touch_holds: [] });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      // Same shape as customer-email-fanout's own zero-work marker
+      // (propagateCustomerEmailChange): recordFirstTouchHold's later ON
+      // CONFLICT merge reads corrected_at/held_email off THIS row (its own
+      // correctness is covered by lead-first-touch-resume.test.js) instead
+      // of overwriting it with the fresh, unconfirmed extraction.
+      expect(tables.first_touch_holds).toHaveLength(1);
+      const marker = tables.first_touch_holds[0];
+      expect(marker.call_log_id).toBe(CALL_ID);
+      expect(marker.customer_id).toBe(CUSTOMER_ID);
+      expect(marker.held_email).toBe('janedoe@example.com');
+      expect(marker.corrected_at).toBeInstanceOf(Date);
+      expect(marker.held_drip).toBe(false);
+      expect(marker.held_newsletter).toBe(false);
+      expect(marker.status).toBe('released');
+      expect(tables.triage_items[0].status).toBe('resolved');
+    });
+  });
+
+  // Codex round-6 P1 (finding at admin-triage.js:679).
+  describe('customer-less path: no authoritative lead resolved', () => {
+    test('refuses with 409 LEAD_NOT_RESOLVED when neither a lead nor a hold channel confirmed anything', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [],
+        first_touch_holds: [], // table absent below simulates no hold channel at all
+        leads: [], // no metadata stamp, no SID match
+      });
+      // Simulate the hold ledger being entirely unavailable — the one
+      // shape where the round-6 P1 fix (an always-successful zero-work
+      // marker) cannot itself supply a confirmation signal.
+      conn.schema.hasTable = async (name) => name !== 'first_touch_holds' && Object.prototype.hasOwnProperty.call(tables, name);
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('LEAD_NOT_RESOLVED');
+      });
+      expect(tables.triage_items[0].status).toBe('open');
+    });
+
+    test('still succeeds via the hold marker when no lead resolves but a hold channel exists (the ordinary case)', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [],
+        first_touch_holds: [],
+        leads: [],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.first_touch_holds).toHaveLength(1);
+      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+      expect(tables.triage_items[0].status).toBe('resolved');
+    });
+  });
+
+  // Codex round-6 P2 (finding at admin-triage.js:649).
+  describe('lock ordering', () => {
+    test('locks every call of the customer, sorted, BEFORE anything else — never a single-call lock followed by the fanout\'s own customer-wide lock', async () => {
+      const OTHER_CALL_ID = 'call-2';
+      const { conn } = fixture({
+        call_log: [
+          { id: CALL_ID, review_status: 'open', customer_id: CUSTOMER_ID, twilio_call_sid: 'CA000' },
+          { id: OTHER_CALL_ID, review_status: 'open', customer_id: CUSTOMER_ID, twilio_call_sid: 'CA111' },
+        ],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      // The route's OWN first two lock acquisitions must already cover
+      // BOTH of the customer's calls, sorted — not just the clicked
+      // card's own call (which would let the fanout's later customer-wide
+      // lock acquire callY while a concurrent confirmation on callY holds
+      // it and waits on callX: the AB-BA deadlock this fix removes).
+      const firstTwoLockedIds = lockTriageCall.mock.calls.slice(0, 2).map((c) => c[1]);
+      expect(firstTwoLockedIds).toEqual([CALL_ID, OTHER_CALL_ID].sort());
+    });
   });
 });

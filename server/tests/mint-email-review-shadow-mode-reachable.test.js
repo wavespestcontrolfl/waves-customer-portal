@@ -82,4 +82,40 @@ describe('shadow-mode bridge always reaches mintEmailReviewCardsFenced (codex ro
     }
     expect(mintAsSibling).toBe(true);
   });
+
+  // Codex round-6 P1: this call site was hoisted (above) to always run,
+  // but it never set `invalidateClaims` — silently falling back to the
+  // function's `true` default. A full-agreement reconcile pass (cards: [],
+  // nothing live minted) then still ran repenHoldsForFreshEmailReview,
+  // converting an unmarked 'releasing' row and letting a provider call
+  // that ALREADY succeeded this pass be force-sent again. Both branches
+  // (the shadow-mode bridge and the enforce-mode fallback right after it)
+  // must explicitly compute invalidateClaims from their own pass's email
+  // reasons, never leave it absent.
+  test('every branch call site explicitly sets invalidateClaims (never left at the implicit true default)', () => {
+    const mintCalls = [];
+    walk(ast, (node) => { if (isMintCall(node)) mintCalls.push(node); });
+    // Only calls that pass a `cards` argument COMPUTED from a per-pass
+    // reason list (a call-expression chain, e.g. `x.slice(...).map(...)`)
+    // are in scope — the end-of-run recovery-marker call site always mints
+    // one fixed literal card (`cards: [buildTriageItem({...})]`), so its
+    // implicit default is correct there and it is not one of the two
+    // branches this guards.
+    const branchCalls = mintCalls.filter((node) => {
+      const argsObj = node.arguments[0];
+      const cardsProp = argsObj?.type === 'ObjectExpression'
+        && argsObj.properties.find((p) => p.key?.name === 'cards');
+      return cardsProp && cardsProp.value.type !== 'ArrayExpression';
+    });
+    expect(branchCalls.length).toBe(2);
+    for (const call of branchCalls) {
+      const argsObj = call.arguments[0];
+      const invalidateProp = argsObj.properties.find((p) => p.key?.name === 'invalidateClaims');
+      expect(invalidateProp).toBeTruthy();
+      // Must be computed from the pass's own evidence, not a bare literal
+      // (which would just re-hardcode true/false instead of reflecting
+      // whether this pass actually minted a live card).
+      expect(invalidateProp.value.type).not.toBe('BooleanLiteral');
+    }
+  });
 });

@@ -595,10 +595,26 @@ router.post('/:id/confirm-email', async (req, res) => {
     let outcome = null;
     let confirmedSource = null;
     await db.transaction(async (trx) => {
-      // Same lock order as every other card writer (owner ruling
-      // 2026-08-02): advisory call lock → first_touch_holds rows →
-      // triage_items.
-      await lockTriageCall(trx, item.call_log_id);
+      // Lock order (Codex round-6 P2): when this call belongs to a
+      // customer, take the SAME customer-wide, sorted advisory-lock set
+      // customer-email-fanout's propagateCustomerEmailChange takes
+      // internally (below, when the customer's email actually changes) —
+      // and take it FIRST, before anything else. A single-call lock here
+      // followed by the fanout's own customer-wide lock (every OTHER call
+      // of the same customer, sorted) is the classic AB-BA deadlock: two
+      // concurrent confirmations on different calls of the same customer
+      // would each hold one call's lock while waiting on the other's. A
+      // customer-less call has no such fan-out, so a single-call lock is
+      // enough. Re-acquiring the same locks inside propagateCustomerEmailChange
+      // itself is a same-transaction no-op, never a second wait.
+      const lockScope = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
+      if (lockScope?.customer_id) {
+        const customerCallRows = await trx('call_log').where({ customer_id: lockScope.customer_id }).select('id');
+        const sortedCallIds = [...new Set(customerCallRows.map((r) => r.id).filter(Boolean))].sort();
+        for (const callId of sortedCallIds) await lockTriageCall(trx, callId);
+      } else {
+        await lockTriageCall(trx, item.call_log_id);
+      }
       if (holdsTable) {
         await trx('first_touch_holds').where({ call_log_id: item.call_log_id }).forUpdate().select('id');
       }
@@ -631,11 +647,55 @@ router.post('/:id/confirm-email', async (req, res) => {
       // customer/lead diff to write. Pending/releasing only — a row that
       // already sent under an earlier cycle's address is a historical fact
       // this must not rewrite.
+      let holdConfirmed = false;
       if (holdsTable) {
-        await trx('first_touch_holds')
+        const holdUpdated = await trx('first_touch_holds')
           .where({ call_log_id: item.call_log_id })
           .whereIn('status', ['pending', 'releasing'])
           .update({ held_email: typedEmail, corrected_at: new Date(), updated_at: new Date() });
+        if (holdUpdated > 0) {
+          holdConfirmed = true;
+        } else {
+          // Pre-Step-6 window (Codex round-6 P1): no hold row exists for
+          // this call yet — the disagreement card committed, but the
+          // processor's own hold-ledger write for THIS run has not landed
+          // (mintEmailReviewCardsFenced and recordFirstTouchHoldOwned are
+          // separate transactions in the same run). Upsert the SAME
+          // zero-work correction marker customer-email-fanout's own
+          // propagateCustomerEmailChange uses for exactly this shape (a
+          // correction landing before Step 6) — recordFirstTouchHold's own
+          // ON CONFLICT merge treats a corrected_at at/after its run's
+          // start as an operator assertion and preserves this held_email
+          // instead of overwriting it with the fresh, unconfirmed
+          // extraction. Status 'released'/zero held flags: nothing was
+          // ever actually queued to send from this marker row; the real
+          // hold-ledger write flips it back to 'pending' on merge.
+          await trx('first_touch_holds')
+            .insert({
+              call_log_id: item.call_log_id,
+              customer_id: lockScope?.customer_id || null,
+              held_email: typedEmail,
+              held_drip: false,
+              held_newsletter: false,
+              status: 'released',
+              released_at: new Date(),
+              corrected_at: new Date(),
+              created_at: new Date(),
+              updated_at: new Date(),
+            })
+            .onConflict('call_log_id')
+            .ignore();
+          // A real row can race in between the update above and this
+          // insert (recordFirstTouchHoldOwned committing concurrently) —
+          // retarget it the same way, so a genuine pending/releasing row
+          // is never left un-corrected just because the marker insert lost
+          // that race.
+          await trx('first_touch_holds')
+            .where({ call_log_id: item.call_log_id })
+            .whereIn('status', ['pending', 'releasing'])
+            .update({ held_email: typedEmail, corrected_at: new Date(), updated_at: new Date() });
+          holdConfirmed = true;
+        }
       }
 
       // (b)/(c) The customer or lead record, through the normal channels.
@@ -674,9 +734,20 @@ router.post('/:id/confirm-email', async (req, res) => {
           await trx('leads').where({ id: leadId }).update({
             email: typedEmail, email_confirmed_at: new Date(), updated_at: new Date(),
           });
+        } else if (!holdConfirmed) {
+          // Codex round-6 P1: no authoritative lead resolved (no metadata
+          // stamp, and either zero or more than one live SID match) AND no
+          // hold channel confirmed anything either — nothing durable would
+          // back this confirmation. Refuse instead of resolving the card
+          // and leaving the lead email-less with no work item left to fix
+          // it (holdConfirmed is normally always true here once a
+          // first_touch_holds table exists — the (a) marker above already
+          // covers the ordinary "no lead, but the hold still confirms"
+          // case; this only fires when even that channel is unavailable).
+          outcome = 'lead_not_resolved';
+          return;
         }
-        // No resolvable lead: the hold write above (when one exists) is
-        // still the confirmation signal; nothing else to stamp.
+        // No resolvable lead but the hold confirmed: nothing else to stamp.
       }
 
       // (d) Stamp the evidence and resolve the card in the same request.
@@ -721,6 +792,12 @@ router.post('/:id/confirm-email', async (req, res) => {
     }
     if (outcome === 'not_applicable') {
       return res.status(400).json({ error: 'This card has no unresolved email disagreement to confirm.' });
+    }
+    if (outcome === 'lead_not_resolved') {
+      return res.status(409).json({
+        error: 'Could not identify a single lead for this call — reprocess the call or link it to a customer, then confirm again.',
+        code: 'LEAD_NOT_RESOLVED',
+      });
     }
 
     // Best-effort release, same discipline as transitionCore: only when no
@@ -1394,14 +1471,21 @@ router.post('/:id/verdict', async (req, res) => {
       // for the clicked item only, never for siblings, so there is no
       // version to bind an unrelated email card to — it is excluded from
       // the bulk resolve entirely (below) and survives for its own click.
-      if (verdict === 'accept' && emailReviewCard) {
+      // Codex round-6 P1 (finding on the Deny path): denyClearsEmailEarly
+      // ALSO treats the email as approved (it lifts a stale deny stamp and
+      // later triggers the same resumeHeldFirstTouch release as Accept —
+      // see denyClearsEmail below) whenever the operator denies on an
+      // unrelated field (address, service, scheduling, routing) — 'email'
+      // is not even a selectable wrong-field. The confirmation guard must
+      // run for that release path too, not only Accept.
+      if ((verdict === 'accept' || denyClearsEmailEarly) && emailReviewCard) {
         // Same guard as transitionCore's plain Resolve (codex round-2/3
-        // P1): an Accept call verdict bulk-resolves every open card on the
-        // call, including an email_unverified/invalid card carrying an
-        // unresolved V1/V2 disagreement — releasing that without confirmed
-        // provenance strands the hold forever (the sweep skips blank
-        // held_email rows) and the closed card leaves no work item to fix
-        // it.
+        // P1): an Accept (or an email-approving Deny) call verdict
+        // bulk-resolves every open card on the call, including an
+        // email_unverified/invalid card carrying an unresolved V1/V2
+        // disagreement — releasing that without confirmed provenance
+        // strands the hold forever (the sweep skips blank held_email rows)
+        // and the closed card leaves no work item to fix it.
         const openEmailCards = await trx('triage_items')
           .where({ call_log_id: item.call_log_id })
           .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)

@@ -523,3 +523,41 @@ describe('POST /admin/triage/:id/verdict on a DIFFERENT card, with an email disa
     expect(tables.triage_items.find((c) => c.id === CARD_ID).status).toBe('resolved');
   });
 });
+
+// Codex round-6 P1 (finding at admin-triage.js:1397): denyClearsEmailEarly
+// treats the email as approved (it lifts a stale deny stamp and later
+// triggers the same resumeHeldFirstTouch release as Accept) whenever the
+// operator denies on a field OTHER than name/consent/spam_status — 'email'
+// isn't even a selectable wrong-field, so a Deny naming e.g. 'address' on
+// the disagreement card ITSELF must be guarded exactly like Accept is.
+describe('POST /admin/triage/:id/verdict deny (with an unrelated wrong-field) on the disagreement card itself', () => {
+  test('refuses with 409 EMAIL_DISAGREEMENT_UNCONFIRMED, same as Accept', async () => {
+    const { conn, tables } = fixture();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, {
+        verdict: 'deny', wrong_fields: ['address'], expected_updated_at: CARD_UPDATED_AT,
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('EMAIL_DISAGREEMENT_UNCONFIRMED');
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+  });
+
+  test('succeeds once the hold has a confirmed target, same as Accept', async () => {
+    const { conn, tables } = fixture({
+      first_touch_holds: [{
+        id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'pending',
+        held_email: 'janedoe@example.com', corrected_at: new Date().toISOString(),
+      }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, {
+        verdict: 'deny', wrong_fields: ['address'], expected_updated_at: CARD_UPDATED_AT,
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items[0].status).toBe('resolved');
+  });
+});

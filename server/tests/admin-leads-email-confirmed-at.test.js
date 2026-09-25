@@ -137,4 +137,29 @@ describe('PUT /admin/leads/:id stamps email_confirmed_at only on a real email ch
     });
     expect(captured.update.email_confirmed_at).toBeInstanceOf(Date);
   });
+
+  // Codex round-6 P2: email_confirmed_at is the sole provenance signal a
+  // customer-less voicemail card's confirmation reads — it must never
+  // stamp on an unvalidated value ('not-an-email' would otherwise satisfy
+  // admin-triage.js's emailDisagreementConfirmed guard).
+  test('an invalid email format refuses with 400 and writes nothing', async () => {
+    const captured = {};
+    primeUpdate(captured, { id: 'lead-1', status: 'new', email: 'original@example.com' });
+    await withServer(async (baseUrl) => {
+      const res = await putLead(baseUrl, { email: 'not-an-email' });
+      expect(res.status).toBe(400);
+    });
+    expect(captured.update).toBeUndefined();
+  });
+
+  test('a typo-shaped but syntactically valid address still normalizes (trim + lowercase) before stamping', async () => {
+    const captured = {};
+    primeUpdate(captured, { id: 'lead-1', status: 'new', email: 'original@example.com' });
+    await withServer(async (baseUrl) => {
+      const res = await putLead(baseUrl, { email: '  Jane.Doe@Example.com  ' });
+      expect(res.status).toBe(200);
+    });
+    expect(captured.update.email).toBe('jane.doe@example.com');
+    expect(captured.update.email_confirmed_at).toBeInstanceOf(Date);
+  });
 });

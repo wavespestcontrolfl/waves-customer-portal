@@ -15,6 +15,7 @@ const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer, markLeadContactedFromEvidence } = require('../services/lead-estimate-link');
 const { getLeadStatusReconciliation, verifiedContactCallIds } = require('../services/lead-status-reconciliation');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
+const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const logger = require('../services/logger');
 
 // Format/length validation for manual lead creation. Permissive by design — it
@@ -1131,6 +1132,22 @@ router.put('/:id', async (req, res, next) => {
       updates.builder_warranty_expires_on = expires || null;
     }
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
+    // Codex round-6 P2: email_confirmed_at (below) is the sole provenance
+    // signal a customer-less voicemail card's confirmation reads
+    // (admin-triage.js's emailDisagreementConfirmed) — it must never stamp
+    // on an unvalidated value. Clearing to blank stays a real, allowed
+    // change (stores NULL); anything else must normalize to a real
+    // address, or the request 400s before any write.
+    if (updates.email !== undefined) {
+      const rawEmail = String(updates.email || '').trim();
+      if (!rawEmail) {
+        updates.email = null;
+      } else {
+        const normalizedEmail = cleanValidEmailOrNull(rawEmail);
+        if (!normalizedEmail) return res.status(400).json({ error: 'Invalid email address' });
+        updates.email = normalizedEmail;
+      }
+    }
     updates.updated_at = new Date();
 
     const performedBy = [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ');
