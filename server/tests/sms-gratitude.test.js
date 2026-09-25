@@ -42,6 +42,36 @@ describe('fixed personal reply', () => {
   });
 });
 
+describe('automated template closures (owner decision 2026-09-24)', () => {
+  const template = (messageType, body) => ({ ...report, messageType, body });
+  test.each([
+    ['reminder_72h', 'Hello Jeanette! Reminder: your Quarterly Pest Control is scheduled for Friday, Oct 3 between 8 and 10 AM.'],
+    ['reminder_24h', 'Hello Jeanette! Reminder: your Quarterly Pest Control is tomorrow between 8 and 10 AM.'],
+    ['appointment_reminder', 'Hello Jeanette! Reminder: your appointment is tomorrow between 8 and 10 AM.'],
+    ['appointment_confirmation', 'Hello Jeanette! Your appointment is confirmed for Friday, Oct 3 at 9 AM.'],
+    ['tech_en_route', 'Hello Jeanette! Your technician Adam is on the way. Track: https://portal.example.test/t/abc'],
+    ['tech_arrived', 'Hello Jeanette! Your technician has arrived.'],
+    ['estimate_sent', 'Hello Jeanette! Your estimate is ready: https://portal.example.test/e/abc'],
+    ['review_request', 'Hello Jeanette! Thanks for choosing Waves. Review: https://g.page/r/abc'],
+  ])('thanks after our %s template is a closure', (messageType, body) => {
+    expect(evaluateGratitudeContext({ ...context, firstName: 'Jeanette', history: [template(messageType, body)] }))
+      .toEqual({ eligible: true, reason: 'gratitude_after_closure', reply: 'Our pleasure, Jeanette!' });
+  });
+  test.each([
+    ['manual', 'Hello Jeanette! Your appointment is tomorrow.'],
+    ['billing_reminder', 'Hello Jeanette! Your invoice is ready.'],
+    [undefined, 'Hello Jeanette! Your appointment is tomorrow.'],
+  ])('other outbound types still need closure evidence: %s', (messageType, body) => {
+    expect(evaluateGratitudeContext({ ...context, history: [template(messageType, body)] }).reason)
+      .toBe('closure_not_established');
+  });
+  test('a template that still asks for an answer abstains', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      template('appointment_reminder', 'Hello Jeanette! Can you confirm 9 AM tomorrow?'),
+    ] }).reason).toBe('outbound_needs_attention');
+  });
+});
+
 describe('conversation context vetoes', () => {
   test('bank acknowledgement does not claim payment cleared', () => {
     const decision = evaluateGratitudeContext({ ...context, firstName: 'Casey', history: [{ ...report,
