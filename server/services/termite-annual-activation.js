@@ -218,6 +218,42 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
       return { activated: true, termId: term.id, invoiceId: invoice.id };
     });
 
+    // Codex P1-A: mirror exactly what the ordinary (non-deferred)
+    // prepay_annual accept does right after minting its invoice — deliver
+    // the pay link via the SAME wrapper (InvoiceService.sendViaSMSAndEmail)
+    // and the SAME gate (canAutoSendDraftInvoice), with the SAME
+    // payUrlParams shape (estimate-converter.js, step 4). Run AFTER the
+    // activation transaction above has committed (safer than the
+    // converter's own inline placement, which can run inside a caller's
+    // still-open transaction) — a delivery failure never undoes the money
+    // side; it only means the customer hears about the charge some other
+    // way (the admin bell below, or a manual follow-up). sendViaSMSAndEmail
+    // claims the invoice before sending (see invoice.js), so calling this
+    // twice on an already-delivered invoice is itself idempotent — but the
+    // outer 'already activated' guard means this code only ever runs once
+    // per estimate anyway.
+    if (result?.activated) {
+      try {
+        const InvoiceService = require('./invoice');
+        const { canAutoSendDraftInvoice } = require('./estimate-converter');
+        if (canAutoSendDraftInvoice({ billingTerm: 'prepay_annual', annualPrepayTermId: result.termId })) {
+          result.invoiceDelivery = await InvoiceService.sendViaSMSAndEmail(result.invoiceId, {
+            payUrlParams: {
+              source: 'estimate',
+              saveCard: '1',
+              saveRequired: '1',
+              billingTerm: 'prepay_annual',
+            },
+          });
+        }
+      } catch (deliveryErr) {
+        result.invoiceDelivery = {
+          ok: false, sms: { ok: false }, email: { ok: false }, error: deliveryErr.message,
+        };
+        logger.error(`[termite-annual-activation] invoice delivery failed for contract ${contractId} (estimate ${estimateId}, invoice ${result.invoiceId}): ${deliveryErr.message}`);
+      }
+    }
+
     if (result?.skipped) return result;
     return result;
   } catch (err) {
@@ -232,7 +268,66 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
   }
 }
 
+// Codex P1-B: the minimal retry for a failed activation. Signing burns the
+// contract's share token, so there is no "sign again" path once
+// activateTermiteAnnualPlanForSignedContract bells and leaves an estimate
+// 'awaiting_signature' — this sweep re-drives it for exactly that stuck
+// case. Idempotent by construction (activateTermiteAnnualPlanForSignedContract
+// itself no-ops on anything not 'awaiting_signature'), bounded batch, and a
+// single row's failure never stops the rest — mirrors
+// reconcileTermiteProgramAgreements' own shape (termite-program-agreement.js).
+// Abandoned-signature EXPIRY (an estimate that never gets signed at all)
+// stays out of scope for 3b, same as noted throughout this slice.
+async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}) {
+  const counts = {
+    scanned: 0, activated: 0, skipped: 0, failed: 0,
+  };
+  let awaitingEstimates;
+  try {
+    awaitingEstimates = await conn('estimates')
+      .where('annual_plan_activation_status', 'awaiting_signature')
+      .select('id')
+      .limit(limit);
+  } catch (err) {
+    logger.error(`[termite-annual-activation] reconciliation estimate scan failed: ${err.message}`);
+    return { ...counts, error: err.message };
+  }
+  if (!awaitingEstimates.length) return counts;
+  const estimateIds = awaitingEstimates.map((row) => String(row.id));
+
+  let signedContracts;
+  try {
+    signedContracts = await conn('customer_contracts')
+      .where('document_template_key', ANNUAL_TEMPLATE_KEY)
+      .where('status', 'signed')
+      // Matched the same way activateTermiteAnnualPlanForSignedContract
+      // resolves its own source estimate — document_variables_snapshot's
+      // JSONB estimate.id, never a new column (see the module header).
+      .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ANY(?)", [estimateIds])
+      .select('id');
+  } catch (err) {
+    logger.error(`[termite-annual-activation] reconciliation contract scan failed: ${err.message}`);
+    return { ...counts, error: err.message };
+  }
+  counts.scanned = signedContracts.length;
+
+  for (const row of signedContracts) {
+    try {
+      // Never throws by construction, but this loop guards anyway so one
+      // truly unexpected failure can't take the rest of the batch down.
+      const result = await activateTermiteAnnualPlanForSignedContract({ contractId: row.id, conn });
+      if (result?.activated) counts.activated += 1;
+      else counts.skipped += 1;
+    } catch (err) {
+      counts.failed += 1;
+      logger.error(`[termite-annual-activation] reconciliation activation errored for contract ${row.id}: ${err.message}`);
+    }
+  }
+  return counts;
+}
+
 module.exports = {
   activateTermiteAnnualPlanForSignedContract,
+  reconcileTermiteAnnualActivations,
   ANNUAL_TEMPLATE_KEY,
 };

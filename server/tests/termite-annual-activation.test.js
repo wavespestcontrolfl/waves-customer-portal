@@ -12,6 +12,7 @@ describe('termite annual plan activation on sign', () => {
     jest.dontMock('../services/estimate-deposits');
     jest.dontMock('../services/invoice');
     jest.dontMock('../services/annual-prepay-renewals');
+    jest.dontMock('../services/estimate-converter');
   });
 
   const CONTRACT_ID = 'contract-1';
@@ -91,6 +92,7 @@ describe('termite annual plan activation on sign', () => {
   function setup({
     contract, estimate, invoiceResult = { id: 'invoice-1', total: 300 }, term = { id: 'term-1' },
     depositCredit = null, depositLockImpl, depositReadImpl,
+    canAutoSend = true, deliveryImpl,
   } = {}) {
     const { trx, estimateUpdate, termUpdate } = makeTrx({ contract, estimate });
     const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
@@ -101,18 +103,22 @@ describe('termite annual plan activation on sign', () => {
     const acquireEstimateDepositLedgerLock = jest.fn(depositLockImpl || (async () => { callOrder.push('lock'); }));
     const pendingDepositCredit = jest.fn(depositReadImpl || (async () => { callOrder.push('read'); return depositCredit; }));
     const consumeDepositCredit = jest.fn().mockResolvedValue(0);
+    const sendViaSMSAndEmail = jest.fn(deliveryImpl || (async () => ({ ok: true, sms: { ok: true }, email: { ok: true } })));
+    const canAutoSendDraftInvoice = jest.fn(() => canAutoSend);
 
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../services/estimate-deposits', () => ({
       acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit,
     }));
-    jest.doMock('../services/invoice', () => ({ create: invoiceCreate }));
+    jest.doMock('../services/invoice', () => ({ create: invoiceCreate, sendViaSMSAndEmail }));
     jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay }));
+    jest.doMock('../services/estimate-converter', () => ({ canAutoSendDraftInvoice }));
 
-    const { activateTermiteAnnualPlanForSignedContract } = require('../services/termite-annual-activation');
+    const { activateTermiteAnnualPlanForSignedContract, reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
     return {
       activateTermiteAnnualPlanForSignedContract,
+      reconcileTermiteAnnualActivations,
       conn,
       estimateUpdate,
       termUpdate,
@@ -122,6 +128,8 @@ describe('termite annual plan activation on sign', () => {
       acquireEstimateDepositLedgerLock,
       pendingDepositCredit,
       consumeDepositCredit,
+      sendViaSMSAndEmail,
+      canAutoSendDraftInvoice,
       callOrder,
     };
   }
@@ -135,7 +143,7 @@ describe('termite annual plan activation on sign', () => {
 
     const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
 
-    expect(result).toEqual({ activated: true, termId: 'term-1', invoiceId: 'invoice-1' });
+    expect(result).toMatchObject({ activated: true, termId: 'term-1', invoiceId: 'invoice-1' });
     expect(invoiceCreate).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'customer-1',
       title: 'WaveGuard Bronze — Annual Prepay (12 months)',
@@ -158,6 +166,57 @@ describe('termite annual plan activation on sign', () => {
     expect(estimateUpdate).toHaveBeenCalledWith(expect.objectContaining({
       annual_plan_activation_status: 'activated',
     }));
+  });
+
+  test('codex P1-A: delivers the invoice via the SAME wrapper + gate the ordinary prepay_annual accept uses, exactly once', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, sendViaSMSAndEmail, canAutoSendDraftInvoice,
+    } = setup({ contract, estimate });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result.invoiceDelivery).toEqual({ ok: true, sms: { ok: true }, email: { ok: true } });
+    expect(canAutoSendDraftInvoice).toHaveBeenCalledWith({ billingTerm: 'prepay_annual', annualPrepayTermId: 'term-1' });
+    expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+    expect(sendViaSMSAndEmail).toHaveBeenCalledWith('invoice-1', expect.objectContaining({
+      payUrlParams: expect.objectContaining({ billingTerm: 'prepay_annual', saveRequired: '1' }),
+    }));
+  });
+
+  test('codex P1-A: a delivery failure does not undo activation — the estimate is still activated, just invoiceDelivery reports the failure', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate } = setup({
+      contract, estimate, deliveryImpl: async () => { throw new Error('sms provider down'); },
+    });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result.activated).toBe(true);
+    expect(result.invoiceDelivery).toMatchObject({ ok: false, error: 'sms provider down' });
+    expect(estimateUpdate).toHaveBeenCalledWith(expect.objectContaining({ annual_plan_activation_status: 'activated' }));
+  });
+
+  test('codex P1-A: idempotent on re-run — a second call (already activated) never delivers again', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, sendViaSMSAndEmail, estimateUpdate } = setup({ contract, estimate });
+
+    const first = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+    expect(first.activated).toBe(true);
+    expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+
+    // Simulate the persisted state after the first call: the mocked
+    // estimate row itself doesn't mutate, so flip it here the way the real
+    // DB would have after the update above.
+    estimate.annual_plan_activation_status = 'activated';
+
+    const second = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+    expect(second).toEqual({ skipped: 'activated' });
+    expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1); // still just once
+    expect(estimateUpdate).toHaveBeenCalledTimes(1); // no second write
   });
 
   test('codex P1-2: setup fee + annual line both ride the one deferred invoice, billed verbatim', async () => {

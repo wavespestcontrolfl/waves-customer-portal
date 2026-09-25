@@ -5877,6 +5877,26 @@ function initScheduledJobs() {
         } catch (err) {
           logger.error(`Termite agreement reconciliation failed: ${err.message}`);
         }
+        // Termite ANNUAL PLAN activation reconciliation (slice 3a, codex
+        // P1-B): the sign-before-pay activation runs once, right after
+        // signature — signing burns the share token, so a failed
+        // activation (bell + estimate left 'awaiting_signature') has no
+        // "sign again" retry path without this sweep. Same slot, right
+        // after the (unrelated) termite program agreement reconciliation
+        // above, and the same dark gate the deferral itself reads — inert
+        // everywhere the annual plan isn't live.
+        try {
+          const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
+          if (termiteAnnualPlanSelectionEnabled()) {
+            const { reconcileTermiteAnnualActivations } = require('./termite-annual-activation');
+            const annualRecon = await reconcileTermiteAnnualActivations();
+            if (annualRecon.activated || annualRecon.failed) {
+              logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed`);
+            }
+          }
+        } catch (err) {
+          logger.error(`Termite annual plan activation reconciliation failed: ${err.message}`);
+        }
         // Reminders run INSIDE the same exclusive section, strictly after
         // reconciliation: on a skipped tick (another dyno holds the lock)
         // a non-holder must not nudge customers to sign requests the
