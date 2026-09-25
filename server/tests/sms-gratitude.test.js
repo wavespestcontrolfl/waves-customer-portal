@@ -2,6 +2,7 @@ const {
   isGratitudeOnly, buildGratitudeReply, evaluateGratitudeContext,
   gratitudeTimingReason, QUIET_WINDOW_MS, MAX_REPLY_AGE_MS,
 } = require('../services/sms-gratitude');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 const received = '2030-01-10T15:00:00.000Z';
 const inbound = { id: 'in-1', direction: 'inbound', body: 'Thank you Adam', createdAt: received, mediaCount: 0 };
@@ -238,6 +239,18 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
       { ...manual('Your appointment is Friday'), humanAuthored: false, createdAt: '2030-01-10T14:58:00Z' },
       report,
     ] }).eligible).toBe(true);
+  });
+  test.each([
+    'Here you go https://portal.wavespestcontrol.com/pay/abc',
+    'Invoice: https://portal.wavespestcontrol.com/i/abc',
+    'Here is your invoice https://portal.wavespestcontrol.com/pay/statement/abc?x=1',
+  ])('a payment link still reads as a request after the stored-body scheme strip: %s', raw => {
+    const stored = stripSmsUrlScheme(raw);
+    expect(stored).not.toMatch(/https:/);
+    expect(evaluateGratitudeContext({ ...context, history: [manual(stored)] }).eligible).toBe(false);
+  });
+  test('a stored scheme-less receipt link is still a closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme('Your receipt: https://portal.wavespestcontrol.com/receipt/abc'))] }).eligible).toBe(true);
   });
   test('a hand-typed receipt link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Your receipt: https://example.invalid/receipt/abc')] }).eligible).toBe(true);

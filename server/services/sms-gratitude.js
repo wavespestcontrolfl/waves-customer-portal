@@ -112,7 +112,9 @@ const manualCourtesy = (text, manualReply) => manualReply
 // are masked first so their dots do not split a clause, and a colon never
 // splits, so "Here is your invoice: <link>" keeps its label. A /pay/ link, or
 // an invoice/bill/payment clause carrying any link, is a request.
-const maskLinks = text => text.replace(/(?:https?:\/\/|www\.)\S+/gi, url => (/\/pay(?:[/?#]|$)/i.test(url) ? ' paylinktoken ' : ' linktoken '));
+// Stored text-only bodies have had https:// stripped (sms-link-policy.js), so
+// a bare host followed by a path, query, fragment, or port is a link too.
+const maskLinks = text => text.replace(/(?:https?:\/\/|www\.|(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]+(?=[:/?#]))[^\s<>"']*/giu, url => (/\/pay(?:[/?#]|$)/i.test(url) ? ' paylinktoken ' : ' linktoken '));
 const PAYMENT_LINK_RE = /\bpaylinktoken\b|\b(?:invoices?|bills?|billing|payments?|pay|balance|statement)\b.*\blinktoken\b/i;
 const asksForMoney = text => maskLinks(String(text || '')).split(/[.,!?;\n]+|\s[-–—]\s|\b(?:but|however|although|though|and|also|plus|then)\b/i)
   .some(clause => (MANUAL_PAYMENT_REQUEST_RE.test(clause) || PAYMENT_LINK_RE.test(clause)) && !PAYMENT_SETTLED_RE.test(clause));
