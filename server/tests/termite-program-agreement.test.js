@@ -9,6 +9,7 @@ const {
   RENTAL_TEMPLATE_KEY,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SERVICE_NAME,
+  isAnnualPlanEstimate,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,
@@ -622,6 +623,16 @@ describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)'
     expect(prepared.values.service.name).not.toBe('Termite Bait Station Program');
     // Quarterly keeps its established service name.
     expect(buildTermiteProgramAgreementValues({}, ownedEstData()).values.service.name).toBe('Termite Bait Station Program');
+  });
+
+  test('isAnnualPlanEstimate exempts the annual plan from the quarterly annual-prepay park, quarterly stays parked (Codex #4811 r2 P1)', () => {
+    // Annual-plan accepts are billed prepay_annual by construction; the
+    // quarterly park (seeded wording says per-application) must not swallow
+    // them before the v3 branch. Quarterly termite estimates are unaffected.
+    expect(isAnnualPlanEstimate(annualEstData())).toBe(true);
+    expect(isAnnualPlanEstimate(ownedEstData())).toBe(false);
+    expect(isAnnualPlanEstimate(rentedEstData())).toBe(false);
+    expect(isAnnualPlanEstimate(null)).toBe(false);
   });
 
   test('PROGRAM_TEMPLATE_KEYS includes the annual key for customer-scoped lookups (existing-agreement checks span all three)', () => {

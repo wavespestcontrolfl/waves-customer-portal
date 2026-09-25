@@ -607,6 +607,17 @@ async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
   }
 }
 
+// The quarterly annual-prepay park does not apply to the Annual Protection
+// plan: that plan IS a prepaid annual product and its v3 template states
+// prepaid annual billing, so the "seeded wording says per-application"
+// contradiction the park guards against cannot arise. Without this exemption
+// every legitimate annual-plan accept (billingTerm 'prepay_annual' by
+// construction) would park before ever reaching the v3 branch (Codex #4811
+// r2 P1). Quarterly termite estimates on annual prepay still park.
+function isAnnualPlanEstimate(estData) {
+  return selectedTermiteAnnualPlanRows(estData).length > 0;
+}
+
 // Commercial / multi-unit accepts never auto-draft: Florida gives them
 // different retreat windows (180 vs 90 days, Rule 5E-14.105), tenants add
 // business-interruption exposure, and the seeded residential wording
@@ -873,7 +884,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
     }
 
-    const prepay = await isAnnualPrepayAccept(estimate, billingTerm);
+    const prepay = isAnnualPlanEstimate(estData) ? false : await isAnnualPrepayAccept(estimate, billingTerm);
     if (prepay === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
     if (prepay) {
       // Fail closed: the seeded wording states per-application billing,
@@ -1408,7 +1419,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     if (isCommercialEstimate(linkedEstimate, linkedEstData)) {
       misissue = 'park_expected';
     } else {
-      const prepayState = await isAnnualPrepayAccept(linkedEstimate, null);
+      const prepayState = isAnnualPlanEstimate(linkedEstData) ? false : await isAnnualPrepayAccept(linkedEstimate, null);
       if (prepayState === 'error') { results.failed += 1; continue; } // retry tomorrow
       if (prepayState) {
         misissue = 'park_expected';
@@ -1823,6 +1834,7 @@ module.exports = {
   classifyExistingAgreement,
   collectTermiteFacts,
   estimateMayDiscount,
+  isAnnualPlanEstimate,
   maybeCreateTermiteProgramAgreement,
   normalizeAddress,
   reconcileTermiteProgramAgreements,
