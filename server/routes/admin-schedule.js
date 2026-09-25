@@ -23807,6 +23807,18 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
+  // writer's helpers, so the behavioural suite can drive each one against a
+  // scripted connection (fallback auditor P1: source guards alone would
+  // let an unresolved helper fail silently at runtime).
+  reseedRecurringSeriesAfterCancel,
+  reseedRecurringSeriesAfterCancelBatch,
+  readReseedCandidate,
+  reseedRefusal,
+  reseedTermShortfall,
+  probeReseedOverlaps,
+  stampReseed,
+  RESEED_STALE_READ_ATTEMPTS,
   negativePricePosted,
   discountChangeWithoutPricePosted,
   addonServiceIdentityForFreshness,
