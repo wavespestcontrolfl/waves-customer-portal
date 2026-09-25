@@ -2354,9 +2354,11 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // the consent gate / deposit twin). A transient provider error does NOT
   // fall back — the invoice stays unstamped for the admin needs-receipt path.
   let emailDeterministicMiss = prefs?.email_enabled === false;
+  let emailAttempted = false;
   let emailDelivered = false;
   if (!receiptOptOut && !emailDeterministicMiss && (wantsEmail === true
     || (wantsEmail === null && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))))) {
+    emailAttempted = true;
     try {
       // Same idempotency key as the receipt-delivery queue's email leg — a
       // held SMS below hands this invoice to that queue, and its 8:00 AM
@@ -2382,7 +2384,7 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   if (!receiptOptOut && (wantsRoutedMessage === true
     || (wantsRoutedMessage === null && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))))) {
     try {
-      await require('./invoice').sendReceipt(invoice.id, { hasEmailLeg: true });
+      await require('./invoice').sendReceipt(invoice.id, { hasEmailLeg: emailAttempted });
     } catch (e) {
       // Send-window hold: the money and paid invoice are already committed
       // and this path has no retry — hand the receipt to the durable

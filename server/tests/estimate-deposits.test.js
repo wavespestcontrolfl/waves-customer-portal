@@ -347,6 +347,7 @@ describe('webhook + invoice credit', () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '',
       customerId: 'cust-1',
+      hasEmailLeg: false,
       metadata: expect.objectContaining({ billingDeliveryCategory: 'payment_receipt' }),
     }));
     renderSmsTemplate.mockResolvedValue(null);

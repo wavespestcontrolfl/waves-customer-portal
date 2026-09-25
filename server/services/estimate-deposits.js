@@ -415,7 +415,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
     : (!phone && !!leadEmail);
 
   if (wantSms && (phone || explicitChannels?.includes('push'))) {
-    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge, paymentIntentId }).catch((err) => {
+    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge, paymentIntentId, hasEmailLeg: wantEmail }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
     });
   } else if (!wantSms) {
@@ -430,7 +430,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
 }
 
 // SMS leg. Kill switch = the deposit_receipt SMS template row.
-async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge = 0, paymentIntentId }) {
+async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge = 0, paymentIntentId, hasEmailLeg = false }) {
   const estimateId = estimate.id;
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
@@ -493,7 +493,7 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
         notificationEventKey: `estimate-deposit:${estimateId}:${paymentIntentId || 'receipt'}`,
       } : {}),
     },
-    ...(estimate.customer_id ? { hasEmailLeg: true } : {}),
+    ...(estimate.customer_id ? { hasEmailLeg } : {}),
   });
   if (!result.sent) {
     // estimate_deposit_receipt is a customer-action entry point (owner
