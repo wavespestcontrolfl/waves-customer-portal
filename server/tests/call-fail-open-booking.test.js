@@ -1548,6 +1548,81 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // Codex round 13 (review of b1cc43a04b): three P1s.
+  // P1 (:1397) — a conditional's consequent is inspected on its own: an
+  // agent-side future/commitment head + any verb poisons, whatever the verb.
+  test.each([
+    "If the email goes to you, we'll put you down. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon. If the email goes to you, we'll put you down.",
+    "If the email goes to you, I'll make sure that's rectified and we'll have you down. We'll see you Sunday at noon.",
+  ])('Codex round-14 regression: a conditional consequent committing the agent poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "Yep, it should go to him, the notification. If it goes to you, I'll make sure that gets figured out. We'll see you Sunday at noon.",
+    "Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
+  ])('Codex round-14: a benign notification-remediation consequent still grounds — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  // P1 (:1084) — "yes" (and "green light") are authorization nouns.
+  test.each([
+    "We need your yes. We'll see you Sunday at noon.",
+    "We're waiting on your green light. We'll see you Sunday at noon.",
+    "Just have to get a yes. We'll see you Sunday at noon.",
+  ])('Codex round-14 regression: "yes"/"green light" as an approval noun poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-14: an opening "Yes," still grounds (not an approval noun)', () => {
+    const turn = "Yes. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
+  // P1 (:1659) — a standalone period before (or after) a bare hour is
+  // honored before any business-hours inference.
+  test('Codex round-14 regression: "Sunday PM at 10" binds the 22:00 slot, not the inferred 10:00 one', () => {
+    const turn = "We'll see you Sunday PM at 10.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const mk = (startAt) => {
+      const ex = agentCommitted(['caller_not_authorized'], { quote: turn });
+      ex.scheduling.confirmed_start_at = startAt;
+      return ex;
+    };
+    const morning = canAutoRoute(mk('2026-08-02T10:00:00-04:00'), opts({ transcript }));
+    expect(morning.allowed).toBe(false);
+    expect(morning.appointmentBlockingFlags).toContain('caller_not_authorized');
+    const evening = canAutoRoute(mk('2026-08-02T22:00:00-04:00'), opts({ transcript }));
+    expect(evening.allowed).toBe(true);
+    expect(evening.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test.each([
+    ['We will see you Sunday pm at 10.', '2026-08-02T22:00:00-04:00', true],
+    ['We will see you at 10 on Sunday pm.', '2026-08-02T22:00:00-04:00', true],
+    ['We will see you at 10 on Sunday pm.', '2026-08-02T10:00:00-04:00', false],
+    ["We will see you Sunday am at 1 o'clock.", '2026-08-02T01:00:00-04:00', true],
+    ["We will see you Sunday am at 1 o'clock.", '2026-08-02T13:00:00-04:00', false],
+    ['We will see you Sunday am at noon.', '2026-08-02T12:00:00-04:00', false],
+    ['We will see you Sunday am at 10 pm.', '2026-08-02T22:00:00-04:00', false],
+    ['We will see you Sunday am pm at 10.', '2026-08-02T10:00:00-04:00', false],
+  ])('Codex round-14: standalone period binding — %s @ %s → %s', (sentence, startAt, expected) => {
+    const ns = normalizeCommitmentText(sentence);
+    expect(quoteBindsConfirmedSlot(ns, startAt, '2026-07-30T15:50:00-04:00')).toBe(expected);
+  });
+
   // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
   // history). Round 3 reworded this test from "Adam works Sundays." (out-
   // of-vocabulary words) to "We come out Sunday afternoon." on the theory

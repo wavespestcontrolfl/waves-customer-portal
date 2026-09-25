@@ -1081,7 +1081,13 @@ const UNAVAILABILITY_TERMS = [
 //       normalized text strips apostrophes, so "owner s") + an
 //       AUTHORIZATION NOUN (okay/ok/approval/confirmation/go ahead/sign
 //       off/permission/authorization/blessing) directly, no "to <verb>".
-const AUTHORIZATION_NEED_RE = /\b(?:(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all) to (?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing))\b/;
+// Codex round 13, P1 (:1084): "We need your yes." — a bare "yes" is an
+// authorization noun too ("your yes" = your approval), as is "green light".
+// One shared alternative for every approval-noun shape below (possessive,
+// request, non-possessive), so a noun added once poisons in all three.
+// ("go-ahead"/"sign-off" normalize to "go ahead"/"sign off".)
+const AUTHORIZATION_NOUN_ALT = '(?:okay|ok|yes|approval|confirmation|go ahead|green light|sign off|permission|authorization|blessing)';
+const AUTHORIZATION_NEED_RE = new RegExp(`\\b(?:(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all) to (?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) ${AUTHORIZATION_NOUN_ALT})\\b`);
 // codex round 7, P1(b): AUTHORIZATION_NEED_RE covers "need"/"waiting on"
 // TRIGGERS; this covers the ACT of chasing that authorization down —
 // "should get your okay.", "have to get his sign off.", "once we have your
@@ -1089,12 +1095,12 @@ const AUTHORIZATION_NEED_RE = /\b(?:(?:need|needs|going to need) (?:him|her|them
 // SHAPE, not a word list: (get/getting/obtain/secure/have/wait for/waiting
 // for) + a POSSESSIVE (your/his/her/their/the owner's/the homeowner's/the
 // client's — normalized text strips apostrophes) + an AUTHORIZATION NOUN.
-const APPROVAL_REQUEST_RE = /\b(?:get|getting|obtain|secure|have|wait for|waiting for) (?:your|his|her|their|the (?:owner|homeowner|client) s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing)\b/;
+const APPROVAL_REQUEST_RE = new RegExp(`\\b(?:get|getting|obtain|secure|have|wait for|waiting for) (?:your|his|her|their|the (?:owner|homeowner|client) s) ${AUTHORIZATION_NOUN_ALT}\\b`);
 // Codex round 10, P1 (:1044): the NON-possessive form — "We need the
 // okay." / "Just have to get an approval." — names the same outstanding
 // authorization with an article instead of an owner. Fails closed: "we
 // have the okay" also poisons, which only ever leaves a turn in triage.
-const NON_POSSESSIVE_APPROVAL_RE = /\b(?:need|needs|needed|require|requires|get|getting|obtain|secure|have|wait for|waiting for) (?:the|an|a|some) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing)\b/;
+const NON_POSSESSIVE_APPROVAL_RE = new RegExp(`\\b(?:need|needs|needed|require|requires|get|getting|obtain|secure|have|wait for|waiting for) (?:the|an|a|some) ${AUTHORIZATION_NOUN_ALT}\\b`);
 // Codex round 9, P1 (:713): neither AUTHORIZATION_NEED_RE nor
 // APPROVAL_REQUEST_RE covers a DIRECTIVE the agent gives to have a third
 // party grant approval — "I will tell him to okay it." names no "need"/
@@ -1390,6 +1396,26 @@ function sentenceContainsCommitmentHead(strippedNs) {
   const padded = ` ${strippedNs} `;
   return COMMITMENT_HEADS.some((head) => padded.includes(` ${head.endsWith(' ') ? head : `${head} `}`));
 }
+// Codex round 13, P1 (:1397): the COMMITMENT_HEADS reuse above only
+// catches a consequent phrased as one of the pinned-sentence templates —
+// "If the email goes to you, we'll put you down." names none of them ("put
+// you down" is neither a head nor a SCHEDULING_PREDICATE_TERMS phrase), so
+// the conditional booking read as a benign aside. The consequent is now
+// inspected on its own, independent of any verb list: in a CONDITIONAL
+// sentence, an agent-side subject in future/commitment form followed by any
+// verb (we'll/we will/I'll/I will/we're going to/I'm going to/we can/I can
+// + a word) is a conditional commitment and poisons — whatever that verb
+// is. The ONE exemption is an anchored whole-consequent shape: the agent
+// promising to fix a notification-routing mixup ("I'll make sure that's
+// rectified" / "I'll make sure that gets figured out" — the live 17ed9362
+// turn), running from the head to the END of the sentence, so nothing can
+// ride along after it ("…rectified and we'll have you down" still poisons).
+const AGENT_FUTURE_CONSEQUENT_RE = /(?:^| )(?:we ll|we will|i ll|i will|we re going to|we are going to|i m going to|i am going to|we re gonna|i m gonna|we can|i can) [a-z0-9]/g;
+const BENIGN_REMEDIATION_CONSEQUENT_RE = /^(?:i|we) (?:ll|will) make sure (?:that|it) (?:s|is|gets) (?:rectified|figured out|done)$/;
+function conditionalConsequentCommitsAgent(ns) {
+  return [...ns.matchAll(AGENT_FUTURE_CONSEQUENT_RE)]
+    .some((m) => !BENIGN_REMEDIATION_CONSEQUENT_RE.test(ns.slice(m.index).trim()));
+}
 function sentenceHasSchedulingPredicate(strippedNs) {
   const padded = ` ${strippedNs} `;
   if (MAY_DATE_RE.test(strippedNs)) return true;
@@ -1431,7 +1457,9 @@ function sentenceHasSchedulingPredicate(strippedNs) {
 //      runs the authorization/unavailability/scheduling-staffing poison-term
 //      checks against each clause's own raw text, still requires a benign
 //      topic, still falls back to the previous sentence only for a
-//      bare-pronoun clause). A conditional sentence can only pass through
+//      bare-pronoun clause), AND no agent-side future consequent may commit
+//      the agent (conditionalConsequentCommitsAgent — codex round 13). A
+//      conditional sentence can only pass through
 //      this carve-out — vocabulary-only clearance is never enough for it,
 //      unlike a non-conditional declarative.
 //   8. Whatever remains of the STRIPPED text must be built from the base
@@ -1454,6 +1482,7 @@ function otherSentenceIsClean(other, prevNs) {
   if (turnHasUnresolvedConditional(other.ns)) {
     const clauses = extractConditionalClauses(other.raw);
     if (!clauses.length || !clauses.every((clause) => clauseIsBenign(clause, prevNs))) return false;
+    if (conditionalConsequentCommitsAgent(other.ns)) return false;
     extraSets = [BENIGN_CONDITIONAL_GLUE_WORDS];
   }
   return stripped.split(' ').every((tok) => turnVocabularyTokenOk(tok, extraSets));
@@ -1487,182 +1516,155 @@ function etWallClockOfConfirmedStart(value) {
   return raw.slice(0, 16);
 }
 
-// Binds one ALREADY-NORMALIZED commitment sentence (normalizeCommitmentText
-// output) to the confirmed slot. Sentence-scoped by the caller: the slot
-// facts come from the same utterance that passed the affirmative-form and
-// vocabulary checks.
-function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStartedAt) {
-  const q = ` ${String(normalizedSentence || '')} `;
-  // All slot facts derive from the CANONICAL ET wall clock — the same value
-  // booking writes (see etWallClockOfConfirmedStart above).
+// Slot facts of the confirmed start, from the CANONICAL ET wall clock — the
+// same value booking writes (see etWallClockOfConfirmedStart above). Null
+// when the slot is unreadable or outside the calendar window below.
+//
+// Calendar disambiguation (codex round-5 P1, tightened round 7): a weekday
+// name alone cannot distinguish "this Sunday" from "next Sunday". Compare
+// ET CALENDAR dates (an absolute 168h window is not calendar-unique around
+// DST transitions) and require the slot to fall 1–6 ET days after the
+// call's ET date: same-day is rejected (a "Sunday" spoken on a Sunday is
+// ambiguous between today and next week) and day 7 is rejected (same
+// weekday again). Within 1–6 days every weekday names exactly one date.
+function confirmedSlotFacts(confirmedStartAt, callStartedAt) {
   const wall = etWallClockOfConfirmedStart(confirmedStartAt);
-  if (!q.trim() || !wall) return false;
-  const wallY = Number(wall.slice(0, 4));
-  const wallMo = Number(wall.slice(5, 7));
-  const wallD = Number(wall.slice(8, 10));
-  const wallH = Number(wall.slice(11, 13));
-  if (![wallY, wallMo, wallD, wallH].every(Number.isFinite)) return false;
-  // Calendar disambiguation (codex round-5 P1, tightened round 7): a weekday
-  // name alone cannot distinguish "this Sunday" from "next Sunday". Compare
-  // ET CALENDAR dates (an absolute 168h window is not calendar-unique around
-  // DST transitions) and require the slot to fall 1–6 ET days after the
-  // call's ET date: same-day is rejected (a "Sunday" spoken on a Sunday is
-  // ambiguous between today and next week) and day 7 is rejected (same
-  // weekday again). Within 1–6 days every weekday names exactly one date.
   const call = new Date(String(callStartedAt || ''));
-  if (Number.isNaN(call.getTime())) return false;
+  if (!wall || Number.isNaN(call.getTime())) return null;
+  const [year, month, day, hour] = [[0, 4], [5, 7], [8, 10], [11, 13]].map(([a, b]) => Number(wall.slice(a, b)));
   let dayDiff;
   try {
     const callYmd = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
     }).format(call);
-    dayDiff = (Date.UTC(wallY, wallMo - 1, wallD) - Date.parse(`${callYmd}T00:00:00Z`)) / 86400000;
-  } catch { return false; }
-  if (!(dayDiff >= 1 && dayDiff <= 6)) return false;
-  // Weekday/hour/date facts from the canonical wall clock (a calendar date
-  // is timezone-free, so UTC day-of-week of the wall date is exact).
-  const weekday = WEEKDAY_NAMES[new Date(Date.UTC(wallY, wallMo - 1, wallD)).getUTCDay()];
-  const hour12 = String(wallH % 12 || 12);
-  const dayPeriod = wallH >= 12 ? 'pm' : 'am';
-  const slotMonth = MONTH_NAMES[wallMo - 1];
-  const slotDay = wallD;
-  if (!weekday || !slotMonth) return false;
-  // Explicit calendar dates must match the slot (codex P1): "Sunday, August
-  // 9, at noon" shares weekday+time with an August 2 slot — the weekday
-  // window alone cannot catch it. Any month name in the quote must be the
-  // slot's ET month AND be immediately followed by the slot's day number
-  // (ordinal suffixes tolerated); any standalone ordinal day ("the 9th")
-  // must equal the slot's day. Unparseable or mismatched explicit dates
-  // fail closed.
-  const monthsInQuote = MONTH_NAMES.filter((m) => q.includes(` ${m} `));
-  if (monthsInQuote.length) {
-    if (monthsInQuote.length > 1 || monthsInQuote[0] !== slotMonth) return false;
-    const dm = q.match(new RegExp(` ${slotMonth} (\\d{1,2})(?:st|nd|rd|th)?(?= )`));
-    if (!dm || Number(dm[1]) !== slotDay) return false;
-  }
-  for (const om of q.matchAll(/ (\d{1,2})(?:st|nd|rd|th)(?= )/g)) {
-    if (Number(om[1]) !== slotDay) return false;
-  }
-  // Numeric dates and years (codex P1): "Sunday 8/9 at noon" normalizes to
-  // the adjacent digit pair "8 9" — every adjacent pair whose second token
-  // is not the ":00" minutes must equal the slot's ET month/day. Any 3–4
-  // digit number must be the slot's ET year; anything else is an
-  // unvalidated explicit date token and fails closed.
-  // Positional numeric-shape consumption (codex round-7j/7k): every RUN of
-  // consecutive number tokens must parse as a complete shape the slot
-  // explains — position matters, not just membership ("Sunday 8/2/2 at
-  // noon" must not book a 2026-08-02 slot because the trailing 2 happens to
-  // equal the day). Valid shapes: [hour12] · [hour12, 00] (spoken ":00") ·
-  // [month, day] · [month, day, year] with a 2- or 4-digit slot year ·
-  // [day] alone. Anything else — extra components, stray street numbers,
-  // prices — fails closed.
-  //
-  // Date POSITION (codex round 11, P1 :1605): a lone number can read as
-  // either the hour or the day, but not when its position says which. For
-  // a 2026-08-02 10:00 slot, "Sunday the 10 at 10 o'clock" used to pass —
-  // each standalone 10 matched the hour, and the o'clock branch supplied
-  // the one time mention, so the cardinal DATE "the 10" was never checked
-  // against the slot's day. A lone number directly after "the", a weekday
-  // name, or a month name is a date and must equal the slot's day — unless
-  // the very next token marks it as an hour (am/pm/o'clock: "the 10 o'clock
-  // slot", "Sunday 10 am"). Ordinal forms ("the 10th") are validated by the
-  // ordinal loop above.
-  const DATE_POSITION_PREV = new Set(['the', ...WEEKDAY_NAMES, ...MONTH_NAMES]);
-  const HOUR_MARKER_NEXT = new Set(['am', 'pm', 'o', 'oclock']);
-  const toks = q.split(' ');
-  const runs = [];
-  let run = [];
-  let runStart = -1;
-  const closeRun = (endIdx) => {
-    runs.push({ nums: run, prev: toks[runStart - 1] || '', next: toks[endIdx] || '' });
-    run = [];
-  };
+    dayDiff = (Date.UTC(year, month - 1, day) - Date.parse(`${callYmd}T00:00:00Z`)) / 86400000;
+  } catch { return null; }
+  // A calendar date is timezone-free, so the UTC day-of-week of the wall
+  // date is exact.
+  const weekday = WEEKDAY_NAMES[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+  const monthName = MONTH_NAMES[month - 1];
+  if (!(dayDiff >= 1 && dayDiff <= 6) || !weekday || !monthName) return null;
+  return { year, month, day, weekday, monthName, hour12: hour % 12 || 12, period: hour >= 12 ? 'pm' : 'am' };
+}
+
+// What ONE normalized sentence says about a slot, parsed once into a flat
+// mention structure (codex round 13, P2: the binder used to interleave
+// parsing and comparison in one 57-branch function). Every field is
+// slot-independent; SLOT_BINDING_CHECKS, below, compares it to the slot.
+//
+// Numbers: every RUN of consecutive number tokens is kept with its
+// position (codex round-7j/7k: position matters, not just membership —
+// "Sunday 8/2/2 at noon" must not bind a 2026-08-02 slot because the
+// trailing 2 happens to equal the day). A lone number directly after
+// "the", a weekday, or a month name is in DATE position (codex round 11,
+// P1 :1605 — "Sunday the 10 at 10 o'clock" must match the slot DAY, not
+// just the hour) unless the next token marks it as an hour (am/pm/o'clock:
+// "the 10 o'clock slot", "Sunday 10 am").
+//
+// Times (codex round-5 P1 — exact binding, not presence): period-attached
+// hours ("10 am", "10 00 am"), noon (12 pm) / midnight (12 am), "N
+// o'clock" with an optional attached period, and a bare "at N" ONLY when
+// it ends the sentence or precedes "on <weekday>" (anywhere else "at 10" is
+// too likely an address or unrelated number). A form with no attached
+// period (live miss 17ed9362: "at 10 o'clock") takes the sentence's
+// STANDALONE period when it states one (codex round 13, P1 :1659: "We'll
+// see you Sunday PM at 10." is 22:00, not the inferred 10:00), and only
+// otherwise infers one from the Waves business day (7–11 morning, 12 noon,
+// 1–6 afternoon). Mentions dedupe by meaning ("12 pm" + "noon" is one);
+// any unparseable hour is an invalid mention and fails the binding.
+const DATE_POSITION_PREV = new Set(['the', ...WEEKDAY_NAMES, ...MONTH_NAMES]);
+const HOUR_MARKER_NEXT = new Set(['am', 'pm', 'o', 'oclock']);
+// A period token is ATTACHED when it follows an hour ("10 pm", "10 00 pm")
+// or an o'clock ("10 o'clock pm"); any other am/pm is a STANDALONE period.
+const PERIOD_ATTACHED_PREV_RE = /^(?:\d{1,2}|clock|oclock)$/;
+const DAY_NUMBER_RE = /^\d{1,2}(?:st|nd|rd|th)?$/;
+const ORDINAL_DAY_RE = /^\d{1,2}(?:st|nd|rd|th)$/;
+const SPOKEN_TIME_RES = [
+  /(?:^| )(\d{1,2})(?: 00)? (am|pm)(?= |$)/g,
+  /(?:^| )(\d{1,2}) o ?clock(?: (am|pm))?(?= |$)/g,
+  new RegExp(`(?:^| )at (\\d{1,2})(?= $| on (?:${WEEKDAY_NAMES.join('|')})(?= |$))`, 'g'),
+];
+function inferPeriodFromBusinessHours(n) {
+  if (n >= 7 && n <= 11) return 'am';
+  return n >= 1 && n <= 12 ? 'pm' : null;
+}
+function parseSpokenSlot(normalizedSentence) {
+  const ns = String(normalizedSentence || '');
+  const toks = ns.split(' ');
+  const at = (i) => toks[i] || '';
+  const numberRuns = [];
   toks.forEach((tok, i) => {
-    if (/^\d{1,4}$/.test(tok)) {
-      if (!run.length) runStart = i;
-      run.push(Number(tok));
-    } else if (run.length) closeRun(i);
+    if (!/^\d{1,4}$/.test(tok)) return;
+    if (!/^\d{1,4}$/.test(at(i - 1))) numberRuns.push({ nums: [], prev: at(i - 1) });
+    numberRuns[numberRuns.length - 1].nums.push(Number(tok));
+    numberRuns[numberRuns.length - 1].next = at(i + 1);
   });
-  if (run.length) closeRun(toks.length);
-  const h12 = Number(hour12);
-  for (const { nums: r, prev, next } of runs) {
-    const datePosition = r.length === 1 && DATE_POSITION_PREV.has(prev) && !HOUR_MARKER_NEXT.has(next);
-    if (datePosition && r[0] !== slotDay) return false;
-    const ok = (r.length === 1 && (r[0] === h12 || r[0] === slotDay))
-      || (r.length === 2 && r[0] === h12 && r[1] === 0)
-      || (r.length === 2 && r[0] === wallMo && r[1] === slotDay)
-      || (r.length === 3 && r[0] === wallMo && r[1] === slotDay && (r[2] === wallY || r[2] === wallY % 100));
-    if (!ok) return false;
-  }
-  // Exact binding, not presence (codex round-5 P1): a multi-slot turn
-  // ("Sunday at 10 AM won't work, but we'll see you at 11 AM") scatters
-  // matching tokens without committing to them. The quote must contain
-  // EXACTLY ONE time mention and EXACTLY ONE weekday name, each equal to the
-  // confirmed slot's. Time mentions are period-attached hours ("10 am",
-  // "10 00 am") plus the unambiguous aliases noon (12 PM) / midnight
-  // (12 AM), deduplicated by meaning ("12 pm" + "noon" is one mention).
-  // Negations can't be parsed deterministically, so ANY second time or
-  // weekday mention fails closed — the extraction prompt directs the model
-  // to pin the single final commitment sentence.
-  //
-  // "N o'clock" and a bare "at N" (live miss, call 17ed9362: "we'll see him
-  // on Monday at 10 o'clock" never grounded because neither form carries an
-  // am/pm marker) are also period-less time mentions — normalizeCommitmentText
-  // leaves "o'clock"/"o clock" as the two tokens "o clock" and a written
-  // "oclock" as one, so the same regex covers both. A bare "at N" is
-  // accepted ONLY when it is immediately followed by the end of the
-  // sentence or "on <weekday>" — anywhere else "at 10" is too likely to be
-  // an address or an unrelated number. Neither form states its OWN period by
-  // construction, but "N o'clock" can still be followed by an EXPLICIT
-  // am/pm ("10 o'clock PM") — codex P1: inferring the period unconditionally
-  // ignored that marker and both recorded the wrong slot (an explicit PM
-  // read as the inferred AM) and refused to bind the slot the caller
-  // actually said. The o'clock regex below consumes a following am/pm FIRST
-  // and uses it verbatim when present; only an "N o'clock" with NO trailing
-  // period falls back to inferring one from the Waves business day
-  // (7am–6pm: 7–11 reads as morning, 12 as noon, 1–6 as afternoon). A bare
-  // "at N" carries no slot for a trailing period to attach to (its lookahead
-  // requires end-of-sentence or "on <weekday>" right after the number), so
-  // it keeps inferring unconditionally. Either way the resulting period AND
-  // hour must still equal the confirmed slot's through the same `mentions`
-  // check below — "10 o'clock" (inferred am) binds a 10:00 slot and does NOT
-  // bind a 22:00 one; "10 o'clock PM" (explicit pm) binds a 22:00 slot and
-  // does NOT bind a 10:00 one.
-  const mentions = new Set();
-  for (const m of q.matchAll(/(?:^| )(\d{1,2})(?: 00)? (am|pm)(?= |$)/g)) {
-    const h = String(Number(m[1]));
-    if (Number(h) >= 1 && Number(h) <= 12) mentions.add(`${h} ${m[2]}`);
-    else mentions.add(`invalid ${m[1]} ${m[2]}`);
-  }
-  if (q.includes(' noon ')) mentions.add('12 pm');
-  if (q.includes(' midnight ')) mentions.add('12 am');
-  const inferPeriodFromBusinessHours = (n) => {
-    if (n >= 7 && n <= 11) return 'am';
-    if (n === 12) return 'pm';
-    if (n >= 1 && n <= 6) return 'pm';
-    return null;
+  const periods = new Set(toks.filter((t, i) => (t === 'am' || t === 'pm') && !PERIOD_ATTACHED_PREV_RE.test(at(i - 1))));
+  // More than one standalone period ("AM … PM") states no single period.
+  const statedPeriod = periods.size === 1 ? [...periods][0] : null;
+  const times = new Set(SPOKEN_TIME_RES.flatMap((re) => [...` ${ns} `.matchAll(re)].map((m) => {
+    const n = Number(m[1]);
+    const period = m[2] || (periods.size ? statedPeriod : inferPeriodFromBusinessHours(n));
+    return n >= 1 && n <= 12 && period ? `${n} ${period}` : 'invalid';
+  })));
+  if (toks.includes('noon')) times.add('12 pm');
+  if (toks.includes('midnight')) times.add('12 am');
+  return {
+    weekdays: new Set(toks.filter((t) => WEEKDAY_NAMES.includes(t))),
+    months: new Set(toks.filter((t) => MONTH_NAMES.includes(t))),
+    // The day number directly after each month name ("August 2nd").
+    monthDays: toks.flatMap((t, i) => (MONTH_NAMES.includes(t) && DAY_NUMBER_RE.test(at(i + 1)) ? [parseInt(at(i + 1), 10)] : [])),
+    ordinals: toks.filter((t) => ORDINAL_DAY_RE.test(t)).map((t) => parseInt(t, 10)),
+    numberRuns: numberRuns.map(({ nums, prev, next }) => ({
+      nums, datePosition: nums.length === 1 && DATE_POSITION_PREV.has(prev) && !HOUR_MARKER_NEXT.has(next),
+    })),
+    periods,
+    times,
   };
-  for (const m of q.matchAll(/(?:^| )(\d{1,2}) o ?clock(?: (am|pm))?(?= |$)/g)) {
-    const n = Number(m[1]);
-    const explicitPeriod = m[2] || null;
-    if (explicitPeriod) {
-      mentions.add((n >= 1 && n <= 12) ? `${n} ${explicitPeriod}` : `invalid ${m[1]} oclock ${explicitPeriod}`);
-    } else {
-      const period = inferPeriodFromBusinessHours(n);
-      mentions.add(period ? `${n} ${period}` : `invalid ${m[1]} oclock`);
-    }
-  }
-  const AT_WEEKDAY_RE = new RegExp(`(?:^| )at (\\d{1,2})(?= $| on (?:${WEEKDAY_NAMES.join('|')})(?= |$))`, 'g');
-  for (const m of q.matchAll(AT_WEEKDAY_RE)) {
-    const n = Number(m[1]);
-    const period = inferPeriodFromBusinessHours(n);
-    mentions.add(period ? `${n} ${period}` : `invalid at ${m[1]}`);
-  }
-  const weekdaysInQuote = WEEKDAY_NAMES.filter((w) => q.includes(` ${w} `));
-  return mentions.size === 1
-    && mentions.has(`${Number(hour12)} ${dayPeriod}`)
-    && weekdaysInQuote.length === 1
-    && weekdaysInQuote[0] === weekday;
+}
+
+// The complete numeric shapes a slot explains: [hour12] · [hour12, 00]
+// (spoken ":00") · [day] · [month, day] · [month, day, year] with a 2- or
+// 4-digit slot year. Anything else — extra components, stray street
+// numbers, prices, a 3–4 digit non-year — fails closed.
+const NUMBER_RUN_SHAPES = [
+  (r, s) => r.length === 1 && (r[0] === s.hour12 || r[0] === s.day),
+  (r, s) => r.length === 2 && r[0] === s.hour12 && r[1] === 0,
+  (r, s) => r.length === 2 && r[0] === s.month && r[1] === s.day,
+  (r, s) => r.length === 3 && r[0] === s.month && r[1] === s.day && (r[2] === s.year || r[2] === s.year % 100),
+];
+// Every check must hold. Negations can't be parsed deterministically, so any
+// SECOND weekday or time mention fails closed — the extraction prompt
+// directs the model to pin the single final commitment sentence.
+const SLOT_BINDING_CHECKS = [
+  // Exactly one weekday, the slot's.
+  (said, slot) => said.weekdays.size === 1 && said.weekdays.has(slot.weekday),
+  // Exactly one time mention, the slot's hour AND period.
+  (said, slot) => said.times.size === 1 && said.times.has(`${slot.hour12} ${slot.period}`),
+  // A standalone period ("Sunday PM at 10") must be the slot's (codex round 13).
+  (said, slot) => [...said.periods].every((p) => p === slot.period),
+  // Explicit calendar dates (codex P1): "Sunday, August 9, at noon" shares
+  // weekday+time with an August 2 slot. Any month name must be the slot's
+  // only month, immediately followed by the slot's day number.
+  (said, slot) => !said.months.size
+    || (said.months.size === 1 && said.months.has(slot.monthName) && said.monthDays[0] === slot.day),
+  // Any ordinal ("the 9th") must be the slot's day.
+  (said, slot) => said.ordinals.every((d) => d === slot.day),
+  // Every number run is a complete shape the slot explains, and a lone
+  // number in date position is the slot's day.
+  (said, slot) => said.numberRuns.every((run) => (!run.datePosition || run.nums[0] === slot.day)
+    && NUMBER_RUN_SHAPES.some((fits) => fits(run.nums, slot))),
+];
+
+// Binds one ALREADY-NORMALIZED commitment sentence (normalizeCommitmentText
+// output) to the confirmed slot. Sentence-scoped by the caller: the slot
+// facts come from the same utterance that passed the affirmative-form and
+// vocabulary checks.
+function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStartedAt) {
+  const slot = confirmedSlotFacts(confirmedStartAt, callStartedAt);
+  if (!slot) return false;
+  const said = parseSpokenSlot(normalizedSentence);
+  return SLOT_BINDING_CHECKS.every((check) => check(said, slot));
 }
 
 // True only when the model pinned an AGENT-spoken evidence quote for the

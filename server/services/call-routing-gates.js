@@ -227,8 +227,14 @@ function checkTcpaConsent(extraction, opts = {}) {
 // must write a fresh decision row rather than onConflict-ignore.
 // v2-1.20.0 (codex round 12): modal subject-led approval requirements
 // ("You'll need to okay it.") now poison — MORE RESTRICTIVE.
-const V2_DECISION_VERSION = 'v2-1.20.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0'];
+// v2-1.21.0 (codex round 13): a conditional whose consequent commits the
+// agent ("If the email goes to you, we'll put you down."), "yes"/"green
+// light" as approval nouns ("We need your yes."), and a standalone period
+// on a bare hour ("Sunday PM at 10" binds 22:00, not the inferred 10:00)
+// — the first two MORE RESTRICTIVE, the third re-binds the stated slot, so a
+// force-reprocess must write a fresh decision row rather than onConflict-ignore.
+const V2_DECISION_VERSION = 'v2-1.21.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0'];
 
 function buildRouteDecision({
   callLogId,
