@@ -187,7 +187,8 @@ ${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t
 // FULL: other lettering is not checked (owner, 2026-09-25: slight variances
 // on the van don't matter; a wrong phone number or web address does).
 function buildVanScreenPrompt() {
-  return `Inspect ONLY the van in this generated blog image and answer as strict JSON only, shape {"van": {"body": "ford_transit_medium_roof" | "mercedes_sprinter" | "ram_promaster" | "high_roof_van" | "box_truck" | "pickup_or_car" | "unsure", "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string[], "web_addresses": string[]} | null}.
+  return `Inspect ONLY the van in this generated blog image and answer as strict JSON only, shape {"van_count": number, "van": {"body": "ford_transit_medium_roof" | "mercedes_sprinter" | "ram_promaster" | "high_roof_van" | "box_truck" | "pickup_or_car" | "unsure", "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string[], "web_addresses": string[]} | null}.
+- van_count: how many vans of ANY kind appear in the frame — plain, wrapped, partial, mirrored, reflected or cut off at the edge each count (0 if none).
 - van: null if there is NO van of any kind in the frame; otherwise an object describing the van that carries ${VAN_WRAP_DESCRIPTION} (or, if none does, the largest van), with these fields:
   - body: which vehicle the van is. "ford_transit_medium_roof": a short sloped hood, a black hexagon-mesh grille (with a Ford oval), and a MEDIUM roof (taller than a car, shorter than a walk-in van). Name a DIFFERENT body only when you can clearly see it: "mercedes_sprinter" (a long pointed nose, no Ford grille), "ram_promaster" (a blunt, nearly vertical flat nose), "high_roof_van" (a roof clearly taller than a medium roof), "box_truck", or "pickup_or_car". "unsure" when the van is too small, distant, angled, obscured or stylized to tell — in a cartoon or flat illustration, a boxy van with a short sloped hood and a medium roof is the Transit.
   - wrapped: true only if the van visibly carries that graphic wrap rather than a plain, unmarked body — false if the van is there but plain.
@@ -207,12 +208,14 @@ function parseJsonObject(text) {
 function parseVanScreen(text) {
   try {
     const obj = parseJsonObject(text);
-    if (!obj || !Object.prototype.hasOwnProperty.call(obj, 'van')) return null;
+    if (!obj || !Object.prototype.hasOwnProperty.call(obj, 'van') || !Number.isInteger(obj.van_count) || obj.van_count < 0) return null;
     const v = obj.van;
+    // A count that contradicts the van answer is unusable, never a verdict.
+    if ((v === null) !== (obj.van_count === 0)) return null;
     if (v === null) return { van: null };
     if (!(v && typeof v === 'object' && VAN_BODY_VALUES.has(v.body) && typeof v.wrapped === 'boolean' && typeof v.wrap_mascot === 'boolean' && Array.isArray(v.phone_numbers) && Array.isArray(v.web_addresses))) return null;
     const strings = (list) => list.map((t) => String(t || '').trim()).filter(Boolean);
-    return { van: { body: v.body, wrapped: v.wrapped, wrapMascot: v.wrap_mascot, phones: strings(v.phone_numbers), webAddresses: strings(v.web_addresses) } };
+    return { van: { count: obj.van_count, body: v.body, wrapped: v.wrapped, wrapMascot: v.wrap_mascot, phones: strings(v.phone_numbers), webAddresses: strings(v.web_addresses) } };
   } catch {
     return null;
   }
@@ -406,6 +409,7 @@ const isVanWebAddress = (t) => String(t).toLowerCase().replace(/\s+/g, '').repla
 //   - a van left plain — the reference exists so the van carries the wrap
 //     (Codex r1 P2 on #4784);
 //   - a wrap without its mascot (Codex r1 P2 on #4785);
+//   - more than one van of any kind in the frame (Codex r1 P2 on #4822);
 //   - a readable phone number or web address that is not Waves' own.
 // Other lettering drift ("Lawn & Pest!", a split or missing tagline) passes.
 function vanWrapReasons(van) {
@@ -413,6 +417,9 @@ function vanWrapReasons(van) {
   const reasons = [];
   const fail = (reason, items = [reason]) => { reasons.push(reason); flagged.push(...items); };
   if (!van) return { reasons, flagged };
+  // Exactly one van (Codex r1 P2 on #4822): a second — even a plain,
+  // partial or mirrored duplicate — carries no mark the main screen sees.
+  if (van.count > 1) fail(`${van.count} vans in the frame, not one`);
   if (WRONG_VAN_BODIES.has(van.body)) fail('van body is not a Ford Transit medium-roof cargo van');
   if (!van.wrapped) {
     fail('van present without the wrap');
@@ -478,6 +485,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       jsonMode: true,
       maxTokens,
       reasoningEffort: SCREEN_REASONING_EFFORT,
+      laneId: 'image_screen',
       ...(timeoutMs > 0 ? { timeoutMs } : {}),
     });
     // The van question runs beside the main one, inside the same deadline.

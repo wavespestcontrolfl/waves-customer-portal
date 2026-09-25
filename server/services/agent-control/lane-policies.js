@@ -250,6 +250,15 @@ const LANE_RUNTIME = {
   review_gate_text: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // customer_visible + M3 (Codex r18): the autonomous publisher stamps the alt text into blog frontmatter the PR poller can auto-merge.
   hero_alt: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  // read_only: a gate, not a write — screenGeneratedImage returns a pass/fail
+  // verdict the blog publisher acts on (retry / accept), the same shape as
+  // lawn_quality_gate. Unlike hero_alt's alt-text pass, this call site DOES
+  // ride the shared adapter (dispatchWithFallback → TEXT_POLICIES.imageScreen,
+  // owner ruling 2026-09-25: Sol first, Claude backup), so it is ledger: 'call'
+  // (laneId 'image_screen' at the call site), and
+  // offline (part of the same background blog-publish pipeline as hero_alt /
+  // image_gen, not a synchronous user request).
+  image_screen: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   editorial_review: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
   editorial_repair: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
   editorial_plan_review: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
@@ -281,6 +290,12 @@ const LANE_RUNTIME = {
   mentions_sentiment: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
   // customer_visible + M3 (Codex r19): hero/body images are committed into the auto-mergeable post PR — same boundary as hero_alt.
   image_gen: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, maturity: 'M3', expected_duration_ms: 180_000 },
+  // customer_visible + M3: a live (non-draft) autonomous run generates exactly
+  // one image and posts it with no approval step (social-content-studio.js
+  // creativeVariantsForRun: count is 1 outside 'draft' mode) — same worst-case
+  // boundary as image_gen. Draft/preview runs generate several variants into
+  // the approval queue, but the lane is classified by its live path.
+  social_image_gen: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, maturity: 'M3', expected_duration_ms: 180_000 },
   // draft_for_human + M2 (Codex r18): a Veo clip is only made for a draft campaign run and lands in the approval queue.
   video_gen: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, maturity: 'M2', ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },

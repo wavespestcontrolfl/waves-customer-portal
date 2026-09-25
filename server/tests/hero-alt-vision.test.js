@@ -280,14 +280,14 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
   const isVanQuestion = (req) => req.text.startsWith('Inspect ONLY the van');
   // The main screen and the van's own question are two dispatches; answer
   // each by its prompt.
-  const mockAnswers = ({ main = CLEAN_MAIN, vanAnswer = { van: van() } } = {}) => {
+  const mockAnswers = ({ main = CLEAN_MAIN, vanAnswer = { van_count: 1, van: van() } } = {}) => {
     mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer(vanAnswer) : answer(main)));
   };
   const screen = ({ main, vanAnswer, ...opts } = {}) => {
     mockAnswers({ main, vanAnswer });
     return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true, ...opts });
   };
-  const withVan = (extra) => screen({ vanAnswer: { van: van(extra) } });
+  const withVan = (extra) => screen({ vanAnswer: { van_count: 1, van: van(extra) } });
   beforeEach(() => mockDispatch.mockReset());
 
   test('the van is asked about in its own question; the main screen is told to leave that one van out of every field', () => {
@@ -299,7 +299,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(main).toMatch(/if two or more vans carry the wrap, list them all/);
     expect(main).not.toMatch(/"van":|van_wrap_elsewhere/);
     const q = _internals.buildVanScreenPrompt();
-    expect(q).toMatch(/shape \{"van": \{"body": "ford_transit_medium_roof" \| "mercedes_sprinter" \| "ram_promaster" \| "high_roof_van" \| "box_truck" \| "pickup_or_car" \| "unsure", "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string\[\], "web_addresses": string\[\]\} \| null\}/);
+    expect(q).toMatch(/shape \{"van_count": number, "van": \{"body": "ford_transit_medium_roof" \| "mercedes_sprinter" \| "ram_promaster" \| "high_roof_van" \| "box_truck" \| "pickup_or_car" \| "unsure", "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string\[\], "web_addresses": string\[\]\} \| null\}/);
     expect(q).toMatch(/a short sloped hood, a black hexagon-mesh grille \(with a Ford oval\), and a MEDIUM roof/);
     expect(q).toMatch(/"mercedes_sprinter" \(a long pointed nose, no Ford grille\)/);
     expect(q).toMatch(/phone number on the van that you can read IN FULL/);
@@ -375,11 +375,18 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(await withVan({ body: 'other' })).toMatchObject({ ok: true, checked: false });
   });
 
+  test('a second van of any kind fails — a plain, partial or mirrored duplicate carries no mark the main screen would see (Codex r1 P2 on #4822)', async () => {
+    const two = await screen({ vanAnswer: { van_count: 2, van: van() } });
+    expect(two.reasons).toEqual(['2 vans in the frame, not one']);
+    expect(two.logos).toEqual(['2 vans in the frame, not one']);
+    expect(_internals.buildVanScreenPrompt()).toMatch(/van_count: how many vans of ANY kind appear in the frame — plain, wrapped, partial, mirrored, reflected or cut off at the edge each count/);
+  });
+
   test('a van present WITHOUT the wrap fails; no van at all is clean (Codex r1 P2 on #4784)', async () => {
     const plain = await withVan({ body: 'ford_transit_medium_roof', wrapped: false, wrap_mascot: false, phone_numbers: [], web_addresses: [] });
     expect(plain.reasons).toEqual(['van present without the wrap']);
     expect(plain.logos).toEqual(['van present without the wrap']);
-    expect(await screen({ vanAnswer: { van: null } })).toMatchObject({ ok: true, checked: true, reasons: [] });
+    expect(await screen({ vanAnswer: { van_count: 0, van: null } })).toMatchObject({ ok: true, checked: true, reasons: [] });
   });
 
   test('a PARTIALLY applied wrap — no mascot — fails whatever else rendered (Codex r1 P2 on #4785)', async () => {
@@ -407,7 +414,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
   });
 
   test('an unusable van answer — omitted key, malformed or contradictory van — fails the screen OPEN, never clean (Codex r1, r4 P2s on #4785)', async () => {
-    for (const vanAnswer of [{}, { van: { wrapped: true } }, { van: van({ body: 'sprinter' }) }, { van: van({ body: undefined }) }, { van: van({ phone_numbers: '941-241-2459' }) }, { van: van({ web_addresses: undefined }) }, { van: 'none' }]) {
+    for (const vanAnswer of [{}, { van: van() }, { van_count: 1.5, van: van() }, { van_count: -1, van: van() }, { van_count: 0, van: van() }, { van_count: 2, van: null }, { van: { wrapped: true } }, { van: van({ body: 'sprinter' }) }, { van: van({ body: undefined }) }, { van: van({ phone_numbers: '941-241-2459' }) }, { van: van({ web_addresses: undefined }) }, { van: 'none' }]) {
       expect(await screen({ vanAnswer })).toMatchObject({ ok: true, checked: false });
     }
   });
@@ -415,7 +422,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
   test('either dispatch failing fails the screen open', async () => {
     mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? { ok: false, reason: 'timeout' } : answer(CLEAN_MAIN)));
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
-    mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer({ van: van() }) : { ok: false, reason: 'timeout' }));
+    mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer({ van_count: 1, van: van() }) : { ok: false, reason: 'timeout' }));
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
   });
 });
