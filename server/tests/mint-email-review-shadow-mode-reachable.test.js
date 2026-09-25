@@ -114,7 +114,10 @@ describe('shadow-mode bridge always reaches mintEmailReviewCardsFenced (codex ro
       expect(invalidateProp).toBeTruthy();
       // Must be computed from the pass's own evidence, not a bare literal
       // (which would just re-hardcode true/false instead of reflecting
-      // whether this pass actually minted a live card).
+      // whether this pass actually minted a live card). espree emits a
+      // boolean as `Literal` (`BooleanLiteral` is Babel's name, which made
+      // this assertion vacuous — pre-push audit P2).
+      expect(invalidateProp.value.type).not.toBe('Literal');
       expect(invalidateProp.value.type).not.toBe('BooleanLiteral');
     }
   });
