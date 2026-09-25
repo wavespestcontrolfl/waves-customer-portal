@@ -510,10 +510,10 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     const historyPhotos = isLive
       ? []
       : (Array.isArray(resultData?.photos) ? resultData.photos : [])
-        .filter((photo) => photo?.id && photo?.url && !unavailableHistoryPhotoIds.includes(photo.id))
+        .filter((photo) => photo?.id)
         .slice(0, PHOTO_LIMIT)
         .map((photo, index) => ({
-          preview: photo.url,
+          preview: unavailableHistoryPhotoIds.includes(photo.id) ? null : photo.url,
           photoId: photo.id,
           name: `Photo ID photo ${index + 1}`,
         }));

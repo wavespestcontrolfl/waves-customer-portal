@@ -175,7 +175,7 @@ describe('ReportIssueOverlay mount safety', () => {
           location: 'inside_home',
           note: 'Found ants by the sink',
           photos: [
-            { preview: 'https://signed.example/one.jpg', photoId: 'saved-1', name: 'Photo ID photo 1' },
+            { preview: null, photoId: 'saved-1', name: 'Photo ID photo 1' },
             { preview: 'https://signed.example/two.jpg', photoId: 'saved-2', name: 'Photo ID photo 2' },
             { preview: 'data:image/jpeg;base64,live', data: 'data:image/jpeg;base64,live', name: 'live.jpg' },
           ],
@@ -185,6 +185,7 @@ describe('ReportIssueOverlay mount safety', () => {
     );
 
     const submit = await screen.findByRole('button', { name: /submit request/i });
+    expect(screen.getByText('Preview unavailable')).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('Remove photo 1'));
     fireEvent.click(submit);
 

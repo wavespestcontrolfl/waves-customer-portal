@@ -15251,14 +15251,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                     {!photos.length && <span>No photos added yet.</span>}
                     {photos.map((p, i) => (
                       <div key={`${p.name || 'photo'}-${i}`} style={{ position: 'relative', aspectRatio: '1 / 1', minWidth: 0 }}>
-                        <img src={p.preview} alt="" style={{
+                        {p.preview ? <img src={p.preview} alt="" style={{
                           width: '100%',
                           height: '100%',
                           objectFit: 'cover',
                           borderRadius: 8,
                           border: '1px solid #E7E2D7',
                           display: 'block',
-                        }} />
+                        }} /> : <div style={{ height: '100%', border: '1px solid #E7E2D7', borderRadius: 8, display: 'flex', alignItems: 'center', padding: 8, fontSize: 14, color: muted }}>Preview unavailable</div>}
                         <button
                           type="button"
                           onClick={() => removePhoto(i)}

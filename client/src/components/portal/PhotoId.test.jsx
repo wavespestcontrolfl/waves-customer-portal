@@ -431,6 +431,8 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
     expect(onOpenRequest).toHaveBeenCalledTimes(1);
     expect(onOpenRequest.mock.calls[0][0].photos).toEqual([
       { preview: 'https://signed.example/photo-1.jpg', photoId: 'saved-1', name: 'Photo ID photo 1' },
+      { preview: null, photoId: 'saved-2', name: 'Photo ID photo 2' },
+      { preview: null, photoId: 'saved-3', name: 'Photo ID photo 3' },
     ]);
     expect(onOpenRequest.mock.calls[0][0].photoIdSource).toEqual({ type: 'lawn', id: 'l1' });
   });
