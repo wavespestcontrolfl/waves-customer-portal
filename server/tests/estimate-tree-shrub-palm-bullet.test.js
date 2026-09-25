@@ -131,8 +131,9 @@ describe('treeShrubFrequenciesFromResultStats — solo T&S ladder (server/routes
   test('attaches palmCount onto the tier row perServiceTreatments entry', () => {
     const estData = {
       result: {
-        results: { ts: RESULT_STATS_TS },
-        lineItems: [tsLineItem({ palmCount: 4 })],
+        // mapV1ToLegacyShape always stamps tsMeta alongside ts rows; the
+        // mapped envelope is the exclusive evidence (Codex round 3 P0).
+        results: { ts: RESULT_STATS_TS, tsMeta: { palmCount: 4, palmCountSource: 'service_line' } },
       },
     };
     const [entry] = treeShrubFrequenciesFromResultStats(estData);
@@ -246,7 +247,9 @@ describe('treeShrubPalmCountForEstData — mapped-v1-shape fallbacks (Codex #1)'
     expect(treeShrubPalmCountForEstData(estData)).toBe(9);
   });
 
-  test('raw lineItems win over the mapped-shape fallbacks when both are present', () => {
+  // Precedence flipped in Codex round 3 P0: the mapped envelope is exclusive
+  // whenever it exists (a revision can leave an older raw line behind).
+  test('the mapped envelope wins over raw lineItems when both are present', () => {
     const estData = {
       result: {
         lineItems: [tsLineItem({ palmCount: 4 })],
@@ -254,17 +257,19 @@ describe('treeShrubPalmCountForEstData — mapped-v1-shape fallbacks (Codex #1)'
         results: { tsMeta: { palmCount: 12, palmCountSource: 'service_line' } },
       },
     };
-    expect(treeShrubPalmCountForEstData(estData)).toBe(4);
+    expect(treeShrubPalmCountForEstData(estData)).toBe(12);
   });
 
-  test('the mapped services row wins over tsMeta when both are present (no raw lineItems)', () => {
+  // tsMeta carries the full priced evidence, so it is read before the
+  // write-time-gated recurring row (Codex round 3 P0).
+  test('tsMeta wins over the mapped services row when both are present', () => {
     const estData = {
       result: {
         recurring: { services: [{ service: 'tree_shrub', palmCount: 5 }] },
         results: { tsMeta: { palmCount: 12, palmCountSource: 'service_line' } },
       },
     };
-    expect(treeShrubPalmCountForEstData(estData)).toBe(5);
+    expect(treeShrubPalmCountForEstData(estData)).toBe(12);
   });
 
   test.each([
@@ -639,5 +644,53 @@ describe('pricedTreeShrubPalmCount against the REAL priceTreeShrub engine output
     const line = priceTreeShrub({ bedArea: 500 }, { tier: 'standard' });
     expect(line.palmCount).toBe(0);
     expect(pricedTreeShrubPalmCount(line)).toBeNull();
+  });
+});
+
+describe('treeShrubPalmCountForEstData — mapped envelope is exclusive over a stale engineResult (Codex round 3 P0)', () => {
+  const staleServiceLine = { service: 'tree_shrub', palmCount: 6, palmCountSource: 'service_line' };
+
+  test('mapped tsMeta showing unpriced property palms beats a stale service_line engine line', () => {
+    const estData = {
+      result: { results: { tsMeta: { palmCount: 4, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } } } },
+      engineResult: { lineItems: [staleServiceLine] },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+
+  test('mapped tsMeta with zero palms beats a stale service_line engine line', () => {
+    const estData = {
+      result: { results: { tsMeta: { palmCount: 0, palmCountSource: 'none' } } },
+      engineResult: { lineItems: [staleServiceLine] },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+
+  test('mapped ts rows alone (pre-palm tsMeta-less envelope) still exclude the raw engine line', () => {
+    const estData = {
+      result: { results: { ts: [{ name: 'Standard', v: 6, mo: 50 }] } },
+      engineResult: { lineItems: [staleServiceLine] },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+
+  test('mapped tsMeta that proves pricing wins over a different stale engine count', () => {
+    const estData = {
+      result: { results: { tsMeta: { palmCount: 3, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 16, minutesPerPalmVisit: 1.5 } } } },
+      engineResult: { lineItems: [staleServiceLine] },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(3);
+  });
+
+  test('mapped recurring row (write-time gated) is used when no tsMeta exists', () => {
+    const estData = {
+      result: { recurring: { services: [{ service: 'tree_shrub', palmCount: 5 }] } },
+      engineResult: { lineItems: [staleServiceLine] },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(5);
+  });
+
+  test('raw engine line is consulted only when there is no mapped T&S envelope', () => {
+    expect(treeShrubPalmCountForEstData({ engineResult: { lineItems: [staleServiceLine] } })).toBe(6);
   });
 });

@@ -19908,58 +19908,52 @@ function treeShrubTierKey(row = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
-// The condensed results.ts rows (name/pa/v/ann/mo — see v1-legacy-mapper's
-// treeShrubLegacyTierRows) never carried palmCount, so it's read separately
-// off the stored T&S line item — same lineItems lookup as
-// treeShrubKnobSignalForReplay (estimate-tree-shrub-knob-replay.js): check
-// estData.result.lineItems then estData.engineResult.lineItems. The raw
-// line item is priceTreeShrub's own return shape, so pricedTreeShrubPalmCount
-// gates it on real evidence (owner 2026-09-24: palms priced inside T&S via
-// routine palm-care reserve — but a property-sourced count that reserve
-// never armed for priced NOTHING; Codex round 2 P0 on #4789).
-//
-// A solo T&S estimate saved in the MAPPED v1 shape (admin-estimate-
-// persistence#resolveServerAuthoritativePricing) carries NO raw lineItems at
-// all when it never ran the server-authoritative recompute (quote-required
-// estimates skip it outright; an ENGINE_ERROR fallback keeps whatever
-// client-preview shape was already stored) — engineResult is only stamped
-// on a recompute that actually ran. Fall back to the mapped shape's own
-// palm carriers:
-//  - result.recurring.services[] tree_shrub row: v1-legacy-mapper's
-//    svcAdd('Tree & Shrub', tsLI, …) ALREADY gates this with
-//    pricedTreeShrubPalmCount(tsLI) at write time — a positive value here
-//    is priced by construction, so a plain positive-integer check is
-//    correct and sufficient (the row carries no further evidence fields to
-//    re-check, and re-applying the full predicate here would wrongly
-//    reject an armed PROPERTY-sourced count that mapper already verified).
-//  - result.results.tsMeta.palmCount (v1-legacy-mapper ~L607+, mapV1To
-//    LegacyShape's return nests its accumulator R as `results: R` — same
-//    path treeShrubKnobSignalForReplay reads, NOT a bare result.tsMeta —
-//    stamped for EVERY mapped T&S line regardless of pricing, since this is
-//    the RAW count the palm/knob replay needs and is never gated at write
-//    time): tsMeta also carries palmCountSource and pricingKnobs (same
-//    fields the replay signal reads), so pricedTreeShrubPalmCount has full
-//    evidence and gates it here, at read time, instead.
-// Fail closed: a legacy pre-v4.7 estimate whose tsMeta carries neither a
-// service_line source nor an armed knob returns null — never guessed priced.
+// The condensed results.ts rows (name/pa/v/ann/mo) never carried palmCount,
+// so it's read separately off the stored T&S evidence, and only when that
+// evidence proves the palms were PRICED (pricedTreeShrubPalmCount; owner
+// 2026-09-24 palm-care reserve — a property-sourced count the reserve never
+// armed for priced nothing; Codex r2 P0 on #4789). Evidence order:
+//  - MAPPED envelope (result.results.tsMeta / results.ts /
+//    result.recurring.services[] tree_shrub row) whenever it exists, and
+//    EXCLUSIVELY (Codex r3 P0): tsMeta carries palmCountSource +
+//    pricingKnobs, so it is gated here; the mapped recurring row was
+//    already gated by v1-legacy-mapper at write time.
+//  - raw lineItems (result.lineItems, then engineResult.lineItems) only when
+//    there is no mapped T&S envelope at all.
+// Fail closed: no proof of pricing returns null — never guessed priced.
 function treeShrubPalmCountForEstData(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
   const positiveInt = (value) => {
     const n = Number(value);
     return Number.isInteger(n) && n > 0 ? n : null;
   };
+  // The MAPPED envelope is authoritative and EXCLUSIVE whenever it exists
+  // (Codex r3 P0 on #4789; same rule as treeShrubPalmProvenanceForReplay in
+  // estimate-tree-shrub-knob-replay.js): a revision replaces result but can
+  // leave an older raw engineResult in place, so a stale service_line count
+  // there must never outrank the mapped revision's own evidence. Raw engine
+  // lines are consulted only when there is no mapped T&S envelope at all.
+  const tsMeta = result?.results?.tsMeta && typeof result.results.tsMeta === 'object'
+    ? result.results.tsMeta : null;
+  const mappedServices = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
+  const mappedTsRow = mappedServices.find((s) => (s?.service || '') === 'tree_shrub');
+  const hasMappedTs = !!tsMeta || !!mappedTsRow
+    || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
+  if (hasMappedTs) {
+    const fromTsMeta = tsMeta ? pricedTreeShrubPalmCount(tsMeta) : null;
+    if (fromTsMeta != null) return fromTsMeta;
+    // A tsMeta that exists but does not prove the palms priced is final —
+    // the mapped row (gated from the same line at write time) cannot
+    // contradict it.
+    if (tsMeta) return null;
+    return positiveInt(mappedTsRow?.palmCount);
+  }
   const lineItems = [
     ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
     ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
   ];
   const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
-  const fromLineItem = tsLine ? pricedTreeShrubPalmCount(tsLine) : null;
-  if (fromLineItem != null) return fromLineItem;
-  const mappedServices = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
-  const mappedTsRow = mappedServices.find((s) => (s?.service || '') === 'tree_shrub');
-  const fromMappedRow = positiveInt(mappedTsRow?.palmCount);
-  if (fromMappedRow != null) return fromMappedRow;
-  return result?.results?.tsMeta ? pricedTreeShrubPalmCount(result.results.tsMeta) : null;
+  return tsLine ? pricedTreeShrubPalmCount(tsLine) : null;
 }
 
 function treeShrubFrequenciesFromResultStats(estData = {}) {

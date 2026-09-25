@@ -1320,11 +1320,12 @@ the sender window and exact origin; no customer details or tokens are posted.
 `pricing.frequencies[].perServiceTreatments[].palmCount` (palm-care bullet
 lane, owner 2026-09-24): a positive integer riding a Tree & Shrub treatment
 row ONLY when the quote actually PRICED those palms — sourced from the
-engine's `tree_shrub` line item's own `palmCount` (fresh builds and
-raw/agent-draft shapes) or, for a mapped/admin-saved estimate with no raw
-line items, the mapped `result.recurring.services[]` tree_shrub row or
-`result.tsMeta.palmCount` (same evidence `estimateTreeShrubKnobSignal`
-reads for its own palm/knob replay). The v4.7 routine palm-care reserve
+engine's `tree_shrub` line item's own `palmCount` on fresh builds; for a
+stored estimate the mapped envelope (`result.results.tsMeta`, then the
+mapped `result.recurring.services[]` tree_shrub row) is authoritative and
+exclusive whenever it exists — the same rule the palm/knob replay applies,
+since a revision can leave an older raw `engineResult` behind — and raw
+line items are read only when no mapped Tree & Shrub envelope exists. The v4.7 routine palm-care reserve
 (armed in prod 2026-09-24 ~23:53Z) prices a SERVICE-LINE palm count either
 way (folded into the legacy per-tree term while unarmed), but a
 PROPERTY-sourced count prices NOTHING until the reserve is armed — every
