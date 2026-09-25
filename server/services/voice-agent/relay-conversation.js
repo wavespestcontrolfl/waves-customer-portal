@@ -232,11 +232,14 @@ function warnRejectedRendererOnce(source, value) {
   logger.warn(`[voice-relay] ignoring unknown renderer override ${key} — falling back to block`);
 }
 /**
- * Resolve the ONE renderer this session pins for its whole lifetime — same
- * shape as resolveSessionModel above, deliberately: walk the override chain
- * highest-precedence first, first allowlisted value wins, an unrecognized
- * value is logged once (never silently substituted) and resolution falls
- * back to 'block'.
+ * Resolve the ONE renderer this session pins for its whole lifetime.
+ * UNLIKE resolveSessionModel above: the highest-precedence candidate
+ * PRESENT decides outright — allowlisted, it wins; not allowlisted, this
+ * resolves to 'block' (logged once, never silently substituted) WITHOUT
+ * falling through to try a lower-precedence candidate. A bad sandbox
+ * override must never quietly pick up the shared `VOICE_RELAY_RENDERER`
+ * value behind it — that would silently promote an operator's typo into a
+ * live rollout on a session it was never meant to reach at all.
  */
 function resolveSessionRenderer({ sandbox } = {}) {
   const candidates = [];
@@ -246,10 +249,10 @@ function resolveSessionRenderer({ sandbox } = {}) {
   }
   const raw = process.env.VOICE_RELAY_RENDERER;
   if (raw) candidates.push({ source: RENDERER_ENV, value: raw });
-  for (const { source, value } of candidates) {
-    if (ALLOWED_RENDERERS.has(value)) return value;
-    warnRejectedRendererOnce(source, value);
-  }
+  if (!candidates.length) return 'block';
+  const { source, value } = candidates[0];
+  if (ALLOWED_RENDERERS.has(value)) return value;
+  warnRejectedRendererOnce(source, value);
   return 'block';
 }
 // A barge-in with no caller transcript inside this window is recorded as
@@ -1420,10 +1423,18 @@ class RelayConversation {
     if (isLast) piece = piece.replace(/\s+$/, '');
     if (!piece && !isLast) return; // nothing new to anchor an entry on or to send
     if (!state.entry && !piece) { state.closed = true; return; } // closing with nothing ever spoken this round
-    // Send FIRST: if it throws (a dead socket), the transcript and history
-    // never claim text that did not reach Twilio — the flush chain's catch
-    // then ends the round as `failed` with only what really went out.
-    this._send(piece, isLast === true);
+    // Send FIRST — and check delivery. relay-server.js's real `send` returns
+    // true only when the frame was actually handed to `ws.send`: false when
+    // the socket is not OPEN, or `ws.send` itself threw and `send` swallowed
+    // it (logging, not re-throwing). A THROWING `_send` (a test double, or
+    // any future caller) is unchanged — it propagates on its own. Either way
+    // the transcript and history must never claim text that did not reach
+    // Twilio, so a strict `false` is synthesized into a throw BEFORE any
+    // entry mutation below — the flush chain's catch then ends the round as
+    // `failed` with only what really went out. Only strict `false` counts:
+    // a test stub or the constructor's default `() => {}` returns
+    // `undefined`, which is not a delivery failure.
+    if (this._send(piece, isLast === true) === false) throw new Error('relay send not delivered');
     if (!state.entry) {
       const entry = {
         role: 'agent', text: piece, planned: piece, played: null,
@@ -1442,7 +1453,13 @@ class RelayConversation {
       state.entry = entry;
     } else if (piece) {
       state.entry.planned += piece;
-      state.entry.text = state.entry.planned;
+      // P1 (played evidence): a played snapshot may already have arrived for
+      // this still-growing entry (P1-a keeps it open rather than retiring
+      // it). Re-deriving via `_syncPlayedEntry` — never a bare
+      // `text = planned` — keeps `entry.text` matching what was actually
+      // HEARD so far rather than overwriting it with the newly-grown planned
+      // text the caller hasn't heard yet.
+      this._syncPlayedEntry(state.entry);
     }
     if (isLast) {
       // Closing: no more growth coming. Re-evaluate retirement now in case a
@@ -1470,7 +1487,10 @@ class RelayConversation {
     if (state.entry.interrupted) { state.closed = true; return; }
     this._send('', true);
     state.entry.planned = state.entry.planned.replace(/\s+$/, '');
-    state.entry.text = state.entry.planned;
+    // P1 (played evidence): same as the growth branch above — derive
+    // `entry.text` from played evidence when there is any, rather than
+    // unconditionally overwriting it with the (now-final) planned text.
+    this._syncPlayedEntry(state.entry);
     state.entry.streamOpen = false; // P1-a — see _flushStreamChunk's isLast branch
     this._retireIfPlayedCaughtUp(state.entry);
     state.closed = true;
@@ -1589,7 +1609,14 @@ class RelayConversation {
    * plus the round's tool_use blocks, each paired with a "not run" result so
    * the next model call sees a valid, honest transcript. No tool runs, no
    * further frame is sent, and an entry interrupt() already cut is left as
-   * interrupt() recorded it.
+   * interrupt() recorded it. THE ONE CHOKEPOINT for every early exit of a
+   * streamed round — finalize-time abort, finalize-time failed send,
+   * mid-stream barge-in, mid-stream model failure/timeout, pre-tool abort —
+   * so history/transcript are built one way regardless of where the round
+   * stopped. `msg` may be `null` (the model call itself never resolved, e.g.
+   * a mid-stream barge-in or a model failure/timeout caught before
+   * `finalMessage()` settled) — there are no tool_use blocks to pair in that
+   * case, only whatever prefix was already sent.
    */
   _closeStreamedRoundEarly(streamState, msg, reason) {
     if (reason === 'failed') {
@@ -1605,12 +1632,25 @@ class RelayConversation {
     }
     streamState.closed = true;
     const sentText = streamState.entry ? streamState.entry.planned.trim() : '';
-    const toolUseBlocks = msg.content.filter((b) => b.type === 'tool_use');
+    const toolUseBlocks = msg ? msg.content.filter((b) => b.type === 'tool_use') : [];
     const assistantMessage = {
       role: 'assistant',
       content: sentText ? [{ type: 'text', text: sentText }, ...toolUseBlocks] : toolUseBlocks,
     };
     if (assistantMessage.content.length) {
+      // Interrupt-context gate (PR 1B): on a normal barge-in caught earlier
+      // (finalize-time, or the pre-existing paths), `interrupt()` already ran
+      // and, when the cut entry already had a `historyMessage`, rewrote its
+      // text to the played record itself (`_noteInterruptForModel`). A
+      // MID-STREAM barge-in has no `historyMessage` yet at that point — this
+      // call is what creates the FIRST one for this entry — so apply the
+      // identical rewrite here. Gate off, or this entry was never
+      // interrupted (e.g. a failed send): the sent prefix (`sentText`,
+      // already `entry.planned`) stands as-is.
+      if (streamState.entry && streamState.entry.interrupted && isInterruptContextEnabled()) {
+        const kept = assistantMessage.content.filter((b) => b.type !== 'text');
+        assistantMessage.content = [{ type: 'text', text: streamState.entry.text }, ...kept];
+      }
       this.messages.push(assistantMessage);
       if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
     }
@@ -1667,8 +1707,21 @@ class RelayConversation {
     // interrupt() already closed the transcript entry; _closeStreamedRoundEarly
     // only fixes up the MODEL's history and never sends another frame.
     if (streamState.signal.aborted) return this._closeStreamedRoundEarly(streamState, msg, 'interrupted');
-    if (tail) this._flushStreamChunk(streamState, tail, stat, true);
-    else this._closeStreamEntry(streamState);
+    if (tail) {
+      try {
+        this._flushStreamChunk(streamState, tail, stat, true);
+      } catch (err) {
+        // The tail flush is a single direct call, not routed through
+        // `_queueOrFlush`/`flushChain` — a delivery failure (P1, see
+        // `_flushStreamChunk`) throws straight out here rather than landing
+        // in a chain catch. Route it through the same chokepoint every other
+        // early exit uses, so history holds only what actually went out.
+        logger.error(`[voice-relay] stream renderer tail flush failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        return this._closeStreamedRoundEarly(streamState, msg, 'failed');
+      }
+    } else {
+      this._closeStreamEntry(streamState);
+    }
     const assistantMessage = { role: 'assistant', content: msg.content };
     this.messages.push(assistantMessage);
     if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
@@ -2679,7 +2732,23 @@ class RelayConversation {
         this._modelFailures = 0; // a completed round resets the streak
         this._clearedFailures.model = true;
       } catch (err) {
-        if (!streamTimedOut && this._controller.signal.aborted) return; // barge-in
+        // A text-delta event fires synchronously off the SDK stream, but its
+        // own flush step (`_queueOrFlush`) is chained async — by the time
+        // this catch runs (the model call rejected/threw), the LAST queued
+        // step may still be settling and could still append to
+        // `streamState.entry`. Await it first, same as `_finalizeStreamedRound`,
+        // so neither branch below reads or closes the entry out from under
+        // an in-flight flush (the abort guard inside `_flushStreamChunk`
+        // already no-ops a stale generation's own send either way).
+        if (streamState) await streamState.flushChain;
+        if (!streamTimedOut && this._controller.signal.aborted) {
+          // Barge-in caught here (mid-model-stream, before finalMessage()
+          // resolved): the same chokepoint every other early exit uses —
+          // there is no `msg` (the model call never resolved), so only the
+          // sent prefix (if any) is pushed, no tool_use blocks to pair.
+          if (streamState) this._closeStreamedRoundEarly(streamState, null, 'interrupted');
+          return;
+        }
         stat.timedOut = streamTimedOut;
         const failure = streamTimedOut ? { level: 'warn', copy: 'streamTimeout' } : { level: 'error', copy: 'modelError' };
         logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${streamTimedOut}: ${err.message}`);
@@ -2687,28 +2756,16 @@ class RelayConversation {
         // PR C: a partial streaming utterance is still "open" on Twilio's side
         // (it has only ever seen last:false frames) — close it out with a
         // last:true empty token so playback finalizes, WITHOUT resending
-        // anything already sent. The fallback copy below is a separate, new
-        // utterance, exactly as it is for the block renderer.
-        if (streamState) {
-          this._closeStreamEntry(streamState);
-          // P2-f: the model's own conversation history otherwise has NO
-          // record this round ever spoke — same as the block path, which
-          // never sends anything until finalMessage() resolves, so a failed
-          // round there truly has nothing to record. Here, though, some
-          // chunks may already be on the air; push exactly that sent prefix
-          // as its own assistant message so the model's next round knows
-          // what it already told the caller (role alternation stays valid —
-          // the very next thing pushed is either the caller's next `user`
-          // turn or this same round's tool_result user turn, never another
-          // assistant message back to back). The failure copy below is
-          // spoken but, like every `say()` call, never enters `this.messages`
-          // — unchanged, existing behavior for both renderers.
-          if (streamState.entry && streamState.entry.planned.trim()) {
-            const assistantMessage = { role: 'assistant', content: [{ type: 'text', text: streamState.entry.planned }] };
-            this.messages.push(assistantMessage);
-            streamState.entry.historyMessage = assistantMessage;
-          }
-        }
+        // anything already sent, and record exactly that sent prefix as its
+        // own assistant message (role alternation stays valid — the very
+        // next thing pushed is either the caller's next `user` turn or this
+        // same round's tool_result user turn, never another assistant
+        // message back to back) — same chokepoint as every other early
+        // exit; there is no `msg` here either (the model call itself is what
+        // failed), so no tool_use blocks to pair. The failure copy below is
+        // spoken but, like every `say()` call, never enters `this.messages`
+        // — unchanged, existing behavior for both renderers.
+        if (streamState) this._closeStreamedRoundEarly(streamState, null, 'failed');
         if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy(failure.copy, this.language));
         return;
       } finally {
@@ -2770,8 +2827,29 @@ class RelayConversation {
 
       if (msg.stop_reason === 'tool_use') {
         const results = [];
+        // PR C (finding 4): finalize already returned normally with the
+        // streamed filler's SENT PREFIX pushed to history the moment a
+        // barge-in lands — a barge-in only aborts `this._controller`
+        // (interrupt()), it never stops this tool loop from still running
+        // write tools the caller's barge-in cut off before hearing any
+        // confirmation. `roundSignal` is this round's own abort signal,
+        // captured once (== streamState.signal, pinned at round start);
+        // block-renderer rounds (`streamState` null) are unaffected.
+        const roundSignal = streamState ? streamState.signal : null;
         for (const block of msg.content) {
           if (block.type !== 'tool_use') continue;
+          // Checked immediately before EACH tool call, not just the first —
+          // a barge-in can land between two tool calls in the same round.
+          // Stop here: every remaining tool_use block (this one included)
+          // gets a synthetic "not run" result, paired and pushed exactly
+          // like the existing failureHandoff/_ending stop below, and the
+          // round ends with no further model call.
+          if (roundSignal && roundSignal.aborted) {
+            const remaining = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
+            results.push(...remaining.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current turn was interrupted.' })));
+            this.messages.push({ role: 'user', content: results });
+            return;
+          }
           // Part of the record: reviewing a call must show that Sandy looked
           // something up rather than invented it. Name only — tool INPUT can
           // carry the caller's contact details and belongs in the lead row.

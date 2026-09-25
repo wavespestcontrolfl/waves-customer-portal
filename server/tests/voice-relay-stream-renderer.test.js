@@ -345,6 +345,16 @@ describe('renderer selector — resolved once, pinned per session', () => {
     const convo = new RelayConversation({ callSid: 'CA-r6', from: '+19415551234', send: jest.fn() });
     expect(convo.renderer).toBe('block');
   });
+
+  // P2 (Codex r2): the FIRST candidate present decides outright — an invalid
+  // highest-precedence override must fall back to 'block', never fall
+  // through to try a lower-precedence candidate that happens to be valid.
+  test('an invalid sandbox override falls back to block and never falls through to a valid shared override', () => {
+    process.env.VOICE_RELAY_RENDERER = 'stream'; // valid, but lower precedence for a sandbox session
+    process.env.VOICE_RELAY_SANDBOX_RENDERER = 'strem'; // typo — invalid, HIGHEST precedence here
+    const sandbox = new RelayConversation({ callSid: 'CA-r7', from: '+19415551234', send: jest.fn(), sandbox: true });
+    expect(sandbox.renderer).toBe('block');
+  });
 });
 
 describe('stream renderer — full round loop', () => {
@@ -1007,5 +1017,253 @@ describe('stream renderer — full round loop', () => {
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
     }
+  });
+
+  // P1 (Codex r2, send delivery): relay-server.js's real `send` returns
+  // FALSE (not a throw) when the socket isn't OPEN or `ws.send` itself
+  // threw internally — the exact scenario the throw-based tests above don't
+  // cover. `_flushStreamChunk` must treat a strict `false` return the same
+  // way it already treats a throwing `_send`.
+  test('a send that returns false (not throws) after earlier chunks went out closes the open utterance and speaks the failure copy', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    let n = 0;
+    // relay-server.js's real `send`: returns `false` on an undelivered frame,
+    // logs and swallows — it never throws.
+    const send = jest.fn(() => { n += 1; return n === 2 ? false : undefined; });
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-df2', from: '+19415551234', send, endSession });
+    const promptPromise = convo.handlePrompt('hello');
+    await flush();
+    const round = captured[0];
+    round.textCb('Sure. '); // chunk 1 — delivered (send returns undefined)
+    await flush();
+    round.textCb('One moment please. '); // chunk 2 — send returns false (not delivered)
+    await flush();
+    round.resolve({ content: [{ type: 'text', text: 'Sure. One moment please.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    const calls = send.mock.calls;
+    expect(calls[0]).toEqual(['Sure. ', false]); // interior chunks keep their whitespace
+    expect(calls[2]).toEqual(['', true]); // the open token group is closed
+    const copy = require('../services/voice-agent/relay-language').copy('modelError', null);
+    expect(calls.slice(3).map(([t]) => t).join('')).toBe(copy); // then the failure copy
+    const first = convo._transcript.find((e) => e.role === 'agent');
+    expect(first.planned).toBe('Sure.'); // only what really went out — the undelivered chunk never counted
+    expect(first.streamOpen).toBe(false);
+    expect(endSession).not.toHaveBeenCalled();
+    expect(convo.messages.filter((m) => m.role === 'assistant').map((m) => m.content)).toEqual([[{ type: 'text', text: 'Sure.' }]]);
+  });
+
+  // P1 (Codex r2, send delivery): the finalize-time tail flush
+  // (`_finalizeStreamedRound`'s held-tail release) is a single direct call,
+  // not routed through `_queueOrFlush`/`flushChain` — a delivery failure
+  // there must still route through `_closeStreamedRoundEarly` rather than
+  // throwing straight out of the round loop.
+  test('an undelivered send on the finalize-time tail flush ends the round through the same chokepoint as a mid-stream failure', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    let n = 0;
+    const send = jest.fn(() => { n += 1; return n === 2 ? false : undefined; }); // the tail flush is call #2
+    const convo = new IsolatedConvo({ callSid: 'CA-tailfail', from: '+19415551234', send });
+
+    const promptPromise = convo.handlePrompt('how much is a visit');
+    await flush();
+    const round = captured[0];
+    round.textCb('One moment please. '); // allowlisted safe filler — flushes for real (call #1)
+    await flush();
+    round.textCb('That will be $149 for the visit.'); // HELD (amount) — becomes the tail, released at finalize
+    round.resolve({ content: [{ type: 'text', text: 'One moment please. That will be $149 for the visit.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    // Normalize like relay-server.js's real `send`: `say()` calls `_send`
+    // with a single arg, defaulting `last` to true.
+    const calls = send.mock.calls.map(([t, last]) => [t, last === undefined ? true : last]);
+    expect(calls[0]).toEqual(['One moment please. ', false]); // the safe prefix, actually delivered
+    expect(calls[1]).toEqual(['That will be $149 for the visit.', true]); // attempted — this is the undelivered one (returns false)
+    expect(calls[2]).toEqual(['', true]); // _closeStreamEntry's own close, run by the chokepoint
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall[1]).toBe(true);
+    expect(lastCall[0]).not.toBe(''); // the failure copy itself, not another empty close
+
+    // History holds only the sent prefix — the tail was never delivered, so
+    // it must never be claimed as something the caller heard.
+    const assistantMsgs = convo.messages.filter((m) => m.role === 'assistant');
+    expect(assistantMsgs).toHaveLength(1);
+    expect(assistantMsgs[0].content).toEqual([{ type: 'text', text: 'One moment please.' }]);
+  });
+
+  // P1 (Codex r2, played evidence): growing `planned` (a later chunk
+  // flushing) or trimming at close must never clobber `entry.text` with the
+  // raw planned text when played evidence already exists — it must keep
+  // reflecting what was actually HEARD, via `_syncPlayedEntry`.
+  test('played evidence for an earlier chunk survives a later chunk growing planned, and the round closing', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-p2-play', from: '+19415551234', send });
+
+    const promptPromise = convo.handlePrompt('tell me about your services');
+    await flush();
+    const round = captured[0];
+    round.textCb('Sure, one moment please. '); // chunk 1 — flushes
+    await flush();
+    convo._appendPlayed('Sure, one moment please.'); // full tokens-played confirmation for chunk 1
+    const entry = convo._transcript.find((e) => e.role === 'agent');
+    expect(entry.playedSource).toBe('twilio_event');
+    expect(entry.text).toBe('Sure, one moment please.');
+
+    round.textCb('Great, let me double-check that. '); // chunk 2 — flushes and GROWS planned
+    await flush();
+    // Growing planned must not overwrite the played-derived text with the
+    // (unheard-so-far) grown planned text. `planned` itself still carries
+    // its natural trailing space at this point — it's only right-trimmed
+    // when the entry actually closes, below.
+    expect(entry.text).toBe('Sure, one moment please.');
+    expect(entry.playedSource).toBe('twilio_event');
+    expect(entry.planned).toBe('Sure, one moment please. Great, let me double-check that. ');
+
+    round.resolve({ content: [{ type: 'text', text: 'Sure, one moment please. Great, let me double-check that.' }], stop_reason: 'end_turn' });
+    await promptPromise; // finalize closes the entry (no pending tail) — must still not clobber
+
+    expect(entry.text).toBe('Sure, one moment please.');
+    expect(entry.playedSource).toBe('twilio_event');
+    expect(entry.planned).toBe('Sure, one moment please. Great, let me double-check that.'); // right-trimmed at close
+  });
+
+  // P1 (Codex r2, mid-stream barge-in history): a barge-in landing BEFORE
+  // finalMessage() resolves (caught in the model-stream catch block, not
+  // `_finalizeStreamedRound`) previously left NO record at all of the sent
+  // prefix in the model's own conversation history — the very next thing
+  // pushed would be the next caller turn's `user` message, right after the
+  // ROUND'S OWN caller `user` turn, an invalid role sequence. Routed through
+  // `_closeStreamedRoundEarly(streamState, null, 'interrupted')`, exactly
+  // like every other early exit.
+  describe('mid-stream barge-in (before finalMessage resolves) — history via the chokepoint', () => {
+    afterEach(() => { delete process.env.GATE_VOICE_RELAY_INTERRUPT_CONTEXT; });
+
+    test('gate off: history gets exactly one assistant message holding the sent prefix, and the next round sees it', async () => {
+      const { IsolatedConvo, captured } = isolatedConvoFactory();
+      process.env.VOICE_RELAY_RENDERER = 'stream';
+      const send = jest.fn();
+      const convo = new IsolatedConvo({ callSid: 'CA-mid-int-1', from: '+19415551234', send });
+
+      const promptPromise = convo.handlePrompt('tell me about your services');
+      await flush();
+      const round = captured[0];
+      round.textCb('Sure, one moment please. '); // flushes
+      await flush();
+      convo.interrupt({ utteranceUntilInterrupt: 'Sure, one moment please.' }); // barge-in BEFORE finalMessage() resolves
+      await promptPromise; // the model round rejects (AbortError) via the mock's abort listener
+
+      const assistantMsgs = convo.messages.filter((m) => m.role === 'assistant');
+      expect(assistantMsgs).toHaveLength(1); // previously: none at all
+      expect(assistantMsgs[0].content).toEqual([{ type: 'text', text: 'Sure, one moment please.' }]);
+
+      // Role alternation stays valid, and the NEXT model round actually
+      // receives this assistant message as history.
+      const secondPrompt = convo.handlePrompt('what about pricing');
+      await flush();
+      const msgs = convo.messages;
+      expect(msgs[msgs.length - 2]).toMatchObject({ role: 'assistant', content: [{ type: 'text', text: 'Sure, one moment please.' }] });
+      expect(msgs[msgs.length - 1]).toMatchObject({ role: 'user' });
+      const round2 = captured[1];
+      expect(round2).toBeTruthy();
+      expect(round2.params.messages[round2.params.messages.length - 2]).toMatchObject({ role: 'assistant' });
+      round2.resolve({ content: [{ type: 'text', text: 'Sure, we cover pricing too.' }], stop_reason: 'end_turn' });
+      await secondPrompt;
+    });
+
+    test('gate on: the pushed assistant message carries the played record, not the sent prefix', async () => {
+      process.env.GATE_VOICE_RELAY_INTERRUPT_CONTEXT = 'true';
+      const { IsolatedConvo, captured } = isolatedConvoFactory();
+      process.env.VOICE_RELAY_RENDERER = 'stream';
+      const send = jest.fn();
+      const convo = new IsolatedConvo({ callSid: 'CA-mid-int-2', from: '+19415551234', send });
+
+      const promptPromise = convo.handlePrompt('tell me about your services');
+      await flush();
+      const round = captured[0];
+      round.textCb('Sure, one moment please. '); // flushes
+      await flush();
+      // A partial utterance — the caller only heard part of what was sent.
+      convo.interrupt({ utteranceUntilInterrupt: 'Sure, one moment' });
+      await promptPromise;
+
+      const entry = convo._transcript.find((e) => e.role === 'agent');
+      expect(entry.interrupted).toBe(true);
+      expect(entry.text).toMatch(/\[interrupted\]/); // the played record, per _syncPlayedEntry
+
+      const assistantMsgs = convo.messages.filter((m) => m.role === 'assistant');
+      expect(assistantMsgs).toHaveLength(1);
+      // Same rewrite `_noteInterruptForModel` already does for a
+      // finalize-time barge-in — the model's history must never claim the
+      // caller heard more than the played record says.
+      expect(assistantMsgs[0].content).toEqual([{ type: 'text', text: entry.text }]);
+      expect(assistantMsgs[0].content[0].text).not.toBe('Sure, one moment please.'); // not the sent prefix
+    });
+  });
+
+  // P1 (Codex r2, write tools after an interrupt): a barge-in can land the
+  // instant AFTER finalize has already pushed the sent prefix to history
+  // (the streamed filler) but BEFORE the tool loop runs the round's write
+  // tool(s) — interrupt() only aborts `this._controller`; nothing previously
+  // stopped the tool loop itself from then running e.g. request_booking on
+  // a turn the caller's barge-in already cut off. This exact race (a
+  // barge-in landing in the single microtask gap right after finalize
+  // resolves) has no natural window in this synchronous test harness — the
+  // model-stream catch block and `_finalizeStreamedRound`'s own signal check
+  // already close that earlier gap (P1-c) — so the barge-in is injected via
+  // a thin wrapper around the real `_finalizeStreamedRound` that fires it
+  // immediately after the ORIGINAL call resolves normally, reproducing
+  // exactly the race a concurrent WS 'interrupt' frame would create in
+  // production without changing anything about what finalize itself does.
+  test('a barge-in landing right after finalize (sent prefix already in history) stops the tool loop before any tool runs', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-tool-abort', from: '+19415551234', send });
+    // Spy directly on the instance method the tool loop calls — robust
+    // regardless of suite ordering (unlike trying to capture the isolated
+    // relay-tools module's own `executeTool` mock: `jest.isolateModules`
+    // only sandboxes SYNCHRONOUS requires inside its callback, so a module
+    // reached later via one of `_executeToolBounded`'s own lazy inline
+    // `require('./relay-tools')` calls — as every other write-tool-round
+    // test in this file already does — escapes that sandbox, and a LATER
+    // `isolatedConvoFactory()` call's fresh mock factory is then never
+    // re-invoked for it). This spy needs none of that plumbing: it asserts
+    // exactly what finding 4 is about — `_executeToolBounded` itself is
+    // never reached — regardless of what backs it.
+    const executeToolBoundedSpy = jest.spyOn(convo, '_executeToolBounded');
+
+    const original = convo._finalizeStreamedRound.bind(convo);
+    convo._finalizeStreamedRound = async (...args) => {
+      const result = await original(...args);
+      convo.interrupt({ utteranceUntilInterrupt: 'Let me check on that for you.' });
+      return result;
+    };
+
+    const promptPromise = convo.handlePrompt('book me for tuesday');
+    await flush();
+    const round = captured[0];
+    round.textCb('Let me check on that for you. '); // safe filler — flushes
+    await flush();
+    round.resolve({
+      content: [
+        { type: 'text', text: 'Let me check on that for you.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await promptPromise;
+
+    expect(executeToolBoundedSpy).not.toHaveBeenCalled(); // the tool executor is never reached
+    const toolResultMsg = convo.messages.find(
+      (m) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result',
+    );
+    expect(toolResultMsg.content).toEqual([
+      { type: 'tool_result', tool_use_id: 't1', content: 'Not run — the current turn was interrupted.' },
+    ]);
+    expect(captured[1]).toBeUndefined(); // no further model round
   });
 });
