@@ -11692,7 +11692,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // and there is no invoice yet for any of them to act on.
           invoiceModeResult = false;
           invoiceIdResult = null;
-          invoiceAmountResult = annualPrepayDisplayAmount || null;
+          // Codex #4819 r6 P2: the total the park FROZE (Station Setup +
+          // annual fee + tax) — the figure the signature-time invoice bills —
+          // never annualPrepayDisplayAmount, which omits the setup line.
+          invoiceAmountResult = annualPrepayConversionResult.annualPlanDeferredTotal ?? null;
           invoicePayUrlResult = null;
           invoiceServiceLabelResult = 'Annual prepay — awaiting signature';
           invoiceKindResult = 'annual_prepay_deferred';
@@ -12449,7 +12452,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // applied — so every quoted amount matches what the pay link collects.
     // annualPrepayDisplayAmount (pre-credit) only survives as the fallback for
     // a conversion that produced no amount.
-    const annualPrepayQuotedAmount = annualPrepaySelected && invoiceAmount != null
+    // A deferred (sign-before-pay) accept quotes only its frozen total — a
+    // missing one stays null rather than falling back to the display figure.
+    const annualPrepayQuotedAmount = annualPrepaySelected && (invoiceAmount != null || invoiceKind === 'annual_prepay_deferred')
       ? invoiceAmount
       : annualPrepayDisplayAmount;
     let acceptedAppointmentsToRegister = txResult.acceptedAppointmentsToRegister || [];

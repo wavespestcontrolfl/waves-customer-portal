@@ -168,7 +168,10 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       // signed"): the customer row's tier/pipeline conversion never runs at
       // accept for this product — only at activation.
       expect(customerUpdate).not.toHaveBeenCalled();
-      expect(result).toEqual({ annualPlanActivationStatus: 'awaiting_signature' });
+      expect(result).toEqual({
+        annualPlanActivationStatus: 'awaiting_signature',
+        annualPlanDeferredTotal: JSON.parse(estimateUpdate.mock.calls[0][0].annual_plan_deferred_invoice).frozenFinancials.total,
+      });
       expect(estimateUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ annual_plan_activation_status: 'awaiting_signature' }),
       );
@@ -198,10 +201,15 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       ];
       const { EstimateConverter } = setup(termiteAnnualLine, { gateOn: true, estimateUpdate, annualPlanRows });
 
-      await EstimateConverter.convertEstimate('estimate-1', convertOpts);
+      const result = await EstimateConverter.convertEstimate('estimate-1', convertOpts);
 
       const acceptContext = JSON.parse(estimateUpdate.mock.calls[0][0].annual_plan_deferred_invoice);
       const frozen = acceptContext.frozenFinancials;
+      // Codex #4819 r6 P2: the park reports THIS frozen total (Station Setup
+      // included) — the accept response and admin notification quote it,
+      // never the setup-less display figure.
+      expect(result.annualPlanDeferredTotal).toBe(frozen.total);
+      expect(result.annualPlanDeferredTotal).toBe(Math.round((frozen.annualPrepayAmount + 199) * 100) / 100);
       expect(frozen.version).toBe(1);
       expect(frozen.annualPrepayAmount).toBeGreaterThan(0);
       expect(frozen.annualPrepayAmount).toBeLessThanOrEqual(250);
@@ -254,7 +262,8 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
       const result = await EstimateConverter.convertEstimate('estimate-1', convertOpts);
 
-      expect(result).toEqual({ annualPlanActivationStatus: 'activated' });
+      // No snapshot on this fixture → no total to report.
+      expect(result).toEqual({ annualPlanActivationStatus: 'activated', annualPlanDeferredTotal: null });
       expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
       expect(invoiceService.create).not.toHaveBeenCalled();
       expect(customerUpdate).not.toHaveBeenCalled();
@@ -263,7 +272,9 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
     test('pre-push P1: re-run while still awaiting_signature keeps the ORIGINAL accept-context — no re-park, no term, no invoice', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
-      const original = { version: 1, parkedAt: '2026-09-01T00:00:00.000Z', prepayInvoiceAmount: 250 };
+      const original = {
+        version: 1, parkedAt: '2026-09-01T00:00:00.000Z', prepayInvoiceAmount: 250, frozenFinancials: { total: 449 },
+      };
       const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
         gateOn: true,
         estimateUpdate,
@@ -273,7 +284,8 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
       const result = await EstimateConverter.convertEstimate('estimate-1', convertOpts);
 
-      expect(result).toEqual({ annualPlanActivationStatus: 'awaiting_signature' });
+      // The replay reports the ORIGINAL frozen total, never a re-derived one.
+      expect(result).toEqual({ annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: 449 });
       expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
       expect(invoiceService.create).not.toHaveBeenCalled();
       expect(estimateUpdate).not.toHaveBeenCalled();

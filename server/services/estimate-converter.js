@@ -4448,14 +4448,28 @@ function frozenTermiteAnnualFinancialsFor(estimate) {
 // 'awaiting_signature' keeps the FIRST parked context (never re-parks at a
 // later/edited acceptance), and a retry once already 'activated' is a
 // no-op that reports the terminal status rather than overwriting it.
+// The accepted total the park FROZE (frozenFinancials.total — every line
+// incl. the annual-plan Station Setup, plus tax), reported with every park
+// outcome so the accept response and the acceptance notification quote the
+// same figure the signature-time invoice will bill (codex #4819 r6 P2) —
+// never a re-derived display amount. Null when no snapshot is readable.
+function parkedDeferredTotal(context) {
+  let parsed = context;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+  }
+  const total = Number(parsed?.frozenFinancials?.total);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
 async function parkTermiteAnnualPlanAccept({
   database, estimateId, estimate, estimateData, opts,
 }) {
   if (estimate.annual_plan_activation_status === 'activated') {
-    return { annualPlanActivationStatus: 'activated' };
+    return { annualPlanActivationStatus: 'activated', annualPlanDeferredTotal: parkedDeferredTotal(estimate.annual_plan_deferred_invoice) };
   }
   if (estimate.annual_plan_activation_status === 'awaiting_signature' && estimate.annual_plan_deferred_invoice) {
-    return { annualPlanActivationStatus: 'awaiting_signature' };
+    return { annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: parkedDeferredTotal(estimate.annual_plan_deferred_invoice) };
   }
   // Codex round-3 P1: freeze the customer-accepted pricing NOW, before any
   // tier/pipeline work runs — never park without it. A failure here fails
@@ -4510,13 +4524,18 @@ async function parkTermiteAnnualPlanAccept({
         annual_plan_activation_status: 'awaiting_signature',
         annual_plan_deferred_invoice: JSON.stringify(acceptContext),
       });
-    if (stampedCount > 0) return { annualPlanActivationStatus: 'awaiting_signature' };
+    if (stampedCount > 0) {
+      return { annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: parkedDeferredTotal(acceptContext) };
+    }
     // The guard matched ZERO rows — a concurrent write (another accept
     // attempt, or activation) landed between the read at the top of
     // convertEstimate and this UPDATE. Report what the row ACTUALLY holds
     // now rather than a blind guess.
-    const freshRow = await database('estimates').where({ id: estimateId }).first('annual_plan_activation_status');
-    return { annualPlanActivationStatus: freshRow?.annual_plan_activation_status || null };
+    const freshRow = await database('estimates').where({ id: estimateId }).first('annual_plan_activation_status', 'annual_plan_deferred_invoice');
+    return {
+      annualPlanActivationStatus: freshRow?.annual_plan_activation_status || null,
+      annualPlanDeferredTotal: parkedDeferredTotal(freshRow?.annual_plan_deferred_invoice),
+    };
   } catch (stampErr) {
     logger.error(`[estimate-converter] annual-plan awaiting-signature stamp failed for estimate ${estimateId}: ${stampErr.message}`);
     throw stampErr;
