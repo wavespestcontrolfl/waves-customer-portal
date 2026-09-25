@@ -167,6 +167,32 @@ describe('billing channel email adapter', () => {
     });
   });
 
+  test.each([400, 401, 403, 404, 405, 413, 415, 422, 429])(
+    'classifies a definite SendGrid %s rejection after handoff as not sent',
+    async (status) => {
+      mockSendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => withProviderHandoff(async () => {
+        throw Object.assign(new Error(`SendGrid ${status}: rejected`), { status });
+      }));
+      await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+        sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'EMAIL_PROVIDER_ERROR',
+      });
+    },
+  );
+
+  test.each([
+    ['408', { status: 408 }],
+    ['other 4xx', { status: 418 }],
+    ['5xx', { status: 503 }],
+    ['network error', { code: 'ECONNRESET' }],
+  ])('keeps a %s failure after handoff uncertain', async (_label, shape) => {
+    mockSendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => withProviderHandoff(async () => {
+      throw Object.assign(new Error('provider failure after handoff'), shape);
+    }));
+    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+      sent: false, deliveryOutcome: 'uncertain', retryable: false,
+    });
+  });
+
   test('rechecks the selected channel at the provider boundary', async () => {
     let reads = 0;
     mockDb.mockImplementation((table) => ({

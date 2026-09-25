@@ -178,8 +178,14 @@ function acceptedResult(result) {
   };
 }
 
+// After the handoff begins, a definite SendGrid rejection (the canonical
+// sendgrid-mail.isDefiniteRejection statuses) accepted nothing, so the
+// outcome is `not_sent` and retryable; a 408, other 4xx, 5xx or network
+// error may have gone out before the response and stays `uncertain`.
 function providerFailure(err, handoffStarted) {
-  const definitelyNotSent = !handoffStarted || err.code === 'EMAIL_SEND_IN_PROGRESS';
+  const definitelyNotSent = !handoffStarted
+    || err.code === 'EMAIL_SEND_IN_PROGRESS'
+    || require('./sendgrid-mail').isDefiniteRejection(err);
   return {
     sent: false,
     provider: 'email',
