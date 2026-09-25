@@ -831,7 +831,7 @@ describe('fulfillment proof', () => {
   test('R2 owner ruling 2026-09-24 (settled r5): a payment is evidence for any "other" ask the model may weigh, but closes without the model only a strong payment question', () => {
     const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
     const invoicePaid = { type: 'payment', payment_source: 'invoice', id: 'invoice-1', ref: 'payment:invoice-1', paid_at: '2040-03-11T15:00:00Z',
-      text: 'Invoice Quarterly paid 2040-03-11', candidate_invoices: 1 };
+      text: 'Invoice Quarterly paid 2040-03-11', candidate_invoices: 1, candidate_invoice_id: 'invoice-1', candidate_invoice_number: 'WPC-1' };
     const smsReceipt = { type: 'payment', payment_source: 'sms', id: 'sms-1', status: 'delivered', message_type: 'receipt' };
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
     const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
@@ -869,7 +869,8 @@ describe('fulfillment proof', () => {
   test('Codex #4816 r2: a payment-method change request is never answered by a payment; an ambiguous payment waits for the model', () => {
     const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
     const paid = (candidate_invoices) => ({ id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
-      paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11', candidate_invoices });
+      paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11', candidate_invoices,
+      candidate_invoice_id: candidate_invoices === 1 ? 'invoice-1' : null, candidate_invoice_number: candidate_invoices === 1 ? 'WPC-1' : null });
     const splitBillingAsk = { kind: 'other', description: 'Can you separate the charges under two payment methods?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
     expect(admissibleWitness(paid(1), splitBillingAsk)).toBe(false);
     expect(admissibleWitness(paid(1), { kind: 'other', description: 'Please update my card on file' })).toBe(false);
@@ -884,9 +885,32 @@ describe('fulfillment proof', () => {
     expect(systemEventFulfillment({ records: [paid(1)], failures: [] }, zelleAsk)).toMatchObject({ reason: 'system_event', record_id: 'invoice-1' });
   });
 
+  test('Codex #4816 r6: the no-model close needs the witness to BE the sole request-time candidate; ledger-only money is model evidence', () => {
+    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
+    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
+    const ask = { kind: 'other', description: 'Did my payment go through?', sms_context: ctx };
+    const base = { type: 'payment', paid_at: '2040-03-11T15:00:00Z', candidate_invoices: 1, candidate_invoice_id: 'invoice-A', candidate_invoice_number: 'WPC-A' };
+    const paidA = { ...base, id: 'invoice-A', ref: 'payment:invoice-A', payment_source: 'invoice', text: 'Invoice A paid 2040-03-11' };
+    // Invoice B was created and paid after the text: candidate count is still 1 (A), but B is not A.
+    const paidB = { ...base, id: 'invoice-B', ref: 'payment:invoice-B', payment_source: 'invoice', text: 'Invoice B paid 2040-03-11' };
+    expect(systemEventFulfillment({ records: [paidA], failures: [] }, ask)).toMatchObject({ reason: 'system_event', record_id: 'invoice-A' });
+    expect(admissibleWitness(paidB, ask)).toBe(true);
+    expect(systemEventFulfillment({ records: [paidB], failures: [] }, ask)).toBeNull();
+    // Zero candidates at request time: never the shortcut.
+    expect(systemEventFulfillment({ records: [{ ...paidA, candidate_invoices: 0, candidate_invoice_id: null, candidate_invoice_number: null }], failures: [] }, ask)).toBeNull();
+    // A receipt text closes only when it names the sole candidate invoice.
+    const receiptA = { ...base, id: 'sms-1', ref: 'payment:sms-1', payment_source: 'sms', status: 'delivered', message_type: 'receipt', created_at: '2040-03-11T15:00:00Z', text: 'Payment received, thank you. Invoice WPC-A: $125' };
+    expect(systemEventFulfillment({ records: [receiptA], failures: [] }, ask)).toMatchObject({ reason: 'system_event', record_id: 'sms-1' });
+    expect(systemEventFulfillment({ records: [{ ...receiptA, text: 'Payment received, thank you. Invoice WPC-B: $400' }], failures: [] }, ask)).toBeNull();
+    // Ledger-only prepayment: admissible for the model, never the shortcut.
+    const ledger = { ...base, id: 'pay-1', ref: 'payment:pay-1', payment_source: 'ledger', created_at: '2040-03-11T15:00:00Z', text: 'Payment of $200.00 recorded 2040-03-11: Account credit prepayment — zelle' };
+    expect(admissibleWitness(ledger, { kind: 'other', description: 'Did you receive my Zelle prepayment?' })).toBe(true);
+    expect(systemEventFulfillment({ records: [ledger], failures: [] }, ask)).toBeNull();
+  });
+
   test('Codex #4816 r1: "check" alone is not a payment question; production confirmation/reschedule-link sends are admissible for their kinds', () => {
     const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
-    const invoicePaid = { type: 'payment', payment_source: 'invoice', id: 'invoice-1', ref: 'payment:invoice-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice X paid 2040-03-11', candidate_invoices: 1 };
+    const invoicePaid = { type: 'payment', payment_source: 'invoice', id: 'invoice-1', ref: 'payment:invoice-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice X paid 2040-03-11', candidate_invoices: 1, candidate_invoice_id: 'invoice-1', candidate_invoice_number: 'WPC-1' };
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
     // "check" is not a payment term: the model may still weigh the payment, it never closes on its own.
     expect(systemEventFulfillment({ records: [invoicePaid], failures: [] }, { kind: 'other', description: 'Please check whether the technician is coming', sms_context: ctx })).toBeNull();

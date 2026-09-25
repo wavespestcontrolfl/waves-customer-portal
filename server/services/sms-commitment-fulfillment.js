@@ -152,7 +152,17 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // With exactly one, the payment that followed can only be that one and
       // may close the ask deterministically.
       conn('invoices').where({ customer_id: customerId }).whereNot('status', 'draft').where('created_at', '<=', after)
-        .where((q) => q.whereNull('paid_at').orWhere('paid_at', '>', after)).count({ n: 'id' }).first(),
+        .where((q) => q.whereNull('paid_at').orWhere('paid_at', '>', after)).orderBy('created_at', 'desc').limit(3)
+        .select('id', 'invoice_number'),
+      // Off-gateway money recorded by staff (cash/check/Zelle/Venmo
+      // prepayments from admin-customers.js) lands only in the payments
+      // ledger, with no invoice link and no receipt text. It is evidence the
+      // model may weigh (Codex #4816 r6); with nothing tying it to a charge
+      // it never takes the no-model shortcut.
+      conn('payments').where({ customer_id: customerId, status: 'paid' })
+        .where('created_at', '>', after).where('created_at', '<=', now)
+        .orderBy('created_at', 'desc').limit(LIMIT + 1)
+        .select('id', 'amount', 'description', 'payment_date', 'created_at'),
       conn('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'delivered' })
         .whereIn('message_type', PAYMENT_SMS_TYPES)
         .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
@@ -163,11 +173,17 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // own overflow always trips the shared LIMIT check the generic loop
       // already runs on `payment` — a mixed-source customer can over-flag as
       // truncated (fails closed to review) but never under-flags.
-    ]).then(([invoicesPaid, candidates, paymentSms]) => {
-      const candidate_invoices = Number(candidates?.n || 0);
+    ]).then(([invoicesPaid, candidates, ledger, paymentSms]) => {
+      // The request-time candidates ride on every payment row (identity, not
+      // just a count): the no-model shortcut requires the witness to BE the
+      // sole candidate (Codex #4816 r6).
+      const candidate = { candidate_invoices: candidates.length,
+        candidate_invoice_id: candidates.length === 1 ? candidates[0].id : null,
+        candidate_invoice_number: candidates.length === 1 ? candidates[0].invoice_number : null };
       return [
-        ...invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice', candidate_invoices })),
-        ...paymentSms.map((row) => ({ ...row, payment_source: 'sms', candidate_invoices })),
+        ...invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice', ...candidate })),
+        ...ledger.map((row) => ({ ...row, payment_source: 'ledger', ...candidate })),
+        ...paymentSms.map((row) => ({ ...row, payment_source: 'sms', ...candidate })),
       ];
     }),
     visit: conn('scheduled_services').where({ customer_id: customerId })
@@ -238,7 +254,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // the quote/fingerprint have something concrete to ground on. An
       // sms-sourced payment row already has message_body (falls through above).
       const paymentText = type === 'payment' && row.payment_source === 'invoice'
-        ? `Invoice ${row.title || row.invoice_number || row.id} paid ${new Date(row.paid_at).toISOString().slice(0, 10)}` : '';
+        ? `Invoice ${row.title || row.invoice_number || row.id} paid ${new Date(row.paid_at).toISOString().slice(0, 10)}`
+        : type === 'payment' && row.payment_source === 'ledger'
+          ? `Payment of $${Number(row.amount).toFixed(2)} recorded ${row.payment_date instanceof Date ? row.payment_date.toISOString().slice(0, 10) : row.payment_date}${row.description ? `: ${row.description}` : ''}` : '';
       const text = row.message_body || row.transcription || row.body_text || row.text_snapshot || paymentText || row.service_interest || row.title || visitText;
       if (text.length > 16000) failures.push(`${type}_body_truncated`);
       records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, 16000) });
@@ -443,11 +461,19 @@ const SYSTEM_EVENT_KINDS = ['other', 'callback'];
 function systemEventFulfillment(evidence, commitment) {
   if (!SYSTEM_EVENT_KINDS.includes(commitment.kind)) return null;
   // A payment closes without the model only when the ask uses a strong
-  // payment term AND the payment is the only charge the question could have
-  // been about (one unpaid invoice at the time of the text). Anything else
-  // stays an admissible witness for the model.
-  const unambiguous = (record) => record.type !== 'payment'
-    || (mentionsPayment(commitment) && Number(record.candidate_invoices) <= 1);
+  // payment term AND the witness IS the one charge the question could have
+  // been about: the single invoice that existed unpaid when the customer
+  // texted, either paid (invoice witness with that id) or receipted (the
+  // receipt text names that invoice number). A later-created invoice, a
+  // zero-candidate snapshot, a ledger-only payment or a receipt for some
+  // other charge all stay admissible witnesses for the model (Codex r6).
+  const unambiguous = (record) => {
+    if (record.type !== 'payment') return true;
+    if (!mentionsPayment(commitment) || !record.candidate_invoice_id) return false;
+    if (record.payment_source === 'invoice') return record.id === record.candidate_invoice_id;
+    if (record.payment_source === 'sms') return !!record.candidate_invoice_number && String(record.text || '').includes(record.candidate_invoice_number);
+    return false;
+  };
   const witness = evidence.records.find((record) => SYSTEM_EVENT_TYPES.includes(record.type)
     && unambiguous(record) && admissibleWitness(record, commitment, evidence.records));
   if (!witness) return null;
@@ -492,7 +518,7 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
     estimate: 'estimates', visit: 'scheduled_services',
     // A 'payment' witness is one of two distinct rows (R2); which table to
     // lock depends on which leg matched, carried on the verdict as payment_source.
-    payment: verdict.payment_source === 'invoice' ? 'invoices' : 'sms_log' };
+    payment: { invoice: 'invoices', ledger: 'payments', sms: 'sms_log' }[verdict.payment_source] };
   const table = tables[verdict.record_type];
   if (!table || !verdict.record_id || !verdict.evidence_hash) return false;
   // Customer/source locks are already held. Estimate writers lock estimate
