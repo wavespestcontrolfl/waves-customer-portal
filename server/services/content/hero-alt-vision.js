@@ -116,8 +116,8 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 // photos (owner ruling 2026-09-24). The one wrapped van is judged by its OWN
 // narrow question (buildVanScreenPrompt, a second vision call in parallel):
 // its body must not be a different van than the Ford Transit medium roof,
-// the wrap must be applied with its mascot, and its lettering must be the
-// wrap's own exact strings. The main screen is told to leave that one van out
+// the wrap must be applied with its mascot, and a readable phone number or
+// web address on it must be Waves' own. The main screen is told to leave that one van out
 // of every field, so its marks are never reported there at all. Deciding
 // after the fact which free-text detections belonged to the van (a keyword
 // allowlist over "Waves logo on the van door") produced a new edge case every
@@ -128,32 +128,46 @@ const SCREEN_MAX_TOKENS = 400;
 const SCREEN_MAX_TOKENS_WITH_LOGO = 1200;
 const VAN_SCREEN_MAX_TOKENS = 600;
 const UNIFORM_LOGO_DESCRIPTION = 'the Waves company logo (a smiling blue wave mascot in a red-and-blue shield, lettered "WAVES" and "LAWN & PEST")';
-const VAN_WRAP_DESCRIPTION = 'the Waves van wrap (a light-colored cargo van with a sky-blue gradient, halftone dots, a cartoon wave-character mascot, "WAVES" / "Lawn & Pest" lettering, a phone number and a web address)';
-// The wrap's own exact strings (owner ruling 2026-09-24): wrap text on the
-// van that is not one of these, whole, is gibberish lettering.
-const VAN_WRAP_ALLOWED_TEXT = ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'];
+const VAN_WRAP_DESCRIPTION = 'the Waves van wrap (the whole van body wrapped bright blue with a halftone-dot pattern, a cartoon wave mascot in a red cap and red overalls, "WAVES" / "Lawn & Pest" lettering, a phone number and a web address)';
+// The wrap's contact details (owner ruling 2026-09-24/25): slight lettering
+// variances on a background van pass, but a READABLE phone number or web
+// address that is wrong fails — a customer could dial it. Compared by digits
+// and by lowercase host, so formatting never matters.
+const VAN_PHONE_DIGITS = '9412412459';
+const VAN_WEB_ADDRESS = 'gowavesfl.com';
 // The only acceptable `van.body` verdicts (Codex r2 P2 on #4785).
-const VAN_BODY_VALUES = new Set(['ford_transit_medium_roof', 'other', 'unsure']);
+// A wrong body must be NAMED: a vague "other" was the checker's easy way out
+// on a stylized Transit (3 of 4 flat-illustration vans in the 2026-09-25 lab,
+// all of them correct Transits).
+const WRONG_VAN_BODIES = new Set(['mercedes_sprinter', 'ram_promaster', 'high_roof_van', 'box_truck', 'pickup_or_car']);
+const VAN_BODY_VALUES = new Set(['ford_transit_medium_roof', 'unsure', ...WRONG_VAN_BODIES]);
 function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false } = {}) {
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
   const shape = allowUniformLogo
-    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "technicians": [{"cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string[]}], "waves_logo_elsewhere": string[], "uniform_logo_lettering": string[], "forbidden_scenes": number[], "notes": string}'
+    ? '{"readable_text": string[], "logos_or_brand_marks": string[], "technicians": [{"facing": "camera" | "side" | "away", "cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string[], "placket_x": number | null, "chest_badge_x": number | null}], "waves_logo_elsewhere": string[], "uniform_logo_lettering": string[], "forbidden_scenes": number[], "notes": string}'
     : '{"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": number[], "notes": string}';
   const uniformLogoRule = allowUniformLogo
     ? `
-- technicians: one entry PER uniformed technician in frame (empty array if none). For that person: cap_front_visible is true only if their cap FRONT is in frame and legible enough to judge for a logo (false when the head is cropped, from behind, or too small); chest_visible is true only if their shirt chest is in frame and legible enough to judge (false when turned away, cropped, or covered); logo_on lists where ${UNIFORM_LOGO_DESCRIPTION} appears on THAT person, each as exactly "cap", "right chest" (the wearer's right side, i.e. the side of their right arm) or "left chest".
+- technicians: one entry PER uniformed technician in frame (empty array if none). For that person: facing is "camera" when their chest and shoulders face the viewer (straight on or a slight three-quarter turn), "side" when seen in profile, "away" when seen from behind; cap_front_visible is true only if their cap FRONT is in frame and legible enough to judge for a logo (false when the head is cropped, from behind, or too small); chest_visible is true only if their shirt chest is in frame and legible enough to judge (false when turned away, cropped, or covered); logo_on lists where ${UNIFORM_LOGO_DESCRIPTION} appears on THAT person, each as exactly "cap" or "chest", or naming any other spot (a sleeve, the back, the pants); placket_x is the horizontal position of their shirt's button placket (the row of buttons under the collar) and chest_badge_x the horizontal position of the CENTER of the logo badge on their shirt chest, both measured in the image from 0 (the picture's left edge) to 1000 (its right edge) — measure carefully rather than guessing from how shirts usually look; null when not visible.
 - waves_logo_elsewhere: every place that Waves logo appears that is NOT a technician's cap or chest (a vehicle, wall, sign, equipment, packaging, floating on its own), each named. Empty array if none.
 - uniform_logo_lettering: the lettering you can read INSIDE that Waves logo on a technician's cap or chest ("WAVES", "LAWN & PEST"), listed here and NOT under readable_text. Empty array if none is legible.
 EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks. Any OTHER lettering (including "WAVES" on a sign, vehicle or wall), and the Waves logo anywhere other than a cap or chest, must still be listed.`
     : '';
-  const vanWrapRule = allowVanWrap
-    ? `
-VAN EXCEPTION (overrides every field above): when exactly ONE van in the frame carries ${VAN_WRAP_DESCRIPTION}, that one van is checked separately — leave everything painted or mounted on it, including its maker's badge, out of every field. The same marks anywhere else (a second van, another vehicle, a sign, a wall, equipment, floating on its own) must still be listed; if two or more vans carry the wrap, list them all.`
+  // Stated FIRST, before any field that says to list marks "on vehicles":
+  // placed after the uniform-logo rule it lost to it — the lab's cartoon
+  // hero (2026-09-25) listed the van's own lettering and "Waves logo
+  // elsewhere: van" anyway.
+  const vanPreamble = allowVanWrap
+    ? `IGNORE THE WAVES VAN FIRST: if exactly ONE van in the frame carries ${VAN_WRAP_DESCRIPTION} — drawn in whatever style the image uses, photo, cartoon or flat illustration — it is checked separately. For every field below, treat that one van as if it were not in the picture — nothing painted or mounted on it (its mascot, its lettering, its phone number, its web address, the Ford oval badge on its grille) goes in any field, including readable_text, logos_or_brand_marks and waves_logo_elsewhere. The same marks anywhere else (a second van, another vehicle, a sign, a wall, equipment, floating on its own) must still be listed; if two or more vans carry the wrap, list them all.
+`
     : '';
-  return `Inspect this generated blog image and answer as strict JSON only, shape ${shape}.
-- readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
-- logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.${uniformLogoRule}${vanWrapRule}
+  // Restated inside the two fields the van's marks kept landing in (the lab's
+  // flat hero listed the Transit's "Ford" badge 4 of 4 times without it).
+  const vanFieldNote = allowVanWrap ? ' Never anything on the Waves van described at the top, not even its Ford badge.' : '';
+  return `${vanPreamble}Inspect this generated blog image and answer as strict JSON only, shape ${shape}.
+- readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.${vanFieldNote}
+- logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.${vanFieldNote}${uniformLogoRule}
 - forbidden_scenes: the NUMBERS of the FORBIDDEN items below the image clearly depicts (e.g. [1]). Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
 - notes: one short sentence.
 ${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}
@@ -164,15 +178,17 @@ ${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t
 // wrap applied (a van left plain fails — Codex r1 P2 on #4784), judges the
 // BODY against the Ford Transit medium roof specifically (a wrap reproduced
 // onto a Sprinter still fails — Codex r2 P2 on #4785; "unsure" passes for a
-// distant van), and reads the wrap's lettering on its own, apart from the
-// maker's badge.
+// distant van), and reads back only the contact details it can read IN
+// FULL: other lettering is not checked (owner, 2026-09-25: slight variances
+// on the van don't matter; a wrong phone number or web address does).
 function buildVanScreenPrompt() {
-  return `Inspect ONLY the van in this generated blog image and answer as strict JSON only, shape {"van": {"body": "ford_transit_medium_roof" | "other" | "unsure", "wrapped": boolean, "wrap_text": string[], "wrap_mascot": boolean} | null}.
-- van: null if there is NO van of any kind in the frame; otherwise an object describing the van that carries ${VAN_WRAP_DESCRIPTION} (or, if none does, the largest van):
-- body: judges the van's make/roof against a Ford Transit medium-roof cargo van specifically — Transit cues: a short hood, a black hexagon-mesh grille with a Ford oval badge, and a MEDIUM roof (taller than a car, shorter than a walk-in van). "ford_transit_medium_roof" only when those cues are clearly visible; "other" when the van is clearly a DIFFERENT body (e.g. a Mercedes Sprinter's long sloped nose and no Ford grille, a noticeably taller high-roof, or a different make entirely); "unsure" when the van is too small, distant, angled, or obscured to judge either way.
-- wrapped: true only if the van visibly carries that graphic wrap rather than a plain, unmarked body — false if the van is there but plain.
-- wrap_text: every distinct string of readable text on the wrap graphics, each as its own array entry, spelled and punctuated exactly as painted — not the maker's badge. Empty if wrapped is false or none is legible.
-- wrap_mascot: true only if the wave mascot character (a blue wave shape wearing a red cap and overalls) is painted on the van.`;
+  return `Inspect ONLY the van in this generated blog image and answer as strict JSON only, shape {"van": {"body": "ford_transit_medium_roof" | "mercedes_sprinter" | "ram_promaster" | "high_roof_van" | "box_truck" | "pickup_or_car" | "unsure", "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string[], "web_addresses": string[]} | null}.
+- van: null if there is NO van of any kind in the frame; otherwise an object describing the van that carries ${VAN_WRAP_DESCRIPTION} (or, if none does, the largest van), with these fields:
+  - body: which vehicle the van is. "ford_transit_medium_roof": a short sloped hood, a black hexagon-mesh grille (with a Ford oval), and a MEDIUM roof (taller than a car, shorter than a walk-in van). Name a DIFFERENT body only when you can clearly see it: "mercedes_sprinter" (a long pointed nose, no Ford grille), "ram_promaster" (a blunt, nearly vertical flat nose), "high_roof_van" (a roof clearly taller than a medium roof), "box_truck", or "pickup_or_car". "unsure" when the van is too small, distant, angled, obscured or stylized to tell — in a cartoon or flat illustration, a boxy van with a short sloped hood and a medium roof is the Transit.
+  - wrapped: true only if the van visibly carries that graphic wrap rather than a plain, unmarked body — false if the van is there but plain.
+  - wrap_mascot: true only if the wave mascot character (a round blue wave with big eyes, a red cap and red overalls) appears on the van.
+  - phone_numbers: every phone number on the van that you can read IN FULL, copied digit for digit exactly as painted. Leave out one that is cut off, blurred, or too small to read every digit. Empty array if none.
+  - web_addresses: every web address on the van that you can read IN FULL, copied letter for letter exactly as painted. Same rule. Empty array if none.`;
 }
 function parseJsonObject(text) {
   const raw = String(text || '').replace(/```[a-z]*|```/gi, '').trim();
@@ -189,8 +205,9 @@ function parseVanScreen(text) {
     if (!obj || !Object.prototype.hasOwnProperty.call(obj, 'van')) return null;
     const v = obj.van;
     if (v === null) return { van: null };
-    if (!(v && typeof v === 'object' && VAN_BODY_VALUES.has(v.body) && typeof v.wrapped === 'boolean' && Array.isArray(v.wrap_text) && typeof v.wrap_mascot === 'boolean')) return null;
-    return { van: { body: v.body, wrapped: v.wrapped, wrapText: v.wrap_text.map((t) => String(t || '').trim()).filter(Boolean), wrapMascot: v.wrap_mascot } };
+    if (!(v && typeof v === 'object' && VAN_BODY_VALUES.has(v.body) && typeof v.wrapped === 'boolean' && typeof v.wrap_mascot === 'boolean' && Array.isArray(v.phone_numbers) && Array.isArray(v.web_addresses))) return null;
+    const strings = (list) => list.map((t) => String(t || '').trim()).filter(Boolean);
+    return { van: { body: v.body, wrapped: v.wrapped, wrapMascot: v.wrap_mascot, phones: strings(v.phone_numbers), webAddresses: strings(v.web_addresses) } };
   } catch {
     return null;
   }
@@ -212,7 +229,7 @@ function parseScreen(text, { requireForbidden = false, requirePlacements = false
     if (requirePlacements && !placementsWellFormed(obj)) return null;
     const strings = (v) => (Array.isArray(v) ? v.map((t) => String(t || '').trim()).filter(Boolean) : []);
     return {
-      technicians: Array.isArray(obj.technicians) ? obj.technicians.map((p) => ({ capVisible: p.cap_front_visible === true, chestVisible: p.chest_visible === true, logoOn: strings(p.logo_on) })) : [],
+      technicians: Array.isArray(obj.technicians) ? obj.technicians.map((p) => ({ facing: p.facing, placketX: Number(p.placket_x), badgeX: Number(p.chest_badge_x), capVisible: p.cap_front_visible === true, chestVisible: p.chest_visible === true, logoOn: strings(p.logo_on) })) : [],
       elsewhere: strings(obj.waves_logo_elsewhere),
       // Lettering the model attributes to the uniform logo itself — only the
       // logo's own words count (a model cannot launder arbitrary text here).
@@ -234,9 +251,10 @@ const normalizeText = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g
 // garment on THAT person can be judged (a profile shot with the chest turned
 // away is not a missing chest logo; one branded tech beside an unbranded one
 // is a failure — pre-push P1 on f3efa39462, Codex r3 P2 on #4761).
+const FACING_VALUES = new Set(['camera', 'side', 'away']);
 function placementsWellFormed(obj) {
   if (!Array.isArray(obj.technicians) || !Array.isArray(obj.waves_logo_elsewhere)) return false;
-  return obj.technicians.every((p) => p && typeof p === 'object' && typeof p.cap_front_visible === 'boolean' && typeof p.chest_visible === 'boolean' && Array.isArray(p.logo_on));
+  return obj.technicians.every((p) => p && typeof p === 'object' && FACING_VALUES.has(p.facing) && typeof p.cap_front_visible === 'boolean' && typeof p.chest_visible === 'boolean' && Array.isArray(p.logo_on));
 }
 // A detection names an exclusion when it is its 1-based id, the same text,
 // or a paraphrase carrying every content word of it ("an irrigation repair
@@ -281,7 +299,7 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
   // allowed caption the image rendered correctly; the caller ranks two failed
   // candidates on it (Codex r11 P2 on #3964).
   const violations = logoReasons.length + vanReasons.length + brandMarks.length + strayText.length + incomplete.length + missing.length + forbidden.length;
-  const placements = allowUniformLogo ? [...parsed.technicians.flatMap((p) => p.logoOn), ...parsed.elsewhere.map((t) => `elsewhere: ${t}`)] : [];
+  const placements = allowUniformLogo ? [...parsed.technicians.flatMap((p) => p.logoOn.map((t) => (classifyPlacement(t) === 'chest' && chestSide(p) ? `${chestSide(p)} chest` : classifyPlacement(t)))), ...parsed.elsewhere.map((t) => `elsewhere: ${t}`)] : [];
   return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: [...logos, ...vanFlagged], forbidden, reasons, violations, placements };
 }
 
@@ -305,9 +323,12 @@ const UNIFORM_LOGO_WORDS = /\bwaves\b/i;
 // or collar mark (Codex r5 P2 on #4761).
 const UNIFORM_LOCATION = /\b(cap|hat|chest)\b/i;
 const OTHER_SURFACE = /\b(van|truck|vehicle|car|door|wall|sign|banner|equipment|sprayer|tank|packaging|bottle|box|background|floating|standalone|sky|ground|clipboard|tablet|backpack|bag|glove|gloves|tool|tools|mailbox|fence|sleeve|sleeves|back|collar|pocket|hem|shoulder)\b/i;
-// A LEFT-chest detection is never allowed: it is a misplaced mark, kept for
-// the reasons and the ranking (Codex r4 P2 on #4761).
-const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t) && !/\bleft\b/i.test(t);
+// Which chest a badge is on is judged ONLY from technicians[] (facing +
+// picture side), never from this free text: "picture-left" in a detection
+// here is the CORRECT chest on a technician facing the camera, so a "left"
+// word says nothing (Codex r4 P2 on #4761 excluded it; the 2026-09-25 lab
+// showed the screen's own left/right words were unreliable).
+const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATION.test(t) && !OTHER_SURFACE.test(t);
 // The words inside the Waves logo. A readable_text entry is dropped only
 // when the model ALSO attributed that same string to the uniform logo under
 // uniform_logo_lettering — the model's own placement, not a blanket filter
@@ -316,17 +337,27 @@ const isAllowedUniformLogo = (t) => UNIFORM_LOGO_WORDS.test(t) && UNIFORM_LOCATI
 // screen retry (regen batch 2026-09-24).
 const LOGO_WORDS = new Set(['waves', 'lawn', 'pest', 'lawn pest', 'lawn and pest', 'waves lawn pest', 'waves lawn and pest']);
 const isLogoWord = (t) => LOGO_WORDS.has(normalizeText(t));
-// A reported placement on a technician → cap | right chest | left chest | other.
+// A reported placement on a technician → cap | chest | other.
 function classifyPlacement(t) {
   const n = normalizeText(t);
   if (/\b(cap|hat)\b/.test(n)) return 'cap';
-  if (/\bchest\b/.test(n) && /\bleft\b/.test(n)) return 'left chest';
-  if (/\bchest\b/.test(n)) return 'right chest';
+  if (/\bchest\b/.test(n)) return 'chest';
   return 'other';
+}
+// Which chest the badge is on → 'right' | 'left' | null (not judgeable).
+// Vision models cannot name the side in words — the 2026-09-25 lab screen
+// called 16 of 16 correct right-chest badges "left chest", and "picture-left"
+// wording fared no better — but the badge's and the button placket's
+// positions, compared in code, got 6 of 6 camera-facing technicians right.
+// Facing the camera, a badge left of the placket in the picture is on the
+// wearer's RIGHT chest. In profile or from behind the side is never judged.
+function chestSide(p) {
+  if (p.facing !== 'camera' || !Number.isFinite(p.placketX) || !Number.isFinite(p.badgeX) || p.badgeX === p.placketX) return null;
+  return p.badgeX < p.placketX ? 'right' : 'left';
 }
 // The placement verdict for a uniform-logo image → { reasons, misplaced }.
 // Per technician: the logo must be on the cap when the cap front can be
-// judged and on the RIGHT chest when the chest can be judged; a left-chest
+// judged and on the RIGHT chest when the chest faces the camera; a left-chest
 // logo is wrong even beside a correct right-chest one; the logo anywhere
 // else is a brand mark. `misplaced` lists every wrongly placed mark so the
 // caller's "no logo beats a logo" ranking still sees it (Codex r3 P2 on #4761).
@@ -343,98 +374,43 @@ function uniformLogoReasons({ technicians, elsewhere }) {
     const stray = p.logoOn.filter((t) => classifyPlacement(t) === 'other');
     if (stray.length) { reasons.push(`${who}logo or brand mark: Waves logo on ${stray.slice(0, 3).join(', ')}`); misplaced.push(...stray.map((t) => `${who}Waves logo on ${t}`)); }
     if (p.capVisible && !where.has('cap')) reasons.push(`${who}uniform logo missing on the cap`);
-    if (where.has('left chest')) { reasons.push(`${who}uniform logo on the left chest${where.has('right chest') ? ' as well as the right' : ', not the right'}`); misplaced.push(`${who}Waves logo on the left chest`); }
-    else if (p.chestVisible && !where.has('right chest')) reasons.push(`${who}uniform logo missing on the chest`);
+    if (where.has('chest') && chestSide(p) === 'left') { reasons.push(`${who}uniform logo on the left chest, not the right`); misplaced.push(`${who}Waves logo on the left chest`); }
+    // A chest badge is demanded only facing the camera: in profile the
+    // visible half may be the plain one.
+    else if (p.chestVisible && p.facing === 'camera' && !where.has('chest')) reasons.push(`${who}uniform logo missing on the chest`);
   });
   return { reasons, misplaced };
 }
-// The van wrap's lettering is matched PUNCTUATION-SENSITIVELY — case- and
-// whitespace-insensitive, but &, -, . and ! must sit exactly where the real
-// wrap has them ("Lawn Pest" and "GoWavesFL-com" are not the wrap; Codex r2
-// P2 on #4785). A string splits into chunks on whitespace ONLY, so a
-// reported fragment boundary is legitimate only where the wrap itself has a
-// space: "Lawn &" + "Pest" is fine, "941-241" + "2459" and "GoWavesFL" +
-// "com" never are (Codex r3 P2 on #4785). The side panel's "Lawn & Pest!"
-// is the same lettering as the rear's "Lawn & Pest" wherever it appears in
-// an entry (Codex r8, r12 P2s on #4785) — never "Pests!", the tagline's own.
-function canonicalChunks(str) {
-  return String(str || '').replace(/\bpest!/gi, 'pest').trim().split(/\s+/).filter(Boolean).map((c) => c.toLowerCase());
-}
-// Indices of whole allowed phrases whose chunks, concatenated in order,
-// equal `chunks` exactly — or null. One OCR entry may group ADJACENT wrap
-// strings ("WAVES Lawn & Pest" off the stacked logo — Codex r9 P2 on #4785).
-function splitIntoWholePhrases(chunks, seqs, from = 0) {
-  if (from === chunks.length) return [];
-  for (let c = 0; c < seqs.length; c += 1) {
-    const seq = seqs[c];
-    if (from + seq.length <= chunks.length && seq.every((x, j) => chunks[from + j] === x)) {
-      const rest = splitIntoWholePhrases(chunks, seqs, from + seq.length);
-      if (rest) return [c, ...rest];
-    }
-  }
-  return null;
-}
-// matchWrapText(fragments) → { strayText, incomplete, complete }
-//   strayText — fragments that are no in-order chunk run of any wrap string
-//   (wrong or dropped punctuation included);
-//   incomplete — wrap strings some fragment(s) partially covered but never
-//   completed ("Lawn" + "Pest" with the "&" dropped at their boundary);
-//   complete — wrap strings fully covered.
-function matchWrapText(fragments) {
-  const allowedSeqs = VAN_WRAP_ALLOWED_TEXT.map(canonicalChunks);
-  const covered = allowedSeqs.map(() => new Set());
-  const cursor = allowedSeqs.map(() => 0);
-  const runAt = (chunks, seq, from) => {
-    for (let i = from; i + chunks.length <= seq.length; i += 1) {
-      if (chunks.every((c, j) => seq[i + j] === c)) return i;
-    }
-    return -1;
-  };
-  const strayText = fragments.filter((raw) => {
-    const chunks = canonicalChunks(raw);
-    let ok = false;
-    allowedSeqs.forEach((seq, c) => {
-      const at = runAt(chunks, seq, cursor[c]);
-      if (!chunks.length || at < 0) return;
-      ok = true;
-      for (let j = 0; j < chunks.length; j += 1) covered[c].add(at + j);
-      cursor[c] = at + chunks.length;
-    });
-    const whole = ok ? null : splitIntoWholePhrases(chunks, allowedSeqs);
-    for (const c of whole || []) { allowedSeqs[c].forEach((_, j) => covered[c].add(j)); cursor[c] = allowedSeqs[c].length; }
-    return !ok && !(whole && whole.length);
-  });
-  const incomplete = VAN_WRAP_ALLOWED_TEXT.filter((_, c) => covered[c].size && covered[c].size < allowedSeqs[c].length);
-  const complete = VAN_WRAP_ALLOWED_TEXT.filter((_, c) => covered[c].size === allowedSeqs[c].length);
-  return { strayText, incomplete, complete };
-}
+// A read-back phone number is right when its digits are the wrap's (a
+// leading country code 1 allowed); a web address when its host is, ignoring
+// case, spaces, scheme and "www.". Formatting never matters.
+const isVanPhone = (t) => String(t).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '') === VAN_PHONE_DIGITS;
+const isVanWebAddress = (t) => String(t).toLowerCase().replace(/\s+/g, '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '') === VAN_WEB_ADDRESS;
 // The van question's verdict → { reasons, flagged } (flagged rides into the
 // screen's `logos` so the caller's "fewest marks" ranking sees each fault).
-//   - the wrap on the WRONG body (a Sprinter, a high-roof, any generic cargo
-//     van) fails; "unsure" passes (Codex r2 P2 on #4785);
-//   - a van left plain fails — the reference exists so the van carries the
-//     wrap (Codex r1 P2 on #4784);
-//   - a wrap without its mascot fails, whatever text rendered (Codex r1 P2
-//     on #4785);
-//   - wrap lettering that is not the wrap's own strings, whole — garbled or
-//     truncated — fails (owner ruling 2026-09-24; Codex r1 P2 on #4784);
-//   - a van close enough to confirm as the Transit is close enough to read,
-//     so it must carry at least "WAVES" (Codex r10 P2 on #4785).
+// Only what matters on a background van fails (owner, 2026-09-25):
+//   - the wrap on the WRONG body (a Sprinter, a high-roof, any other make);
+//     "unsure" passes (Codex r2 P2 on #4785);
+//   - a van left plain — the reference exists so the van carries the wrap
+//     (Codex r1 P2 on #4784);
+//   - a wrap without its mascot (Codex r1 P2 on #4785);
+//   - a readable phone number or web address that is not Waves' own.
+// Other lettering drift ("Lawn & Pest!", a split or missing tagline) passes.
 function vanWrapReasons(van) {
   const flagged = [];
   const reasons = [];
   const fail = (reason, items = [reason]) => { reasons.push(reason); flagged.push(...items); };
   if (!van) return { reasons, flagged };
-  if (van.body === 'other') fail('van body is not a Ford Transit medium-roof cargo van');
+  if (WRONG_VAN_BODIES.has(van.body)) fail('van body is not a Ford Transit medium-roof cargo van');
   if (!van.wrapped) {
     fail('van present without the wrap');
     return { reasons, flagged };
   }
   if (!van.wrapMascot) fail('van wrap missing the mascot');
-  const { strayText, incomplete, complete } = matchWrapText(van.wrapText);
-  const garbled = [...strayText, ...incomplete];
-  if (garbled.length) fail(`garbled van wrap text: ${garbled.slice(0, 3).join(', ')}`, garbled.map((t) => `garbled van wrap text: ${t}`));
-  if (van.body === 'ford_transit_medium_roof' && !complete.includes('WAVES')) fail('van wrap missing the WAVES lettering');
+  const wrongPhones = van.phones.filter((t) => !isVanPhone(t));
+  if (wrongPhones.length) fail(`wrong phone number on the van: ${wrongPhones.slice(0, 3).join(', ')}`, wrongPhones.map((t) => `wrong phone number on the van: ${t}`));
+  const wrongWeb = van.webAddresses.filter((t) => !isVanWebAddress(t));
+  if (wrongWeb.length) fail(`wrong web address on the van: ${wrongWeb.slice(0, 3).join(', ')}`, wrongWeb.map((t) => `wrong web address on the van: ${t}`));
   return { reasons, flagged };
 }
 // The caption match (Codex r1/r4 P2s on #3964): an allowed caption may come
@@ -519,4 +495,4 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
 }
 
 module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt, screenGeneratedImage, buildScreenPrompt, parseScreen };
-module.exports._internals = { SCREEN_MAX_TOKENS, SCREEN_MAX_TOKENS_WITH_LOGO, VAN_SCREEN_MAX_TOKENS, VAN_WRAP_ALLOWED_TEXT, isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, vanWrapReasons, buildVanScreenPrompt, parseVanScreen, matchWrapText, matchCaptions, isLogoWord, UNIFORM_LOGO_DESCRIPTION };
+module.exports._internals = { SCREEN_MAX_TOKENS, SCREEN_MAX_TOKENS_WITH_LOGO, VAN_SCREEN_MAX_TOKENS, VAN_PHONE_DIGITS, VAN_WEB_ADDRESS, isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, vanWrapReasons, buildVanScreenPrompt, parseVanScreen, isVanPhone, isVanWebAddress, matchCaptions, isLogoWord, UNIFORM_LOGO_DESCRIPTION };
