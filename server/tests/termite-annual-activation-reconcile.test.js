@@ -28,17 +28,23 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
 
   const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 
-  function baseSnapshot() {
+  function baseAcceptContext() {
     return {
-      amountCents: 30000,
-      setupFeeCents: 0,
-      lines: [{ description: 'annual fee', quantity: 1, unit_price: 300 }],
-      title: 'WaveGuard Bronze — Annual Prepay (12 months)',
-      notes: 'test',
-      taxRate: null,
-      monthlyRate: 25,
-      resolvedBy: 'estimate-converter:prepay_annual',
-      at: '2026-09-25T00:00:00.000Z',
+      version: 1,
+      parkedAt: '2026-09-25T00:00:00.000Z',
+      prepayInvoiceAmount: 300,
+      firstApplicationAmount: null,
+      allowFirstApplicationFallback: true,
+      manualDiscountItemization: null,
+      adoptedExistingAppointmentId: null,
+      annualPrepayTermStart: null,
+      coverageServiceType: null,
+      coverageVisitCount: null,
+      coverageCadence: null,
+      deferFollowUpReminderRegistration: true,
+      deferCommercialScheduleNotification: true,
+      skipMembershipEmail: true,
+      skipWelcomeSms: false,
     };
   }
 
@@ -106,22 +112,42 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     // contract with no resolvable estimate is dropped, matching real SQL).
     function contractsJoinEstimatesBuilder() {
       const filters = {}; // qualified key ('cc.x' / 'e.x') -> value
-      let order = null;
+      let notAttemptedTodayGuard = false; // codex P2 starvation throttle
+      const orders = []; // compound sort, in .orderBy() call order
       let lim = null;
       const builder = {
         join() { return builder; }, // semantics are hardcoded below
         where(a, b) {
+          // Only usage in production for the callback form: the "not
+          // attempted today" OR-condition on e.annual_plan_activation_attempted_at.
+          if (typeof a === 'function') { notAttemptedTodayGuard = true; return builder; }
           if (b !== undefined) filters[a] = b;
           else if (a && typeof a === 'object') Object.assign(filters, a);
           return builder;
         },
-        orderBy(col, dir = 'asc') { order = { col, dir }; return builder; },
+        orderBy(col, dir = 'asc') { orders.push({ col, dir }); return builder; },
         select() { return builder; },
         limit(n) { lim = n; return builder; },
         then: (resolve, reject) => Promise.resolve(rows()).then(resolve, reject),
         catch: (reject) => Promise.resolve(rows()).catch(reject),
       };
       function fieldFor(prefix, key) { return key.startsWith(prefix) ? key.slice(prefix.length) : null; }
+      // UTC-calendar-day comparison — good enough for the fake (the real
+      // query compares ET calendar days in Postgres); tests set
+      // annual_plan_activation_attempted_at to either null, "now", or
+      // several days in the past, never within hours of a real day
+      // boundary. Mirrors estimatesJoinTermsJoinInvoicesBuilder's identical
+      // helper below.
+      function attemptedBeforeToday(attemptedAt) {
+        if (!attemptedAt) return true;
+        const attempted = new Date(attemptedAt);
+        const now = new Date();
+        return attempted.getUTCFullYear() !== now.getUTCFullYear()
+          || attempted.getUTCMonth() !== now.getUTCMonth()
+          || attempted.getUTCDate() !== now.getUTCDate()
+          ? attempted < now
+          : false;
+      }
       function rows() {
         let joined = [...contracts.values()]
           .map((cc) => {
@@ -137,15 +163,30 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
           if (eField !== null) return e[eField] === v;
           return true;
         }));
-        if (order) {
-          const field = fieldFor('cc.', order.col) || order.col;
-          joined.sort((a, b) => {
-            const av = a.cc[field];
-            const bv = b.cc[field];
-            const cmp = av < bv ? -1 : av > bv ? 1 : 0;
-            return order.dir === 'desc' ? -cmp : cmp;
-          });
+        if (notAttemptedTodayGuard) {
+          joined = joined.filter(({ e }) => e.annual_plan_activation_attempted_at == null
+            || attemptedBeforeToday(e.annual_plan_activation_attempted_at));
         }
+        // Apply least-significant orderBy first, most-significant last —
+        // Array#sort is stable, so this reproduces SQL's compound ORDER BY
+        // from a sequence of single-key .orderBy() calls.
+        [...orders].reverse().forEach(({ col, dir }) => {
+          const ccField = fieldFor('cc.', col);
+          const eField = fieldFor('e.', col);
+          const valueOf = (row) => (ccField !== null ? row.cc[ccField] : eField !== null ? row.e[eField] : row.cc[col]);
+          joined.sort((a, b) => {
+            const av = valueOf(a);
+            const bv = valueOf(b);
+            // NULLS FIRST is Postgres' default for ASC (and NULLS LAST for
+            // DESC) — matches the real query's ordering of never-attempted
+            // rows ahead of previously-attempted ones.
+            if (av == null && bv == null) return 0;
+            if (av == null) return dir === 'desc' ? 1 : -1;
+            if (bv == null) return dir === 'desc' ? -1 : 1;
+            const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+            return dir === 'desc' ? -cmp : cmp;
+          });
+        });
         let result = joined.map(({ cc }) => ({ contract_id: cc.id }));
         if (lim != null) result = result.slice(0, lim);
         return result;
@@ -282,7 +323,9 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     }));
     const invoiceCreate = jest.fn(invoiceCreateImpl || (async () => {
       const id = `invoice-${Math.random().toString(36).slice(2)}`;
-      invoices.set(id, { id, total: 300, sent_at: null });
+      invoices.set(id, {
+        id, total: 300, sent_at: null, created_at: new Date(),
+      });
       return { id, total: 300 };
     }));
     const sendViaSMSAndEmail = jest.fn(deliveryImpl || (async (invoiceId) => {
@@ -291,17 +334,32 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
       return { ok: true, sms: { ok: true }, email: { ok: true } };
     }));
     const notifyAdmin = jest.fn(notifyAdminImpl || (async () => true));
+    // Mirrors the REAL convertEstimate's activationRun outcome for these
+    // sweep tests (its own exhaustive behavior is covered by
+    // estimate-converter-termite-annual-sign-before-pay.test.js): mints an
+    // invoice + term through the SAME injectable termCreateImpl /
+    // invoiceCreateImpl points the failure-injection tests below use, then
+    // marks the estimate row 'activated' in the SAME Map the fake conn's
+    // plain table handler reads/writes — so a subsequent idempotency
+    // re-check or the delivery-retry scan sees the update exactly like the
+    // real transaction would.
+    const convertEstimate = jest.fn(async (estimateId) => {
+      const estimate = estimates.get(String(estimateId));
+      if (!estimate) throw new Error(`Estimate ${estimateId} not found`);
+      const invoice = await invoiceCreate({ customerId: estimate.customer_id });
+      if (!invoice?.id) throw new Error('Annual prepay invoice was not created');
+      const term = await createTermForAnnualPrepay({ prepayInvoiceId: invoice.id, sourceEstimateId: String(estimateId) });
+      if (!term?.id) throw new Error('Annual prepay term was not created');
+      Object.assign(estimate, { annual_plan_activation_status: 'activated', annual_plan_activated_at: new Date() });
+      return {
+        annualPlanActivationStatus: 'activated', draftInvoiceId: invoice.id, annualPrepayTermId: term.id,
+      };
+    });
 
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
-    jest.doMock('../services/estimate-deposits', () => ({
-      acquireEstimateDepositLedgerLock: jest.fn().mockResolvedValue(undefined),
-      pendingDepositCredit: jest.fn().mockResolvedValue(null),
-      consumeDepositCredit: jest.fn().mockResolvedValue(0),
-    }));
-    jest.doMock('../services/invoice', () => ({ create: invoiceCreate, sendViaSMSAndEmail }));
-    jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay }));
-    jest.doMock('../services/estimate-converter', () => ({ canAutoSendDraftInvoice: jest.fn(() => true) }));
+    jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+    jest.doMock('../services/estimate-converter', () => ({ canAutoSendDraftInvoice: jest.fn(() => true), convertEstimate }));
 
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
     return {
@@ -314,7 +372,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('signed-but-awaiting: activates the estimate and reports it in the counts', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const contracts = new Map([
@@ -335,7 +393,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('unsigned contract: the estimate is untouched (not in the signed-contract scan at all)', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const contracts = new Map([
@@ -356,7 +414,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('already activated: not scanned in the first place (the join WHERE excludes it)', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const contracts = new Map([
@@ -377,10 +435,10 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('one failure does not stop the batch — the other rows still activate', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
       ['est-2', {
-        id: 'est-2', customer_id: 'cust-2', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-2', customer_id: 'cust-2', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const contracts = new Map([
@@ -449,11 +507,11 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     for (let i = 0; i < 5; i += 1) {
       const id = `unsigned-${i}`;
       estimates.set(id, {
-        id, customer_id: `cust-unsigned-${i}`, annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseSnapshot(),
+        id, customer_id: `cust-unsigned-${i}`, annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseAcceptContext(),
       });
     }
     estimates.set('signed-est', {
-      id: 'signed-est', customer_id: 'cust-signed', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseSnapshot(),
+      id: 'signed-est', customer_id: 'cust-signed', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseAcceptContext(),
     });
     contracts.set('signed-contract', {
       id: 'signed-contract', document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date('2026-09-25T00:00:00Z'), annual_plan_version: null, document_variables_snapshot: { estimate: { id: 'signed-est' } },
@@ -470,12 +528,127 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     expect(estimates.get('signed-est').annual_plan_activation_status).toBe('activated');
   });
 
+  // ---- codex P2 (round 2 restructure): activation-attempt throttle ------
+
+  test('codex P2: a signed estimate whose activation already failed TODAY is skipped this tick (throttle), so it never monopolizes the batch', async () => {
+    const estimates = new Map([
+      ['est-1', {
+        id: 'est-1',
+        customer_id: 'cust-1',
+        annual_plan_activation_status: 'awaiting_signature',
+        annual_plan_deferred_invoice: baseAcceptContext(),
+        // Already attempted a few minutes ago (still today) — a
+        // permanently-failing row (a structurally broken accept-context)
+        // would otherwise retain this NULL-free stamp forever and re-win
+        // the LIMIT every tick.
+        annual_plan_activation_attempted_at: new Date(Date.now() - 5 * 60 * 1000),
+      }],
+    ]);
+    const contracts = new Map([
+      ['contract-1', {
+        id: 'contract-1', document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date('2026-09-25T00:00:00Z'), annual_plan_version: null, document_variables_snapshot: { estimate: { id: 'est-1' } },
+      }],
+    ]);
+    const { reconcileTermiteAnnualActivations, conn, createTermForAnnualPrepay } = setup({ estimates, contracts });
+
+    const counts = await reconcileTermiteAnnualActivations({ conn });
+
+    expect(counts.scanned).toBe(0);
+    expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+    expect(estimates.get('est-1').annual_plan_activation_status).toBe('awaiting_signature');
+  });
+
+  test('codex P2: an estimate whose activation was attempted on an EARLIER day is eligible again (the throttle is per-day, not permanent)', async () => {
+    const estimates = new Map([
+      ['est-1', {
+        id: 'est-1',
+        customer_id: 'cust-1',
+        annual_plan_activation_status: 'awaiting_signature',
+        annual_plan_deferred_invoice: baseAcceptContext(),
+        annual_plan_activation_attempted_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+      }],
+    ]);
+    const contracts = new Map([
+      ['contract-1', {
+        id: 'contract-1', document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date('2026-09-25T00:00:00Z'), annual_plan_version: null, document_variables_snapshot: { estimate: { id: 'est-1' } },
+      }],
+    ]);
+    const { reconcileTermiteAnnualActivations, conn } = setup({ estimates, contracts });
+
+    const counts = await reconcileTermiteAnnualActivations({ conn });
+
+    expect(counts.scanned).toBe(1);
+    expect(counts.activated).toBe(1);
+  });
+
+  test('codex P2: an activation attempt stamps annual_plan_activation_attempted_at, success or failure', async () => {
+    const estimates = new Map([
+      ['est-1', {
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseAcceptContext(),
+      }],
+    ]);
+    const contracts = new Map([
+      ['contract-1', {
+        id: 'contract-1', document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date('2026-09-25T00:00:00Z'), annual_plan_version: null, document_variables_snapshot: { estimate: { id: 'est-1' } },
+      }],
+    ]);
+    const { reconcileTermiteAnnualActivations, conn } = setup({
+      estimates,
+      contracts,
+      termCreateImpl: async () => { throw new Error('term creation exploded'); },
+    });
+
+    expect(estimates.get('est-1').annual_plan_activation_attempted_at).toBeUndefined();
+    await reconcileTermiteAnnualActivations({ conn });
+    expect(estimates.get('est-1').annual_plan_activation_attempted_at).toBeInstanceOf(Date);
+    // The failure itself leaves the estimate awaiting_signature, retryable.
+    expect(estimates.get('est-1').annual_plan_activation_status).toBe('awaiting_signature');
+  });
+
+  test('codex P2: never-attempted rows are ordered ahead of previously-attempted ones, then by signed_at', async () => {
+    const estimates = new Map([
+      ['est-attempted', {
+        id: 'est-attempted',
+        customer_id: 'cust-attempted',
+        annual_plan_activation_status: 'awaiting_signature',
+        annual_plan_deferred_invoice: baseAcceptContext(),
+        annual_plan_activation_attempted_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+      }],
+      ['est-fresh', {
+        id: 'est-fresh', customer_id: 'cust-fresh', annual_plan_activation_status: 'awaiting_signature', annual_plan_deferred_invoice: baseAcceptContext(),
+      }],
+    ]);
+    const contracts = new Map([
+      // Signed LATER but never attempted — should still activate FIRST.
+      ['contract-fresh', {
+        id: 'contract-fresh', document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date('2026-09-25T00:00:00Z'), annual_plan_version: null, document_variables_snapshot: { estimate: { id: 'est-fresh' } },
+      }],
+      ['contract-attempted', {
+        id: 'contract-attempted', document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date('2026-09-01T00:00:00Z'), annual_plan_version: null, document_variables_snapshot: { estimate: { id: 'est-attempted' } },
+      }],
+    ]);
+    const activatedOrder = [];
+    const { reconcileTermiteAnnualActivations, conn } = setup({
+      estimates,
+      contracts,
+      termCreateImpl: async ({ prepayInvoiceId, sourceEstimateId }) => {
+        activatedOrder.push(sourceEstimateId);
+        const id = `term-${sourceEstimateId}`;
+        return { id };
+      },
+    });
+
+    await reconcileTermiteAnnualActivations({ conn });
+
+    expect(activatedOrder).toEqual(['est-fresh', 'est-attempted']);
+  });
+
   // ---- codex P1 (this round), item 1: delivery retry --------------------
 
   test('codex P1: an activated estimate whose invoice never delivered is retried and delivered once', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const terms = new Map([
@@ -501,7 +674,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('codex P1: a delivered invoice is not re-scanned or re-sent', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const terms = new Map([
@@ -523,7 +696,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('codex P1: a persistent delivery failure is reported and does not stop the rest of the sweep', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const terms = new Map([
@@ -555,7 +728,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('codex P1 (item 2): two consecutive sweep ticks against the same still-undelivered invoice pass the IDENTICAL dedupeKey', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const terms = new Map([
@@ -604,7 +777,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
       { inv: { status: 'sent', sent_at: null }, term: { renewed_from_term_id: 'term-prior' } },
     ];
     cases.forEach(({ inv, term }, i) => {
-      estimates.set(`est-${i}`, { id: `est-${i}`, customer_id: `cust-${i}`, annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot() });
+      estimates.set(`est-${i}`, { id: `est-${i}`, customer_id: `cust-${i}`, annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext() });
       invoices.set(`inv-${i}`, { id: `inv-${i}`, total: 300, ...inv });
       terms.set(`term-${i}`, { id: `term-${i}`, source_estimate_id: `est-${i}`, prepay_invoice_id: `inv-${i}`, renewed_from_term_id: null, ...term });
     });
@@ -621,7 +794,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('codex P2: a delivery attempt stamps annual_delivery_attempted_at, success or failure', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const terms = new Map([
@@ -642,7 +815,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('codex P2: a row attempted TODAY is skipped this tick (throttle), so it never monopolizes the batch', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const terms = new Map([
@@ -667,7 +840,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   test('codex P2: an invoice attempted on an EARLIER day is eligible again (the throttle is per-day, not permanent)', async () => {
     const estimates = new Map([
       ['est-1', {
-        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext(),
       }],
     ]);
     const terms = new Map([
@@ -698,7 +871,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
       { id: 'middle', createdAt: new Date('2026-09-15T00:00:00Z') },
     ];
     rows.forEach(({ id, createdAt }) => {
-      estimates.set(`est-${id}`, { id: `est-${id}`, customer_id: `cust-${id}`, annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot() });
+      estimates.set(`est-${id}`, { id: `est-${id}`, customer_id: `cust-${id}`, annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseAcceptContext() });
       invoices.set(`inv-${id}`, {
         id: `inv-${id}`, total: 300, sent_at: null, created_at: createdAt,
       });

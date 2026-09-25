@@ -3,12 +3,21 @@
 // ============================================================
 // termite-annual-activation.js — completes the deferred half of "sign
 // before pay" for the Subterranean Termite Protection annual plan (slice
-// 3a, owner ruling 2026-09-24, dark behind GATE_TERMITE_ANNUAL_PLAN).
+// 3a, restructured 2026-09-25 per round-2 review of #4819).
 //
-// estimate-converter.js defers the annual-fee invoice + annual_prepay_terms
-// row on accept until the customer e-signs the annual agreement — this
-// module runs that deferred work once contracts-public.js's sign route
-// commits a signature on that exact agreement template.
+// estimate-converter.js's convertEstimate() PARKS a termite annual-plan
+// accept before any tier/pipeline/invoice/term work runs (see its
+// parkTermiteAnnualPlanAccept helper) — this module completes that
+// deferred work once contracts-public.js's sign route commits a signature
+// on that exact agreement template, by calling convertEstimate AGAIN with
+// activationRun: true. convertEstimate's ORDINARY prepay_annual branch then
+// owns every pricing / due-date / overlap-lock / setup-line / tax /
+// service-seeding decision, exactly as it would for any other prepay_annual
+// accept — this module never re-implements or re-derives any of that. The
+// parallel "snapshot billing minter" this replaces kept drifting from that
+// branch on every review round (due date, the overlap lock, the setup
+// line, tax, delivery statuses) precisely because it was a second
+// implementation of the same decision.
 //
 // Idempotent by construction: everything happens under a FOR UPDATE lock on
 // the source estimate row, gated on
@@ -18,22 +27,16 @@
 //
 // Fail-closed, never throws out of the caller: any failure rings the admin
 // bell and leaves the estimate 'awaiting_signature' so it can be retried —
-// by a re-drive of this function, or by the slice-3b reconciliation sweep
-// (TODO: not built in this slice — see estimate-converter.js's deferral
-// comment for the same TODO).
+// by a re-drive of this function, or by reconcileTermiteAnnualActivations
+// below.
 // ============================================================
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 const DEFAULT_ANNUAL_PLAN_VERSION = 'v3';
-// The annual plan is one inspection per year (gate comment on
-// GATE_TERMITE_ANNUAL_PLAN, feature-gates.js) — fixed coverage shape, not
-// derived per-estimate the way the generic multi-program prepay path does.
-const COVERAGE_SERVICE_TYPE = 'Termite Bait';
-const COVERAGE_VISIT_COUNT = 1;
-const COVERAGE_CADENCE = 'annual';
 
 function parseJsonish(raw) {
   if (!raw) return null;
@@ -44,41 +47,31 @@ function parseJsonish(raw) {
 // The termite program agreement (termite-program-agreement.js) has always
 // snapshotted its source estimate at document_variables_snapshot.estimate.id
 // — reused here rather than adding a new customer_contracts column, per the
-// slice's own design note. Slice 2 (the v3 annual template, PR #4811, not
-// yet merged) builds its render context the same way; if that ever
-// diverges, sourceEstimateId comes back null and this function fails
-// closed below rather than guessing.
+// slice's own design note.
 function sourceEstimateIdFromContract(contract) {
   const snapshot = parseJsonish(contract?.document_variables_snapshot);
   const id = snapshot?.estimate?.id;
   return id ? String(id) : null;
 }
 
-// Codex P1-2: activation must bill EXACTLY what estimate-converter.js's
-// prepay_annual branch decided to bill at accept time (annualAmount post
-// WaveGuard discount, the rodent-bait setup line, the resolved tax rate,
-// the exact line-item descriptions) — never re-derive it from
-// selectedTermiteAnnualPlanRows here. Re-deriving would silently drop the
-// setup-fee line (setup rows carry no `.annual` field) and could disagree
-// with the accepted amount if pricing config, a WaveGuard tier discount, or
-// a tax rate changed between acceptance and signature — the estimate
-// converter is the ONLY place that ever prices this invoice; this module
-// only replays its decision.
-function validDeferredInvoiceSnapshot(raw) {
-  const snapshot = parseJsonish(raw);
-  if (!snapshot || typeof snapshot !== 'object') return null;
-  if (!Array.isArray(snapshot.lines) || snapshot.lines.length === 0) return null;
-  if (!snapshot.lines.every((line) => line && Number(line.unit_price) > 0)) return null;
-  if (!(Number(snapshot.amountCents) > 0)) return null;
-  return snapshot;
+// Parses the accept-context estimate-converter.js's parkTermiteAnnualPlanAccept
+// persisted at accept time — the whitelisted opts convertEstimate needs to
+// replay the FULL conversion it deferred (billing term inputs, selected
+// coverage options, the caller's booked-date override, etc). Never required
+// to be present or well-formed: convertEstimate's ordinary path falls back
+// to its own defaults (e.g. the estimate's own annual_total) for anything
+// missing, so a malformed or absent context degrades to "activation
+// re-derives pricing from the estimate itself" rather than failing —
+// there is no frozen dollar amount here to lose.
+function acceptContextFromEstimate(estimate) {
+  const context = parseJsonish(estimate?.annual_plan_deferred_invoice);
+  return context && typeof context === 'object' ? context : {};
 }
 
-// Codex P1 (2 of the last round): one stable key per estimate + failure
-// kind, so a sweep that re-drives the SAME stuck estimate every tick (or a
-// caller that retries inline) rings exactly once per distinct problem — not
-// once per attempt. Uses notifyAdmin's own built-in dedupeKey mechanism
-// (notification-service.js: opt-in, advisory-locked, no dedupeKey = today's
-// unchanged behavior for every other caller) rather than hand-rolling a
+// One stable key per estimate + failure kind, so a sweep that re-drives the
+// SAME stuck estimate every tick (or a caller that retries inline) rings
+// exactly once per distinct problem — not once per attempt. Uses
+// notifyAdmin's own built-in dedupeKey mechanism rather than hand-rolling a
 // second dedupe path — falls back to the contract id when no estimate id is
 // known yet (a failure before sourceEstimateIdFromContract resolves one).
 function bellDedupeKey(estimateId, contractId, kind) {
@@ -86,14 +79,16 @@ function bellDedupeKey(estimateId, contractId, kind) {
   return subject ? `termite-annual-activation:${subject}:${kind}` : undefined;
 }
 
-// Codex P1 (this round, item on ~96): a delivery failure happens AFTER the
-// activation transaction already committed the invoice, term, and
-// 'activated' status — the money is real. Reusing the activation-failure
-// copy ("stays awaiting signature — activate by hand") told an operator to
-// activate something that was already activated, risking a SECOND
-// invoice/term. Delivery failures get their own copy: activation succeeded,
-// only the customer-facing send needs a retry, naming the invoice.
-function bellCopyFor(kind, { contractId, estimateId, invoiceId, reason }) {
+// A delivery failure happens AFTER the activation transaction already
+// committed the invoice, term, and 'activated' status — the money is real.
+// Reusing the activation-failure copy ("stays awaiting signature — activate
+// by hand") told an operator to activate something that was already
+// activated, risking a SECOND invoice/term. Delivery failures get their own
+// copy: activation succeeded, only the customer-facing send needs a retry,
+// naming the invoice.
+function bellCopyFor(kind, {
+  contractId, estimateId, invoiceId, reason,
+}) {
   if (kind === 'delivery_failed') {
     return {
       title: 'Termite annual plan invoice not delivered',
@@ -138,13 +133,9 @@ async function ringActivationBell(NotificationService, {
   }
 }
 
-// Codex P1 (1 of the last round): a delivery failure used to be silent and
-// unretried — the estimate reads 'activated' (money is real) but nobody
-// hears about it. Rings its OWN deduped bell (distinct 'delivery_failed'
-// kind from the activation-failure bell above) and reports ok:false so the
-// caller can decide what to do; it never throws. Shared by both the
-// immediate post-activation attempt and the reconciliation sweep's retry
-// pass, so both paths bell and report identically.
+// Shared by both the immediate post-activation attempt and the
+// reconciliation sweep's retry pass, so both paths bell and report
+// identically. Never throws.
 async function deliverAnnualInvoiceOrBell({
   estimateId, contractId = null, invoiceId, termId, conn = db,
 }) {
@@ -157,7 +148,7 @@ async function deliverAnnualInvoiceOrBell({
       // silently pretending success.
       return { ok: false, invoiceDelivery: { ok: false, error: 'delivery gate refused (no term)' } };
     }
-    // Codex P2: stamp the ATTEMPT before sending, success or failure — the
+    // Stamp the ATTEMPT before sending, success or failure — the
     // reconciliation sweep's undelivered-invoice scan (below) skips a row
     // already attempted today, so a permanently-failing invoice (no
     // deliverable channel on file, say) gets exactly one attempt per ET
@@ -177,11 +168,15 @@ async function deliverAnnualInvoiceOrBell({
         billingTerm: 'prepay_annual',
       },
     });
-    // sendViaSMSAndEmail can resolve a failure descriptor WITHOUT throwing
-    // (a claim fence, a suppressed send, a missing template) — treat that
-    // exactly like a thrown error: bell + report not-ok so the sweep
-    // retries, rather than only catching the throw case.
-    if (!invoiceDelivery || invoiceDelivery.ok === false) {
+    // Codex P2 (quiet hours): sendViaSMSAndEmail can resolve
+    // { ok: false, sms: { scheduled: true } } for a phone-only after-hours
+    // send queued for the 8 AM window open — delivery IN PROGRESS, not a
+    // failure. estimate-public.js treats the identical shape the same way
+    // (invoiceSmsQueued counts as delivered, never bells) — mirrored here
+    // so the queued cohort doesn't ring a false-alarm bell every sweep tick
+    // until the queue actually flushes.
+    const deliveryQueued = invoiceDelivery?.sms?.scheduled === true;
+    if (!invoiceDelivery || (invoiceDelivery.ok === false && !deliveryQueued)) {
       const NotificationService = require('./notification-service');
       await ringActivationBell(NotificationService, {
         estimateId, contractId, invoiceId, kind: 'delivery_failed', reason: invoiceDelivery?.error || 'delivery reported not ok',
@@ -207,8 +202,8 @@ async function deliverAnnualInvoiceOrBell({
 }
 
 /**
- * Runs the deferred annual-prepay term + invoice for a just-signed termite
- * annual agreement. Call this AFTER the sign transaction has committed.
+ * Runs the deferred conversion for a just-signed termite annual agreement.
+ * Call this AFTER the sign transaction has committed.
  *
  * @param {object} params
  * @param {string|number} params.contractId - the just-signed customer_contracts.id
@@ -227,9 +222,8 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
 
       estimateId = sourceEstimateIdFromContract(contract);
       if (!estimateId) {
-        // Fallback-round P1 (a): this used to skip silently. A signed v3
-        // agreement with no resolvable source estimate is an anomaly
-        // (slice 2's context builder should always stamp
+        // A signed v3 agreement with no resolvable source estimate is an
+        // anomaly (slice 2's context builder should always stamp
         // document_variables_snapshot.estimate.id) — a human needs to find
         // and activate the right estimate by hand, so bell rather than
         // vanish.
@@ -253,148 +247,81 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         return { skipped: estimate.annual_plan_activation_status || 'not_awaiting_signature' };
       }
 
-      // Codex P1-2: bill EXACTLY what was deferred at accept — never
-      // re-derive. A missing/malformed snapshot means the accept path
-      // failed to record what it was deferring (shouldn't happen — the
-      // converter fails the whole accept if it can't write this), so this
-      // is an error state: bell for a human, leave 'awaiting_signature' for
-      // a retry once the snapshot is fixed, never guess an amount.
-      const deferredInvoiceSnapshot = validDeferredInvoiceSnapshot(estimate.annual_plan_deferred_invoice);
-      if (!deferredInvoiceSnapshot) {
-        // Anomaly, not a routine skip: an estimate reading
-        // 'awaiting_signature' with no (or a malformed) deferred-invoice
-        // snapshot means the accept path failed to record what it deferred
-        // — bell for a human rather than silently doing nothing, since the
-        // customer signed and expects to be billed.
-        try {
-          const NotificationService = require('./notification-service');
-          await ringActivationBell(NotificationService, {
-            estimateId, contractId, kind: 'no_deferred_snapshot', reason: 'no valid annual_plan_deferred_invoice snapshot on the estimate',
-          });
-        } catch (bellErr) {
-          logger.error(`[termite-annual-activation] bell setup failed for contract ${contractId}: ${bellErr.message}`);
-        }
-        return { skipped: 'no_deferred_snapshot' };
+      // Codex P2 (starvation): stamp the ATTEMPT before running the
+      // conversion, success or failure — the reconciliation sweep's
+      // activation scan (below) orders by this and skips a row already
+      // attempted today, so a permanently-failing activation can't
+      // monopolize the bounded batch ahead of genuinely retryable rows.
+      // Best-effort: a stamp failure must not block the actual attempt.
+      try {
+        await trx('estimates').where({ id: estimateId }).update({ annual_plan_activation_attempted_at: new Date() });
+      } catch (stampErr) {
+        logger.warn(`[termite-annual-activation] activation-attempt stamp failed for estimate ${estimateId}: ${stampErr.message}`);
       }
-      const annualAmount = Number(deferredInvoiceSnapshot.amountCents) / 100;
 
-      // Codex P1-3: take the SAME ledger lock the converter takes before
-      // reading the deposit balance — without it, a concurrent deposit
-      // refund/consumption (e.g. the accept-time flow retrying, or a manual
-      // deposit adjustment) could read a balance that changes underneath
-      // this invoice mint. Any failure here (lock or read) propagates to
-      // the outer catch below — never swallowed — so it bells and leaves
-      // the estimate 'awaiting_signature' rather than silently minting the
-      // invoice with a stale or zero deposit credit.
-      const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
-      const InvoiceService = require('./invoice');
-      await acquireEstimateDepositLedgerLock(trx, estimateId);
-      const depositCredit = await pendingDepositCredit(estimateId, trx);
-      const requestedDepositCredit = depositCredit ? Number(depositCredit.amount) || 0 : 0;
-      const invoice = await InvoiceService.create({
+      // Codex P1 (round 2): the ordinary prepay_annual path owns invoice
+      // creation, dueDate, the per-customer overlap recheck, the setup
+      // line, tax, and service seeding — activation only REPLAYS the exact
+      // opts the accept parked, with activationRun:true so convertEstimate
+      // bypasses the sign-before-pay park (it would otherwise re-park
+      // forever) and bills for real. Never re-implement any of that here.
+      const acceptContext = acceptContextFromEstimate(estimate);
+      const EstimateConverter = require('./estimate-converter');
+      const conversion = await EstimateConverter.convertEstimate(estimateId, {
         database: trx,
-        customerId: estimate.customer_id,
-        title: deferredInvoiceSnapshot.title || 'Subterranean Termite Protection — Annual Fee',
-        lineItems: deferredInvoiceSnapshot.lines,
-        notes: deferredInvoiceSnapshot.notes
-          || `Auto-generated on signature of the termite annual agreement (contract #${contractId}, estimate #${estimateId}). Charge was deferred at acceptance until this signature (sign-before-pay).`,
-        // Codex P1: ALWAYS pass the accepted rate explicitly (the converter
-        // now freezes 0, never null, when it computed no tax) — never let
-        // InvoiceService.create fall back to recomputing tax from the
-        // customer's CURRENT property type, which could add tax nobody
-        // agreed to if the property was reclassified between acceptance and
-        // signature. `!= null` still covers a pre-fix snapshot from before
-        // this column existed.
-        taxRate: deferredInvoiceSnapshot.taxRate != null ? deferredInvoiceSnapshot.taxRate : 0,
-        ...(requestedDepositCredit > 0
-          ? { depositCredit: { amount: requestedDepositCredit, estimateId } }
-          : {}),
+        activationRun: true,
+        billingTerm: 'prepay_annual',
+        skipAutoSchedule: true,
+        // The activation transaction delivers the invoice itself, below,
+        // AFTER this transaction commits — never inline, same as the
+        // ordinary accept path's own deferred-delivery convention.
+        autoSendInvoice: false,
+        prepayInvoiceAmount: acceptContext.prepayInvoiceAmount ?? undefined,
+        firstApplicationAmount: acceptContext.firstApplicationAmount ?? undefined,
+        allowFirstApplicationFallback: acceptContext.allowFirstApplicationFallback,
+        manualDiscountItemization: acceptContext.manualDiscountItemization || undefined,
+        adoptedExistingAppointmentId: acceptContext.adoptedExistingAppointmentId || undefined,
+        annualPrepayTermStart: acceptContext.annualPrepayTermStart || undefined,
+        coverageServiceType: acceptContext.coverageServiceType || undefined,
+        coverageVisitCount: acceptContext.coverageVisitCount || undefined,
+        coverageCadence: acceptContext.coverageCadence || undefined,
+        deferFollowUpReminderRegistration: acceptContext.deferFollowUpReminderRegistration === true,
+        deferCommercialScheduleNotification: acceptContext.deferCommercialScheduleNotification === true,
+        skipMembershipEmail: acceptContext.skipMembershipEmail === true,
+        skipWelcomeSms: acceptContext.skipWelcomeSms === true,
       });
-      const appliedDepositCredit = Number(invoice?.applied_deposit_credit) || 0;
-      if (invoice?.id && appliedDepositCredit > 0) {
-        await consumeDepositCredit({
-          estimateId, amount: appliedDepositCredit, invoiceId: invoice.id, trx,
-        });
-      }
-      if (!invoice?.id) throw new Error('Annual-fee invoice was not created');
 
-      const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-      // GROSS coverage-slicing basis, matching the converter's own prepay
-      // accounting: the annual fee alone (amountCents already excludes the
-      // setup-fee line — see the converter's deferredInvoiceSnapshot
-      // comment), pre-deposit-credit, so renewals split the same figure the
-      // customer actually agreed to regardless of any deposit applied here.
-      const prepayAmount = annualAmount;
-      const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
-        customerId: estimate.customer_id,
-        sourceEstimateId: estimateId,
-        prepayInvoiceId: invoice.id,
-        planLabel: 'Termite Annual Protection',
-        monthlyRate: deferredInvoiceSnapshot.monthlyRate != null
-          ? Number(deferredInvoiceSnapshot.monthlyRate)
-          : Math.round((annualAmount / 12) * 100) / 100,
-        prepayAmount,
-        // Codex P1: the accepted first-service date, snapshotted by the
-        // converter at accept time (deferredInvoiceSnapshot.termStartDate)
-        // — the SAME value the ordinary (non-deferred) branch passes as
-        // termStart. Omitting it here would default the term to the
-        // SIGNATURE day; coverage queries only include visits between
-        // term_start/term_end, so an already-scheduled visit dated before
-        // signature would fall outside paid coverage and complete-bill
-        // again.
-        termStart: deferredInvoiceSnapshot.termStartDate || null,
-        coverageServiceType: COVERAGE_SERVICE_TYPE,
-        coverageVisitCount: COVERAGE_VISIT_COUNT,
-        coverageCadence: COVERAGE_CADENCE,
-        conn: trx,
-      });
-      if (!term?.id) throw new Error('Annual prepay term was not created');
+      // Defense in depth: convertEstimate either throws (a coverage guard,
+      // the multi-service guard, a term/invoice creation failure — every
+      // one of those propagates naturally out of this await and is caught
+      // below) or, on success, always returns 'activated' with both ids.
+      // This should be unreachable, but never silently report success on a
+      // conversion that didn't actually finish.
+      if (conversion?.annualPlanActivationStatus !== 'activated'
+        || !conversion?.draftInvoiceId || !conversion?.annualPrepayTermId) {
+        throw new Error(`Termite annual activation did not complete conversion for estimate ${estimateId} (status=${conversion?.annualPlanActivationStatus || 'unknown'})`);
+      }
 
       // Ruling A-13: the signed v3 annual agreement IS the auto-charge
       // consent — stamp it on the term the moment that signature commits.
-      await trx('annual_prepay_terms').where({ id: term.id }).update({
+      await trx('annual_prepay_terms').where({ id: conversion.annualPrepayTermId }).update({
         annual_plan_version: contract.annual_plan_version || DEFAULT_ANNUAL_PLAN_VERSION,
         renewal_charge_consent_at: contract.signed_at || new Date(),
       });
 
-      await trx('estimates').where({ id: estimateId }).update({
-        annual_plan_activation_status: 'activated',
-        annual_plan_activated_at: new Date(),
-      });
-
-      return { activated: true, termId: term.id, invoiceId: invoice.id };
+      return { activated: true, termId: conversion.annualPrepayTermId, invoiceId: conversion.draftInvoiceId };
     });
 
-    // Codex P1-A: mirror exactly what the ordinary (non-deferred)
-    // prepay_annual accept does right after minting its invoice — deliver
-    // the pay link via the SAME wrapper (InvoiceService.sendViaSMSAndEmail)
-    // and the SAME gate (canAutoSendDraftInvoice), with the SAME
-    // payUrlParams shape (estimate-converter.js, step 4). Run AFTER the
-    // activation transaction above has committed (safer than the
-    // converter's own inline placement, which can run inside a caller's
-    // still-open transaction) — a delivery failure never undoes the money
-    // side; it only means the customer hears about the charge some other
-    // way (the admin bell below, or a manual follow-up). sendViaSMSAndEmail
-    // claims the invoice before sending (see invoice.js), so calling this
-    // twice on an already-delivered invoice is itself idempotent — but the
-    // outer 'already activated' guard means this code only ever runs once
-    // per estimate anyway.
+    // Run AFTER the activation transaction above has committed (safer than
+    // an inline placement, which can run inside a caller's still-open
+    // transaction) — a delivery failure never undoes the money side.
     if (result?.activated) {
-      // Codex P1 (last round): a delivery failure here used to be silent
-      // and unretried. deliverAnnualInvoiceOrBell rings its own deduped
-      // bell on failure and reports ok:false — the reconciliation sweep's
-      // second pass (below) finds this exact case (an 'activated' estimate
-      // whose invoice never got sent_at) and retries it, so nothing is lost
-      // even though this attempt doesn't persist a "delivery failed" flag
-      // anywhere (estimates.annual_plan_* is frozen; invoices.sent_at IS
-      // NULL already IS that flag).
       const { invoiceDelivery } = await deliverAnnualInvoiceOrBell({
         estimateId, contractId, invoiceId: result.invoiceId, termId: result.termId, conn,
       });
       result.invoiceDelivery = invoiceDelivery;
     }
 
-    if (result?.skipped) return result;
     return result;
   } catch (err) {
     logger.error(`[termite-annual-activation] activation failed for contract ${contractId}${estimateId ? ` (estimate ${estimateId})` : ''}: ${err.message}`);
@@ -408,28 +335,18 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
   }
 }
 
-// Codex P1-B (prior round) + codex P1 (this round, item 3): the minimal
-// retry for a failed activation. Signing burns the contract's share token,
-// so there is no "sign again" path once activateTermiteAnnualPlanForSignedContract
-// bells and leaves an estimate 'awaiting_signature' — this sweep re-drives
-// it for exactly that stuck case. Idempotent by construction
-// (activateTermiteAnnualPlanForSignedContract itself no-ops on anything not
-// 'awaiting_signature'), bounded batch, and a single row's failure never
-// stops the rest — mirrors reconcileTermiteProgramAgreements' own shape
-// (termite-program-agreement.js). Abandoned-signature EXPIRY (an estimate
-// that never gets signed at all) stays out of scope for 3b, same as noted
-// throughout this slice.
+// The minimal retry for a failed activation. Signing burns the contract's
+// share token, so there is no "sign again" path once
+// activateTermiteAnnualPlanForSignedContract bells and leaves an estimate
+// 'awaiting_signature' — this sweep re-drives it for exactly that stuck
+// case. Idempotent by construction, bounded batch, and a single row's
+// failure never stops the rest. Abandoned-signature EXPIRY (an estimate
+// that never gets signed at all) stays out of scope for this slice.
 //
-// Query direction (codex P1, this round): drives from SIGNED CONTRACTS
-// (bounded + ordered by signed_at), not from awaiting estimates. The
-// earlier shape scanned up to `limit` awaiting-signature estimates first,
-// unordered — with more than `limit` awaiting estimates outstanding, an
-// unlucky page could be ALL unsigned ones, starving a genuinely-signed
-// estimate sitting just past the cutoff forever (every tick re-draws the
-// same unlucky page). Starting from signed contracts joined to
-// still-awaiting estimates, ordered oldest-signed-first, makes every row
-// this query returns immediately actionable, and processes the
-// longest-waiting customers first.
+// Query direction: driven from SIGNED CONTRACTS (bounded + ordered by
+// signed_at), not from awaiting estimates — an unlucky page of awaiting-but-
+// unsigned estimates can never crowd out a genuinely signed one, and every
+// row this query returns is immediately actionable.
 async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}) {
   const counts = {
     scanned: 0, activated: 0, skipped: 0, failed: 0,
@@ -445,6 +362,20 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
       .where('cc.document_template_key', ANNUAL_TEMPLATE_KEY)
       .where('cc.status', 'signed')
       .where('e.annual_plan_activation_status', 'awaiting_signature')
+      // Codex P2 (starvation): a permanently-failing activation (e.g. a
+      // structurally broken accept-context, or a coverage guard that will
+      // never resolve without a human) retains its attempt stamp from
+      // TODAY and is skipped rather than re-drawn every tick, so it can't
+      // monopolize the bounded batch ahead of genuinely retryable rows —
+      // same ET-calendar-day throttle as the delivery scan below.
+      .where((builder) => {
+        builder.whereNull('e.annual_plan_activation_attempted_at')
+          .orWhereRaw("(e.annual_plan_activation_attempted_at AT TIME ZONE 'America/New_York')::date < (now() AT TIME ZONE 'America/New_York')::date");
+      })
+      // Never-attempted rows first (oldest signed_at among them), then
+      // rows attempted on an earlier day — same "oldest actionable first"
+      // ordering the delivery scan uses.
+      .orderBy('e.annual_plan_activation_attempted_at', 'asc')
       .orderBy('cc.signed_at', 'asc')
       .select('cc.id as contract_id')
       .limit(limit);
@@ -456,7 +387,7 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
         // truly unexpected failure can't take the rest of the batch down.
         const result = await activateTermiteAnnualPlanForSignedContract({ contractId: row.contract_id, conn });
         if (result?.activated) counts.activated += 1;
-        // Codex P2: an explicit { skipped: 'error' } result means
+        // An explicit { skipped: 'error' } result means
         // activateTermiteAnnualPlanForSignedContract caught a real failure
         // (it already bells) — count it as failed, not a routine skip, so
         // a tick where every signed activation fails still reports
@@ -474,39 +405,42 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     counts.activationScanError = err.message;
   }
 
-  // Codex P1 (this round, item 1): the sweep's second job — an already-
-  // ACTIVATED estimate whose invoice never got delivered (a prior
-  // sendViaSMSAndEmail failure, or the process dying between activation and
-  // delivery). Found via the invoice's own existing links — no new column:
-  // annual_prepay_terms.source_estimate_id -> the estimate,
-  // annual_prepay_terms.prepay_invoice_id -> the invoice, and
-  // invoices.sent_at IS NULL is the same "never delivered" signal
-  // sendViaSMSAndEmail itself stamps on success (invoice.js). Only ever
-  // matches a termite-annual term: source_estimate_id only points at an
-  // estimate carrying annual_plan_activation_status at all for this program.
+  // The sweep's second job — an already-ACTIVATED estimate whose invoice
+  // never got delivered (a prior sendViaSMSAndEmail failure, or the
+  // process dying between activation and delivery). Found via the
+  // invoice's own existing links — no new column: annual_prepay_terms.
+  // source_estimate_id -> the estimate, annual_prepay_terms.
+  // prepay_invoice_id -> the invoice, and invoices.sent_at IS NULL is the
+  // same "never delivered" signal sendViaSMSAndEmail itself stamps on
+  // success. Only ever matches a termite-annual term: source_estimate_id
+  // only points at an estimate carrying annual_plan_activation_status at
+  // all for this program.
   try {
     const undelivered = await conn('estimates as e')
       .join('annual_prepay_terms as apt', conn.raw('apt.source_estimate_id = e.id'))
       .join('invoices as inv', conn.raw('inv.id = apt.prepay_invoice_id'))
       .where('e.annual_plan_activation_status', 'activated')
       // Only the ORIGINAL activation term (a renewal successor carries
-      // renewed_from_term_id and owns its own invoice workflow — slice 6),
-      // only a still-collectable invoice (never re-send a paid / void /
-      // cancelled one), and "never delivered" on EVERY channel: sent_at is
-      // the combined stamp, sms_sent_at / email_sent_at are the per-channel
-      // durable stamps invoice.js also writes (pre-push P1).
+      // renewed_from_term_id and owns its own invoice workflow), and only a
+      // still-collectable invoice — the canonical uncollectible-status set
+      // InvoiceService's own callers already share (codex P2: this used to
+      // be an ad hoc list missing 'prepaid' and carrying a 'voided' typo
+      // not in the real status vocabulary), never re-send a settled one.
+      // "Never delivered" on EVERY channel: sent_at is the combined stamp,
+      // sms_sent_at / email_sent_at are the per-channel durable stamps
+      // invoice.js also writes.
       .whereNull('apt.renewed_from_term_id')
-      .whereNotIn('inv.status', ['paid', 'void', 'voided', 'canceled', 'cancelled', 'refunded'])
+      .whereNotIn('inv.status', INVOICE_UNCOLLECTIBLE_STATUSES)
       .whereNull('inv.sent_at')
       .whereNull('inv.sms_sent_at')
       .whereNull('inv.email_sent_at')
-      // Codex P2: a permanently-failing row (e.g. no deliverable channel on
-      // file) retains all three NULL delivery stamps forever — without
-      // this, it would keep sorting to the front and monopolizing the
-      // LIMIT batch, starving genuinely retryable invoices behind it.
-      // Skip anything already attempted TODAY (ET calendar day; the sweep
-      // runs once daily), and order oldest-invoice-first so the longest-
-      // waiting customers are attempted first among what's left.
+      // A permanently-failing row (e.g. no deliverable channel on file)
+      // retains all three NULL delivery stamps forever — without this, it
+      // would keep sorting to the front and monopolizing the LIMIT batch,
+      // starving genuinely retryable invoices behind it. Skip anything
+      // already attempted TODAY (ET calendar day; the sweep runs once
+      // daily), and order oldest-invoice-first so the longest-waiting
+      // customers are attempted first among what's left.
       .where((builder) => {
         builder.whereNull('inv.annual_delivery_attempted_at')
           .orWhereRaw("(inv.annual_delivery_attempted_at AT TIME ZONE 'America/New_York')::date < (now() AT TIME ZONE 'America/New_York')::date");
