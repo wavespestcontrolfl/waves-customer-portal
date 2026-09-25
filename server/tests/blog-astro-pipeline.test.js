@@ -2576,12 +2576,25 @@ describe('parseImageDataUrl (bounded data-URL header parse)', () => {
     const { stampLogoReference } = AstroPublisher._internals;
     const stamped = stampLogoReference('data:image/png;base64,AAAA');
     expect(stamped).toBe('data:image/png;waves-logo=1;base64,AAAA');
-    expect(parseImageDataUrl(stamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true });
-    expect(parseImageDataUrl('data:image/png;base64,AAAA')).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false });
+    expect(parseImageDataUrl(stamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: false });
+    expect(parseImageDataUrl('data:image/png;base64,AAAA')).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: false });
     expect(parseImageDataUrl('data:image/png;evil=1;base64,AAAA').logoReference).toBe(false);
     expect(stampLogoReference('https://example.com/x.png')).toBe('https://example.com/x.png');
     expect(parseImageDataUrl('data:image/png,rawdata')).toBeNull();
     expect(parseImageDataUrl('')).toBeNull();
+  });
+
+  test('the waves-van-wrap marker mirrors the logo marker: independent stamp/parse, and both survive together in either order (Codex r2 P2 on #4785)', () => {
+    const { stampLogoReference, stampVanWrapReference } = AstroPublisher._internals;
+    const vanStamped = stampVanWrapReference('data:image/png;base64,AAAA');
+    expect(vanStamped).toBe('data:image/png;waves-van-wrap=1;base64,AAAA');
+    expect(parseImageDataUrl(vanStamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: true });
+    // Both markers stamped, in either order, both survive the parse.
+    const both1 = stampVanWrapReference(stampLogoReference('data:image/png;base64,AAAA'));
+    const both2 = stampLogoReference(stampVanWrapReference('data:image/png;base64,AAAA'));
+    expect(parseImageDataUrl(both1)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true });
+    expect(parseImageDataUrl(both2)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true });
+    expect(stampVanWrapReference('https://example.com/x.png')).toBe('https://example.com/x.png');
   });
 });
 

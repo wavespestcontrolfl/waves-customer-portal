@@ -143,16 +143,12 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(() => 'wpc'),
   shortLinkBaseUrl: () => 'https://wavespest.co',
 }));
-// Controllable gates: the auto-send interlock (claim check + reservation row)
-// is gated on smsAutoSend, OFF by default so the manual send path is unchanged
-// for the existing tests. One test flips it on via mockGates.smsAutoSend.
-const mockGates = { smsAutoSend: false, smsGratitudeReplies: true };
+// Controllable gates: either autonomous reply lane arms the shared claim
+// interlock and reservation row. Both stay OFF by default for existing tests.
+const mockGates = { smsAutoSend: false, smsGratitudeReplies: false };
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: (gate) => {
-    if (gate === 'smsAutoSend') return mockGates.smsAutoSend;
-    if (gate === 'smsGratitudeReplies') return mockGates.smsGratitudeReplies;
-    return true;
-  },
+  isEnabled: (gate) => (Object.hasOwn(mockGates, gate) ? mockGates[gate] : true),
+  gateEnvTimestamp: () => mockGates.gratitudeActivatedAt || null,
   gates: {},
   logGateStatus: jest.fn(),
 }));
@@ -281,7 +277,8 @@ describe('admin communications SMS route', () => {
     jest.clearAllMocks();
     db.mockReset();
     mockGates.smsAutoSend = false;
-    mockGates.smsGratitudeReplies = true;
+    mockGates.smsGratitudeReplies = false;
+    mockGates.gratitudeActivatedAt = null;
   });
 
   test('cleans rewrite model labels and quotes before returning SMS copy', () => {
@@ -1707,9 +1704,11 @@ describe('admin communications SMS route', () => {
     });
   });
 
-  test('refuses a manual send while an autonomous reply is mid-send to the thread', async () => {
-    // The auto-send interlock is only active when Phase E auto-send is enabled.
-    mockGates.smsAutoSend = true;
+  test.each([
+    ['general auto-send', 'smsAutoSend'],
+    ['gratitude-only', 'smsGratitudeReplies'],
+  ])('the %s gate refuses a manual send while an autonomous reply is mid-send', async (_label, gate) => {
+    mockGates[gate] = true;
     // An auto-send claim is in flight for this thread (it reserved under the
     // shared lock). The manual send must back off, not race its provider
     // window — both would reach the customer.
@@ -1732,6 +1731,112 @@ describe('admin communications SMS route', () => {
       expect(res.status).toBe(409);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
+  });
+
+  test.each([
+    ['immediate', '/admin/communications/sms', {}],
+    ['scheduled', '/admin/communications/schedule-sms', { scheduledFor: '2099-01-01T10:00', customerId: 'cust-A' }],
+  ])('an outstanding gratitude claim still refuses a %s manual send after both gates are disabled', async (_label, path, extra) => {
+    // Activated earlier, then the kill switch was flipped off while an
+    // attempt was provider-uncertain: its retained claim must still fence.
+    mockGates.gratitudeActivatedAt = new Date('2026-09-24T12:00:00Z');
+    hasActiveAutoSendClaim.mockResolvedValueOnce(true);
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      if (table === 'customers') builder.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      return builder;
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand', messageType: 'manual', ...extra }),
+      });
+      expect(res.status).toBe(409);
+    });
+    expect(hasActiveAutoSendClaim).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('after activation, a gate-off immediate send publishes its reservation for a racing claim', async () => {
+    mockGates.gratitudeActivatedAt = new Date('2026-09-24T12:00:00Z');
+    db.mockImplementation(() => makeUniversalBuilder());
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SM-after' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand', messageType: 'manual' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(hasActiveAutoSendClaim).toHaveBeenCalledTimes(1);
+    expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      providerHandoffReservation: expect.anything(),
+    }));
+  });
+
+  test('a never-activated dark lane does not consult autonomous claims', async () => {
+    db.mockImplementation(() => makeUniversalBuilder());
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-dark' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand', messageType: 'manual' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(hasActiveAutoSendClaim).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['refuses an active autonomous claim', true, 409],
+    ['writes the scheduled reservation when no claim is active', false, 200],
+  ])('the gratitude-only gate %s', async (_label, activeClaim, expectedStatus) => {
+    mockGates.smsAutoSend = false;
+    mockGates.smsGratitudeReplies = true;
+    hasActiveAutoSendClaim.mockResolvedValueOnce(activeClaim);
+    const scheduledRows = [];
+    db.mockImplementation((table) => {
+      const builder = makeUniversalBuilder();
+      if (table === 'customers') {
+        builder.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      if (table === 'sms_log') {
+        builder.insert.mockImplementation((row) => {
+          scheduledRows.push(row);
+          return builder;
+        });
+      }
+      return builder;
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Replying later by hand',
+          messageType: 'manual',
+          scheduledFor: '2099-01-01T10:00',
+          customerId: 'cust-A',
+        }),
+      });
+
+      expect(res.status).toBe(expectedStatus);
+    });
+    expect(hasActiveAutoSendClaim).toHaveBeenCalledWith(db, {
+      threadLast10: '5551234567',
+      customerId: 'cust-A',
+    });
+    expect(scheduledRows).toHaveLength(activeClaim ? 0 : 1);
+    if (!activeClaim) expect(scheduledRows[0]).toMatchObject({ status: 'scheduled', customer_id: 'cust-A' });
   });
 
   test.each([
@@ -1831,6 +1936,7 @@ describe('admin communications SMS route', () => {
   });
 
   test('sender lookup failure stays retryable before reservation or provider entry', async () => {
+    mockGates.smsGratitudeReplies = true;
     db.mockImplementation(() => makeUniversalBuilder());
     require('../services/twilio').deriveOutboundNumber.mockRejectedValueOnce(new Error('db down'));
     await withServer(async (baseUrl) => {
@@ -1846,11 +1952,14 @@ describe('admin communications SMS route', () => {
     });
   });
 
-  test('a gate-on manual send without fromNumber reserves and still sends (no 503)', async () => {
+  test.each([
+    ['general auto-send', 'smsAutoSend'],
+    ['gratitude-only', 'smsGratitudeReplies'],
+  ])('a %s gate manual send without fromNumber reserves and still sends', async (_label, gate) => {
     // Regression: the reservation insert must resolve a non-null from_phone
     // without referencing an out-of-scope customer. With the gate on and no
     // fromNumber, it must NOT throw → 503; it should reserve and send.
-    mockGates.smsAutoSend = true; // hasActiveAutoSendClaim default mock → false
+    mockGates[gate] = true; // hasActiveAutoSendClaim default mock → false
     db.mockImplementation(() => makeUniversalBuilder());
     sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM777' });
 
@@ -1862,19 +1971,29 @@ describe('admin communications SMS route', () => {
       });
 
       expect(res.status).toBe(200);
+      expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledWith(db, expect.objectContaining({
+        to: '+15551234567',
+        body: 'Hi there',
+      }));
       expect(sendCustomerMessage).toHaveBeenCalled();
       const sentInput = sendCustomerMessage.mock.calls[0][0];
       expect(require('../services/messaging/provider-handoff-reservation')
         .isProviderHandoffHandle(sentInput.providerHandoffReservation)).toBe(true);
+      const expectedFromNumber = gate === 'smsGratitudeReplies'
+        ? '+19413529161'
+        : require('../config/twilio-numbers').getOutboundNumber();
       expect(sentInput.providerHandoffReservation.context).toMatchObject({
-        fromNumber: '+19413529161', to: '+15551234567', body: 'Hi there', messageType: 'manual',
+        fromNumber: expectedFromNumber, to: '+15551234567', body: 'Hi there', messageType: 'manual',
       });
-      expect(sentInput.metadata.fromNumber).toBe('+19413529161');
+      if (gate === 'smsGratitudeReplies') {
+        expect(sentInput.metadata.fromNumber).toBe(expectedFromNumber);
+      }
     });
   });
 
   test('bearer customer adoption re-derives and corrects the reserved and canonical sender', async () => {
     mockGates.smsAutoSend = true;
+    mockGates.smsGratitudeReplies = true;
     const reservationUpdates = [];
     db.mockImplementation((table) => {
       const builder = makeUniversalBuilder();
@@ -1921,6 +2040,7 @@ describe('admin communications SMS route', () => {
 
   test('review-request customer adoption re-derives before its reservation and canonical handoff', async () => {
     mockGates.smsAutoSend = true;
+    mockGates.smsGratitudeReplies = true;
     const reservationUpdates = [];
     db.mockImplementation((table) => {
       const builder = makeUniversalBuilder();
@@ -2374,6 +2494,7 @@ describe('Communications review ask serialization', () => {
     held.clear();
     require('../services/short-url').existingShortUrlFor.mockReset().mockResolvedValue(null);
     mockGates.smsAutoSend = false;
+    mockGates.smsGratitudeReplies = false;
     history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
     history.lastManualAskAt.mockReset().mockResolvedValue(null);
     locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {

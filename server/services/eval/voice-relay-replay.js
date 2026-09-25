@@ -1461,7 +1461,14 @@ function qualityScore(checks) {
 function newRecord(scenario, h) {
   return {
     id: scenario.id, language: scenario.language || 'en', from: (scenario.caller && scenario.caller.from) || null, turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
-    endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL,
+    // Placeholder until the conversation exists (below h.MODEL is the module
+    // default — the best guess available before construction). runScenario
+    // overwrites both with the constructed conversation's actual resolved
+    // this.model / this._modelFallbackReason right after newConversation()
+    // runs, so a candidate-model bake-off (VOICE_RELAY_INBOUND_MODEL) is
+    // attributed to the model that really ran the scenario, fallback and all
+    // — never the module-level constant a per-session override never moves.
+    endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL, modelFallbackReason: null,
     modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0, interruptInFlight: false, toolResponseUse: {},
   };
 }
@@ -1548,6 +1555,13 @@ async function runScenario(scenario, { judge = false, judgeFn = null } = {}) {
       throw Object.assign(new Error('model unavailable: fixtures.modelFailures needs model fault injection, which this process could not install (no usable SDK)'), { code: 'EVAL_MODEL_UNAVAILABLE' });
     }
     const convo = newConversation(h, scenario, record);
+    // The scenario's REAL attributed model, not the module-level default:
+    // a candidate override (VOICE_RELAY_INBOUND_MODEL) is resolved once at
+    // construction, same as a live call, and the record must say what
+    // actually ran — including a rejected override's fallback reason.
+    record.model = convo.model;
+    // Always null or a string (resolveSessionModel never returns undefined).
+    record.modelFallbackReason = convo._modelFallbackReason;
     applyResumeFixture(convo, scenario, record);
     await driveTurns(convo, scenario, record);
     record.toolsAvailable = (convo._tools || []).map((t) => t.name);

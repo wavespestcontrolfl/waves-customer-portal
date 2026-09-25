@@ -1386,10 +1386,9 @@ async function updateCustomer(customerId, updates, expectedVersion) {
   }
   if (addressSubmitted) {
     // lat/lng were cleared inside the update transaction (gh-r46) —
-    // re-geocode, then re-mirror the fresh coords onto the primary property
-    // (syncPrimaryAddress nulled them).
-    void require('../geocoder').ensureCustomerGeocoded(customerId)
-      .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
+    // re-geocode with an address/coord CAS, mirror the fresh coords onto the
+    // primary property, then refresh affected route-quality warnings.
+    void require('../geocoder').regeocodeCustomerAddressGuarded(customerId)
       .catch(() => {});
   }
   const after = await db('customers').where('id', customerId).first();
@@ -1863,9 +1862,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
     }
     if (addressSubmitted) {
-      // lat/lng cleared in-transaction (gh-r46) — re-geocode only.
-      void require('../geocoder').ensureCustomerGeocoded(customerId)
-        .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
+      // lat/lng cleared in-transaction (gh-r46) — guarded re-geocode also
+      // mirrors the primary property and refreshes route-quality warnings.
+      void require('../geocoder').regeocodeCustomerAddressGuarded(customerId)
         .catch(() => {});
     }
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);

@@ -512,15 +512,28 @@ describe('findDuplicateGroups', () => {
 describe('mergeSingletonPrefRow', () => {
   function stubTrx({ loserRow, winnerRow }) {
     const state = { updated: null, deleted: false };
+    const locks = [];
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (q.called('del')) { state.deleted = true; return 1; }
-      if (q.called('first')) return q.args('where')[1] === 'L' ? loserRow : winnerRow;
+      if (q.called('first')) {
+        if (q.called('forUpdate')) locks.push(q.args('where')[1]);
+        return q.args('where')[1] === 'L' ? loserRow : winnerRow;
+      }
       if (q.called('update')) { state.updated = q.args('update')[0]; return 1; }
       return [];
     }));
     trx.fn = { now: () => 'NOW' };
-    return { trx, state };
+    return { trx, state, locks };
   }
+
+  it.each([['W', 'L'], ['L', 'W']])('locks preferences in customer-ID order for winner %s and loser %s', async (winnerId, loserId) => {
+    const { trx, locks } = stubTrx({
+      winnerRow: { customer_id: 'W', invoice_channels: ['email'] },
+      loserRow: { customer_id: 'L', invoice_channels: ['email'] },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', winnerId, loserId);
+    expect(locks).toEqual(['L', 'W']);
+  });
 
   it('notification_prefs: consent ANDs, channels take the least-SMS value, empty fields fill', async () => {
     const { trx, state } = stubTrx({
@@ -532,6 +545,22 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.updated.billing_channel).toBe('email');    // never resume SMS
     expect(state.updated.quiet_hours_start).toBe('22:00');  // fill-if-empty
     expect(state.deleted).toBe(true);
+  });
+
+  it('notification_prefs: billing arrays stay native and incompatible choices refuse before writes', async () => {
+    const rows = { winnerRow: { customer_id: 'W', invoice_channels: null },
+      loserRow: { customer_id: 'L', invoice_channels: ['email', 'push'] } };
+    const allowed = stubTrx(rows);
+    await mergeSingletonPrefRow(allowed.trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(allowed.state.updated.invoice_channels).toEqual(['email', 'push']);
+    expect(allowed.locks).toEqual(['L', 'W']);
+    const refused = stubTrx({ ...rows, winnerRow: { customer_id: 'W', invoice_channels: ['sms'] } });
+    await expect(mergeSingletonPrefRow(refused.trx, 'notification_prefs', 'customer_id', 'W', 'L'))
+      .rejects.toMatchObject({ mergeConflictCode: 'billing_delivery_channels_conflict', statusCode: 409 });
+    expect(refused.state).toEqual({ updated: null, deleted: false });
+    const moved = stubTrx({ ...rows, winnerRow: null });
+    await mergeSingletonPrefRow(moved.trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(moved.state.updated).toEqual({ customer_id: 'W' });
   });
 
   it('notification_prefs: never widens — winner email-only keeps email over loser both', async () => {

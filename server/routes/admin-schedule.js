@@ -2902,11 +2902,33 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
   }
 }
 
+// Service keys that are ALWAYS a one-time line regardless of what their
+// `recurring_pattern` column actually holds. waveguard_membership is the
+// $99 one-time WaveGuard signup fee (owner-confirmed) — its add-on rows
+// were created with recurring_pattern NULL, which this function otherwise
+// reads as "due on every occurrence", so the nightly top-up
+// (GATE_RECURRING_SERIES_TOPUP) and completion auto-extend both copied the
+// fee onto later visits of the series instead of only the one it was sold
+// on (2026-09-25: six new visits across five customers). The live rows
+// were hand-repaired (recurring_pattern set to 'one_time'), but
+// any row that still has NULL — a stale row, a future one-off insert bug,
+// a restore — must stay safe, so the check lives here rather than at each
+// of the many call sites below.
+const ONE_TIME_ADDON_SERVICE_KEYS = new Set(['waveguard_membership']);
+
 // `blackoutDates` must be the same layers the visit-date generator used:
 // a visit nudged off a closure (Oct 15 → Oct 16) still owes the add-ons due
 // on that occurrence, so the add-on walk applies the same nudge before the
 // exact-date match.
 function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
+  // Due only on the visit it was sold on (the series anchor), never on a
+  // later occurrence. Returning true on the anchor date keeps the fee in the
+  // booking's own price-floor gate, which also filters the parent's date.
+  const serviceKey = line?.serviceKey || line?.service_key_snapshot || null;
+  if (serviceKey && ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)) {
+    const anchor = normalizeDateOnly(baseDateStr);
+    return !!anchor && anchor === normalizeDateOnly(targetDateStr);
+  }
   const pattern = line?.recurringPattern || line?.recurring_pattern || null;
   if (!pattern) return true;
   if (pattern === 'one_time') return false;
@@ -23862,6 +23884,9 @@ router._test = {
   lockReseedOwner,
   addOneReseedVisit,
   RESEED_STALE_READ_ATTEMPTS,
+  lineDueOnRecurringDate,
+  filterAddonLinesForDate,
+  ONE_TIME_ADDON_SERVICE_KEYS,
   negativePricePosted,
   discountChangeWithoutPricePosted,
   addonServiceIdentityForFreshness,

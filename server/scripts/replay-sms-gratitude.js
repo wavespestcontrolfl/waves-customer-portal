@@ -116,7 +116,13 @@ function normalizeRow(row, lineNumber) {
     body: requireString(row, 'body', lineNumber, { allowEmpty: true }),
     status: typeof row.status === 'string' ? row.status : null,
     mediaCount,
-    messageType: null,
+    // Optional export column; the live loader reads the same persisted type.
+    messageType: typeof (row.messageType ?? row.message_type) === 'string'
+      ? (row.messageType ?? row.message_type) : null,
+    // Optional export column; absent means not hand-typed, exactly as live.
+    humanAuthored: (row.humanAuthored ?? row.human_authored) === true,
+    // Optional export column; a scheduled send's provider row names its queued row.
+    scheduledSourceId: row.scheduledSourceId ?? row.scheduled_sms_log_id ?? null,
     threadKey: [from, to].sort().join('\u0000'),
   };
 }
@@ -160,6 +166,8 @@ function policyHistory(rows, candidate, evaluationTimestamp) {
       createdAt: row.createdAt,
       mediaCount: row.mediaCount,
       messageType: row.messageType,
+      humanAuthored: row.humanAuthored,
+      scheduledSourceId: row.scheduledSourceId,
     }));
 }
 

@@ -25,12 +25,14 @@ describe("AdminCommandHeader heading hierarchy", () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
-  it("uses a primary heading and sticky behavior by default", () => {
+  it("uses the modern workspace presentation and sticky behavior by default", () => {
     const { container } = render(<AdminCommandHeader title="Services" />);
 
     expect(
       screen.getByRole("heading", { level: 1, name: "Services" }),
-    ).toHaveClass("text-18", "md:text-22");
+    ).toHaveClass("text-22");
+    expect(container.querySelector(".ui-workspace-command")).toBeInTheDocument();
+    expect(container.querySelector(".rounded-md.border-hairline")).not.toBeInTheDocument();
     // Sticky at md+ only. Below md the header scrolls with the page: a
     // sticky header that tracked the iOS keyboard pan covered the focused
     // field on hub pages (SMS composer bug), so it must never carry a bare
@@ -59,7 +61,7 @@ describe("AdminCommandHeader heading hierarchy", () => {
     expect(container.firstChild).not.toHaveClass("md:sticky");
   });
 
-  it("keeps section targets touch-safe and compact on larger screens", () => {
+  it("uses the workspace section row by default", () => {
     const { container } = render(
       <AdminCommandHeader
         title="Schedule"
@@ -72,15 +74,15 @@ describe("AdminCommandHeader heading hierarchy", () => {
     );
 
     expect(screen.getByRole("navigation", { name: "Schedule section" }))
-      .toBeInTheDocument();
+      .toHaveClass("ui-workspace-nav");
     expect(screen.getByRole("button", { name: "Calendar" }))
       .toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: "Auto Dispatch" }))
-      .toHaveClass("h-11", "md:h-9", "leading-tight");
-    expect(container.querySelector(".border-b")).toBeInTheDocument();
+      .toHaveClass("ui-workspace-nav-action");
+    expect(container.querySelector(".border-b")).not.toBeInTheDocument();
   });
 
-  it("renders hub tabs and sub-tabs as two rows inside one card", () => {
+  it("renders hub tabs and sub-tabs as distinct workspace rows", () => {
     const { container } = render(
       <AdminCommandHeader
         title="Pricing"
@@ -99,7 +101,9 @@ describe("AdminCommandHeader heading hierarchy", () => {
     expect(screen.getByRole("button", { name: "Logic" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: "Brackets" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: "Margins" })).not.toHaveAttribute("aria-current");
-    // Both rows live in the single bordered card.
-    expect(container.querySelectorAll(".rounded-md.border-hairline")).toHaveLength(1);
+    expect(navs[0]).toHaveClass("ui-workspace-nav");
+    expect(navs[1]).toHaveClass("ui-workspace-nav");
+    expect(container.querySelectorAll(".rounded-md.border-hairline")).toHaveLength(0);
   });
+
 });

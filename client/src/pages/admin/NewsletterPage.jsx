@@ -1811,7 +1811,7 @@ export default function NewsletterPage() {
         />
         {/* Leaf sub-tab pill row — only when the active group has >1 leaf. */}
         {activeGroup.tabs.length > 1 && (
-          <div className="my-4 flex flex-wrap gap-2">
+          <div className="my-4 flex flex-wrap justify-center gap-2">
             {activeGroup.tabs.map((leafKey) => {
               const leaf = TAB_BY_KEY[leafKey];
               if (!leaf) return null;

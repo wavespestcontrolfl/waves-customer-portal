@@ -302,7 +302,7 @@ export default function GBPManagement() {
         </Button>{" "}
       </div>
       {/* Sub-tabs: parent groups + leaf sub-row */}
-      <div className="mb-2 flex flex-wrap gap-1">
+      <div className="mb-2 flex flex-wrap justify-center gap-1">
         {GBP_TAB_GROUPS.map((g) => {
           const badge = g.tabs.reduce(
             (s, k) => s + (subTabByKey[k]?.badge || 0),
@@ -322,7 +322,7 @@ export default function GBPManagement() {
         })}
       </div>
       {activeGroup.tabs.length > 1 && (
-        <div className="mb-4 flex flex-wrap gap-1">
+        <div className="mb-4 flex flex-wrap justify-center gap-1">
           {activeGroup.tabs.map((k) => {
             const t = subTabByKey[k];
             const isActive = subTab === k;

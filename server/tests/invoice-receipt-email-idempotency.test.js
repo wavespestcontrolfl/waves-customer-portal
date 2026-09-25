@@ -131,4 +131,23 @@ describe('sendReceiptEmail idempotency', () => {
     expect(result.blocked).toBe(true);
     expect(result.error).toMatch(/Suppressed/);
   });
+
+  test('does not report success when the provider handoff aborts before dispatch', async () => {
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({
+      sent: false,
+      aborted: true,
+      reason: 'Receipt ownership changed before provider handoff',
+    });
+
+    const result = await sendReceiptEmail('inv-1', {
+      idempotencyKey: 'receipt_email_auto:inv-1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'receipt_handoff_aborted',
+      error: 'Receipt ownership changed before provider handoff',
+    });
+  });
 });

@@ -170,6 +170,8 @@ async function geocodeAddress(address, options) {
  * Returns { lat, lng } or null.
  */
 async function ensureCustomerGeocoded(customerId) {
+  // Shared by auto-dispatch dry runs: keep writes limited to coordinates.
+  // geocoder-sweep.test.js guards against triggering route repair here.
   const c = await db('customers').where({ id: customerId }).first();
   if (!c) return null;
   if (c.latitude != null && c.longitude != null) {
@@ -216,6 +218,7 @@ async function regeocodeCustomerAddressGuarded(customerId) {
     }
     return count;
   });
+  if (written) await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds: [customerId] });
   return written ? result : null;
 }
 
@@ -304,6 +307,7 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
     .select('id');
 
   const results = { checked: rows.length, geocoded: 0, unresolved: 0 };
+  const recoveredCustomers = [];
   for (const row of rows) {
     try {
       const c = await db('customers').where({ id: row.id }).first();
@@ -330,8 +334,10 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
           }
           return count;
         });
-        if (written) results.geocoded += 1;
-        else results.unresolved += 1;
+        if (written) {
+          results.geocoded += 1;
+          recoveredCustomers.push(row.id);
+        } else results.unresolved += 1;
       } else {
         results.unresolved += 1;
         // Only permanent failures (ZERO_RESULTS for this exact address) are
@@ -344,6 +350,9 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
       results.unresolved += 1;
       logger.error(`[geocoder] sweep failed for customer ${row.id}: ${err.message}`);
     }
+  }
+  if (recoveredCustomers.length) {
+    await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds: recoveredCustomers });
   }
   if (results.checked > 0) {
     logger.info(
