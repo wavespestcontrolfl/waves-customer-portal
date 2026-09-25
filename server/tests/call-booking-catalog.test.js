@@ -1691,6 +1691,7 @@ describe('loadBookableCallServices (catalog order feeds the prompt hash)', () =>
     const orderBys = [];
     const chain = {
       where: jest.fn().mockReturnThis(),
+      whereNotIn: jest.fn().mockReturnThis(),
       orderBy: jest.fn((col, dir) => { orderBys.push([col, dir]); return chain; }),
       select: jest.fn().mockResolvedValue([{ name: 'A' }]),
     };
@@ -1698,5 +1699,17 @@ describe('loadBookableCallServices (catalog order feeds the prompt hash)', () =>
     const rows = await loadBookableCallServices(conn);
     expect(rows).toEqual([{ name: 'A' }]);
     expect(orderBys).toEqual([['name', 'asc'], ['id', 'asc']]);
+  });
+
+  test('a retired-for-sale row never reaches the call pipelines, even with booking_enabled re-selected (codex r22 on #4786)', async () => {
+    const chain = {
+      where: jest.fn().mockReturnThis(),
+      whereNotIn: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([]),
+    };
+    await loadBookableCallServices(jest.fn(() => chain));
+    expect(chain.where).toHaveBeenCalledWith({ is_active: true, booking_enabled: true });
+    expect(chain.whereNotIn).toHaveBeenCalledWith('service_key', expect.arrayContaining(['tree_shrub_quarterly']));
   });
 });

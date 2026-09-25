@@ -426,7 +426,10 @@ function recurrenceWords(recurrence) {
  * sale). Empty array = booking allowed. `recurrence` ({ pattern,
  * intervalDays }) is the booking's structured cadence: each label is also
  * read with those words appended, so an ID-less "Tree & Shrub Care" booked
- * quarterly cannot bypass the label matcher.
+ * quarterly cannot bypass the label matcher. A `serviceTypes` entry may be
+ * `{ label, recurrence }` for a line with its OWN cadence (an add-on
+ * pattern — codex r22): that recurrence replaces the booking's for that
+ * label; a plain string rides the booking's.
  */
 async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes, recurrence = null } = {}) {
   const ids = new Set((serviceIds || []).filter((id) => UUID_RE.test(String(id || ''))).map(String));
@@ -434,10 +437,13 @@ async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes, 
   // pick): exact key / name / short_name only, the first tier of
   // resolveServiceType — a partial match would refuse unrelated services.
   const { RETIRED_SALE_SERVICE_KEYS, retiredSaleKeyForLabel, labelMayNameRetiredSale } = require('./pricing-engine/retired-sale-catalog');
-  const cadence = recurrenceWords(recurrence);
-  const labels = (serviceTypes || []).filter((t) => typeof t === 'string' && t.trim());
+  const bookingCadence = recurrenceWords(recurrence);
+  const labelled = (serviceTypes || [])
+    .map((t) => (t && typeof t === 'object' ? { label: t.label, cadence: t.recurrence ? recurrenceWords(t.recurrence) : bookingCadence } : { label: t, cadence: bookingCadence }))
+    .filter((t) => typeof t.label === 'string' && t.label.trim());
   // Only names that could be a retired row cost a catalog read.
-  const names = new Set([...labels, ...(cadence ? labels.map((t) => `${t} ${cadence}`) : [])]
+  const names = new Set(labelled
+    .flatMap((t) => [t.label, ...(t.cadence ? [`${t.label} ${t.cadence}`] : [])])
     .filter(labelMayNameRetiredSale).map((t) => t.trim().toLowerCase()));
   if (!ids.size && !names.size) return [];
   // Loose variants ("Quarterly Tree & Shrub", "T&S 4x") name the row too.

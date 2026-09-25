@@ -1,4 +1,4 @@
-// Codex r17/r18/r19/r20 on #4786: the visit-edit retired-for-sale gate must see every
+// Codex r17/r18/r19/r20/r22 on #4786: the visit-edit retired-for-sale gate must see every
 // line the save ADDS — catalog ids, a changed primary label, and the name of
 // an ID-less add-on line (normalizeUpdateDetailsAddons keeps an unresolved
 // serviceName and persists it by name alone) — and nothing the visit already
@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })) }));
 
-const { retiredGateInputsForVisitEdit, retiredSaleKeysVouchedByAcceptedEstimate } = require('../routes/admin-schedule')._test;
+const { retiredGateInputsForVisitEdit, retiredSaleKeysVouchedByAcceptedEstimate, addonLineRecurrence } = require('../routes/admin-schedule')._test;
 
 const RETIRED_ID = '11111111-2222-4333-8444-555555555555';
 const LIVE_ID = '66666666-7777-4888-8999-aaaaaaaaaaaa';
@@ -26,7 +26,12 @@ describe('retiredGateInputsForVisitEdit', () => {
     expect(retiredGateInputsForVisitEdit({
       current, currentAddons: [], postedServiceId: LIVE_ID,
       postedAddons: [{ serviceId: null, serviceName: 'Quarterly Tree & Shrub', recurringPattern: null }], serviceType: 'Quarterly Pest Control',
-    })).toEqual({ serviceIds: [], serviceTypes: ['Quarterly Tree & Shrub'] });
+    })).toEqual({ serviceIds: [], serviceTypes: [{ label: 'Quarterly Tree & Shrub', recurrence: null }] });
+    // An add-on line's own cadence rides with its name (codex r22).
+    expect(retiredGateInputsForVisitEdit({
+      current, currentAddons: [], postedServiceId: LIVE_ID,
+      postedAddons: [{ serviceId: null, serviceName: 'Tree & Shrub Care', recurringPattern: 'quarterly', recurringIntervalDays: null }], serviceType: 'Quarterly Pest Control',
+    })).toEqual({ serviceIds: [], serviceTypes: [{ label: 'Tree & Shrub Care', recurrence: { pattern: 'quarterly', intervalDays: null } }] });
   });
 
   test('a grandfathered visit that keeps its own lines is never re-checked', () => {
@@ -55,7 +60,7 @@ describe('retiredGateInputsForVisitEdit', () => {
       postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care', plansRetainedLines: true,
     })).toEqual({
       serviceIds: [RETIRED_ID, LIVE_ID],
-      serviceTypes: ['Quarterly Tree & Shrub Care', 'Mosquito add-on'],
+      serviceTypes: ['Quarterly Tree & Shrub Care', { label: 'Mosquito add-on', recurrence: null }],
     });
     // Already recurring, or a save that does not post recurrence: nothing retained is re-checked.
     expect(retiredGateInputsForVisitEdit({
@@ -63,9 +68,10 @@ describe('retiredGateInputsForVisitEdit', () => {
     })).toEqual({ serviceIds: [], serviceTypes: [] });
   });
 
-  // codex r19 P1: on a visit that already recurs, a retained add-on stored
-  // as its own one_time line and reposted with a plan pattern (null rides
-  // the recurring parent) joins the plan — gated as if added.
+  // codex r19/r22 P1: on a visit that already recurs, a retained add-on
+  // reposted with a different pattern than its stored one (one_time promoted
+  // to the plan, or a plan pattern changed) is gated as if added — by id and
+  // by name, carrying the NEW cadence.
   test('promoting a one_time add-on to a plan pattern gates it, by id or by name', () => {
     const recurring = { ...current, is_recurring: true };
     const stored = [
@@ -78,7 +84,16 @@ describe('retiredGateInputsForVisitEdit', () => {
         { serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null },
         { serviceId: null, serviceName: 'Quarterly Tree & Shrub', recurringPattern: 'quarterly' },
       ],
-    })).toEqual({ serviceIds: [RETIRED_ID], serviceTypes: ['Quarterly Tree & Shrub'] });
+    })).toEqual({
+      serviceIds: [RETIRED_ID],
+      serviceTypes: [{ label: 'Quarterly T&S', recurrence: null }, { label: 'Quarterly Tree & Shrub', recurrence: { pattern: 'quarterly', intervalDays: null } }],
+    });
+    // A live 6x add-on reposted with a quarterly pattern: the id stays live,
+    // but the name now carries the retired cadence (codex r22).
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: [{ service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: 'bimonthly' }], postedServiceId: LIVE_ID, serviceType: 'Quarterly Pest Control',
+      postedAddons: [{ serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'quarterly' }],
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: [{ label: 'Bi-Monthly Tree & Shrub Care', recurrence: { pattern: 'quarterly', intervalDays: null } }] });
     // Reposted still as one_time: unchanged, not gated.
     expect(retiredGateInputsForVisitEdit({
       current: recurring, currentAddons: stored, postedServiceId: LIVE_ID, serviceType: 'Quarterly Pest Control',
@@ -92,8 +107,17 @@ describe('retiredGateInputsForVisitEdit', () => {
     })).toEqual({ serviceIds: [], serviceTypes: [] });
     expect(retiredGateInputsForVisitEdit({
       current: recurring, currentAddons: [{ service_id: RETIRED_ID, service_name: 'Quarterly T&S', recurring_pattern: null }], postedServiceId: LIVE_ID, serviceType: 'Quarterly Pest Control',
-      postedAddons: [{ serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: 'quarterly' }],
+      postedAddons: [{ serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null }],
     })).toEqual({ serviceIds: [], serviceTypes: [] });
+  });
+
+  test('addonLineRecurrence reads a line\'s own pattern or interval, else null', () => {
+    expect(addonLineRecurrence({ recurringPattern: 'quarterly' })).toEqual({ pattern: 'quarterly', intervalDays: null });
+    expect(addonLineRecurrence({ recurringPattern: 'custom', recurringIntervalDays: '90' })).toEqual({ pattern: 'custom', intervalDays: 90 });
+    expect(addonLineRecurrence({ recurringIntervalDays: 90 })).toEqual({ pattern: null, intervalDays: 90 });
+    expect(addonLineRecurrence({ recurringPattern: null, recurringIntervalDays: null })).toBeNull();
+    expect(addonLineRecurrence({ recurringPattern: ' ' })).toBeNull();
+    expect(addonLineRecurrence(undefined)).toBeNull();
   });
 
   test('the route hands every posted add-on line, with the stored pattern, to the helper', () => {
@@ -108,6 +132,8 @@ describe('retiredGateInputsForVisitEdit', () => {
     // The posted cadence reaches the gate on both write paths (codex r20).
     const recurrenceArg = /recurrence: (?:recurrencePosted|isRecurring) \? \{ pattern: recurringPattern, intervalDays: recurringIntervalDays \} : null,/g;
     expect((source.match(recurrenceArg) || []).length).toBe(2);
+    // POST / hands each add-on name its own cadence (codex r22).
+    expect(source).toMatch(/recurrence: addonLineRecurrence\(\{ recurringPattern: a\?\.recurringPattern \|\| a\?\.cadence, recurringIntervalDays: a\?\.recurringIntervalDays \?\? a\?\.intervalDays \}\),/);
   });
 });
 
@@ -122,6 +148,24 @@ describe('retiredSaleKeysVouchedByAcceptedEstimate', () => {
   test('an accepted quote on the retired cadence vouches for the retired row (object or JSON estimate_data)', () => {
     expect([...retiredSaleKeysVouchedByAcceptedEstimate({ status: 'accepted', estimate_data: quarterly })]).toEqual(['tree_shrub_quarterly']);
     expect([...retiredSaleKeysVouchedByAcceptedEstimate({ status: 'accepted', estimate_data: JSON.stringify(quarterly) })]).toEqual(['tree_shrub_quarterly']);
+  });
+
+  test('only the retired row the quote actually carries is vouched for (codex r22)', () => {
+    // A legacy 12x Premium quote is retired too, but was never sold as tree_shrub_quarterly.
+    const premium = { recurring: { services: [{ name: 'Tree & Shrub Premium', visitsPerYear: 12 }] } };
+    expect(retiredSaleKeysVouchedByAcceptedEstimate({ status: 'accepted', estimate_data: premium }).size).toBe(0);
+    // Light / 4x evidence in any of the row's identity fields vouches.
+    for (const svc of [
+      { name: 'Tree & Shrub Care', serviceKey: 'tree_shrub_quarterly' },
+      { name: 'Tree & Shrub Care', visitsPerYear: 4 },
+      { name: 'Tree & Shrub Care', frequency: 'quarterly' },
+      { name: 'Tree & Shrub Care', tier: 'light' },
+      { name: 'Ornamental Care (Light)' },
+    ]) {
+      expect([...retiredSaleKeysVouchedByAcceptedEstimate({ status: 'accepted', estimate_data: { recurring: { services: [svc] } } })]).toEqual(['tree_shrub_quarterly']);
+    }
+    // A quarterly row of another family never vouches for the T&S plan.
+    expect(retiredSaleKeysVouchedByAcceptedEstimate({ status: 'accepted', estimate_data: { recurring: { services: [{ name: 'Quarterly Pest Control', visitsPerYear: 4 }] } } }).size).toBe(0);
   });
 
   test('an open quote, a current-cadence quote, or no quote vouches for nothing', () => {

@@ -232,6 +232,17 @@ describe('new-appointment write boundary (codex r12)', () => {
     expect(await run({ customerId: CUSTOMER, serviceTypes: ['Tree & Shrub Care'], recurrence: { pattern: 'quarterly' }, heldBy: [CUSTOMER] })).toEqual([]);
   });
 
+  test('an add-on line\'s own cadence replaces the booking\'s for that label (codex r22)', async () => {
+    const ids = async (serviceTypes, recurrence) => (await run({ customerId: OTHER, serviceTypes, recurrence })).map((r) => r.id);
+    // Monthly lawn parent, live 6x T&S add-on posted with a quarterly pattern.
+    expect(await ids(['Monthly Lawn Care', { label: 'Bi-Monthly Tree & Shrub Care', recurrence: { pattern: 'quarterly', intervalDays: null } }], { pattern: 'monthly' })).toEqual([RETIRED_ID]);
+    // The same add-on riding the parent's monthly cadence, or on its own bimonthly one, is sellable.
+    expect(await ids(['Monthly Lawn Care', { label: 'Bi-Monthly Tree & Shrub Care', recurrence: null }], { pattern: 'monthly' })).toEqual([]);
+    expect(await ids([{ label: 'Tree & Shrub Care', recurrence: { pattern: 'bimonthly', intervalDays: null } }], { pattern: 'quarterly' })).toEqual([]);
+    // A blank or malformed entry is ignored.
+    expect(await ids([{ label: '', recurrence: { pattern: 'quarterly' } }, { label: null }, null], { pattern: 'quarterly' })).toEqual([]);
+  });
+
   test('a one_time add-on line is not grandfathering evidence (codex r17)', async () => {
     expect((await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon', addonPattern: 'one_time' })).map((r) => r.id)).toEqual([RETIRED_ID]);
     // An add-on with its own recurring pattern, or none (rides the parent), still holds.
