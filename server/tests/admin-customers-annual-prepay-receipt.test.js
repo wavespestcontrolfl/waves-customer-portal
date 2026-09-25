@@ -115,6 +115,7 @@ beforeEach(() => {
     // awaiting-signature termite annual plan — empty here since this
     // route's flow never involves one.
     estimates: [],
+    'estimates as e': [],
     invoices: [], payments: [], annual_prepay_terms: [], activity_log: [], receipt_delivery_jobs: [],
   };
   db.mockImplementation((name) => {

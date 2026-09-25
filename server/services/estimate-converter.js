@@ -4479,6 +4479,11 @@ async function parkTermiteAnnualPlanAccept({
     coverageServiceType: opts.coverageServiceType || null,
     coverageVisitCount: Number.isInteger(opts.coverageVisitCount) ? opts.coverageVisitCount : null,
     coverageCadence: opts.coverageCadence || null,
+    // The slot the customer picked at accept — a scheduling preference for
+    // staff only; nothing is booked before signature.
+    requestedFirstVisit: opts.requestedFirstVisit && typeof opts.requestedFirstVisit === 'object'
+      ? opts.requestedFirstVisit
+      : null,
     deferFollowUpReminderRegistration: opts.deferFollowUpReminderRegistration === true,
     deferCommercialScheduleNotification: opts.deferCommercialScheduleNotification === true,
     skipMembershipEmail: opts.skipMembershipEmail === true,

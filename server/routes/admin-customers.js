@@ -1446,6 +1446,8 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
 
 const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card_present', 'other']);
 
+const { ANNUAL_TEMPLATE_KEY: TERMITE_ANNUAL_TEMPLATE_KEY } = require('../services/termite-annual-activation');
+
 // Advisory-lock namespace for serializing per-customer annual-prepay creation,
 // so hashtext(customerId) can't collide with locks taken elsewhere.
 const ANNUAL_PREPAY_LOCK_NS = 0x4150;
@@ -1497,10 +1499,34 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
   // and signing BOTH would double-bill the year. excludeEstimateId lets a
   // retry of the SAME estimate (already awaiting_signature) pass through
   // rather than self-block.
-  let awaitingSignatureQuery = trx('estimates')
-    .where({ customer_id: customerId, annual_plan_activation_status: 'awaiting_signature' });
-  if (excludeEstimateId) awaitingSignatureQuery = awaitingSignatureQuery.whereNot({ id: excludeEstimateId });
-  const awaitingSignatureEstimate = await awaitingSignatureQuery.first('id');
+  // Codex round-3 P2: the commitment lasts only while it can still turn
+  // into a plan — its annual agreement is signed (activation pending), or
+  // still signable (draft/sent/viewed with an open or not-yet-minted share
+  // window), or not drafted yet at all (agreement prep runs just after the
+  // accept). Once every agreement drafted for it is cancelled, voided or
+  // expired, the abandoned park no longer blocks a new annual plan.
+  let awaitingSignatureQuery = trx('estimates as e')
+    .where({ 'e.customer_id': customerId, 'e.annual_plan_activation_status': 'awaiting_signature' })
+    .where(function liveAnnualAgreement() {
+      const linkedAgreements = (q) => q.select(trx.raw('1'))
+        .from('customer_contracts as cc')
+        .where('cc.document_template_key', TERMITE_ANNUAL_TEMPLATE_KEY)
+        .whereRaw("cc.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text");
+      this.whereNotExists(function noAgreementYet() { linkedAgreements(this); })
+        .orWhereExists(function signedOrSignable() {
+          linkedAgreements(this).where(function liveStatus() {
+            this.where('cc.status', 'signed')
+              .orWhere(function openShareWindow() {
+                this.whereIn('cc.status', ['draft', 'sent', 'viewed'])
+                  .where(function unexpired() {
+                    this.whereNull('cc.share_token_expires_at').orWhere('cc.share_token_expires_at', '>', trx.fn.now());
+                  });
+              });
+          });
+        });
+    });
+  if (excludeEstimateId) awaitingSignatureQuery = awaitingSignatureQuery.whereNot('e.id', excludeEstimateId);
+  const awaitingSignatureEstimate = await awaitingSignatureQuery.first('e.id');
   if (awaitingSignatureEstimate) {
     const message = `This account already has a termite annual agreement (estimate #${awaitingSignatureEstimate.id}) awaiting the customer's signature. Sign or cancel it before accepting another annual plan.`;
     const err = new Error(message);
