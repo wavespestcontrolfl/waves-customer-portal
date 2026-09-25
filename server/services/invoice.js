@@ -5794,6 +5794,62 @@ const InvoiceService = {
     }
 
     const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    if (emailMustRetry && sms.ok && claimed && !allowClaimed
+      && ["draft", "scheduled"].includes(previousStatus)) {
+      // A direct caller owns this claim, so it must put the accepted Text/App
+      // and owed Email onto the scheduled retry rail itself. The scheduled
+      // worker's separate restore path only runs for allowClaimed callers.
+      let queued = false;
+      try {
+        queued = await db.transaction(async (trx) => {
+          const owned = await trx("invoices")
+            .where({ id: invoiceId, status: "sending", send_claim_token: claim.invoice.send_claim_token })
+            .whereNull("payer_id")
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+            .forUpdate()
+            .first("id", "scheduled_send_error", "scheduled_send_attempts");
+          if (!owned) return false;
+          // A queued pay-link text adopted by this claim is discharged by its
+          // accepted replacement. Resolve it before clearing the claim token;
+          // any failure rolls back the whole transition and holds the claim.
+          if (!await resolveConsumedQueuedSend(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, trx)) {
+            throw new Error("adopted queued text could not be resolved");
+          }
+          const alreadyPending = String(owned.scheduled_send_error || "")
+            .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+          const now = new Date();
+          const updated = await trx("invoices")
+            .where({ id: invoiceId, status: "sending", send_claim_token: claim.invoice.send_claim_token })
+            .whereNull("payer_id")
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+            .update({
+              status: "scheduled",
+              sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [now]),
+              scheduled_send_at: new Date(now.getTime() + 5 * 60 * 1000),
+              scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+              scheduled_send_attempts: alreadyPending ? owned.scheduled_send_attempts : 0,
+              scheduled_request_review: Boolean(effectiveRequestReview),
+              scheduled_review_delay_minutes: effectiveRequestReview ? effectiveReviewDelayMinutes : null,
+              send_claim_token: null,
+              updated_at: now,
+            });
+          if (updated !== 1) throw new Error("send claim changed before Email retry was queued");
+          return true;
+        });
+      } catch (err) {
+        logger.error(`[invoice] Accepted Text/App for ${invoiceId} held under its claim: Email retry could not be queued (${err.message})`);
+      }
+      return {
+        ok: false,
+        code: queued ? "INVOICE_EMAIL_RETRY_QUEUED" : "INVOICE_ACCEPTED_LEG_UNSTAMPED",
+        deliveryQueued: queued,
+        deliveryHeld: !queued,
+        sms,
+        email,
+        payUrl,
+        creditApplied: 0,
+      };
+    }
     if (emailMustRetry && sms.ok
       && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token)) {
       logger.error(`[invoice] Email retry for ${invoiceId} parked because its accepted Text/App leg has no durable retry marker`);

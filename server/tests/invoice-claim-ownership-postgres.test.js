@@ -82,10 +82,10 @@ postgres('invoice send episode ownership', () => {
     expect(require('../services/invoice-issued-closeout').closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
   });
 
-  test('Email retry marker preserves a payer withdrawal after Text acceptance', async () => {
+  test.each([true, false])('Email retry marker preserves a payer withdrawal after Text acceptance (preclaimed=%s)', async (preclaimed) => {
     const claimToken = randomUUID();
     const withdrawal = `payer_billed:${randomUUID()}`;
-    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: claimToken });
+    if (preclaimed) await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: claimToken });
     const sms = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({ sent: true });
     require('../services/invoice-email').sendInvoiceEmail.mockImplementationOnce(async () => {
       await trx('invoices').where({ id: invoiceId }).update({
@@ -94,17 +94,50 @@ postgres('invoice send episode ownership', () => {
       return { ok: false, code: 'billing_prefs_unavailable', error: 'preferences temporarily unavailable' };
     });
     try {
-      await expect(Invoice.sendViaSMSAndEmail(invoiceId, { allowClaimed: true, claimToken }))
+      await expect(Invoice.sendViaSMSAndEmail(invoiceId, preclaimed ? { allowClaimed: true, claimToken } : {}))
         .resolves.toMatchObject({ ok: false, code: 'INVOICE_ACCEPTED_LEG_UNSTAMPED', deliveryHeld: true });
       const withdrawn = await read();
       expect(withdrawn).toMatchObject({
-        status: 'draft', scheduled_send_error: withdrawal, send_claim_token: claimToken,
+        status: 'draft', scheduled_send_error: withdrawal,
         payer_id: null, sent_at: null, sms_sent_at: null,
       });
+      expect(withdrawn.send_claim_token).toBeTruthy();
       expect(() => require('../services/invoice-helpers').assertInvoiceCollectible(withdrawn)).toThrow(/payer|third.party/i);
-      await expect(Invoice.restoreSendClaim(invoiceId, 'scheduled', true, [], trx, claimToken)).resolves.toBe(false);
+      await expect(Invoice.restoreSendClaim(invoiceId, 'scheduled', true, [], trx, withdrawn.send_claim_token)).resolves.toBe(false);
       expect((await read()).scheduled_send_error).toBe(withdrawal);
       expect(sms).toHaveBeenCalledTimes(1);
+    } finally { sms.mockRestore(); }
+  });
+
+  test('direct accepted Text with unreadable Email preferences queues only Email and preserves review intent', async () => {
+    const sms = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValue({ sent: true });
+    const sendInvoiceEmail = require('../services/invoice-email').sendInvoiceEmail;
+    sendInvoiceEmail
+      .mockResolvedValueOnce({ ok: false, code: 'billing_prefs_unavailable', error: 'preferences temporarily unavailable' })
+      .mockResolvedValueOnce({ ok: true, messageId: 'synthetic-email' });
+    try {
+      const result = await Invoice.sendViaSMSAndEmail(invoiceId, { requestReview: true, reviewDelayMinutes: 45 });
+      expect(result).toMatchObject({
+        ok: false, code: 'INVOICE_EMAIL_RETRY_QUEUED', deliveryQueued: true,
+        sms: { ok: true }, email: { code: 'billing_prefs_unavailable' },
+      });
+      const pending = await read();
+      expect(pending).toMatchObject({
+        status: 'scheduled', send_claim_token: null,
+        scheduled_send_error: 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED',
+        scheduled_send_attempts: 0, scheduled_request_review: true,
+        scheduled_review_delay_minutes: 45,
+      });
+      expect(pending.sms_sent_at).toBeTruthy();
+      expect(pending.scheduled_send_at).toBeInstanceOf(Date);
+      expect(pending.scheduled_send_at.getTime()).toBeGreaterThan(Date.now());
+      expect(sms).toHaveBeenCalledTimes(1);
+
+      await trx('invoices').where({ id: invoiceId }).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+      expect(await Invoice.processScheduledSends()).toMatchObject({ sent: 1, failed: 0 });
+      expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null, scheduled_send_at: null });
+      expect(sms).toHaveBeenCalledTimes(1);
+      expect(sendInvoiceEmail).toHaveBeenCalledTimes(2);
     } finally { sms.mockRestore(); }
   });
 
@@ -359,6 +392,50 @@ postgres('invoice send episode ownership', () => {
       };
       return wrapTrx(realConnection);
     }
+
+    test('direct Email retry holds its accepted Text claim when adopted queued-text resolution fails', async () => {
+      const { queueId } = await queuedPayLinkFixture();
+      const faultState = { armed: false };
+      const realConnection = mockConnection;
+      const wrapTrx = (real) => {
+        const wrapped = (table, ...args) => {
+          if (table === 'sms_log' && faultState.armed) {
+            faultState.armed = false;
+            const failing = {};
+            for (const method of ['whereIn', 'where', 'whereRaw']) failing[method] = () => failing;
+            failing.update = () => Promise.reject(new Error('adopted text resolution failed (injected)'));
+            return failing;
+          }
+          return real(table, ...args);
+        };
+        for (const name of ['raw', 'queryBuilder', 'ref']) wrapped[name] = (...args) => real[name](...args);
+        wrapped.transaction = (callback, ...args) => real.transaction((nested) => callback(wrapTrx(nested)), ...args);
+        for (const name of ['schema', 'fn']) Object.defineProperty(wrapped, name, { get: () => real[name] });
+        return wrapped;
+      };
+      mockConnection = wrapTrx(realConnection);
+      const sms = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValue({ sent: true });
+      require('../services/invoice-email').sendInvoiceEmail.mockImplementationOnce(async () => {
+        faultState.armed = true;
+        return { ok: false, code: 'billing_prefs_unavailable', error: 'preferences temporarily unavailable' };
+      });
+      try {
+        const result = await Invoice.sendViaSMSAndEmail(invoiceId);
+        expect(result).toMatchObject({ ok: false, code: 'INVOICE_ACCEPTED_LEG_UNSTAMPED', deliveryHeld: true,
+          sms: { ok: true }, email: { code: 'billing_prefs_unavailable' } });
+        expect(sms).toHaveBeenCalledTimes(1);
+      } finally {
+        sms.mockRestore();
+        mockConnection = realConnection;
+      }
+      const held = await read();
+      expect(held).toMatchObject({ status: 'sending', scheduled_send_at: null });
+      expect(held.send_claim_token).toBeTruthy();
+      const queued = await trx('sms_log').where({ id: queueId }).first();
+      expect(queued.status).toBe('cancelled');
+      expect(queued.metadata.invoice_send_adoption_pending).toBe(true);
+      expect(queued.metadata.adoption_resolved_at).toBeUndefined();
+    });
 
     test('a failed queue restore leaves the row safely stuck (cancelled, pending) and survives stale-claim parking', async () => {
       const { queueId, originalSchedule } = await queuedPayLinkFixture();
