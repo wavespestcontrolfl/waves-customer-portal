@@ -245,7 +245,7 @@ function buildPlacementTarget(context, windowStart, windowEnd, durationMinutes) 
     raw_estimate_minutes: Number(context.target?.estimated_duration_minutes) || 0,
     planning_exempt: true,
     estimated_duration_minutes: context.prospective ? Number(durationMinutes)
-      : Math.max(workDuration(context.target), Number(durationMinutes) || 0),
+      : Math.max(workDuration({ ...context.target, planning_exempt: true }), Number(durationMinutes) || 0),
   };
 }
 

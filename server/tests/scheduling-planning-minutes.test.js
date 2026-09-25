@@ -70,6 +70,13 @@ describe('planning minutes table', () => {
     expect(workDuration(pest)).toBe(60);
   });
 
+  test('an existing row being re-saved keeps its own allowance, not the table', () => {
+    const target = stop('existing', 9 * 60, 60, { service_type: 'Quarterly Pest Control Service', technician_id: null });
+    const fit = evaluateArrivalPlacement({ date, now, rows: [], target, travel },
+      { windowStart: '09:00', windowEnd: '10:00', durationMinutes: 0 });
+    expect(fit.target.estimated_duration_minutes).toBe(60);
+  });
+
   test('every planning input rides the route-write guard on both sides of the lock', () => {
     // A signature built from rows missing an input would plan them
     // differently and abort every nightly write as stale.
