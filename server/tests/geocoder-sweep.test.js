@@ -3,8 +3,10 @@ process.env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || 'test-key';
 
 const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
+jest.mock('../services/scheduling/quality-after-change', () => ({ refreshScheduleQualityAfterChange: jest.fn(async () => {}) }));
 
-const { sweepUngeocodedCustomers } = require('../services/geocoder');
+const { sweepUngeocodedCustomers, ensureCustomerGeocoded } = require('../services/geocoder');
+const { refreshScheduleQualityAfterChange } = require('../services/scheduling/quality-after-change');
 
 function installDb({ listRows, customersById }) {
   const updates = [];
@@ -101,6 +103,8 @@ describe('sweepUngeocodedCustomers', () => {
     // Every successful geocode mirrors onto the primary property row.
     expect(propertyMirrors).toHaveLength(2);
     expect(propertyMirrors[0].patch.latitude).toBe(27.5);
+    expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
+    expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: ['cust-1', 'cust-2'] });
   });
 
   it('counts un-geocodable addresses as unresolved without writing', async () => {
@@ -117,6 +121,7 @@ describe('sweepUngeocodedCustomers', () => {
 
     expect(result).toEqual({ checked: 1, geocoded: 0, unresolved: 1 });
     expect(updates).toHaveLength(0);
+    expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
 
     // Unresolved ids are skipped on later sweeps so they can't starve the
     // batch — the same candidate list now yields nothing to check.
@@ -183,6 +188,27 @@ describe('sweepUngeocodedCustomers', () => {
 
     expect(result).toEqual({ checked: 0, geocoded: 0, unresolved: 0 });
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('generic geocoding used by dry runs never starts route repair, even with every repair gate enabled', async () => {
+    const gates = ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_SCHEDULE_QUALITY_MEASUREMENTS'];
+    const saved = gates.map(gate => process.env[gate]);
+    try {
+      gates.forEach(gate => { process.env[gate] = 'true'; });
+      const updates = installDb({ listRows: [], customersById: {
+        'dry-run-customer': { id: 'dry-run-customer', latitude: null, longitude: null,
+          address_line1: '700 Dry Run Fixture Way', city: 'Bradenton', state: 'FL', zip: '34211' },
+      } });
+      mockGoogle('OK', { lat: 27.5, lng: -82.4 });
+      expect(await ensureCustomerGeocoded('dry-run-customer')).toEqual({ lat: 27.5, lng: -82.4 });
+      expect(updates.map(update => update.table)).toEqual(['customers']);
+      expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
+    } finally {
+      gates.forEach((gate, index) => {
+        if (saved[index] === undefined) delete process.env[gate];
+        else process.env[gate] = saved[index];
+      });
+    }
   });
 });
 

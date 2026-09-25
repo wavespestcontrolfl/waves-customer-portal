@@ -2,10 +2,12 @@
 // fails the chronology/feasibility guards, the nightly pass computes the best
 // LEGAL order in-process. Covered here: gate OFF = byte-for-byte the
 // pre-fallback skip; gate ON applies a legal order through the same fenced
-// write with source 'window_constrained' + unconstrained_saved_meters; an
-// infeasible/unprofitable day keeps its ORIGINAL skip reason plus the
-// fallback:'NO_FEASIBLE_IMPROVEMENT' tag; a legal Google order never
-// consults the fallback. Plus unit coverage of the search itself
+// write with source 'window_constrained' + unconstrained_saved_meters; a
+// search that finds no certifiable order keeps the ORIGINAL skip reason
+// plus the fallback:'NO_FEASIBLE_IMPROVEMENT' tag; a certifiable order below
+// the savings floor is honestly BELOW_MIN_SAVINGS with its original conflict
+// retained as evidence; a legal Google order never consults the fallback.
+// Plus unit coverage of the search itself
 // (backbone preserved, exhaustive optimality, greedy above the cap,
 // infeasible day ⇒ null).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -272,6 +274,32 @@ test('gate ON: a below-floor ILLEGAL Google order still reaches the fallback —
     unconstrained_saved_meters: 0,
   });
   expect(ledger().skips.find((s) => s.date === DAY)).toBeUndefined();
+});
+
+test('gate ON: a legal constrained order below the floor is feasible but not worth rewriting', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  // Current U,T2,T1 = 22,500 m. Google and the constrained search both find
+  // 22,000 m orders, but Google's order reverses the promised windows. The
+  // constrained order is legal and saves 500 m — below the 805 m write floor.
+  stopsByDate[DAY] = [
+    stop('T1', { window_start: '09:00', lng: 10, route_order: 3 }),
+    stop('T2', { window_start: '13:00', lng: 1, route_order: 2 }),
+    stop('U', { lng: 1.25, route_order: 1 }),
+  ];
+  mockOptimizerOrder(['T2', 'T1', 'U']);
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  const skip = ledger().skips.find((s) => s.date === DAY);
+  expect(skip).toMatchObject({
+    reason: 'BELOW_MIN_SAVINGS',
+    saved_meters: 500,
+    conflict: 'WINDOW_ORDER_CONFLICT',
+    constrained_order_feasible: true,
+    fallback_saved_meters: 500,
+  });
+  expect(skip.fallback).toBeUndefined();
+  expect(trxUpdates).toEqual([]);
 });
 
 test('gate OFF: a below-floor illegal Google order still skips BELOW_MIN_SAVINGS — legacy sequencing byte for byte', async () => {

@@ -2122,6 +2122,9 @@ const gates = {
 
   // Null-position repair through the existing writer. Keeps customer promises
   // and positioned-stop order; requires drive calibration and the reorder gate.
+  // Also enables verified service-address pin recovery in the hourly geocoder
+  // backstop (with GATE_ROUTE_REORDER). Pin writes do not require calibration;
+  // the subsequent route repair still does. No customer messages.
   // Explicit opt-in in every environment.
   routeReorderRepair: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
 
