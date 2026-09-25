@@ -17924,23 +17924,25 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 // no audit row at all was not cancelled by a wired surface; a legacy NULL
 // status counted (Codex r2 P1) and so does its audit row.
 async function readReseedCandidate(trx, cancelledServiceId) {
-  const { isPlanSeriesRow, isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
+  const { isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
   const cancelled = await trx('scheduled_services').where({ id: cancelledServiceId }).first();
   if (!cancelled) return { skipped: 'not_found' };
   if (cancelled.status !== 'cancelled') return { skipped: 'not_cancelled' };
+  // Plan rows only — the root, an explicitly recurring child, or a legacy
+  // null-flagged child; never an explicit booster (Codex #4814 P1).
   if (!isPlanSeriesRow(cancelled)) return { skipped: 'not_plan_visit' };
+  // The CURRENT cancellation episode (Codex r7 P1): the newest unbroken run
+  // of rows that landed on 'cancelled' — a same-status retry appends
+  // cancelled→cancelled replays on top of the real transition (Codex r4),
+  // and an older cancel that was compensated back to live must not be
+  // consulted. The episode's entering row says what the visit left.
   const transitions = await trx('job_status_history')
-    .where({ job_id: cancelledServiceId, to_status: 'cancelled' })
+    .where({ job_id: cancelledServiceId })
     .orderBy('transitioned_at', 'desc')
-    .select('from_status');
-  if (!transitions.length) return { skipped: 'no_transition_record' };
-  // The latest COUNTING transition, not merely the latest (Codex r4 P1): a
-  // same-status retry on the dispatch route appends a cancelled→cancelled
-  // replay row on top of the real pending→cancelled one — and that retry is
-  // exactly how a first reseed that failed without its stamp gets another
-  // chance. A row whose cancel rows were ALL non-counting stays refused.
-  const transition = transitions.find((t) => isCountingSourceStatus(t.from_status));
-  if (!transition) return { skipped: 'non_counting_transition', fromStatus: transitions[0].from_status };
+    .select('from_status', 'to_status');
+  const episode = cancelEpisodeSourceStatus(transitions);
+  if (!episode) return { skipped: 'no_transition_record' };
+  if (!isCountingSourceStatus(episode.fromStatus)) return { skipped: 'non_counting_transition', fromStatus: episode.fromStatus };
   return { cancelled };
 }
 
@@ -17985,7 +17987,7 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }
 // reads plan rows only (no boosters) by the same position.
 async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
   const {
-    plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow,
+    plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows,
   } = require('../services/recurring-series-cancel-reseed');
   const expected = plannedVisitsPerYearForSeries(parent);
   if (!expected) return { skipped: 'no_planned_count' };
@@ -18013,12 +18015,17 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
   if (counting >= expected) return { skipped: 'term_still_whole', counting, expected };
   // Nothing left upcoming = the plan ended (its last visit was cancelled, or
   // every remaining visit was), not a gap inside a running plan.
-  if (!hasUpcomingPlanRow(seriesRows, etDateString())) return { skipped: 'no_live_visits', counting, expected };
+  const todayET = etDateString();
+  if (!hasUpcomingPlanRow(seriesRows, todayET)) return { skipped: 'no_live_visits', counting, expected };
+  // The visit cap counts the SAME plan-row population the term does (Codex
+  // r7 P1) — legacy null-flagged children included, callbacks excluded —
+  // not liveUpcomingSeriesVisits' is_recurring = true reader.
+  const upcomingPlanCount = countUpcomingPlanRows(seriesRows, todayET);
   // The calendar span of that term (anchored on the root's PLAN position —
   // a single-moved root keeps its cadence date) rides on the stamp for
   // humans; membership itself is by slot.
   const window = termWindowAtIndex(planPositionDate(parent), termIndex) || { index: termIndex, start: null, end: null };
-  return { window, counting, expected };
+  return { window, counting, expected, upcomingPlanCount };
 }
 
 // Step 4 — tech-blind occupancy probe on each added row (Codex #4814 P1),
@@ -18092,14 +18099,16 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // absolute target would then add two. baselineCount is the reconciler's own
 // staleness fence — a mismatch refuses (409 → series_changed_retry, the
 // wrapper retries) instead of over-adding.
-async function addOneReseedVisit(trx, { parent, parentId, cols }) {
+async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount }) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
   const reconcileParent = normalizedWindow
     ? { ...parent, window_start: normalizedWindow.start, window_end: normalizedWindow.end }
     : parent;
+  // Cap on the plan-row population (Codex r7 P1); the reconciler's own live
+  // read below only sets its target and baseline.
+  if (upcomingPlanCount >= MAX_SERIES_VISIT_COUNT) return { skipped: 'at_max_visit_count' };
   const live = await liveUpcomingSeriesVisits(trx, parentId);
-  if (live.length >= MAX_SERIES_VISIT_COUNT) return { skipped: 'at_max_visit_count' };
   try {
     const result = await reconcileRecurringSeriesVisitCount(trx, {
       parentId, parent: reconcileParent, cols,
@@ -18128,7 +18137,20 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   await acquireRecurringSeriesMaintenanceLock(trx, parentId);
   const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);
   if (fenced.skipped) return { added: [], skipped: fenced.skipped, parentId };
-  cancelled = fenced.cancelled;
+  // Re-read the WHOLE row under the fences and repeat every eligibility
+  // check (Codex r7 P1): between the pre-lock read and the locks a cancel
+  // can be compensated back to live (offboarding / cancellation-processor)
+  // or the row re-parented; a stale status, lineage or plan position would
+  // add a billable visit to a plan that no longer lost one, or extend the
+  // wrong series. A changed lineage or owner is transient — the wrapper
+  // retries with fresh reads.
+  const fresh = await readReseedCandidate(trx, cancelledServiceId);
+  if (fresh.skipped) return { added: [], skipped: fresh.skipped, fromStatus: fresh.fromStatus, parentId };
+  if (String(fresh.cancelled.recurring_parent_id || fresh.cancelled.id) !== String(parentId)
+    || String(fresh.cancelled.customer_id) !== String(fenced.cancelled.customer_id)) {
+    return { added: [], skipped: 'series_changed_retry', parentId };
+  }
+  cancelled = fresh.cancelled;
   let parent = await trx('scheduled_services').where({ id: parentId }).first();
   if (!parent) return { added: [], skipped: 'no_series_root' };
   if (parent.recurring_parent_id) return { added: [], skipped: 'not_series_root' };
@@ -18143,7 +18165,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
-  const add = await addOneReseedVisit(trx, { parent, parentId, cols });
+  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount });
   if (add.skipped) return { added: [], skipped: add.skipped, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
   if (add.added.length) {
@@ -18209,23 +18231,32 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
 // ending that plan (fallback auditor P1 on def6002a84) — never something to
 // refill. Each single reseed opens its own transaction (the writer above).
 async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source = 'cancel' } = {}) {
-  const { isPlanSeriesRow, isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
+  const { isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
   const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
   if (!ids.length) return { results: [], skippedRoots: [] };
   const rows = await conn('scheduled_services').whereIn('id', ids)
     .select('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
-  // Only cancels that REMOVED a counting visit take part in the per-plan
-  // count (Codex #4814 r2 P1): a 'rescheduled' placeholder cancelled in the
-  // same batch as one real visit must not make the pair read as a plan
-  // reduction. Same audit read the locked writer repeats for its own row.
+  // Only cancels whose CURRENT episode removed a counting visit take part in
+  // the per-plan count (Codex r2 / r4 / r7 P1s): a 'rescheduled' placeholder
+  // cancelled beside one real visit must not read as a plan reduction, a
+  // cancelled→cancelled replay must not hide the real transition, and an
+  // older cancel compensated back to live must not be consulted. Same
+  // episode rule the locked writer repeats for its own row.
   const transitions = await conn('job_status_history')
-    .whereIn('job_id', ids).where('to_status', 'cancelled')
+    .whereIn('job_id', ids)
     .orderBy('transitioned_at', 'desc')
-    .select('job_id', 'from_status');
-  // A job qualifies when ANY of its cancel rows left a counting status —
-  // the newest may be a cancelled→cancelled replay (Codex r4 P1).
+    .select('job_id', 'from_status', 'to_status');
+  const byJob = new Map();
+  for (const t of transitions) {
+    const key = String(t.job_id);
+    if (!byJob.has(key)) byJob.set(key, []);
+    byJob.get(key).push(t);
+  }
   const countingCancel = new Set();
-  for (const t of transitions) if (isCountingSourceStatus(t.from_status)) countingCancel.add(String(t.job_id));
+  for (const [key, history] of byJob) {
+    const episode = cancelEpisodeSourceStatus(history);
+    if (episode && isCountingSourceStatus(episode.fromStatus)) countingCancel.add(key);
+  }
   const byRoot = new Map();
   for (const row of rows) {
     // Plan rows only: explicit recurring, or a legacy null-flagged child of

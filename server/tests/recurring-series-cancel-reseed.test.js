@@ -25,7 +25,7 @@ const adminSchedule = require('../routes/admin-schedule');
 const gates = require('../config/feature-gates');
 const {
   runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, assignPlanTerms, countTermVisits,
-  isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, planPositionDate, hasUpcomingPlanRow,
+  isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows,
   COUNTING_SOURCE_STATUSES,
 } = require('../services/recurring-series-cancel-reseed');
 
@@ -233,6 +233,31 @@ describe('term / count math (pure)', () => {
     expect(isCountingSourceStatus('cancelled')).toBe(false);
   });
 
+  test('cancelEpisodeSourceStatus: the newest unbroken run of cancelled rows is the episode; its entering row decides (Codex r7)', () => {
+    const t = (from, to) => ({ from_status: from, to_status: to });
+    // plain cancel
+    expect(cancelEpisodeSourceStatus([t('confirmed', 'cancelled')])).toEqual({ fromStatus: 'confirmed' });
+    // dispatch same-status retry on top of the real cancel
+    expect(cancelEpisodeSourceStatus([t('cancelled', 'cancelled'), t('pending', 'cancelled'), t(null, 'pending')])).toEqual({ fromStatus: 'pending' });
+    // an OLDER counting cancel compensated back to live, then a placeholder cancelled: only the new episode counts
+    expect(cancelEpisodeSourceStatus([t('rescheduled', 'cancelled'), t('cancelled', 'pending'), t('confirmed', 'cancelled')])).toEqual({ fromStatus: 'rescheduled' });
+    // legacy NULL source
+    expect(cancelEpisodeSourceStatus([t(null, 'cancelled')])).toEqual({ fromStatus: null });
+    // no current episode: newest row is not a cancel, or no history at all
+    expect(cancelEpisodeSourceStatus([t('cancelled', 'pending'), t('confirmed', 'cancelled')])).toBeUndefined();
+    expect(cancelEpisodeSourceStatus([])).toBeUndefined();
+    expect(cancelEpisodeSourceStatus(undefined)).toBeUndefined();
+    // the cap's population is the plan rows
+    const today = '2026-09-25';
+    expect(countUpcomingPlanRows([
+      { scheduled_date: '2026-10-01', status: 'pending', is_recurring: null, recurring_parent_id: 'root' },
+      { scheduled_date: '2026-10-02', status: 'pending', is_recurring: true, recurring_parent_id: 'root', is_callback: true },
+      { scheduled_date: '2026-09-01', status: 'pending', is_recurring: true, recurring_parent_id: 'root' },
+      { scheduled_date: '2026-10-03', status: 'cancelled', is_recurring: true, recurring_parent_id: 'root' },
+      { scheduled_date: '2026-10-04', status: 'on_site', is_recurring: true, recurring_parent_id: 'root' },
+    ], today)).toBe(2);
+  });
+
   test('a moved exception keeps its cadence position: ordered (and termed) by its cadence date, not the appointment date (Codex #4814 r2)', () => {
     const moved = child({ id: 'moved', scheduled_date: '2027-07-20', status: 'pending', date_exception: true, date_exception_cadence_date: '2026-10-11' });
     expect(planPositionDate(moved)).toBe('2026-10-11');
@@ -309,7 +334,10 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(count(dispatch, '../services/recurring-series-cancel-reseed')).toBe(1);
     expect(count(schedule, '../services/recurring-series-cancel-reseed')).toBe(1);
     expect(count(services, '../services/recurring-series-cancel-reseed')).toBe(1);
-    expect(count(ib, '../recurring-series-cancel-reseed')).toBe(1);
+    // the Intelligence Bar tool: the initial path AND its already-cancelled replay branch (Codex r7)
+    expect(count(ib, '../recurring-series-cancel-reseed')).toBe(2);
+    expect(ib).toMatch(/source: 'intelligence-bar-cancel-replay'/);
+    expect(ib.indexOf("source: 'intelligence-bar-cancel-replay'")).toBeLessThan(ib.indexOf('already_cancelled: true'));
   });
 
   test('bulk cancel: collects real transitions right after the commit (before fallible post-commit work) and calls the bridge ONCE after the batch settled', () => {
@@ -381,11 +409,11 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(history).toBeGreaterThan(planRow);
     expect(noRecord).toBeGreaterThan(history);
     expect(nonCounting).toBeGreaterThan(noRecord);
-    expect(c).toMatch(/\.where\(\{ job_id: cancelledServiceId, to_status: 'cancelled' \}\)[\s\S]*?\.orderBy\('transitioned_at', 'desc'\)/);
-    // the latest COUNTING cancel row wins — a cancelled→cancelled replay must not hide the real transition
-    expect(c).toMatch(/transitions\.find\(\(t\) => isCountingSourceStatus\(t\.from_status\)\)/);
-    expect(c).toMatch(/\.select\('from_status'\)/);
-    expect(c).not.toMatch(/\.first\('from_status'\)/);
+    // the CURRENT cancellation episode decides (Codex r7): full history, newest first, episode helper
+    expect(c).toMatch(/\.where\(\{ job_id: cancelledServiceId \}\)[\s\S]*?\.orderBy\('transitioned_at', 'desc'\)[\s\S]*?\.select\('from_status', 'to_status'\)/);
+    expect(c).toMatch(/const episode = cancelEpisodeSourceStatus\(transitions\);/);
+    expect(c).toMatch(/isCountingSourceStatus\(episode\.fromStatus\)/);
+    expect(c).not.toMatch(/to_status: 'cancelled'/);
     const body = lockedBody();
     const candidate = body.indexOf('await readReseedCandidate(trx, cancelledServiceId)');
     const lock = body.indexOf('acquireRecurringSeriesMaintenanceLock(trx, parentId)');
@@ -400,7 +428,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const comms = body.indexOf('const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);');
     const refusal = body.indexOf('await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols })');
     const term = body.indexOf('await reseedTermShortfall(trx, { parent, parentId, cancelled })');
-    const reconcile = body.indexOf('await addOneReseedVisit(trx, { parent, parentId, cols })');
+    const reconcile = body.indexOf('await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount })');
     expect(addFn()).toMatch(/reconcileRecurringSeriesVisitCount\(trx, \{/);
     expect(lock).toBeGreaterThan(-1);
     expect(comms).toBeGreaterThan(lock);
@@ -410,6 +438,14 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(fence).toBeGreaterThan(lock);
     expect(parentRead).toBeGreaterThan(fence);
     expect(body).toMatch(/if \(fenced\.skipped\) return \{ added: \[\], skipped: fenced\.skipped, parentId \};/);
+    // the whole row is re-read and re-validated UNDER the fences (Codex r7); a moved lineage/owner is transient
+    const revalidate = body.indexOf('const fresh = await readReseedCandidate(trx, cancelledServiceId);');
+    expect(revalidate).toBeGreaterThan(fence);
+    expect(revalidate).toBeLessThan(parentRead);
+    expect(body).toMatch(/String\(fresh\.cancelled\.recurring_parent_id \|\| fresh\.cancelled\.id\) !== String\(parentId\)/);
+    expect(body).toMatch(/String\(fresh\.cancelled\.customer_id\) !== String\(fenced\.cancelled\.customer_id\)/);
+    expect(body.slice(revalidate, parentRead)).toMatch(/skipped: 'series_changed_retry'/);
+    expect(body.slice(revalidate, parentRead)).toMatch(/cancelled = fresh\.cancelled;/);
     const owner = schedule.slice(schedule.indexOf('async function lockReseedOwner('), schedule.indexOf('async function reseedRecurringSeriesAfterCancelLocked('));
     const commsFirst = owner.indexOf('await lockCustomerComms(trx, cancelled.customer_id);');
     const relock = owner.indexOf("first('customer_id')");
@@ -448,7 +484,15 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const own = t.indexOf("if (termIndex == null) return { skipped: 'not_in_plan_sequence' };");
     const count = t.indexOf('countTermVisits(seriesRows, termIndex, terms)');
     const whole = t.indexOf("skipped: 'term_still_whole'");
-    const guard = t.indexOf("if (!hasUpcomingPlanRow(seriesRows, etDateString())) return { skipped: 'no_live_visits'");
+    const guard = t.indexOf("if (!hasUpcomingPlanRow(seriesRows, todayET)) return { skipped: 'no_live_visits'");
+    // the cap counts the same plan-row population (Codex r7)
+    expect(t).toMatch(/const upcomingPlanCount = countUpcomingPlanRows\(seriesRows, todayET\);/);
+    expect(t).toMatch(/return \{ window, counting, expected, upcomingPlanCount \};/);
+    const add = addFn();
+    expect(add).toMatch(/if \(upcomingPlanCount >= MAX_SERIES_VISIT_COUNT\) return \{ skipped: 'at_max_visit_count' \};/);
+    expect(add.indexOf('upcomingPlanCount >= MAX_SERIES_VISIT_COUNT')).toBeLessThan(add.indexOf('await liveUpcomingSeriesVisits(trx, parentId)'));
+    expect(add).not.toMatch(/live\.length >= MAX_SERIES_VISIT_COUNT/);
+    expect(lockedBody()).toMatch(/upcomingPlanCount: term\.upcomingPlanCount/);
     expect(stampsRead).toBeGreaterThan(-1);
     expect(slots).toBeGreaterThan(stampsRead);
     expect(own).toBeGreaterThan(slots);
@@ -503,10 +547,11 @@ describe('cancel surfaces wire the hook (source guards)', () => {
 
   test('batch writer: only audited counting→cancelled transitions take part; 2+ of one plan = plan reduction, never a refill; per-root isolation', () => {
     const b = batchFn();
-    expect(b).toMatch(/conn\('job_status_history'\)[\s\S]*?\.whereIn\('job_id', ids\)\.where\('to_status', 'cancelled'\)/);
-    // a job qualifies when ANY of its cancel rows left a counting status (replay rows must not hide it)
-    expect(b).toMatch(/for \(const t of transitions\) if \(isCountingSourceStatus\(t\.from_status\)\) countingCancel\.add\(String\(t\.job_id\)\);/);
+    // a job qualifies when its CURRENT cancellation episode left a counting status (Codex r7)
+    expect(b).toMatch(/\.whereIn\('job_id', ids\)[\s\S]*?\.select\('job_id', 'from_status', 'to_status'\)/);
+    expect(b).toMatch(/const episode = cancelEpisodeSourceStatus\(history\);\s*if \(episode && isCountingSourceStatus\(episode\.fromStatus\)\) countingCancel\.add\(key\);/);
     expect(b).toMatch(/if \(!countingCancel\.has\(String\(row\.id\)\)\) continue;/);
+    expect(b).not.toMatch(/\.where\('to_status', 'cancelled'\)/);
     expect(b).toMatch(/if \(!isPlanSeriesRow\(row\)\) continue;/);
     expect(b).toMatch(/\.select\('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'\)/);
     expect(b).not.toMatch(/row\.is_recurring !== true/);

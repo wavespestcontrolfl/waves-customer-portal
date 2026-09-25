@@ -122,6 +122,8 @@ function scenario(over = {}) {
         if (calls.some((c) => c[0] === 'first' && c[1] === 'customer_id') && s.relockOwners?.length) {
           return { customer_id: s.relockOwners.shift() };
         }
+        // full-row reads of the cancelled row can be scripted in sequence (pre-lock read, then the re-validation under the fences)
+        if (String(where?.[1]?.id) === String(CANCELLED.id) && s.cancelledReads?.length) return s.cancelledReads.shift();
         // ids reach the writer as strings from the batch (String(id)) and as numbers from the direct callers
         if (String(where?.[1]?.id) === String(CANCELLED.id)) return s.cancelled;
         if (String(where?.[1]?.id) === String(PARENT.id)) return s.parent;
@@ -132,7 +134,14 @@ function scenario(over = {}) {
       return [];
     }
     if (table === 'job_status_history') {
-      if (op === 'await') return s.transitions || (s.transition ? [{ job_id: CANCELLED.id, from_status: s.transition.from_status }] : []);
+      // full history newest first; a scripted row without to_status is a cancel row
+      if (op === 'await') {
+        const history = (s.transitions || (s.transition ? [{ job_id: CANCELLED.id, from_status: s.transition.from_status }] : []))
+          .map((row) => ({ to_status: 'cancelled', ...row }));
+        // honour the per-job filter the candidate read applies (the batch reads every id at once)
+        const byJob = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && c[1].job_id != null);
+        return byJob ? history.filter((row) => String(row.job_id) === String(byJob[1].job_id)) : history;
+      }
     }
     if (table === 'recurring_plan_alerts') return op === 'await' ? s.decisions : null;
     if (table === 'activity_log') {
@@ -153,6 +162,14 @@ describe('readReseedCandidate — the audited transition decides', () => {
     ['not_plan_visit', { cancelled: { ...CANCELLED, is_recurring: false } }], // an explicit booster
     ['no_transition_record', { transition: undefined }],
     ['non_counting_transition', { transition: { from_status: 'rescheduled' } }],
+    // Codex r7: an older counting cancel compensated back to live, then a placeholder cancelled → only the CURRENT episode counts
+    ['non_counting_transition', { transitions: [
+      { job_id: 22, from_status: 'rescheduled', to_status: 'cancelled' },
+      { job_id: 22, from_status: 'cancelled', to_status: 'pending' },
+      { job_id: 22, from_status: 'confirmed', to_status: 'cancelled' },
+    ] }],
+    // newest row is not a cancel at all (compensated) → no current episode
+    ['no_transition_record', { transitions: [{ job_id: 22, from_status: 'cancelled', to_status: 'pending' }, { job_id: 22, from_status: 'confirmed', to_status: 'cancelled' }] }],
   ])('%s', async (skipped, over) => {
     const { handler } = scenario(over);
     const trx = makeConn(handler);
@@ -275,6 +292,7 @@ describe('reseedTermShortfall — term by plan position, stamps pin earlier re-a
     expect(out.skipped).toBeUndefined();
     expect(out).toMatchObject({ counting: 11, expected: 12 });
     expect(out.window.index).toBe(0);
+    expect(out.upcomingPlanCount).toBe(series.filter((r) => r.status === 'pending' && r.scheduled_date >= daysOut(0)).length);
   });
 });
 
@@ -328,7 +346,13 @@ describe('the writing wrapper and the batch', () => {
     expect(out.skipped).toBe('owner_changed_under_fence');
     expect(logger.warn).toHaveBeenCalledTimes(RESEED_STALE_READ_ATTEMPTS);
     // moved once and stable under the second lock → evaluated under the fresh owner (then refused: stopped)
-    const { handler: settled } = scenario({ relockOwners: [6, 6], parent: { ...PARENT, customer_id: 6 }, decisions: [{ recurring_parent_id: 10, resolved_action: 'cancel_series' }] });
+    const { handler: settled } = scenario({
+      relockOwners: [6, 6],
+      // pre-lock read still shows the old owner; the re-validation under the fences shows the row moved with its root
+      cancelledReads: [CANCELLED, { ...CANCELLED, customer_id: 6 }],
+      parent: { ...PARENT, customer_id: 6 },
+      decisions: [{ recurring_parent_id: 10, resolved_action: 'cancel_series' }],
+    });
     expect((await reseedRecurringSeriesAfterCancel(makeConn(settled), CANCELLED.id, { source: 'test' })).skipped).toBe('series_stopped');
   });
 
@@ -340,7 +364,11 @@ describe('the writing wrapper and the batch', () => {
 
   test('the batch keeps only audited counting cancels, treats 2+ of one plan as a reduction, and isolates a failing root', async () => {
     const { handler } = scenario({
-      transitions: [{ job_id: 22, from_status: 'confirmed' }, { job_id: 23, from_status: 'rescheduled' }],
+      transitions: [
+        { job_id: 22, from_status: 'confirmed' },
+        // 23: a cancelled→cancelled replay on top of a rescheduled→cancelled — its current episode left 'rescheduled' → filtered out
+        { job_id: 23, from_status: 'cancelled' }, { job_id: 23, from_status: 'rescheduled' },
+      ],
       decisions: [{ recurring_parent_id: 10, resolved_action: 'cancel_series' }],
     });
     const conn = makeConn((q) => {

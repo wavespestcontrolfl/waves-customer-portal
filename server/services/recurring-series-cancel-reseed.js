@@ -47,6 +47,23 @@ function isCountingSourceStatus(status) {
 // Upcoming plan rows: the statuses the visit-count reconciler treats as live.
 const UPCOMING_STATUSES = Object.freeze(['pending', 'confirmed']);
 
+// The status a visit LEFT when its current cancellation began (Codex #4814
+// r7 P1). Audit rows newest first; the current episode is the newest
+// unbroken run of rows that landed on 'cancelled' — retries append
+// cancelled→cancelled rows on top of the real one, and a cancel that was
+// later compensated back to a live status (offboarding / cancellation-
+// processor write cancelled→live) ends an OLDER episode that must not be
+// consulted. Returns the entering row's from_status, or undefined when no
+// cancellation episode is current.
+function cancelEpisodeSourceStatus(transitionsNewestFirst) {
+  let entering;
+  for (const row of transitionsNewestFirst || []) {
+    if (String(row.to_status) !== 'cancelled') break;
+    entering = row;
+  }
+  return entering ? { fromStatus: entering.from_status } : undefined;
+}
+
 // Booster months are deliberately non-recurring rows hanging off a
 // recurring root (is_recurring === false + recurring_parent_id): paid
 // extras, never part of the accepted cadence (Codex #4814 P1 — counting one
@@ -193,10 +210,15 @@ function countTermVisits(rows, termIndex, terms) {
 // "Live" = every counting active state (pending/confirmed/en_route/on_site
 // and a legacy NULL status — Codex r4 P1), the same set the source-status
 // rule and the term count treat as counting; terminal rows never qualify.
+function isUpcomingPlanRow(row, todayStr) {
+  return isPlanSeriesRow(row) && isCountingSourceStatus(row.status) && dateOnly(row.scheduled_date) >= todayStr;
+}
 function hasUpcomingPlanRow(rows, todayStr) {
-  return (rows || []).some((row) => isPlanSeriesRow(row)
-    && isCountingSourceStatus(row.status)
-    && dateOnly(row.scheduled_date) >= todayStr);
+  return (rows || []).some((row) => isUpcomingPlanRow(row, todayStr));
+}
+// The visit cap's population (Codex r7 P1): the same plan rows.
+function countUpcomingPlanRows(rows, todayStr) {
+  return (rows || []).filter((row) => isUpcomingPlanRow(row, todayStr)).length;
 }
 
 // `serviceId` for the single-visit surfaces; `serviceIds` for the bulk
@@ -234,8 +256,10 @@ module.exports = {
   isBoosterRow,
   isPlanSeriesRow,
   isCountingSourceStatus,
+  cancelEpisodeSourceStatus,
   planPositionDate,
   hasUpcomingPlanRow,
+  countUpcomingPlanRows,
   NON_COUNTING_STATUSES,
   COUNTING_SOURCE_STATUSES,
   UPCOMING_STATUSES,
