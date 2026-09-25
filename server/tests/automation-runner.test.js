@@ -683,7 +683,7 @@ describe('sendStepLocked (via sendStep) — consultation-booking block wiring', 
     const result = await sendStep('enrollment-lead-1');
 
     expect(result.sent).toBe(true);
-    expect(buildConsultationEmailBlock).toHaveBeenCalledWith({ leadId: 'lead-789' });
+    expect(buildConsultationEmailBlock).toHaveBeenCalledWith({ leadId: 'lead-789', recipientEmail: 'lead@example.com' });
     const sentArgs = sendgrid.sendOne.mock.calls[0][0];
     expect(sentArgs.html).toContain('<p>3 slots</p>');
     expect(sentArgs.text).toContain('Pick a time: https://x');

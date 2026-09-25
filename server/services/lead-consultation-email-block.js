@@ -99,19 +99,36 @@ function renderText(baseUrl) {
 // intent is the email-only narrowing on top. Kept separate from slot
 // computation so an ineligible lead never spends a round-trip on
 // availability.
-async function eligibleLead(leadId) {
+async function eligibleLead(leadId, recipientEmail) {
   const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
-    .first('id', 'phone', 'service_interest', 'status', 'converted_at', 'customer_id');
+    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
   if (!lead) return null;
+  if (!recipientIsLead(recipientEmail, lead)) return null;
   if (await leadLinkRefusal(lead)) return null;
   if (!leadWantsRecurringPlan(lead)) return null;
   return lead;
 }
 
-async function buildConsultationEmailBlock({ leadId } = {}) {
-  if (!leadInspectionLinkLive() || !leadId) return EMPTY_BLOCK;
+// The bearer link goes ONLY to the lead's own email (pre-push audit P1): an
+// enrollment can carry a lead id matched by phone (lead-webhook.js's
+// call-lead attach, lead-first-touch-resume.js's phone fallback), so a
+// submitter supplying someone else's phone with their own email must never
+// be mailed that lead's booking link. No lead email, or a different one →
+// no link. The email itself still sends, block empty.
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function recipientIsLead(recipientEmail, lead) {
+  const to = normalizeEmail(recipientEmail);
+  const own = normalizeEmail(lead.email);
+  return !!to && !!own && to === own;
+}
+
+async function buildConsultationEmailBlock({ leadId, recipientEmail } = {}) {
+  if (!leadInspectionLinkLive() || !leadId || !recipientEmail) return EMPTY_BLOCK;
   try {
-    const lead = await eligibleLead(leadId);
+    const lead = await eligibleLead(leadId, recipientEmail);
     if (!lead) return EMPTY_BLOCK;
 
     // Reused verbatim from the /inspection/:token page's own availability

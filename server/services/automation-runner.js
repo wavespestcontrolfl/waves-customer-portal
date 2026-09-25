@@ -434,7 +434,9 @@ async function resolveConsultationBlock(step, enrollment) {
   const leadId = enrollmentLeadId(enrollment);
   if (!leadId) return EMPTY_CONSULTATION_BLOCK;
   const { buildConsultationEmailBlock } = require('./lead-consultation-email-block');
-  return buildConsultationEmailBlock({ leadId });
+  // The enrollment's recipient rides along: the block mints a bearer link
+  // only when that address is the lead's OWN email (pre-push audit P1).
+  return buildConsultationEmailBlock({ leadId, recipientEmail: enrollment.email });
 }
 
 async function sendStepLocked(enrollment, { testRecipient } = {}) {

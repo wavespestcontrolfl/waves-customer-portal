@@ -42,9 +42,11 @@ const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
 const originalGate = process.env.GATE_LEAD_INSPECTION_LINK;
 const originalSecret = process.env.LEAD_PREFILL_SECRET;
 
+const LEAD_EMAIL = 'lead@example.com';
 const OPEN_RECURRING_LEAD = {
   id: LEAD_ID,
   phone: '9415551234',
+  email: LEAD_EMAIL,
   service_interest: 'Recurring Pest Control',
   status: 'new',
   converted_at: null,
@@ -85,7 +87,7 @@ function shortLinksIn(html) {
 describe('buildConsultationEmailBlock — hidden cases', () => {
   test('gate off renders empty and never touches the DB', async () => {
     process.env.GATE_LEAD_INSPECTION_LINK = 'false';
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
     expect(mockDb).not.toHaveBeenCalled();
   });
@@ -98,71 +100,71 @@ describe('buildConsultationEmailBlock — hidden cases', () => {
 
   test('one-time (non-recurring) lead renders empty', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, service_interest: 'One-Time Pest Control' } });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
     expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('blank service_interest renders empty', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, service_interest: null } });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
   });
 
   test('closed/converted lead renders empty', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, status: 'converted', converted_at: new Date() } });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
     expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('lost/cancelled status renders empty', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, status: 'cancelled' } });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
   });
 
   test('non-US phone renders empty', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, phone: '+442071234567' } });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
     expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
   test('lead not found renders empty', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: null });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
   });
 
   test('no bookable slots renders empty', async () => {
     mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [], needsAddress: false });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
   });
 
   test('slot computation refused (ok:false) renders empty', async () => {
     mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: false });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
   });
 
   test('error computing availability renders empty and never throws', async () => {
     mockComputeConsultationSlotsForLead.mockRejectedValue(new Error('boom'));
-    await expect(buildConsultationEmailBlock({ leadId: LEAD_ID })).resolves.toEqual({ html: '', text: '' });
+    await expect(buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL })).resolves.toEqual({ html: '', text: '' });
   });
 
   test('no signing secret configured renders empty', async () => {
     delete process.env.LEAD_PREFILL_SECRET;
     delete process.env.JWT_SECRET;
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
   });
 });
 
 describe('buildConsultationEmailBlock — full block', () => {
   test('renders 3 slot links + a see-all link, no "Adam", email-channeled (or unset) token', async () => {
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result.html).not.toBe('');
     expect(result.text).not.toBe('');
 
@@ -203,7 +205,7 @@ describe('buildConsultationEmailBlock — full block', () => {
 
   test('needsAddress (no address on file) renders heading + sentence + see-all only, no slot buttons', async () => {
     mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [], needsAddress: true });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result.html).toContain('Pick a time for us to stop by');
     expect(result.html).toContain('See all open times');
     expect(slotTargets()).toHaveLength(0);
@@ -211,10 +213,33 @@ describe('buildConsultationEmailBlock — full block', () => {
     expect(result.text).toContain('Pick a time for us to stop by for a free consultation:');
   });
 
+  test('recipient email is not the lead\'s own → empty, nothing minted', async () => {
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: 'someone-else@example.com' });
+    expect(result).toEqual({ html: '', text: '' });
+    expect(mockCreateShortCode).not.toHaveBeenCalled();
+  });
+
+  test('lead has no email on file → empty even when the recipient is set', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, email: null } });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
+    expect(result).toEqual({ html: '', text: '' });
+  });
+
+  test('no recipient email at all → empty without touching the DB', async () => {
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    expect(result).toEqual({ html: '', text: '' });
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  test('recipient matches the lead\'s email case- and whitespace-insensitively', async () => {
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: '  Lead@Example.COM ' });
+    expect(shortLinksIn(result.html)).toHaveLength(4);
+  });
+
   test('linked customer archived → empty (same refusal rule as the text link)', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, customer_id: 'cust-1' } });
     mockBuilders.customers = chainBuilder({ firstRow: null });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
     expect(mockCreateShortCode).not.toHaveBeenCalled();
   });
@@ -222,7 +247,7 @@ describe('buildConsultationEmailBlock — full block', () => {
   test('linked customer now on a different phone → empty', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, customer_id: 'cust-1' } });
     mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415559999' } });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
     expect(mockCreateShortCode).not.toHaveBeenCalled();
   });
@@ -230,19 +255,19 @@ describe('buildConsultationEmailBlock — full block', () => {
   test('linked customer live and on the lead\'s phone → full block', async () => {
     mockBuilders.leads = chainBuilder({ firstRow: { ...OPEN_RECURRING_LEAD, customer_id: 'cust-1' } });
     mockBuilders.customers = chainBuilder({ firstRow: { phone: '+19415551234' } });
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(shortLinksIn(result.html)).toHaveLength(4);
   });
 
   test('short-wrap failure renders EMPTY — the raw token never falls through', async () => {
     mockCreateShortCode.mockRejectedValueOnce(new Error('short_codes insert failed'));
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
   });
 
   test('a short-url that hands the long URL back is treated as a failure', async () => {
     mockCreateShortCode.mockImplementationOnce(async (targetUrl) => ({ code: null, shortUrl: targetUrl }));
-    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID, recipientEmail: LEAD_EMAIL });
     expect(result).toEqual({ html: '', text: '' });
   });
 });
