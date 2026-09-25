@@ -410,23 +410,6 @@ const STANDARD_GUARDS = [
   'no company logos, brand names, or brand marks of any kind — equipment and vehicles are generic and unbranded, and uniforms carry no logo or lettering (only the uniform COLORS follow the Waves uniform line)',
   'no invented control-panel labels, dials with fake words, or gibberish lettering',
 ];
-// With the logo reference attached, the ONLY mark allowed is the Waves logo
-// on the technician's cap and chest; everything else stays unbranded.
-const STANDARD_GUARDS_WITH_LOGO = [
-  'no company logos, brand names, or brand marks other than the Waves logo on the technician\'s cap and chest — equipment and vehicles are generic and unbranded',
-  STANDARD_GUARDS[1],
-];
-// With the van wrap reference attached, the ONLY branded vehicle is the one
-// Ford Transit described in VAN_WRAP_LINE; every other vehicle and all
-// equipment stay unbranded — mirrors STANDARD_GUARDS_WITH_LOGO for the van.
-const STANDARD_GUARDS_WITH_VAN_WRAP = [
-  'no company logos, brand names, or brand marks other than the Waves wrap on the one van described above — every other vehicle, and all equipment, is generic and unbranded',
-  STANDARD_GUARDS[1],
-];
-const STANDARD_GUARDS_WITH_LOGO_AND_VAN_WRAP = [
-  'no company logos, brand names, or brand marks other than the Waves logo on the technician\'s cap and chest and the Waves wrap on the one van described above — every other vehicle, and all equipment, is generic and unbranded',
-  STANDARD_GUARDS[1],
-];
 // Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
 // a blue long-sleeve and khakis): any Waves technician in a generated image wears
 // the REAL uniform. Every scene mode carries the line — a hero, body slot or social
@@ -447,6 +430,38 @@ const WAVES_UNIFORM_LOGO_LINE = 'If a Waves technician appears, they wear the re
 // #4761, superseding the "infographic carries the uniform line" P2 on #4696).
 const INFOGRAPHIC_NO_PEOPLE_LINE = 'Do not draw people, technician figures, faces, hands or mascots — flat icons of tools, pests, plants, homes and yards only.';
 
+// What each combination of attached references changes in a scene prompt,
+// keyed `${withLogo}/${withVanWrap}`: the uniform line, the van line, the
+// no-text rule and the brand guard. With the logo reference the ONLY marks
+// allowed are the Waves logo on the technician's cap and chest; with the van
+// wrap reference, the wrap on the one van in VAN_WRAP_LINE; everything else
+// stays unbranded. One lookup instead of a branch per combination (Codex r12
+// P2 on #4785).
+const NO_TEXT = 'No text, words, letters, numbers, watermarks, or logos anywhere in the image';
+const LOGO_TEXT_EXCEPTION = "the Waves logo on the technician's cap and right chest";
+const VAN_TEXT_EXCEPTION = 'the Waves wrap text and graphics on the one van described above';
+const REFERENCE_CLAUSES = {
+  'false/false': { uniform: WAVES_UNIFORM_LINE, van: VAN_LINE, noText: `${NO_TEXT}.`, guard: STANDARD_GUARDS[0] },
+  'true/false': {
+    uniform: WAVES_UNIFORM_LOGO_LINE,
+    van: VAN_LINE,
+    noText: `${NO_TEXT}, other than ${LOGO_TEXT_EXCEPTION}.`,
+    guard: 'no company logos, brand names, or brand marks other than the Waves logo on the technician\'s cap and chest — equipment and vehicles are generic and unbranded',
+  },
+  'false/true': {
+    uniform: WAVES_UNIFORM_LINE,
+    van: VAN_WRAP_LINE,
+    noText: `${NO_TEXT}, other than ${VAN_TEXT_EXCEPTION}.`,
+    guard: 'no company logos, brand names, or brand marks other than the Waves wrap on the one van described above — every other vehicle, and all equipment, is generic and unbranded',
+  },
+  'true/true': {
+    uniform: WAVES_UNIFORM_LOGO_LINE,
+    van: VAN_WRAP_LINE,
+    noText: `${NO_TEXT}, other than ${LOGO_TEXT_EXCEPTION} and ${VAN_TEXT_EXCEPTION}.`,
+    guard: 'no company logos, brand names, or brand marks other than the Waves logo on the technician\'s cap and chest and the Waves wrap on the one van described above — every other vehicle, and all equipment, is generic and unbranded',
+  },
+};
+
 function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [], uniformLogo = false, vanWrap = false }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
@@ -464,12 +479,10 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   // An infographic's plan is a layout on a plain background — no scene, time
   // of day, or camera framing, which would contradict the style line.
   const isInfographic = Boolean(plan) && plan.style === 'infographic';
-  // An infographic never carries the reference (no scene, and its text rule
-  // is caption-only).
-  const withLogo = Boolean(uniformLogo) && !isInfographic;
-  // The van wrap is only meaningful when the plan actually places a van in
-  // the scene — an infographic has no scene either.
-  const withVanWrap = Boolean(vanWrap) && !isInfographic && Boolean(plan && plan.van);
+  // An infographic never carries a reference (no scene, and its text rule
+  // is caption-only); the van wrap only where the plan places a van.
+  const hasVan = Boolean(plan && plan.van) && !isInfographic;
+  const clauses = REFERENCE_CLAUSES[`${Boolean(uniformLogo) && !isInfographic}/${Boolean(vanWrap) && hasVan}`];
   const local = isInfographic
     ? `Layout: ${plan.setting}, ${plan.vantage}, on a plain light background — no photographic scene, no time of day; at most one small Southwest Florida cue (a palm or wave icon).`
     : plan
@@ -491,20 +504,10 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast; a technician's red shirt or red cap is part of the palette.`
     : `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).`;
   const captionList = (style && style.allowsText ? captions : []).map((c) => String(c || '').trim()).filter(Boolean);
-  const textExceptions = [
-    ...(withLogo ? ["the Waves logo on the technician's cap and right chest"] : []),
-    ...(withVanWrap ? ['the Waves wrap text and graphics on the one van described above'] : []),
-  ];
   const textRule = captionList.length
     ? `The ONLY text in the image is exactly: ${captionList.map((c) => `"${c}"`).join(', ')} — spelled exactly, nothing else written anywhere.`
-    : (textExceptions.length
-      ? `No text, words, letters, numbers, watermarks, or logos anywhere in the image, other than ${textExceptions.join(' and ')}.`
-      : 'No text, words, letters, numbers, watermarks, or logos anywhere in the image.');
-  const guardSet = withLogo && withVanWrap ? STANDARD_GUARDS_WITH_LOGO_AND_VAN_WRAP
-    : withLogo ? STANDARD_GUARDS_WITH_LOGO
-    : withVanWrap ? STANDARD_GUARDS_WITH_VAN_WRAP
-    : STANDARD_GUARDS;
-  const guards = `Must not depict: ${[...guardSet, ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
+    : clauses.noText;
+  const guards = `Must not depict: ${[clauses.guard, STANDARD_GUARDS[1], ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
   const framing = mode === 'blog-body' && !isInfographic ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
@@ -512,8 +515,8 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   const editorial = mode === 'blog-hero' || mode === 'blog-body'
     ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
     : '';
-  const uniform = isInfographic ? INFOGRAPHIC_NO_PEOPLE_LINE : (withLogo ? WAVES_UNIFORM_LOGO_LINE : WAVES_UNIFORM_LINE);
-  const van = plan && plan.van && !isInfographic ? (withVanWrap ? VAN_WRAP_LINE : VAN_LINE) : '';
+  const uniform = isInfographic ? INFOGRAPHIC_NO_PEOPLE_LINE : clauses.uniform;
+  const van = hasVan ? clauses.van : '';
   return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
 
@@ -682,6 +685,12 @@ function logLegFailure(slug, result) {
 
 // ── public API ───────────────────────────────────────────────────────
 
+// Which references a call carried, as the provenance flags callers read —
+// the publisher's screen allows the uniform logo / van wrap only then.
+function referenceProvenance(references) {
+  return { logoReference: references.some((r) => r.kind === 'logo'), vanWrapReference: references.some((r) => r.kind === 'van') };
+}
+
 class ImageGenerator {
   // uniformLogo: Buffer (the reference) | null (never attach) | undefined
   // (load the bundled asset lazily, honoring BLOG_IMAGE_UNIFORM_LOGO).
@@ -726,19 +735,20 @@ class ImageGenerator {
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
     const deadline = Number.isFinite(deadlineAt) ? deadlineAt : this._now() + this._chainBudgetMs;
-    const logoBuffer = this._logoReference({ customPrompt, plan, uniformLogo });
-    const vanBuffers = this._vanWrapReference({ customPrompt, plan, vanWrap });
-    const referencePrompt = (logoBuffer || vanBuffers)
-      ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: Boolean(logoBuffer), vanWrap: Boolean(vanBuffers) })
+    const references = [...this._logoReference({ customPrompt, plan, uniformLogo }), ...this._vanWrapReference({ customPrompt, plan, vanWrap })];
+    const attached = referenceProvenance(references);
+    const referencePrompt = references.length
+      ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: attached.logoReference, vanWrap: attached.vanWrapReference })
       : null;
 
     for (const slug of this.chain) {
-      const { result, legLogo, legVanWrap } = await this._runLeg({ slug, mode, prompt, referencePrompt, logoBuffer, vanBuffers, deadline, attempts });
-      attempts.push({ provider: slug, logoReference: legLogo, vanWrapReference: legVanWrap, result });
+      const { result, legReferences } = await this._runLeg({ slug, mode, prompt, referencePrompt, references, deadline, attempts });
+      const provenance = referenceProvenance(legReferences);
+      attempts.push({ provider: slug, ...provenance, result });
       if (result.dataUrl) {
-        const note = `${legLogo ? ' with the uniform logo reference' : ''}${legVanWrap ? ' with the van wrap reference' : ''}`;
+        const note = legReferences.length ? ` with ${legReferences.map((r) => r.filename).join(', ')}` : '';
         logger.info(`[image-generator] generated via ${slug}${note} (${result.mimeType}, ${result.dataUrl.length} chars)`);
-        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: (legLogo || legVanWrap) ? referencePrompt : prompt, alt, plan: plan || null, logoReference: legLogo, vanWrapReference: legVanWrap };
+        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt: legReferences.length ? referencePrompt : prompt, alt, plan: plan || null, ...provenance };
       }
       // Skipped / fatal / retryable → next provider. The whole point
       // of the chain is resilience: a 408/429/5xx on OpenAI should fall
@@ -756,20 +766,26 @@ class ImageGenerator {
   // The logo reference rides only on a prompt this module built (a caller's
   // custom prompt says nothing about a reference), only when the caller opted
   // in, and never on an infographic (which draws no people at all).
+  // → the reference images to attach ([] for none).
   _logoReference({ customPrompt, plan, uniformLogo }) {
-    if (uniformLogo !== true || customPrompt || (plan && plan.style === 'infographic')) return null;
+    if (uniformLogo !== true || customPrompt || (plan && plan.style === 'infographic')) return [];
     const logo = this._uniformLogo === undefined ? loadUniformLogo() : this._uniformLogo;
-    return Buffer.isBuffer(logo) && logo.length ? logo : null;
+    return Buffer.isBuffer(logo) && logo.length ? [{ kind: 'logo', buffer: logo, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
   }
 
   // The van wrap references ride only on a prompt this module built, only
   // when the caller opted in, and only when the plan actually places a van
-  // in the scene (plan.van) — attaching a van reference to a scene with no
-  // van would have nothing to anchor it to.
+  // in the scene (plan.van; never an infographic, which has no scene) —
+  // attaching a van reference to a scene with no van would have nothing to
+  // anchor it to.
   _vanWrapReference({ customPrompt, plan, vanWrap }) {
-    if (vanWrap !== true || customPrompt || !(plan && plan.van)) return null;
+    if (vanWrap !== true || customPrompt || !(plan && plan.van) || plan.style === 'infographic') return [];
     const refs = this._vanWrapRefs === undefined ? loadVanWrapReferences() : this._vanWrapRefs;
-    return Array.isArray(refs) && refs.length === 2 && refs.every((b) => Buffer.isBuffer(b) && b.length) ? refs : null;
+    if (!(Array.isArray(refs) && refs.length === 2 && refs.every((b) => Buffer.isBuffer(b) && b.length))) return [];
+    return [
+      { kind: 'van', buffer: refs[0], mimeType: 'image/png', filename: 'waves-van-side.png' },
+      { kind: 'van', buffer: refs[1], mimeType: 'image/png', filename: 'waves-van-rear.png' },
+    ];
   }
 
   _budgetSpent() {
@@ -779,45 +795,35 @@ class ImageGenerator {
     return { skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
   }
 
-  // One provider leg → { result, legLogo, legVanWrap }. Only OpenAI legs take
-  // references; Gemini's prompt is the fully plain one. An OpenAI leg that
-  // REJECTS the request with references attached (400/413/415/422) runs once
-  // more with NO references at all (logo-free AND van-plain) inside the same
-  // deadline — a retryable failure, an auth/model failure or an empty
-  // response falls through to the next provider, never a second call on the
-  // same leg (pre-push fallback P1 on ae29283fcc; Codex r1 P2 on #4761).
-  async _runLeg({ slug, mode, prompt, referencePrompt, logoBuffer, vanBuffers, deadline, attempts }) {
+  // One provider leg → { result, legReferences } (the reference images the
+  // winning call actually carried). Only OpenAI legs take references;
+  // Gemini's prompt is the fully plain one. An OpenAI leg that REJECTS the
+  // request with references attached (400/413/415/422) runs once more with NO
+  // references at all (logo-free AND van-plain) inside the same deadline — a
+  // retryable failure, an auth/model failure or an empty response falls
+  // through to the next provider, never a second call on the same leg
+  // (pre-push fallback P1 on ae29283fcc; Codex r1 P2 on #4761).
+  async _runLeg({ slug, mode, prompt, referencePrompt, references, deadline, attempts }) {
     const cfg = MODEL_MAP[slug];
     const size = sizeFor(mode, cfg.api);
     const timeoutMs = legTimeoutMs(deadline, this._now());
-    let legLogo = Boolean(logoBuffer) && cfg.api === 'openai';
-    let legVanWrap = Boolean(vanBuffers) && cfg.api === 'openai';
-    if (timeoutMs === null) return { result: this._budgetSpent(), legLogo, legVanWrap };
+    const legReferences = cfg.api === 'openai' ? references : [];
+    if (timeoutMs === null) return { result: this._budgetSpent(), legReferences };
     if (cfg.api === 'gemini') {
       const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
-      return { result: await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs }), legLogo: false, legVanWrap: false };
+      return { result: await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs }), legReferences };
     }
-    if (cfg.api !== 'openai') return { result: { fatal: true, status: 'unknown_api' }, legLogo: false, legVanWrap: false };
-    const referenceImages = [];
-    if (legLogo) referenceImages.push({ buffer: logoBuffer, mimeType: 'image/png', filename: 'waves-logo.png' });
-    if (legVanWrap) {
-      referenceImages.push(
-        { buffer: vanBuffers[0], mimeType: 'image/png', filename: 'waves-van-side.png' },
-        { buffer: vanBuffers[1], mimeType: 'image/png', filename: 'waves-van-rear.png' },
-      );
-    }
-    let result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: (legLogo || legVanWrap) ? referencePrompt : prompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
-    if ((legLogo || legVanWrap) && result.fatal && REFERENCE_REJECT_STATUSES.has(result.status)) {
-      attempts.push({ provider: slug, logoReference: legLogo, vanWrapReference: legVanWrap, result });
-      logger.warn(`[image-generator] ${slug} rejected the request with ${referenceImages.length} reference image(s) (${result.status} ${result.body || ''}) — retrying this leg without them`);
-      legLogo = false;
-      legVanWrap = false;
-      const retryMs = legTimeoutMs(deadline, this._now());
-      result = retryMs === null
-        ? this._budgetSpent()
-        : await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs: retryMs });
-    }
-    return { result, legLogo, legVanWrap };
+    if (cfg.api !== 'openai') return { result: { fatal: true, status: 'unknown_api' }, legReferences };
+    const referenceImages = legReferences.map(({ buffer, mimeType, filename }) => ({ buffer, mimeType, filename }));
+    const result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt: legReferences.length ? referencePrompt : prompt, size, referenceImages }, { fetchFn: this._fetchFn, timeoutMs });
+    if (!(legReferences.length && result.fatal && REFERENCE_REJECT_STATUSES.has(result.status))) return { result, legReferences };
+    attempts.push({ provider: slug, ...referenceProvenance(legReferences), result });
+    logger.warn(`[image-generator] ${slug} rejected the request with ${legReferences.length} reference image(s) (${result.status} ${result.body || ''}) — retrying this leg without them`);
+    const retryMs = legTimeoutMs(deadline, this._now());
+    return {
+      result: retryMs === null ? this._budgetSpent() : await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs: retryMs }),
+      legReferences: [],
+    };
   }
 
   /**
@@ -900,9 +906,7 @@ module.exports._internals = {
   WAVES_UNIFORM_LOGO_LINE,
   INFOGRAPHIC_NO_PEOPLE_LINE,
   STANDARD_GUARDS,
-  STANDARD_GUARDS_WITH_LOGO,
-  STANDARD_GUARDS_WITH_VAN_WRAP,
-  STANDARD_GUARDS_WITH_LOGO_AND_VAN_WRAP,
+  REFERENCE_CLAUSES,
   stylePermutation,
   retryStyleFor,
   settingsFor,

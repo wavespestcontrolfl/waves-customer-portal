@@ -722,6 +722,11 @@ describe('van wrap reference (owner ruling 2026-09-24: real current wrap on the 
     expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
     const noVanPlan = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: NO_VAN_PLAN, vanWrap: true });
     expect(noVanPlan.vanWrapReference).toBe(false);
+    // An infographic plan that carries van: true still attaches nothing — its
+    // prompt has no van to anchor the photos to.
+    const info = await gen.generate({ title: 'Test', mode: 'blog-body', plan: { ...VAN_PLAN, style: 'infographic' }, captions: ['One'], vanWrap: true });
+    expect(info.vanWrapReference).toBe(false);
+    expect(mockFetch.mock.calls.every((c) => c[0] === 'https://api.openai.com/v1/images/generations')).toBe(true);
   });
 
   test('vanWrap: null (or the kill switch) keeps the plain generations call and the plain van line', async () => {
