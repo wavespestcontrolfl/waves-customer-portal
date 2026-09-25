@@ -59,6 +59,14 @@ describe('project report — every shipped chip answers its own category (AW-06)
   });
 
   test.each([
+    'Do I need to be home for the next visit?',
+    'When can I see you again?',
+    'When are you coming back?',
+  ])('typed scheduling question "%s" answers the next visit', (question) => {
+    expect(answerProjectReportQuestion({ question, project, payload })).toMatch(/Nothing further is scheduled|scheduled for/i);
+  });
+
+  test.each([
     'What should I do next?',
     'What do I need to do next?',
     'Anything I should do now?',
@@ -202,6 +210,22 @@ describe('service report — every shipped chip answers its own category (AW-06)
     const answer = answerServiceReportQuestion({ question: 'When is my next service?', data: pestData, nextAppointment });
     expect(answer).toMatch(/Your next appointment is/);
   });
+  test.each([
+    'When can we go outside again?',
+    'Can the kids play outdoors now?',
+  ])('location-only re-entry question "%s" still gets the re-entry answer', (question) => {
+    const answer = answerServiceReportQuestion({ question, data: pestData });
+    expect(answer).not.toMatch(/service is complete/i);
+    expect(answer).not.toMatch(/Your next appointment is/);
+    expect(answer).not.toMatch(/Taurus SC/);
+  });
+
+  test('the no-timer re-entry handoff makes no blanket safety claim', () => {
+    const answer = answerServiceReportQuestion({ question: 'When can my pets go back out?', data: { ...pestData, dynamicContext: {} } });
+    expect(answer).toMatch(/confirm the timing/);
+    expect(answer).not.toMatch(/\bsafe\b/i);
+  });
+
   test('"When will you come back?" is a scheduling question, not re-entry', () => {
     const answer = answerServiceReportQuestion({ question: 'When will you come back?', data: pestData, nextAppointment });
     expect(answer).toMatch(/Your next appointment is/);

@@ -139,11 +139,10 @@ const PROMPT_INTENTS = {
   next_visit: ({ project, payload }) => answerNextVisit({ project, payload }),
 };
 
-// Free-text routing, in precedence order. Checked in order; first match
-// wins. Treatment/recommendation intents are checked BEFORE the visit/
-// schedule router (AW-06): a bare "next" — as in "What should I do next?" —
-// is not itself scheduling intent, and "treated" (an inflection of "treat")
-// must be recognized as a treatment word.
+// Free-text routing, in precedence order; first match wins (AW-06). Only
+// explicit scheduling phrases outrank treatment/recommendations — a bare
+// "next" ("What should I do next?") or "when" is weak and checked last — and
+// "treated" (an inflection of "treat") is recognized as a treatment word.
 function answerProjectReportQuestion({ question, project, payload, intent }) {
   const q = String(question || '').toLowerCase();
   const typeCfg = getProjectType(project.project_type);
@@ -152,16 +151,21 @@ function answerProjectReportQuestion({ question, project, payload, intent }) {
     return PROMPT_INTENTS[intent]({ project, payload, typeCfg });
   }
 
-  if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|use|used|using|appl(?:y|ies|ied|ying|ication|ications)|chemical|chemicals|spray|sprays|sprayed|spraying|bait|baits|baited|gallon|gallons)\b/.test(q)) {
+  // Explicit scheduling phrases first — "Do I need to be home for the next
+  // visit?" is a visit question even though it also says "do I need".
+  if (/\b(appointment|schedule|scheduled|come back|coming back|next visit|follow[- ]?up visit)\b/.test(q)) {
+    return answerNextVisit({ project, payload });
+  }
+  if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|used|appl(?:y|ies|ied|ying|ication|ications)|chemical|chemicals|spray|sprays|sprayed|spraying|bait|baits|baited|gallon|gallons)\b/.test(q)) {
     return answerTreatment({ project, typeCfg });
   }
   if (/\b(recommend(?:ation|ations)?|next step|advice|prep|do now|should i|do i need|need to do|do next)\b/.test(q)) {
     return answerRecommendations({ project });
   }
-  if (/\b(find|found|finding|findings|see|saw|observe|observed|activity|evidence|result|results)\b/.test(q)) {
+  if (/\b(find|found|finding|findings|saw|observe|observed|activity|evidence|result|results)\b/.test(q)) {
     return answerFindings({ project, typeCfg });
   }
-  if (/\b(follow|when|appointment|visit|schedule|come back)\b/.test(q)) {
+  if (/\b(follow|when|visit)\b/.test(q)) {
     return answerNextVisit({ project, payload });
   }
   return `The full details of this project are on the report above. For anything it doesn't cover, call or text ${WAVES_PHONE_DISPLAY} and we'll walk through it with you.`;

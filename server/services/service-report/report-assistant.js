@@ -2,9 +2,9 @@ const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
 
-// AW-06: the only cues allowed to route a typed question to the re-entry
-// answer on their own. A bare location word ("outside"/"inside") is NOT a
-// safety cue by itself — "What was applied outside today?" must reach the
+// AW-06: cues that route a typed question to the re-entry answer. A
+// location word ("outside"/"inside") only counts when the question is not
+// about treatment — "What was applied outside today?" must reach the
 // treatment answer, not be hijacked here. Safety-subject words (who is
 // affected) always win regardless of the rest of the wording, and their
 // plural forms are included (the old matcher had "pet" but missed "pets").
@@ -12,8 +12,14 @@ const SAFETY_SUBJECT_RE = /\b(pets?|dogs?|cats?|kids?|child(?:ren)?)\b/;
 // Bare "come back" / "go back" / "wait" are NOT cues: "When will you come
 // back?" is a scheduling question.
 const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b|\bback\s*(?:out|outside|in|inside)\b/;
+// A location word still means re-entry ("When can we go outside again?")
+// unless the question is about what was applied there.
+const LOCATION_RE = /\b(outside|inside|outdoors|indoors)\b/;
+const TREATMENT_QUESTION_RE = /\b(treat|treats|treating|treated|treatment|treatments|product|products|application|applications|apply|applies|applied|applying|spray|sprays|sprayed|spraying|bait|baits|baited|chemical|chemicals|used)\b/;
 function isReentryIntent(q) {
-  return SAFETY_SUBJECT_RE.test(q) || REENTRY_PHRASE_RE.test(q);
+  return SAFETY_SUBJECT_RE.test(q)
+    || REENTRY_PHRASE_RE.test(q)
+    || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q));
 }
 
 const PRODUCT_INSIGHTS = [
@@ -390,7 +396,7 @@ function answerReentry({ data = {} } = {}) {
   // bare "not recorded" and nothing to do next.
   const base = hasWindow
     ? 'Give treated areas time to fully dry before normal use.'
-    : `No re-entry timer was recorded for this report — call or text ${WAVES_PHONE_DISPLAY} and we'll confirm it's safe to go back out.`;
+    : `No re-entry timer was recorded for this report — call or text ${WAVES_PHONE_DISPLAY} and we'll confirm the timing for your treated areas.`;
   return `${base}${advisory.pet_advisory ? ` ${advisory.pet_advisory}` : ''}`;
 }
 
@@ -532,7 +538,7 @@ function answerServiceReportQuestion({
   // AW-06: exact-word matching missed inflections ("treated", "applying",
   // "products", "used") — this is the branch "What was applied outside
   // today?" and "Why was <product> used?" must reach.
-  if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|application|applications|apply|applies|applied|applying|spray|sprays|sprayed|spraying|bait|baits|baited|chemical|chemicals|used)\b/.test(q)) {
+  if (TREATMENT_QUESTION_RE.test(q)) {
     return answerAppliedToday({ data });
   }
 
