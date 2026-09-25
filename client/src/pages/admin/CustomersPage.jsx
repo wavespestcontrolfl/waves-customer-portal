@@ -6,7 +6,6 @@
 //   - CustomerMap                 (lat/lng pins of the directory)
 //   - CustomerIntelligenceTab     (AI Advisor)
 //   - STAGES / STAGE_MAP / KANBAN_STAGES / LEAD_SOURCES / TIER_COLORS
-//   - PipelineColumn              (legacy named export)
 //
 // Endpoints these helpers are wired against (kept in sync with V2):
 //   GET    /admin/customers
@@ -64,20 +63,6 @@ function adminFetch(path, options = {}) {
   });
 }
 
-function timeAgo(dateStr) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr);
-  const mins = Math.floor((Date.now() - d) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days === 1) return "yesterday";
-  if (days < 30) return `${days}d ago`;
-  const months = Math.floor(days / 30);
-  return months === 1 ? "1mo ago" : `${months}mo ago`;
-}
 
 // --- Pipeline stage config ---
 const STAGES = [
@@ -384,95 +369,6 @@ function PipelineCard({ customer, onDelete }) {
   );
 }
 
-// --- Pipeline column ---
-function PipelineColumn({ stage, customers, onDeleteCustomer }) {
-  const monthlyTotal = customers.reduce(
-    (sum, c) => sum + (c.monthlyRate || 0),
-    0,
-  );
-  return (
-    <div
-      style={{
-        flex: "0 0 260px",
-        minWidth: 260,
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        display: "flex",
-        flexDirection: "column",
-        maxHeight: "calc(100vh - 220px)",
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          padding: "14px 16px",
-          borderBottom: `1px solid ${D.border}`,
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        {" "}
-        <div>
-          {" "}
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: 500,
-              color: D.heading,
-              fontFamily: "Roboto, Arial, sans-serif",
-            }}
-          >
-            {stage.label}
-          </div>{" "}
-          <div
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              fontFamily: "JetBrains Mono, monospace",
-              marginTop: 2,
-            }}
-          >
-            {customers.length}{" "}
-            {customers.length === 1 ? "customer" : "customers"}
-          </div>{" "}
-        </div>
-        {monthlyTotal > 0 && (
-          <span
-            style={{
-              fontFamily: "JetBrains Mono, monospace",
-              fontSize: 12,
-              color: D.green,
-              fontWeight: 500,
-            }}
-          >
-            ${monthlyTotal.toLocaleString()}/mo
-          </span>
-        )}
-      </div>{" "}
-      <div style={{ padding: 10, overflowY: "auto", flex: 1 }}>
-        {customers.length === 0 ? (
-          <div
-            style={{
-              color: D.muted,
-              fontSize: 12,
-              fontFamily: "Roboto, Arial, sans-serif",
-              textAlign: "center",
-              padding: 20,
-            }}
-          >
-            No customers
-          </div>
-        ) : (
-          customers.map((c) => (
-            <PipelineCard key={c.id} customer={c} onDelete={onDeleteCustomer} />
-          ))
-        )}
-      </div>{" "}
-    </div>
-  );
-}
 
 
 // =============================================================================
@@ -1599,6 +1495,5 @@ export {
   PROPERTY_LABEL_OPTIONS,
   CUSTOMER_TAG_OPTIONS,
   CustomerMap,
-  PipelineColumn,
   CustomerIntelligenceTab,
 };
