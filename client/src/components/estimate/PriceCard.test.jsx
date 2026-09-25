@@ -768,3 +768,46 @@ describe('PriceCard — residential-unit scope note', () => {
     expect(screen.queryByTestId('row-scope-note')).toBeNull();
   });
 });
+
+describe('PriceCard — Tree & Shrub palm-care inclusion bullet (owner 2026-09-24: palms priced inside T&S via routine palm-care reserve)', () => {
+  const tsFrequency = (palmCount) => ({
+    key: 'standard',
+    label: 'Bi-monthly (6 visits)',
+    monthly: 55.5,
+    annual: 666,
+    perTreatment: 111,
+    visitsPerYear: 6,
+    perServiceTreatments: [{
+      service: 'tree_shrub', label: 'Tree & Shrub', perTreatment: 111, displayPrice: 111, visitsPerYear: 6,
+      ...(palmCount !== undefined ? { palmCount } : {}),
+    }],
+  });
+
+  it('shows a pluralized bullet for a palm count of 4', () => {
+    render(<PriceCard frequency={tsFrequency(4)} />);
+    expect(screen.getByText(
+      'Includes care for your 4 palms — seasonal palm nutrition and root-zone treatment when needed',
+    )).toBeInTheDocument();
+  });
+
+  it('singularizes "palm" for a palm count of exactly 1', () => {
+    render(<PriceCard frequency={tsFrequency(1)} />);
+    expect(screen.getByText(
+      'Includes care for your 1 palm — seasonal palm nutrition and root-zone treatment when needed',
+    )).toBeInTheDocument();
+  });
+
+  it.each([
+    ['zero', 0],
+    ['missing', undefined],
+    ['invalid (non-integer)', 2.5],
+    ['invalid (negative)', -1],
+  ])('shows no palm bullet and leaves the baseline T&S list unchanged — %s', (_label, palmCount) => {
+    render(<PriceCard frequency={tsFrequency(palmCount)} />);
+    expect(screen.queryByText(/Includes care for your/)).toBeNull();
+    // Baseline SERVICE_INCLUSIONS.tree_shrub list still renders in full.
+    expect(screen.getByText('Ornamental inspection during service visits')).toBeInTheDocument();
+    expect(screen.getByText('Targeted insect, mite, and disease observations')).toBeInTheDocument();
+    expect(screen.getByText('Seasonal plant-health treatment support')).toBeInTheDocument();
+  });
+});

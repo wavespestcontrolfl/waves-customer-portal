@@ -19,6 +19,7 @@ import {
   glassTierDisplay,
   setCommercialGlass,
   setGlassDefault,
+  withTreeShrubPalmBullet,
   GLASS_COPY,
   GLASS_DAY_LINES,
 } from './estimate-glass-copy';
@@ -369,6 +370,24 @@ describe('commercial glass release', () => {
     expect(applyCommercialExteriorScope(commercial, true, true)).toEqual(commercial);
     expect(applyCommercialExteriorScope(commercial, true, null)).toEqual(commercial);
     expect(applyCommercialExteriorScope(commercial, false, false)).toEqual(commercial);
+  });
+
+  it('withTreeShrubPalmBullet appends the palm-care bullet only for a positive integer count (owner 2026-09-24)', () => {
+    const base = ['Ornamental inspection during service visits', 'Seasonal plant-health treatment support'];
+    expect(withTreeShrubPalmBullet(base, 4)).toEqual([
+      ...base,
+      'Includes care for your 4 palms — seasonal palm nutrition and root-zone treatment when needed',
+    ]);
+    expect(withTreeShrubPalmBullet(base, 1)).toEqual([
+      ...base,
+      'Includes care for your 1 palm — seasonal palm nutrition and root-zone treatment when needed',
+    ]);
+    // Zero/absent/invalid — list comes back unchanged (same reference contents).
+    expect(withTreeShrubPalmBullet(base, 0)).toEqual(base);
+    expect(withTreeShrubPalmBullet(base, undefined)).toEqual(base);
+    expect(withTreeShrubPalmBullet(base, -1)).toEqual(base);
+    expect(withTreeShrubPalmBullet(base, 2.5)).toEqual(base);
+    expect(withTreeShrubPalmBullet(null, 4)).toBeNull();
   });
 
   it('gives commercial rows their own inclusions with no residential guarantee claims', () => {

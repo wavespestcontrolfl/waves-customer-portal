@@ -825,7 +825,14 @@ function mapV1ToLegacyShape(v1Result) {
     // recurring row and `detail` is the no-visits fallback / JSON field.
     ...(pestLI?.scopeNote ? { detail: pestLI.scopeNote, scopeNote: pestLI.scopeNote } : {}),
   });
-  svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
+  // Palm count rides the mapped row so the customer-facing card can render
+  // the palm-care inclusion bullet (owner 2026-09-24: palms priced inside
+  // T&S via routine palm-care reserve, no separate line item). Positive
+  // integer only — the engine emits palmCount:0 when there are none.
+  svcAdd('Tree & Shrub', tsLI, {
+    service: 'tree_shrub',
+    ...(tsLI && Number.isInteger(tsLI.palmCount) && tsLI.palmCount > 0 ? { palmCount: tsLI.palmCount } : {}),
+  });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)
       || (mqLI.tiers || []).find(t => t.selected || t.isSelected)

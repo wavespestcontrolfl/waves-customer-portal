@@ -3784,6 +3784,11 @@ function recurringServicesWithSupplements(estResult = {}) {
           : {}),
         perTreatment: firstPositiveNumber(item.perApp, item.perVisit),
         visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
+        // Palm count rides the T&S row (raw agent/engine draft path) for the
+        // palm-care inclusion bullet (owner 2026-09-24: palms priced inside
+        // T&S via routine palm-care reserve). Positive integer only.
+        ...(key === 'tree_shrub' && Number.isInteger(item.palmCount) && item.palmCount > 0
+          ? { palmCount: item.palmCount } : {}),
         // Carry cadence (foam) so pattern inference / cadence-aware shapers don't
         // fall back to the monthly billing key; null for services without one.
         cadence: item.cadence || null,
@@ -16992,6 +16997,12 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         // copy (owner ruling 2026-08-11 #5) — the React card renders it
         // under the treatment row, same as renderPage's card note.
         ...(li.scopeNote ? { scopeNote: String(li.scopeNote) } : {}),
+        // Palm count rides the T&S row so the client can render the palm-care
+        // inclusion bullet (owner 2026-09-24: palms priced inside T&S via
+        // routine palm-care reserve, no separate line item). Positive-integer
+        // only — the engine emits palmCount:0 when there are none.
+        ...(li.service === 'tree_shrub' && Number.isInteger(li.palmCount) && li.palmCount > 0
+          ? { palmCount: li.palmCount } : {}),
       };
     });
   const sameDayTreatmentTotal = perServiceTreatments.reduce(
@@ -19889,11 +19900,30 @@ function treeShrubTierKey(row = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
+// The condensed results.ts rows (name/pa/v/ann/mo — see v1-legacy-mapper's
+// treeShrubLegacyTierRows) never carried palmCount, so it's read separately
+// off the stored T&S line item — same lineItems lookup as
+// treeShrubKnobSignalForReplay (estimate-tree-shrub-knob-replay.js): check
+// estData.result.lineItems then estData.engineResult.lineItems. Positive
+// integer only (owner 2026-09-24: palms priced inside T&S via routine
+// palm-care reserve, no separate line item).
+function treeShrubPalmCountForEstData(estData = {}) {
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const lineItems = [
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+  ];
+  const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
+  const n = Number(tsLine?.palmCount);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 function treeShrubFrequenciesFromResultStats(estData = {}) {
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats.ts) ? resultStats.ts : [];
   const seen = new Set();
   const rawManualDiscount = normalizeManualDiscountSummary(estData);
+  const palmCount = treeShrubPalmCountForEstData(estData);
   return rows
     .map((row) => {
       const tierKey = treeShrubTierKey(row);
@@ -19968,6 +19998,7 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
           perTreatment,
           displayPrice: perTreatment,
           visitsPerYear: visits,
+          ...(palmCount ? { palmCount } : {}),
         }] : [],
         addOns: [],
       };
@@ -23806,6 +23837,10 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
         monthlyBase: hasMonthly ? rawMonthly : null,
         monthly: hasMonthly ? roundMonthly(discountMonthly(rawMonthly, svc)) : null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(svc),
+        // Palm count rides through from v1.services (mapped or raw-supplement
+        // row) so the client can render the palm-care inclusion bullet.
+        ...(recurringServiceKey(svc) === 'tree_shrub' && Number.isInteger(svc?.palmCount) && svc.palmCount > 0
+          ? { palmCount: svc.palmCount } : {}),
       });
     });
   }
@@ -27002,3 +27037,9 @@ module.exports.attachMeasuredBasis = attachMeasuredBasis;
 // Test hook (acceptance-terms lane 2026-08-28): which estimates get the
 // cancel-anytime acceptance line at all.
 module.exports.acceptanceTermsApplyTo = acceptanceTermsApplyTo;
+// Test hooks (T&S palm-care bullet lane 2026-09-24): the per-service-treatment
+// row builders the client's palm-care bullet (PriceCard) reads palmCount off.
+module.exports.shapeFrequencyEntry = shapeFrequencyEntry;
+module.exports.treeShrubFrequenciesFromResultStats = treeShrubFrequenciesFromResultStats;
+module.exports.treeShrubPalmCountForEstData = treeShrubPalmCountForEstData;
+module.exports.shapeFromV1 = shapeFromV1;

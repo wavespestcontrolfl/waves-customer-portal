@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
+import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
 import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
@@ -738,16 +738,22 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                 // GATE_ESTIMATE_COMMERCIAL_GLASS is off, and the swap must
                 // hold on every stack (glass, residential-slug glass,
                 // baseline non-glass alike).
-                items={applyCommercialExteriorScope(
-                  (glass && glassRowInclusions(
-                    glassServiceSlug(String(row.service || row.key || row.label || '')),
-                    row.visitsPerYear,
-                    glassSetupBullet,
-                  )) || serviceInclusions(row),
-                  /commercial/.test(String(row.service || row.key || '').toLowerCase())
-                    && /pest/.test(String(row.service || row.key || '').toLowerCase()),
-                  commercialInteriorSelected,
-                )}
+                items={(() => {
+                  const glassSlug = glassServiceSlug(String(row.service || row.key || row.label || ''));
+                  const base = applyCommercialExteriorScope(
+                    (glass && glassRowInclusions(glassSlug, row.visitsPerYear, glassSetupBullet))
+                      || serviceInclusions(row),
+                    /commercial/.test(String(row.service || row.key || '').toLowerCase())
+                      && /pest/.test(String(row.service || row.key || '').toLowerCase()),
+                    commercialInteriorSelected,
+                  );
+                  // Palm-care bullet (owner 2026-09-24: palms priced inside
+                  // T&S via routine palm-care reserve) — classified the same
+                  // way as the inclusion-list swap above: glassServiceSlug
+                  // under glass, serviceKey(row) for the baseline list.
+                  const isTreeShrubRow = glass ? glassSlug === 'tree_shrub' : serviceKey(row) === 'tree_shrub';
+                  return isTreeShrubRow ? withTreeShrubPalmBullet(base, row.palmCount) : base;
+                })()}
                 collapsible={glass}
               />
             </div>
