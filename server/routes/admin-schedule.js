@@ -17993,7 +17993,7 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
   if (!window) return { skipped: 'no_term_window' };
   const seriesRows = await trx('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date');
+    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included');
   const counting = countTermVisits(seriesRows, window, termOverrides);
   if (counting >= expected) return { skipped: 'term_still_whole', counting, expected };
   // Nothing left upcoming = the plan ended (its last visit was cancelled, or
@@ -18194,7 +18194,7 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
   const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
   if (!ids.length) return { results: [], skippedRoots: [] };
   const rows = await conn('scheduled_services').whereIn('id', ids)
-    .select('id', 'is_recurring', 'recurring_parent_id');
+    .select('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
   // Only cancels that REMOVED a counting visit take part in the per-plan
   // count (Codex #4814 r2 P1): a 'rescheduled' placeholder cancelled in the
   // same batch as one real visit must not make the pair read as a plan

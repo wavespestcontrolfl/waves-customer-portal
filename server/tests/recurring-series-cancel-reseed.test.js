@@ -142,17 +142,18 @@ describe('term / count math (pure)', () => {
       { scheduled_date: '2027-03-19', status: 'pending' },
       { scheduled_date: '2027-04-30', status: 'confirmed' },
       { scheduled_date: '2027-06-11', status: 'pending' },
-    ];
+    ].map((r) => ({ is_recurring: true, recurring_parent_id: 'root', ...r })); // plan children
     expect(countTermVisits(rows, window)).toBe(8);
     // a re-added visit at the end of the term restores 9
-    expect(countTermVisits([...rows, { scheduled_date: '2027-07-09', status: 'pending' }], window)).toBe(9);
+    const child = (r) => ({ is_recurring: true, recurring_parent_id: 'root', ...r });
+    expect(countTermVisits([...rows, child({ scheduled_date: '2027-07-09', status: 'pending' })], window)).toBe(9);
     // next-term rows and no-show/skipped/rescheduled rows never count
     expect(countTermVisits([
       ...rows,
-      { scheduled_date: '2027-07-23', status: 'pending' },
-      { scheduled_date: '2026-08-19', status: 'no_show' },
-      { scheduled_date: '2026-08-20', status: 'skipped' },
-      { scheduled_date: '2026-08-21', status: 'rescheduled' },
+      child({ scheduled_date: '2027-07-23', status: 'pending' }),
+      child({ scheduled_date: '2026-08-19', status: 'no_show' }),
+      child({ scheduled_date: '2026-08-20', status: 'skipped' }),
+      child({ scheduled_date: '2026-08-21', status: 'rescheduled' }),
     ], window)).toBe(8);
     expect(countTermVisits(rows, null)).toBe(0);
     expect(countTermVisits([], window)).toBe(0);
@@ -172,6 +173,13 @@ describe('term / count math (pure)', () => {
     expect(isPlanSeriesRow({ is_recurring: true, recurring_parent_id: null })).toBe(true); // the root
     expect(isPlanSeriesRow({ is_recurring: null, recurring_parent_id: null })).toBe(false); // a plain one-off
     expect(isPlanSeriesRow({ is_recurring: false, recurring_parent_id: null })).toBe(false);
+    // free re-service callbacks / included follow-ups on a recurring root are never purchased applications (Codex r5)
+    expect(isPlanSeriesRow({ is_recurring: true, recurring_parent_id: 'root', is_callback: true })).toBe(false);
+    expect(isPlanSeriesRow({ is_recurring: true, recurring_parent_id: 'root', followup_included: true })).toBe(false);
+    expect(isBoosterRow({ is_recurring: true, recurring_parent_id: 'root', is_callback: true })).toBe(false);
+    const cbWindow = { index: 0, start: '2026-07-10', end: '2027-07-10' };
+    expect(countTermVisits([{ scheduled_date: '2026-09-01', status: 'pending', is_recurring: true, recurring_parent_id: 'root', is_callback: true }], cbWindow)).toBe(0);
+    expect(hasUpcomingPlanRow([{ scheduled_date: '2099-01-01', status: 'pending', is_recurring: true, recurring_parent_id: 'root', followup_included: true }], '2026-09-25')).toBe(false);
     expect(COUNTING_SOURCE_STATUSES).toEqual(['pending', 'confirmed', 'en_route', 'on_site']);
     // a legacy NULL status counts as a source (Codex #4814 r2)
     expect(isCountingSourceStatus(null)).toBe(true);
@@ -390,7 +398,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
 
   test('term: chosen by the cancelled row\'s PLAN position, counted by plan position over plan rows (exception fields selected), and "nothing upcoming" read from the plan rows themselves', () => {
     const t = termFn();
-    expect(t).toMatch(/'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date'\)/);
+    expect(t).toMatch(/'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included'\)/);
     const count = t.indexOf('countTermVisits(seriesRows, window, termOverrides)');
     const whole = t.indexOf("skipped: 'term_still_whole'");
     // earlier reseeds' stamps pin their added rows to the term they served
@@ -455,6 +463,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(b).toMatch(/for \(const t of transitions\) if \(isCountingSourceStatus\(t\.from_status\)\) countingCancel\.add\(String\(t\.job_id\)\);/);
     expect(b).toMatch(/if \(!countingCancel\.has\(String\(row\.id\)\)\) continue;/);
     expect(b).toMatch(/if \(!isPlanSeriesRow\(row\)\) continue;/);
+    expect(b).toMatch(/\.select\('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'\)/);
     expect(b).not.toMatch(/row\.is_recurring !== true/);
     expect(b).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?skipped: 'batch_series_cancel'/);
     expect(b).toMatch(/try \{\s*results\.push\(await reseedRecurringSeriesAfterCancel\([\s\S]*?\} catch \(e\) \{[\s\S]*?results\.push\(\{ added: \[\], skipped: 'error', parentId: rootId, error: e\.message \}\);/);

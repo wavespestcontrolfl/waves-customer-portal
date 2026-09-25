@@ -63,6 +63,10 @@ function isBoosterRow(row) {
 // `=== true` test before the root could be inspected).
 function isPlanSeriesRow(row) {
   if (!row || isBoosterRow(row)) return false;
+  // Free re-service callbacks and included follow-ups ride a recurring
+  // root but are never purchased applications (Codex #4814 r5 P1) — the
+  // same exclusions the accepted-plan classifier applies.
+  if (row.is_callback === true || row.followup_included === true) return false;
   if (row.is_recurring === true) return true;
   return row.is_recurring == null && !!row.recurring_parent_id;
 }
@@ -163,7 +167,8 @@ function planPositionDate(row) {
 function countTermVisits(rows, window, termOverrides = null) {
   if (!window) return 0;
   return (rows || []).filter((row) => {
-    if (isBoosterRow(row) || NON_COUNTING_STATUSES.includes(String(row.status))) return false;
+    // plan rows only: no boosters, no callbacks / included follow-ups (Codex r5)
+    if (!isPlanSeriesRow(row) || NON_COUNTING_STATUSES.includes(String(row.status))) return false;
     if (termOverrides && termOverrides.has(String(row.id))) return termOverrides.get(String(row.id)) === window.index;
     const d = planPositionDate(row);
     return d && d >= window.start && d < window.end;
