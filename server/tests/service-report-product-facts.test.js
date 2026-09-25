@@ -81,24 +81,6 @@ describe('service report approved product facts', () => {
     });
   });
 
-  // AW-03 (ask-waves-audit-20260925): rainfastMinutes rides the same
-  // approval/freeze gate as reentryHours so the report Q&A assistant can
-  // read it from the frozen facts instead of a live catalog lookup.
-  test('carries the approved catalog rainfast interval alongside REI', () => {
-    const facts = approvedReportProductFacts({
-      approved_for_service_report: true,
-      name: 'Audit Product',
-      category: 'insecticide',
-      product_type: 'pesticide',
-      active_ingredient: 'Frozen ingredient',
-      epa_reg_number: 'synthetic-epa',
-      rei_hours: 4,
-      rainfast_minutes: 120,
-    });
-
-    expect(facts).toMatchObject({ reentryHours: 4, rainfastMinutes: 120 });
-  });
-
   test('blocks unapproved facts and pesticide facts without real EPA number', () => {
     expect(approvedReportProductFacts({
       approved_for_service_report: false,

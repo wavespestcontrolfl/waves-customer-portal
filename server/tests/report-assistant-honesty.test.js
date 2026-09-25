@@ -220,12 +220,12 @@ describe('service report answers only approved/frozen product facts (AW-03)', ()
     };
   }
 
-  test('a frozen REI survives a later, unapproved catalog edit', () => {
+  test('a later catalog edit never reaches the answer, and no REI figure is rendered', () => {
     // At completion the catalog said REI 4 and was approved, so
     // reportIdentitySnapshot.productFacts froze reentry_hours at 4. A later
-    // catalog edit to REI 24 (even if also marked unapproved) must never
-    // change what this report says, because attachApprovedReportProductFacts
-    // never re-consults the live catalog for a frozen product id.
+    // catalog edit to REI 24 must never reach this answer (no live lookup),
+    // and no fixed re-entry figure is rendered at all (compliance language:
+    // the re-entry answer gives the once-dry guidance instead).
     const answer = answerAppliedToday({
       data: appliedTodayData({
         name: 'Audit Product',
@@ -235,8 +235,8 @@ describe('service report answers only approved/frozen product facts (AW-03)', ()
         facts_approved: true,
       }),
     });
-    expect(answer).toContain('label REI 4 hr');
-    expect(answer).not.toMatch(/label REI 24 hr/);
+    expect(answer).toContain('active ingredient: Frozen ingredient');
+    expect(answer).not.toMatch(/\bREI\b|\b24 hr\b|\b4 hr\b/);
   });
 
   test('an explicitly unapproved product never falls back to a live value', () => {
@@ -276,9 +276,9 @@ describe('service report answers only approved/frozen product facts (AW-03)', ()
         facts_approved: true,
       }),
     });
-    expect(answer).toContain('label REI 12 hr');
-    expect(answer).toContain('rainfast about 1 hr');
     expect(answer).toContain('EPA Reg. legacy-epa-1');
+    expect(answer).toContain('active ingredient: Bifenthrin');
+    expect(answer).not.toMatch(/\bREI\b|rainfast/i);
   });
 });
 
@@ -309,12 +309,30 @@ describe('product insight matcher classifies from approved facts, not brand name
         serviceDisplayName: 'Pest Control',
         applications: [{
           id: 'adjuvant-app',
-          product: { name: 'LESCO Wetting Concentrate', product_type: 'wetting_agent', category: 'surfactant' },
+          product: { name: 'LESCO Wetting Concentrate', product_type: 'wetting_agent', category: 'surfactant', facts_approved: true },
           method: 'perimeter_spray',
         }],
         dynamicContext: {},
       },
     });
     expect(answer).toMatch(/spray adjuvant/i);
+  });
+
+  test('an unapproved product never gets a category-derived chemistry claim', () => {
+    // buildReportV1Data still carries the recorded product_category onto
+    // app.product.category when facts are frozen-null / unapproved.
+    const answer = answerAppliedToday({
+      data: {
+        serviceDisplayName: 'Pest Control',
+        applications: [{
+          id: 'unapproved-adjuvant-app',
+          product: { name: 'Wetting Concentrate', product_type: null, category: 'surfactant', facts_approved: false },
+          method: 'perimeter_spray',
+        }],
+        dynamicContext: {},
+      },
+    });
+    expect(answer).not.toMatch(/spray adjuvant/i);
+    expect(answer).not.toMatch(/not the insecticide/i);
   });
 });

@@ -127,6 +127,9 @@ function productName(app = {}) {
 // evidence of chemistry or function (a brand covers multiple product types).
 function categoryInsightFor(app = {}) {
   const product = app.product || {};
+  // Only approved catalog facts may drive a chemistry claim; a frozen-null or
+  // unapproved product still carries its recorded category string.
+  if (!product.facts_approved) return null;
   const productType = String(product.product_type || '').toLowerCase();
   const category = String(product.category || '').toLowerCase();
   if (productType === 'wetting_agent' || /\b(surfactant|adjuvant|wetting agent)\b/.test(category)) {
@@ -175,27 +178,9 @@ function rateText(app = {}) {
   return '';
 }
 
-// AW-03: rainfast/REI come only from app.product, the same approved/frozen
-// facts report-data.js's attachApprovedReportProductFacts already resolved
-// for the report display (frozen at completion when a snapshot exists, the
-// current approved catalog row for genuinely pre-freeze/legacy reports, or
-// absent — never a second, ungated live catalog lookup here). A frozen-null
-// or explicitly-unapproved product carries no reentry_hours/rainfast_minutes
-// and must render nothing rather than fall back to any other source.
-function rainfastText(app = {}) {
-  const minutes = Number(app.product?.rainfast_minutes ?? app.product?.rainfastMinutes);
-  if (!Number.isFinite(minutes) || minutes <= 0) return '';
-  if (minutes < 60) return `rainfast about ${Math.round(minutes)} min`;
-  const hours = minutes / 60;
-  return `rainfast about ${Number.isInteger(hours) ? hours : hours.toFixed(1)} hr`;
-}
-
-function reiText(app = {}) {
-  const hours = Number(app.product?.reentry_hours ?? app.product?.reiHours);
-  if (!Number.isFinite(hours) || hours <= 0) return '';
-  return `label REI ${hours} hr`;
-}
-
+// No re-entry or rainfast figure is rendered here: customer surfaces never
+// carry a fixed re-entry/drying duration (AGENTS.md compliance language) —
+// the re-entry answer gives the once-dry guidance instead.
 function applicationScope(data = {}) {
   const apps = Array.isArray(data.applications) ? data.applications : [];
   const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas : [];
@@ -265,8 +250,6 @@ function answerAppliedToday({ data = {} } = {}) {
       area ? `area: ${area}` : '',
       targets,
       rateText(app),
-      rainfastText(app),
-      reiText(app),
       epa ? `EPA Reg. ${epa}` : '',
     ]);
     const meaning = insight?.customerMeaning ? ` ${insight.customerMeaning}` : '';
