@@ -359,21 +359,23 @@ describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
   });
 
   test('email DISAGREEMENT: normalized-different V1/V2 emails hold for the read-back card — neither wins (owner ruling 2026-09-25)', () => {
-    // Gillett call 78798d5c: V1 misheard an extra E, V2 heard it correctly.
-    const v1 = { ...v1Stub(), email: 'gillettecole@gmail.com' };
-    const v2 = v2Fixture({ caller: { ...v2Fixture().caller, email: 'gillettcole@gmail.com' } });
+    // Call 78798d5c: a spelled-out email had one letter drop between the
+    // two legs — V1 misheard an extra letter, V2 heard it correctly.
+    // Synthetic fixture; only the shape of the real miss is preserved.
+    const v1 = { ...v1Stub(), email: 'janedoee@example.com' };
+    const v2 = v2Fixture({ caller: { ...v2Fixture().caller, email: 'janedoe@example.com' } });
     const { merged, adoptedFields } = adoptV2PrimaryFields(v1, v2);
     expect(merged.email).toBeNull();
-    expect(merged.email_candidates).toEqual(['gillettecole@gmail.com', 'gillettcole@gmail.com']);
+    expect(merged.email_candidates).toEqual(['janedoee@example.com', 'janedoe@example.com']);
     expect(adoptedFields).toContain('email_disagreement');
 
-    // Same-day call 6fee5f34: the reverse — V1 right, V2 wrong. Still holds
-    // both candidates rather than trusting either extractor by default.
-    const v1b = { ...v1Stub(), email: 'walshjamie96@gmail.com' };
-    const v2b = v2Fixture({ caller: { ...v2Fixture().caller, email: 'jamiewalsh96@gmail.com' } });
+    // A same-day call had the reverse — V1 right, V2 wrong. Still holds both
+    // candidates rather than trusting either extractor by default.
+    const v1b = { ...v1Stub(), email: 'marksmith@example.com' };
+    const v2b = v2Fixture({ caller: { ...v2Fixture().caller, email: 'markssmith@example.com' } });
     const out2 = adoptV2PrimaryFields(v1b, v2b);
     expect(out2.merged.email).toBeNull();
-    expect(out2.merged.email_candidates).toEqual(['walshjamie96@gmail.com', 'jamiewalsh96@gmail.com']);
+    expect(out2.merged.email_candidates).toEqual(['marksmith@example.com', 'markssmith@example.com']);
     expect(out2.adoptedFields).toContain('email_disagreement');
 
     // Disagreement is normalized (trim + lowercase) — mere case/whitespace

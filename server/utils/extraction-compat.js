@@ -295,16 +295,16 @@ function mapCallNatureToLegacy(nature) {
 //     recurring-intent backstop (owner rule) already ran on the V1 value,
 //     and the enforce path re-adopts + re-asserts it for approved bookings.
 //   • email DISAGREEMENT is the one exception to fill-gap's "V1 present
-//     wins" rule (owner ruling, 2026-09-25 — call 78798d5c: caller spelled
-//     "G-I-L-L-E-T-T, no E at the end, Cole at gmail"; V2 heard the correct
-//     gillettcole@gmail.com, V1 misheard gillettecole@gmail.com, and plain
-//     fill-gap let V1's wrong spelling win onto customer 2234d8e1 — same
-//     day, call 6fee5f34 had the reverse, V1 right and V2 wrong). Neither
-//     extractor's spelled-letter guess is trustworthy over the other, so
-//     when BOTH are present and normalize (trim + lowercase) to DIFFERENT
-//     values, merged.email is nulled and BOTH raw candidates ride on
-//     merged.email_candidates for the read-back card — never picked here.
-//     Equal-normalized values, V1-only, and V2-only are unaffected.
+//     wins" rule (owner ruling, 2026-09-25 — call 78798d5c: a spelled-out
+//     email had one letter drop between the two legs, e.g. V1 heard
+//     "janedoee@example.com", V2 heard the correct "janedoe@example.com",
+//     and plain fill-gap let V1's wrong spelling win onto the customer
+//     record — a same-day call had the reverse, V1 right and V2 wrong).
+//     Neither extractor's spelled-letter guess is trustworthy over the
+//     other, so when BOTH are present and normalize (trim + lowercase) to
+//     DIFFERENT values, merged.email is nulled and BOTH raw candidates ride
+//     on merged.email_candidates for the read-back card — never picked
+//     here. Equal-normalized values, V1-only, and V2-only are unaffected.
 function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock, callerPhone = null } = {}) {
   const adoptedFields = [];
   if (!isV2Extraction(v2Extraction)) return { merged: extracted, adoptedFields };

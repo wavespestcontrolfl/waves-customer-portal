@@ -1579,11 +1579,61 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
         .forUpdate()
         .first('id');
       if (!owned) return false;
+      let hasDisagreementCard = false;
       for (const card of cards) {
+        // V1/V2 email disagreement (owner ruling 2026-09-25): a force-
+        // reprocess whose call ALREADY has a live email_unverified/invalid
+        // card takes the ordinary insert below to .onConflict(...).ignore()
+        // — the two-candidate evidence this cycle found would be silently
+        // dropped and the office would keep reading the earlier cycle's
+        // single-address guess (codex P1). Refresh that live card's payload
+        // in place instead, under this SAME advisory-locked transaction, so
+        // the office always sees the current cycle's candidates.
+        let payloadObj = null;
+        try { payloadObj = JSON.parse(card.payload); } catch (_e) { /* not JSON — normal insert below */ }
+        if (payloadObj && payloadObj.email_disagreement) {
+          hasDisagreementCard = true;
+          const existing = await trx('triage_items')
+            .where({ call_log_id: callLogId, reason_code: card.reason_code })
+            .whereIn('status', ['open', 'in_progress'])
+            .forUpdate()
+            .first('id', 'payload');
+          if (existing) {
+            let existingPayload = {};
+            try {
+              existingPayload = typeof existing.payload === 'string' ? JSON.parse(existing.payload) : (existing.payload || {});
+            } catch (_e) { /* corrupt payload — overwrite with the fresh evidence below */ }
+            const mergedPayload = {
+              ...existingPayload,
+              email_candidates: payloadObj.email_candidates,
+              email_as_heard: payloadObj.email_as_heard,
+              confirmation_question: payloadObj.confirmation_question,
+              email_disagreement: payloadObj.email_disagreement,
+              ...(payloadObj.email_release_target !== undefined ? { email_release_target: payloadObj.email_release_target } : {}),
+            };
+            await trx('triage_items')
+              .where({ id: existing.id })
+              .update({ payload: JSON.stringify(mergedPayload), updated_at: new Date() });
+            continue;
+          }
+        }
         await trx('triage_items')
           .insert(card)
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore();
+      }
+      if (hasDisagreementCard && await trx.schema.hasTable('first_touch_holds')) {
+        // The hold's held target: no single confirmed address survives a
+        // disagreement — clear it so recordFirstTouchHold's "preserve the
+        // earlier live card's held_email" rule (lead-first-touch-resume.js)
+        // does not pin the PRIOR cycle's single-guess address once this
+        // cycle's two-candidate card replaces it. Scoped to rows not yet
+        // released/blocked — a row that already sent under the old cycle's
+        // address is a historical fact this must not rewrite.
+        await trx('first_touch_holds')
+          .where({ call_log_id: callLogId })
+          .whereIn('status', ['pending', 'releasing'])
+          .update({ held_email: '', updated_at: new Date() });
       }
       if (invalidateClaims) {
         const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');

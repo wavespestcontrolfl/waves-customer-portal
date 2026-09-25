@@ -1564,9 +1564,10 @@ function deriveEmailReview(extracted = {}) {
  * (server/utils/extraction-compat.js) nulls extracted.email and stamps BOTH
  * raw candidates onto extracted.email_candidates when the two call extractors
  * captured normalized-DIFFERENT emails — neither spelled-letter guess is
- * trustworthy over the other (Gillett call 78798d5c: V1 gillettecole@gmail.com
- * vs V2's correct gillettcole@gmail.com; V1 won under the old fill-gap rule
- * and wrote the wrong address to customer 2234d8e1).
+ * trustworthy over the other (call 78798d5c: a one-letter-dropped spelled
+ * email, e.g. V1 "janedoee@example.com" vs V2's correct "janedoe@example.com";
+ * V1 won under the old fill-gap rule and wrote the wrong address to the
+ * customer record).
  *
  * This runs LAST in the call processor's email pipeline, after the transcript
  * dictation decoder and its quarantine arbiter have had their turn — neither

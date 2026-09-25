@@ -174,3 +174,72 @@ describe('mintEmailReviewCardsFenced (r55)', () => {
     })).rejects.toMatchObject({ emailReviewStateUnavailable: true });
   });
 });
+
+// V1/V2 email disagreement (owner ruling 2026-09-25): a force-reprocess
+// whose call already has a LIVE email_unverified/invalid card must not have
+// its two-candidate evidence silently dropped by the ordinary
+// .onConflict(...).ignore() insert — the office would keep reading an
+// earlier cycle's single-address guess (codex P1). Fixtures use synthetic
+// example.com addresses shaped like the real miss (one letter dropped from
+// a spelled email) — never a real customer's name or address.
+describe('mintEmailReviewCardsFenced — V1/V2 email disagreement refresh (codex P1)', () => {
+  const DISAGREEMENT_CARD = {
+    call_log_id: 'call-1',
+    reason_code: 'email_unverified',
+    payload: JSON.stringify({
+      flag: 'email_unverified',
+      email_candidates: [{ value: 'janedoee@example.com' }, { value: 'janedoe@example.com' }],
+      email_as_heard: 'janedoee@example.com',
+      confirmation_question: 'Which spelling is right — janedoee@example.com or janedoe@example.com?',
+      email_disagreement: { v1: 'janedoee@example.com', v2: 'janedoe@example.com' },
+    }),
+  };
+
+  test('an existing open card is refreshed in place with both candidates — insert is skipped, held target cleared', async () => {
+    mockFirstResult = {
+      id: 'existing-card-1',
+      payload: JSON.stringify({ flag: 'email_unverified', email_candidates: [{ value: 'stale@example.com' }] }),
+    };
+    await mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [DISAGREEMENT_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    // The stale single-address card was UPDATED (merged), not replaced
+    // wholesale and not silently ignored.
+    const payloadUpdateCall = db._chain.update.mock.calls.find((c) => c[0] && typeof c[0].payload === 'string');
+    expect(payloadUpdateCall).toBeDefined();
+    const mergedPayload = JSON.parse(payloadUpdateCall[0].payload);
+    expect(mergedPayload.email_candidates).toEqual([
+      { value: 'janedoee@example.com' }, { value: 'janedoe@example.com' },
+    ]);
+    expect(mergedPayload.email_disagreement).toEqual({ v1: 'janedoee@example.com', v2: 'janedoe@example.com' });
+    expect(mergedPayload.flag).toBe('email_unverified'); // merged, not replaced
+    // No single confirmed address survives a disagreement — the hold's held
+    // target is cleared under the same advisory-locked transaction.
+    const heldClearCall = db._chain.update.mock.calls.find((c) => c[0] && c[0].held_email === '');
+    expect(heldClearCall).toBeDefined();
+    // The ordinary insert path never ran for this reason_code — the office
+    // never sees a duplicate or a silently-ignored insert.
+    expect(db._chain.insert).not.toHaveBeenCalled();
+  });
+
+  test('no existing open card → inserts normally, still clears any held target', async () => {
+    mockFirstResult = null; // no live email_unverified/invalid card yet
+    await mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [DISAGREEMENT_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    expect(db._chain.insert).toHaveBeenCalledWith(DISAGREEMENT_CARD);
+    const heldClearCall = db._chain.update.mock.calls.find((c) => c[0] && c[0].held_email === '');
+    expect(heldClearCall).toBeDefined();
+  });
+
+  test('a card with no disagreement evidence is unaffected — normal insert, no held-target clear', async () => {
+    const PLAIN_CARD = { call_log_id: 'call-1', reason_code: 'email_unverified' };
+    mockFirstResult = { id: 'call-1' };
+    await mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [PLAIN_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    expect(db._chain.insert).toHaveBeenCalledWith(PLAIN_CARD);
+    const heldClearCall = db._chain.update.mock.calls.find((c) => c[0] && c[0].held_email === '');
+    expect(heldClearCall).toBeUndefined();
+  });
+});
