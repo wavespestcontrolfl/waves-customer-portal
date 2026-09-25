@@ -1436,6 +1436,27 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // was vocabulary, laundering an explicit rejection as a clean aside. "but"
   // is now pinned-sentence-only (via COMMITMENT_OPENER_TOKENS), and a bare
   // "no"/"nope"/"nah" is a negation/hedge token in its own right.
+  // Codex round 10 (review of 86991f9bdc): P1 — the non-possessive
+  // approval requirement; P2 — "No problem." must survive the bare-"no" screen.
+  test.each([
+    "We need the okay. We'll see you Sunday at noon.",
+    "Just have to get an approval. We'll see you Sunday at noon.",
+    "We're waiting for the go ahead. We'll see you Sunday at noon.",
+  ])('Codex round-11 regression: non-possessive approval requirement poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-11: "No problem." still grounds (affirmation, not the bare-"no" rejection)', () => {
+    const turn = "No problem. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test('Codex round-10 regression: "Yeah, but no." still poisons (explicit rejection must not launder through shared vocabulary)', () => {
     const turn = "We'll see you Sunday at noon. Yeah, but no.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);

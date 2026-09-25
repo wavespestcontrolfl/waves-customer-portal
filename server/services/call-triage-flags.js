@@ -611,7 +611,9 @@ const NEGATION_HEDGE_TOKENS = [
   ' see if ', ' ask someone ', ' no ', ' nope ', ' nah ',
 ];
 function turnHasNegationOrHedge(normalizedTurn) {
-  const padded = ` ${normalizedTurn} `;
+  // "No problem." is an affirmation, not the bare-"no" rejection (codex
+  // round 10, P2) — drop the phrase before the token screen.
+  const padded = ` ${normalizedTurn} `.replace(/ no problem(?= )/g, '');
   return NEGATION_HEDGE_TOKENS.some((t) => padded.includes(t));
 }
 
@@ -1083,6 +1085,11 @@ const AUTHORIZATION_NEED_RE = /\b(?:(?:need|needs|going to need) (?:him|her|them
 // for) + a POSSESSIVE (your/his/her/their/the owner's/the homeowner's/the
 // client's — normalized text strips apostrophes) + an AUTHORIZATION NOUN.
 const APPROVAL_REQUEST_RE = /\b(?:get|getting|obtain|secure|have|wait for|waiting for) (?:your|his|her|their|the (?:owner|homeowner|client) s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing)\b/;
+// Codex round 10, P1 (:1044): the NON-possessive form — "We need the
+// okay." / "Just have to get an approval." — names the same outstanding
+// authorization with an article instead of an owner. Fails closed: "we
+// have the okay" also poisons, which only ever leaves a turn in triage.
+const NON_POSSESSIVE_APPROVAL_RE = /\b(?:need|needs|needed|require|requires|get|getting|obtain|secure|have|wait for|waiting for) (?:the|an|a|some) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing)\b/;
 // Codex round 9, P1 (:713): neither AUTHORIZATION_NEED_RE nor
 // APPROVAL_REQUEST_RE covers a DIRECTIVE the agent gives to have a third
 // party grant approval — "I will tell him to okay it." names no "need"/
@@ -1138,6 +1145,7 @@ function sentenceHasDeclarativePoisonVocabulary(ns) {
     || UNAVAILABILITY_TERMS.some((t) => padded.includes(t))
     || AUTHORIZATION_NEED_RE.test(ns)
     || APPROVAL_REQUEST_RE.test(ns)
+    || NON_POSSESSIVE_APPROVAL_RE.test(ns)
     || THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(ns)
     || SUBJECT_LED_APPROVAL_NEED_RE.test(ns);
 }
@@ -1241,6 +1249,7 @@ function clauseIsBenign(clauseNs, prevNs) {
   if (UNAVAILABILITY_TERMS.some((t) => padded.includes(t))) return false;
   if (AUTHORIZATION_NEED_RE.test(clauseNs)) return false;
   if (APPROVAL_REQUEST_RE.test(clauseNs)) return false;
+  if (NON_POSSESSIVE_APPROVAL_RE.test(clauseNs)) return false;
   if (THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(clauseNs)) return false;
   if (SUBJECT_LED_APPROVAL_NEED_RE.test(clauseNs)) return false;
   if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
