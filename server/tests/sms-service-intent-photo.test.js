@@ -40,13 +40,17 @@ describe('regex fast path', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  test('tree/shrub words route to the TODO constant (pest until the tree_shrub type lands)', async () => {
-    expect(TREE_SHRUB_TRIAGE_TYPE).toBe('pest');
+  test('tree/shrub words route to their own assessment type', async () => {
+    expect(TREE_SHRUB_TRIAGE_TYPE).toBe('tree_shrub');
     const result = await classifyPhotoDiagnosisIntent('what is wrong with my palm tree leaves');
     expect(result).toEqual({ intent: 'photo_diagnosis', assessmentType: TREE_SHRUB_TRIAGE_TYPE, method: 'regex' });
-    // Tree words count on the pest side, so they outvote a single lawn word.
+    // Tree words outvote a single lawn word (lawn must strictly outnumber
+    // the combined pest + tree/shrub words to win).
     await expect(classifyPhotoDiagnosisIntent('shrubs and bushes next to the lawn are dying'))
       .resolves.toMatchObject({ assessmentType: TREE_SHRUB_TRIAGE_TYPE });
+    // A tie between pest and tree/shrub words still runs the pest identifier.
+    await expect(classifyPhotoDiagnosisIntent('found a bug on my plant'))
+      .resolves.toMatchObject({ assessmentType: 'pest' });
   });
 
   test.each([
@@ -85,7 +89,7 @@ describe('Claude FAST fallback', () => {
     expect(request.jsonSchema.properties.subject.enum).toEqual(['lawn', 'pest', 'tree_shrub', 'none']);
   });
 
-  test('tree_shrub from the model maps to the TODO constant', async () => {
+  test('tree_shrub from the model maps to its own assessment type', async () => {
     mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'tree_shrub' } });
     await expect(classifyPhotoDiagnosisIntent('Look at this by the driveway'))
       .resolves.toMatchObject({ intent: 'photo_diagnosis', assessmentType: TREE_SHRUB_TRIAGE_TYPE });

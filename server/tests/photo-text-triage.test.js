@@ -125,7 +125,7 @@ async function triageInboundPhotoText(args) {
   return triage.runPhotoTriage(await triage.assessPhotoTriageCandidacy(args), { legacyFallback: mockLegacyFallback });
 }
 const AMBIGUOUS = 'Look at this by the driveway';
-const { buildDraftText, dailyCap, imageMedia, teaserOutcome } = triage._test;
+const { dailyCap, imageMedia, teaserOutcome } = triage._test;
 
 const MESSAGE_ID = 'dddddddd-eeee-4fff-8000-111111111111';
 const INBOUND_KEY = 'sms-media/inbound/abc123';
@@ -360,9 +360,14 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
       assessment_id: 'assess-1',
       message_id: MESSAGE_ID,
       classifier_method: 'regex',
+      // CUSTOMER carries no pipeline_stage / property facts in this fixture,
+      // so the opportunity gauge lands on advise (lead + no facts to quote).
+      opportunity_mode: 'advise',
+      opportunity_reasons: ['lead', 'actionable', 'no_property_facts'],
+      quote: null,
     });
     expect(draft.draft_response).toBe(
-      "Thanks for the photo, Dana. From what we can see, it's consistent with chinch bug activity. Want us to come take a closer look and quote treatment?",
+      "Thanks for the photo, Dana. From what we can see, it's chinch bug activity. Reply if you'd like a quote.",
     );
     expect(draft.draft_response).not.toMatch(/RAW MODEL|INTERNAL|https?:|www\./i);
     expect(countSegments(draft.draft_response).segmentCount).toBeLessThanOrEqual(2);
@@ -374,7 +379,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
     expect(result).toMatchObject({ status: 'drafted', type: 'pest' });
     expect(mockState.inserts.pest_identifications[0].source).toBe('auto_triage');
     const [draft] = mockState.inserts.message_drafts;
-    expect(draft.draft_response).toContain("it's consistent with an ant species.");
+    expect(draft.draft_response).toContain("it's an ant species.");
     // The species name is withheld pre-capture exactly like the public teaser.
     expect(draft.draft_response).not.toMatch(/ghost/i);
     expect(draft.draft_response).not.toMatch(/RAW MODEL/);
@@ -485,33 +490,60 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
 });
 
 describe('draft text builder', () => {
-  const act = (label) => ({ kind: 'actionable', label });
-  const ok = (label) => ({ kind: 'harmless', label });
-  const NONE = { kind: 'none' };
+  const { composeBody, composeDraft } = triage._test;
+  // opportunity fixtures: composeBody only reads .mode / .reasons / .quote.
+  const ADVISE_ACTIONABLE = { mode: 'advise', reasons: ['actionable'], quote: null };
+  const ADVISE_HARMLESS = { mode: 'advise', reasons: ['harmless'], quote: null };
+  const ONSITE = { mode: 'onsite', reasons: ['lead', 'actionable', 'large_scope'], quote: null };
+  const QUOTE = (overrides = {}) => ({
+    mode: 'quote',
+    reasons: ['actionable', 'quoted'],
+    quote: { service: 'tree_shrub', tier: 'standard', monthly: 41.31, annual: 495.72, frequency: 6, ...overrides },
+  });
+  const draft = (firstName, label, opportunity, advice = '') => composeDraft({
+    firstName, bodyText: composeBody({ label, advice, opportunity }),
+  });
 
-  test('one closing line per outcome: actionable offers a quote, harmless says no treatment, none just offers a look', () => {
-    expect(buildDraftText({ firstName: 'Dana', outcome: act('weed pressure') })).toBe(
-      "Thanks for the photo, Dana. From what we can see, it's consistent with weed pressure. Want us to come take a closer look and quote treatment?",
+  test('advise: actionable offers a quote, harmless says no treatment', () => {
+    expect(draft('Dana', 'weed pressure', ADVISE_ACTIONABLE)).toBe(
+      "Thanks for the photo, Dana. From what we can see, it's weed pressure. Reply if you'd like a quote.",
     );
-    expect(buildDraftText({ firstName: 'Dana', outcome: ok('nothing to worry about') })).toBe(
-      "Thanks for the photo, Dana. From what we can see, it's nothing to worry about, so no treatment is needed. Reply if you'd like us to take a look anyway.",
+    expect(draft('Dana', 'nothing to worry about', ADVISE_HARMLESS)).toBe(
+      "Thanks for the photo, Dana. From what we can see, it's nothing to worry about. No treatment is needed.",
     );
-    expect(buildDraftText({ firstName: 'Dana', outcome: NONE })).toBe('Thanks for the photo, Dana. Want us to take a look?');
-    // Only the actionable outcome ever mentions a quote or treatment offer.
-    expect(buildDraftText({ firstName: 'Dana', outcome: ok('a healthy lawn') })).not.toMatch(/quote/i);
-    expect(buildDraftText({ firstName: 'Dana', outcome: NONE })).not.toMatch(/quote|treatment/i);
+    expect(draft('Dana', null, ADVISE_ACTIONABLE)).toBe('Thanks for the photo, Dana. Want us to take a look?');
+    // Only the non-harmless advise outcome ever mentions a quote.
+    expect(draft('Dana', 'a healthy lawn', ADVISE_HARMLESS)).not.toMatch(/quote/i);
+  });
+
+  test('quote: names the frequency, service, and monthly price, and asks to add it', () => {
+    const text = draft('Shelley', 'water or heat stress', QUOTE(), 'Pull mulch a few inches back from the trunk and water deep and even.');
+    expect(text).toBe(
+      "Thanks for the photo, Shelley. From what we can see, it's water or heat stress. "
+      + 'Pull mulch a few inches back from the trunk and water deep and even. '
+      + 'Our 6-visit tree & shrub program at your home is about $41/mo. Want me to add it?',
+    );
+  });
+
+  test('onsite: never mentions a price, asks for a day this week', () => {
+    const text = draft('Gretchen', 'pest-pressure signals', ONSITE);
+    expect(text).toBe(
+      "Thanks for the photo, Gretchen. From what we can see, it's pest-pressure signals. "
+      + "With that much to cover we'd rather see it in person before quoting. What day this week works for a quick visit?",
+    );
+    expect(text).not.toMatch(/\$\d|quote/i);
   });
 
   test('promises nothing Approve does not send: no report, no link', () => {
-    for (const outcome of [NONE, act('weed pressure'), ok('a healthy lawn')]) {
-      expect(buildDraftText({ firstName: 'Dana', outcome })).not.toMatch(/report|link|https?:|shortly/i);
+    for (const [label, opportunity] of [[null, ADVISE_ACTIONABLE], ['weed pressure', ADVISE_ACTIONABLE], ['a healthy lawn', ADVISE_HARMLESS], ['pest-pressure signals', ONSITE], ['thin foliage', QUOTE()]]) {
+      expect(draft('Dana', label, opportunity)).not.toMatch(/report|link|https?:|shortly/i);
     }
   });
 
   test('every lawn label the teaser can publish fits two segments with a long first name, and carries no link', () => {
     for (const label of [...CONDITION_LABEL_VALUES, 'a healthy lawn']) {
-      for (const outcome of [act(label), ok(label)]) {
-        const text = buildDraftText({ firstName: 'Bartholomew-Alexander', outcome });
+      for (const opportunity of [ADVISE_ACTIONABLE, ADVISE_HARMLESS]) {
+        const text = draft('Bartholomew-Alexander', label, opportunity);
         expect(countSegments(text).segmentCount).toBeLessThanOrEqual(2);
         expect(text).not.toMatch(/https?:|www\.|\.com/i);
       }
@@ -521,18 +553,19 @@ describe('draft text builder', () => {
   test('every pest teaser label fits two segments in either outcome', () => {
     const { GROUP_GENERIC, CATEGORY_GENERIC } = require('../services/pest-identification')._test;
     for (const label of [...Object.values(GROUP_GENERIC), ...Object.values(CATEGORY_GENERIC)]) {
-      for (const outcome of [act(label), ok(label)]) {
-        expect(countSegments(buildDraftText({ firstName: 'Bartholomew-Alexander', outcome })).segmentCount).toBeLessThanOrEqual(2);
+      for (const opportunity of [ADVISE_ACTIONABLE, ADVISE_HARMLESS]) {
+        expect(countSegments(draft('Bartholomew-Alexander', label, opportunity)).segmentCount).toBeLessThanOrEqual(2);
       }
     }
   });
 
   test('first name only, sanitized; dropped when it would push past two segments', () => {
-    expect(buildDraftText({ firstName: 'Dana Reed', outcome: NONE })).toBe('Thanks for the photo, Dana. Want us to take a look?');
-    expect(buildDraftText({ firstName: '12345', outcome: NONE })).toMatch(/^Thanks for the photo\. /);
+    expect(draft('Dana Reed', null, ADVISE_ACTIONABLE)).toBe('Thanks for the photo, Dana. Want us to take a look?');
+    expect(draft('12345', null, ADVISE_ACTIONABLE)).toMatch(/^Thanks for the photo\. /);
     // A non-GSM letter flips the whole text to UCS-2 (67 chars/segment), so
-    // the name goes rather than the copy running to a third segment.
-    const long = buildDraftText({ firstName: 'Łukasz', outcome: act('large patch (fungal) activity') });
+    // a long enough label pushes a named draft to a third segment — the
+    // name goes rather than the copy running long.
+    const long = draft('Łukasz', 'severe and widespread turf damage across the entire front and back yard', ADVISE_ACTIONABLE);
     expect(long.startsWith('Thanks for the photo. ')).toBe(true);
     expect(countSegments(long).segmentCount).toBeLessThanOrEqual(2);
   });
