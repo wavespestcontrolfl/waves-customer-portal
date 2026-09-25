@@ -48,10 +48,6 @@ const { TREE_SHRUB } = require('./constants');
 
 const RETIRED_SALE_SERVICE_KEYS = new Set(['tree_shrub_quarterly']);
 
-function isRetiredSaleServiceKey(serviceKey) {
-  return RETIRED_SALE_SERVICE_KEYS.has(String(serviceKey || '').trim());
-}
-
 // 'premium' (12x T&S) was fully removed from TREE_SHRUB.tiers well before
 // the 2026-09-24 Light retirement — it never carried (and can never carry)
 // a `hidden` flag, so it must be named here explicitly, the same way
@@ -59,15 +55,37 @@ function isRetiredSaleServiceKey(serviceKey) {
 // 'basic'.
 const REMOVED_TREE_SHRUB_TIER_ALIASES = new Set(['premium']);
 
+// STRING-only: a non-string tier (array, object, number, boolean, ...) is
+// never a valid tier key, full stop — it must fall through to "not
+// sellable" without `String()`-coercing into an accidental match (a
+// single-element array like ['standard'] stringifies to the bare string
+// "standard", which would otherwise slip past a naive lowercase compare).
+function normalizedTierKey(tier) {
+  return typeof tier === 'string' ? tier.trim().toLowerCase() : '';
+}
+
 function isRetiredTreeShrubTier(tier) {
-  const key = String(tier || '').trim().toLowerCase();
+  const key = normalizedTierKey(tier);
   if (!key) return false;
   if (REMOVED_TREE_SHRUB_TIER_ALIASES.has(key)) return true;
   return TREE_SHRUB?.tiers?.[key]?.hidden === true;
 }
 
+// Positive form for a boundary that must accept ONLY a currently-sold tier
+// (property-lookup-v2.js's builder input, public-quote.js's unkeyed
+// /calculate) — `!isRetiredTreeShrubTier(tier)` is NOT the right check
+// there: it also returns true for a garbage value like 'gold' (never
+// retired because it was never a tier at all), which would wrongly pass
+// validation. isSellableTreeShrubTier requires the key to be BOTH a real
+// TREE_SHRUB.tiers entry AND not hidden — true only for 'standard'/
+// 'enhanced' today.
+function isSellableTreeShrubTier(tier) {
+  const key = normalizedTierKey(tier);
+  return !!(key && TREE_SHRUB?.tiers?.[key] && !TREE_SHRUB.tiers[key].hidden);
+}
+
 module.exports = {
   RETIRED_SALE_SERVICE_KEYS,
-  isRetiredSaleServiceKey,
   isRetiredTreeShrubTier,
+  isSellableTreeShrubTier,
 };

@@ -125,7 +125,7 @@ const {
   OPEN_ESTIMATE_STATUSES,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
-const { TREE_SHRUB } = require('../services/pricing-engine/constants');
+const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const {
   isCommercialProperty,
   normalizePropertyType,
@@ -1044,11 +1044,15 @@ function dropKeyedOnlyServices(bodyServices) {
 // hidden tier is refused rather than silently priced — codex P1 pre-push:
 // this route used to forward services.treeShrub.tier unchanged, so an
 // unkeyed request could still persist a fresh Light quote after retirement.
-// Extracted so it's directly unit-testable without a full HTTP harness.
+// Shared chokepoint (codex P1 round 2 pre-push): isSellableTreeShrubTier
+// (pricing-engine/retired-sale-catalog.js), never a locally hand-rolled
+// hidden-flag check — the next tier retirement is one edit there, not one
+// per file. Extracted so it's directly unit-testable without a full HTTP
+// harness.
 function publicQuoteTreeShrubTierRejection(tier) {
   const requested = String(tier || '').trim().toLowerCase();
   if (!requested) return null;
-  if (!TREE_SHRUB.tiers[requested] || TREE_SHRUB.tiers[requested].hidden) {
+  if (!isSellableTreeShrubTier(requested)) {
     return 'Tree & Shrub program must be standard or enhanced.';
   }
   return null;

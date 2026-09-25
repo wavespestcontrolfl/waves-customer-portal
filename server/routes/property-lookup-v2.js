@@ -43,6 +43,7 @@ const {
 // land-use text) — shared so the unit-lot verify flag and the unit-scope
 // model can never disagree on what counts as a condo record.
 const { _private: { isCondoRecord: shadowIsCondoRecord } } = require('../services/estimator-engine/property-facts-shadow');
+const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
@@ -4159,7 +4160,9 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
 // treatment as a genuinely unknown tier. The one grandfathered quarterly
 // customer's existing plan is unaffected: this validates a NEW property
 // lookup / estimate build, never a replay of their stored engine inputs.
-const TREE_SHRUB_TIERS = new Set(['standard', 'enhanced']);
+// Shared chokepoint (codex P1 round 2 pre-push): isSellableTreeShrubTier
+// (pricing-engine/retired-sale-catalog.js), never a locally hand-rolled
+// tier set — the next tier retirement is one edit there, not one per file.
 const TREE_SHRUB_ACCESS = new Set(['easy', 'moderate', 'difficult']);
 function treeShrubInputError(message) {
   const err = new Error(message);
@@ -4437,7 +4440,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     const enumInput = (value, fallback) => (isBlankInput(value) ? fallback
       : (typeof value === 'string' ? value.trim().toLowerCase() : value));
     const tsTier = enumInput(o.treeShrubTier, 'standard');
-    if (!TREE_SHRUB_TIERS.has(tsTier)) throw treeShrubInputError('Tree & Shrub program must be standard or enhanced.');
+    if (!isSellableTreeShrubTier(tsTier)) throw treeShrubInputError('Tree & Shrub program must be standard or enhanced.');
     const tsAccess = enumInput(o.treeShrubAccess, 'easy');
     if (!TREE_SHRUB_ACCESS.has(tsAccess)) throw treeShrubInputError('Tree & Shrub access must be easy, moderate, or difficult.');
     // Palms: the same resolution the property block uses below — the

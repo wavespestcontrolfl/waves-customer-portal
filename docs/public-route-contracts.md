@@ -944,6 +944,13 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+`services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
+present tier must be a currently-sold one (`standard`/`enhanced`) or the
+route answers 400 before pricing — `light` (4x/quarterly, retired for new
+sales) and any unrecognized value are refused rather than silently priced
+or forwarded unchanged. Absent stays absent (the engine's own `enhanced`
+default runs). A narrowing of the existing payload contract, not a new
+field.
 Address-verification guard (2026-09-23): when the SERVER-trusted property
 profile (the cache-only `performPropertyLookup` re-read, or the lookup
 stage's own server-written `extracted_data.address_unverified` on the
