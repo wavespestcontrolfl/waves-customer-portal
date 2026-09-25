@@ -7223,6 +7223,21 @@ router.post('/', requireAdmin, async (req, res, next) => {
           });
         }
       }
+      // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence
+      // (retired 2026-09-24) must not be booked-and-accepted here: the
+      // appointment commits BEFORE the best-effort acceptance, which would
+      // then refuse it (codex P1 r9). Already-accepted plans still book.
+      if (linkedEstimate.status !== 'accepted') {
+        const { recurringTreeShrubRowAtRetiredCadence } = require('./estimate-public');
+        let data = linkedEstimate.estimate_data || {};
+        if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+        if (recurringTreeShrubRowAtRetiredCadence(data)) {
+          return res.status(409).json({
+            error: 'This estimate’s tree & shrub plan uses a retired schedule (quarterly). Requote it with the 6x or 9x program before booking from it.',
+            code: 'RETIRED_TREE_SHRUB_CADENCE',
+          });
+        }
+      }
     }
     // Booking from a phone "yes": a sent/viewed quote the customer accepted
     // verbally gets its win recorded AFTER the appointment commits (below), so

@@ -589,6 +589,16 @@ async function markEstimateManuallyAccepted({
       }
     }
 
+    // Retired T&S cadence (4x/quarterly, retired 2026-09-24): same gate as
+    // the customer PUT /accept (codex P1 r9). Already-accepted estimates
+    // returned above, so pre-retirement plans are unaffected.
+    {
+      const { recurringTreeShrubRowAtRetiredCadence } = require('../routes/estimate-public');
+      if (recurringTreeShrubRowAtRetiredCadence(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
+        throw httpError('This estimate’s tree & shrub plan uses a retired schedule (quarterly). Requote it with the 6x or 9x program before accepting.', 409);
+      }
+    }
+
     const isCommercialProposal = isCommercialProposalEstimate(estimate);
 
     // Invoice-mode: a normal estimate's due-immediately invoice is built by

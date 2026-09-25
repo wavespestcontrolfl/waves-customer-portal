@@ -284,6 +284,17 @@ cadence, visit count, or cadence wording. 9x/Enhanced and 6x/Standard stay
 current. One existing customer's already-scheduled quarterly program is
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
+
+GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
+estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light entry
+(only Standard 6x / Enhanced 9x cards render). When the stored recurring T&S
+row itself still resolves to a retired cadence, the response's quote
+requirement is `{ quoteRequired: true, reason:
+'retired_tree_shrub_cadence_requote' }` with the friendly "call Waves to
+refresh your tree & shrub plan" copy, so the page shows the requote state
+instead of an acceptable card. The same gate applies to staff-side manual
+acceptance (Mark Won / phone accept) of a not-yet-accepted estimate; estimates
+accepted before the retirement are unaffected.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned

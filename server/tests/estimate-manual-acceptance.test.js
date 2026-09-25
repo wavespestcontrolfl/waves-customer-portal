@@ -26,6 +26,9 @@ jest.mock('../services/estimate-converter', () => ({
       ?? estData?.summary?.manualDiscount)?.floorBreach?.acknowledged === true
   ),
   resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
+  // Real cadence reader: manual acceptance now runs the retired-T&S-cadence
+  // gate (codex P1 r9), which reads each row's cadence through it.
+  explicitServiceCadence: (...args) => jest.requireActual('../services/estimate-converter').explicitServiceCadence(...args),
   // Real-enough commercial helpers for the taxed invoiceTotal path: key from
   // the row's service field, flat base rate, and a blended rate equal to the
   // base (single-line commercial quotes in these tests are fully taxable).
@@ -501,7 +504,9 @@ describe('estimate manual acceptance', () => {
       waveguard_tier: 'Bronze',
       estimate_data: {
         recurring: {
-          services: [{ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'monthly' }],
+          // Live 6x cadence: monthly (12x Premium) T&S is a retired cadence the
+          // manual-accept gate refuses (codex P1 r9); this test is about prepay.
+          services: [{ service: 'tree_shrub', name: 'Tree & Shrub Care', frequency: 'bimonthly' }],
         },
       },
     };
@@ -702,6 +707,36 @@ describe('estimate manual acceptance', () => {
       if (prev === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
       else process.env.GATE_BERMUDA_SUPPRESSION = prev;
     }
+  });
+
+  test('refuses manual acceptance of a not-yet-accepted 4x/quarterly tree & shrub estimate (retired 2026-09-24, codex P1 r9)', async () => {
+    const estimate = {
+      id: 'estimate-ts-quarterly',
+      status: 'sent',
+      estimate_data: JSON.stringify({ recurring: { services: [{
+        name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', visitsPerYear: 4, price: 55,
+      }] } }),
+    };
+    const { database, updates } = makeDb(estimate);
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 1,
+      database,
+    })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/retired schedule/) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('an estimate accepted before the T&S quarterly retirement is untouched by the gate', async () => {
+    const estimate = {
+      id: 'estimate-ts-quarterly-accepted',
+      status: 'accepted',
+      estimate_data: JSON.stringify({ recurring: { services: [{
+        name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', visitsPerYear: 4, price: 55,
+      }] } }),
+    };
+    const { database } = makeDb(estimate);
+    const result = await markEstimateManuallyAccepted({ estimateId: estimate.id, adminUserId: 1, database });
+    expect(result.alreadyAccepted).toBe(true);
   });
 
   test('gate on: a suppression estimate passes the gate (fails later on the missing customer link instead)', async () => {
