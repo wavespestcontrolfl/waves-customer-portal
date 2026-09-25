@@ -1564,7 +1564,7 @@ describe('SuccessCard — already-accepted retry', () => {
     expect(screen.getByText('Next step: sign your plan agreement.')).toBeInTheDocument();
     // Channel-neutral (codex round 3): the agreement may go out by email
     // only, or be drafted for the office to send.
-    expect(screen.getByText("We'll send you the signing link — your plan starts once it's signed.")).toBeInTheDocument();
+    expect(screen.getByText("We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.")).toBeInTheDocument();
     expect(screen.queryByText(/text and email/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/approved/i)).not.toBeInTheDocument();
     expect(screen.queryByText("You're booked!")).not.toBeInTheDocument();

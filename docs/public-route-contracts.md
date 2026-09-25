@@ -286,9 +286,14 @@ it (no `402 PREPAY_CHARGE_QUOTE` round-trip, no card capture, no due-today);
 a selected slot hold is released, not committed, and an existing
 appointment is not adopted — the pick is kept only as a staff scheduling
 preference. The success payload carries `invoiceKind:
-'annual_prepay_deferred'`, `invoiceId`/`invoicePayUrl` null, `billingTerm:
-'prepay_annual'` and `nextStep: 'sign_agreement'`; the accept notifications
-tell the customer to sign, never "approved, invoice to follow". The
+'annual_prepay_deferred'`, `invoiceId`/`invoicePayUrl` null,
+`invoiceAmount`/`prepayInvoiceAmount` = the frozen accepted total (setup
+lines and tax included — the figure the signature-time invoice bills, never
+a re-derived display amount), `billingTerm: 'prepay_annual'` and `nextStep:
+'sign_agreement'`; the success card and accept notifications tell the
+customer to sign — signing starts the plan and its billing, and the 12-month
+coverage begins on the installation date — never "approved, invoice to
+follow". The
 already-accepted retry returns the same shape while the agreement is
 unsigned, and `invoiceKind: 'annual_prepay_activation_pending'` with
 `nextStep: 'activation_pending'` once it is signed but the plan has not

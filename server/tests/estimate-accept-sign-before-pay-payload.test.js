@@ -49,7 +49,10 @@ describe('estimate accept — sign-before-pay payloads', () => {
     const payload = buildAcceptNotificationPayload({
       customerName: 'Customer', billingTerm: 'prepay_annual', invoiceKind: 'annual_prepay_deferred', annualPrepayAmount: 449,
     });
-    expect(payload.customerBody).toBe("Next step: sign your plan agreement. We'll send you the signing link — your plan starts once it's signed.");
+    expect(payload.customerBody).toBe("Next step: sign your plan agreement. We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.");
+    // Codex #4819 r6 P2: coverage begins at installation, never at signature.
+    expect(payload.customerBody).toMatch(/coverage begins on your installation date/);
+    expect(payload.adminBody).toMatch(/coverage year begins on the installation date/);
     expect(payload.customerBody).not.toMatch(/approved|invoice/i);
     expect(payload.adminBody).toMatch(/waiting on the customer's signature/);
     expect(payload.adminBody).not.toMatch(/Invoice follow-up needed/);

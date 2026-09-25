@@ -19281,9 +19281,11 @@ function buildAcceptNotificationPayload({
     const amountText = annualPrepayAmount != null ? ` (${fmtMoney(annualPrepayAmount)})` : '';
     return {
       adminTitle: `Estimate accepted — signature pending: ${customerName}`,
-      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; at signature the saved payment method is charged, or the pay link sent.`,
+      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; at signature the saved payment method is charged, or the pay link sent. The 12-month coverage year begins on the installation date.`,
       customerTitle: 'Next step: sign your plan agreement',
-      customerBody: "Next step: sign your plan agreement. We'll send you the signing link — your plan starts once it's signed.",
+      // Codex #4819 r6: signing starts the plan and its billing; the
+      // 12-month coverage year begins on the installation date.
+      customerBody: "Next step: sign your plan agreement. We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.",
       customerLink: '/?tab=billing',
     };
   }
