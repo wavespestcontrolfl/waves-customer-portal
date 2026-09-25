@@ -1,5 +1,5 @@
 /**
- * 20260924000001 → 000002 → 000003 → 000004 → 000005 — prep guide content v3.
+ * 20260924000001 → … → 000006 — prep guide content v3.
  *
  * Each earlier file ran on the PR preview database before the next Codex
  * round and is frozen; each later file supersedes the previous with
@@ -25,7 +25,10 @@ const CHAIN = [
   require('../models/migrations/20260924000003_prep_guide_content_v3_codex_r2'),
   require('../models/migrations/20260924000004_prep_guide_content_v3_codex_r3'),
   require('../models/migrations/20260924000005_prep_guide_content_v3_codex_r4'),
+  require('../models/migrations/20260924000006_prep_guide_content_v3_codex_r5'),
 ];
+// The step-0 sequence swaps ship in 000005 (the latest file carrying them).
+const stepMigration = [...CHAIN].reverse().find((m) => m.STEP_SWAPS);
 const refreshMigration = require('../models/migrations/20260715000001_prep_guide_content_refresh');
 const baseMigration = CHAIN[CHAIN.length - 2];
 const migration = CHAIN[CHAIN.length - 1];
@@ -71,7 +74,7 @@ function allNewCopy() {
 
 // Sequence step-0 bodies (automation_steps) the latest migration ships.
 function stepBodies() {
-  return (migration.STEP_SWAPS || []).map((s) => `${s.templateKey} step0: ${s.toHtml}`);
+  return (stepMigration.STEP_SWAPS || []).map((s) => `${s.templateKey} step0: ${s.toHtml}`);
 }
 
 function allLinks() {
@@ -155,7 +158,7 @@ describe('prep guide v3 content compliance', () => {
   });
 
   test('sequence step-0 bodies match v3: exact-match on the shipped copy, package-accurate, approved sign-off, EPA-registered (Codex r4)', () => {
-    const swaps = migration.STEP_SWAPS;
+    const swaps = stepMigration.STEP_SWAPS;
     expect(swaps.map((s) => s.templateKey).sort()).toEqual(['bed_bug', 'cockroach', 'flea']);
     for (const s of swaps) {
       const shipped = refreshMigration.STEP_SWAPS.find((r) => r.templateKey === s.templateKey);
@@ -176,6 +179,16 @@ describe('prep guide v3 content compliance', () => {
     expect(bedBug).toMatch(/follow-up visits/);
     expect(bedBug).toMatch(/Electronics never go in a dryer or freezer/);
     expect(bedBug).not.toMatch(/hot (garage|car)|\b3 days\b/i);
+  });
+
+  test('birds never go outside, and termite renewal copy is conditional on a sold plan (Codex r5)', () => {
+    const flea = textChunks(TEMPLATES.find((x) => x.key === 'prep.flea')).join('\n');
+    expect(flea).not.toMatch(/Bird cages go outside/);
+    expect(flea).toMatch(/Never set a cage outside/);
+    const termite = textChunks(TEMPLATES.find((x) => x.key === 'prep.termite')).join('\n');
+    expect(termite).not.toMatch(/a termite treatment is a long-term protection plan/);
+    expect(termite).not.toMatch(/^Keep your annual inspection\./m);
+    expect(termite).toMatch(/If your service includes a protection plan or bait monitoring/);
   });
 
   test('bed bug guide describes chemical/IPM work only — no heat-treatment or steam component', () => {
