@@ -227,13 +227,14 @@ async function dispatchSelectedNonEmail({ ContactLedger, customer, invoice, body
     }
     ledgers[channel] = ledger;
     results[channel] = await dispatchReservedText(ContactLedger, ledger, () => sendCustomerMessage({
-      to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'payment_link',
+      to: customer.phone, body, channel, audience: 'customer', purpose: 'payment_link',
       customerId: customer.id, invoiceId: invoice.id, entryPoint,
       metadata: {
         original_message_type: originalMessageType,
         billingDeliveryCategory: category,
         notificationEventKey: eventKey,
         ...(explicitChannels !== null ? { billingDeliveryLeg: channel } : {}),
+        ...(channel === 'push' ? { appOnly: true } : {}),
       },
       hasEmailLeg: true,
       ...(preDispatchCheck ? { preDispatchCheck } : {}),

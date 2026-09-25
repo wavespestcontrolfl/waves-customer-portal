@@ -329,11 +329,12 @@ class BalanceReminder {
         channels: selectedChannels, metadata: { tier, days_until: daysUntil,
           invoiceId: balance.oldestInvoiceId, scheduledDate: formatDateOnly(service.scheduled_date) },
         send: (channel) => sendCustomerMessage({
-          to: service.phone, body: message, channel: channel === 'push' ? 'sms' : channel,
+          to: service.phone, body: message, channel,
           audience: 'customer', purpose: 'payment_link', customerId: service.cust_id,
           invoiceId: balance.oldestInvoiceId, entryPoint: 'balance_reminder_workflow',
           metadata: { original_message_type: 'balance_reminder', billingDeliveryCategory: 'billing',
-            notificationEventKey: eventKey, billingDeliveryLeg: channel },
+            notificationEventKey: eventKey, billingDeliveryLeg: channel,
+            ...(channel === 'push' ? { appOnly: true } : {}) },
           preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(balance.oldestInvoiceId, db),
         }),
       });
@@ -609,10 +610,11 @@ class BalanceReminder {
         ? this.sendLatePaymentEmail({ customer, invoice, balance, smsTemplateKey: templateKey,
           invoiceTitle, serviceDateClause: dateClause, payUrl: link, initialPrefs: prefs })
         : sendCustomerMessage({
-          to: customer.phone, body: message, channel: 'sms', audience: 'customer', purpose: 'payment_link',
+          to: customer.phone, body: message, channel, audience: 'customer', purpose: 'payment_link',
           customerId: customer.id, invoiceId: invoice.id, entryPoint: 'balance_reminder_late_payment_check',
           metadata: { original_message_type: 'late_payment', billingDeliveryCategory: 'billing',
-            notificationEventKey: eventKey, billingDeliveryLeg: channel },
+            notificationEventKey: eventKey, billingDeliveryLeg: channel,
+            ...(channel === 'push' ? { appOnly: true } : {}) },
           hasEmailLeg: true, preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(invoice.id, db),
         }),
     });

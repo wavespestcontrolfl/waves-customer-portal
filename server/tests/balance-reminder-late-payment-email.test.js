@@ -445,9 +445,26 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     armHappyPath({ billing_channels: ['push'] }, { phone: null });
     await BalanceReminder.latePaymentCheck();
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: 'cust-1', to: null, metadata: expect.objectContaining({ billingDeliveryCategory: 'billing' }),
+      customerId: 'cust-1', to: null, channel: 'push', metadata: expect.objectContaining({
+        billingDeliveryCategory: 'billing', billingDeliveryLeg: 'push', appOnly: true,
+      }),
     }));
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a selected App previsit reminder reaches the canonical sender as push without a phone', async () => {
+    const service = customer({ cust_id: 'cust-1', phone: null, scheduled_date: '2026-05-25', service_type: 'Pest Control' });
+    const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
+    setDbQueues({
+      notification_prefs: [chain({ first: { billing_channels: ['push'] } })],
+      collections_contact_ledger: [chain({ result: [] })],
+      customer_interactions: [chain()],
+    });
+
+    await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: null, channel: 'push', metadata: expect.objectContaining({ billingDeliveryLeg: 'push', appOnly: true }),
+    }));
   });
 
   test.each(['direct', 'daily', 'late payment'])('%s reminder holds when channel preferences cannot be read', async (entry) => {

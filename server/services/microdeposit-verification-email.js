@@ -11,6 +11,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
+const { isDefiniteRejection } = require('./sendgrid-mail');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { currency } = require('./email-template');
@@ -91,9 +92,10 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
     if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(e.code)) {
       return { ok: false, skipped: true, reason: 'template_unavailable' };
     }
-    const definitelyNotSent = e.providerOutcome?.deliveryOutcome === 'not_sent'
-      || (e.providerOutcome?.deliveryOutcome !== 'uncertain'
-        && enforceBillingPreference && !providerHandoffStarted && e.code !== 'EMAIL_SEND_IN_PROGRESS');
+    const definitelyNotSent = e.code !== 'EMAIL_SEND_IN_PROGRESS'
+      && (e.providerOutcome?.deliveryOutcome === 'not_sent'
+        || (e.providerOutcome?.deliveryOutcome !== 'uncertain'
+          && ((enforceBillingPreference && !providerHandoffStarted) || isDefiniteRejection(e))));
     return { ok: false, error: e.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
   }
 }

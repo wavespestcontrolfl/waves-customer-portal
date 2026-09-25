@@ -93,6 +93,7 @@ describe('sendMicrodepositVerificationEmail', () => {
 
   test('structured uncertain outcome wins over an unstarted local handoff', async () => {
     EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('handoff state unknown'), {
+      status: 429,
       providerOutcome: { deliveryOutcome: 'uncertain' },
     }));
     const result = await sendMicrodepositVerificationEmail({
@@ -109,6 +110,19 @@ describe('sendMicrodepositVerificationEmail', () => {
       invoice, customer, touchKey: '14d', enforceBillingPreference: true,
     });
     expect(result.deliveryOutcome).toBe('uncertain');
+  });
+
+  test.each([
+    ['rate limit', 429, 'not_sent'], ['timeout', 408, 'uncertain'],
+    ['server error', 503, 'uncertain'], ['network error', null, 'uncertain'],
+  ])('post-handoff %s has truthful Email delivery outcome', async (_label, status, expected) => {
+    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) =>
+      withProviderHandoff(async () => { throw Object.assign(new Error('SendGrid error'), status ? { status } : {}); }));
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+    expect(result.deliveryOutcome).toBe(expected);
   });
 
   test('provider acceptance evidence survives a later thrown error', async () => {

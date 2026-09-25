@@ -358,6 +358,8 @@ describe('late-payment checker email sidecar', () => {
     const pending = JSON.parse(activityInsert.insert.mock.calls[0][0].metadata);
     expect(pending).toMatchObject({ pendingEmail: true, channel: channel === 'push' ? 'app' : 'sms', tierDays: 14 });
     expect(sendCustomerMessage.mock.calls[0][0].metadata.billingDeliveryLeg).toBe(channel);
+    expect(sendCustomerMessage.mock.calls[0][0].channel).toBe(channel);
+    if (channel === 'push') expect(sendCustomerMessage.mock.calls[0][0].metadata.appOnly).toBe(true);
 
     jest.setSystemTime(new Date('2026-06-15T14:00:00.000Z'));
     const completion = chain();

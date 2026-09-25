@@ -41,6 +41,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
 const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
+const { isDefiniteRejection } = require('./sendgrid-mail');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
@@ -318,9 +319,10 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
     if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
       return { ok: false, skipped: true, reason: 'template_unavailable' };
     }
-    const definitelyNotSent = err.providerOutcome?.deliveryOutcome === 'not_sent'
-      || (err.providerOutcome?.deliveryOutcome !== 'uncertain'
-        && !providerHandoffStarted && err.code !== 'EMAIL_SEND_IN_PROGRESS');
+    const definitelyNotSent = err.code !== 'EMAIL_SEND_IN_PROGRESS'
+      && (err.providerOutcome?.deliveryOutcome === 'not_sent'
+        || (err.providerOutcome?.deliveryOutcome !== 'uncertain'
+          && (!providerHandoffStarted || isDefiniteRejection(err))));
     return { ok: false, error: err.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
   }
 }

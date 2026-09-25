@@ -205,7 +205,9 @@ describe('late-payment-checker rail', () => {
     }));
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
-      to: null, metadata: { billingDeliveryLeg: 'push', billingDeliveryCategory: 'billing' },
+      to: null, channel: 'push', metadata: {
+        billingDeliveryLeg: 'push', billingDeliveryCategory: 'billing', appOnly: true,
+      },
     });
   });
 
@@ -245,6 +247,7 @@ describe('late-payment-checker rail', () => {
     expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
     expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['push', 'sms']);
     expect(sendCustomerMessage.mock.calls.map(([args]) => args.metadata.billingDeliveryLeg)).toEqual(['push', 'sms']);
+    expect(sendCustomerMessage.mock.calls.map(([args]) => args.channel)).toEqual(['push', 'sms']);
     expect(ContactLedger.markDelivered.mock.calls.map(([ledger]) => ledger.id)).toEqual(['push-14', 'sms-14']);
   });
 
@@ -700,6 +703,55 @@ describe('invoice-followups rail', () => {
     expect(finalUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
   });
 
+  test('post-handoff SendGrid 429 retries Email without repeating accepted App', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const selfPayAtDispatch = jest.spyOn(require('../services/invoice-helpers'), 'selfPayAtDispatch')
+      .mockReturnValue(async () => ({ ok: true }));
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-d3`, metadata: {} }));
+    let pushClaims = 0;
+    ContactLedger.claimAttempt.mockImplementation(async (ledger) => ledger.id === 'push-d3' && pushClaims++ > 0
+      ? { allowed: false, delivered: true } : { allowed: true });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) =>
+      withProviderHandoff(async () => { throw Object.assign(new Error('SendGrid rate limit'), { status: 429 }); }));
+    const firstUpdate = armFollowupHappyPath({ prefs: { invoice_channels: ['email', 'push'] } });
+    await InvoiceFollowUps.runPending();
+    selfPayAtDispatch.mockRestore();
+
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'email-d3' }), expect.objectContaining({ reason: 'SendGrid rate limit' }),
+    );
+    expect(firstUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
+
+    const finalUpdate = armFollowupHappyPath({ prefs: { invoice_channels: ['email', 'push'] }, ledgerRows: [
+      { id: 'email-d3', idempotency_key: 'invoice_followups:seq-1:d3_friendly:email' },
+      { id: 'push-d3', idempotency_key: 'invoice_followups:seq-1:d3_friendly:push' },
+    ] });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(2);
+    expect(finalUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+  });
+
+  test.each([
+    ['HTTP 408', 408], ['HTTP 503', 503], ['network failure', null],
+  ])('post-handoff %s leaves Email and accepted App on the same held step', async (_label, status) => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const selfPayAtDispatch = jest.spyOn(require('../services/invoice-helpers'), 'selfPayAtDispatch')
+      .mockReturnValue(async () => ({ ok: true }));
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-d3`, metadata: {} }));
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) =>
+      withProviderHandoff(async () => { throw Object.assign(new Error('ambiguous provider result'), status ? { status } : {}); }));
+    const sequenceUpdate = armFollowupHappyPath({ prefs: { invoice_channels: ['email', 'push'] } });
+    await InvoiceFollowUps.runPending();
+    selfPayAtDispatch.mockRestore();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'email-d3' }), expect.anything(),
+    );
+    expect(sequenceUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
+  });
+
   test('Email in-progress collision stays fenced before this caller starts its handoff', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-d3`, metadata: {} }));
@@ -719,6 +771,7 @@ describe('invoice-followups rail', () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-d3`, metadata: {} }));
     EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('handoff state unknown'), {
+      status: 429,
       providerOutcome: { deliveryOutcome: 'uncertain' },
     }));
     const sequenceUpdate = armFollowupHappyPath({ prefs: { invoice_channels: ['email', 'push'] } });
