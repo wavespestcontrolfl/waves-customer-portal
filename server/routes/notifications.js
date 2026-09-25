@@ -725,7 +725,7 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     // Capture the primary profile's prior channel state before writing.
-    const primaryId = (Object.keys(channelDbUpdates).length || hasBillingArrayUpdates)
+    const primaryId = (Object.keys(channelDbUpdates).length || hasBillingArrayUpdates || updates.billingEmail !== undefined)
       ? await resolvePrimaryProfileId(req)
       : req.customerId;
     const existingPrimary = String(primaryId) === String(req.customerId) ? existing : await ensurePrefs(primaryId);
@@ -734,10 +734,13 @@ router.put('/preferences', async (req, res, next) => {
       .filter(([key]) => updates[key] !== undefined);
     let billingEmailAvailable = true;
     let addsBillingPush = false;
-    if (billingArrayUpdates.length) {
-      const currentCustomerHasEmail = await customerEmailAvailable(req.customerId);
+    const checksBillingEmail = billingArrayUpdates.length || updates.billingEmail !== undefined;
+    const currentCustomerHasEmail = checksBillingEmail && await customerEmailAvailable(req.customerId);
+    if (checksBillingEmail) {
       const effectiveBillingEmail = updates.billingEmail !== undefined ? updates.billingEmail : existing.billing_email;
       billingEmailAvailable = currentCustomerHasEmail || deliverableEmail(effectiveBillingEmail);
+    }
+    if (billingArrayUpdates.length) {
       const emailEnabled = updates.emailEnabled !== undefined
         ? updates.emailEnabled
         : existing.email_enabled !== false;
@@ -756,6 +759,24 @@ router.put('/preferences', async (req, res, next) => {
       addsBillingPush = billingArrayUpdates.some(([key]) => (
         updates[key].includes('push') && !beforeBilling[key].includes('push')
       ));
+    }
+    if (updates.billingEmail !== undefined && !billingEmailAvailable) {
+      const effectivePrefs = { ...existing, ...propertyDbUpdates,
+        push_enabled: channelDbUpdates.push_enabled ?? existingPrimary.push_enabled };
+      const effectiveChannels = billingChannelsPayload(effectivePrefs, { emailAvailable: false });
+      const billingCustomer = await db('customers').where({ id: req.customerId }).first('phone');
+      const textAvailable = effectivePrefs.sms_enabled !== false && Boolean(String(billingCustomer?.phone || '').trim());
+      const hasAppAlternative = [...BILLING_ARRAY_KEYS].some((key) => effectiveChannels[key].includes('email')
+        && effectiveChannels[key].includes('push'));
+      const appStatus = hasAppAlternative
+        ? await require('../services/push-notifications').customerStatus(req.customerId) : null;
+      const appAvailable = appStatus?.fresh === true
+        && (updates.pushEnabled === true || (effectivePrefs.push_enabled !== false && appStatus.enabled));
+      const stranded = [...BILLING_ARRAY_KEYS].some((key) => effectiveChannels[key].includes('email')
+        && !effectiveChannels[key].some((channel) => (channel === 'sms' && textAvailable
+          && (key !== 'paymentConfirmationChannels' || effectivePrefs.payment_confirmation_sms !== false))
+          || (channel === 'push' && appAvailable)));
+      if (stranded) return res.status(409).json({ error: 'Choose Text or App for every billing notification before removing the billing email.' });
     }
 
     // Older native builds render an unknown channel as Text and may echo it

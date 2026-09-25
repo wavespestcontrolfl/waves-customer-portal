@@ -595,6 +595,51 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     }
   });
 
+  test('billing email destination guard rejects stranding and permits replacements, fallbacks, and dark-gate protection', async () => {
+    const emailOnly = { billing_email: 'billing@example.com', invoice_channels: ['email'] };
+    try {
+      await mockPg('customers').where({ id: property }).update({ email: null });
+      await mockPg('notification_prefs').where({ customer_id: property }).update(emailOnly);
+      expect(await put({ billingEmail: '' })).toMatchObject({ status: 409,
+        body: { error: 'Choose Text or App for every billing notification before removing the billing email.' } });
+      expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).billing_email).toBe('billing@example.com');
+
+      await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email', 'sms'], sms_enabled: false });
+      expect((await put({ billingEmail: '' })).status).toBe(409);
+      await mockPg('customers').where({ id: property }).update({ phone: '' });
+      expect((await put({ billingEmail: '', smsEnabled: true })).status).toBe(409);
+      await mockPg('customers').where({ id: property }).update({ phone: '+19415550101' });
+      expect((await put({ billingEmail: '', invoiceChannels: ['sms'], smsEnabled: true })).status).toBe(200);
+      expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+        billing_email: null, invoice_channels: ['sms'], sms_enabled: true,
+      });
+
+      await mockPg('notification_prefs').where({ customer_id: property }).update({
+        ...emailOnly, invoice_channels: ['sms'], payment_receipt_channels: ['email', 'sms'], payment_confirmation_sms: false,
+      });
+      expect((await put({ billingEmail: '' })).status).toBe(409);
+
+      await mockPg('notification_prefs').where({ customer_id: property }).update({
+        ...emailOnly, invoice_channels: ['email', 'push'], payment_receipt_channels: null, payment_confirmation_sms: true,
+      });
+      expect((await put({ billingEmail: '' })).status).toBe(409);
+
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid', phone: '+19415550101' });
+      await mockPg('notification_prefs').where({ customer_id: property }).update({ ...emailOnly, payment_receipt_channels: null });
+      expect((await put({ billingEmail: '' })).status).toBe(200);
+      expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels).toEqual(['email']);
+
+      await mockPg('customers').where({ id: property }).update({ email: null });
+      await mockPg('notification_prefs').where({ customer_id: property }).update(emailOnly);
+      process.env.GATE_BILLING_NOTIFICATION_CHANNELS = 'false';
+      expect((await put({ billingEmail: '' })).status).toBe(409);
+      expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject(emailOnly);
+    } finally {
+      process.env.GATE_BILLING_NOTIFICATION_CHANNELS = 'true';
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid', phone: '+19415550101' });
+    }
+  });
+
   test('saved App can be retained or removed during an outage, but cannot be newly added', async () => {
     await device();
     expect((await put({ paymentIssueChannels: ['push'] })).status).toBe(200);
