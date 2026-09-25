@@ -44,6 +44,13 @@ const { buildPestTeaser, PEST_LIBRARY } = require('./pest-identification');
 // { lotSqFt, bedArea } object bypasses the profile and its review-worthy-
 // default detection — codex review on this lane, 2026-09-25).
 const { generateEstimate } = require('./pricing-engine/estimate-engine');
+// Pricing is DB-authoritative (pricing_config rows overlay constants.js via
+// db-bridge.syncConstantsFromDB, 60s cache). Every other in-process
+// generateEstimate caller (customer-pricing-ai, one-tap-purchase,
+// relay-context) refreshes before pricing so the number matches what the
+// estimator would show — same here, or a stale constant set could quote a
+// price the customer's later estimate contradicts (pre-push audit).
+const pricingEngine = require('./pricing-engine');
 // The SAME review gate the admin/agent estimator draft path enforces before
 // ever showing a customer a price (a zero-tree/zero-count line prices only
 // fixed costs — an invisible underquote without this check).
@@ -235,16 +242,23 @@ async function customerHasActiveService(customerId, serviceKey) {
 }
 
 // AGENTS.md P1 "per application price copy": customer-facing estimate copy
-// must never state a combined plan total ($X/mo, $X/yr) — only a per-visit
-// amount. The pricing engine already computes the per-visit figure
-// (priceTreeShrub: internalPerVisitRevenue/perApp; priceLawnCare: perApp) —
-// prefer that over deriving one, and fall back to annual/frequency only if a
-// pricer result is ever missing both.
-function perVisitFrom(result, frequency) {
-  const preferred = Number(result.internalPerVisitRevenue ?? result.perApp);
-  if (Number.isFinite(preferred) && preferred > 0) return Math.round(preferred);
+// must never state a combined plan total ($X/mo, $X/yr) — only the
+// per-application amount. `perApp` is the customer-facing per-application
+// figure every estimate surface reads (priceTreeShrub sets perApp to the
+// same value as its internalPerVisitRevenue; priceLawnCare sets perApp
+// directly) — read that one field, never an "internal" alias, and fall back
+// to annual/frequency only if a pricer result is ever missing it.
+function perApplicationFrom(result, frequency) {
+  const perApp = Number(result.perApp);
+  if (Number.isFinite(perApp) && perApp > 0) return Math.round(perApp);
   const freq = Number(frequency) || 1;
   return Math.round((Number(result.annual) || 0) / freq);
+}
+
+async function ensurePricingConstantsSynced() {
+  if (typeof pricingEngine.needsSync === 'function' && pricingEngine.needsSync()) {
+    await pricingEngine.syncConstantsFromDB(db);
+  }
 }
 
 // Compute-only pricing for one service — NEVER inserts an estimates row,
@@ -256,8 +270,8 @@ function perVisitFrom(result, frequency) {
 // { quote } on success or { reason } naming why not ('no_property_facts' |
 // 'quote_needs_review' | 'already_active'). quote.monthly/.annual are
 // admin-audit context only (flags.quote, context_summary) — the customer-
-// facing draft copy (photo-text-triage.js) uses quote.per_visit only, never
-// a combined total.
+// facing draft copy (photo-text-triage.js) uses quote.per_visit (the
+// per-application amount) only, never a combined total.
 async function priceForCustomer(type, customer, facts) {
   const serviceKey = SERVICE_KEY[type];
   // pest: no home-square-footage source exists anywhere in the schema
@@ -269,6 +283,7 @@ async function priceForCustomer(type, customer, facts) {
     if (!facts.lotSqFt && !facts.bedArea) return { reason: 'no_property_facts' };
     let line;
     try {
+      await ensurePricingConstantsSynced();
       const estimate = generateEstimate({
         lotSqFt: facts.lotSqFt,
         bedArea: facts.bedArea,
@@ -287,7 +302,7 @@ async function priceForCustomer(type, customer, facts) {
     return {
       quote: {
         service: serviceKey, tier: line.tier, monthly: line.monthly, annual: line.annual,
-        frequency: line.frequency, per_visit: perVisitFrom(line, line.frequency),
+        frequency: line.frequency, per_visit: perApplicationFrom(line, line.frequency),
       },
     };
   }
@@ -302,6 +317,7 @@ async function priceForCustomer(type, customer, facts) {
     // 2026-09-24) is "the standard lawn program the engine prices today".
     // track rides in services.lawn (the pricer's OPTIONS arg) — a saved
     // lawn_type on the property object itself is never read.
+    await ensurePricingConstantsSynced();
     const estimate = generateEstimate({
       measuredTurfSf: facts.turfSf,
       services: { lawn: { track: customer?.lawn_type || undefined } },
@@ -316,7 +332,7 @@ async function priceForCustomer(type, customer, facts) {
   return {
     quote: {
       service: serviceKey, tier: line.tier, monthly: line.monthly, annual: line.annual,
-      frequency: line.frequency, per_visit: perVisitFrom(line, line.frequency),
+      frequency: line.frequency, per_visit: perApplicationFrom(line, line.frequency),
     },
   };
 }

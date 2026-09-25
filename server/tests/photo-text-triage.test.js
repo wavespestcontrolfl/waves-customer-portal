@@ -516,14 +516,14 @@ describe('draft text builder', () => {
     expect(draft('Dana', 'a healthy lawn', ADVISE_HARMLESS)).not.toMatch(/quote/i);
   });
 
-  test('quote: names the service and a per-visit price, never a combined monthly/annual total (AGENTS.md P1)', () => {
+  test('quote: names the service and a per-application price, never "per visit" or a combined monthly/annual total (AGENTS.md P1)', () => {
     const text = draft('Morgan', 'water or heat stress', QUOTE(), 'It looks like stress from water, heat, or pruning rather than a pest or disease.');
     expect(text).toBe(
       "Thanks for the photo, Morgan. From what we can see, it's water or heat stress. "
       + 'It looks like stress from water, heat, or pruning rather than a pest or disease. '
-      + 'Our tree & shrub program is about $83 per visit, 6 visits a year. Want me to add it?',
+      + 'Our tree & shrub program is about $83 per application, 6 applications a year. Want me to add it?',
     );
-    expect(text).not.toMatch(/\/mo\b|\/yr\b|per month|per year/i);
+    expect(text).not.toMatch(/\/mo\b|\/yr\b|per month|per year|per visit|visits a year/i);
   });
 
   test('tree_shrub healthy (no worst_signal): a customer-friendly label, not the internal "no major visible stress" sentinel', () => {

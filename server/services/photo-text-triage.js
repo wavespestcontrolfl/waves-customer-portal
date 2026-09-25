@@ -253,12 +253,13 @@ function composeBody({ label, advice, opportunity }) {
   }
 
   if (opportunity.mode === 'quote' && opportunity.quote) {
-    // AGENTS.md P1 "per application price copy": never state a combined
-    // plan total ($X/mo, $X/yr) in customer-facing copy — per_visit only
-    // (photo-triage-opportunity.js#perVisitFrom).
+    // AGENTS.md P1 "per application price copy": the customer-facing unit
+    // is "per application" (never "per visit"), and never a combined plan
+    // total ($X/mo, $X/yr). quote.per_visit is the engine's per-application
+    // amount (photo-triage-opportunity.js#perApplicationFrom).
     const serviceLabel = QUOTE_SERVICE_LABEL[opportunity.quote.service] || 'service';
-    const perVisit = Math.round(Number(opportunity.quote.per_visit) || 0);
-    const quoteLine = `Our ${serviceLabel} program is about $${perVisit} per visit, ${opportunity.quote.frequency} visits a year. Want me to add it?`;
+    const perApplication = Math.round(Number(opportunity.quote.per_visit) || 0);
+    const quoteLine = `Our ${serviceLabel} program is about $${perApplication} per application, ${opportunity.quote.frequency} applications a year. Want me to add it?`;
     return joinSentences([lead, advice, quoteLine]);
   }
 

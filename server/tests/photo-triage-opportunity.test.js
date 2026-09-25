@@ -35,6 +35,17 @@ function mockQuery(table) {
 const mockDb = jest.fn((table) => mockQuery(table));
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The gauge refreshes DB-authoritative pricing constants before pricing
+// (same needsSync/syncConstantsFromDB pattern as customer-pricing-ai). The
+// real engine runs unmocked; only the DB refresh is stubbed here (mockDb
+// has no pricing_config table) and asserted to have been consulted.
+const mockNeedsSync = jest.fn(() => true);
+const mockSyncConstants = jest.fn(async () => {});
+jest.mock('../services/pricing-engine', () => ({
+  ...jest.requireActual('../services/pricing-engine'),
+  needsSync: (...args) => mockNeedsSync(...args),
+  syncConstantsFromDB: (...args) => mockSyncConstants(...args),
+}));
 
 const { gaugeOpportunity, _test } = require('../services/photo-triage-opportunity');
 const { largeScope, priorTreatmentFailed, outcomeFor, loadPropertyFacts, customerHasActiveService } = _test;
@@ -256,10 +267,12 @@ describe('gaugeOpportunity', () => {
     expect(result.mode).toBe('quote');
     expect(result.reasons).toEqual(expect.arrayContaining(['actionable', 'quoted']));
     expect(result.quote).toMatchObject({ service: 'lawn_care' });
+    // DB-authoritative pricing: constants were refreshed before the engine ran.
+    expect(mockSyncConstants).toHaveBeenCalled();
     expect(result.quote.monthly).toBeGreaterThan(0);
     expect(result.quote.annual).toBeCloseTo(result.quote.monthly * 12, 0);
     // AGENTS.md P1 "per application price copy": the customer-facing quote
-    // line reads per_visit, never the monthly/annual total.
+    // line reads per_visit (the per-application amount), never the monthly/annual total.
     expect(result.quote.per_visit).toBeGreaterThan(0);
     expect(result.quote.per_visit).toBeCloseTo(result.quote.annual / result.quote.frequency, 0);
   });
