@@ -5883,16 +5883,16 @@ function initScheduledJobs() {
         // activation (bell + estimate left 'awaiting_signature') has no
         // "sign again" retry path without this sweep. Same slot, right
         // after the (unrelated) termite program agreement reconciliation
-        // above, and the same dark gate the deferral itself reads — inert
-        // everywhere the annual plan isn't live.
+        // above. Deliberately NOT gated on GATE_TERMITE_ANNUAL_PLAN: the
+        // gate controls whether NEW annual accepts defer, but a customer
+        // who already signed must still be activated and billed if the
+        // gate is later turned off (pre-push P1). Cheap when nothing is
+        // awaiting: both scans are indexed lookups on stamped rows.
         try {
-          const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
-          if (termiteAnnualPlanSelectionEnabled()) {
-            const { reconcileTermiteAnnualActivations } = require('./termite-annual-activation');
-            const annualRecon = await reconcileTermiteAnnualActivations();
-            if (annualRecon.activated || annualRecon.failed) {
-              logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed`);
-            }
+          const { reconcileTermiteAnnualActivations } = require('./termite-annual-activation');
+          const annualRecon = await reconcileTermiteAnnualActivations();
+          if (annualRecon.activated || annualRecon.failed || annualRecon.delivered || annualRecon.deliveryFailed) {
+            logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed, ${annualRecon.delivered || 0} delivered, ${annualRecon.deliveryFailed || 0} delivery failed`);
           }
         } catch (err) {
           logger.error(`Termite annual plan activation reconciliation failed: ${err.message}`);

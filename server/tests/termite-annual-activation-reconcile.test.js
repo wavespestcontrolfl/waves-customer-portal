@@ -169,17 +169,23 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
           return builder;
         },
         whereNull(col) { nullChecks.push(col); return builder; },
+        whereNotIn(col, values) { notIn.push([col, values]); return builder; },
         select() { return builder; },
         limit(n) { lim = n; return builder; },
         then: (resolve, reject) => Promise.resolve(rows()).then(resolve, reject),
         catch: (reject) => Promise.resolve(rows()).catch(reject),
       };
+      const notIn = [];
       function fieldFor(prefix, key) { return key.startsWith(prefix) ? key.slice(prefix.length) : null; }
       function rows() {
         let joined = [...estimates.values()].flatMap((e) => {
           const matchingTerms = [...terms.values()].filter((t) => t.source_estimate_id === e.id);
           return matchingTerms.map((apt) => ({ e, apt, inv: apt.prepay_invoice_id ? invoices.get(apt.prepay_invoice_id) : null }));
         }).filter(({ inv }) => !!inv);
+        joined = joined.filter(({ inv }) => notIn.every(([col, values]) => {
+          const invField = fieldFor('inv.', col) || col;
+          return !values.includes(inv[invField]);
+        }));
         joined = joined.filter(({ e, apt, inv }) => Object.entries(filters).every(([k, v]) => {
           const eField = fieldFor('e.', k);
           if (eField !== null) return e[eField] === v;
@@ -189,7 +195,9 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
           if (invField !== null) return inv[invField] === v;
           return true;
         }));
-        joined = joined.filter(({ inv }) => nullChecks.every((col) => {
+        joined = joined.filter(({ apt, inv }) => nullChecks.every((col) => {
+          const aptField = fieldFor('apt.', col);
+          if (aptField !== null) return apt[aptField] == null;
           const invField = fieldFor('inv.', col) || col;
           return inv[invField] == null;
         }));
@@ -526,5 +534,30 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     // ticks pass the IDENTICAL key proves this module correctly PARTICIPATES
     // in notifyAdmin's own dedupe contract, which is what actually
     // collapses them to one bell in production.
+  });
+  test('pre-push P1: paid, void, per-channel-delivered and renewal-successor invoices are never re-sent by the delivery retry', async () => {
+    const estimates = new Map();
+    const terms = new Map();
+    const invoices = new Map();
+    const cases = [
+      { inv: { status: 'paid', sent_at: null }, term: {} },
+      { inv: { status: 'void', sent_at: null }, term: {} },
+      { inv: { status: 'sent', sent_at: null, sms_sent_at: new Date() }, term: {} },
+      { inv: { status: 'sent', sent_at: null, email_sent_at: new Date() }, term: {} },
+      { inv: { status: 'sent', sent_at: null }, term: { renewed_from_term_id: 'term-prior' } },
+    ];
+    cases.forEach(({ inv, term }, i) => {
+      estimates.set(`est-${i}`, { id: `est-${i}`, customer_id: `cust-${i}`, annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot() });
+      invoices.set(`inv-${i}`, { id: `inv-${i}`, total: 300, ...inv });
+      terms.set(`term-${i}`, { id: `term-${i}`, source_estimate_id: `est-${i}`, prepay_invoice_id: `inv-${i}`, renewed_from_term_id: null, ...term });
+    });
+    const { reconcileTermiteAnnualActivations, conn, sendViaSMSAndEmail } = setup({
+      estimates, contracts: new Map(), terms, invoices,
+    });
+
+    const counts = await reconcileTermiteAnnualActivations({ conn });
+
+    expect(counts.deliveryScanned).toBe(0);
+    expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 });

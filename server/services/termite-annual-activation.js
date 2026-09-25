@@ -407,7 +407,17 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
       .join('annual_prepay_terms as apt', conn.raw('apt.source_estimate_id = e.id'))
       .join('invoices as inv', conn.raw('inv.id = apt.prepay_invoice_id'))
       .where('e.annual_plan_activation_status', 'activated')
+      // Only the ORIGINAL activation term (a renewal successor carries
+      // renewed_from_term_id and owns its own invoice workflow — slice 6),
+      // only a still-collectable invoice (never re-send a paid / void /
+      // cancelled one), and "never delivered" on EVERY channel: sent_at is
+      // the combined stamp, sms_sent_at / email_sent_at are the per-channel
+      // durable stamps invoice.js also writes (pre-push P1).
+      .whereNull('apt.renewed_from_term_id')
+      .whereNotIn('inv.status', ['paid', 'void', 'voided', 'canceled', 'cancelled', 'refunded'])
       .whereNull('inv.sent_at')
+      .whereNull('inv.sms_sent_at')
+      .whereNull('inv.email_sent_at')
       .select('e.id as estimate_id', 'apt.id as term_id', 'inv.id as invoice_id')
       .limit(limit);
     counts.deliveryScanned = undelivered.length;
