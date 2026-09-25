@@ -92,7 +92,10 @@ function teaserOutcome(type, analysis) {
 const SCOPE_SUBJECT = '(?:yard|lawn|property|house|home|landscape|landscaping|bed|beds|hedge|hedges|hedgerow|shrub|shrubs|bush|bushes|tree|trees|palm|palms|plant|plants|border|borders|side|sides|perimeter|fence ?line)';
 // "all my" binds to a property subject too — "I used all my spray on this
 // one shrub" is one shrub (codex #4810 r2).
-const LARGE_SCOPE_RE = new RegExp(`\\b(both sides|around the (?:house|property)|front and back|(?:all (?:of )?my|entire|whole|every) (?:\\w+ )?${SCOPE_SUBJECT})\\b`, 'i');
+// "both sides" / "front and back" bind to a property-sized subject too —
+// "both sides of this one leaf" is one leaf (codex #4810 r6).
+const PROPERTY_SIZED = '(?:house|home|property|yard|lot|driveway|street|building|lawn)';
+const LARGE_SCOPE_RE = new RegExp(`\\b(both sides of (?:the |my |our )?${PROPERTY_SIZED}|around the (?:house|property)|front and back (?:of (?:the |my |our )?${PROPERTY_SIZED}|yards?)|(?:all (?:of )?my|entire|whole|every) (?:\\w+ )?${SCOPE_SUBJECT})\\b`, 'i');
 
 // Failure/recurrence language: the customer (or their lawn company) already
 // attempted treatment AND it did not hold. "tried"/"treated" ALONE are not
@@ -337,8 +340,41 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
   return { mode: 'advise', reasons, quote: null };
 }
 
+// ── Dispatch-time recheck ────────────────────────────────────────────────
+
+const NO_PITCH_REASONS = new Set(['harmless', 'already_owned', 'offer_unavailable']);
+
+// Re-run the offer check immediately before a photo-triage draft is SENT
+// (admin-drafts approve/revise — codex #4810 r6): the creation-time check
+// is stale the moment the customer enrolls in the family, a plan rate
+// lands, or pricing facts change while the draft sits pending. Returns
+//   { ok: true }                                  — send as-is
+//   { blocked: 'owned'|'unavailable'|'no_longer_priced', family }
+//   { repriced: <per_visit>, family }             — owner-only figure drifted
+// Throws on a lookup failure — the caller fails closed (draft left pending).
+async function recheckDraftOffer({ customerId, flags }) {
+  if (!flags || flags.origin !== 'photo_triage') return { ok: true };
+  const mode = flags.opportunity_mode;
+  const reasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
+  const pitches = mode === 'quote' || (mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
+  if (!pitches || !customerId) return { ok: true };
+  const family = flags.quote?.service || SERVICE_KEY[flags.assessment_type] || null;
+  if (!family) return { ok: true };
+  const offer = await buildOfferForFamily(customerId, db, family);
+  if (offer?.mode === 'owned') return { blocked: 'owned', family };
+  if (offer?.mode === 'unavailable') return { blocked: 'unavailable', family };
+  if (mode === 'quote') {
+    if (!offer || offer.mode !== 'priced' || !offer.option) return { blocked: 'no_longer_priced', family };
+    const perApplication = Math.round((Number(offer.option.perVisit) || 0) * 100) / 100;
+    if (!(perApplication > 0)) return { blocked: 'no_longer_priced', family };
+    if (perApplication !== Number(flags.quote?.per_visit)) return { repriced: perApplication, family };
+  }
+  return { ok: true };
+}
+
 module.exports = {
   gaugeOpportunity,
+  recheckDraftOffer,
   teaserOutcome,
   // The resolved { kind, label, cultural, uncertain } for any type — the
   // single source photo-text-triage.js reads its draft-copy label from

@@ -522,6 +522,51 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
   };
 }
 
+// Photo-triage drafts (services/photo-text-triage.js): the opportunity
+// gauge's ownership/offer check ran at CREATION; by approval the customer
+// may have enrolled in the family, a plan rate may have landed, or the
+// owner-only per-application figure may have drifted. Re-run the SAME
+// check right before dispatch (codex #4810 r6): owned/unavailable → 409,
+// claim released, draft left pending for the owner to rewrite; a quote
+// whose figure moved → flags.quote refreshed, 409 so the owner re-reads it;
+// lookup failure → 503 fail closed. Narrowly scoped to flags.origin ===
+// 'photo_triage'; the text itself never carries a price.
+async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
+  const flags = parseFlags(draft.flags);
+  if (flags.origin !== 'photo_triage') return { blocked: false };
+  let verdict;
+  try {
+    const { recheckDraftOffer } = require('../services/photo-triage-opportunity');
+    verdict = await recheckDraftOffer({ customerId: draft.customer_id, flags });
+  } catch (err) {
+    logger.warn(`[admin-drafts] photo-triage offer recheck failed for draft ${draft.id} (code=${err?.code || 'none'})`);
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(503).json({ error: 'Photo-triage offer recheck unavailable — draft left pending, try again', code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE' });
+    return { blocked: true };
+  }
+  if (verdict.ok) return { blocked: false };
+  if (verdict.repriced !== undefined) {
+    const nextFlags = { ...flags, quote: { ...(flags.quote || {}), per_visit: verdict.repriced }, quote_repriced_at: new Date().toISOString() };
+    await releaseDraftClaim(draft.id, { ...releaseFields, flags: JSON.stringify(nextFlags) });
+    res.status(409).json({
+      error: `The offer core now prices ${verdict.family} at $${verdict.repriced.toFixed(2)} per application — the draft's owner-only figure was refreshed; review and approve again.`,
+      code: 'PHOTO_TRIAGE_REPRICED',
+    });
+    return { blocked: true };
+  }
+  await releaseDraftClaim(draft.id, releaseFields);
+  const why = verdict.blocked === 'owned'
+    ? `the customer now has ${verdict.family} on their plan`
+    : verdict.blocked === 'unavailable'
+      ? `ownership of ${verdict.family} could not be confirmed (live plan rate or lookup failure)`
+      : `${verdict.family} can no longer be priced for this customer`;
+  res.status(409).json({
+    error: `Photo-triage draft held: ${why} — rewrite it without the quote ask, then approve.`,
+    code: 'PHOTO_TRIAGE_OFFER_STALE',
+  });
+  return { blocked: true };
+}
+
 // Post-guard failure release. A clarify draft past its dispatch decision
 // must reconcile UNDER the clarify lock — plain releaseDraftClaim is
 // unconditional, so it could resurrect a concurrently rejected draft and it
@@ -852,6 +897,8 @@ router.put('/:id/approve', async (req, res, next) => {
     // remove.
     const clarifyGuard = await guardClarifySend(draft, res);
     if (clarifyGuard.blocked) return;
+    const photoTriageGuard = await guardPhotoTriageSend(draft, res);
+    if (photoTriageGuard.blocked) return;
     let smsResult;
     try {
       smsResult = await sendManualCustomerSms({
@@ -1015,6 +1062,8 @@ router.put('/:id/revise', async (req, res, next) => {
 
     const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
     if (clarifyGuard.blocked) return;
+    const photoTriageGuard = await guardPhotoTriageSend(draft, res, { revised_response: null, final_response: null });
+    if (photoTriageGuard.blocked) return;
     let smsResult;
     try {
       smsResult = await sendManualCustomerSms({

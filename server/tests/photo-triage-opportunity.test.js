@@ -16,7 +16,7 @@ const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { gaugeOpportunity, _test } = require('../services/photo-triage-opportunity');
+const { gaugeOpportunity, recheckDraftOffer, _test } = require('../services/photo-triage-opportunity');
 const { largeScope, priorTreatmentFailed, outcomeFor } = _test;
 
 const PRICED_OFFER = (serviceKey, overrides = {}) => ({
@@ -59,6 +59,8 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     'the whole thing started last week',
     'every time it rains the spots get worse',
     'I used all my spray on this one shrub',
+    'both sides of this one leaf have spots',
+    'front and back of the same shrub',
     '',
   ])('%p is not large scope', (body) => expect(largeScope(body)).toBe(false));
 
@@ -407,5 +409,52 @@ describe('gaugeOpportunity', () => {
     expect(result.mode).toBe('advise');
     expect(result.reasons).toContain('lead');
     expect(result.reasons).not.toContain('onsite_scope');
+  });
+});
+
+// ── recheckDraftOffer (dispatch-time, admin-drafts approve/revise) ───────
+
+describe('recheckDraftOffer', () => {
+  beforeEach(() => { mockBuildOffer.mockReset(); mockBuildOffer.mockResolvedValue(null); });
+  const FLAGS = (overrides = {}) => ({
+    origin: 'photo_triage', assessment_type: 'tree_shrub', opportunity_mode: 'quote',
+    opportunity_reasons: ['actionable', 'quoted'], quote: { service: 'tree_shrub', per_visit: 83.33 }, ...overrides,
+  });
+
+  test('non-photo-triage flags, no customer, or a draft that pitches nothing → ok without a lookup', async () => {
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: { origin: 'other' } })).toEqual({ ok: true });
+    expect(await recheckDraftOffer({ customerId: null, flags: FLAGS() })).toEqual({ ok: true });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null }) })).toEqual({ ok: true });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS({ opportunity_mode: 'onsite', quote: null }) })).toEqual({ ok: true });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
+  });
+
+  test('customer enrolled meanwhile → blocked owned; plan rate landed → blocked unavailable', async () => {
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).toEqual({ blocked: 'owned', family: 'tree_shrub' });
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'lawn_care', mode: 'unavailable', option: null });
+    const advise = FLAGS({ assessment_type: 'lawn', opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'no_offer'], quote: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: advise })).toEqual({ blocked: 'unavailable', family: 'lawn_care' });
+    expect(mockBuildOffer).toHaveBeenLastCalledWith('c1', mockDb, 'lawn_care');
+  });
+
+  test('quote draft: same figure → ok; drifted figure → repriced; no longer priced → blocked', async () => {
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub', { perVisit: 83.33 }));
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).toEqual({ ok: true });
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub', { perVisit: 91.5 }));
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).toEqual({ repriced: 91.5, family: 'tree_shrub' });
+    mockBuildOffer.mockResolvedValueOnce(CTA_OFFER('tree_shrub'));
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).toEqual({ blocked: 'no_longer_priced', family: 'tree_shrub' });
+  });
+
+  test('an advise draft that still pitches a quote is fine when the offer core simply has nothing (manual quote conversation)', async () => {
+    mockBuildOffer.mockResolvedValueOnce(null);
+    const advise = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'no_offer'], quote: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: advise })).toEqual({ ok: true });
+  });
+
+  test('a lookup failure propagates (the route fails closed)', async () => {
+    mockBuildOffer.mockRejectedValueOnce(new Error('down'));
+    await expect(recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).rejects.toThrow('down');
   });
 });
