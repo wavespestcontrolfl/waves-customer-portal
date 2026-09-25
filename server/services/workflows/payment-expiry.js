@@ -282,10 +282,12 @@ class PaymentExpiry {
           if (!routesEmail && billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; continue; }
         }
 
-        // 30-day cooldown per customer
+        // Keep each escalation reachable: a 30-day notice must not suppress
+        // the distinct 7-day stage roughly three weeks later.
+        const cooldownDays = reminderStage === '7_day' ? 7 : 30;
         const recentNotice = await db('sms_log')
           .where({ customer_id: card.customer_id, message_type: 'payment_expiry' })
-          .where('created_at', '>', db.raw("NOW() - INTERVAL '30 days'"))
+          .where('created_at', '>', db.raw(`NOW() - INTERVAL '${cooldownDays} days'`))
           .first();
 
         if (recentNotice) { await emailPromise; continue; }
@@ -337,10 +339,12 @@ class PaymentExpiry {
           status: 'active',
         });
 
+        const deliveredChannel = ['sms', 'email', 'push'].includes(sendResult.channel)
+          ? sendResult.channel : 'sms';
         await db('customer_interactions').insert({
           customer_id: card.customer_id,
-          interaction_type: 'sms_outbound',
-          channel: 'sms',
+          interaction_type: `${deliveredChannel}_outbound`,
+          channel: deliveredChannel,
           subject: 'Payment method expiry notice',
           body: `Card ****${card.last_four} expires ${expLabel}`,
         });

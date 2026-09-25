@@ -50,7 +50,8 @@ async function paymentIssueEmailSelected(customerId) {
 
 async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0, hasEmailLeg = false }) {
   const metadata = { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode,
-    billingDeliveryCategory: purpose === 'payment_failure' ? 'payment_issue' : 'billing',
+    billingDeliveryCategory: purpose === 'payment_failure' ? 'payment_issue'
+      : purpose === 'payment_receipt' ? 'payment_receipt' : 'billing',
     ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
     ...(attemptPaymentId
       ? { notificationEventKey: `payment-problem:attempt:${attemptPaymentId}:${messageType}` }

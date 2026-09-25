@@ -292,8 +292,10 @@ async function sendCardExpiryWarnings() {
         if (!routesEmail && billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; skipped++; continue; }
       }
 
-      // Dedup: one per card per 30 days
-      const already = await eventExistsRecently(r.customer_id, eventType, 30, r.payment_method_id);
+      // Keep each escalation reachable: a 30-day notice must not suppress
+      // the distinct 7-day stage roughly three weeks later.
+      const cooldownDays = reminderStage === '7_day' ? 7 : 30;
+      const already = await eventExistsRecently(r.customer_id, eventType, cooldownDays, r.payment_method_id);
       if (already) { await emailPromise; skipped++; continue; }
 
       const expStr = `${String(r.exp_month).padStart(2, '0')}/${String(r.exp_year).slice(-2)}`;

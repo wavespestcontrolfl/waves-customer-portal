@@ -33,6 +33,7 @@ const { getChargeableAutopayMethod } = require('../services/autopay-eligibility'
 const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals');
 const exemptions = (customerIds = [], charged = []) => ({ customerIds: new Set(customerIds), chargeMethodIdsByCustomer: new Map(charged) });
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { eventExistsRecently } = require('../services/autopay-log');
 const { sendCardExpiryWarnings } = require('../services/autopay-notifications');
 
 function thenable(rows) {
@@ -58,7 +59,10 @@ beforeAll(() => {
   jest.setSystemTime(new Date('2026-08-26T15:00:00Z'));
 });
 afterAll(() => jest.useRealTimers());
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.setSystemTime(new Date('2026-08-26T15:00:00Z'));
+  jest.clearAllMocks();
+});
 
 describe('sendCardExpiryWarnings — current-method selection', () => {
   test('chargeable current CARD expiring within the window warns on THAT card only', async () => {
@@ -76,6 +80,21 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
       hasEmailLeg: false,
       metadata: expect.objectContaining({ notificationEventKey: 'payment-expiry:pm-cur:9:2026:60_day' }),
     }));
+  });
+
+  test.each([
+    ['30_day', '2026-09-10T15:00:00Z', 30],
+    ['7_day', '2026-09-24T15:00:00Z', 7],
+  ])('%s escalation uses its own cooldown window', async (_stage, now, cooldownDays) => {
+    jest.setSystemTime(new Date(now));
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb({
+      customers: [thenable([CUSTOMER])],
+      payment_methods: [thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa',
+        last_four: '4242', exp_month: '9', exp_year: '26' }])],
+    });
+    await sendCardExpiryWarnings();
+    expect(eventExistsRecently).toHaveBeenCalledWith('c1', 'card_expiring_soon', cooldownDays, 'pm-cur');
   });
 
   test('chargeable current card NOT expiring soon → no warning even if a replaced card is in the window', async () => {

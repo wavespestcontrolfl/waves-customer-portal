@@ -211,5 +211,9 @@ describe('monthly payment settlement reporting', () => {
     expect(logAutopay).toHaveBeenCalledWith('cust-state', status === 'paid' ? 'charge_success' : 'charge_processing', expect.objectContaining({ amountCents: 10290, paymentId: 'pay-state' }));
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     expect(sendCustomerMessage).toHaveBeenCalledTimes(status === 'paid' ? 1 : 0);
+    if (status === 'paid') expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      purpose: 'payment_receipt',
+      metadata: expect.objectContaining({ billingDeliveryCategory: 'payment_receipt' }),
+    }));
   });
 });
