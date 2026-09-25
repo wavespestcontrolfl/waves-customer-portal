@@ -46,6 +46,13 @@ postgres('disclaimed_number_holds on PostgreSQL', () => {
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 6 } });
     await migration.up(mockPg);
+    // Minimal call_log for the processing-claim fence (round 8 P1): only
+    // the columns armDisclaimedNumberHold's claim check reads.
+    await mockPg.schema.createTable('call_log', (t) => {
+      t.uuid('id').primary();
+      t.string('processing_token').nullable();
+      t.integer('processing_generation').notNullable().defaultTo(0);
+    });
   });
 
   afterAll(async () => {
@@ -124,5 +131,72 @@ postgres('disclaimed_number_holds on PostgreSQL', () => {
     await arm;
     expect(armed).toBe(true);
     expect((await row(callLogId)).cleared_at).toBeNull();
+  });
+
+  // Codex round 8 P1: the decision-point write is fenced to the pass's
+  // processing claim, verified inside the same transaction as the insert.
+  describe('processing-claim fence (round 8 P1)', () => {
+    const claimCall = async (token, generation = 1) => {
+      const id = randomUUID();
+      await mockPg('call_log').insert({ id, processing_token: token, processing_generation: generation });
+      return id;
+    };
+
+    test('the owning pass (token + generation match) arms', async () => {
+      const callLogId = await claimCall('tok-A', 3);
+      const res = await Holds.armDisclaimedNumberHold({ phone: PHONE, callLogId, procToken: 'tok-A', procGeneration: 3 });
+      expect(res).toEqual({ recorded: true, phoneE164: PHONE });
+      expect((await row(callLogId)).cleared_at).toBeNull();
+    });
+
+    test('a superseded worker (call reclaimed: token rotated) writes nothing', async () => {
+      const callLogId = await claimCall('tok-B', 2);
+      const res = await Holds.armDisclaimedNumberHold({ phone: PHONE, callLogId, procToken: 'tok-A', procGeneration: 1 });
+      expect(res).toEqual({ recorded: false, claimLost: true });
+      expect(await row(callLogId)).toBeUndefined();
+    });
+
+    test('a completed call (token released) plus a human clearance: the stale worker cannot re-arm', async () => {
+      const callLogId = await claimCall('tok-A', 1);
+      await Holds.armDisclaimedNumberHold({ phone: PHONE, callLogId, procToken: 'tok-A', procGeneration: 1 });
+      // Peer reclaimed + completed (token cleared), office verified the number.
+      await mockPg('call_log').where({ id: callLogId }).update({ processing_token: null, processing_generation: 2 });
+      await Holds.clearDisclaimedNumberHoldsForCall({ callLogId, reason: 'verified_same_number' });
+      const res = await Holds.armDisclaimedNumberHold({ phone: PHONE, callLogId, procToken: 'tok-A', procGeneration: 1 });
+      expect(res).toEqual({ recorded: false, claimLost: true });
+      const r = await row(callLogId);
+      expect(r.cleared_at).not.toBeNull();
+      expect(r.clear_reason).toBe('verified_same_number');
+    });
+
+    test('a generation mismatch alone is ownership loss', async () => {
+      const callLogId = await claimCall('tok-A', 5);
+      const res = await Holds.armDisclaimedNumberHold({ phone: PHONE, callLogId, procToken: 'tok-A', procGeneration: 4 });
+      expect(res).toEqual({ recorded: false, claimLost: true });
+      expect(await row(callLogId)).toBeUndefined();
+    });
+
+    test('a reclaim in flight (token rotation not yet committed): the arm waits on the claim row, then sees the lost claim and writes nothing', async () => {
+      const callLogId = await claimCall('tok-A', 1);
+      let commitReclaim;
+      const reclaimHolding = new Promise((resolve) => { commitReclaim = resolve; });
+      let rotated;
+      const rotationWritten = new Promise((resolve) => { rotated = resolve; });
+      const reclaimTrx = mockPg.transaction(async (trx) => {
+        await trx('call_log').where({ id: callLogId }).update({ processing_token: 'tok-B', processing_generation: 2 });
+        rotated();
+        await reclaimHolding;
+      });
+      await rotationWritten;
+      let settled = false;
+      const arm = Holds.armDisclaimedNumberHold({ phone: PHONE, callLogId, procToken: 'tok-A', procGeneration: 1 })
+        .then((res) => { settled = true; return res; });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(settled).toBe(false); // parked on the call_log row lock
+      commitReclaim();
+      await reclaimTrx;
+      expect(await arm).toEqual({ recorded: false, claimLost: true });
+      expect(await row(callLogId)).toBeUndefined();
+    });
   });
 });

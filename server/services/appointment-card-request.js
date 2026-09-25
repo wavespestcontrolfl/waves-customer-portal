@@ -792,10 +792,17 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       // nothing actually proved. The tri-state reader returns true only on
       // a confirmed row; a read failure (null) falls through with
       // everything else to the same silent delivery_suppressed skip.
+      //
+      // Round 8 P1: "confirmed" means THIS visit's hold, not merely a held
+      // number — the reader also requires the visit's own evidence (its
+      // uncleared callback_number_hold_at stamp and an active hold row from
+      // its own source call on the phone we would text). A visit suppressed
+      // for another reason whose customer shares a number some other call
+      // disclaimed stays delivery_suppressed.
       const holdConfirmed = await require('./appointment-reminders')
         .callbackNumberHoldConfirmedForVisit(visit.id)
         .catch((err) => {
-          logger.warn(`[appt-card-request] callback-number hold read failed for visit ${visit.id} — staying silent (delivery_suppressed): ${err.message}`);
+          logger.warn(`[appt-card-request] callback-number hold read failed for visit ${visit.id} — staying silent (delivery_suppressed): ${err?.code || err?.name || 'db_error'}`);
           return null;
         });
       if (holdConfirmed === true) {
@@ -1118,7 +1125,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     if (emailOnlyForDisclaimedAni) {
       const emailResult = await runInvitationEmailLeg({ visit, secureUrl, planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY })
         .catch((emailErr) => {
-          logger.warn(`[appt-card-request] email-only invitation failed for visit ${visit.id}: ${emailErr.message}`);
+          logger.warn(`[appt-card-request] email-only invitation failed for visit ${visit.id}: ${emailErr?.code || emailErr?.name || 'send_error'}`);
           return null;
         });
       // codex round-3 P1: sendAutopaySetupInvitation/sendTemplate return

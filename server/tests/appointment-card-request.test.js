@@ -130,8 +130,13 @@ jest.mock('../config/twilio-numbers', () => ({
 // lives in disclaimed-number-holds.js (number-keyed: is the visit's
 // customer phone an actively held number?). Default: not held.
 const mockDisclaimedNumberHeldForVisit = jest.fn(async () => false);
+// Round 8 P1: the email-only path also needs THIS visit's own evidence
+// (its uncleared callback_number_hold_at stamp + an active hold row from
+// its own source call on the phone on file). Default: no evidence.
+const mockDisclaimedNumberHoldEvidenceForVisit = jest.fn(async () => false);
 jest.mock('../services/disclaimed-number-holds', () => ({
   disclaimedNumberHeldForVisit: (...a) => mockDisclaimedNumberHeldForVisit(...a),
+  disclaimedNumberHoldEvidenceForVisit: (...a) => mockDisclaimedNumberHoldEvidenceForVisit(...a),
 }));
 
 const {
@@ -1761,6 +1766,8 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
   beforeEach(() => {
     mockDisclaimedNumberHeldForVisit.mockReset();
     mockDisclaimedNumberHeldForVisit.mockResolvedValue(false);
+    mockDisclaimedNumberHoldEvidenceForVisit.mockReset();
+    mockDisclaimedNumberHoldEvidenceForVisit.mockResolvedValue(false);
   });
 
   // Round 6: "held" is now a property of the customer's NUMBER
@@ -1769,7 +1776,38 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
   function setHeldVisitFixture(row = HELD_VISIT) {
     mockTableHandlers.scheduled_services.first = () => ({ ...row });
     mockDisclaimedNumberHeldForVisit.mockResolvedValue(true);
+    mockDisclaimedNumberHoldEvidenceForVisit.mockResolvedValue(true);
   }
+
+  // Codex round 8 P1: the number on file is held by SOME call (another
+  // call/customer disclaimed the same shared line), but this visit's
+  // delivery:'none' came from something else (no SMS consent) — no stamp /
+  // no hold row from this visit's own source call. Must stay silent: no
+  // /secure token minted, no card-invitation email.
+  test('a number held by ANOTHER call, with no hold evidence on this visit, stays delivery_suppressed — never emailed', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT });
+    mockDisclaimedNumberHeldForVisit.mockResolvedValue(true);
+    mockDisclaimedNumberHoldEvidenceForVisit.mockResolvedValue(false);
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+    expect(res.reason).toBe('delivery_suppressed');
+    expect(mockDisclaimedNumberHoldEvidenceForVisit).toHaveBeenCalledWith('svc-1');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+    const inserts = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
+  });
+
+  test('an evidence-read failure stays SILENT (never a confirmed hold)', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT });
+    mockDisclaimedNumberHeldForVisit.mockResolvedValue(true);
+    mockDisclaimedNumberHoldEvidenceForVisit.mockRejectedValue(new Error('select * from "customers" where "phone" = +19415551234'));
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+    expect(res.reason).toBe('delivery_suppressed');
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
 
   test('disclaimed ANI + email on file: one invitation email, zero SMS, the claim consumed exactly once', async () => {
     setHeldVisitFixture();

@@ -215,6 +215,42 @@ describe('armDisclaimedNumberHold / ensureDisclaimedNumberHold (round 7)', () =>
       .toEqual({ recorded: true, phoneE164: HELD, active: true });
   });
 
+  // Codex round 8 P1: with the pass's claim, the arm verifies it (FOR
+  // UPDATE on call_log) inside the same transaction, after the triage lock
+  // and before the upsert; a mismatch writes nothing.
+  function fencedConn({ owned }) {
+    const calls = [];
+    const trx = jest.fn((table) => {
+      const q = {
+        wheres: [],
+        where(a, b) { q.wheres.push(typeof a === 'object' ? a : { [a]: b }); return q; },
+        forUpdate() { calls.push({ on: 'trx', op: 'forUpdate', table, wheres: q.wheres }); return q; },
+        first: jest.fn(async () => (owned ? { id: 'call-1' } : undefined)),
+      };
+      return q;
+    });
+    trx.raw = jest.fn(async (sql, bindings) => { calls.push({ on: 'trx', sql, bindings }); return { rows: [] }; });
+    const conn = { raw: jest.fn(), transaction: jest.fn(async (fn) => fn(trx)) };
+    return { conn, calls };
+  }
+
+  test('arm with a processing claim: triage lock → claim row FOR UPDATE (token + generation) → upsert', async () => {
+    const { conn, calls } = fencedConn({ owned: true });
+    const res = await Holds.armDisclaimedNumberHold({ phone: HELD, callLogId: 'call-1', procToken: 'tok-A', procGeneration: 7, conn });
+    expect(res).toEqual({ recorded: true, phoneE164: HELD });
+    expect(calls[0].sql).toMatch(/pg_advisory_xact_lock/);
+    expect(calls[1]).toMatchObject({ op: 'forUpdate', table: 'call_log' });
+    expect(calls[1].wheres).toEqual([{ id: 'call-1' }, { processing_token: 'tok-A' }, { processing_generation: 7 }]);
+    expect(calls[2].sql).toMatch(/INSERT INTO disclaimed_number_holds/);
+  });
+
+  test('arm after losing the claim: claimLost, nothing written', async () => {
+    const { conn, calls } = fencedConn({ owned: false });
+    const res = await Holds.armDisclaimedNumberHold({ phone: HELD, callLogId: 'call-1', procToken: 'tok-A', procGeneration: 7, conn });
+    expect(res).toEqual({ recorded: false, claimLost: true });
+    expect(calls.some((c) => /INSERT/.test(c.sql || ''))).toBe(false);
+  });
+
   test('neither writes without a dialable number and a call', async () => {
     const { conn } = recordingConn();
     expect(await Holds.ensureDisclaimedNumberHold({ phone: null, callLogId: 'call-1', conn })).toEqual({ recorded: false, reason: 'no_phone' });
@@ -234,7 +270,11 @@ describe('visit-level pre-check (callbackNumberHoldActiveForVisit / ConfirmedFor
       disclaimed_number_holds: [holdRow()],
     }));
     expect(await AppointmentReminders.callbackNumberHoldActiveForVisit('svc-1')).toBe(true);
-    expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBe(true);
+    // Round 8 P1 (changed expectation): a held NUMBER alone is not proof
+    // THIS visit was booked under callback_number_needed — this visit has
+    // no stamp and no source call, so the card-request email-only reader
+    // does not confirm it (see the round-8 describe below).
+    expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBe(false);
   });
 
   test('a customer whose phone was CHANGED to an unheld number is not held — even though the old number stays held', async () => {
@@ -301,6 +341,92 @@ describe('visit-level pre-check (callbackNumberHoldActiveForVisit / ConfirmedFor
     }, { failTables: { disclaimed_number_holds: new Error('db down') } }));
     expect(await AppointmentReminders.callbackNumberHoldActiveForVisit('svc-1')).toBe(true);
     expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBeNull();
+  });
+});
+
+// Codex round 8 P1: callbackNumberHoldConfirmedForVisit (the card-request
+// email-only gate) requires THIS visit's own evidence, not just any active
+// hold on the number on file.
+describe('callbackNumberHoldConfirmedForVisit — visit evidence (round 8 P1)', () => {
+  const STAMP = new Date('2026-09-25T14:00:00Z');
+  const visitRow = (overrides = {}) => ({
+    id: 'svc-1', customer_id: 'cust-1', visit_id: null, source_call_log_id: 'call-A',
+    callback_number_hold_at: STAMP, call_sms_cleared_at: null, ...overrides,
+  });
+  const holdRow = (overrides = {}) => ({ id: 'h1', phone_e164: HELD, source_call_log_id: 'call-A', cleared_at: null, ...overrides });
+
+  test('stamped visit + an active row from its OWN source call on the phone on file → confirmed', async () => {
+    wire(makeFakeDb({
+      scheduled_services: [visitRow()],
+      customers: [{ id: 'cust-1', phone: '941-555-1234' }],
+      disclaimed_number_holds: [holdRow()],
+    }));
+    expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBe(true);
+  });
+
+  test('the number is held only by ANOTHER call → not confirmed (visit suppressed for some other reason)', async () => {
+    wire(makeFakeDb({
+      scheduled_services: [visitRow({ source_call_log_id: 'call-A', callback_number_hold_at: null })],
+      customers: [{ id: 'cust-1', phone: HELD }],
+      disclaimed_number_holds: [holdRow({ source_call_log_id: 'call-B' })],
+    }));
+    // The SMS pre-check still holds the number…
+    expect(await AppointmentReminders.callbackNumberHoldActiveForVisit('svc-1')).toBe(true);
+    // …but nothing proves THIS visit's delivery:'none' was that hold.
+    expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBe(false);
+  });
+
+  test('stamped visit, but the only active row on this number is from a different call → not confirmed', async () => {
+    wire(makeFakeDb({
+      scheduled_services: [visitRow()],
+      customers: [{ id: 'cust-1', phone: HELD }],
+      disclaimed_number_holds: [holdRow({ source_call_log_id: 'call-A', cleared_at: new Date() }), holdRow({ id: 'h2', source_call_log_id: 'call-B' })],
+    }));
+    expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBe(false);
+  });
+
+  test('a call-level clearance newer than the stamp → not confirmed', async () => {
+    wire(makeFakeDb({
+      scheduled_services: [visitRow({ call_sms_cleared_at: new Date(STAMP.getTime() + 1000) })],
+      customers: [{ id: 'cust-1', phone: HELD }],
+      disclaimed_number_holds: [holdRow()],
+    }));
+    expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBe(false);
+  });
+
+  test('no source call on the visit → not confirmed', async () => {
+    wire(makeFakeDb({
+      scheduled_services: [visitRow({ source_call_log_id: null })],
+      customers: [{ id: 'cust-1', phone: HELD }],
+      disclaimed_number_holds: [holdRow()],
+    }));
+    expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBe(false);
+  });
+});
+
+// Codex round 8 P1: hold-read failures log a code/name only — a Knex
+// err.message can render the SQL and the bound phone_e164.
+describe('hold-read failure logs carry no phone number (round 8 P1)', () => {
+  const logger = require('../services/logger');
+  const leaky = () => Object.assign(
+    new Error(`select "id" from "disclaimed_number_holds" where "phone_e164" = '${HELD}' - connection terminated`),
+    { code: '57P01' },
+  );
+  const allLogText = () => [...logger.warn.mock.calls, ...logger.error.mock.calls, ...logger.info.mock.calls]
+    .map((args) => args.map(String).join(' ')).join('\n');
+
+  test('callbackNumberHoldActiveForVisit / ConfirmedForVisit / disclaimedNumberBlocksSend', async () => {
+    wire(makeFakeDb({
+      scheduled_services: [{ id: 'svc-1', customer_id: 'cust-1', visit_id: null }],
+      customers: [{ id: 'cust-1', phone: HELD }],
+    }, { failTables: { disclaimed_number_holds: leaky() } }));
+    expect(await AppointmentReminders.callbackNumberHoldActiveForVisit('svc-1')).toBe(true);
+    expect(await AppointmentReminders.callbackNumberHoldConfirmedForVisit('svc-1')).toBeNull();
+    expect(await Holds.disclaimedNumberBlocksSend({ to: HELD })).toBe(true);
+    const text = allLogText();
+    expect(text).toContain('57P01');
+    expect(text).not.toContain('5551234');
+    expect(text).not.toContain('phone_e164');
   });
 });
 

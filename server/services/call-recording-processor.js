@@ -8691,14 +8691,27 @@ const CallRecordingProcessor = {
     // this decision. A failure fails the pass closed (the capped
     // extraction_failed retry) — code/name only in the log (a Knex message
     // can render the bound phone number).
+    //
+    // Round 8 P1: the write is FENCED to this pass's processing claim —
+    // armDisclaimedNumberHold verifies processing_token (+ generation)
+    // with a FOR UPDATE on call_log inside the same transaction as the
+    // insert (lock order: triage advisory lock → call_log row → hold row,
+    // the mintEmailReviewCardsFenced order; /resolve takes the advisory
+    // lock first too). A superseded worker writes nothing and gets false
+    // back: the caller abandons the pass (abandonToPeer), the same
+    // outcome as the stillOwnsClaim boundaries — it must never arm, or
+    // re-arm over a human clearance, from a stale extraction.
     let callbackNumberHoldArmed = false;
     const armCallbackNumberHoldAtDecision = async () => {
-      if (callbackNumberHoldArmed) return;
+      if (callbackNumberHoldArmed) return true;
       try {
-        await require('./disclaimed-number-holds').armDisclaimedNumberHold({
+        const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
           phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
+          procToken, procGeneration,
         });
+        if (armed?.claimLost) return false;
         callbackNumberHoldArmed = true;
+        return true;
       } catch (holdErr) {
         const code = holdErr.code || holdErr.name || 'db_error';
         logger.error(`[call-proc] disclaimed-number hold write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
@@ -9128,7 +9141,8 @@ const CallRecordingProcessor = {
             callbackNumberNeededHoldActive = true;
             // Round 7 P1: persisted NOW — before the route decision, the
             // advisory card below, and anything else this pass awaits.
-            await armCallbackNumberHoldAtDecision();
+            // Round 8 P1: a lost claim abandons the pass (nothing written).
+            if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
           }
 
           const routeDecision = buildRouteDecision({
@@ -9432,7 +9446,8 @@ const CallRecordingProcessor = {
           callbackNumberNeededHoldActive = true;
           // Round 7 P1: persisted NOW — before the bridge files the card
           // below and before any further awaited work.
-          await armCallbackNumberHoldAtDecision();
+          // Round 8 P1: a lost claim abandons the pass (nothing written).
+          if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
         }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the

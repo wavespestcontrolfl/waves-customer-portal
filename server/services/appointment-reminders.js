@@ -378,7 +378,9 @@ async function callbackNumberHoldActiveForVisit(idsOrScheduledServiceId) {
   try {
     return await require('./disclaimed-number-holds').disclaimedNumberHeldForVisit(idsOrScheduledServiceId);
   } catch (err) {
-    logger.warn(`[appt-remind] callback-number hold read failed — failing CLOSED (treating as held): ${err.message}`);
+    // Code/name only (codex round 8 P1): a Knex err.message can render the
+    // SQL with the bound phone_e164.
+    logger.warn(`[appt-remind] callback-number hold read failed — failing CLOSED (treating as held): ${err.code || err.name || 'db_error'}`);
     return true;
   }
 }
@@ -393,11 +395,21 @@ async function callbackNumberHoldActiveForVisit(idsOrScheduledServiceId) {
 // transient read error must never be read as a proven callback-number hold.
 // Returns true (confirmed held), false (confirmed not held — including "no
 // visit context"), or null (read failed — treat as NOT authorized).
+//
+// Round 8 P1 (codex, PR #4807): the global number hold alone no longer
+// proves THIS visit was booked under callback_number_needed — the number
+// can be held by another call/customer while this visit's delivery:'none'
+// came from something else (no SMS consent). "Confirmed" now also requires
+// the visit's own evidence (disclaimedNumberHoldEvidenceForVisit: the
+// uncleared callback_number_hold_at stamp AND an active hold row from the
+// visit's own source call on the phone we would text).
 async function callbackNumberHoldConfirmedForVisit(idsOrScheduledServiceId) {
   try {
-    return await require('./disclaimed-number-holds').disclaimedNumberHeldForVisit(idsOrScheduledServiceId);
+    const holds = require('./disclaimed-number-holds');
+    if (!(await holds.disclaimedNumberHeldForVisit(idsOrScheduledServiceId))) return false;
+    return (await holds.disclaimedNumberHoldEvidenceForVisit(idsOrScheduledServiceId)) === true;
   } catch (err) {
-    logger.warn(`[appt-remind] callback-number hold read failed — returning UNKNOWN (not authorizing the email-only path): ${err.message}`);
+    logger.warn(`[appt-remind] callback-number hold read failed — returning UNKNOWN (not authorizing the email-only path): ${err.code || err.name || 'db_error'}`);
     return null;
   }
 }

@@ -294,13 +294,16 @@ describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the
  * (the decision points live inline in processRecording).
  */
 describe('round-7 P1 — the number hold is persisted when the flag is decided', () => {
-  const ARM = 'await armCallbackNumberHoldAtDecision();';
+  // Round 8 P1: the call now sits in `if (!(await …())) return abandonToPeer(…)`
+  // (a lost processing claim abandons the pass) — match the awaited call.
+  const ARM = 'await armCallbackNumberHoldAtDecision()';
 
   test('the decision-point helper arms through armDisclaimedNumberHold and fails the pass closed', () => {
     const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async () => {');
     expect(idx).toBeGreaterThan(-1);
     const body = src.slice(idx, src.indexOf('\n    };', idx));
-    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*\}\)/);
+    // Round 8 P1: the write now carries the pass's processing claim.
+    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*procToken, procGeneration,\s*\}\)/);
     expect(body).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
     expect(body).toMatch(/throw failClosed;/);
     expect(body).not.toMatch(/holdErr\.message/);
@@ -353,5 +356,26 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
     const fbBody = src.slice(fb, src.indexOf('if (!holdStampFailed)', fb));
     expect(fbBody.indexOf('ensureDisclaimedNumberHold')).toBeLessThan(fbBody.indexOf("db('scheduled_services')"));
     expect(fbBody).toMatch(/if \(!\(numberHold\.recorded && numberHold\.active === false\)\) await db\('scheduled_services'\)/);
+  });
+});
+
+/**
+ * Codex round 8 P1 (PR #4807): the decision-point write is fenced to the
+ * pass's processing claim (verified in the same transaction as the insert —
+ * see disclaimed-number-holds.js), and a lost claim abandons the pass the
+ * same way the stillOwnsClaim boundaries do.
+ */
+describe('round-8 P1 — the decision-point write is fenced to the processing claim', () => {
+  test('the helper reports a lost claim (false) without marking the hold armed', () => {
+    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async () => {');
+    const body = src.slice(idx, src.indexOf('\n    };', idx));
+    expect(body).toMatch(/if \(armed\?\.claimLost\) return false;/);
+    expect(body.indexOf('if (armed?.claimLost) return false;')).toBeLessThan(body.indexOf('callbackNumberHoldArmed = true;'));
+  });
+
+  test('both decision points abandon the pass on a lost claim', () => {
+    const sites = src.match(/if \(!\(await armCallbackNumberHoldAtDecision\(\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);/g) || [];
+    expect(sites).toHaveLength(2);
+    expect(src.match(/armCallbackNumberHoldAtDecision\(\)/g)).toHaveLength(2);
   });
 });

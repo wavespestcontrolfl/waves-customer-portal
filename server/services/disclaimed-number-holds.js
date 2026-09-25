@@ -84,12 +84,38 @@ async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId,
  * raising the flag again); a later clearance wins over every later write
  * in the pass (ensureDisclaimedNumberHold). Throws on DB error — the
  * processor fails the pass closed.
+ *
+ * Round 8 P1 — fenced to the processing claim. A superseded worker (its
+ * heartbeat failed, the call was reclaimed and completed by a peer, or an
+ * operator resolved the card in between) must not arm — or RE-arm over a
+ * human clearance — from its stale extraction. With `procToken` (and
+ * `procGeneration` when known) the transaction verifies the active claim
+ * with `SELECT … FROM call_log WHERE id = ? AND processing_token = ?
+ * [AND processing_generation = ?] FOR UPDATE` BEFORE the insert; no match
+ * returns { recorded: false, claimLost: true } with nothing written, and the
+ * processor abandons the pass exactly like its stillOwnsClaim boundaries.
+ * Holding the call_log row lock through the insert means a reclaim's token
+ * rotation queues behind this write instead of racing it.
+ *
+ * LOCK ORDER (same as mintEmailReviewCardsFenced): per-call triage advisory
+ * lock → call_log row (FOR UPDATE) → disclaimed_number_holds row. /resolve
+ * and /verdict take the same advisory lock FIRST, so whatever rows they
+ * touch after it (triage_items, scheduled_services, disclaimed_number_holds)
+ * are only ever reached by one of the two at a time — no deadlock cycle.
  */
-async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, conn = db }) {
+async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, procToken = null, procGeneration = null, conn = db }) {
   if (!holdPhoneKey(phone) || !callLogId) return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
   const { lockTriageCall } = require('../utils/triage-locks');
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
+    if (procToken) {
+      const claim = trx('call_log')
+        .where({ id: callLogId })
+        .where('processing_token', procToken);
+      if (procGeneration != null) claim.where('processing_generation', procGeneration);
+      const owned = await claim.forUpdate().first('id');
+      if (!owned) return { recorded: false, claimLost: true };
+    }
     return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn: trx });
   });
 }
@@ -234,8 +260,49 @@ async function disclaimedNumberHeldForVisit(idsOrScheduledServiceId, conn = db) 
   return false;
 }
 
+/**
+ * VISIT evidence for the card-request email-only path (codex round 8 P1,
+ * PR #4807). disclaimedNumberHeldForVisit answers "is the number we would
+ * text for this visit held by ANY call?" — right for an SMS pre-check, but
+ * not proof that THIS visit's delivery:'none' came from a
+ * callback_number_needed hold. A visit suppressed for a different reason
+ * (no SMS consent) whose customer happens to share a number another call
+ * disclaimed must stay silent, not mint a /secure token and email a card
+ * invitation. True only when BOTH hold:
+ *   - the visit carries the processor's audit stamp for this hold
+ *     (callback_number_hold_at set, and no later call-level clearance:
+ *     call_sms_cleared_at is null or older than the stamp) — it was booked
+ *     under callback_number_needed; and
+ *   - the visit's OWN source call has an ACTIVE hold row on the phone
+ *     currently on file for the visit's customer — the number the visit's
+ *     SMS leg would use is the one that call disclaimed.
+ * Plain scheduledServiceId or { scheduledServiceId }. THROWS on a read
+ * error (the caller maps it to "not confirmed").
+ */
+async function disclaimedNumberHoldEvidenceForVisit(idsOrScheduledServiceId, conn = db) {
+  const scheduledServiceId = typeof idsOrScheduledServiceId === 'string'
+    ? idsOrScheduledServiceId
+    : idsOrScheduledServiceId?.scheduledServiceId;
+  if (!scheduledServiceId) return false;
+  const visit = await conn('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .first('customer_id', 'source_call_log_id', 'callback_number_hold_at', 'call_sms_cleared_at');
+  if (!visit || !visit.customer_id || !visit.source_call_log_id || !visit.callback_number_hold_at) return false;
+  const heldAt = new Date(visit.callback_number_hold_at).getTime();
+  if (visit.call_sms_cleared_at && new Date(visit.call_sms_cleared_at).getTime() >= heldAt) return false;
+  const customer = await conn('customers').where({ id: visit.customer_id }).first('phone');
+  const phoneE164 = holdPhoneKey(customer?.phone);
+  if (!phoneE164) return false;
+  const row = await conn(TABLE)
+    .where({ phone_e164: phoneE164, source_call_log_id: visit.source_call_log_id })
+    .whereNull('cleared_at')
+    .first('id');
+  return !!row;
+}
+
 module.exports = {
   holdPhoneKey,
+  disclaimedNumberHoldEvidenceForVisit,
   recordDisclaimedNumberHold,
   armDisclaimedNumberHold,
   ensureDisclaimedNumberHold,

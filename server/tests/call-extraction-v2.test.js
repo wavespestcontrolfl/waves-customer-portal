@@ -1224,6 +1224,69 @@ describe('extraction compat adapter', () => {
         { ani: '+19415550100' },
       )).toBe(true);
     });
+
+    // Codex round 8 P1: the caller REPEATS the shared office number aloud
+    // while saying it isn't theirs. The schema records that as
+    // phone_source 'both' (spoken AND matches the ANI) — or the model may
+    // call it 'spoken' — with phone_e164 === the ANI. That is not a
+    // replacement callback: the hold and the card must still happen.
+    describe('ANI repeated aloud (round 8 P1)', () => {
+      const ANI = '+19415550100';
+
+      test('spoken + a DISTINCT number → not needed (a real replacement callback)', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+12395557788' },
+          { ani: ANI },
+        )).toBe(false);
+      });
+
+      test('both + a number EQUAL to the ANI → still needed', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'both', phone_e164: ANI },
+          { ani: ANI },
+        )).toBe(true);
+      });
+
+      test('spoken + a number equal to the ANI → still needed', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: ANI },
+          { ani: ANI },
+        )).toBe(true);
+      });
+
+      test('equality is on the E.164 form, not the raw string', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '(941) 555-0100' },
+          { ani: '19415550100' },
+        )).toBe(true);
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'both', phone_e164: '+19415550100' },
+          { ani: '941-555-0100' },
+        )).toBe(true);
+      });
+
+      test('a one/two-digit near miss of the ANI is the same number (the processor keeps the ANI for it)', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+19415550109' },
+          { ani: ANI },
+        )).toBe(true);
+      });
+
+      test('no dialable ANI to compare: spoken/both still count, caller_id still fails closed', () => {
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+12395557788' },
+          { ani: 'anonymous' },
+        )).toBe(false);
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'both', phone_e164: '+12395557788' },
+          { ani: null },
+        )).toBe(false);
+        expect(callerIdDisclaimedNeedsCallback(
+          { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+12395557788' },
+          { ani: 'anonymous' },
+        )).toBe(true);
+      });
+    });
   });
 
   // callerIdDisclaimedNoteText (schema 1.14.0, live miss 2026-09-25, call

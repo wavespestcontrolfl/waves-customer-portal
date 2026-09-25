@@ -254,4 +254,17 @@ describe('callback_number_needed — disclaimed caller ID with no spoken callbac
     );
     expect(flags).toContain('callback_number_needed');
   });
+
+  // Codex round 8 P1: the caller repeats the shared office number aloud
+  // while saying it isn't theirs — 'both' (spoken AND matches the ANI) or
+  // 'spoken' with phone_e164 equal to the call's ANI is not a replacement.
+  test('ANI repeated aloud (both / spoken, equal to the ANI) still raises the flag', () => {
+    for (const phone_source of ['both', 'spoken']) {
+      const flags = computeDeterministicTriageFlags(
+        v2({ caller: { caller_id_disclaimed: true, phone_source, phone_e164: ANI } }),
+        { contactPhone: '(941) 555-0100' },
+      );
+      expect(flags).toContain('callback_number_needed');
+    }
+  });
 });

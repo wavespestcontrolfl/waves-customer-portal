@@ -1,4 +1,5 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
+const { toE164, isLikelyE164 } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
@@ -13,13 +14,6 @@ function isDialablePhone(value) {
   return String(value).replace(/\D/g, '').length >= 10;
 }
 
-// last-10-digit comparator — same convention used throughout
-// call-recording-processor.js (its several inline `last10` helpers) for
-// comparing two phone strings regardless of formatting/country-code prefix.
-function last10Digits(value) {
-  return String(value || '').replace(/\D/g, '').slice(-10);
-}
-
 // Pure predicate: did THIS caller disclaim the ANI as not their own with no
 // spoken callback number backing it up? Single source of truth (schema
 // 1.14.0) — computeDeterministicTriageFlags derives callback_number_needed
@@ -28,30 +22,57 @@ function last10Digits(value) {
 // csr-coach.js) calls this instead of re-deriving the condition, so a
 // future refinement here can't silently desync from the flag.
 //
-// Requires EVIDENCE that a callback was actually spoken (Codex round-1 P1):
-// a schema-valid model response can set caller_id_disclaimed:true,
-// phone_source:'caller_id', and copy the disclaimed ANI straight into
-// phone_e164 — that is the model faithfully recording caller ID, not a
-// callback the caller spoke. A bare "phone_e164 present" check let that
-// shape silently clear the flag and send the confirmation/reminder SMS to
-// the exact number the caller just said isn't theirs. The disclaimer is now
-// unresolved (returns true) unless phone_e164 is a real, dialable number
-// AND either:
-//   (a) phone_source is 'spoken' or 'both' — the MODEL heard the caller say
-//       a number themselves, independent of the ANI, or
-//   (b) phone_e164 is PROVABLY DIFFERENT from the call's own ANI (opts.ani)
-//       — a caller_id-sourced number that doesn't even match the ANI can't
-//       be the model echoing caller ID back; it's some other number on the
-//       extraction (e.g. adopted from a prior call/customer record).
-// With no ANI available to compare against, (b) can never clear the hold —
-// fails closed to "still needed", same posture as a missing phone_e164.
+// Requires EVIDENCE of a DIFFERENT callback number (Codex round-1 P1,
+// tightened round 8 P1). A schema-valid model response can set
+// caller_id_disclaimed:true and still put the disclaimed ANI in phone_e164 —
+// under phone_source 'caller_id' (the model recording caller ID), and ALSO
+// under 'spoken'/'both' when the caller simply repeats the shared office
+// number aloud while saying it isn't theirs (the schema defines 'both' as a
+// spoken number that MATCHES the ANI). Neither is a replacement callback:
+// treating it as one cleared the flag, so no card and no hold, and the
+// confirmation/reminder SMS went to the exact number the caller disclaimed.
+//
+// The disclaimer is therefore unresolved (returns true) unless phone_e164
+// is a real, dialable number AND:
+//   - with a dialable ANI (opts.ani): phone_e164 is DISTINCT from it, both
+//     normalized to E.164 — whatever phone_source says. A number within one
+//     or two digits of the ANI counts as the SAME number (the processor's
+//     resolveCallContactPhone keeps the ANI for such a near miss, so the
+//     SMS would go to the disclaimed number anyway).
+//   - with no dialable ANI to compare (nothing to repeat aloud): the
+//     round-1 rule stands — phone_source 'spoken'/'both' counts as a
+//     callback the caller spoke; 'caller_id'/unknown fails closed to
+//     "still needed".
+function comparablePhoneKey(value) {
+  const e164 = toE164(value);
+  if (typeof e164 === 'string' && isLikelyE164(e164)) return e164.replace(/\D/g, '');
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits : null;
+}
+
+// Same rule as call-recording-processor.js's phoneNearMissOfAni: equal
+// length, same prefix, last 7 digits differing in 1–2 places.
+function nearMissPhoneKeys(a, b) {
+  if (!a || !b || a === b || a.length !== b.length || a.length < 10) return false;
+  if (a.slice(0, -7) !== b.slice(0, -7)) return false;
+  let diff = 0;
+  for (let i = 1; i <= 7; i += 1) if (a[a.length - i] !== b[b.length - i]) diff += 1;
+  return diff > 0 && diff <= 2;
+}
+
+function sameCallbackAsAni(phone, ani) {
+  const a = comparablePhoneKey(phone);
+  const b = comparablePhoneKey(ani);
+  if (!a || !b) return true; // uncomparable — fail closed to "same"
+  return a === b || nearMissPhoneKeys(a, b);
+}
+
 function callerIdDisclaimedNeedsCallback(caller, opts = {}) {
   if (!caller || caller.caller_id_disclaimed !== true) return false;
   if (!isDialablePhone(caller.phone_e164)) return true;
-  if (caller.phone_source === 'spoken' || caller.phone_source === 'both') return false;
   const ani = opts.ani;
-  if (isDialablePhone(ani) && last10Digits(caller.phone_e164) !== last10Digits(ani)) return false;
-  return true;
+  if (isDialablePhone(ani)) return sameCallbackAsAni(caller.phone_e164, ani);
+  return !(caller.phone_source === 'spoken' || caller.phone_source === 'both');
 }
 
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
