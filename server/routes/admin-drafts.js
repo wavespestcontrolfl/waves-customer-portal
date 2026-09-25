@@ -576,6 +576,16 @@ async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id
     };
     return { blocked: false, preDispatchCheck: lateCheck, preProviderCheck: lateCheck };
   }
+  if (verdict.blocked === 'pre_gauge') {
+    // Old universal copy with nothing to recheck: the owner revises it
+    // (still allowed for these) or rejects it.
+    await releaseDraftClaim(draft.id);
+    res.status(409).json({
+      error: 'This photo-triage draft predates the opportunity check — revise it before sending, or reject it.',
+      code: 'PHOTO_TRIAGE_PRE_GAUGE',
+    });
+    return { blocked: true };
+  }
   if (verdict.blocked === 'recipient_changed') {
     // Nothing stored can be patched into shape: the copy itself (lead
     // on-site ask, quote ask) was chosen for another audience.
@@ -1098,7 +1108,10 @@ router.put('/:id/revise', async (req, res, next) => {
     // free operator wording is not something a text parser can hold to the
     // no-price / no-pitch-an-owned-family rules. Refused before any send
     // work; the claim goes back with the edit cleared.
-    if (draft.intent === 'photo_triage') {
+    // Only gauge-written drafts (flags.gauge_version); an older or
+    // hand-written photo-triage draft stays revisable (codex #4810 r14).
+    const { isGaugedDraft } = require('../services/photo-triage-opportunity');
+    if (draft.intent === 'photo_triage' && isGaugedDraft(parseFlags(draft.flags))) {
       await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
       return res.status(409).json({
         error: 'Photo-triage drafts can be approved as written or rejected, not revised — reject it and reply from the conversation.',

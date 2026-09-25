@@ -114,7 +114,9 @@ const TREATMENT_SUBJECT = '(?:spray\\w*|treat\\w*|product|remedy|application|pes
 // rid") say nothing about a TREATMENT on their own — "this patch keeps
 // coming back every year" attempted nothing — so they need the treatment
 // subject in the same sentence, on either side (codex #4810 r9).
-const RECURRENCE = '(?:won.?t go away|(?:can.?t|couldn.?t) get rid|keeps coming back|still (?:there|here) after)';
+// Plain "still there" counts once bound to a treatment subject ("we treated
+// it and it's still there", codex #4810 r14); alone it still reads nothing.
+const RECURRENCE = '(?:won.?t go away|(?:can.?t|couldn.?t) get rid|keeps coming back|still (?:there|here))';
 const PRIOR_TREATMENT_RE = new RegExp(`\\b(?:${TREATMENT_SUBJECT}\\b[^.!?]{0,40}\\b(?:(?:didn.?t|did not) work|${RECURRENCE})|${RECURRENCE}\\b[^.!?]{0,40}\\b${TREATMENT_SUBJECT}|couldn.?t (?:fix|kill|stop|control|treat|clear))\\b`, 'i');
 // "our lawn guy/company ... failed [to fix it]" — a wider gap between the
 // subject and the verdict, and the one failure word (failed) the plain list
@@ -139,7 +141,9 @@ function priorTreatmentFailed(body) {
 // for this mapping — photo-text-triage.js reads the resolved label through
 // outcomeFor()/gaugeOpportunity() rather than keeping its own copy.
 const TREE_SHRUB_SIGNAL_PHRASE = {
-  water_heat_mechanical_stress: 'water or heat stress',
+  // The category is the worse of water/heat and pruning/mechanical, so the
+  // phrase names all three (codex #4810 r14).
+  water_heat_mechanical_stress: 'water, heat, or pruning stress',
   pest_activity: 'pest-pressure signals',
   disease_leaf_spot: 'leaf-spot signals',
   foliage_fullness: 'thin foliage',
@@ -399,6 +403,14 @@ function draftPitches(flags) {
     || (flags.opportunity_mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
 }
 
+// Drafts the gauge wrote carry flags.gauge_version (photo-text-triage.js).
+// Only those are approve-as-written; an older or hand-written photo-triage
+// draft stays revisable and is held at approve.
+const GAUGE_VERSION = 1;
+function isGaugedDraft(flags) {
+  return flags?.gauge_version === GAUGE_VERSION;
+}
+
 // Whether the draft's audience moved since it was gauged: a different (or
 // newly linked) customer, or the same row crossing the lead/customer line
 // (a lead converted while an onsite "before quoting" draft sat pending —
@@ -429,6 +441,10 @@ async function audienceChanged(customerId, flags) {
 // Throws on a lookup failure — the caller fails closed (draft left pending).
 async function recheckDraftOffer({ customerId, flags }) {
   if (!flags || flags.origin !== 'photo_triage') return { ok: true };
+  // A draft written before this gauge (or by hand) carries none of the
+  // verdict fields — its copy is the old universal on-site/quote ask and
+  // nothing stored can be rechecked, so it is held (codex #4810 r14).
+  if (!isGaugedDraft(flags)) return { blocked: 'pre_gauge', family: null };
   const family = flags.offer_family || null;
   // The whole stored verdict (lead vs customer, onsite vs pitch, which
   // family could be checked) was computed for the customer the draft was
@@ -476,6 +492,8 @@ function replacePriceContext(contextSummary, sentence) {
 module.exports = {
   gaugeOpportunity,
   recheckDraftOffer,
+  isGaugedDraft,
+  GAUGE_VERSION,
   stripQuotePitch,
   priceContextSentence,
   replacePriceContext,

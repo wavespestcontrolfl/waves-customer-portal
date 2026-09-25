@@ -119,7 +119,7 @@ async function withServer(fn) {
 }
 
 const PHOTO_FLAGS = {
-  origin: 'photo_triage', assessment_type: 'tree_shrub', offer_family: 'tree_shrub', opportunity_mode: 'quote',
+  origin: 'photo_triage', gauge_version: 1, assessment_type: 'tree_shrub', offer_family: 'tree_shrub', opportunity_mode: 'quote',
   opportunity_reasons: ['actionable', 'quoted'], quote: { service: 'tree_shrub', per_visit: 83.33 },
   toPhone: '+19415550142',
 };
@@ -366,5 +366,40 @@ describe('revise — photo-triage drafts are approve-as-written (codex #4810 r7�
     const release = updates[updates.length - 1].payload;
     expect(release).toMatchObject({ status: 'pending', revised_response: null, final_response: null });
     expect(release).not.toHaveProperty('draft_response');
+  });
+});
+
+describe('pre-gauge photo-triage drafts (no gauge_version) stay revisable and are held at approve (codex #4810 r14)', () => {
+  const LEGACY_FLAGS = JSON.stringify({ origin: 'photo_triage', assessment_type: 'pest', assessment_id: 'a1', toPhone: '+19415550142' });
+
+  test('approve → 409 PHOTO_TRIAGE_PRE_GAUGE, claim released, nothing sent', async () => {
+    enqueue('message_drafts', { returning: [photoDraft({ flags: LEGACY_FLAGS })] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
+    enqueue('message_drafts', { update: 1 });
+    mockRecheck.mockResolvedValue({ blocked: 'pre_gauge', family: null });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('PHOTO_TRIAGE_PRE_GAUGE');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates[updates.length - 1].payload.status).toBe('pending');
+  });
+
+  test('revise is NOT refused for them — the owner can rewrite the old copy', async () => {
+    enqueue('message_drafts', { returning: [photoDraft({ status: 'revised', flags: LEGACY_FLAGS })] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
+    enqueue('message_drafts', { update: 1 });
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM9' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/revise`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Thanks for the photo. That looks like an ant species. Reply if you have questions.' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 });

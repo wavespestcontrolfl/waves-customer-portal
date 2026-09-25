@@ -218,14 +218,20 @@ function countTokens(lower, tokens) {
 // surround it — the identifier already reads the plant context (codex #4810
 // r1). Everything else, including 0-0 (a question with no subject word),
 // runs the pest identifier, same default as always.
-// A named lawn-soil pest spelled with a generic pest noun ("chinch bug")
-// is ONE lawn subject — its "bug" must not tie the lawn word and send the
-// photo to the pest identifier (codex #4810 r11).
-const LAWN_PEST_PHRASE_RE = /\bchinch bugs?\b/g;
+// Lawn-soil pest names customers spell as two words collapse to the one
+// lawn token before counting: "chinch bug" must not let its "bug" tie the
+// lawn word (codex #4810 r11), and "army worm" / "sod web worm" must match
+// the armyworm/webworm lawn words at all (r14).
+const LAWN_PEST_PHRASES = [
+  [/\bchinch bugs?\b/g, 'chinch'],
+  [/\barmy worms?\b/g, 'armyworm'],
+  [/\b(?:sod )?web worms?\b/g, 'webworm'],
+];
 
-function photoAssessmentType(lower) {
+function photoAssessmentType(rawLower) {
+  const lower = LAWN_PEST_PHRASES.reduce((text, [re, token]) => text.replace(re, token), rawLower);
   const lawnScore = countTokens(lower, PHOTO_LAWN_WORDS);
-  const pestScore = countTokens(lower.replace(LAWN_PEST_PHRASE_RE, 'chinch'), PHOTO_PEST_WORDS);
+  const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
   const treeShrubScore = countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
   if (lawnScore > pestScore + treeShrubScore) return 'lawn';
   if (treeShrubScore > 0 && pestScore === 0) {

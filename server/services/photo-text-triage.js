@@ -74,7 +74,7 @@ const {
 const { isSignableStoredMediaKey } = require('./sms-media');
 const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 const { countSegments } = require('./messaging/segment-counter');
-const { gaugeOpportunity, teaserOutcome, outcomeFor, priceContextSentence } = require('./photo-triage-opportunity');
+const { gaugeOpportunity, teaserOutcome, outcomeFor, priceContextSentence, GAUGE_VERSION } = require('./photo-triage-opportunity');
 const { safePublicFirstName } = require('../utils/public-report-egress');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
@@ -199,21 +199,6 @@ async function releaseVisionSlot(messageId) {
     .catch((err) => logger.error(`[photo-triage] vision slot release failed for message ${messageId}: ${err.message}`));
 }
 
-// One short piece of fixed advice per tree/shrub worst_signal — never model
-// text, so the copy can't drift or overclaim. Empty for lawn/pest (their own
-// teaser label already carries the finding) and for signals with no simple
-// fixed tip. water_heat_mechanical_stress covers three distinct causes
-// (water, heat, AND pruning) — a single prescriptive fix ("pull mulch back
-// and water deep") would be wrong for the other two, so the copy stays
-// observational and lets the reply/quote ask do the rest (codex review
-// 2026-09-25).
-const TREE_SHRUB_ADVICE = {
-  // No "rather than a pest or disease": worst_signal is only the LOWEST
-  // category — pest/disease can be flagged in the same assessment (codex
-  // #4810 r2).
-  water_heat_mechanical_stress: 'It looks like stress from water, heat, or pruning.',
-};
-
 // "it's {label}." — the SAME resolved label the opportunity gauge itself
 // reasons over (photo-triage-opportunity.js#outcomeFor: lawn/pest via the
 // allowlisted teaser, tree_shrub via its own worst_signal phrase map). One
@@ -224,11 +209,6 @@ function messageLabel(type, analysis) {
   return outcomeFor(type, analysis).label;
 }
 
-function messageAdvice(type, analysis) {
-  if (type !== 'tree_shrub') return '';
-  return TREE_SHRUB_ADVICE[analysis?.worst_signal] || '';
-}
-
 function joinSentences(parts) {
   return parts.filter(Boolean).join(' ');
 }
@@ -237,13 +217,16 @@ const QUOTE_SERVICE_LABEL = { tree_shrub: 'tree & shrub', lawn_care: 'lawn', pes
 
 // The sentences after the greeting, keyed by the opportunity gauge's mode
 // (owner ruling 2026-09-25 — see photo-triage-opportunity.js). Fixed copy +
-// an allowlisted label/advice/quote only, and nothing Approve does not
+// an allowlisted label/quote only, and nothing Approve does not
 // deliver: approving sends only this text (no report, no link — staff mint
 // the report link from the draft's View assessment link). Pure — takes the
-// already-resolved label/advice rather than re-deriving them, so it (and the
+// already-resolved label rather than re-deriving them, so it (and the
 // "every real label fits in two segments" regression tests) never need a
 // real photo-analysis fixture.
-function composeBody({ label, advice, opportunity }) {
+// No separate advice sentence: the tree/shrub label already names the
+// cause ("water, heat, or pruning stress"), and a fixed tip would either
+// repeat it or prescribe one fix for three causes (codex #4810 r14).
+function composeBody({ label, opportunity }) {
   // No safe label → no finding sentence, but an on-site verdict still gets
   // its explanation and scheduling ask (codex #4810 r9); every other mode
   // falls back to the plain look-offer below.
@@ -275,7 +258,7 @@ function composeBody({ label, advice, opportunity }) {
     // OWNER, who adds it (or sends the estimate) when approving.
     const serviceLabel = QUOTE_SERVICE_LABEL[opportunity.quote.service] || 'service';
     const quoteLine = `Want a quote for our ${serviceLabel} program? Just reply yes.`;
-    return joinSentences([lead, advice, quoteLine]);
+    return joinSentences([lead, quoteLine]);
   }
 
   // advise
@@ -291,11 +274,11 @@ function composeBody({ label, advice, opportunity }) {
   const close = harmless
     ? 'No treatment is needed.'
     : noPitch ? 'Reply if you have questions.' : "Reply if you'd like a quote.";
-  return joinSentences([lead, advice, close]);
+  return joinSentences([lead, close]);
 }
 
 function draftBodyText({ type, analysis, opportunity }) {
-  return composeBody({ label: messageLabel(type, analysis), advice: messageAdvice(type, analysis), opportunity });
+  return composeBody({ label: messageLabel(type, analysis), opportunity });
 }
 
 // ≤ MAX_DRAFT_SEGMENTS SMS segments, no link. The first name is dropped
@@ -351,6 +334,9 @@ async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, cr
       assessment_id: created.id,
       message_id: messageId,
       classifier_method: method,
+      // Marks a gauge-written draft: approve-as-written + the dispatch
+      // recheck apply only to these (codex #4810 r14).
+      gauge_version: GAUGE_VERSION,
       opportunity_mode: opportunity.mode,
       opportunity_reasons: opportunity.reasons,
       // The family the gauge checked — the dispatch-time recheck
@@ -519,7 +505,6 @@ module.exports = {
     teaserOutcome,
     buildDraftText,
     messageLabel,
-    messageAdvice,
     draftBodyText,
     composeBody,
     composeDraft,

@@ -362,6 +362,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
       classifier_method: 'regex',
       // CUSTOMER carries no pipeline_stage / property facts in this fixture,
       // so the opportunity gauge lands on advise (lead + no facts to quote).
+      gauge_version: 1,
       opportunity_mode: 'advise',
       opportunity_reasons: ['lead', 'actionable', 'lead_not_priced'],
       // The family the dispatch-time recheck will check (codex #4810 r11).
@@ -508,8 +509,8 @@ describe('draft text builder', () => {
     reasons: ['actionable', 'quoted'],
     quote: { service: 'tree_shrub', label: 'Standard tree & shrub care', option_id: 'tree-standard', per_visit: 83, ...overrides },
   });
-  const draft = (firstName, label, opportunity, advice = '') => composeDraft({
-    firstName, bodyText: composeBody({ label, advice, opportunity }),
+  const draft = (firstName, label, opportunity) => composeDraft({
+    firstName, bodyText: composeBody({ label, opportunity }),
   });
 
   test('advise: actionable offers a quote, harmless says no treatment', () => {
@@ -531,10 +532,9 @@ describe('draft text builder', () => {
   });
 
   test('quote: offers the program by name and NEVER a dollar amount (existing customers are blocked from engine drafting; the price is owner-only context)', () => {
-    const text = draft('Morgan', 'water or heat stress', QUOTE(), 'It looks like stress from water, heat, or pruning.');
+    const text = draft('Morgan', 'water, heat, or pruning stress', QUOTE());
     expect(text).toBe(
-      "Thanks for the photo, Morgan. From what we can see, it's water or heat stress. "
-      + 'It looks like stress from water, heat, or pruning. '
+      "Thanks for the photo, Morgan. From what we can see, it's water, heat, or pruning stress. "
       + 'Want a quote for our tree & shrub program? Just reply yes.',
     );
     expect(text).not.toMatch(/\$\d|\/mo\b|\/yr\b|per month|per year|per visit|per application/i);

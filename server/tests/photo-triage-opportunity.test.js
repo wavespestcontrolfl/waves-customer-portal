@@ -73,6 +73,8 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     'our lawn company tried treating it and it did not work',
     "the spray we put down didn't work",
     'our lawn company failed to fix it twice',
+    // Plain "still there" bound to a treatment subject (codex #4810 r14).
+    "we treated it and it's still there",
   ])('%p reads as prior treatment failed', (body) => expect(priorTreatmentFailed(body)).toBe(true));
 
   // codex review 2026-09-25: "tried"/"treated" ALONE (no failure/recurrence
@@ -478,7 +480,7 @@ describe('gaugeOpportunity', () => {
 describe('recheckDraftOffer', () => {
   beforeEach(() => { mockBuildOffer.mockReset(); mockBuildOffer.mockResolvedValue(null); });
   const FLAGS = (overrides = {}) => ({
-    origin: 'photo_triage', assessment_type: 'tree_shrub', offer_family: 'tree_shrub', opportunity_mode: 'quote',
+    origin: 'photo_triage', gauge_version: 1, assessment_type: 'tree_shrub', offer_family: 'tree_shrub', opportunity_mode: 'quote',
     opportunity_reasons: ['actionable', 'quoted'], quote: { service: 'tree_shrub', per_visit: 83.33 }, ...overrides,
   });
 
@@ -543,6 +545,15 @@ describe('recheckDraftOffer', () => {
     // Still a lead → onsite pitches nothing to recheck.
     mockDb.mockReturnValueOnce({ where: () => ({ first: async () => ({ id: 'c1', active: true, pipeline_stage: 'new_lead' }) }) });
     expect(await recheckDraftOffer({ customerId: 'c1', flags: onsiteLead })).toEqual({ ok: true });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
+  });
+
+  test('a draft written before the gauge (or by hand) is held — nothing stored can be rechecked (codex #4810 r14)', async () => {
+    const legacy = { origin: 'photo_triage', assessment_type: 'tree_shrub', assessment_id: 'a1' };
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: legacy })).toEqual({ blocked: 'pre_gauge', family: null });
+    // A hand-set verdict without the version marker is still pre-gauge.
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: { ...legacy, opportunity_mode: 'quote', quote: { service: 'tree_shrub', per_visit: 84 } } }))
+      .toEqual({ blocked: 'pre_gauge', family: null });
     expect(mockBuildOffer).not.toHaveBeenCalled();
   });
 
