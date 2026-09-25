@@ -485,9 +485,14 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
   // which visit's call disclaimed the old one. call_sms_cleared_at >=
   // callback_number_hold_at by construction (GREATEST), matching the
   // timestamp rule the hold predicate reads (callbackNumberHoldFromRow).
+  // NONTERMINAL, not just pending/confirmed (codex round-3 P2, shared with
+  // admin-triage.js's clearance writer so the two can never drift): a
+  // visit already en_route/on_site is still live and its arrival text must
+  // not stay withheld after the customer's number is corrected.
+  const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('./scheduled-service-statuses');
   counts.callbackNumberHoldsCleared = await conn('scheduled_services')
     .where({ customer_id: customerId })
-    .whereIn('status', ['pending', 'confirmed'])
+    .whereIn('status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
     .whereNotNull('callback_number_hold_at')
     .update({
       call_sms_cleared_at: conn.raw('GREATEST(callback_number_hold_at, now())'),

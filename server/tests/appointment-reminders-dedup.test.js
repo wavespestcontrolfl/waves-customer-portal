@@ -470,8 +470,12 @@ describe('appointment reminder reschedule windows', () => {
     // safeSendAppointment's callback_number_needed hold check (codex round-2
     // finding #7) reads scheduled_services via .select(...), not .first(...)
     // — a 3rd entry, not-held by default (empty result set).
+    // safeSendAppointment's callback_number_needed hold check resolves the
+    // visit group from the service id itself (codex round-3 finding #4)
+    // before reading the hold columns — a 4th entry, ungrouped by default.
+    const ownerLookupQuery = chain({ first: jest.fn().mockResolvedValue({ visit_id: null }) });
     const holdCheckQuery = chain({ select: jest.fn().mockResolvedValue([]) });
-    const scheduledServiceQueries = [chain({ first: jest.fn().mockResolvedValue(null) }), techQuery, holdCheckQuery];
+    const scheduledServiceQueries = [chain({ first: jest.fn().mockResolvedValue(null) }), techQuery, ownerLookupQuery, holdCheckQuery];
     const notificationPrefsQueries = [prefsQuery];
 
     if (sendResult) {

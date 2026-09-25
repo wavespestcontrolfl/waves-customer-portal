@@ -83,6 +83,13 @@ describe('callbackNumberHoldActiveForVisit (finding #3 fail-closed, #5 grouped v
   function chain(result) {
     return { where: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue(result) };
   }
+  // A bare scheduledServiceId (no visitId key at all) triggers the owner
+  // lookup first (finding #4, round 3) before the hold-columns select — an
+  // explicit {scheduledServiceId, visitId} call (the grouped-occurrence
+  // tests below) already supplies the answer and skips it.
+  function mockOwnerLookup(visitId = null) {
+    db.mockReturnValueOnce({ where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ visit_id: visitId }) });
+  }
 
   test('no scheduledServiceId or visitId at all → not held (nothing to check)', async () => {
     expect(await AppointmentReminders.callbackNumberHoldActiveForVisit(null)).toBe(false);
@@ -91,16 +98,38 @@ describe('callbackNumberHoldActiveForVisit (finding #3 fail-closed, #5 grouped v
   });
 
   test('accepts a bare scheduledServiceId string (legacy call shape)', async () => {
+    mockOwnerLookup();
     db.mockReturnValueOnce(chain([{ callback_number_hold_at: new Date(), call_sms_cleared_at: null }]));
     expect(await AppointmentReminders.callbackNumberHoldActiveForVisit('svc-1')).toBe(true);
   });
 
+  test('a bare scheduledServiceId string resolves its visit_id and picks up a held SIBLING (finding #4)', async () => {
+    mockOwnerLookup('visit-group-9');
+    db.mockReturnValueOnce(chain([
+      { callback_number_hold_at: null, call_sms_cleared_at: null },
+      { callback_number_hold_at: new Date(), call_sms_cleared_at: null },
+    ]));
+    expect(await AppointmentReminders.callbackNumberHoldActiveForVisit('svc-owner')).toBe(true);
+  });
+
   test('a read error FAILS CLOSED — treated as held, never as clear-to-text', async () => {
+    mockOwnerLookup();
     db.mockReturnValueOnce({
       where: jest.fn().mockReturnThis(),
       select: jest.fn().mockRejectedValue(new Error('connection reset')),
     });
     expect(await AppointmentReminders.callbackNumberHoldActiveForVisit('svc-1')).toBe(true);
+  });
+
+  test('a failed owner-id lookup FAILS CLOSED too', async () => {
+    db.mockReturnValueOnce({ where: jest.fn().mockReturnThis(), first: jest.fn().mockRejectedValue(new Error('connection reset')) });
+    expect(await AppointmentReminders.callbackNumberHoldActiveForVisit('svc-1')).toBe(true);
+  });
+
+  test('an explicit visitId (even null) skips the owner lookup entirely', async () => {
+    db.mockReturnValueOnce(chain([{ callback_number_hold_at: null, call_sms_cleared_at: null }]));
+    const held = await AppointmentReminders.callbackNumberHoldActiveForVisit({ scheduledServiceId: 'svc-1', visitId: null });
+    expect(held).toBe(false);
   });
 
   test('a grouped occurrence is held if ANY sibling member carries the hold, even when the queried id itself does not', async () => {
@@ -163,7 +192,19 @@ describe('safeSendAppointment — the single send boundary (finding #7)', () => 
     jest.clearAllMocks();
   });
 
+  // safeSendAppointment's callers that never resolved visit_id themselves
+  // (confirmation, reschedule, cancellation, no-show, series cancellation —
+  // every one of these tests) trigger the predicate's own visit_id lookup
+  // first (finding #4, round 3) before the hold-columns select.
+  function mockOwnerLookup(visitId = null) {
+    db.mockReturnValueOnce({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ visit_id: visitId }),
+    });
+  }
+
   test('held (via metaExtra.scheduled_service_id) → never dials Twilio, returns false, marks the outcome retryable', async () => {
+    mockOwnerLookup();
     db.mockReturnValueOnce({
       where: jest.fn().mockReturnThis(),
       select: jest.fn().mockResolvedValue([{ callback_number_hold_at: new Date(), call_sms_cleared_at: null }]),
@@ -180,6 +221,7 @@ describe('safeSendAppointment — the single send boundary (finding #7)', () => 
   });
 
   test('not held → proceeds to the real send', async () => {
+    mockOwnerLookup();
     db.mockReturnValueOnce({
       where: jest.fn().mockReturnThis(),
       select: jest.fn().mockResolvedValue([{ callback_number_hold_at: null, call_sms_cleared_at: null }]),
@@ -187,6 +229,19 @@ describe('safeSendAppointment — the single send boundary (finding #7)', () => 
     const sent = await AppointmentReminders.safeSendAppointment(
       CUSTOMER, {}, 'BODY', 'appointment_rescheduled', 'appointment_confirmation',
       { scheduled_service_id: 'svc-clear' }, {},
+    );
+    expect(sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a caller that already resolved visit_id (even to null) skips the owner lookup entirely', async () => {
+    db.mockReturnValueOnce({
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ callback_number_hold_at: null, call_sms_cleared_at: null }]),
+    });
+    const sent = await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, 'BODY', 'reminder_72h', 'appointment_reminder_72h',
+      { scheduled_service_id: 'svc-clear', visit_id: null }, {},
     );
     expect(sent).toBe(true);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -204,6 +259,7 @@ describe('safeSendAppointment — the single send boundary (finding #7)', () => 
   });
 
   test('a read-error while held-checking FAILS CLOSED — the boundary refuses to text on an unknown consent state', async () => {
+    mockOwnerLookup();
     db.mockReturnValueOnce({
       where: jest.fn().mockReturnThis(),
       select: jest.fn().mockRejectedValue(new Error('db down')),
@@ -211,6 +267,19 @@ describe('safeSendAppointment — the single send boundary (finding #7)', () => 
     const sent = await AppointmentReminders.safeSendAppointment(
       CUSTOMER, {}, 'BODY', 'appointment_cancelled', 'appointment_cancellation',
       { scheduled_service_id: 'svc-unknown' }, {},
+    );
+    expect(sent).toBe(false);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the owner-lookup itself failing FAILS CLOSED too', async () => {
+    db.mockReturnValueOnce({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockRejectedValue(new Error('db down')),
+    });
+    const sent = await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, 'BODY', 'appointment_cancelled', 'appointment_cancellation',
+      { scheduled_service_id: 'svc-unknown-2' }, {},
     );
     expect(sent).toBe(false);
     expect(sendCustomerMessage).not.toHaveBeenCalled();

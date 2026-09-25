@@ -1110,7 +1110,15 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           logger.warn(`[appt-card-request] email-only invitation failed for visit ${visit.id}: ${emailErr.message}`);
           return null;
         });
-      if (!emailResult) {
+      // codex round-3 P1: sendAutopaySetupInvitation/sendTemplate return
+      // TRUTHY objects for definite non-sends too — {sent:false,
+      // blocked:true} (suppressed recipient / hard bounce) and {sent:false,
+      // aborted:true} (a caller/guard refusal before dispatch) — a bare
+      // truthiness check treated both as success and permanently consumed
+      // the one-text-ever claim on a message that never left. Every real
+      // success shape (including the deduped-existing-message replay) sets
+      // sent: true; nothing else may be trusted.
+      if (emailResult?.sent !== true) {
         await releaseClaim();
         return skip('email_only_no_usable_email');
       }

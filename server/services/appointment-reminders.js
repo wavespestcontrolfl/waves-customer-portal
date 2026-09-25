@@ -395,9 +395,26 @@ function callbackNumberHoldFromRow(row) {
 async function callbackNumberHoldActiveForVisit(idsOrScheduledServiceId) {
   const isPlainId = typeof idsOrScheduledServiceId === 'string' || idsOrScheduledServiceId == null;
   const scheduledServiceId = isPlainId ? idsOrScheduledServiceId : idsOrScheduledServiceId.scheduledServiceId;
-  const visitId = isPlainId ? null : idsOrScheduledServiceId.visitId;
+  // A caller that already resolved visitId — even to null, "confirmed
+  // ungrouped" (the reminder cron, which reads visit_id off its own svc
+  // query) — passes the key explicitly and that answer is trusted as-is,
+  // skipping the extra read below. A caller with no visitId KEY at all
+  // (a bare scheduledServiceId string, or an object that never set it —
+  // confirmation/reschedule/cancellation/no-show/series cancellation, and
+  // twilio.js's en-route/arrival) gets it resolved from the service row
+  // itself (finding #4, round 3): a plain `undefined` must never be read
+  // as "confirmed no group".
+  const visitIdSupplied = !isPlainId && Object.prototype.hasOwnProperty.call(idsOrScheduledServiceId, 'visitId');
+  let visitId = visitIdSupplied ? idsOrScheduledServiceId.visitId : null;
   if (!scheduledServiceId && !visitId) return false; // no visit context at all — nothing to hold.
   try {
+    // Finding #5 (round 2) resolved a caller-supplied visitId to sibling
+    // members; finding #4 (round 3) closes the gap for every caller that
+    // only ever had the owner service id.
+    if (!visitIdSupplied && scheduledServiceId) {
+      const owner = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
+      visitId = owner?.visit_id || null;
+    }
     const rows = await db('scheduled_services')
       .where(function idOrVisitId() {
         if (scheduledServiceId) this.orWhere('id', scheduledServiceId);
@@ -1700,7 +1717,14 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   if (metaExtra?.scheduled_service_id || metaExtra?.visit_id) {
     const callbackHeld = await callbackNumberHoldActiveForVisit({
       scheduledServiceId: metaExtra.scheduled_service_id,
-      visitId: metaExtra.visit_id,
+      // Only include the key when THIS caller actually resolved it (the
+      // reminder cron, which already read visit_id off its own svc query) —
+      // an explicit null still means "confirmed ungrouped" and is trusted
+      // as-is. Every other caller (confirmation, reschedule, cancellation,
+      // no-show, series cancellation) never sets metaExtra.visit_id at all,
+      // so omitting the key here lets the predicate resolve it itself
+      // (finding #4) instead of reading a plain `undefined` as "no group".
+      ...(metaExtra.visit_id !== undefined ? { visitId: metaExtra.visit_id } : {}),
     });
     if (callbackHeld) {
       if (sendOptions.sendOutcome && typeof sendOptions.sendOutcome === 'object') {

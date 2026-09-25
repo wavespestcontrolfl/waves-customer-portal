@@ -314,9 +314,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // call_sms_cleared_at >= callback_number_hold_at by construction
       // (GREATEST), matching the timestamp rule the hold predicate reads
       // (appointment-reminders.js's callbackNumberHoldFromRow).
+      // NONTERMINAL, not just pending/confirmed (codex round-3 P2): a visit
+      // already en_route/on_site is still live and its arrival text must
+      // not stay withheld after the office verifies the number.
+      const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
       await trx('scheduled_services')
         .where({ source_call_log_id: item.call_log_id })
-        .whereIn('status', ['pending', 'confirmed'])
+        .whereIn('status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
         .whereNotNull('callback_number_hold_at')
         .update({
           call_sms_cleared_at: trx.raw('GREATEST(callback_number_hold_at, now())'),

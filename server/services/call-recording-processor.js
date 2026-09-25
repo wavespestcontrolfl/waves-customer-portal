@@ -2553,14 +2553,22 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
 }
 
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false }) {
-  // Codex round-2 finding #4 (PR #4807): must land BEFORE the reminder row
-  // below is armed — a booking already inside the 72h/24h send window could
-  // otherwise be texted before the hold's UPDATE commits, and a worker exit
-  // between the two would leave it unheld with no reminder-side guard at
-  // all. whereNull guards a concurrent pass; nulling call_sms_cleared_at (+
-  // recipient) in the SAME update closes finding #1's atomicity half — a
-  // fresh hold must never read as already-cleared by a stale clearance a
-  // reused/reprocessed row still carries from an earlier call.
+  // Codex round-2 finding #4 (PR #4807), tightened round 3: the AUTHORITATIVE
+  // stamp for the two main call-booking paths (fresh insert, idempotency-
+  // conflict reuse) now lands INSIDE the booking transaction itself
+  // (stampCallbackNumberHoldForCall, above the trx that creates svc) — that
+  // atomic write can never be skipped by a crash between commit and this
+  // post-commit helper. This write is the FALLBACK for paths that reach
+  // registerScheduleSideEffects without going through that transaction (the
+  // replay-repair self-heal below); whereNull makes it a harmless no-op
+  // (0 rows) when the in-transaction write already landed. Nulling
+  // call_sms_cleared_at (+ recipient) in the SAME update closes finding #1's
+  // atomicity half — a fresh hold must never read as already-cleared by a
+  // stale clearance a reused/reprocessed row still carries from an earlier
+  // call. Round-3 P1: a THROWN failure here must refuse to arm messaging —
+  // proceeding to registerAppointment on an unconfirmed hold is exactly the
+  // gap this hardening closes, so skip it and log code/name only.
+  let holdStampFailed = false;
   if (scheduledServiceId && callbackNumberHoldActive) {
     try {
       await db('scheduled_services')
@@ -2572,26 +2580,33 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
           call_sms_cleared_recipient: null,
         });
     } catch (holdErr) {
-      logger.warn(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId}: ${holdErr.code || holdErr.name || 'db_error'}`);
+      holdStampFailed = true;
+      logger.error(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId} — refusing to arm messaging: ${holdErr.code || holdErr.name || 'db_error'}`);
     }
   }
-  try {
-    const AppointmentReminders = require('./appointment-reminders');
-    await AppointmentReminders.registerAppointment(
-      scheduledServiceId,
-      customerId,
-      `${scheduledDate}T${windowStart || '08:00'}`,
-      serviceType,
-      'call_recording',
-      // closeReminderWindows: a WINDOWLESS visit registers the canonical
-      // pre-closed placeholder at the date+08:00 slot instead of an ARMED
-      // reminder at a fabricated start — the cron must never text a time
-      // nobody chose (Codex #3361 r24 P1; same rule the confirm hook's
-      // registration leg applies).
-      { sendConfirmation: false, closeReminderWindows }
-    );
-  } catch (err) {
-    logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
+  // Messaging (reminders/confirmation) is gated on the hold stamp actually
+  // landing — arming it on an unconfirmed hold is precisely the gap round-3
+  // P1 closes. Everything below (inspection credit) is unrelated to
+  // messaging and still runs.
+  if (!holdStampFailed) {
+    try {
+      const AppointmentReminders = require('./appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        scheduledServiceId,
+        customerId,
+        `${scheduledDate}T${windowStart || '08:00'}`,
+        serviceType,
+        'call_recording',
+        // closeReminderWindows: a WINDOWLESS visit registers the canonical
+        // pre-closed placeholder at the date+08:00 slot instead of an ARMED
+        // reminder at a fabricated start — the cron must never text a time
+        // nobody chose (Codex #3361 r24 P1; same rule the confirm hook's
+        // registration leg applies).
+        { sendConfirmation: false, closeReminderWindows }
+      );
+    } catch (err) {
+      logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
+    }
   }
 
   // Inspection credit: fast redemption for a confirmed call booking, same
@@ -9980,8 +9995,18 @@ const CallRecordingProcessor = {
           // callerIdDisclaimedNoteText) — stamp crm_notes instead. Fail-open,
           // same posture as the line-type check just above: never blocks or
           // delays creation, which has already committed.
+          //
+          // Gated on callExtractionV2PrimaryEnabled() (codex round-3 P2):
+          // v2CanonicalExtraction is populated even in V2 SHADOW mode (V2
+          // enabled but not driving routing/adoption) — writing a canonical
+          // customer field (crm_notes) off an unpromoted model's output
+          // there would violate the shadow contract every other adoption
+          // site in this file already honors (adoptV2PrimaryFields only
+          // runs when this same gate is on).
           try {
-            const disclaimedNote = callerIdDisclaimedNoteText(v2CanonicalExtraction?.caller, { ani: contactPhone });
+            const disclaimedNote = callExtractionV2PrimaryEnabled()
+              ? callerIdDisclaimedNoteText(v2CanonicalExtraction?.caller, { ani: contactPhone })
+              : null;
             if (disclaimedNote) {
               await db('customers').where({ id: customerId }).update({
                 crm_notes: db.raw(
@@ -14759,6 +14784,36 @@ const CallRecordingProcessor = {
                     return null;
                   }
                 };
+                // Codex round-3 P1 (findings #2 + #3): the disclaimed-
+                // caller-ID hold must land INSIDE this booking transaction —
+                // not only the post-commit registerScheduleSideEffects call,
+                // whose catch previously swallowed a failed write and let
+                // messaging arm unheld — and must cover the
+                // ai_call_pipeline_followup second-treatment row too, which
+                // ensureCallFollowUpVisit creates with no hold of its own
+                // (dispatch confirming it later texted the disclaimed ANI).
+                // One UPDATE by source_call_log_id catches every live row
+                // this call created (primary + any follow-up) regardless of
+                // which of the ensureCallFollowUpVisit call sites (fresh
+                // insert, idempotency-conflict reuse, marker/slot-match
+                // reuse) this pass took — called right after each, so the
+                // follow-up row (if any) already exists to be caught.
+                // Deliberately NOT caught here: a genuine write failure
+                // aborts the whole transaction (schedErr path) rather than
+                // let a booking the caller disclaimed their number on commit
+                // unheld — the outer catch's "no booking, no SMS, office
+                // reviews" outcome is the correct fail-closed answer.
+                const stampCallbackNumberHoldForCall = async () => {
+                  if (!callbackNumberNeededHoldActive) return;
+                  await trx('scheduled_services')
+                    .where({ source_call_log_id: call.id })
+                    .whereNull('callback_number_hold_at')
+                    .update({
+                      callback_number_hold_at: new Date(),
+                      call_sms_cleared_at: null,
+                      call_sms_cleared_recipient: null,
+                    });
+                };
                 const existing = await findExistingCallAppointment({
                   customerId,
                   call,
@@ -14868,6 +14923,7 @@ const CallRecordingProcessor = {
                   } else if (!primaryRowSkipped && !reuseHeldForAddress) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                    await stampCallbackNumberHoldForCall();
                   } else if (!primaryRowSkipped && reuseHeldForAddress && callFollowUpPlan) {
                     // Only when no AI follow-up child exists yet (an earlier
                     // pass may have created it; it was pulled above, not
@@ -15486,6 +15542,7 @@ const CallRecordingProcessor = {
                     });
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
+                  await stampCallbackNumberHoldForCall();
                   return created;
                 }
                 // Idempotency conflict: another writer already created a row with this key.
@@ -15534,6 +15591,7 @@ const CallRecordingProcessor = {
                   if (!existingByKeySkipped) {
                     followUpCreated = await ensureCallFollowUpVisit(existingByKey);
                   }
+                  await stampCallbackNumberHoldForCall();
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');

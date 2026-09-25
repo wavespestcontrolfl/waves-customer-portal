@@ -14,6 +14,7 @@ const {
   nameKey,
   phoneKey,
 } = require('../services/customer-contact-fanout');
+const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
 
 /**
  * Minimal knex-shaped stub (mirrors customer-email-fanout.test.js). Per-table
@@ -360,6 +361,21 @@ describe('propagateCustomerPhoneChange', () => {
     const svcCalls = conn.__calls.filter((c) => c.table === 'scheduled_services');
     expect(svcCalls.some((c) => c.op === 'whereIn' && c.arg.col === 'status')).toBe(true);
     expect(svcCalls.some((c) => c.op === 'whereNotNull' && c.arg === 'callback_number_hold_at')).toBe(true);
+  });
+
+  // codex round-3 P2, PR #4807: this writer used to filter on a bare
+  // ['pending', 'confirmed'] literal — excluding an en_route/on_site visit,
+  // so a tech already rolling never got the arrival text unheld even after
+  // the number was verified. It must now share the ONE nonterminal-status
+  // constant with admin-triage.js's clearance writer.
+  test('the status filter is the shared NONTERMINAL_SCHEDULED_SERVICE_STATUSES constant (includes en_route/on_site)', async () => {
+    const conn = makeConn();
+    await propagateCustomerPhoneChange({ before: PHONE_BEFORE, after: PHONE_AFTER }, conn);
+    const svcCalls = conn.__calls.filter((c) => c.table === 'scheduled_services');
+    const whereInStatus = svcCalls.find((c) => c.op === 'whereIn' && c.arg.col === 'status');
+    expect(whereInStatus).toBeDefined();
+    expect(whereInStatus.arg.vals.slice().sort()).toEqual(NONTERMINAL_SCHEDULED_SERVICE_STATUSES.slice().sort());
+    expect(whereInStatus.arg.vals).toEqual(expect.arrayContaining(['en_route', 'on_site']));
   });
 
   test('no-op phone edits never touch scheduled_services at all', async () => {

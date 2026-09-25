@@ -1802,6 +1802,38 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
     expect(deletes).toHaveLength(1);
   });
 
+  // codex round-3 P1: sendAutopaySetupInvitation/sendTemplate return TRUTHY
+  // objects for a definite non-send too — a bare truthiness check on the
+  // result treated these as delivered, permanently consuming the
+  // one-text-ever claim on a message that never left.
+  test('a suppressed recipient ({sent:false, blocked:true}) releases the claim instead of consuming it', async () => {
+    setHeldVisitFixture();
+    mockSendSetupInvitation.mockResolvedValueOnce({ sent: false, blocked: true, reason: 'Email suppressed' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+
+    expect(res.reason).toBe('email_only_no_usable_email');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const releases = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at === null));
+    expect(releases).toHaveLength(1);
+    const deletes = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'del'));
+    expect(deletes).toHaveLength(1);
+  });
+
+  test('a pre-dispatch abort ({sent:false, aborted:true}) releases the claim instead of consuming it', async () => {
+    setHeldVisitFixture();
+    mockSendSetupInvitation.mockResolvedValueOnce({ sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+
+    expect(res.reason).toBe('email_only_no_usable_email');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const releases = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at === null));
+    expect(releases).toHaveLength(1);
+    const deletes = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'del'));
+    expect(deletes).toHaveLength(1);
+  });
+
   test('a plain "no SMS consent" delivery:none call (no callback_number_hold_at) is unaffected — still delivery_suppressed, never emailed', async () => {
     // Explicitly NOT the disclaimed-ANI hold — callback_number_hold_at unset.
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
