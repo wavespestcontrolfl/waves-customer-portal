@@ -4,7 +4,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
-const migration = require('../models/migrations/20260924010300_billing_notice_email_template');
+const seed = require('../models/migrations/20260924010300_billing_notice_email_template');
+const correction = require('../models/migrations/20260924010400_billing_notice_remove_duplicate_greeting');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -37,12 +38,15 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
     }
   });
 
-  test('is atomic, repeatable, and preserves later operator history', async () => {
+  test('seeds immutably, publishes the exact correction, and preserves operator history', async () => {
     const probe = await db.transaction();
     try {
-      await migration.up(probe);
+      await seed.up(probe);
+      await correction.up(probe);
       expect(await probe('email_templates').where({ template_key: 'billing.notice' })).toHaveLength(1);
+      expect(await probe('email_template_versions')).toHaveLength(2);
       expect(await probe('audit_log').where({ action: 'email_template.seeded' })).toHaveLength(1);
+      expect(await probe('audit_log').where({ action: 'email_template.corrected' })).toHaveLength(1);
     } finally {
       await probe.rollback();
     }
@@ -50,22 +54,53 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
       expect(await db(table)).toHaveLength(0);
     }
 
-    await db.transaction((trx) => migration.up(trx));
-    await db.transaction((trx) => migration.up(trx));
+    const editedProbe = await db.transaction();
+    try {
+      await seed.up(editedProbe);
+      const editedTemplate = await editedProbe('email_templates').where({ template_key: 'billing.notice' }).first();
+      await editedProbe('email_template_versions').where({ id: editedTemplate.active_version_id }).update({ status: 'archived' });
+      const [edited] = await editedProbe('email_template_versions').insert({
+        template_id: editedTemplate.id, version_number: 2, status: 'active',
+        subject: 'Operator subject', preview_text: 'Operator preview', blocks: [],
+      }).returning('*');
+      await editedProbe('email_templates').where({ id: editedTemplate.id }).update({ active_version_id: edited.id });
+      await editedProbe('email_template_fixtures').where({ template_id: editedTemplate.id })
+        .update({ payload: { notification_body: 'Operator fixture' } });
+      await correction.up(editedProbe);
+      expect(await editedProbe('email_template_versions').where({ template_id: editedTemplate.id })).toHaveLength(2);
+      expect((await editedProbe('email_templates').where({ id: editedTemplate.id }).first()).active_version_id).toBe(edited.id);
+      expect((await editedProbe('email_template_fixtures').where({ template_id: editedTemplate.id }).first()).payload)
+        .toEqual({ notification_body: 'Operator fixture' });
+    } finally {
+      await editedProbe.rollback();
+    }
+
+    await db.transaction(async (trx) => {
+      await seed.up(trx); await seed.up(trx);
+      await correction.up(trx); await correction.up(trx);
+    });
     const template = await db('email_templates').where({ template_key: 'billing.notice' }).first();
-    const versions = await db('email_template_versions').where({ template_id: template.id });
+    const versions = await db('email_template_versions').where({ template_id: template.id }).orderBy('version_number');
     const fixtures = await db('email_template_fixtures').where({ template_id: template.id });
-    const audits = await db('audit_log').where({ action: 'email_template.seeded' });
 
     expect(template).toMatchObject({
       name: 'Billing notice', mode: 'service', purpose: 'billing', status: 'active',
-      legal_classification: 'transactional_relationship', active_version_id: versions[0].id,
+      legal_classification: 'transactional_relationship', active_version_id: versions[1].id,
       allowed_variables: ['first_name', 'category_label', 'notification_body', 'billing_url'],
       required_variables: ['first_name', 'category_label', 'notification_body', 'billing_url'],
     });
-    expect(versions).toHaveLength(1);
+    expect(versions).toHaveLength(2);
     expect(versions[0]).toMatchObject({
-      version_number: 1, status: 'active', subject: '{{category_label}} from Waves',
+      version_number: 1, status: 'archived', subject: '{{category_label}} from Waves',
+      blocks: [
+        { type: 'heading', content: '{{category_label}}' },
+        { type: 'paragraph', content: 'Hi {{first_name}},' },
+        { type: 'paragraph', content: '{{notification_body}}' },
+        { type: 'cta', label: 'Open billing', url_variable: 'billing_url' },
+      ],
+    });
+    expect(versions[1]).toMatchObject({
+      version_number: 2, status: 'active', subject: '{{category_label}} from Waves',
       blocks: [
         { type: 'heading', content: '{{category_label}}' },
         { type: 'paragraph', content: '{{notification_body}}' },
@@ -79,31 +114,40 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
         notification_body: 'Hi Customer, please review the billing update in your customer portal.',
         billing_url: 'https://portal.wavespestcontrol.com/?tab=billing' },
     });
-    expect(audits).toHaveLength(1);
-    expect(audits[0]).toMatchObject({
+    expect(await db('audit_log').where({ action: 'email_template.seeded' })).toHaveLength(1);
+    const corrections = await db('audit_log').where({ action: 'email_template.corrected' });
+    expect(corrections).toHaveLength(1);
+    expect(corrections[0]).toMatchObject({
       actor_type: 'system', resource_type: 'email_template', resource_id: template.id,
-      metadata: { templateKey: 'billing.notice', migration: '20260924010300_billing_notice_email_template' },
+      metadata: { templateKey: 'billing.notice', migration: '20260924010400_billing_notice_remove_duplicate_greeting',
+        priorVersionId: versions[0].id, publishedVersionId: versions[1].id, fixtureCorrected: true },
     });
 
-    await db('email_template_versions').where({ id: versions[0].id }).update({ status: 'archived' });
+    await db('email_template_versions').where({ id: versions[1].id }).update({ status: 'archived' });
     const [operatorVersion] = await db('email_template_versions').insert({
-      template_id: template.id, version_number: 2, status: 'active',
+      template_id: template.id, version_number: 3, status: 'active',
       subject: 'Operator-authored billing subject', preview_text: 'Operator preview', blocks: [],
     }).returning('*');
     await db('email_templates').where({ id: template.id }).update({
       name: 'Operator billing notice', active_version_id: operatorVersion.id,
     });
 
-    await db.transaction((trx) => migration.up(trx));
-    await migration.down(db);
+    await db('email_template_fixtures').where({ template_id: template.id })
+      .update({ payload: { notification_body: 'Operator fixture after correction' } });
+    await db.transaction(async (trx) => { await seed.up(trx); await correction.up(trx); });
+    await correction.down(db);
+    await seed.down(db);
     expect(await db('email_templates').where({ id: template.id }).first()).toMatchObject({
       name: 'Operator billing notice', active_version_id: operatorVersion.id,
     });
     expect(await db('email_template_versions').where({ id: operatorVersion.id }).first()).toMatchObject({
       status: 'active', subject: 'Operator-authored billing subject', preview_text: 'Operator preview',
     });
-    expect(await db('email_template_versions').where({ template_id: template.id })).toHaveLength(2);
+    expect(await db('email_template_versions').where({ template_id: template.id })).toHaveLength(3);
     expect(await db('email_template_fixtures').where({ template_id: template.id })).toHaveLength(1);
+    expect((await db('email_template_fixtures').where({ template_id: template.id }).first()).payload)
+      .toEqual({ notification_body: 'Operator fixture after correction' });
     expect(await db('audit_log').where({ action: 'email_template.seeded' })).toHaveLength(1);
+    expect(await db('audit_log').where({ action: 'email_template.corrected' })).toHaveLength(1);
   }, 30000);
 });
