@@ -12,7 +12,7 @@ import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import EstimateToolViewV2 from "./EstimateToolViewV2";
+import EstimateToolViewV2, { sellableTreeShrubTier } from "./EstimateToolViewV2";
 
 function jsonResponse(body) {
   return Promise.resolve({
@@ -144,5 +144,15 @@ describe("tree & shrub program and access selects", () => {
     await waitFor(() => {
       expect(findSelectWithOption(container, "enhanced")).toBeUndefined();
     });
+  });
+});
+
+describe("sellableTreeShrubTier — what the builder submits", () => {
+  it("submits the retired 4x light tier as 6x, matching what the picker shows", () => {
+    expect(sellableTreeShrubTier("light")).toBe("standard");
+    expect(sellableTreeShrubTier(undefined)).toBe("standard");
+    expect(sellableTreeShrubTier("")).toBe("standard");
+    expect(sellableTreeShrubTier("standard")).toBe("standard");
+    expect(sellableTreeShrubTier("enhanced")).toBe("enhanced");
   });
 });
