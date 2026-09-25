@@ -559,8 +559,18 @@ for a scheduled-service token the visit's `prep_view_count` /
 miss = the key moved, so the page re-resolves and renders the new guide),
 which pairs with the manual prep sender's re-key / release fence on those
 view columns so an opened page never changes guide or 404s behind the
-customer; the `prep_guide_views` log row follows; response shape
-unchanged),
+customer; the `prep_guide_views` log row follows. Response blocks (#4790):
+in addition to `paragraph` / `heading` / `details` / `callout`, the
+anonymous payload may carry `{ type: 'list', items: string[] }` check-list
+blocks, and prose in paragraph / callout `content`, list `items[]` and
+details `label` / `value` (NOT heading content, which both surfaces print
+verbatim) may contain author-written inline markdown links
+`[label](https://…)` that the page and PDF render with an
+http/https/mailto/tel allowlist. Server-side interpolation now also
+substitutes `items[]` and details `label`, and breaks any `](` inside a
+substituted VALUE (`neutralizeLinkSyntax`) so a customer-influenced field
+can never complete link syntax — only template-authored markdown becomes
+an anchor),
 `/api/public/prep/:token/pdf` (downloadable PDF twin of the prep page —
 action-bar Download parity with service reports; same 32-hex token format
 gate, same 60 req/min limiter, same privacy headers, generic 404; payload

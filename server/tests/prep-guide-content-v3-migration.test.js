@@ -1,0 +1,432 @@
+/**
+ * 20260924000001 → … → 000007 — prep guide content v3.
+ *
+ * Each earlier file ran on the PR preview database before the next Codex
+ * round and is frozen; each later file supersedes the previous with
+ * exact-match text patches and publishes the effective content. This suite
+ * reads the LATEST file's TEMPLATES as the content customers receive, and
+ * checks each supersession link.
+ *
+ * Guards the compliance rules the 2026-07-15 refresh established (they
+ * must never regress in prep copy) plus the v3 additions: links are plain
+ * https URLs on an allowlist of hosts (no affiliate tags — Amazon Associates
+ * forbids Special Links in email; the affiliate pilot is web-only), list
+ * blocks carry items, bed bug copy has no heat-treatment component, and the
+ * publish/rollback mechanics mirror the refresh migration.
+ */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => false), sendOne: jest.fn() }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/notification-service', () => ({}));
+
+const CHAIN = [
+  require('../models/migrations/20260924000001_prep_guide_content_v3'),
+  require('../models/migrations/20260924000002_prep_guide_content_v3_codex_r1'),
+  require('../models/migrations/20260924000003_prep_guide_content_v3_codex_r2'),
+  require('../models/migrations/20260924000004_prep_guide_content_v3_codex_r3'),
+  require('../models/migrations/20260924000005_prep_guide_content_v3_codex_r4'),
+  require('../models/migrations/20260924000006_prep_guide_content_v3_codex_r5'),
+  require('../models/migrations/20260924000007_prep_guide_content_v3_codex_r6'),
+];
+// The step-0 sequence swaps ship in 000005 (the latest file carrying them).
+const stepMigration = [...CHAIN].reverse().find((m) => m.STEP_SWAPS);
+const refreshMigration = require('../models/migrations/20260715000001_prep_guide_content_refresh');
+const baseMigration = CHAIN[CHAIN.length - 2];
+const migration = CHAIN[CHAIN.length - 1];
+const { normalizeBlocks, renderTemplate } = require('../services/email-template-library');
+
+const { TEMPLATES, MIGRATION_MARKER } = migration;
+
+const EXPECTED_KEYS = [
+  'prep.flea', 'prep.cockroach', 'prep.bed_bug', 'prep.rodent',
+  'prep.termite', 'prep.mosquito', 'prep.lawn', 'prep.interior_pest',
+];
+
+const LINK_HOST_ALLOWLIST = new Set([
+  'nexgardforpets.com',
+  'www.simparicatrio.com',
+  'www.bravecto.com',
+  'www.credelio.com',
+  'www.revolutionplus.com',
+  'frontline.com',
+  'yourpetandyou.elanco.com',
+  'www.amazon.com',
+  'www.chewy.com',
+  'www.wavespestcontrol.com',
+]);
+
+const MD_LINK_RE = /\[([^\]\n]+)\]\((\S+?)\)/g;
+
+function textChunks(t) {
+  const chunks = [];
+  chunks.push(`${t.key} subject: ${t.subject}`);
+  chunks.push(`${t.key} preview: ${t.preview}`);
+  for (const b of t.blocks) {
+    if (typeof b.content === 'string') chunks.push(`${t.key}: ${b.content}`);
+    for (const item of b.items || []) chunks.push(`${t.key}: ${item}`);
+    for (const row of b.rows || []) chunks.push(`${t.key}: ${row.label} ${row.value}`);
+  }
+  return chunks;
+}
+
+function allNewCopy() {
+  return TEMPLATES.flatMap(textChunks);
+}
+
+// Sequence step-0 bodies (automation_steps) the latest migration ships.
+function stepBodies() {
+  return (stepMigration.STEP_SWAPS || []).map((s) => `${s.templateKey} step0: ${s.toHtml}`);
+}
+
+function allLinks() {
+  const links = [];
+  for (const chunk of allNewCopy()) {
+    for (const m of chunk.matchAll(MD_LINK_RE)) links.push({ chunk, label: m[1], href: m[2] });
+  }
+  return links;
+}
+
+describe('prep guide v3 content compliance', () => {
+  test('covers exactly the eight guides and never wildlife', () => {
+    expect(TEMPLATES.map((t) => t.key).sort()).toEqual([...EXPECTED_KEYS].sort());
+    expect(TEMPLATES.map((t) => t.key)).not.toContain('prep.wildlife');
+  });
+
+  test('re-entry copy never says safe/safely', () => {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
+      expect(chunk).not.toMatch(/\bsafe(ly)?\b/i);
+    }
+  });
+
+  test('no fixed re-entry windows (hours/minutes tied to leaving or re-entering)', () => {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
+      expect(chunk).not.toMatch(/(out of the (home|house|kitchen|room)|stay (out|away|off)|re-?enter|be out)[^.]{0,50}\d+\s*(–|-|to)?\s*\d*\s*(hour|hr|minute|min)/i);
+    }
+  });
+
+  test('brand and pricing wording rules', () => {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
+      expect(chunk).not.toMatch(/Waves Lawn (&|and) Pest/i);
+      expect(chunk).not.toMatch(/per visit/i);
+    }
+  });
+
+  test('no fumigation or tenting content (owner prohibition)', () => {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
+      expect(chunk).not.toMatch(/fumigat|tent(ing|ed)?\b/i);
+    }
+  });
+
+  test('flea and German roach copy never promise a single-visit outcome (both are sold as multi-visit programs)', () => {
+    for (const key of ['prep.flea', 'prep.cockroach']) {
+      const t = TEMPLATES.find((x) => x.key === key);
+      for (const chunk of textChunks(t)) {
+        expect(chunk).not.toMatch(/one[- ]visit job|one treatment usually|single (visit|treatment) (does|is enough|will do)/i);
+      }
+    }
+    const flea = textChunks(TEMPLATES.find((x) => x.key === 'prep.flea')).join(' ');
+    expect(flea).toMatch(/two-visit/i);
+  });
+
+  test('copy never over- or under-states the sold package (Codex r2)', () => {
+    const flea = textChunks(TEMPLATES.find((x) => x.key === 'prep.flea')).join('\n');
+    expect(flea).not.toMatch(/saves a second visit/i);
+    expect(flea).toMatch(/when yard treatment is part of your package/);
+    expect(flea).not.toMatch(/then treats exterior harborage/);
+    const roach = textChunks(TEMPLATES.find((x) => x.key === 'prep.cockroach')).join('\n');
+    expect(roach).not.toMatch(/initial visit plus the 10 to 14 day follow-up/);
+    const bedBug = textChunks(TEMPLATES.find((x) => x.key === 'prep.bed_bug')).join('\n');
+    expect(bedBug).not.toMatch(/\b3 days\b/);
+    expect(bedBug).toMatch(/at least 4 full days/);
+    expect(bedBug).not.toMatch(/hot (garage|car)/i);
+    expect(bedBug).not.toMatch(/A second treatment 10 to 14 days later/);
+    expect(bedBug).toMatch(/follow-up visits your infestation calls for/);
+  });
+
+  test('electronics never share the dryer/freezer step, and lawn watering defers to the county restriction (Codex r3)', () => {
+    const bedBug = textChunks(TEMPLATES.find((x) => x.key === 'prep.bed_bug')).join('\n');
+    expect(bedBug).not.toMatch(/electronics, delicate fabric/);
+    expect(bedBug).toMatch(/never go in a dryer or freezer/);
+    const lawn = textChunks(TEMPLATES.find((x) => x.key === 'prep.lawn')).join('\n');
+    expect(lawn).not.toMatch(/\d+ to \d+ times a week/);
+    expect(lawn).toMatch(/county restriction currently allows/);
+  });
+
+  test('bed bug guide names the method it covers and routes heat/hybrid customers to method-specific prep (Codex r4)', () => {
+    const bedBug = textChunks(TEMPLATES.find((x) => x.key === 'prep.bed_bug')).join('\n');
+    expect(bedBug).toMatch(/covers our standard chemical treatment/);
+    expect(bedBug).toMatch(/heat or hybrid treatment instead, your technician will send separate prep/);
+  });
+
+  test('sequence step-0 bodies match v3: exact-match on the shipped copy, package-accurate, approved sign-off, EPA-registered (Codex r4)', () => {
+    const swaps = stepMigration.STEP_SWAPS;
+    expect(swaps.map((s) => s.templateKey).sort()).toEqual(['bed_bug', 'cockroach', 'flea']);
+    for (const s of swaps) {
+      const shipped = refreshMigration.STEP_SWAPS.find((r) => r.templateKey === s.templateKey);
+      expect(s.fromHtml).toBe(shipped.toHtml); // admin-edit-preserving swap keys off the current shipped body
+      expect(s.toHtml).not.toBe(s.fromHtml);
+      expect(s.toHtml).toContain('— The Waves Team');
+      expect(s.toHtml).not.toMatch(/Waves Pest Control team/i);
+      expect(s.toHtml).toMatch(/EPA-registered/);
+      expect(s.toHtml).not.toMatch(/one treatment and a repeat visit|one[- ]visit job|A second treatment/);
+      expect(s.toHtml).not.toMatch(/\]\(https?:/); // HTML bodies carry no markdown
+    }
+    const flea = swaps.find((s) => s.templateKey === 'flea').toHtml;
+    expect(flea).toMatch(/two-visit elimination package/);
+    expect(flea).toMatch(/Yard treatment is an add-on/);
+    const roach = swaps.find((s) => s.templateKey === 'cockroach').toHtml;
+    expect(roach).toMatch(/follow-up visits your infestation calls for/);
+    const bedBug = swaps.find((s) => s.templateKey === 'bed_bug').toHtml;
+    expect(bedBug).toMatch(/follow-up visits/);
+    expect(bedBug).toMatch(/Electronics never go in a dryer or freezer/);
+    expect(bedBug).not.toMatch(/hot (garage|car)|\b3 days\b/i);
+  });
+
+  test('birds never go outside, and termite renewal copy is conditional on a sold plan (Codex r5)', () => {
+    const flea = textChunks(TEMPLATES.find((x) => x.key === 'prep.flea')).join('\n');
+    expect(flea).not.toMatch(/Bird cages go outside/);
+    expect(flea).toMatch(/Never set a cage outside/);
+    const termite = textChunks(TEMPLATES.find((x) => x.key === 'prep.termite')).join('\n');
+    expect(termite).not.toMatch(/a termite treatment is a long-term protection plan/);
+    expect(termite).not.toMatch(/^Keep your annual inspection\./m);
+    expect(termite).toMatch(/If your service includes a protection plan or bait monitoring/);
+  });
+
+  test('no insulation content anywhere, and the misting upsell is not "set-and-forget" (Codex r6)', () => {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
+      expect(chunk).not.toMatch(/insulation/i);
+      expect(chunk).not.toMatch(/set-and-forget/i);
+    }
+    const rodent = TEMPLATES.find((x) => x.key === 'prep.rodent');
+    const faqRows = rodent.blocks.find((b) => b.type === 'details' && b.variant === 'faq').rows;
+    expect(faqRows.map((r) => r.label)).not.toContain('Should I clean the attic insulation?');
+    expect(faqRows.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('bed bug guide describes chemical/IPM work only — no heat-treatment or steam component', () => {
+    const bedBug = TEMPLATES.find((t) => t.key === 'prep.bed_bug');
+    for (const chunk of textChunks(bedBug)) {
+      expect(chunk).not.toMatch(/heat[- ]treat|whole[- ]room heat|steam/i);
+    }
+  });
+
+  test('every guide that describes products uses the EPA-registered phrasing', () => {
+    for (const t of TEMPLATES) {
+      const joined = textChunks(t).join(' ');
+      if (/\bproducts?\b/i.test(joined)) expect(joined).toMatch(/EPA-registered/);
+    }
+  });
+
+  test('every guide keeps the required structure: service details, Pets & kids, what to expect, one FAQ, exact CTA, signature', () => {
+    for (const t of TEMPLATES) {
+      const headings = t.blocks.filter((b) => b.type === 'heading').map((b) => b.content);
+      expect(headings).toContain('Pets & kids');
+      expect(headings.some((x) => /what to expect/i.test(x))).toBe(true);
+      expect(t.blocks.filter((b) => b.type === 'details').length).toBeGreaterThanOrEqual(2);
+      expect(t.blocks.filter((b) => b.type === 'details' && b.variant === 'faq').length).toBe(1);
+      const cta = t.blocks.find((b) => b.type === 'cta');
+      expect(cta).toEqual({ type: 'cta', label: 'Open prep guide', url_variable: 'prep_url' });
+      const signatures = t.blocks.filter((b) => b.type === 'signature');
+      expect(signatures.length).toBe(1);
+      // Owner call 2026-07-21 (20260721100020): service emails sign as
+      // "— The Waves Team", never as the company name.
+      expect(signatures[0].content).toBe('— The Waves Team');
+      expect(typeof t.subject).toBe('string');
+      expect(t.subject.length).toBeGreaterThan(10);
+      expect(typeof t.preview).toBe('string');
+    }
+  });
+
+  test('list blocks carry non-empty items and survive the editor normalizer', () => {
+    for (const t of TEMPLATES) {
+      const lists = t.blocks.filter((b) => b.type === 'list');
+      expect(lists.length).toBeGreaterThan(0);
+      for (const l of lists) {
+        expect(Array.isArray(l.items)).toBe(true);
+        expect(l.items.length).toBeGreaterThan(0);
+        for (const item of l.items) expect(String(item).trim()).not.toBe('');
+      }
+      const normalized = normalizeBlocks(t.blocks);
+      const normalizedLists = normalized.filter((b) => b.type === 'list');
+      expect(normalizedLists.map((b) => b.items)).toEqual(lists.map((b) => b.items));
+      // FAQ variant must survive too (codex #2741 r2).
+      expect(normalized.filter((b) => b.type === 'details' && b.variant === 'faq').length).toBe(1);
+    }
+  });
+
+  test('every link is plain https on an allowlisted host with no affiliate or tracking parameters', () => {
+    const links = allLinks();
+    expect(links.length).toBeGreaterThan(10);
+    for (const { href, label } of links) {
+      const url = new URL(href);
+      expect(url.protocol).toBe('https:');
+      expect(LINK_HOST_ALLOWLIST.has(url.host)).toBe(true);
+      expect(label.trim()).not.toBe('');
+      for (const key of url.searchParams.keys()) {
+        // Amazon Associates `tag=`, Google click ids, UTM: none belong in a
+        // transactional email.
+        expect(key).not.toMatch(/^(tag|gclid|gad_source|utm_.*|ref|linkCode|ascsubtag)$/i);
+      }
+      expect(href).not.toMatch(/amzn\.to|wavespestcont-20/);
+    }
+  });
+
+  test('no link label or href carries a template variable (links are author-authored only)', () => {
+    for (const { label, href } of allLinks()) {
+      expect(label).not.toMatch(/\{\{/);
+      expect(href).not.toMatch(/\{\{/);
+    }
+  });
+
+  test('every guide renders through the email renderer with anchors and check rows, and the plain-text arm carries the URLs', () => {
+    const payload = {
+      first_name: 'Taylor',
+      project_type: 'Flea Treatment',
+      service_date: 'October 3',
+      property_address: '123 Palm Ave',
+      technician_name: 'Adam',
+      prep_url: 'https://portal.wavespestcontrol.com/prep/abc',
+    };
+    for (const t of TEMPLATES) {
+      const rendered = renderTemplate({
+        template: { template_key: t.key, from_name: 'Waves Pest Control', from_email: 'contact@wavespestcontrol.com' },
+        version: { subject: t.subject, preview_text: t.preview, blocks: t.blocks },
+        payload,
+      });
+      const html = rendered.html || rendered.bodyHtml || '';
+      const text = rendered.text || rendered.bodyText || '';
+      expect(html).toContain('Open prep guide');
+      expect(html).toContain('&#10003;'); // list check rows
+      expect(html).not.toMatch(/\]\(https?:/); // no raw markdown leaked into HTML
+      const linkCount = textChunks(t).reduce((n, c) => n + [...c.matchAll(MD_LINK_RE)].length, 0);
+      const anchors = html.match(/<a class="dm-link" href="https:\/\/[^"]+" target="_blank" rel="noopener"/g) || [];
+      expect(anchors.length).toBe(linkCount); // every authored link becomes exactly one anchor
+      if (linkCount > 0) expect(text).toMatch(/\(https:\/\/[^)]+\)/); // text arm shows destinations
+      expect(html).not.toContain('{{');
+    }
+  });
+});
+
+describe('each migration supersedes the previous one (each frozen after its preview run)', () => {
+  test('publishes the same eight keys, records what it supersedes, and every patch landed', () => {
+    for (let i = 1; i < CHAIN.length; i += 1) {
+      expect(CHAIN[i].TEMPLATES.map((t) => t.key)).toEqual(CHAIN[i - 1].TEMPLATES.map((t) => t.key));
+      expect(CHAIN[i].SUPERSEDES).toBe(CHAIN[i - 1].MIGRATION_MARKER);
+    }
+    expect(new Set(CHAIN.map((m) => m.MIGRATION_MARKER)).size).toBe(CHAIN.length);
+    const effective = allNewCopy().join('\n');
+    for (const patch of migration.PATCHES) {
+      // A patch may extend its `from` (to = from + more); only a true replacement removes it.
+      if (!patch.to.includes(patch.from)) expect(effective).not.toContain(patch.from);
+      if (patch.to) expect(effective).toContain(patch.to);
+    }
+  });
+
+  test('only the patched templates differ from the previous migration', () => {
+    for (const t of migration.TEMPLATES) {
+      const before = baseMigration.TEMPLATES.find((x) => x.key === t.key);
+      const patchedKeys = new Set(migration.PATCHES.map((p) => p.key));
+      const changed = JSON.stringify([t.blocks, t.subject, t.preview]) !== JSON.stringify([before.blocks, before.subject, before.preview]);
+      expect(changed).toBe(patchedKeys.has(t.key));
+    }
+  });
+});
+
+describe('publish mechanics', () => {
+  function makeKnex({ withMarker = true } = {}) {
+    const state = {
+      template: { id: 't-1', template_key: 'prep.flea', active_version_id: 'v-1' },
+      versions: [{ id: 'v-1', template_id: 't-1', version_number: 3, status: 'active', subject: 'Old subj', preview_text: 'Old prev', blocks: '[]', validation_snapshot: withMarker ? JSON.stringify({ source: MIGRATION_MARKER }) : JSON.stringify({ source: 'seed' }) }],
+      templateUpdates: [],
+      versionUpdates: [],
+      inserted: [],
+    };
+    const knex = jest.fn((table) => {
+      if (table === 'email_templates') {
+        const q = {
+          where: jest.fn(() => q),
+          first: jest.fn(async () => state.template),
+          update: jest.fn(async (patch) => { state.templateUpdates.push(patch); return 1; }),
+        };
+        return q;
+      }
+      if (table === 'email_template_versions') {
+        const filters = {};
+        const q = {
+          where: jest.fn((a, b, c) => {
+            if (typeof a === 'object') Object.assign(filters, a);
+            else if (c !== undefined) filters[`${a}${b}`] = c;
+            return q;
+          }),
+          whereNot: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          first: jest.fn(async () => {
+            if (filters.id) return state.versions.find((v) => v.id === filters.id) || null;
+            if (filters.status === 'archived') return state.versions.filter((v) => v.status === 'archived').sort((a, b) => b.version_number - a.version_number)[0] || null;
+            return state.versions.slice().sort((a, b) => b.version_number - a.version_number)[0] || null;
+          }),
+          insert: jest.fn((row) => ({
+            returning: jest.fn(async () => {
+              const created = { id: `v-${state.versions.length + 1}`, ...row };
+              state.versions.push(created);
+              state.inserted.push(created);
+              return [created];
+            }),
+          })),
+          update: jest.fn(async (patch) => { state.versionUpdates.push({ filters: { ...filters }, patch }); return 1; }),
+        };
+        return q;
+      }
+      if (table === 'automation_steps') {
+        // No step row → the exact-match swap is a no-op (admin-edit-preserving path).
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          first: jest.fn(async () => null),
+          update: jest.fn(async () => { throw new Error('automation_steps.update must not run without a matching row'); }),
+        };
+        return q;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    knex.schema = { hasTable: jest.fn(async () => true) };
+    return { knex, state };
+  }
+
+  test('up publishes a new active version per template with the migration marker, new subject, and archives the prior active', async () => {
+    const { knex, state } = makeKnex();
+    await migration.up(knex);
+    expect(state.inserted).toHaveLength(TEMPLATES.length);
+    const first = state.inserted[0];
+    expect(first.version_number).toBe(4);
+    expect(first.status).toBe('active');
+    expect(first.subject).toBe(TEMPLATES[0].subject);
+    expect(first.preview_text).toBe(TEMPLATES[0].preview);
+    expect(JSON.parse(first.validation_snapshot).source).toBe(MIGRATION_MARKER);
+    expect(JSON.parse(first.blocks)).toEqual(TEMPLATES[0].blocks);
+    expect(state.versionUpdates.some((u) => u.patch.status === 'archived')).toBe(true);
+    expect(state.templateUpdates.some((u) => u.active_version_id === first.id)).toBe(true);
+  });
+
+  test('up is a no-op when the template tables are missing', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false) };
+    await migration.up(knex);
+    expect(knex).not.toHaveBeenCalled();
+  });
+
+  test('down restores the prior archived version only when the active one carries this migration marker', async () => {
+    const marked = makeKnex({ withMarker: true });
+    marked.state.versions.push({ id: 'v-0', template_id: 't-1', version_number: 2, status: 'archived', blocks: '[]' });
+    await migration.down(marked.knex);
+    expect(marked.state.versionUpdates.some((u) => u.filters.id === 'v-0' && u.patch.status === 'active')).toBe(true);
+    expect(marked.state.versionUpdates.some((u) => u.filters.id === 'v-1' && u.patch.status === 'archived')).toBe(true);
+    expect(marked.state.templateUpdates.some((u) => u.active_version_id === 'v-0')).toBe(true);
+
+    const unmarked = makeKnex({ withMarker: false });
+    unmarked.state.versions.push({ id: 'v-0', template_id: 't-1', version_number: 2, status: 'archived', blocks: '[]' });
+    await migration.down(unmarked.knex);
+    expect(unmarked.state.versionUpdates).toHaveLength(0);
+    expect(unmarked.state.templateUpdates).toHaveLength(0);
+  });
+});

@@ -28,6 +28,33 @@ const SOFT = PDF_COLORS.soft;
 const HEADER_SUB = PDF_COLORS.headerSub;
 const WHITE = PDF_COLORS.white;
 
+// Inline markdown links [label](https://…) in block prose — the PDF twin
+// of email-template-library's renderInline link support and of
+// PrepGuidePage's client-side renderInlineLinks. Same allowlist
+// (http/https/mailto/tel); an unusable scheme is left as literal text.
+// pdfkit text runs don't carry per-substring hit regions the way this
+// flowing, wrapping body copy is laid out, so — same posture as
+// email-template-library's own plain-text arm — a link renders as
+// "label (https://…)" rather than as a clickable annotation. See the
+// KNOWN GAP comment above renderInlineLinks in PrepGuidePage.jsx: this text
+// arrives already {{variable}}-substituted by prep-public.js, so this is
+// necessarily parsing server output, not author-only text.
+const SAFE_HREF_RE = /^(https?:|mailto:|tel:)/i;
+const MD_LINK_RE = /\[([^\]\n]+)\]\((\S+?)\)/g;
+
+function isSafeHref(href) {
+  return SAFE_HREF_RE.test(String(href || '').trim());
+}
+
+function renderLinksAsText(text) {
+  const raw = text == null ? '' : String(text);
+  if (!raw) return raw;
+  MD_LINK_RE.lastIndex = 0;
+  return raw.replace(MD_LINK_RE, (whole, label, href) => (
+    isSafeHref(href) ? `${label} (${href.trim()})` : whole
+  ));
+}
+
 const PAGE_W = 612;
 const L = 40;
 const W = PAGE_W - 80;
@@ -108,8 +135,8 @@ function detailsBlock(doc, rows) {
   ensureRoom(doc, 40);
   doc.moveDown(0.2);
   for (const row of items) {
-    const label = String(row.label || '');
-    const value = String(row.value || '');
+    const label = renderLinksAsText(String(row.label || ''));
+    const value = renderLinksAsText(String(row.value || ''));
     doc.font('Helvetica-Bold').fontSize(8.5);
     const labelH = doc.heightOfString(label.toUpperCase(), { width: W, lineGap: 1 });
     doc.font('Helvetica').fontSize(9.5);
@@ -140,6 +167,32 @@ function calloutBlock(doc, text) {
     .text(text, L + 14, top + 10, { width: W - 28, lineGap: 2 });
   doc.y = top + boxH;
   doc.moveDown(0.7);
+}
+
+// Check-list rows — matches the email renderer's checklist block. Each
+// item wraps under a hanging indent; a blank item (after link/whitespace
+// resolution) is skipped so a payload-driven empty string leaves no
+// dangling check mark.
+const LIST_CHECK_GLYPH = '4'; // ZapfDingbats: heavy check mark
+
+function listBlock(doc, items) {
+  const rows = (items || []).map((item) => renderLinksAsText(String(item || '')).trim()).filter(Boolean);
+  if (!rows.length) return;
+  ensureRoom(doc, 30);
+  doc.moveDown(0.2);
+  const indent = 14;
+  doc.font('Helvetica').fontSize(9.5);
+  for (const row of rows) {
+    const rowH = doc.heightOfString(row, { width: W - indent, lineGap: 2 });
+    ensureRoom(doc, rowH + 8);
+    const startY = doc.y;
+    // U+2713 is not in the standard-14 WinAnsi set (Helvetica renders a
+    // missing-glyph box); ZapfDingbats '4' is the heavy check mark (✔).
+    doc.font('ZapfDingbats').fillColor(NAVY).text(LIST_CHECK_GLYPH, L, startY, { width: indent, lineGap: 2 });
+    doc.font('Helvetica').fillColor(BODY).text(row, L + indent, startY, { width: W - indent, lineGap: 2 });
+    doc.moveDown(0.35);
+  }
+  doc.moveDown(0.2);
 }
 
 /**
@@ -175,9 +228,10 @@ function renderPrepGuidePdf({ title, blocks, technicianName, customerName, prope
   for (const block of blocks || []) {
     if (!block || typeof block !== 'object') continue;
     if (block.type === 'heading') sectionHeading(doc, String(block.content || ''));
-    else if (block.type === 'paragraph') paragraph(doc, String(block.content || ''));
+    else if (block.type === 'paragraph') paragraph(doc, renderLinksAsText(String(block.content || '')));
     else if (block.type === 'details') detailsBlock(doc, block.rows);
-    else if (block.type === 'callout') calloutBlock(doc, String(block.content || ''));
+    else if (block.type === 'callout') calloutBlock(doc, renderLinksAsText(String(block.content || '')));
+    else if (block.type === 'list') listBlock(doc, block.items);
     // Unknown block types are skipped — same posture as the page renderer.
   }
 
