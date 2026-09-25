@@ -948,7 +948,9 @@ function TreeShrubResult({ result }) {
 const RESULT_BODY_BY_TYPE = { pest: PestResult, lawn: LawnResult, tree_shrub: TreeShrubResult };
 
 function ResultPhotos({ photos, unavailablePhotoIds, onPhotoUnavailable }) {
-  if (!Array.isArray(photos) || photos.length === 0) return null;
+  if (!Array.isArray(photos) || photos.length === 0) {
+    return <div role="status" style={{ fontSize: 14, color: SHELL.muted }}>Original photos are unavailable. Add a new photo to your request.</div>;
+  }
   const unavailable = new Set(unavailablePhotoIds || []);
   const available = photos.filter((photo) => photo?.url && !unavailable.has(photo.id));
   const unavailableCount = photos.length - available.length;

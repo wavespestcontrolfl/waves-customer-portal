@@ -356,6 +356,15 @@ describe('result rendering per type + next-step CTAs', () => {
 });
 
 describe('stale-flow safety (Codex r1 P1s)', () => {
+  it('warns when a saved identification has no persisted photo rows', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [{ id: 'p1', type: 'pest', headline: 'Ants', created_at: '2026-09-02T00:00:00Z' }] });
+    api.getPhotoId.mockResolvedValue({ id: 'p1', type: 'pest', result: { label: 'Ants' }, photos: [], next_step: { kind: 'none', title: 'Result' } });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(await screen.findByText('Ants'));
+    expect(await screen.findByRole('status')).toHaveTextContent('Original photos are unavailable. Add a new photo to your request.');
+  });
+
   it('closing the sheet mid-identify discards a late response instead of resurrecting it on reopen', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
     let resolvePost;

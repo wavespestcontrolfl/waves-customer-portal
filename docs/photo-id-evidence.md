@@ -27,6 +27,9 @@ submission's customer-visible photos. The server retrieves their private bytes
 and copies them into the existing `service_requests.photos` data-URL array;
 combined new and saved attachments obey the existing three-photo and size limits.
 Missing photos return 409; failed storage reads return 503, with no request filed.
+When no visible photo rows survived storage, a replacement upload is required;
+this differs from explicitly removing selections from an existing photo set.
+An already-filed retry returns the existing request before reading storage again.
 No caller-supplied URL or storage key is fetched. Customers can remove individual
 saved attachments before submitting.
 
@@ -40,6 +43,7 @@ Consumers: customer `PhotoIdSheet` and `ReportIssueOverlay` (web/PWA/native bund
 and the existing request handlers. Older clients can ignore the extra read field
 and continue sending their current request bodies. Assessment token routes,
 public website forms, model calls, coverage routing and communication behavior
-are unchanged. Staff see copied attachments through existing request views.
+are unchanged. The companion staff-attachment viewer must ship before this
+handoff is released so staff can inspect the copied evidence from request triage.
 
 This is evidence restoration, not technician confirmation or issue resolution.

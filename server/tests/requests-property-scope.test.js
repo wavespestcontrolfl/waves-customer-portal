@@ -174,6 +174,26 @@ test.each([404, 409, 503])('an unavailable Photo ID source (%s) never files a re
   expect(notifyAdmin).not.toHaveBeenCalled();
 });
 
+test('an already-filed Photo ID retry succeeds without reading photo storage again', async () => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  db.mockImplementation(() => chain([{ id: 'existing-request', category: 'other' }], log));
+  const res = await post({ category: 'other', subject: 'Photo follow-up', photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+  expect(res.status).toBe(200);
+  expect(res.body).toMatchObject({ deduped: true, request: { id: 'existing-request' } });
+  expect(requestPhotoIdEvidence).not.toHaveBeenCalled();
+  expect(notifyAdmin).not.toHaveBeenCalled();
+});
+
+test.each([false, true])('missing original photo rows require a replacement (attached=%s)', async (attached) => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  requestPhotoIdEvidence.mockResolvedValueOnce({ photos: [], missingPhotos: true });
+  const res = await post({ category: 'other', subject: 'Photo follow-up', photos: attached ? ['data:image/jpeg;base64,/9j/2w=='] : [], photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+  expect(res.status).toBe(attached ? 201 : 409);
+  expect(log.some((e) => e[0] === 'insert')).toBe(attached);
+});
+
 test('combined new and saved attachments still obey the shared photo cap', async () => {
   global.__SCOPE__ = SECONDARY;
   const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');

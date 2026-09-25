@@ -39,6 +39,7 @@ async function requestPhotoIdEvidence(req, source, scope) {
   const row = await query.first('id');
   if (!row) return { status: 404, error: 'Photo ID not found.' };
   const rows = await customerPhotoRows(source.type, source.id);
+  if (!rows.length && !source.photoIds.length) return { photos: [], missingPhotos: true };
   const selected = source.photoIds.map((id) => rows.find((photo) => photo.id === id));
   if (selected.some((photo) => !photo || !photo.s3_key)) {
     return { status: 409, error: 'A saved photo is unavailable. Reopen your Photo ID or attach a new photo.' };

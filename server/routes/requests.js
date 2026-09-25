@@ -305,14 +305,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         code: 'property_selection_stale',
       });
     }
-    if (value.photoIdSource) {
-      if (!isEnabled('customerPhotoId')) return res.status(404).json({ error: 'Photo ID not found.' });
-      const evidence = await requestPhotoIdEvidence(req, value.photoIdSource, requestScope);
-      if (evidence.error) return res.status(evidence.status).json({ error: evidence.error });
-      const combined = validateRequestPhotos([...photoData, ...evidence.photos]);
-      if (!combined.ok) return res.status(combined.status).json({ error: combined.error });
-      photoData = combined.photos;
-    }
+    if (value.photoIdSource && !isEnabled('customerPhotoId')) return res.status(404).json({ error: 'Photo ID not found.' });
     // Lightweight server-side dedupe — reject identical create within 60s
     const dupeWindow = new Date(Date.now() - 60 * 1000);
     const dupeQuery = db('service_requests')
@@ -416,6 +409,18 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // from this branch — the original request's already went out.
         ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at) } : {}),
       });
+    }
+
+    // A retry already has copied evidence; only a new request needs storage.
+    if (value.photoIdSource) {
+      const evidence = await requestPhotoIdEvidence(req, value.photoIdSource, requestScope);
+      if (evidence.error) return res.status(evidence.status).json({ error: evidence.error });
+      if (evidence.missingPhotos && !photoData.length) {
+        return res.status(409).json({ error: 'Original photos are unavailable. Please attach a new photo to your request.' });
+      }
+      const combined = validateRequestPhotos([...photoData, ...evidence.photos]);
+      if (!combined.ok) return res.status(combined.status).json({ error: combined.error });
+      photoData = combined.photos;
     }
 
     // An INACTIVE account never creates a fresh request: the allow-inactive

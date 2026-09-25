@@ -1385,6 +1385,9 @@ describe('saved Photo ID evidence', () => {
     mockGetPhotoBase64.mockRejectedValueOnce(new Error('storage offline'));
     expect((await requestPhotoIdEvidence(req, source)).status).toBe(503);
     expect((await requestPhotoIdEvidence(req, source, { enabled: true, scoped: true, property: { id: 'home-b' } })).status).toBe(404);
+    expect(await requestPhotoIdEvidence(req, { ...source, photoIds: [] })).toEqual({ photos: [] });
+    TABLES.pest_identification_photos = [];
+    expect(await requestPhotoIdEvidence(req, { ...source, photoIds: [] })).toEqual({ photos: [], missingPhotos: true });
   });
 });
 
