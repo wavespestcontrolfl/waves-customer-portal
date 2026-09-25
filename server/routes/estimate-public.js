@@ -24662,16 +24662,16 @@ async function buildPricingBundleInner(estimate) {
     // discounted quote displayed. Already-netted legacy snapshots pass.
     && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
   ) {
-    // Chokepoint stamp (never a price field, never written back) — a
-    // snapshot frozen before the palm-care bullet lane, or one carrying a
-    // stale/raw value from any pre-round-4 builder, otherwise fast-paths
-    // forever with the wrong palmCount on its T&S row/frequency.
-    const stampedSnapshotBundle = stampTreeShrubPalmCount(snapshotBundle, treeShrubPalmCountForEstData(estData));
-    return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
-      ...stampedSnapshotBundle,
+    // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
+    // attachPublicPricingContract rebuilds services[] split cards there and
+    // would drop an earlier stamp. Never a price field, never written back;
+    // a snapshot frozen before this lane or carrying a stale value is
+    // corrected on every read.
+    return stampTreeShrubPalmCount(finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
+      ...snapshotBundle,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
-    })), estimate, estData);
+    })), estimate, estData), treeShrubPalmCountForEstData(estData));
   }
 
   const cached = getEstimatePricingCache(estimate);
@@ -24680,12 +24680,12 @@ async function buildPricingBundleInner(estimate) {
   // total the converter won't bill.
   if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)
     && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)) {
-    // Defensive chokepoint stamp: every fresh-build path below already
-    // stamps before caching, so this is normally a same-reference no-op —
-    // but a cache entry written before this deploy (or by any future path
-    // that forgets to stamp) must never serve a stale/unstamped palmCount.
-    const stampedCached = stampTreeShrubPalmCount(cached, treeShrubPalmCountForEstData(estData));
-    return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({ ...stampedCached, cacheHit: true })), estimate, estData);
+    // Stamped after finalize for the same reason as the snapshot path; a
+    // cache entry written before this deploy must never serve a stale count.
+    return stampTreeShrubPalmCount(
+      finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({ ...cached, cacheHit: true })), estimate, estData),
+      treeShrubPalmCountForEstData(estData),
+    );
   }
 
   const prefs = normalizePrefs(estData?.preferences);
