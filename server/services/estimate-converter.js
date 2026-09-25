@@ -4401,25 +4401,28 @@ function roundCents(value) {
 // Activation reads the frozen snapshot back and FAILS CLOSED on anything
 // missing or malformed (the caller bells and the estimate stays
 // awaiting_signature) — never a silent fallback to live repricing.
+const isFiniteNonNegative = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+const toCents = (v) => Math.round(v * 100);
+
+function isValidFrozenTermiteAnnualFinancials(frozen) {
+  if (!frozen || frozen.version !== 1 || typeof frozen.prepayDiscountApplied !== 'boolean') return false;
+  const setup = frozen.annualPlanSetup;
+  if (setup != null && !(isFiniteNonNegative(setup.amount) && typeof setup.description === 'string')) return false;
+  if (frozen.taxRate != null && !isFiniteNonNegative(frozen.taxRate)) return false;
+  const money = [frozen.annualPrepayAmount, frozen.rodentSetupAmount, frozen.subtotal, frozen.taxAmount, frozen.total];
+  if (!money.every(isFiniteNonNegative) || !(frozen.annualPrepayAmount > 0)) return false;
+  const lineSum = frozen.annualPrepayAmount + frozen.rodentSetupAmount + (setup?.amount || 0);
+  return toCents(frozen.subtotal) === toCents(lineSum)
+    && toCents(frozen.total) === toCents(frozen.subtotal + frozen.taxAmount);
+}
+
 function frozenTermiteAnnualFinancialsFor(estimate) {
   let context = estimate?.annual_plan_deferred_invoice;
   if (typeof context === 'string') {
     try { context = JSON.parse(context); } catch { context = null; }
   }
   const frozen = context && typeof context === 'object' ? context.frozenFinancials : null;
-  const finite = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
-  const setupOk = frozen && (frozen.annualPlanSetup == null
-    || (finite(frozen.annualPlanSetup.amount) && typeof frozen.annualPlanSetup.description === 'string'));
-  const valid = frozen && frozen.version === 1
-    && finite(frozen.annualPrepayAmount) && frozen.annualPrepayAmount > 0
-    && typeof frozen.prepayDiscountApplied === 'boolean'
-    && finite(frozen.rodentSetupAmount)
-    && (frozen.taxRate == null || finite(frozen.taxRate))
-    && finite(frozen.subtotal) && finite(frozen.taxAmount) && finite(frozen.total)
-    && setupOk
-    && Math.round(frozen.subtotal * 100) === Math.round((frozen.annualPrepayAmount
-      + frozen.rodentSetupAmount + (frozen.annualPlanSetup?.amount || 0)) * 100)
-    && Math.round(frozen.total * 100) === Math.round((frozen.subtotal + frozen.taxAmount) * 100);
+  const valid = isValidFrozenTermiteAnnualFinancials(frozen);
   if (!valid) {
     const err = new Error(`Termite annual plan for estimate ${estimate?.id} has no valid frozen accepted-price snapshot — refusing to reprice at signature`);
     err.code = 'TERMITE_ANNUAL_FROZEN_FINANCIALS_INVALID';
