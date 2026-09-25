@@ -1326,6 +1326,37 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(base.price_count).toBe(acceptedChanged.price_count);
   });
 
+  // caller.caller_id_disclaimed / caller.phone_note (schema 1.14.0, live
+  // miss 2026-09-25, call 6fee5f34): flatView must expose these so replay
+  // variance (FIELD_GROUPS medium) watches them the same way it watches price.
+  test('flatView exposes caller_id_disclaimed and phone_note', () => {
+    const flat = flatView({
+      meta: { schema_version: '1.14.0' },
+      caller: { caller_id_disclaimed: true, phone_note: 'office line, routes to me', phone_source: 'caller_id' },
+    });
+    expect(flat.caller_id_disclaimed).toBe(true);
+    expect(flat.phone_note).toBe('office line, routes to me');
+  });
+
+  test('flatView keeps caller_id_disclaimed a genuine tri-state (false survives, absent reads null)', () => {
+    const disclaimedFalseIsNeverModelSet = flatView({
+      meta: { schema_version: '1.14.0' },
+      caller: { caller_id_disclaimed: false },
+    });
+    // The model never emits false (schema description), but flatView must
+    // still pass a false value through unchanged if one ever arrives —
+    // never silently collapsed to null.
+    expect(disclaimedFalseIsNeverModelSet.caller_id_disclaimed).toBe(false);
+
+    const absent = flatView({ meta: { schema_version: '1.14.0' }, caller: {} });
+    expect(absent.caller_id_disclaimed).toBeNull();
+    expect(absent.phone_note).toBeNull();
+
+    const nulled = flatView({ meta: { schema_version: '1.14.0' }, caller: { caller_id_disclaimed: null, phone_note: null } });
+    expect(nulled.caller_id_disclaimed).toBeNull();
+    expect(nulled.phone_note).toBeNull();
+  });
+
   test('normalizeCallExtraction sanitizes the new V1 fields', () => {
     const out = normalizeCallExtraction({
       quoted_price: '350',

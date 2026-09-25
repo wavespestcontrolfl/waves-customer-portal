@@ -271,6 +271,20 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('caller_phone_missing');
   }
 
+  // callback_number_needed (schema 1.14.0, live miss 2026-09-25, call
+  // 6fee5f34: "this is our office line... I pick up, and then text"). The
+  // caller explicitly disclaimed the ANI as NOT their own AND gave us no
+  // spoken number to use instead (phone_source would be 'spoken' or 'both'
+  // if they had) — the only number on file is one we now KNOW is wrong to
+  // text. Distinct from caller_phone_missing above, which fires when there
+  // is no reachable number at all; here the ANI IS dialable, it's just not
+  // this caller's. SMS-only: see SMS_ONLY_FLAGS / ADVISORY_TRIAGE_FLAGS —
+  // the appointment still books, the confirmation/reminder SMS leg holds.
+  if (caller.caller_id_disclaimed === true
+      && caller.phone_source !== 'spoken' && caller.phone_source !== 'both') {
+    flags.push('callback_number_needed');
+  }
+
   if (hasNameEmailMismatch(caller)) {
     flags.push('name_email_mismatch');
   }
@@ -342,7 +356,23 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
 const SMS_ONLY_FLAGS = new Set([
   'no_sms_consent_captured',
   'sms_consent_missing',
+  // Disclaimed caller ID, no spoken callback (see computeDeterministicTriageFlags):
+  // the SMS leg holds, never the appointment. Also registered in
+  // ADVISORY_TRIAGE_FLAGS so it files a Needs Review card without holding
+  // the booking; listed here too so a reader grepping SMS-blocking flags
+  // finds it.
+  'callback_number_needed',
 ]);
+
+// Pure decision: does callback_number_needed hold the confirmation/reminder
+// SMS leg for this call? Extracted so call-recording-processor.js's
+// v2SmsBlocked assignment is unit-testable without a DB/LLM — mirrors
+// checkTcpaConsent's own testability (call-routing-gates.js). Whatever TCPA
+// consent decided, the caller told us the ANI reaches someone who isn't
+// them, so it never overrides this hold.
+function callbackNumberNeededBlocksSms(finalTriageFlags) {
+  return Array.isArray(finalTriageFlags) && finalTriageFlags.includes('callback_number_needed');
+}
 
 // Advisory flags — they surface in the Needs Review inbox (informational: missing
 // surname, rental/tenant-occupied, a second service address) but must NOT block
@@ -383,6 +413,13 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // call-triage-safety.js ADVISORY set); blocking here was an unintended
   // regression, now pinned by the schema-classification contract test.
   'competing_quotes_active',
+  // The caller disclaimed the ANI as not their own and gave no spoken
+  // callback: booking proceeds (the ANI is the only key available), only
+  // the SMS leg holds — see the SMS gate in call-recording-processor.js
+  // and SMS_ONLY_FLAGS above. Never auto-resolved (not listed in
+  // triage-auto-resolve.js): a "get a real callback number" ask is a
+  // human-only verdict, same as missing_unit_number.
+  'callback_number_needed',
 ]);
 
 // Explicit allowlist of flags allowed to HOLD an appointment (owner ruling
@@ -1907,6 +1944,7 @@ module.exports = {
   canAutoRoute,
   onFileAddressSatisfaction,
   SMS_ONLY_FLAGS,
+  callbackNumberNeededBlocksSms,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,

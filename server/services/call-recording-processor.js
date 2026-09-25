@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -126,7 +126,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
-const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -866,6 +866,7 @@ const CONFIRM_REASON_TEXT = {
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
+  callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -9006,6 +9007,21 @@ const CallRecordingProcessor = {
           v2SmsBlocked = !tcpa.canSms;
           v2SmsClearedByImpliedConsent = tcpa.canSms && tcpa.reason === 'implied_consent_inbound';
           v2EmailBlocked = !tcpa.canEmail;
+          // callback_number_needed (schema 1.14.0, live miss 2026-09-25, call
+          // 6fee5f34): the caller told us the ANI isn't theirs and gave no
+          // callback of their own — TCPA consent (if any) was given by
+          // whoever answers THAT line, not necessarily this caller, so the
+          // confirmation/reminder SMS leg holds here regardless of what tcpa
+          // decided. Booking is unaffected (not in BLOCKING_TRIAGE_FLAGS);
+          // email is unaffected (a different, non-ANI-keyed channel when one
+          // is on file). Clearing this hold is a human verdict (the
+          // callback_number_needed card) — never automatic. Pure decision
+          // in call-triage-flags.js so it's unit-testable independent of
+          // this pass's DB/LLM calls.
+          if (callbackNumberNeededBlocksSms(finalFlags)) {
+            v2SmsBlocked = true;
+            v2SmsClearedByImpliedConsent = false;
+          }
 
           const routeDecision = buildRouteDecision({
             callLogId: call.id,
@@ -9923,6 +9939,27 @@ const CallRecordingProcessor = {
             phone,
             name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
           });
+
+          // caller_id_disclaimed (schema 1.14.0, live miss 2026-09-25, call
+          // 6fee5f34): the caller said `phone` (the ANI, our only key to
+          // create this customer) is NOT their own number. No dedicated
+          // phone-verification column exists for this meaning (see
+          // callerIdDisclaimedNoteText) — stamp crm_notes instead. Fail-open,
+          // same posture as the line-type check just above: never blocks or
+          // delays creation, which has already committed.
+          try {
+            const disclaimedNote = callerIdDisclaimedNoteText(v2CanonicalExtraction?.caller);
+            if (disclaimedNote) {
+              await db('customers').where({ id: customerId }).update({
+                crm_notes: db.raw(
+                  "CASE WHEN COALESCE(crm_notes, '') = '' THEN ? ELSE crm_notes || ? END",
+                  [disclaimedNote, `\n\n${disclaimedNote}`],
+                ),
+              });
+            }
+          } catch (e) {
+            logger.warn(`[call-proc] caller-id-disclaimed note stamp failed for ${customerId}: ${e.message}`);
+          }
 
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently

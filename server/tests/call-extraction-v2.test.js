@@ -136,8 +136,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.13.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.13.0');
+  test('schema version is 1.14.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.14.0');
   });
 
   describe('model-output schema', () => {
@@ -337,6 +337,70 @@ describe('schema validation', () => {
       data.caller.phone_e164 = null;
       const { valid } = validateModelOutput(data);
       expect(valid).toBe(true);
+    });
+
+    // caller.caller_id_disclaimed / caller.phone_note (schema 1.14.0, live
+    // miss 2026-09-25, call 6fee5f34): the caller stated the Twilio ANI is
+    // not their own number.
+    describe('caller.caller_id_disclaimed / phone_note', () => {
+      test('caller_id_disclaimed true with a phone_note validates', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = true;
+        data.caller.phone_note = 'this is our office line, they route it to me and I text back';
+        data.caller.phone_source = 'caller_id';
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('null caller_id_disclaimed / phone_note is valid (nothing said about the number)', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = null;
+        data.caller.phone_note = null;
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('omitting both fields is still valid (backward compatible with pre-1.14.0 prompts)', () => {
+        const data = validModelOutput();
+        delete data.caller.caller_id_disclaimed;
+        delete data.caller.phone_note;
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('a non-boolean caller_id_disclaimed fails', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = 'yes';
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('phone_note over 160 chars fails', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = true;
+        data.caller.phone_note = 'x'.repeat(161);
+        const { valid } = validateModelOutput(data);
+        expect(valid).toBe(false);
+      });
+
+      test('phone_note at exactly 160 chars validates', () => {
+        const data = validModelOutput();
+        data.caller.caller_id_disclaimed = true;
+        data.caller.phone_note = 'x'.repeat(160);
+        const { valid, errors } = validateModelOutput(data);
+        expect(errors).toBeNull();
+        expect(valid).toBe(true);
+      });
+
+      test('survives persisted validation', () => {
+        const data = validPersisted();
+        data.caller.caller_id_disclaimed = true;
+        data.caller.phone_note = 'shared shop phone';
+        expect(validatePersisted(data).valid).toBe(true);
+      });
     });
 
     // service_request.price (call-agent audit 2026-09-23): captures any

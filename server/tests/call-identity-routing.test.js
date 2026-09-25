@@ -1,4 +1,4 @@
-const { canAutoRoute, computeDeterministicTriageFlags, isExplicitlyNonOwner, BLOCKING_TRIAGE_FLAGS, deriveCallReviewBridge } = require('../services/call-triage-flags');
+const { canAutoRoute, computeDeterministicTriageFlags, isExplicitlyNonOwner, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, deriveCallReviewBridge, callbackNumberNeededBlocksSms } = require('../services/call-triage-flags');
 const { decideDisposition } = require('../services/call-disposition');
 const { adoptV2PrimaryFields } = require('../utils/extraction-compat');
 const { sameSpokenFirstName } = require('../utils/name-match');
@@ -155,5 +155,51 @@ describe('regressions', () => {
     expect(deriveCallReviewBridge({ ...base, callerRelationship: 'spouse_partner' }).needsConfirmation).not.toContain('caller_not_authorized');
     expect(deriveCallReviewBridge({ ...base, callerRelationship: 'tenant' }).needsConfirmation).toContain('caller_not_authorized');
     expect(deriveCallReviewBridge({ ...base, callerRelationship: 'property_manager' }).needsConfirmation).toContain('caller_not_authorized');
+  });
+});
+
+// callback_number_needed (schema 1.14.0, live miss 2026-09-25, call 6fee5f34):
+// "this is our office line... they don't pick up, I pick up, and then
+// text" — the caller disclaimed the ANI as not their own and gave no
+// spoken callback.
+describe('callback_number_needed — disclaimed caller ID with no spoken callback', () => {
+  test('fires when caller_id_disclaimed is true and phone_source is caller_id/unknown', () => {
+    for (const phone_source of ['caller_id', 'unknown']) {
+      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed: true, phone_source } }));
+      expect(flags).toContain('callback_number_needed');
+    }
+  });
+
+  test('does not fire when a spoken callback also covers the call (phone_source spoken/both)', () => {
+    for (const phone_source of ['spoken', 'both']) {
+      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed: true, phone_source } }));
+      expect(flags).not.toContain('callback_number_needed');
+    }
+  });
+
+  test('does not fire when caller_id_disclaimed is null or false', () => {
+    for (const caller_id_disclaimed of [null, undefined, false]) {
+      const flags = computeDeterministicTriageFlags(v2({ caller: { caller_id_disclaimed, phone_source: 'caller_id' } }));
+      expect(flags).not.toContain('callback_number_needed');
+    }
+  });
+
+  test('is advisory, not blocking — the appointment still books', () => {
+    expect(BLOCKING_TRIAGE_FLAGS.has('callback_number_needed')).toBe(false);
+    expect(ADVISORY_TRIAGE_FLAGS.has('callback_number_needed')).toBe(true);
+    const r = canAutoRoute(
+      v2({ caller: { relationship_to_property: 'owner', on_site_authorization: true, caller_id_disclaimed: true, phone_source: 'caller_id' } }),
+      { contactPhone: ANI, addressValidation: AV_CLEAN },
+    );
+    expect(r.allowed).toBe(true);
+    expect(r.flags).toContain('callback_number_needed');
+  });
+
+  test('callbackNumberNeededBlocksSms is true only when the flag is present', () => {
+    expect(callbackNumberNeededBlocksSms(['callback_number_needed'])).toBe(true);
+    expect(callbackNumberNeededBlocksSms(['out_of_service_area'])).toBe(false);
+    expect(callbackNumberNeededBlocksSms([])).toBe(false);
+    expect(callbackNumberNeededBlocksSms(null)).toBe(false);
+    expect(callbackNumberNeededBlocksSms(undefined)).toBe(false);
   });
 });
