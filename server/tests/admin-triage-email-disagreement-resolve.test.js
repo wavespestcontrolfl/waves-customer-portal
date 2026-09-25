@@ -235,13 +235,23 @@ describe('PUT /admin/triage/:id/resolve on a card carrying email_disagreement', 
   // Codex round-3 P1 (finding #7): a customer-less voicemail lead never
   // gets a first_touch_holds row — the ONLY correction path is editing the
   // lead's own email, so that must be an accepted provenance shape too.
+  // Codex round-4 P1 (finding #1): the signal is `leads.email_confirmed_at`
+  // — stamped ONLY by admin-leads.js when the email field itself actually
+  // changes — never the lead's generic `updated_at` (an unrelated
+  // status/notes/SMS-bookkeeping touch bumps that and would falsely
+  // confirm the card).
   describe('customer-less voicemail lead (no hold row at all)', () => {
-    test('a lead email set AFTER the card was filed confirms and closes the card', async () => {
+    test('a lead email_confirmed_at set AFTER the card was filed confirms and closes the card', async () => {
       const { conn, tables } = fixture({
         call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
         first_touch_holds: [],
         customers: [],
-        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', email: 'lead@example.com', updated_at: '2026-09-21T00:00:00.000Z' }],
+        leads: [{
+          id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: 'lead@example.com',
+          // A late, unrelated row touch (status change, SMS bookkeeping)
+          // bumped updated_at even later — must NOT be what confirms this.
+          updated_at: '2026-09-23T00:00:00.000Z', email_confirmed_at: '2026-09-21T00:00:00.000Z',
+        }],
       });
       wireDb(db, { conn });
       await withServer(async (baseUrl) => {
@@ -251,18 +261,40 @@ describe('PUT /admin/triage/:id/resolve on a card carrying email_disagreement', 
       expect(tables.triage_items[0].status).toBe('resolved');
     });
 
-    test('a lead email that predates the card (never an answer to IT) still refuses', async () => {
+    test('a lead whose updated_at is late but email_confirmed_at predates the card still refuses (round-4 fix)', async () => {
       const { conn, tables } = fixture({
         call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
         first_touch_holds: [],
         customers: [],
-        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', email: 'lead@example.com', updated_at: '2026-09-19T00:00:00.000Z' }],
+        leads: [{
+          id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: 'lead@example.com',
+          // Some UNRELATED field edit (status/notes) after the card was
+          // filed bumped updated_at — round-3's updated_at signal would
+          // have wrongly confirmed this; email_confirmed_at is untouched
+          // and predates the card, so it correctly still refuses.
+          updated_at: '2026-09-23T00:00:00.000Z', email_confirmed_at: '2026-09-19T00:00:00.000Z',
+        }],
       });
       wireDb(db, { conn });
       await withServer(async (baseUrl) => {
         const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_UPDATED_AT });
         expect(res.status).toBe(409);
         expect((await res.json()).code).toBe('EMAIL_DISAGREEMENT_UNCONFIRMED');
+      });
+      expect(tables.triage_items[0].status).toBe('open');
+    });
+
+    test('a lead with no email_confirmed_at at all still refuses, even with a nonblank email and a late updated_at', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        first_touch_holds: [],
+        customers: [],
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: 'lead@example.com', updated_at: '2026-09-23T00:00:00.000Z' }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_UPDATED_AT });
+        expect(res.status).toBe(409);
       });
       expect(tables.triage_items[0].status).toBe('open');
     });
@@ -280,6 +312,51 @@ describe('PUT /admin/triage/:id/resolve on a card carrying email_disagreement', 
         expect(res.status).toBe(409);
       });
       expect(tables.triage_items[0].status).toBe('open');
+    });
+
+    // Codex round-4 P1 (finding #3): leads.twilio_call_sid is NOT unique.
+    test('two leads share the call SID → ambiguous, fails closed to unconfirmed', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        first_touch_holds: [],
+        customers: [],
+        leads: [
+          { id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: 'lead1@example.com', email_confirmed_at: '2026-09-21T00:00:00.000Z' },
+          { id: 'lead-2', twilio_call_sid: 'CA000', deleted_at: null, email: 'lead2@example.com', email_confirmed_at: '2026-09-21T00:00:00.000Z' },
+        ],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_UPDATED_AT });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('EMAIL_DISAGREEMENT_UNCONFIRMED');
+      });
+      expect(tables.triage_items[0].status).toBe('open');
+    });
+
+    // Codex round-4 P1 (finding #3): the processor's own authoritative
+    // stamp (call_log.metadata.lead_id) resolves the lead unambiguously
+    // when present, bypassing the non-unique SID match entirely — even
+    // with ANOTHER lead sharing the same SID.
+    test('call_log.metadata.lead_id resolves the correct lead even when the SID is shared with another', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{
+          id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000',
+          metadata: { lead_id: 'lead-1' },
+        }],
+        first_touch_holds: [],
+        customers: [],
+        leads: [
+          { id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: 'lead1@example.com', email_confirmed_at: '2026-09-21T00:00:00.000Z' },
+          { id: 'lead-2', twilio_call_sid: 'CA000', deleted_at: null, email: 'lead2@example.com', email_confirmed_at: null },
+        ],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: CARD_UPDATED_AT });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.triage_items[0].status).toBe('resolved');
     });
   });
 
@@ -376,5 +453,73 @@ describe('POST /admin/triage/:id/verdict accept on a card carrying email_disagre
       expect((await res.json()).code).toBe('STALE_CARD_VERSION');
     });
     expect(tables.triage_items[0].status).toBe('open');
+  });
+});
+
+// Codex round-4 P1 (finding #2): the version bind covers only the CLICKED
+// item — a verdict submitted through a non-email sibling card must not
+// bulk-resolve a SEPARATE (possibly superseded/replaced) email card and
+// release its hold unseen. The client sends expected_updated_at for the
+// clicked item only, never for siblings, so an unrelated email card is
+// excluded from the bulk resolve entirely and survives for its own click.
+describe('POST /admin/triage/:id/verdict on a DIFFERENT card, with an email disagreement card also open on the call', () => {
+  const OTHER_CARD_ID = 'card-other';
+
+  function siblingFixture(extra = {}) {
+    return fixture({
+      triage_items: [
+        {
+          id: CARD_ID, call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open',
+          category: 'lead_intake', severity: 'advisory', payload: DISAGREEMENT_PAYLOAD,
+          created_at: CARD_CREATED_AT, updated_at: CARD_UPDATED_AT,
+        },
+        {
+          id: OTHER_CARD_ID, call_log_id: CALL_ID, reason_code: 'address_unverified', status: 'open',
+          category: 'address_review', severity: 'blocking', payload: { flag: 'address_unverified' },
+          created_at: CARD_CREATED_AT, updated_at: CARD_UPDATED_AT,
+        },
+      ],
+      ...extra,
+    });
+  }
+
+  test('Accept on the OTHER card resolves it, but leaves the email card open and its hold untouched', async () => {
+    const { conn, tables } = siblingFixture();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${OTHER_CARD_ID}/verdict`, { verdict: 'accept', expected_updated_at: CARD_UPDATED_AT });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items.find((c) => c.id === OTHER_CARD_ID).status).toBe('resolved');
+    // The email disagreement card survives, unconfirmed, needing its own click.
+    expect(tables.triage_items.find((c) => c.id === CARD_ID).status).toBe('open');
+    expect(tables.first_touch_holds[0].held_email).toBe('');
+  });
+
+  test('a Deny on the OTHER card also leaves the email card open and untouched', async () => {
+    const { conn, tables } = siblingFixture();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${OTHER_CARD_ID}/verdict`, { verdict: 'deny', wrong_fields: ['address'], expected_updated_at: CARD_UPDATED_AT });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items.find((c) => c.id === OTHER_CARD_ID).status).toBe('resolved');
+    expect(tables.triage_items.find((c) => c.id === CARD_ID).status).toBe('open');
+    expect(tables.first_touch_holds[0].held_email).toBe('');
+  });
+
+  test('Accept on the email card ITSELF still resolves it (self-click still works)', async () => {
+    const { conn, tables } = siblingFixture({
+      first_touch_holds: [{
+        id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'pending',
+        held_email: 'janedoe@example.com', corrected_at: new Date().toISOString(),
+      }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept', expected_updated_at: CARD_UPDATED_AT });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items.find((c) => c.id === CARD_ID).status).toBe('resolved');
   });
 });

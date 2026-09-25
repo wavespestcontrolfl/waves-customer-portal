@@ -1139,6 +1139,16 @@ router.put('/:id', async (req, res, next) => {
       const current = await trx('leads').where('id', req.params.id).whereNull('deleted_at').forUpdate().first();
       if (!current) return null;
       previousStatus = current.status;
+      // Email-specific correction provenance (Codex round-4 P1 on the
+      // V1/V2 email-disagreement hold, PR #4802): stamped ONLY when the
+      // email field itself actually changes, never on an unrelated field
+      // edit (status/notes/assignment/...) that also happens to touch this
+      // row's plain updated_at. admin-triage.js's emailDisagreementConfirmed
+      // reads this for customer-less voicemail leads (no first_touch_holds
+      // row to retarget) as the only available correction signal.
+      if (updates.email !== undefined && updates.email !== current.email) {
+        updates.email_confirmed_at = new Date();
+      }
       const statusChanged = updates.status && updates.status !== current.status;
       // Match booking/conversion semantics: first win owns the timestamp.
       // Reopening and retrying a manual win never re-dates earned revenue.

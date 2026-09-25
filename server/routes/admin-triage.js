@@ -212,10 +212,20 @@ router.get('/', async (req, res) => {
 //       (customer-email-fanout's propagateCustomerEmailChange stamps both
 //       together; this is the only writer that ever sets corrected_at).
 //   (b) no hold row exists at all — a customer-less voicemail lead never
-//       gets one — and the call-linked lead (leads.twilio_call_sid) has a
-//       nonblank email touched AFTER this card was filed (the only
-//       correction path available when there is no customer record to
-//       edit).
+//       gets one — and the call-linked lead has a nonblank email whose
+//       EMAIL-SPECIFIC correction stamp (leads.email_confirmed_at, set only
+//       when the lead's email field itself changes — see admin-leads.js's
+//       PUT /:id) is AFTER this card was filed. Codex round-4 P1: the
+//       lead's plain `updated_at` is generic row provenance — any allowed
+//       field edit (status, notes, assignment, ...) or the voicemail-lead
+//       SMS bookkeeping bumps it, which would falsely confirm an unrelated
+//       touch. The lead itself is resolved by the call's OWN authoritative
+//       stamp (call_log.metadata.lead_id, the same stamp the processor's
+//       reconciliation paths trust) when the call carries one; otherwise by
+//       leads.twilio_call_sid, which is NOT unique (codex round-4 P1) — an
+//       ambiguous multi-lead match fails closed to unconfirmed, mirroring
+//       the processor's own unique-match rule (call-recording-processor.js,
+//       the sid-only repair arm around line 18174).
 // Nothing else counts, so a Resolve/Accept on an unconfirmed disagreement
 // card refuses with 409 EMAIL_DISAGREEMENT_UNCONFIRMED and the card stays
 // open — a live work item, not a silently-stranded hold.
@@ -225,14 +235,25 @@ async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTa
     const hold = await trx('first_touch_holds').where({ call_log_id: callLogId }).first('held_email', 'corrected_at');
     if (hold) return !!(hold.corrected_at && String(hold.held_email || '').trim());
   }
-  const call = await trx('call_log').where({ id: callLogId }).first('twilio_call_sid');
-  if (!call?.twilio_call_sid) return false;
-  const lead = await trx('leads')
-    .where({ twilio_call_sid: call.twilio_call_sid })
-    .orderBy('updated_at', 'desc')
-    .first('email', 'updated_at');
-  if (!lead || !String(lead.email || '').trim() || !lead.updated_at) return false;
-  return new Date(lead.updated_at).getTime() > new Date(cardCreatedAt).getTime();
+  const call = await trx('call_log').where({ id: callLogId }).first('twilio_call_sid', 'metadata');
+  if (!call) return false;
+  const metadata = typeof call.metadata === 'string'
+    ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+    : (call.metadata || {});
+  const stampedLeadId = metadata?.lead_id ? String(metadata.lead_id) : null;
+  let lead = null;
+  if (stampedLeadId) {
+    lead = await trx('leads').where({ id: stampedLeadId }).whereNull('deleted_at').first('email', 'email_confirmed_at');
+  } else if (call.twilio_call_sid) {
+    const sidLeads = await trx('leads')
+      .where({ twilio_call_sid: call.twilio_call_sid })
+      .whereNull('deleted_at')
+      .limit(2)
+      .select('id', 'email', 'email_confirmed_at');
+    if (sidLeads.length === 1) lead = sidLeads[0];
+  }
+  if (!lead || !String(lead.email || '').trim() || !lead.email_confirmed_at) return false;
+  return new Date(lead.email_confirmed_at).getTime() > new Date(cardCreatedAt).getTime();
 }
 
 // Status transition WITHOUT touching res, so callers can gate side effects (like
@@ -1166,7 +1187,15 @@ router.post('/:id/verdict', async (req, res) => {
       if (live?.payload?.reschedule_proposal) {
         throw Object.assign(new Error('Review or dismiss the reschedule proposal instead of recording a call verdict.'), { proposalConflict: true });
       }
-      if (verdict === 'accept') {
+      // Codex round-4 P1 (finding #2): only check (and only sweep, below)
+      // email review cards when THIS verdict's own clicked item IS one —
+      // an Accept on some OTHER card (address, name, ...) must never
+      // silently bulk-resolve a SEPARATE, possibly-superseded email card
+      // and release its hold unseen. The client sends expected_updated_at
+      // for the clicked item only, never for siblings, so there is no
+      // version to bind an unrelated email card to — it is excluded from
+      // the bulk resolve entirely (below) and survives for its own click.
+      if (verdict === 'accept' && emailReviewCard) {
         // Same guard as transitionCore's plain Resolve (codex round-2/3
         // P1): an Accept call verdict bulk-resolves every open card on the
         // call, including an email_unverified/invalid card carrying an
@@ -1220,9 +1249,16 @@ router.post('/:id/verdict', async (req, res) => {
         // …and a recovery task (its window / retained visit refreshed in
         // place by a settlement) is settled only by ITS OWN version-bound
         // verdict, never swept by a sibling card's verdict (codex r31 P1).
+        // …and an email review card, UNLESS it is itself the clicked item
+        // (codex round-4 P1, finding #2): the client's expected_updated_at
+        // only ever covers the clicked card, so a verdict on some OTHER
+        // card has no version to bind a separate email card to — sweeping
+        // it in would resolve (and release the hold of) evidence the
+        // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
+          ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])
         .modify((q) => { if (conflictLeftForOwnVerdict) q.whereNot({ id: heldConflict.id }); })
         // A verdict ON a recovery task settles that row alone: a reprocess

@@ -58,6 +58,10 @@ function makeFakeDb(seed = {}) {
       },
       whereIn(col, vals) { whereInClauses.push({ col, vals }); return api; },
       forUpdate() { return api; },
+      count(spec) {
+        const alias = spec && typeof spec === 'object' ? Object.keys(spec)[0] : 'count';
+        return { first: async () => ({ [alias]: filtered().length }) };
+      },
       select: async (...cols) => filtered().map((r) => pick(r, cols)),
       first: async (...cols) => {
         const r = filtered()[0];
@@ -124,7 +128,7 @@ function fixture(extra = {}) {
     first_touch_holds: [{
       id: 'hold-1', call_log_id: CALL_ID, customer_id: 'cust-1', status: 'pending', held_email: '',
     }],
-    call_log: [{ id: CALL_ID, processing_token: 'tok' }],
+    call_log: [{ id: CALL_ID, processing_token: 'tok', review_status: 'open' }],
     ...extra,
   });
 }
@@ -269,6 +273,43 @@ describe('mintEmailReviewCardsFenced — supersession (codex round 3)', () => {
     wireDb(db, { conn });
     await mintEmailReviewCardsFenced({ callLogId: CALL_ID, procToken: 'tok', cards: [], callSid: 'CA1' });
     expect(conn.transaction).not.toHaveBeenCalled();
+  });
+});
+
+// Codex round-4 P1 (finding #4): superseding the call's LAST live card with
+// no replacement (full agreement on reprocess) previously left
+// call_log.review_status stuck 'open' forever — the finalizer only writes
+// 'open' when the pass has confirmation reasons, so a full-agreement pass
+// never re-closes it, and call-intelligence keeps telling staff to clear a
+// card that no longer exists.
+describe('mintEmailReviewCardsFenced — call_log.review_status sync (codex round 4, finding #4)', () => {
+  test('the last live card is superseded with NO replacement → review_status clears to resolved', async () => {
+    const { conn, tables } = fixture(); // call_log seeded review_status: 'open'
+    wireDb(db, { conn });
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [], callSid: 'CA1', invalidateClaims: false,
+      resolvedEmail: 'janedoe@example.com',
+    });
+    expect(tables.triage_items).toHaveLength(1); // only the closed row — nothing replaces it
+    expect(tables.triage_items[0].status).toBe('resolved');
+    expect(tables.call_log[0].review_status).toBe('resolved');
+  });
+
+  test('the live card is superseded WITH a fresh replacement → review_status stays open', async () => {
+    const PLAIN_PAYLOAD = { flag: 'email_unverified', email_candidates: [{ value: 'plain@example.com' }], email_release_target: 'plain@example.com' };
+    const { conn, tables } = fixture({
+      triage_items: [disagreementCardRow({ payload: JSON.stringify(PLAIN_PAYLOAD) })],
+    });
+    wireDb(db, { conn });
+    const DISAGREEMENT_CARD = {
+      call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open', payload: JSON.stringify(DISAGREEMENT_PAYLOAD),
+    };
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [DISAGREEMENT_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    const fresh = tables.triage_items.find((c) => c.status === 'open');
+    expect(fresh).toBeDefined();
+    expect(tables.call_log[0].review_status).toBe('open');
   });
 });
 

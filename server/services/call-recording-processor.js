@@ -1754,6 +1754,25 @@ async function mintEmailReviewCardsFenced({
           .whereIn('status', ['pending', 'releasing'])
           .update({ held_email: target.held_email, updated_at: new Date() });
       }
+      // Mirror admin-triage transitionCore's / triage-auto-resolve's
+      // review_status sync (Codex round-4 P1, finding #4): superseding the
+      // call's LAST live card with no replacement (full agreement on
+      // reprocess) previously left call_log.review_status stuck 'open'
+      // forever — the finalizer only writes 'open' when the pass itself
+      // has confirmation reasons, so a pass with none never re-closes it,
+      // and call-intelligence keeps telling staff to clear a card that no
+      // longer exists. A call with any open/in_progress card remaining
+      // (including a fresh replacement this same pass just inserted) stays
+      // 'open'; otherwise it closes to 'resolved' — the same terminal
+      // status the superseded row itself took.
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: callLogId })
+        .whereIn('status', ['open', 'in_progress'])
+        .count({ n: '*' })
+        .first();
+      await trx('call_log')
+        .where({ id: callLogId })
+        .update({ review_status: Number(stillOpen?.n || 0) > 0 ? 'open' : 'resolved', updated_at: new Date() });
       if (invalidateClaims) {
         const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
         await repenHoldsForFreshEmailReview(callLogId, trx);
