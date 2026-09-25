@@ -186,7 +186,6 @@ async function hasLocalContent(templateKey) {
  * second pooled connection while doing so).
  */
 async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode = 'block', context = {} }) {
-  const { leadId } = context;
   const template = await dbh('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error(`Unknown automation template: ${templateKey}`);
   if (!template.enabled) return { enrolled: false, reason: 'template disabled' };
@@ -198,6 +197,8 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
     .where({ template_key: templateKey, enabled: true })
     .orderBy('step_order', 'asc');
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
+
+  const leadId = await enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, context });
 
   // Customer-linked enrollment mutations serialize with a concurrent
   // merge-undo (r21): the undo's active-enrollment absence probe runs
@@ -291,6 +292,39 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
     await lockCustomerComms(trx, customer.id);
     return runEnrollment(trx);
   });
+}
+
+// Lead-aware callers (lead-webhook, public-quote, public-newsletter,
+// lead-first-touch-resume, call-recording-processor) always pass the
+// `leadId` key — even as null/undefined — and own that decision. Every other
+// new_lead enroll (admin manual + bulk trigger, the email-automations
+// dispatcher, automation-enroll) knows only the customer, so the
+// consultation block would render empty. For those, the lead is the
+// customer's newest non-deleted, still-open lead whose email is this
+// recipient — the same newest-open-lead rule as composer-customer-links.js's
+// buildConsultationLink, narrowed to the recipient because the block only
+// renders for the lead's own address. The block re-checks the lead at send
+// time, so this lookup is a pointer, not a trust decision. Runs on the
+// shared pool before the comms lock (new_lead has no transactional caller)
+// and fails soft: no lead id, email unchanged.
+async function enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, context }) {
+  if (Object.prototype.hasOwnProperty.call(context, 'leadId')) return context.leadId;
+  if (templateKey !== 'new_lead' || !customer.id) return undefined;
+  try {
+    const { applyOpenLeadPredicate } = require('./lead-statuses');
+    const lead = await applyOpenLeadPredicate(
+      db('leads')
+        .where({ customer_id: customer.id })
+        .whereNull('deleted_at')
+        .whereRaw('lower(email) = ?', [normalizedEmail])
+    )
+      .orderBy('created_at', 'desc')
+      .first('id');
+    return lead?.id || undefined;
+  } catch (err) {
+    logger.warn(`[automation] new_lead lead lookup failed for customer ${customer.id}: ${err.message}`);
+    return undefined;
+  }
 }
 
 async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps, leadId }) {
