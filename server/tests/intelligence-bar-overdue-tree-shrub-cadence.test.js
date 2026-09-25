@@ -120,6 +120,23 @@ test('the plan line\'s own recurrence outranks its catalog default (codex r28)',
   expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['bare-42', 42], ['custom-42', 42]]);
 });
 
+test('every supported recurrence resolves through the seeder\'s own table (codex r29)', async () => {
+  db.__state.rows = [
+    // semiannual tree_shrub_program: due at 180, not the catalog's 60.
+    { ...row('semiannual-not-due', 'Tree & Shrub', 100), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'semiannual', recurring_interval_days: null } },
+    { ...row('semiannual-due', 'Tree & Shrub', 181), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'semiannual', recurring_interval_days: null } },
+    { ...row('triannual-not-due', 'Tree & Shrub', 100), active_plan: { service_key: 'tree_shrub_6week', recurring_pattern: 'triannual', recurring_interval_days: null } },
+    { ...row('biweekly-due', 'Tree & Shrub', 15), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'biweekly', recurring_interval_days: null } },
+    // A pattern the seeder cannot place in days (seasonal) keeps the catalog default.
+    { ...row('seasonal-catalog', 'Tree & Shrub', 45), active_plan: { service_key: 'tree_shrub_6week', recurring_pattern: 'seasonal_feb_oct', recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['biweekly-due', 14], ['seasonal-catalog', 42], ['semiannual-due', 180]]);
+  const { intervalDaysForPattern } = require('../services/recurring-appointment-seeder');
+  expect([['custom', 45], [null, 42], ['quarterly', 42], ['bimonthly', null], ['every_6_weeks', null], ['weekly', null], ['annual', null], ['seasonal_feb_oct', null], ['custom', null]]
+    .map(([pattern, interval]) => intervalDaysForPattern(pattern, interval))).toEqual([45, 42, 90, 60, 42, 7, 360, null, null]);
+});
+
 test('other categories keep their fixed interval', async () => {
   db.__state.rows = [{ ...row('pest', 'Quarterly Pest Control Service', 100) }];
   const result = await executeTool('find_overdue_customers', { service_category: 'pest' });

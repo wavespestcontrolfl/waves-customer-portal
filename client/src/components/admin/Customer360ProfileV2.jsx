@@ -3762,17 +3762,22 @@ export function estimateSuggestionMatchesService(suggestion, serviceType, covera
 
 // Both prepay paths use the service library for label selection only; prices
 // and coverage still come from their existing, independently guarded handlers.
-function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
+function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange, customerId = null }) {
   const listId = useId();
   const [catalog, setCatalog] = useState([]);
   const [catalogError, setCatalogError] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    adminFetch("/admin/services/dropdown")
+    // Sellable rows only, scoped to this customer: a retired-for-sale plan
+    // (quarterly T&S) is offered just to the customer already on it — the
+    // same filter the booking pickers read, so every choice here saves.
+    const params = new URLSearchParams({ sellable: "true" });
+    if (customerId) params.set("sellable_customer_id", String(customerId));
+    adminFetch(`/admin/services/dropdown?${params}`)
       .then((rows) => { if (!cancelled) setCatalog(rows); })
       .catch(() => { if (!cancelled) setCatalogError(true); });
     return () => { cancelled = true; };
-  }, []);
+  }, [customerId]);
 
   const options = [...serviceOptions];
   for (const service of catalog) {
@@ -4113,6 +4118,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
             serviceOptions={serviceOptions}
             serviceType={serviceType}
             onChange={handleServiceTypeChange}
+            customerId={customer?.id}
           />
           <label className="block">
             <div className="ui-label text-ink-secondary mb-1">Cadence</div>
@@ -4578,6 +4584,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             serviceOptions={serviceOptions}
             serviceType={serviceType}
             onChange={handleServiceTypeChange}
+            customerId={customer?.id}
           />
           <label className="block">
             <div className="ui-label text-ink-secondary mb-1">Cadence</div>

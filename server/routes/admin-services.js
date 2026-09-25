@@ -60,7 +60,8 @@ router.get('/', async (req, res, next) => {
 // GET /dropdown — lightweight for selects / dropdowns
 router.get('/dropdown', async (req, res, next) => {
   try {
-    const rows = await serviceLibrary.getDropdown();
+    const { sellable, sellable_customer_id: sellableCustomerId } = req.query;
+    const rows = await serviceLibrary.getDropdown({ sellable, sellableCustomerId });
     res.json(rows);
   } catch (err) { next(err); }
 });

@@ -61,7 +61,11 @@ describe('retiredGateInputsForVisitEdit', () => {
       serviceType: 'Quarterly Pest Control',
     })).toEqual({
       serviceIds: [RETIRED_ID],
-      serviceTypes: [{ label: 'Quarterly Tree & Shrub', recurrence: { pattern: 'quarterly', intervalDays: null } }],
+      // Every added line's label rides along, catalog-backed or not (codex r29).
+      serviceTypes: [
+        { label: 'Quarterly T&S', recurrence: null },
+        { label: 'Quarterly Tree & Shrub', recurrence: { pattern: 'quarterly', intervalDays: null } },
+      ],
     });
     // The primary line's own id is one occurrence: a posted add-on carrying
     // it is a move, a second one is added.
@@ -69,7 +73,7 @@ describe('retiredGateInputsForVisitEdit', () => {
       current: { ...current, service_id: RETIRED_ID }, currentAddons: [], postedServiceId: LIVE_ID,
       postedAddons: [{ serviceId: RETIRED_ID, serviceName: 'Quarterly T&S' }, { serviceId: RETIRED_ID, serviceName: 'Quarterly T&S' }],
       serviceType: 'Quarterly Pest Control',
-    })).toEqual({ serviceIds: [LIVE_ID, RETIRED_ID], serviceTypes: [] });
+    })).toEqual({ serviceIds: [LIVE_ID, RETIRED_ID], serviceTypes: [{ label: 'Quarterly T&S', recurrence: null }] });
     // A same-id posted primary takes the primary occurrence first, so the
     // stored add-on occurrence still covers the reposted add-on.
     expect(retiredGateInputsForVisitEdit({
@@ -124,7 +128,20 @@ describe('retiredGateInputsForVisitEdit', () => {
       current, currentAddons: [{ id: 'a1', service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: null }],
       postedServiceId: LIVE_ID, serviceType: 'Quarterly Pest Control',
       postedAddons: [{ submittedAddonId: 'a1', serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null }],
-    })).toEqual({ serviceIds: [RETIRED_ID], serviceTypes: [] });
+    })).toEqual({ serviceIds: [RETIRED_ID], serviceTypes: [{ label: 'Quarterly T&S', recurrence: null }] });
+  });
+
+  test('an added catalog-backed add-on reaches the gate by name + its own cadence too (codex r29)', () => {
+    // The live 6x T&S row added with a quarterly pattern: its id is live, but
+    // the label at that cadence is the retired plan — both go through.
+    expect(retiredGateInputsForVisitEdit({
+      current: { ...current, is_recurring: true, recurring_pattern: 'monthly' }, currentAddons: [], postedServiceId: LIVE_ID,
+      postedAddons: [{ serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'quarterly', recurringIntervalDays: null }],
+      serviceType: 'Quarterly Pest Control',
+    })).toEqual({
+      serviceIds: [LIVE_ID],
+      serviceTypes: [{ label: 'Bi-Monthly Tree & Shrub Care', recurrence: { pattern: 'quarterly', intervalDays: null } }],
+    });
   });
 
   test('added catalog ids and a changed primary label are gated too', () => {

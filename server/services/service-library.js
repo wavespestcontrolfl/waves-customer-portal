@@ -301,6 +301,38 @@ function assertOperationalConsistency(merged) {
 /**
  * Paginated list of services with filters
  */
+// The new-sale catalog filter shared by every booking picker and the
+// annual-prepay plan selector (codex r29 on #4786): retired-for-sale rows are
+// dropped unless the customer already holds the plan.
+function applySellableFilter(query, sellableCustomerId = null) {
+  const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
+  const retiredKeys = [...RETIRED_SALE_SERVICE_KEYS];
+  const customerId = UUID_RE.test(String(sellableCustomerId || '')) ? String(sellableCustomerId) : null;
+  return query.where(function () {
+    // NULL-key rows are not retired; NOT IN alone would drop them.
+    this.whereNull('service_key').orWhereNotIn('service_key', retiredKeys);
+    if (customerId) {
+      this.orWhereExists(function () {
+        whereCustomerHoldsService(
+          this.select(db.raw('1')).from('scheduled_services').whereRaw(HOLDER_VISIT_IS_SERVICE_SQL),
+          customerId,
+        );
+      }).orWhereExists(function () {
+        // Held as an add-on line of a combined recurring visit (a one_time
+        // add-on line is not a plan — the same predicate the write gate
+        // applies, so the picker never offers what the save refuses).
+        whereCustomerHoldsService(
+          this.select(db.raw('1')).from('scheduled_service_addons')
+            .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
+            .whereRaw(HOLDER_ADDON_IS_SERVICE_SQL)
+            .whereRaw(ADDON_LINE_IS_PLAN_SQL),
+          customerId,
+        );
+      });
+    }
+  });
+}
+
 async function getServices({ category, billingType, isActive, isArchived, includeArchived = false, sellable = false, sellableCustomerId = null, search, limit = 50, offset = 0 } = {}) {
   const parsedLimit = Number(limit);
   const parsedOffset = Number(offset);
@@ -317,34 +349,7 @@ async function getServices({ category, billingType, isActive, isArchived, includ
   // grandfathered plans but must not be offered for a new appointment —
   // except to a customer who already has visits on that service (the
   // grandfathered plan's catch-up / one-off visits).
-  if (sellable === true || sellable === 'true') {
-    const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
-    const retiredKeys = [...RETIRED_SALE_SERVICE_KEYS];
-    const customerId = UUID_RE.test(String(sellableCustomerId || '')) ? String(sellableCustomerId) : null;
-    query = query.where(function () {
-      // NULL-key rows are not retired; NOT IN alone would drop them.
-      this.whereNull('service_key').orWhereNotIn('service_key', retiredKeys);
-      if (customerId) {
-        this.orWhereExists(function () {
-          whereCustomerHoldsService(
-            this.select(db.raw('1')).from('scheduled_services').whereRaw(HOLDER_VISIT_IS_SERVICE_SQL),
-            customerId,
-          );
-        }).orWhereExists(function () {
-          // Held as an add-on line of a combined recurring visit (a one_time
-          // add-on line is not a plan — the same predicate the write gate
-          // applies, so the picker never offers what the save refuses).
-          whereCustomerHoldsService(
-            this.select(db.raw('1')).from('scheduled_service_addons')
-              .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
-              .whereRaw(HOLDER_ADDON_IS_SERVICE_SQL)
-              .whereRaw(ADDON_LINE_IS_PLAN_SQL),
-            customerId,
-          );
-        });
-      }
-    });
-  }
+  if (sellable === true || sellable === 'true') query = applySellableFilter(query, sellableCustomerId);
   if (search) {
     // Token-AND across the searchable text columns. Splitting on
     // whitespace and requiring each token to match somewhere lets the
@@ -787,10 +792,14 @@ async function deactivateService(id, { audit } = {}) {
 /**
  * Lightweight dropdown list
  */
-async function getDropdown() {
-  return db('services')
+async function getDropdown({ sellable = false, sellableCustomerId = null } = {}) {
+  let query = db('services')
     .select('id', 'service_key', 'name', 'short_name', 'icon', 'category', 'color', 'default_duration_minutes', 'base_price')
-    .where({ is_active: true, is_archived: false })
+    .where({ is_active: true, is_archived: false });
+  // A plan selector (annual prepay) offers only what its save accepts: the
+  // same sellable, customer-scoped filter the booking pickers read.
+  if (sellable === true || sellable === 'true') query = applySellableFilter(query, sellableCustomerId);
+  return query
     .orderBy('sort_order', 'asc')
     .orderBy('name', 'asc');
 }

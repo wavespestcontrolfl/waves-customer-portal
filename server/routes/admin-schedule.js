@@ -11898,7 +11898,11 @@ function retiredGateInputsForVisitEdit({
     ])],
     serviceTypes: [
       ...(renamed ? [serviceType] : []),
-      ...addedLines.filter((l) => !l.serviceId && named(l)).map(labelOf),
+      // Every added line's label rides with its own cadence, catalog-backed
+      // or not (codex r29): a live 6x T&S row added with a quarterly
+      // pattern is the retired plan by name + cadence while its id is live —
+      // the same shape POST / hands the gate for every add-on.
+      ...addedLines.filter(named).map(labelOf),
       ...retainedNames,
       ...repatterned.filter(named).map(labelOf),
     ],

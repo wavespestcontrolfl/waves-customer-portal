@@ -105,6 +105,37 @@ describe('service library list — new-appointment picker (codex r11)', () => {
     return calls;
   };
   const CUSTOMER = '5a3f2c1d-9b8e-4f6a-a1b2-c3d4e5f60789';
+  // The lightweight dropdown (annual-prepay plan selector) reads the same
+  // filter through getDropdown (codex r29).
+  const runDropdown = async (opts) => {
+    const db = require('../models/db');
+    const calls = { notIn: [], exists: [], whereFn: 0 };
+    const sub = {
+      whereNull() { return this; },
+      orWhereNotIn(column, values) { calls.notIn.push([column, values]); return this; },
+      orWhereExists(fn) {
+        const inner = {
+          select() { return this; }, from(t) { calls.exists.push(t); return this; },
+          join(t) { calls.exists.push(['join', t]); return this; },
+          whereRaw(sql) { calls.exists.push(sql); return this; },
+          where(col, val) { calls.exists.push([col, val]); return this; },
+          whereNotIn(col, vals) { calls.exists.push([col, 'NOT IN', vals]); return this; },
+        };
+        fn.call(inner);
+        return this;
+      },
+    };
+    const builder = {
+      select() { return this; },
+      orderBy() { return this; },
+      where(arg) { if (typeof arg === 'function') { calls.whereFn += 1; arg.call(sub); } return this; },
+    };
+    db.mockImplementation(() => builder);
+    db.raw = (sql) => sql;
+    const { getDropdown } = require('../services/service-library');
+    await getDropdown(opts);
+    return calls;
+  };
 
   test('sellable=true hides retired-for-sale rows', async () => {
     const calls = await run({ isActive: 'true', sellable: 'true' });
@@ -140,6 +171,19 @@ describe('service library list — new-appointment picker (codex r11)', () => {
   test('a non-uuid customer id is ignored', async () => {
     const calls = await run({ isActive: 'true', sellable: 'true', sellableCustomerId: "x' OR 1=1" });
     expect(calls.exists).toEqual([]);
+  });
+
+  test('the services dropdown applies the same sellable, customer-scoped filter only when asked (codex r29)', async () => {
+    const plain = await runDropdown();
+    expect(plain.whereFn).toBe(0);
+    const sellable = await runDropdown({ sellable: 'true', sellableCustomerId: CUSTOMER });
+    expect(sellable.whereFn).toBe(1);
+    expect(sellable.notIn).toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
+    expect(sellable.exists).toContainEqual(['scheduled_services.customer_id', CUSTOMER]);
+    expect(sellable.exists).toContain('scheduled_service_addons');
+    // The route hands the query flags through.
+    const source = require('fs').readFileSync(require.resolve('../routes/admin-services'), 'utf8');
+    expect(source).toMatch(/const \{ sellable, sellable_customer_id: sellableCustomerId \} = req\.query;\s*const rows = await serviceLibrary\.getDropdown\(\{ sellable, sellableCustomerId \}\);/);
   });
 
   test('the Service Library page (no sellable flag) still lists them', async () => {

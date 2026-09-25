@@ -567,15 +567,17 @@ async function findOverdueCustomers(input) {
   const PLAN_TERMINAL_STATUSES = require('../service-library').terminalHistoryStatuses();
   const terminalSql = PLAN_TERMINAL_STATUSES.map(() => '?').join(', ');
   // The live plan line's OWN recurrence outranks its catalog default (codex
-  // r28 on #4786): a tree_shrub_program row customized to every 42 days is
-  // due at 42, not the row's 60. A custom / bare interval wins, else the
-  // stored pattern, else the catalog key, else the label.
-  const PLAN_PATTERN_DAYS = { quarterly: 90, bimonthly: 60, every_6_weeks: 42, monthly: 30 };
+  // r28/r29 on #4786): a tree_shrub_program row customized to every 42 days
+  // is due at 42, not the row's 60, and a semiannual one at 180. Every
+  // supported pattern resolves through the seeder's own recurrence table
+  // (intervalDaysForPattern: custom / bare interval, month patterns, day-gap
+  // patterns); only a pattern it cannot place falls back to the catalog key,
+  // then the label.
+  const { intervalDaysForPattern } = require('../recurring-appointment-seeder');
   const planIntervalDays = (plan) => {
     if (!plan) return null;
-    const interval = Number.parseInt(plan.recurring_interval_days, 10);
-    if ((!plan.recurring_pattern || plan.recurring_pattern === 'custom') && Number.isInteger(interval) && interval > 0) return interval;
-    return PLAN_PATTERN_DAYS[plan.recurring_pattern] || TREE_SHRUB_KEY_INTERVAL[plan.service_key] || null;
+    return intervalDaysForPattern(plan.recurring_pattern, plan.recurring_interval_days)
+      || TREE_SHRUB_KEY_INTERVAL[plan.service_key] || null;
   };
   const treeShrubIntervalDays = (serviceType, plan) => {
     const fromPlan = planIntervalDays(plan);

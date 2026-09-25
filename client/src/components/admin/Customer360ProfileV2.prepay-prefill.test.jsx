@@ -10,7 +10,7 @@ import { AnnualPrepayModal, AnnualPrepayInvoiceModal, estimateSuggestionMatchesS
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url) => new Response(JSON.stringify(
-    String(url).endsWith('/services/dropdown') ? [
+    String(url).includes('/services/dropdown?') ? [
       { id: 'svc-pest', name: 'Pest Control', base_price: 999 },
       { id: 'svc-lawn', name: 'Lawn Care', base_price: 999 },
       { id: 'svc-commercial', name: 'Commercial Pest Control', base_price: 999 },
@@ -52,6 +52,16 @@ function renderModal(props = {}) {
     />,
   );
 }
+
+describe('AnnualPrepayServiceFields catalog load', () => {
+  it('asks for sellable rows scoped to the customer, so every offered plan can be saved (codex r29 on #4786)', async () => {
+    renderModal();
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/services/dropdown?'))).toBe(true));
+    const url = String(vi.mocked(fetch).mock.calls.find(([u]) => String(u).includes('/services/dropdown?'))[0]);
+    expect(url).toContain('sellable=true');
+    expect(url).toContain('sellable_customer_id=c-1');
+  });
+});
 
 describe('estimateSuggestionMatchesService', () => {
   it('requires cadence-neutral label identity plus cadence and visit-count agreement', () => {

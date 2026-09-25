@@ -22,6 +22,9 @@ const MONTH_RECURRENCE_INTERVALS = {
   yearly: 12,
 };
 
+// Day-gap patterns (month patterns above walk calendar months instead).
+const DAY_RECURRENCE_INTERVALS = { daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42 };
+
 const DEFAULT_WEEKEND_SHIFT = 'forward';
 
 // Seasonal mosquito: 9 visits at monthly gaps that NEVER land Nov-Jan (owner
@@ -302,9 +305,22 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
 
-  const intervals = { daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42 };
-  const gap = pattern === 'custom' && intNum ? Math.max(1, intNum) : (intervals[pattern] || 91);
+  const gap = pattern === 'custom' && intNum ? Math.max(1, intNum) : (DAY_RECURRENCE_INTERVALS[pattern] || 91);
   return etDateString(addETDays(base, gap * i));
+}
+
+// The nominal day gap of a stored series' recurrence, for cadence math that
+// reads a series (the overdue scan) — never for scheduling, which walks
+// calendar months above. A custom or bare interval is its own gap; a month
+// pattern is months × 30 (bimonthly 60, quarterly 90, semiannual 180); a
+// day-gap pattern reads the table; anything else (seasonal, unknown) is null
+// so the caller falls back to its own default.
+function intervalDaysForPattern(pattern, intervalDays = null) {
+  const interval = Number.parseInt(intervalDays, 10);
+  const hasInterval = Number.isInteger(interval) && interval > 0;
+  if ((!pattern || pattern === 'custom') && hasInterval) return interval;
+  if (MONTH_RECURRENCE_INTERVALS[pattern]) return MONTH_RECURRENCE_INTERVALS[pattern] * 30;
+  return DAY_RECURRENCE_INTERVALS[pattern] || null;
 }
 
 function shiftPastWeekend(dateStr, skip, direction = DEFAULT_WEEKEND_SHIFT) {
@@ -1455,6 +1471,7 @@ module.exports = {
   scheduledServiceColumns,
   seriesCreateLockKeys,
   inferRecurringPattern,
+  intervalDaysForPattern,
   SEASONAL_FEB_OCT,
   seasonalFebOctDate,
   clampDateToSeason,
