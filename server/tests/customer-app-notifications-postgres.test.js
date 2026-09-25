@@ -358,6 +358,23 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(status.body).toEqual({ available: true, enabled: true, registered: true, fresh: true });
   });
 
+  test('App readiness uses the caller transaction with a one-connection pool', async () => {
+    await device(owner);
+    const previous = mockPg;
+    const limited = require('knex')({ client: 'pg', connection, searchPath: [schema],
+      acquireConnectionTimeout: 500, pool: { min: 0, max: 1 } });
+    mockPg = limited;
+    try {
+      await limited.transaction(async (trx) => {
+        await trx('notification_prefs').where({ customer_id: owner }).forUpdate().first();
+        expect(await Push.customerStatus(property, trx)).toMatchObject({ enabled: true, fresh: true });
+      });
+    } finally {
+      mockPg = previous;
+      await limited.destroy();
+    }
+  });
+
 
   test('request App choice belongs to the requesting profile and preserves old-client saves', async () => {
     expect((await put({ requestChannel: 'push' })).status).toBe(409);

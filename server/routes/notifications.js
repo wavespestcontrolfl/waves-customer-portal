@@ -590,7 +590,7 @@ async function billingAvailabilityError({ req, trx, updates, propertyDbUpdates, 
   const needsApp = candidates.some(({ channels, keys, addsPush }) => addsPush
     || keys.some((key) => channels[key].includes('push')));
   const appStatus = gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && needsApp
-    ? await require('../services/push-notifications').customerStatus(req.customerId) : null;
+    ? await require('../services/push-notifications').customerStatus(req.customerId, trx) : null;
   const appAvailable = appStatus?.fresh === true && primaryPrefs.push_enabled !== false
     && (updates.pushEnabled === true || appStatus.enabled);
   if (candidates.some(({ addsPush }) => addsPush) && !appAvailable) {
