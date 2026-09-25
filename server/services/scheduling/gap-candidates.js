@@ -89,7 +89,13 @@ function analyzeGapCandidate(candidate, rows, {
   // missing. Such results stay provisional; an omitted break is not zero.
   const returnBy = Number.isFinite(targetReturnMinutes)
     ? targetReturnMinutes - (Number.isFinite(breakMinutes) ? breakMinutes : 0) : null;
-  const duration = workDuration(service);
+  // The candidate is the visit BEING analyzed for a different gap, the same
+  // role arrival-route.js's own `target` plays — its duration keeps the
+  // legacy window/estimate rule, never the owner planning minutes that rule
+  // applies to the OTHER stops already on the route it might join (Codex r1
+  // P2: an unmarked candidate matching the table was offered shorter windows
+  // than its own stored estimate).
+  const duration = workDuration({ ...service, planning_exempt: true });
   const sameRoute = toDateStr(service.scheduled_date) === date && service.technician_id === technicianId;
   const target = { ...service, technician_id: technicianId, scheduled_date: date, route_order: sameRoute ? service.route_order : null };
   const context = { target, rows: others, date, now, grouped: false, activeTarget: false };

@@ -12,6 +12,11 @@ jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 const db = require('../models/db');
 const RetentionEngine = require('../services/customer-intelligence/retention-engine');
 
+// These tests exercise the drafting path itself; the call-time kill switch
+// (GATE_CUSTOMER_INTEL_AI, default off) is covered in customer-intel-ai-gate.test.js.
+beforeAll(() => { process.env.GATE_CUSTOMER_INTEL_AI = 'true'; });
+afterAll(() => { delete process.env.GATE_CUSTOMER_INTEL_AI; });
+
 const makeChain = (result) => {
   const chain = {};
   for (const m of ['where', 'whereIn', 'whereRaw', 'orderBy', 'select', 'insert', 'returning', 'limit']) {

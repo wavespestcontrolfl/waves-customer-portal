@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const EstimateConverter = require('./estimate-converter');
+const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
 const AccountMembershipEmail = require('./account-membership-email');
 const { markLinkedLeadEstimateAccepted } = require('./lead-estimate-link');
 const { normalizeProposal } = require('./estimate-proposal');
@@ -228,6 +229,11 @@ function isRodentBaitSetupRow(row = {}) {
     || /bait station setup/i.test(String(row?.name || row?.label || ''));
 }
 
+function isTermiteAnnualSetupRow(row = {}, { requireKind = true } = {}) {
+  return String(row?.service || '').toLowerCase() === 'termite_bait_installation'
+    && (!requireKind || String(row?.kind || '').toLowerCase() === 'setup');
+}
+
 function manualPrepayBlockingOneTimeCharge(estimate = {}) {
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
   try {
@@ -240,7 +246,24 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
     // converter (its own line on the prepay invoice — codex #3591 r4/r24),
     // so it is never a dropped charge; only a genuinely uninvoiced one-time
     // line blocks the manual lane.
-    const blocksPrepay = (row) => !isNonBillableOneTimeRow(row) && !isRodentBaitSetupRow(row);
+    // The termite annual plan's own Station Setup is invoiced the same way
+    // (codex #4819 r7 P1): a sign-before-pay accept parks, and activation
+    // bills the setup row selectedTermiteAnnualPlanRows returns on the
+    // plan's single invoice. Exempt only when this IS such an accept AND
+    // that selection carries the setup — the exact row the converter bills.
+    // Resolved lazily — only a quote that carries such a row ever asks.
+    let termiteAnnualSetupInvoiced;
+    const termiteAnnualSetupExempt = (row) => {
+      if (!isTermiteAnnualSetupRow(row, { requireKind: false })) return false;
+      if (termiteAnnualSetupInvoiced === undefined) {
+        termiteAnnualSetupInvoiced = EstimateConverter
+          .isTermiteAnnualSignBeforePayAccept(estimate, data, 'prepay_annual')
+          && selectedTermiteAnnualPlanRows(data).some((r) => isTermiteAnnualSetupRow(r));
+      }
+      return termiteAnnualSetupInvoiced;
+    };
+    const blocksPrepay = (row) => !isNonBillableOneTimeRow(row) && !isRodentBaitSetupRow(row)
+      && !termiteAnnualSetupExempt(row);
     const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
     if (oneTimeRows.some(blocksPrepay)) return true;
     // The raw-rows list masks the residual: when ANY raw one-time row exists,
@@ -540,7 +563,7 @@ async function markEstimateManuallyAccepted({
     // marker-only terminal invalidation.
     {
       const freshLinkRow = await trx('estimates').where({ id: estimateId })
-        .forUpdate().first('estimate_data', 'archived_at');
+        .forUpdate().first('estimate_data', 'archived_at', 'status');
       // Propagate the LOCKED re-read back onto `estimate` (codex P1): every
       // check below this point — including the existing-member prepay guard
       // — read `estimate.estimate_data` from the earlier UNLOCKED select, so
@@ -579,11 +602,13 @@ async function markEstimateManuallyAccepted({
           await trx('leads').where({ id: String(manualAcceptData.lead_id) }).forUpdate().first('id');
         }
         const { staleCallLinkageReason } = require('./admin-estimate-persistence');
-        if (await staleCallLinkageReason(trx, manualAcceptData, { lockCallRow: true })) {
+        // The LOCKED row's status (codex #4815 r8 P2): a queued row-scoped
+        // verdict judges a terminal row by it; omitted = fail closed.
+        if (await staleCallLinkageReason(trx, manualAcceptData, { lockCallRow: true, estimateStatus: freshLinkRow?.status })) {
           throw quarantined;
         }
         const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-        if (await callSideBlockForEstimateData(trx, manualAcceptData)) {
+        if (await callSideBlockForEstimateData(trx, manualAcceptData, { estimateStatus: freshLinkRow?.status })) {
           throw quarantined;
         }
       }
@@ -945,10 +970,20 @@ async function markEstimateManuallyAccepted({
             annualPrepayTermStart || etDateString(),
             false,
             'Customer already has an annual prepay term through',
+            updatedEstimate.id,
           );
         }
         conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
-        if (annualPrepaySelected && !conversion?.draftInvoiceId) {
+        // Sign-before-pay (slice 3a restructure): a termite annual-plan
+        // manual accept intentionally defers its invoice + prepay term
+        // until the customer e-signs — a missing draftInvoiceId is the
+        // EXPECTED outcome then, not a failure to roll back. Fallback P1:
+        // ANY truthy annualPlanActivationStatus is a park outcome
+        // ('awaiting_signature' the common case, 'activated' on an
+        // idempotent replay, or a concurrent-write re-read) — never
+        // narrowed to one exact string.
+        if (annualPrepaySelected && !conversion?.draftInvoiceId
+          && !conversion?.annualPlanActivationStatus) {
           throw new Error('Annual prepay invoice was not created');
         }
       } catch (err) {
@@ -1091,7 +1126,7 @@ async function markEstimateManuallyAccepted({
           const { maybeCreateTermiteProgramAgreement } = require('./termite-program-agreement');
           const { formatDisplayDate } = require('../utils/date-only');
           const agreementStartLabel = agreementStartDate ? (formatDisplayDate(agreementStartDate, { fallback: '' }) || null) : null;
-          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: normalizedBillingTerm, startDateLabel: agreementStartLabel })
+          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: normalizedBillingTerm, startDateLabel: agreementStartLabel, startDateRaw: agreementStartDate })
             .catch((err) => logger.warn(`[estimate-manual-acceptance] termite agreement prep failed for estimate ${acceptedEstimate.id}: ${err.message}`));
         } catch (err) {
           logger.warn(`[estimate-manual-acceptance] termite agreement prep setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
@@ -1196,4 +1231,5 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   hasManualAnnualPrepayRecurringRows,
   isManualAnnualPrepayEligibleServiceMix,
   isCommercialProposalEstimate,
+  _private: { manualPrepayBlockingOneTimeCharge },
 };

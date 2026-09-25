@@ -233,6 +233,7 @@ postgres('photo-text triage draft parking under concurrency', () => {
       created: { type: 'lawn', id: randomUUID() },
       messageId: randomUUID(),
       method: 'regex',
+      opportunity: { mode: 'advise', reasons: ['lead'], family: 'lawn_care', quote: null },
     });
     const results = await Promise.all(anchors.map(park));
     expect(results.filter(Boolean)).toHaveLength(1);
@@ -269,6 +270,7 @@ postgres('photo-text triage draft parking under concurrency', () => {
       created: { type: 'lawn', id: randomUUID() },
       messageId: randomUUID(),
       method: 'regex',
+      opportunity: { mode: 'advise', reasons: ['lead'], family: 'lawn_care', quote: null },
     })));
     expect(results.filter(Boolean)).toHaveLength(1);
     expect(await pooled('message_drafts').where({ customer_id: customer.id, status: 'pending' })).toHaveLength(1);

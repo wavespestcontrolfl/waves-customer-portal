@@ -35,6 +35,43 @@ const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
 // performs no syntax validation of its own.
 const RESUME_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
+// The lead id to stamp on the new_lead enrollment's context (so the
+// consultation-booking email block — dark behind GATE_LEAD_INSPECTION_LINK
+// — has something to render from). Prefers the call's own
+// call_log.metadata.lead_id stamp — the SAME linkage
+// call-recording-processor.js writes whenever it creates or reuses a lead
+// for this call — exact, no guessing. Falls back to the most recent OPEN
+// lead (lead-statuses.js's applyOpenLeadPredicate: an OPEN_LEAD_STATUSES
+// status AND converted_at IS NULL) on the call's own phone, not deleted,
+// only when the call never stamped one at all (e.g. an existing-customer
+// call that never minted a lead row). No match on either path → null,
+// which the email block treats as "nothing to render" — this NEVER blocks
+// or fails the drip release itself.
+async function resolveFirstTouchLeadId({ metadataLeadId, fromPhone, dbh }) {
+  if (metadataLeadId) return metadataLeadId;
+  // Full phone identity, never a last-10 suffix (Codex #4709 r19 P1, same
+  // rule as lead-consultation-link.js): an international number sharing a
+  // US number's last ten digits is not it. The suffix SQL below is only a
+  // candidate prefilter; phoneIdentityKey decides.
+  const { phoneIdentityKey } = require('../utils/phone');
+  const callKey = phoneIdentityKey(fromPhone);
+  if (!callKey) return null;
+  const digits = String(fromPhone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length !== 10) return null;
+  try {
+    const { applyOpenLeadPredicate } = require('./lead-statuses');
+    const query = dbh('leads')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+      .whereNull('deleted_at');
+    const candidates = await applyOpenLeadPredicate(query).orderBy('created_at', 'desc').select('id', 'phone');
+    const lead = (candidates || []).find((row) => phoneIdentityKey(row.phone) === callKey);
+    return lead?.id || null;
+  } catch (err) {
+    logger.warn(`[first-touch-resume] lead-by-phone lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
 async function customerCallDoNotContact(customerId, dbh) {
   const row = await dbh('call_log')
     .where({ customer_id: customerId })
@@ -765,12 +802,25 @@ async function resumeHeldFirstTouch({
       let callCreatedAt = null;
       let callCustomerId = null;
       let callFound = !hold.call_log_id;
+      // Carried to the new_lead enroll below (context.leadId) so the
+      // consultation-booking email block (dark behind
+      // GATE_LEAD_INSPECTION_LINK) has a lead id to render from — see
+      // resolveFirstTouchLeadId's own comment for the metadata-stamp vs
+      // phone-lookup fallback.
+      let callLeadIdFromMetadata = null;
+      let callFromPhone = null;
       if (hold.call_log_id) {
         try {
-          const call = await dbh('call_log').where({ id: hold.call_log_id }).first('created_at', 'customer_id');
+          const call = await dbh('call_log').where({ id: hold.call_log_id }).first('created_at', 'customer_id', 'metadata', 'from_phone');
           callFound = Boolean(call);
           callCreatedAt = call?.created_at || null;
           callCustomerId = call?.customer_id || null;
+          let callMeta = call?.metadata;
+          if (typeof callMeta === 'string') {
+            try { callMeta = JSON.parse(callMeta); } catch { callMeta = null; }
+          }
+          callLeadIdFromMetadata = callMeta?.lead_id || null;
+          callFromPhone = call?.from_phone || null;
         } catch (_e) {
           await settleHold(hold.id, { status: 'pending', last_error: 'call_age_unavailable' }, dbh, claimStamp);
           result.skipped = result.skipped || 'call_age_unavailable';
@@ -981,6 +1031,11 @@ async function resumeHeldFirstTouch({
           result.skipped = result.skipped || 'email_suppressed';
           continue;
         }
+        // Read-only context for the enroll below — never gates the send
+        // (a lookup failure resolves to null inside the helper itself).
+        const enrollLeadId = await resolveFirstTouchLeadId({
+          metadataLeadId: callLeadIdFromMetadata, fromPhone: callFromPhone, dbh,
+        });
         // Enrollment creation and its validation are ATOMIC (Codex #3084
         // r29, replacing the r26/r28 post-enroll repair): the fresh
         // enrollment's first step is immediately due, and the scheduler
@@ -1074,6 +1129,9 @@ async function resumeHeldFirstTouch({
                 last_name: customer.last_name || null,
                 id: holdCustomerId,
               },
+              // Consultation-booking email block (dark behind
+              // GATE_LEAD_INSPECTION_LINK) needs a lead id to render.
+              context: { leadId: enrollLeadId },
               dbh: trx,
               // This transaction holds the hold row FOR UPDATE — an
               // undo-contended lock (r23/r33) — so the comms acquire must
@@ -2189,4 +2247,5 @@ module.exports = {
   emailReviewBlocksRelease,
   releaseBoundaryBlocks,
   FIRST_TOUCH_AUTO_RELEASE_RULE,
+  resolveFirstTouchLeadId,
 };

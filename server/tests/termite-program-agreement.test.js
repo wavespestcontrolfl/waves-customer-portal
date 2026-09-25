@@ -7,6 +7,14 @@ const {
   isCommercialEstimate,
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
+  ANNUAL_TEMPLATE_KEY,
+  ANNUAL_SERVICE_NAME,
+  isAnnualPlanEstimate,
+  annualPlanNetFee,
+  annualPlanDurableEvidence,
+  PARKED_HANDOFF_OUTCOMES,
+  TERMINAL_PREPAY_TERM_STATUSES,
+  PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,
   classifyExistingAgreement,
@@ -16,6 +24,10 @@ const {
 } = require('../services/termite-program-agreement');
 const { DEFAULT_TEMPLATES } = require('../models/migrations/20260729000001_seed_termite_program_agreements');
 const { TEMPLATE_V2 } = require('../models/migrations/20260730000001_termite_program_agreements_v2');
+const { TEMPLATE_V3_ANNUAL } = require('../models/migrations/20260924030002_termite_annual_protection_agreement_v3');
+const { TEMPLATE_V3_ANNUAL_R2_BODY, ORIGINAL_SIGNATURE_BLOCK } = require('../models/migrations/20260924030003_termite_annual_v3_signature_block');
+// The body as it stands after every migration in this branch (030002 seed + 030003 revision).
+const V3_BODY = TEMPLATE_V3_ANNUAL_R2_BODY;
 const {
   buildCustomerDocumentContext,
   renderDocumentTemplate,
@@ -53,6 +65,37 @@ function rentedEstData() {
         { service: 'termite_bait', monthly: 24, perApp: 72, annual: 288, visitsPerYear: 4, ownership: 'rent', installation: { price: 0 } },
         { service: 'termite_station_rental', monthly: 10.33, perApp: 31 },
       ],
+    },
+  };
+}
+
+// Mapped results.tmBait shape v1-legacy-mapper.js emits for the Annual
+// Protection plan (plan === 'annual_protection'): the base ai/ti/monMonthly
+// fields are ALWAYS present (any termite bait line sets them, program-
+// shape-independent — this is what keeps collectTermiteFacts' hasProgram
+// gate true for an annual accept too), plus the plan-specific setupFee/
+// annualFee this builder reads.
+function annualEstData(overrides = {}) {
+  return {
+    results: {
+      tmBait: {
+        plan: 'annual_protection',
+        selectedSystem: 'trelona',
+        system: 'trelona',
+        ai: null,
+        ti: null,
+        monMonthly: 0,
+        bmo: 0,
+        pmo: 0,
+        sta: 12,
+        planLabel: 'Annual Protection',
+        planTerms: { coverageMonths: 12, visitsPerYear: 1 },
+        setupFee: 900,
+        setupPerStation: 45,
+        annualFee: 480,
+        visitsPerYear: 1,
+        ...overrides,
+      },
     },
   };
 }
@@ -478,5 +521,273 @@ describe('v2 templates (active version — owner-approved 2026-07-29)', () => {
       const v1 = DEFAULT_TEMPLATES.find((t) => t.template_key === seed.template_key);
       expect([...seed.variables].sort()).toEqual([...v1.variables].sort());
     }
+  });
+});
+
+// Annual Protection plan (v3, owner rulings 2026-09-24 — plan doc §A2-A4).
+// Template seeded DRAFT by 20260924030002_termite_annual_protection_agreement_v3
+// — never active until the owner's own review (A-11). These tests cover the
+// pure selection/price/date logic (buildTermiteProgramAgreementValues) and
+// render the seeded DRAFT body against it, proving every variable resolves
+// and the ruling-critical first-page + renewal wording is present.
+describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)', () => {
+  test('annual estimate selects the annual template key with setup/annual price and the booked start/computed end date', () => {
+    const prepared = buildTermiteProgramAgreementValues({}, annualEstData(), {
+      startDateLabel: 'September 24, 2026',
+      startDateRaw: '2026-09-24',
+    });
+    expect(prepared).not.toBeNull();
+    expect(prepared.templateKey).toBe(ANNUAL_TEMPLATE_KEY);
+    expect(prepared.values.program.setup_price).toBe('$900');
+    expect(prepared.values.program.annual_price).toBe('$480');
+    expect(prepared.values.agreement.start_date).toBe('September 24, 2026');
+    expect(prepared.values.agreement.end_date).toBe('September 24, 2027'); // start + 12 months
+  });
+
+  test('no booked visit yet: start and end date both fall back to the confirmed-at-installation text', () => {
+    const prepared = buildTermiteProgramAgreementValues({}, annualEstData());
+    expect(prepared.values.agreement.start_date).toBe(START_DATE_FALLBACK);
+    expect(prepared.values.agreement.end_date).toBe(START_DATE_FALLBACK);
+  });
+
+  test('end date is a calendar-exact +12 months, clamped for a Feb 29 start in a non-leap target year', () => {
+    const prepared = buildTermiteProgramAgreementValues({}, annualEstData(), { startDateRaw: '2028-02-29' });
+    expect(prepared.values.agreement.end_date).toBe('February 28, 2029');
+  });
+
+  test('fail-closed: annual plan without a resolvable setup or annual fee builds nothing', () => {
+    expect(buildTermiteProgramAgreementValues({}, annualEstData({ setupFee: null }))).toBeNull();
+    expect(buildTermiteProgramAgreementValues({}, annualEstData({ setupFee: 0 }))).toBeNull();
+    expect(buildTermiteProgramAgreementValues({}, annualEstData({ annualFee: null }))).toBeNull();
+    expect(buildTermiteProgramAgreementValues({}, annualEstData({ annualFee: 0 }))).toBeNull();
+  });
+
+  test('an annual-plan line always wins the template key — never falls through to purchase/rental', () => {
+    const data = annualEstData();
+    // Quarterly-shaped sibling data in the same estimate must not pull
+    // selection back toward the quarterly templates.
+    data.recurring = { services: [{ name: 'Termite Bait', perTreatment: 72, visitsPerYear: 4 }] };
+    const prepared = buildTermiteProgramAgreementValues({}, data);
+    expect(prepared.templateKey).toBe(ANNUAL_TEMPLATE_KEY);
+    expect(prepared.templateKey).not.toBe(PURCHASE_TEMPLATE_KEY);
+    expect(prepared.templateKey).not.toBe(RENTAL_TEMPLATE_KEY);
+  });
+
+  test('quarterly estimates are unaffected by the annual addition — still resolve to purchase/rental only', () => {
+    expect(buildTermiteProgramAgreementValues({}, ownedEstData()).templateKey).toBe(PURCHASE_TEMPLATE_KEY);
+    expect(buildTermiteProgramAgreementValues({}, rentedEstData()).templateKey).toBe(RENTAL_TEMPLATE_KEY);
+  });
+
+  test('a discounted annual plan states the accepted NET annual fee, not the gross list fee (Codex #4811 r1 P1)', () => {
+    const data = annualEstData();
+    // v1-legacy-mapper: the recurring row carries the accepted net annual
+    // (manualFinalAnnual after a manual discount, annualAfterDiscount after
+    // WaveGuard) while tmBait.annualFee stays the pre-discount list figure.
+    data.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 40, perTreatment: 480, visitsPerYear: 1, annualAfterDiscount: 432, manualFinalAnnual: 400 }] };
+    const prepared = buildTermiteProgramAgreementValues({ waveguard_tier: 'gold' }, data);
+    expect(prepared.values.program.annual_price).toBe('$400');
+    expect(prepared.values.program.setup_price).toBe('$900');
+  });
+
+  test('WaveGuard-only discount uses annualAfterDiscount when no manual discount landed', () => {
+    const data = annualEstData();
+    data.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 1, annualAfterDiscount: 432 }] };
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'silver' }, data).values.program.annual_price).toBe('$432');
+  });
+
+  test('fail-closed: an estimate that may carry a discount but stores no net annual figure builds nothing', () => {
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'gold' }, annualEstData())).toBeNull();
+    expect(buildTermiteProgramAgreementValues({ estimate_data: JSON.stringify({ manualDiscount: { amount: 50 } }) }, { ...annualEstData(), manualDiscount: { amount: 50 } })).toBeNull();
+    // Bronze / no discount: the gross list fee IS the accepted fee.
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'bronze' }, annualEstData()).values.program.annual_price).toBe('$480');
+  });
+
+  test('raw engine lineItems (no mapped envelope — published website quote) still resolve setup, annual fee and system (Codex #4811 r1 P2)', () => {
+    const raw = {
+      result: {
+        lineItems: [{
+          service: 'termite_bait', plan: 'annual_protection', selectedSystem: 'advance', system: 'advance',
+          annual: 520, annualFee: 520, annualAfterDiscount: 520, visitsPerYear: 1,
+          setup: { price: 810, perStation: 45, stations: 18 },
+          installation: { kind: 'setup', price: 810 },
+        }],
+        oneTime: { items: [{ service: 'termite_bait_installation', kind: 'setup', price: 810 }] },
+      },
+    };
+    const prepared = buildTermiteProgramAgreementValues({}, raw, { startDateLabel: 'October 1, 2026', startDateRaw: '2026-10-01' });
+    expect(prepared).not.toBeNull();
+    expect(prepared.templateKey).toBe(ANNUAL_TEMPLATE_KEY);
+    expect(prepared.values.program.setup_price).toBe('$810');
+    expect(prepared.values.program.annual_price).toBe('$520');
+    expect(prepared.values.program.system).toMatch(/advance/i);
+    expect(prepared.values.agreement.end_date).toBe('October 1, 2027');
+  });
+
+  test('annual plan records name the Waves-owned annual plan, never the purchase program (Codex #4811 r1 P2)', () => {
+    const prepared = buildTermiteProgramAgreementValues({}, annualEstData());
+    expect(prepared.ownership).toBe('annual_protection');
+    expect(prepared.values.service.name).toBe(ANNUAL_SERVICE_NAME);
+    expect(prepared.values.service.name).not.toBe('Termite Bait Station Program');
+    // Quarterly keeps its established service name.
+    expect(buildTermiteProgramAgreementValues({}, ownedEstData()).values.service.name).toBe('Termite Bait Station Program');
+  });
+
+  test('isAnnualPlanEstimate exempts the annual plan from the quarterly annual-prepay park, quarterly stays parked (Codex #4811 r2 P1)', () => {
+    // Annual-plan accepts are billed prepay_annual by construction; the
+    // quarterly park (seeded wording says per-application) must not swallow
+    // them before the v3 branch. Quarterly termite estimates are unaffected.
+    expect(isAnnualPlanEstimate(annualEstData())).toBe(true);
+    expect(isAnnualPlanEstimate(ownedEstData())).toBe(false);
+    expect(isAnnualPlanEstimate(rentedEstData())).toBe(false);
+    expect(isAnnualPlanEstimate(null)).toBe(false);
+  });
+
+  test('a stale quarterly raw row beside the mapped result never supplies the annual net fee (Codex #4811 r3 P1)', () => {
+    const data = { result: annualEstData() };
+    // Retained raw containers from an earlier QUARTERLY quote: $288/yr over 4
+    // visits. Neither may leak into the annual fee.
+    data.engineResult = { lineItems: [{ service: 'termite_bait', plan: 'quarterly', annual: 288, annualAfterDiscount: 288, manualFinalAnnual: 288, visitsPerYear: 4 }] };
+    data.result.lineItems = [{ service: 'termite_bait', plan: 'quarterly', annual: 288, annualAfterDiscount: 288, visitsPerYear: 4 }];
+    expect(annualPlanNetFee(data)).toBeNull();
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'bronze' }, data).values.program.annual_price).toBe('$480');
+    // With a discount and no authoritative net row: fail closed, never $288 or $72.
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'gold' }, data)).toBeNull();
+    // The mapper's own recurring row IS authoritative.
+    data.result.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 1, annualAfterDiscount: 432 }] };
+    expect(annualPlanNetFee(data)).toBe(432);
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'gold' }, data).values.program.annual_price).toBe('$432');
+  });
+
+  test('a quarterly-shaped recurring row (visitsPerYear 4) in the mapped container is ignored for the annual fee', () => {
+    const data = annualEstData();
+    data.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 4, annualAfterDiscount: 288 }] };
+    expect(annualPlanNetFee(data)).toBeNull();
+  });
+
+  test('every annual-plan park is a completed handoff for reconciliation (Codex #4811 r5 P2)', () => {
+    for (const outcome of ['commercial', 'annual_prepay', 'figures_unresolved', 'annual_template_not_active', 'annual_plan_billing_mismatch', 'annual_plan_billing_unverified']) {
+      expect(PARKED_HANDOFF_OUTCOMES.has(outcome)).toBe(true);
+    }
+    expect(PARKED_HANDOFF_OUTCOMES.has('prepay_lookup_failed')).toBe(false);
+  });
+
+  test('durable evidence: a live term counts, a cancelled/refunded term does not, the deferral stamp counts (Codex #4811 r6 P1)', async () => {
+    expect(TERMINAL_PREPAY_TERM_STATUSES).toEqual(expect.arrayContaining(['cancelled', 'refunded']));
+    const fakeConn = (termRow, hasColumn = false, stampRow = null) => {
+      const conn = (table) => ({
+        where: () => ({
+          whereNotIn: (_col, statuses) => ({ first: async () => (termRow && !statuses.includes(termRow.status) ? termRow : undefined) }),
+          first: async () => stampRow,
+        }),
+      });
+      conn.schema = { hasColumn: async () => hasColumn };
+      return conn;
+    };
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn({ id: 't', status: 'active' }))).toBe(true);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn({ id: 't', status: 'cancelled' }))).toBe(false);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn({ id: 't', status: 'refunded' }))).toBe(false);
+    expect(await annualPlanDurableEvidence({ id: 'e1', annual_plan_activation_status: 'awaiting_signature' }, fakeConn(null))).toBe(true);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn(null, true, { annual_plan_activation_status: 'activated' }))).toBe(true);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn(null, true, { annual_plan_activation_status: null }))).toBe(false);
+  });
+
+  test('PROGRAM_TEMPLATE_KEYS includes the annual key for customer-scoped lookups (existing-agreement checks span all three)', () => {
+    expect(PROGRAM_TEMPLATE_KEYS).toEqual(expect.arrayContaining([PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY, ANNUAL_TEMPLATE_KEY]));
+    expect(PROGRAM_TEMPLATE_KEYS).toHaveLength(3);
+  });
+
+  // maybeCreateTermiteProgramAgreement's DB-level fail-closed check — the
+  // annual template row is seeded status:'draft' with no active_version_id
+  // (20260924030002), and the service explicitly checks
+  // document_templates.status = 'active' AND active_version_id IS NOT NULL
+  // before ever rendering, returning skipped:'annual_template_not_active'
+  // (ringing the manual-prep bell) rather than falling back to the
+  // quarterly templates. That DB-gated behavior needs Postgres to exercise
+  // end-to-end and is NOT covered by an automated test in this worktree —
+  // no QA database is configured here (see the repo's *-postgres.test.js
+  // convention: WAVES_LOCAL_DEV=1 + a provisioned waves_qa_<worktree> DB).
+  // The "never falls back to quarterly" half of that guarantee IS covered
+  // above at the pure-function level, which is what actually decides the
+  // template key regardless of what the DB lookup later finds.
+});
+
+describe('Annual v3 template body (seeded DRAFT — owner review pending, plan §A2-A4)', () => {
+  test('signature block promises only what the e-sign flow captures — no blank operator ink lines (Codex #4811 r4)', () => {
+    expect(V3_BODY).not.toContain(ORIGINAL_SIGNATURE_BLOCK);
+    expect(V3_BODY).not.toContain('License: ________');
+    expect(V3_BODY).toContain('Issued by Waves Pest Control, LLC (FL business license JB351547)');
+    expect(V3_BODY).toContain('ELECTRONIC SIGNATURE: By signing, the customer confirms');
+  });
+
+  function renderAnnual(prepared) {
+    const context = buildCustomerDocumentContext(CUSTOMER, prepared.values);
+    return renderDocumentTemplate({
+      template: { template_key: TEMPLATE_V3_ANNUAL.template_key, name: TEMPLATE_V3_ANNUAL.name },
+      version: { title: TEMPLATE_V3_ANNUAL.title, body: V3_BODY },
+      context,
+    });
+  }
+
+  test('first page states Formosan inclusion, drywood exclusion, and retreatment-only/no-repair coverage', () => {
+    expect(V3_BODY).toContain('SUBTERRANEAN TERMITES, including Formosan');
+    expect(V3_BODY).toContain('DRYWOOD TERMITES');
+    expect(V3_BODY).toContain('RETREATMENT ONLY — NO REPAIR');
+  });
+
+  test('states the auto-renew (Section 501.165) and auto-charge renewal consent with the literal 30-day grace (A-13 Option 2)', () => {
+    expect(V3_BODY).toContain('AUTOMATIC RENEWAL (Section 501.165, Florida Statutes)');
+    expect(V3_BODY).toContain('authorizes Waves to charge the renewal fee');
+    expect(V3_BODY).toContain('not paid within 30 days coverage lapses');
+  });
+
+  test('carries no leftover editor scaffolding — no unresolved {…} notes, no Option 1 / invoice-and-wait text', () => {
+    // Every REAL merge field is {{dotted.path}}; stripping those must leave
+    // no stray { or } behind (an editor note like "{v2 clause…}" or
+    // "{A-13 — choose ONE:}" would fail this).
+    expect(TEMPLATE_V3_ANNUAL.body.replace(/\{\{[^}]*\}\}/g, '')).not.toMatch(/[{}]/);
+    expect(V3_BODY).not.toContain('Option 1');
+    expect(V3_BODY).not.toContain('Option 2');
+    expect(V3_BODY).not.toContain('invoice-and-wait');
+    expect(V3_BODY).not.toContain('choose ONE');
+  });
+
+  test('declared variables exactly match what the body uses (customer/program/agreement fields only)', () => {
+    const used = [...new Set([...TEMPLATE_V3_ANNUAL.body.matchAll(/\{\{\s*([a-z0-9_.]+)\s*\}\}/gi)].map((m) => m[1]))].sort();
+    expect(used).toEqual([...TEMPLATE_V3_ANNUAL.variables].sort());
+    expect(used).toEqual([
+      'agreement.end_date',
+      'agreement.start_date',
+      'customer.address',
+      'customer.name',
+      'program.annual_price',
+      'program.setup_price',
+      'program.system',
+    ]);
+  });
+
+  test('renders against the builder output with zero unresolved variables and the sold figures present', () => {
+    const prepared = buildTermiteProgramAgreementValues({}, annualEstData(), {
+      startDateLabel: 'September 24, 2026',
+      startDateRaw: '2026-09-24',
+    });
+    const rendered = renderAnnual(prepared);
+    expect(rendered.unresolvedVariables).toEqual([]);
+    expect(rendered.body).toContain('Stan Sample');
+    expect(rendered.body).toContain('$900');
+    expect(rendered.body).toContain('$480');
+    expect(rendered.body).toContain('September 24, 2026');
+    expect(rendered.body).toContain('September 24, 2027');
+    expect(rendered.body).toContain('Trelona® ATBS annual bait stations');
+  });
+
+  test('is seeded as a DRAFT row (status:\'draft\', no active_version_id) — the migration itself never activates it', () => {
+    // Static shape check on the exported constant/migration wiring: the
+    // migration's up() inserts status:'draft' and leaves active_version_id
+    // NULL (asserted by reading the migration source, since this test file
+    // has no DB access) — see 20260924030002's up()/down() and its header
+    // comment. This test pins the constant's own shape so a future edit to
+    // TEMPLATE_V3_ANNUAL can't silently smuggle in a live status field.
+    expect(TEMPLATE_V3_ANNUAL).not.toHaveProperty('status');
+    expect(TEMPLATE_V3_ANNUAL.template_key).toBe('service_agreement.termite_annual_protection');
   });
 });

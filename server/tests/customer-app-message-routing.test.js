@@ -9,6 +9,19 @@ jest.mock('../services/messaging/validators/line-type', () => ({
 jest.mock('../services/appointment-email', () => ({ sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/reschedule-link', () => ({ buildRescheduleLink: jest.fn(async () => ({ url: null })) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+// callback_number_needed hold (PR #4807, round 6 — number-keyed): the
+// canonical chokepoint checks every SMS `to` against
+// disclaimed_number_holds, and safeSendAppointment's visit pre-check asks
+// the same module whether the customer's phone is held. Stubbed (never
+// held) so this file's bespoke customers/notification_prefs/
+// messaging_suppression `db` double is never also asked to answer the
+// hold reads; the hold itself is covered by
+// send-customer-message-callback-number-hold.test.js and
+// callback-number-hold-boundary.test.js.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberBlocksSend: jest.fn(async () => false),
+  disclaimedNumberHeldForVisit: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
 const Twilio = require('../services/twilio');

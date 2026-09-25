@@ -122,14 +122,20 @@ function loadVanWrapReferences() {
 // caption list; ~75–90 s, ~$0.17); gpt-image-1.5 next (~35–40 s); gpt-image-1
 // last. The Gemini legs that used to sit between them were removed 2026-09-24
 // (SynthID pixel watermark — see the header); OpenAI-only by design.
-const DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1';
+// gpt-image-2.5-sunburst leads since 2026-09-25 (owner: render on Images
+// 2.5): with the reference prompts below it put the uniform badge on the
+// correct chest 8 of 8 times where gpt-image-2 managed 1 of 12, and drew one
+// correct van every time (~45 s per image). gpt-image-2 stays the first
+// fallback.
+const DEFAULT_CHAIN = 'gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1';
 // The pre-2026-09-24 chain (bake-off order, Gemini legs interleaved). Used as
 // the default ONLY while ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true, so the
 // documented kill switch restores the old fallback legs during an OpenAI
 // outage without also requiring a BLOG_/SOCIAL_IMAGE_PROVIDER change.
-const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
+const WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2.5-sunburst,gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
 
 const MODEL_MAP = {
+  'gpt-image-2.5-sunburst': { api: 'openai', model: 'gpt-image-2.5-sunburst', quality: 'high' },
   'gpt-image-2':   { api: 'openai', model: 'gpt-image-2',   quality: 'high' },
   'gpt-image-1.5': { api: 'openai', model: 'gpt-image-1.5', quality: 'high' },
   'gpt-image-1':   { api: 'openai', model: 'gpt-image-1',   quality: 'high' },
@@ -388,7 +394,10 @@ const VAN_LINE = 'In the background, a solid Waves-blue (#009CDE) Ford Transit 2
 // current wrap (it reads the retired "WAVES" / "Lawn & Pest" name) over
 // waiting for a re-wrap. Used only when the caller opts in
 // (generate({ vanWrap: true })) and the references actually attach.
-const VAN_WRAP_LINE = 'In the background, a Ford Transit 250 medium-roof cargo van wearing the Waves wrap — reproduced faithfully from the attached van reference photos: a sky-blue gradient background with halftone dots, the wave mascot character in a red cap and overalls, "WAVES" and "Lawn & Pest" lettering, "Wave Goodbye to Pests!", the phone number "941-241-2459", and "GoWavesFL.com" — parked at the curb or in the driveway, not the focus of the shot. These wrap graphics and text belong ONLY on this one van; do not repeat any of them on any other vehicle, sign, piece of equipment, or surface in the picture.';
+const VAN_WRAP_LINE = [
+  'VAN: Park exactly ONE physical Waves van several metres behind the main action, at the curb or in the driveway. Show it once at a single side or slight rear-three-quarter angle, fully inside the frame, separated from the subject, and occupying approximately 20–30% of the image width; it stays clearly secondary. Include no second, partial, mirrored, or reflected van.',
+  'Faithfully reproduce, in the image\'s own style, the Ford Transit 250 medium-roof body and bright-blue halftone wrap from the van photos. Keep WAVES, Lawn & Pest, Wave Goodbye to Pests!, 941-241-2459, and GoWavesFL.com as separate wrap elements. The phone number and web address must be exact; leave tiny text unresolved rather than inventing other digits or merging the web address with the slogan.',
+].join(' ');
 // The style a slot regenerates in after a failed text/logo screen: one no
 // sibling slot of the post uses (the permutation's unused fourth style, when
 // the slot can carry it), else the slot's own style under a fresh seed — a
@@ -422,7 +431,12 @@ const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Wa
 // Owner directive 2026-09-24 (Adam): with the real logo attached as the
 // reference image, the technician carries it on the cap and the RIGHT chest —
 // and nowhere else in the picture.
-const WAVES_UNIFORM_LOGO_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo with the Waves logo — reproduced faithfully from the attached reference image — as a small badge on the wearer\'s RIGHT chest (the side of the wearer\'s right arm, not the left), a baseball cap that is either light blue or red with that same Waves logo centered on the front of the cap, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants. The reference logo appears ONLY on the technician\'s cap and right chest, at badge scale; never anywhere else in the picture and never as a standalone graphic. If no technician appears, do not use the reference image at all.';
+const WAVES_UNIFORM_LOGO_LINE = [
+  'TECHNICIAN: If the scene includes a technician, include exactly one. Use a solid bright-red long-sleeve polo with both sleeves fully extended to the wrists, a solid light-blue or red baseball cap, plain black or dark-navy work pants, dark boots, and optional plain gloves.',
+  'Keep the upper torso in a near-front pose with the cap front, button placket, and both chest panels visible, and arms, straps, hoses, handles, and tools below or beside the chest; the anatomical right hand and arm appear on the viewer-left side.',
+  'Include exactly two compact embroidered badges reproducing the COMPLETE Waves logo image: a roughly 2-inch badge centered on the cap front and a roughly 3-inch badge on the wearer\'s anatomical RIGHT chest. The shirt badge is clearly LEFT of the button placket as the viewer sees it, directly below the viewer-left collarbone and above the wearer\'s right arm. The viewer-right chest is uninterrupted red fabric.',
+  'Use the complete mascot-and-wording logo rather than an isolated W or mascot fragment. Place no logo on sleeves, back, pants, gloves, or equipment. If the scene has no technician, do not use the logo image at all.',
+].join(' ');
 
 // An infographic draws no people: it can carry neither the logo reference
 // nor a judgeable uniform, and the audit would flag any logo-free technician
@@ -462,7 +476,7 @@ const REFERENCE_CLAUSES = {
   },
 };
 
-function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [], uniformLogo = false, vanWrap = false }) {
+function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [], uniformLogo = false, vanWrap = false, referenceRoles }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
   const base = style
@@ -517,7 +531,7 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     : '';
   const uniform = isInfographic ? INFOGRAPHIC_NO_PEOPLE_LINE : clauses.uniform;
   const van = hasVan ? clauses.van : '';
-  return [base, focus, local, framing, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
+  return [base, focus, local, framing, referenceRoles, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
@@ -685,6 +699,17 @@ function logLegFailure(slug, result) {
 
 // ── public API ───────────────────────────────────────────────────────
 
+// "HARD REFERENCE ROLES": which attached image is which, numbered in the
+// order they are posted. Without it the model can treat the side and rear
+// van photos as two vehicles and draw two vans (2026-09-25 lab, per GPT-5.6
+// Sol's review of the renders).
+function referenceRolesFor(references) {
+  const at = (kind) => references.map((r, i) => (r.kind === kind ? i + 1 : null)).filter(Boolean);
+  const parts = [];
+  if (at('logo').length) parts.push(`Attached Image ${at('logo')[0]} is the complete Waves logo lockup for the uniform badges.`);
+  if (at('van').length) parts.push(`Attached Images ${at('van').join(' and ')} are two photographs of the SAME single company van — side and rear views of one object, never two vehicles.`);
+  return parts.length ? `HARD REFERENCE ROLES: ${parts.join(' ')}` : '';
+}
 // Which references a call carried, as the provenance flags callers read —
 // the publisher's screen allows the uniform logo / van wrap only then.
 function referenceProvenance(references) {
@@ -697,15 +722,17 @@ class ImageGenerator {
   // vanWrap: [sideBuffer, rearBuffer] (the two references) | null (never
   // attach) | undefined (load the bundled assets lazily, honoring
   // BLOG_IMAGE_VAN_WRAP).
-  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed(), uniformLogo, vanWrap } = {}) {
+  // defaultChain: the caller's own no-env chain (social keeps an older one);
+  // an envChain with no valid slug falls back to it, never to the blog default.
+  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, defaultChain, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed(), uniformLogo, vanWrap } = {}) {
     this.chain = parseChain(envChain, { allowPixelWatermark });
     this._uniformLogo = uniformLogo;
     this._vanWrapRefs = vanWrap;
     this._chainBudgetMs = chainBudgetMs;
     this._now = now;
     if (!this.chain.length) {
-      logger.warn('[image-generator] no valid providers in BLOG_IMAGE_PROVIDER; falling back to defaults');
-      this.chain = parseChain(undefined, { allowPixelWatermark });
+      logger.warn('[image-generator] no valid providers in the configured image chain; falling back to defaults');
+      this.chain = parseChain(defaultChain, { allowPixelWatermark });
     }
     this._fetchFn = fetchFn;
     this._capabilityChecked = false;
@@ -738,7 +765,7 @@ class ImageGenerator {
     const references = [...this._logoReference({ customPrompt, plan, uniformLogo }), ...this._vanWrapReference({ customPrompt, plan, vanWrap })];
     const attached = referenceProvenance(references);
     const referencePrompt = references.length
-      ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: attached.logoReference, vanWrap: attached.vanWrapReference })
+      ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: attached.logoReference, vanWrap: attached.vanWrapReference, referenceRoles: referenceRolesFor(references) })
       : null;
 
     for (const slug of this.chain) {
@@ -907,6 +934,7 @@ module.exports._internals = {
   INFOGRAPHIC_NO_PEOPLE_LINE,
   STANDARD_GUARDS,
   REFERENCE_CLAUSES,
+  referenceRolesFor,
   stylePermutation,
   retryStyleFor,
   settingsFor,

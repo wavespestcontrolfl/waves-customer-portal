@@ -34,7 +34,8 @@ jest.mock('../services/customer-address-fanout', () => ({
   propagateCustomerAddressChange: jest.fn(() => Promise.resolve({ leads: 0, estimates: 0 })),
 }));
 jest.mock('../services/geocoder', () => ({
-  ensureCustomerGeocoded: jest.fn(() => Promise.resolve({ latitude: 27.1, longitude: -82.4 })),
+  ensureCustomerGeocoded: jest.fn(() => Promise.resolve({ lat: 27.1, lng: -82.4 })),
+  regeocodeCustomerAddressGuarded: jest.fn(() => Promise.resolve({ lat: 27.1, lng: -82.4 })),
 }));
 // Churn billing disarm disclosure (GitHub Codex #4684 r4): churnGuardOrRepair
 // itself (its live-visit/prepay-term/pending-invoice checks and its call
@@ -91,7 +92,9 @@ test('an address change syncs the primary property atomically and re-geocodes', 
   );
   // coords cleared, then a re-geocode kicked off
   expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ latitude: null, longitude: null }));
-  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith(CUSTOMER_ID);
+  expect(geocoder.regeocodeCustomerAddressGuarded).toHaveBeenCalledWith(CUSTOMER_ID);
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+  expect(customerProperties.syncPrimaryCoordsFromCustomer).not.toHaveBeenCalled();
 });
 
 test('a colliding address rolls back and returns a clear error, no geocode', async () => {
@@ -107,7 +110,7 @@ test('a colliding address rolls back and returns a clear error, no geocode', asy
   });
 
   expect(result).toEqual({ error: 'That address already exists as another property on this customer.' });
-  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+  expect(geocoder.regeocodeCustomerAddressGuarded).not.toHaveBeenCalled();
 });
 
 test('resubmitting the same address still syncs + re-geocodes (self-heals a stale row)', async () => {
@@ -126,7 +129,7 @@ test('resubmitting the same address still syncs + re-geocodes (self-heals a stal
 
   expect(result.success).toBe(true);
   expect(customerProperties.syncPrimaryAddress).toHaveBeenCalledTimes(1);
-  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith(CUSTOMER_ID);
+  expect(geocoder.regeocodeCustomerAddressGuarded).toHaveBeenCalledWith(CUSTOMER_ID);
 });
 
 test('a non-address change does not touch the property mirror or geocoder', async () => {
@@ -143,6 +146,7 @@ test('a non-address change does not touch the property mirror or geocoder', asyn
   expect(result.success).toBe(true);
   expect(customerProperties.syncPrimaryAddress).not.toHaveBeenCalled();
   expect(addressFanout.propagateCustomerAddressChange).not.toHaveBeenCalled();
+  expect(geocoder.regeocodeCustomerAddressGuarded).not.toHaveBeenCalled();
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
 });
 
@@ -168,8 +172,10 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
   expect(addressFanout.propagateCustomerAddressChange).toHaveBeenCalledTimes(2);
   // stale coords cleared, re-geocode kicked off for each row
   expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ latitude: null, longitude: null }));
-  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-a');
-  expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-b');
+  expect(geocoder.regeocodeCustomerAddressGuarded).toHaveBeenCalledWith('cust-a');
+  expect(geocoder.regeocodeCustomerAddressGuarded).toHaveBeenCalledWith('cust-b');
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+  expect(customerProperties.syncPrimaryCoordsFromCustomer).not.toHaveBeenCalled();
 });
 
 describe('churn billing disarm disclosure in the tool RESULT (GitHub Codex #4684 r4)', () => {
@@ -376,5 +382,6 @@ test('a bulk NON-address edit skips per-customer fanout (one transaction, no add
   expect(db.transaction).toHaveBeenCalledTimes(1);
   expect(customerProperties.syncPrimaryAddress).not.toHaveBeenCalled();
   expect(addressFanout.propagateCustomerAddressChange).not.toHaveBeenCalled();
+  expect(geocoder.regeocodeCustomerAddressGuarded).not.toHaveBeenCalled();
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
 });

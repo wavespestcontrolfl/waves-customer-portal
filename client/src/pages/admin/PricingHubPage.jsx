@@ -9,7 +9,6 @@ import { getAdminUser } from "../../lib/adminAuth";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 import { UiSurface } from "../../components/ui";
-import { cn } from "../../components/ui/cn";
 
 export const PRICING_AREAS = [
   { key: "logic", label: "Logic", Icon: Calculator },
@@ -80,18 +79,12 @@ export default function PricingHubPage() {
           activeKey={activeArea}
           onSectionChange={selectArea}
           ariaLabel="Pricing areas"
-          // `.ui-workspace-nav` is inline-flex, so the area strip and an area's
-          // own section strip sit side by side whenever their combined width
-          // fits the 1300px header — collapsing the two hierarchical rows the
-          // block-level framed variant used to give. Full-width strips restore
-          // the rows without touching the shared header component.
-          navGridClassName="w-full grid-cols-1 sm:grid-cols-3"
           actions={secondary?.actions}
           secondarySections={secondary?.sections || []}
           secondaryActiveKey={secondary?.activeKey}
           onSecondaryChange={secondary?.onChange}
           secondaryAriaLabel={secondary?.ariaLabel}
-          secondaryNavGridClassName={cn("w-full", secondary?.navGridClassName)}
+          secondaryNavGridClassName={secondary?.navGridClassName}
       />
 
       {activeArea === "logic" && (

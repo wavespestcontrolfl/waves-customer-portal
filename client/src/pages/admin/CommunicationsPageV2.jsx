@@ -4000,7 +4000,7 @@ export default function CommunicationsPageV2() {
       {activeTab === "events" && <NotificationEventsTabV2 isAdminRole={isAdminRole} />}
       {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
-      {activeTab === "triage" && <TriageInboxTabV2 />}
+      {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
       {activeTab === "owed" && <OwedTabV2 />}
       {activeTab === "templates" && (
         <>

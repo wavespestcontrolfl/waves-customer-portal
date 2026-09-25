@@ -276,6 +276,32 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
     expect(out.needsConfirmation).toEqual(['caller_not_authorized']);
   });
 
+  // Finding #4 (round 4 P1, PR #4807): the call processor's shadow branch
+  // (CALL_EXTRACTION_V2_ENABLED=true, DRIVES_ROUTING=false — the documented
+  // prod posture) merges computeDeterministicTriageFlags's output (which
+  // derives callback_number_needed) into the flags handed here, but nothing
+  // copied it into needsConfirmation — no review card filed, no SMS hold
+  // armed, and the disclaimed ANI kept getting texted. This is a plain
+  // ADVISORY pass-through: never holds the booking, only files the card the
+  // processor's SMS-hold arming and triage_items insert both key on.
+  test('callback_number_needed passes through to needsConfirmation (finding #4)', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: null,
+      extracted: { first_name: 'Pat', last_name: 'Doe' },
+      v2TriageFlags: ['callback_number_needed'],
+    });
+    expect(out.needsConfirmation).toContain('callback_number_needed');
+  });
+
+  test('no callback_number_needed flag → not added', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: null,
+      extracted: { first_name: 'Pat', last_name: 'Doe' },
+      v2TriageFlags: [],
+    });
+    expect(out.needsConfirmation).not.toContain('callback_number_needed');
+  });
+
   test('missing surname flagged ONLY on a hot/warm prospect', () => {
     const base = { address_line1: '7620 Charleston Ln', first_name: 'Elaine', last_name: '' };
     expect(deriveCallReviewBridge({ extracted: { ...base, lead_quality: 'hot' } }).needsConfirmation).toContain('missing_last_name');

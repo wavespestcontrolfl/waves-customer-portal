@@ -1446,6 +1446,8 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
 
 const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card_present', 'other']);
 
+const { ANNUAL_TEMPLATE_KEY: TERMITE_ANNUAL_TEMPLATE_KEY } = require('../services/termite-annual-activation');
+
 // Advisory-lock namespace for serializing per-customer annual-prepay creation,
 // so hashtext(customerId) can't collide with locks taken elsewhere.
 const ANNUAL_PREPAY_LOCK_NS = 0x4150;
@@ -1472,7 +1474,7 @@ function annualPrepayOverlapStatusClause() {
 // concurrent submissions (double-click, or two admins) can both pass that check
 // and create duplicate invoices/terms/payments. Throws a tagged error the route
 // translates to a 409. Statuses mirror the pre-flight overlap query.
-async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, allowOverlap, errorPrefix) {
+async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, allowOverlap, errorPrefix, excludeEstimateId = null) {
   await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [ANNUAL_PREPAY_LOCK_NS, String(customerId)]);
   if (allowOverlap === true) return;
   const activeTerm = await trx('annual_prepay_terms')
@@ -1485,6 +1487,50 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
     const message = `${errorPrefix} ${activeTermEnd}. Use a start date after ${activeTermEnd}.`;
     const err = new Error(message);
     err.annualPrepayOverlap = { error: message, activeTermId: activeTerm.id, activeTermEnd };
+    throw err;
+  }
+  // Sign-before-pay overlap (termite annual-plan restructure): a termite
+  // annual-plan estimate parked awaiting the customer's signature is a
+  // binding commitment too, even though it has no annual_prepay_terms row
+  // yet (estimate-converter.js's parkTermiteAnnualPlanAccept defers that
+  // row until signature) — without this check, under the SAME per-customer
+  // lock this function already holds, a second annual estimate for the
+  // same customer could park while the first is still awaiting signature,
+  // and signing BOTH would double-bill the year. excludeEstimateId lets a
+  // retry of the SAME estimate (already awaiting_signature) pass through
+  // rather than self-block.
+  // Codex round-3 P2: the commitment lasts only while it can still turn
+  // into a plan — its annual agreement is signed (activation pending), or
+  // still signable (draft/sent/viewed with an open or not-yet-minted share
+  // window), or not drafted yet at all (agreement prep runs just after the
+  // accept). Once every agreement drafted for it is cancelled, voided or
+  // expired, the abandoned park no longer blocks a new annual plan.
+  let awaitingSignatureQuery = trx('estimates as e')
+    .where({ 'e.customer_id': customerId, 'e.annual_plan_activation_status': 'awaiting_signature' })
+    .where(function liveAnnualAgreement() {
+      const linkedAgreements = (q) => q.select(trx.raw('1'))
+        .from('customer_contracts as cc')
+        .where('cc.document_template_key', TERMITE_ANNUAL_TEMPLATE_KEY)
+        .whereRaw("cc.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text");
+      this.whereNotExists(function noAgreementYet() { linkedAgreements(this); })
+        .orWhereExists(function signedOrSignable() {
+          linkedAgreements(this).where(function liveStatus() {
+            this.where('cc.status', 'signed')
+              .orWhere(function openShareWindow() {
+                this.whereIn('cc.status', ['draft', 'sent', 'viewed'])
+                  .where(function unexpired() {
+                    this.whereNull('cc.share_token_expires_at').orWhere('cc.share_token_expires_at', '>', trx.fn.now());
+                  });
+              });
+          });
+        });
+    });
+  if (excludeEstimateId) awaitingSignatureQuery = awaitingSignatureQuery.whereNot('e.id', excludeEstimateId);
+  const awaitingSignatureEstimate = await awaitingSignatureQuery.first('e.id');
+  if (awaitingSignatureEstimate) {
+    const message = `This account already has a termite annual agreement (estimate #${awaitingSignatureEstimate.id}) awaiting the customer's signature. Sign or cancel it before accepting another annual plan.`;
+    const err = new Error(message);
+    err.annualPrepayOverlap = { error: message, awaitingSignatureEstimateId: awaitingSignatureEstimate.id };
     throw err;
   }
 }
@@ -2113,12 +2159,10 @@ async function findCrossAccountContactConflict(customerId, accountId, updates) {
   if (updates.email !== undefined) {
     const email = cleanEmail(updates.email);
     if (email) {
-      const rows = await db('customers')
-        .whereNull('deleted_at')
-        .whereNot({ id: customerId })
-        .whereRaw('LOWER(email) = ?', [email])
-        .select('id', 'account_id', 'first_name', 'last_name', 'email');
-      const conflict = rows.find((row) => String(row.account_id || row.id) !== normalizedAccountId);
+      // One predicate for every operator email writer (the triage read-back
+      // confirm reuses it under the address key): services/customer-email-write.js.
+      const conflict = await require('../services/customer-email-write')
+        .findCrossAccountEmailConflict(db, { customerId, accountId: normalizedAccountId, email });
       if (conflict) conflicts.push({ field: 'email', customer: conflict });
     }
   }
@@ -5972,6 +6016,10 @@ router._private = {
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   lockAndAssertNoAnnualPrepayOverlap,
+  // The status set every annual-prepay overlap check shares — the termite
+  // annual plan's installation re-anchor (termite-annual-activation.js)
+  // checks a moved window against the same set.
+  annualPrepayOverlapStatusClause,
   stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,

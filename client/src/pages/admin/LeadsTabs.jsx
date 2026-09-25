@@ -590,7 +590,7 @@ function PipelineStatusCard({ label, value }) {
 }
 function LeadsWorkspaceNav({ active, onChange }) {
   return (
-    <nav aria-label="Lead tools" className="flex gap-[16px] mb-[12px]">
+    <nav aria-label="Lead tools" className="flex [justify-content:safe_center] gap-[16px] mb-[12px] overflow-x-auto [&>button]:shrink-0">
       {[
         {
           key: "pipeline",

@@ -1,7 +1,10 @@
 const crypto = require('crypto');
 const { isDeepStrictEqual } = require('node:util');
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callReprocessInFlight } = require('../utils/estimate-claim-sql');
+const {
+  DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callReprocessInFlight, callDraftVerdict,
+  isRowScopedDraftBlockReason, TERMINAL_ESTIMATE_STATUSES,
+} = require('../utils/estimate-claim-sql');
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
@@ -113,6 +116,19 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
   // about the CALL, not about which lead it points at — linkage legitimately
   // stays unchanged, and treating that as "nothing to do" would leave the
   // wrong or rejected draft public and sendable.
+  // A ROW-SCOPED verdict (agreed-price cleanup) never touches a terminal
+  // row (codex #4815 r2 P0, extended r6): the scan and its per-row lock
+  // both skip one, but a customer can accept (or the row can expire)
+  // between the DEFERRED marker and this claim-release finalization. Only
+  // an identity/rejection verdict may marker-stamp a terminal row — for an
+  // agreed price the customer's own decision stands, so the pending marker
+  // is dropped as obsolete and the permanent public token keeps working.
+  const rowStatus = String(row.status || '').toLowerCase();
+  if (isRowScopedDraftBlockReason(pending.reason) && TERMINAL_ESTIMATE_STATUSES.includes(rowStatus)) {
+    await trx('estimates').where({ id: estimateId })
+      .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+    return { terminal: true, status: rowStatus, obsolete: true };
+  }
   const forcedQuarantine = !!(pending.conflict || pending.reason);
   // A forced verdict CAN be superseded by a newer processing generation
   // (codex P1, local audit on 3092fbbb8): the spam/identity verdict was
@@ -201,14 +217,15 @@ async function completePendingInvalidation(trx, estimateId, { row, data, pending
     if (!(await staleCallLinkageReason(trx, data, {
       lockCallRow: true,
       supersededBelowGeneration: forcedSuperseded ? liveGenForRecheck : null,
+      estimateStatus: rowStatus,
     }))) {
       await trx('estimates').where({ id: estimateId })
         .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
       return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
     }
   }
-  const status = String(row.status || '').toLowerCase();
-  const terminal = ['accepted', 'declined', 'expired'].includes(status);
+  const status = rowStatus;
+  const terminal = TERMINAL_ESTIMATE_STATUSES.includes(status);
   delete data.lead_id;
   delete data.lead_linkage;
   eng.linkage_invalidated_at = new Date().toISOString();
@@ -421,21 +438,14 @@ async function callRejectedForDrafting(dbc, callLogId, {
     // honor them, but the sweep that owns them must NOT read them as
     // proof of the underlying verdict (codex P1, PR #3304 GH r9) — that
     // made its own re-qualification cleanup unreachable.
+    // A QUEUED quarantine that has not landed yet is equally
+    // disqualifying — its estimate-side marker is what failed to write.
+    // Read through the ONE shared marker predicate (codex #4815 r6 P0/P1):
+    // a row-scoped (agreed-price) block a re-qualifying pass superseded no
+    // longer refuses the fresh draft; every call-wide verdict still does.
     if (!ignoreQueuedMarkers) {
-      const markerCurrent = (marker) => {
-        if (supersededBelowGeneration == null) return true;
-        const g = marker?.generation;
-        if (g == null) return true;
-        return Number(g) >= Number(supersededBelowGeneration);
-      };
-      if (md?.estimator_draft_block?.reason && markerCurrent(md.estimator_draft_block)) {
-        return String(md.estimator_draft_block.reason);
-      }
-      // A QUEUED quarantine that has not landed yet is equally
-      // disqualifying — its estimate-side marker is what failed to write.
-      if (md?.estimator_quarantine_pending?.reason && markerCurrent(md.estimator_quarantine_pending)) {
-        return String(md.estimator_quarantine_pending.reason);
-      }
+      const verdict = callDraftVerdict(md, { forNewDraft: true, supersededBelowGeneration });
+      if (verdict) return verdict.reason;
     }
   } catch { /* unparseable metadata: not a rejection signal */ }
   return null;
@@ -449,9 +459,12 @@ async function callRejectedForDrafting(dbc, callLogId, {
 // 'call_draft_block', the obsolete test would fail, and the valid draft
 // would be archived anyway. Only LEAD-LESS drafts took the caller's early
 // return, so the linked-draft path — the production shape — still lost.
+// `estimateStatus` (codex #4815 r7 P0): the judged row's status column,
+// when the caller has it — a queued row-scoped (agreed-price) verdict never
+// blocks a terminal row (callDraftVerdict). Omitted = fail closed.
 async function staleCallLinkageReason(dbc, data, {
   lockCallRow = false, ownerProcToken = null, ownerProcGeneration = null,
-  supersededBelowGeneration = null,
+  supersededBelowGeneration = null, estimateStatus = null,
 } = {}) {
   const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
   const draftCallLogId = data?.estimatorEngine?.callLogId || null;
@@ -496,18 +509,14 @@ async function staleCallLinkageReason(dbc, data, {
   // only — so the known wrong-identity draft stayed sendable until a
   // scheduler sweep succeeded. Legacy and lead-less drafts carry only a
   // callLogId, so this must precede the durable-linkage bail.
+  // Row-scoped verdicts (agreed-price) block only the rows they marked —
+  // the ONE shared predicate decides (codex #4815 r6 P0), so an accepted
+  // estimate's token survives an agreed-price reprocess of its call.
   try {
-    const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
-    const markerCurrent = (marker) => {
-      if (supersededBelowGeneration == null) return true;
-      const g = marker?.generation;
-      if (g == null) return true;
-      return Number(g) >= Number(supersededBelowGeneration);
-    };
-    if (md?.estimator_draft_block?.reason && markerCurrent(md.estimator_draft_block)) return 'call_draft_block';
-    if (md?.estimator_quarantine_pending?.reason && markerCurrent(md.estimator_quarantine_pending)) {
-      return 'call_quarantine_pending';
-    }
+    const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : callRow.metadata;
+    const verdict = callDraftVerdict(md, { estimateData: data, estimateStatus, supersededBelowGeneration });
+    if (verdict?.marker === 'draft_block') return 'call_draft_block';
+    if (verdict?.marker === 'quarantine_pending') return 'call_quarantine_pending';
   } catch { /* unparseable metadata: fall through to the linkage compare */ }
   // The REPROCESSING fence applies to every engine draft too (codex P1,
   // PR #3304 GH r10): a legacy or lead-less draft is just as unsafe to
@@ -2659,7 +2668,15 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // handoff-link recheck — an ordinary staff revision must not silently drop
 // it and revive a stale booking link for a still-unconfirmed address
 // (codex #4667 r5 P1); a clean wizard run clears it explicitly (false).
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState'];
+// assessment_exception: the Waves Assessment pre-draft's provenance
+// ({ call_log_id, generation, ... }, booking-predraft.js). When the booked
+// visit went terminal before it could be linked it is the ONLY durable
+// reason a later agreed-price cleanup spares the draft, so an ordinary
+// staff revision must carry it (codex #4815 r9 P2). It is server-owned:
+// the locked pass mirrors the locked row exactly, so a client payload can
+// neither drop it nor invent one.
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'assessment_exception'];
+const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception'];
 // The wizard's county-roll verdict (addressUnverified + addressUnverifiedFlag)
 // is carried across an ORDINARY revision (the public link and the send
 // guard both refuse while it stands), and cleared by the two staff actions
@@ -2999,6 +3016,16 @@ async function reviseAdminEstimate({
           preserved = true;
         }
       }
+      for (const key of REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS) {
+        if (existingData[key] === undefined && nextData[key] !== undefined) {
+          delete nextData[key];
+          preserved = true;
+        } else if (existingData[key] !== undefined
+          && JSON.stringify(nextData[key]) !== JSON.stringify(existingData[key])) {
+          nextData[key] = existingData[key];
+          preserved = true;
+        }
+      }
       if (carryAddressBlockAcrossRevise(nextData, existingData, {
         addressChanged: premiseChanged(estimate.address, writeFields.address),
         explicitConfirm: body?.confirmAddress === true,
@@ -3301,6 +3328,9 @@ async function reviseAdminEstimate({
         if (pendingData && typeof pendingData === 'object' && lockedData && typeof lockedData === 'object') {
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
+          }
+          for (const key of REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS) {
+            if (lockedData[key] === undefined) delete pendingData[key];
           }
           carryAddressBlockAcrossRevise(pendingData, lockedData, {
             addressChanged: premiseChanged(lockedPrior.address, revisedFields.address),

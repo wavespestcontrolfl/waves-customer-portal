@@ -21,7 +21,7 @@ const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
-const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
+const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes } = require('./policy');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 const { travelGapEnabled, violatesTravelGap } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
@@ -237,12 +237,21 @@ async function findCapacitySlots(opts) {
     await travel.preload(legs);
   }
   const slots = [];
+  // Why each refused candidate was refused (arrival_window, day_overcommitted,
+  // return_time, detour_cap, ...), so a thin week explains itself.
+  const rejections = {};
+  const reject = (reason) => { rejections[reason] = (rejections[reason] || 0) + 1; };
+  const maxDetour = opts.customerFacing ? customerMaxDetourMinutes() : Infinity;
   for (const candidate of candidates) {
     const { context, date, tech, start, options } = candidate;
     const fit = evaluateArrivalPlacement(context, options);
-    if (!fit.feasible) continue;
+    if (!fit.feasible) { reject(fit.reason); continue; }
     // Existing save probes have no traffic preload; their fallback must fit too.
-    if (!opts.capacityPlacement && !evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) continue;
+    if (!opts.capacityPlacement && !evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) {
+      reject('conservative_travel');
+      continue;
+    }
+    if (fit.detourMinutes > maxDetour) { reject('detour_cap'); continue; }
     const index = fit.routeOrder.indexOf(context.target.id);
     const byId = new Map(context.rows.map(row => [row.id, row]));
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
@@ -253,6 +262,7 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      return_time: minutesToTime(Math.ceil(fit.finishMinute)),
       route_mode: 'arrival_windows', travel_source: fit.travelSource, travel_reasons: fit.travelReasons,
       stops_that_day: fit.arrivals.length - 1, latest_start_min: start,
       // Route neighbours of this placement (packed-ends filter below) — BY
@@ -267,7 +277,7 @@ async function findCapacitySlots(opts) {
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
   return { slots: packed.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
-    evaluated: candidates.length, total_feasible: packed.length, travel: travel.diagnostics() };
+    evaluated: candidates.length, total_feasible: packed.length, rejections, travel: travel.diagnostics() };
 }
 
 // Route neighbours of a capacity placement, BY TIME rather than

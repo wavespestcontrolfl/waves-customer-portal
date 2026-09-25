@@ -164,6 +164,7 @@ async function handleMerge(req, res, { linkAsProperty }) {
     }
     const conflict = err.mergeConflictCode === 'inactive_primary_property_conflict'
       || err.mergeConflictCode === 'duplicate_series_conflict'
+      || err.mergeConflictCode === 'billing_delivery_channels_conflict'
       || /Stripe profile|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue|recurring series/.test(err.message);
     res.status(conflict ? 409 : 500).json({ error: err.message });
   }

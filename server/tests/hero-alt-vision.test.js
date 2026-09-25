@@ -95,7 +95,10 @@ describe('sanitizeAlt', () => {
 describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — required on cap + right chest per technician, forbidden elsewhere)', () => {
   const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
   const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
-  const tech = (extra = {}) => ({ cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'right chest'], ...extra });
+  // facing 'camera' + chest_badges_x LEFT of placket_x (in picture coordinates)
+  // is the wearer's correct RIGHT chest — chestSide() judges it from these two
+  // numbers only, never from the logo_on wording itself.
+  const tech = (extra = {}) => ({ facing: 'camera', cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'chest'], placket_x: 500, chest_badges_x: [440], ...extra });
   const branded = (extra = {}) => answer({ readable_text: [], logos_or_brand_marks: [], technicians: [tech()], waves_logo_elsewhere: [], uniform_logo_lettering: [], forbidden_scenes: [], notes: '', ...extra });
   const screen = (extra) => { mockDispatch.mockResolvedValue(branded(extra)); return screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true }); };
   beforeEach(() => mockDispatch.mockReset());
@@ -104,9 +107,11 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     const plain = buildScreenPrompt({});
     expect(plain).not.toMatch(/EXCEPTION|technicians|waves_logo_elsewhere/);
     const p = buildScreenPrompt({ allowUniformLogo: true });
-    expect(p).toMatch(/"technicians": \[\{"cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string\[\]\}\], "waves_logo_elsewhere": string\[\], "uniform_logo_lettering": string\[\]/);
+    expect(p).toMatch(/"technicians": \[\{"facing": "camera" \| "side" \| "away", "cap_front_visible": boolean, "chest_visible": boolean, "logo_on": string\[\], "placket_x": number \| null, "chest_badges_x": number\[\]\}\], "waves_logo_elsewhere": string\[\], "uniform_logo_lettering": string\[\]/);
     expect(p).toMatch(/one entry PER uniformed technician/);
-    expect(p).toMatch(/"right chest" \(the wearer's right side/);
+    expect(p).toMatch(/facing is "camera" when their chest and shoulders face the viewer/);
+    expect(p).toMatch(/placket_x is the horizontal position of their shirt's button placket/);
+    expect(p).toMatch(/chest_badges_x lists the horizontal position of the CENTER of EACH logo badge on their shirt chest, one number per badge/);
     expect(p).toMatch(/EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected/);
   });
 
@@ -119,31 +124,53 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(_internals.SCREEN_MAX_TOKENS_WITH_LOGO).toBeGreaterThanOrEqual(1000);
   });
 
-  test('a technician in frame with the logo missing, on one garment only, or on the LEFT chest fails (Codex r1 P1 on #4761)', async () => {
-    expect((await screen({ technicians: [tech({ logo_on: [] })] })).reasons).toEqual(['uniform logo missing on the cap', 'uniform logo missing on the chest']);
-    expect((await screen({ technicians: [tech({ logo_on: ['cap'] })] })).reasons).toEqual(['uniform logo missing on the chest']);
-    const left = await screen({ technicians: [tech({ logo_on: ['cap', 'left chest'] })] });
+  test('a technician in frame with the logo missing, on one garment only, or on the LEFT chest (per the picture-position numbers) fails (Codex r1 P1 on #4761)', async () => {
+    expect((await screen({ technicians: [tech({ chest_badges_x: [], logo_on: [] })] })).reasons).toEqual(['uniform logo missing on the cap', 'uniform logo missing on the chest']);
+    expect((await screen({ technicians: [tech({ chest_badges_x: [], logo_on: ['cap'] })] })).reasons).toEqual(['uniform logo missing on the chest']);
+    // chest_badges_x RIGHT of placket_x (in picture coordinates) is the wearer's LEFT chest.
+    const left = await screen({ technicians: [tech({ chest_badges_x: [560] })] });
     expect(left.ok).toBe(false);
     expect(left.reasons).toEqual(['uniform logo on the left chest, not the right']);
     expect(left.violations).toBe(1);
   });
 
-  test('an EXTRA left-chest logo beside a correct right-chest one still fails (Codex r3 P2 on #4761)', async () => {
-    const r = await screen({ technicians: [tech({ logo_on: ['cap', 'right chest', 'left chest'] })] });
-    expect(r.ok).toBe(false);
-    expect(r.reasons).toEqual(['uniform logo on the left chest as well as the right']);
-    expect(r.logos).toEqual(['Waves logo on the left chest']);
+  test('an EXTRA chest badge fails: a wrong-side one beside a correct one, or two anywhere (Codex r3 P2 on #4761; pre-push fallback P1 on 0569ff57cd)', async () => {
+    const both = await screen({ technicians: [tech({ chest_badges_x: [440, 560] })] });
+    expect(both.reasons).toEqual(['uniform logo on the left chest as well as the right']);
+    expect(both.logos).toEqual(['Waves logo on the left chest']);
+    expect(both.placements).toEqual(['cap', 'right chest', 'left chest']);
+    const twoInProfile = await screen({ technicians: [tech({ facing: 'side', chest_badges_x: [300, 340] })] });
+    expect(twoInProfile.reasons).toEqual(['more than one chest badge']);
+    expect(twoInProfile.logos).toEqual(['extra Waves chest badge']);
+  });
+
+  test('a missing (null or empty) placket or badge position never fakes a side verdict — Number(null) is 0 (pre-push fallback P1 on 199826df78)', async () => {
+    for (const extra of [{ placket_x: null, chest_badges_x: [440] }, { placket_x: 500, chest_badges_x: [] }, { placket_x: '', chest_badges_x: [440] }, { placket_x: '500', chest_badges_x: [560] }]) {
+      const r = await screen({ technicians: [tech(extra)] });
+      expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
+      expect(r.placements).toEqual(['cap', 'chest']);
+    }
+  });
+
+  test('a side-facing technician with no chest badge is not flagged, and a side-facing badge\'s side is never judged (facing gates the chest requirement and chestSide)', async () => {
+    const sideNoBadge = await screen({ technicians: [tech({ facing: 'side', chest_badges_x: [], logo_on: ['cap'] })] });
+    expect(sideNoBadge.ok).toBe(true);
+    // Numbers that would read as the wrong side facing the camera are never
+    // judged in profile — the badge's side is not knowable off-camera.
+    const sideBadge = await screen({ technicians: [tech({ facing: 'side', chest_badges_x: [560] })] });
+    expect(sideBadge.ok).toBe(true);
+    expect(sideBadge.placements).toEqual(['cap', 'chest']);
   });
 
   test('each placement is demanded only for a garment that can be judged on THAT person (pre-push P1 on f3efa39462)', async () => {
-    expect((await screen({ technicians: [tech({ chest_visible: false, logo_on: ['cap'] })] })).ok).toBe(true);
-    expect((await screen({ technicians: [tech({ cap_front_visible: false, logo_on: ['right chest'] })] })).ok).toBe(true);
-    expect((await screen({ technicians: [tech({ chest_visible: false, logo_on: [] })] })).reasons).toEqual(['uniform logo missing on the cap']);
+    expect((await screen({ technicians: [tech({ chest_visible: false, chest_badges_x: [], logo_on: ['cap'] })] })).ok).toBe(true);
+    expect((await screen({ technicians: [tech({ cap_front_visible: false, logo_on: ['chest'] })] })).ok).toBe(true);
+    expect((await screen({ technicians: [tech({ chest_visible: false, chest_badges_x: [], logo_on: [] })] })).reasons).toEqual(['uniform logo missing on the cap']);
     expect((await screen({ technicians: [] })).ok).toBe(true); // a bait-station close-up: nobody to judge
   });
 
   test('a partially branded crew fails: one correct technician beside an unbranded one (Codex r3 P2 on #4761)', async () => {
-    const r = await screen({ technicians: [tech(), tech({ logo_on: [] })] });
+    const r = await screen({ technicians: [tech(), tech({ chest_badges_x: [], logo_on: [] })] });
     expect(r.ok).toBe(false);
     expect(r.reasons).toEqual(['technician 2: uniform logo missing on the cap', 'technician 2: uniform logo missing on the chest']);
   });
@@ -155,7 +182,7 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(r.logos).toEqual(['Waves logo elsewhere: van door']);
     expect(r.violations).toBe(1);
     expect(r.placements).toEqual(['cap', 'right chest', 'elsewhere: van door']);
-    const onGlove = await screen({ technicians: [tech({ logo_on: ['cap', 'right chest', 'glove'] })] });
+    const onGlove = await screen({ technicians: [tech({ logo_on: ['cap', 'chest', 'glove'] })] });
     expect(onGlove.reasons).toEqual(['logo or brand mark: Waves logo on glove']);
     expect(onGlove.logos).toEqual(['Waves logo on glove']);
     const listed = await screen({ logos_or_brand_marks: ['Waves logo on the van door'] });
@@ -205,8 +232,10 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
 
   test('helpers: placement classification and the allowlist', () => {
     const { isAllowedUniformLogo, classifyPlacement } = _internals;
+    // classifyPlacement is cap | chest | other — which chest side is judged
+    // separately, from technicians[]' picture-position numbers (chestSide()).
     expect(['cap', 'Cap front', 'on the hat'].map(classifyPlacement)).toEqual(['cap', 'cap', 'cap']);
-    expect(['right chest', 'chest', 'Left chest', 'glove', 'van door'].map(classifyPlacement)).toEqual(['right chest', 'right chest', 'left chest', 'other', 'other']);
+    expect(['right chest', 'chest', 'Left chest', 'glove', 'van door'].map(classifyPlacement)).toEqual(['chest', 'chest', 'chest', 'other', 'other']);
     expect(isAllowedUniformLogo('Waves logo on the cap')).toBe(true);
     expect(isAllowedUniformLogo('Waves badge on the polo chest')).toBe(true);
     expect(isAllowedUniformLogo('Waves logo on the cap and on the van')).toBe(false);
@@ -217,7 +246,11 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(isAllowedUniformLogo('Waves badge on the uniform')).toBe(false);
     expect(isAllowedUniformLogo('wave pattern on the shirt')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on the glove and cap')).toBe(false);
-    expect(isAllowedUniformLogo('Waves logo on left chest')).toBe(false);
+    // Side is judged only from technicians[]' placket_x/chest_badges_x numbers,
+    // never from this free text — "left" alone no longer excludes it
+    // (Codex r4 P2 on #4761 excluded it; the 2026-09-25 lab showed the
+    // screen's own left/right words were unreliable).
+    expect(isAllowedUniformLogo('Waves logo on left chest')).toBe(true);
     // explicit cap/chest only: another garment location is a forbidden mark (Codex r5 P2 on #4761)
     expect(isAllowedUniformLogo('Waves logo on shirt sleeve')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on the back of the polo')).toBe(false);
@@ -225,49 +258,52 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(isAllowedUniformLogo('Waves logo on the shirt')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on the polo')).toBe(false);
     expect(isAllowedUniformLogo('Waves logo on the right chest of the polo')).toBe(true);
-    expect(isAllowedUniformLogo("Waves logo on the technician's left chest")).toBe(false);
+    expect(isAllowedUniformLogo("Waves logo on the technician's left chest")).toBe(true);
   });
 
-  test('a left-chest mark reported only under logos_or_brand_marks is still a violation (Codex r4 P2 on #4761)', async () => {
-    const r = await screen({ logos_or_brand_marks: ['Waves logo on left chest'] });
+  test('a wrong-side badge is caught via technicians[] numbers, never via free-text wording (Codex r4 P2 on #4761, superseded 2026-09-25)', async () => {
+    // "left chest" in free text alone is now the allowed uniform logo — the
+    // side comes only from the picture-position numbers on technicians[].
+    expect((await screen({ logos_or_brand_marks: ['Waves logo on left chest'] }))).toMatchObject({ ok: true, logos: [] });
+    const r = await screen({ technicians: [tech({ chest_badges_x: [560] })] });
     expect(r.ok).toBe(false);
-    expect(r.reasons).toEqual(['logo or brand mark: Waves logo on left chest']);
-    expect(r.logos).toEqual(['Waves logo on left chest']);
+    expect(r.reasons).toEqual(['uniform logo on the left chest, not the right']);
+    expect(r.logos).toEqual(['Waves logo on the left chest']);
   });
 });
 
 describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks/text allowed ON the van only)', () => {
   const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
   const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
-  const WRAP_TEXT = ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'];
-  const van = (extra = {}) => ({ body: 'unsure', wrapped: true, wrap_text: WRAP_TEXT, wrap_mascot: true, ...extra });
+  const van = (extra = {}) => ({ body: 'unsure', wrapped: true, wrap_mascot: true, phone_numbers: ['941-241-2459'], web_addresses: ['GoWavesFL.com'], ...extra });
   const CLEAN_MAIN = { readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' };
   const isVanQuestion = (req) => req.text.startsWith('Inspect ONLY the van');
   // The main screen and the van's own question are two dispatches; answer
   // each by its prompt.
-  const mockAnswers = ({ main = CLEAN_MAIN, vanAnswer = { van: van() } } = {}) => {
+  const mockAnswers = ({ main = CLEAN_MAIN, vanAnswer = { van_count: 1, van: van() } } = {}) => {
     mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer(vanAnswer) : answer(main)));
   };
   const screen = ({ main, vanAnswer, ...opts } = {}) => {
     mockAnswers({ main, vanAnswer });
     return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true, ...opts });
   };
-  const withVan = (extra) => screen({ vanAnswer: { van: van(extra) } });
+  const withVan = (extra) => screen({ vanAnswer: { van_count: 1, van: van(extra) } });
   beforeEach(() => mockDispatch.mockReset());
 
   test('the van is asked about in its own question; the main screen is told to leave that one van out of every field', () => {
-    expect(buildScreenPrompt({})).not.toMatch(/VAN EXCEPTION/);
-    expect(buildScreenPrompt({ allowUniformLogo: true })).not.toMatch(/VAN EXCEPTION/);
+    expect(buildScreenPrompt({})).not.toMatch(/IGNORE THE WAVES VAN/);
+    expect(buildScreenPrompt({ allowUniformLogo: true })).not.toMatch(/IGNORE THE WAVES VAN/);
     const main = buildScreenPrompt({ allowVanWrap: true });
-    expect(main).toMatch(/VAN EXCEPTION \(overrides every field above\): when exactly ONE van in the frame carries the Waves van wrap/);
-    expect(main).toMatch(/including its maker's badge, out of every field/);
+    expect(main).toMatch(/^IGNORE THE WAVES VAN FIRST: if exactly ONE van in the frame carries the Waves van wrap/);
+    expect(main).toMatch(/treat that one van as if it were not in the picture/);
     expect(main).toMatch(/if two or more vans carry the wrap, list them all/);
     expect(main).not.toMatch(/"van":|van_wrap_elsewhere/);
     const q = _internals.buildVanScreenPrompt();
-    expect(q).toMatch(/shape \{"van": \{"body": "ford_transit_medium_roof" \| "other" \| "unsure", "wrapped": boolean, "wrap_text": string\[\], "wrap_mascot": boolean\} \| null\}/);
-    expect(q).toMatch(/Transit cues: a short hood, a black hexagon-mesh grille with a Ford oval badge/);
-    expect(q).toMatch(/Mercedes Sprinter's long sloped nose/);
-    expect(q).toMatch(/not the maker's badge/);
+    expect(q).toMatch(/shape \{"van_count": number, "van": \{"body": "ford_transit_medium_roof" \| "mercedes_sprinter" \| "ram_promaster" \| "high_roof_van" \| "box_truck" \| "pickup_or_car" \| "other_make" \| "unsure", "other_make": string, "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string\[\], "web_addresses": string\[\]\} \| null\}/);
+    expect(q).toMatch(/a short sloped hood, a black hexagon-mesh grille \(with a Ford oval\), and a MEDIUM roof/);
+    expect(q).toMatch(/"mercedes_sprinter" \(a long pointed nose, no Ford grille\)/);
+    expect(q).toMatch(/phone number on the van that you can read IN FULL/);
+    expect(q).toMatch(/whole van body wrapped bright blue/);
   });
 
   test('two dispatches in parallel, each with its own budget and the same deadline; without the allowance only the main one', async () => {
@@ -287,76 +323,87 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     mockAnswers();
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER })).toMatchObject({ ok: true, checked: true });
     expect(mockDispatch).toHaveBeenCalledTimes(1);
-    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/VAN EXCEPTION/);
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/IGNORE THE WAVES VAN/);
   });
 
-  test('the wrap on the van, nothing off it, exact wrap strings → clean', async () => {
+  test('both screen questions run on the Sol-first imageScreen policy (Claude backup) at medium reasoning, above the reasoning floor (owner ruling 2026-09-25)', async () => {
+    mockAnswers();
+    await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true, allowVanWrap: true });
+    expect(mockDispatch).toHaveBeenCalledTimes(2);
+    for (const [policy, req] of mockDispatch.mock.calls) {
+      expect(policy).toBe(MODELS.TEXT_POLICIES.imageScreen);
+      expect(req.reasoningEffort).toBe('medium');
+      expect(req.maxTokens).toBeGreaterThan(1024);
+    }
+    expect(MODELS.TEXT_POLICIES.imageScreen.primary.provider).toBe('openai');
+    expect(MODELS.TEXT_POLICIES.imageScreen.fallback).toEqual({ provider: 'anthropic', model: MODELS.VISION });
+  });
+
+  test('the wrap on the van, nothing off it, its own phone number and web address → clean', async () => {
     expect(await screen()).toMatchObject({ ok: true, checked: true, reasons: [], violations: 0, logos: [] });
   });
 
-  test('garbled or TRUNCATED wrap text on the van fails as gibberish lettering (Codex r1 P2 on #4784)', async () => {
-    const garbled = await withVan({ wrap_text: ['WAVES', '941-XX9-ZZ59'] });
-    expect(garbled.reasons).toEqual(['garbled van wrap text: 941-XX9-ZZ59']);
-    expect(garbled.logos).toEqual(['garbled van wrap text: 941-XX9-ZZ59']);
-    const phone = await withVan({ wrap_text: ['WAVES', '941-241'] });
-    expect(phone.reasons).toEqual(['garbled van wrap text: 941-241']);
+  test('a READABLE phone number or web address that is not Waves\' own fails; formatting never matters (owner, 2026-09-25)', async () => {
+    const phone = await withVan({ phone_numbers: ['941-214-2459'] });
+    expect(phone.reasons).toEqual(['wrong phone number on the van: 941-214-2459']);
+    expect(phone.logos).toEqual(['wrong phone number on the van: 941-214-2459']);
     expect(phone.violations).toBe(1);
-    expect((await withVan({ wrap_text: ['GoWavesFL'] })).reasons).toEqual(['garbled van wrap text: GoWavesFL']);
-  });
-
-  test('PUNCTUATION-SENSITIVE: the right words with the wrong punctuation fail (Codex r2 P2 on #4785)', async () => {
-    for (const bad of ['Lawn Pest', 'Lawn-Pest', 'GoWavesFL-com']) {
-      expect((await withVan({ wrap_text: [bad] })).reasons).toEqual([`garbled van wrap text: ${bad}`]);
+    const web = await withVan({ web_addresses: ['GoWaveFL.com'] });
+    expect(web.reasons).toEqual(['wrong web address on the van: GoWaveFL.com']);
+    for (const ok of [['(941) 241-2459'], ['941.241.2459'], ['+1 941 241 2459']]) {
+      expect(await withVan({ phone_numbers: ok })).toMatchObject({ ok: true, reasons: [] });
     }
-    expect(await withVan({ wrap_text: ['Lawn & Pest', 'Wave Goodbye to Pests!'] })).toMatchObject({ ok: true });
-  });
-
-  test('a split is legitimate ONLY at a canonical whitespace boundary (Codex r3 P2 on #4785)', async () => {
-    expect((await withVan({ wrap_text: ['941-241', '2459'] })).reasons).toEqual(['garbled van wrap text: 941-241, 2459']);
-    expect((await withVan({ wrap_text: ['941', '241', '2459'] })).ok).toBe(false);
-    expect((await withVan({ wrap_text: ['GoWavesFL', 'com'] })).ok).toBe(false);
-    expect(await withVan({ wrap_text: ['Lawn &', 'Pest'] })).toMatchObject({ ok: true });
-    expect(await withVan({ wrap_text: ['Lawn', '& Pest'] })).toMatchObject({ ok: true });
-    expect((await withVan({ wrap_text: ['Lawn', 'Pest'] })).reasons).toEqual(['garbled van wrap text: Lawn & Pest']);
-    expect(await withVan({ wrap_text: ['Wave Goodbye', 'to Pests!'] })).toMatchObject({ ok: true });
-  });
-
-  test('one entry grouping adjacent wrap strings is valid, with the side panel\'s "Lawn & Pest!" anywhere in it (Codex r8, r9, r12 P2s on #4785)', async () => {
-    for (const ok of [['Lawn & Pest!'], ['Lawn &', 'Pest!'], ['WAVES Lawn & Pest'], ['WAVES Lawn & Pest! Wave Goodbye to Pests!']]) {
-      expect(await withVan({ wrap_text: ok })).toMatchObject({ ok: true, reasons: [] });
+    for (const ok of [['gowavesfl.com'], ['www.GoWavesFL.com'], ['https://gowavesfl.com/'], ['GoWaves FL.com']]) {
+      expect(await withVan({ web_addresses: ok })).toMatchObject({ ok: true, reasons: [] });
     }
-    expect((await withVan({ wrap_text: ['WAVES Lawn Pest'] })).reasons).toEqual(['garbled van wrap text: WAVES Lawn Pest']);
-    // The tagline's own "!" belongs to "Pests!" — "Pest!" there is not the wrap.
-    expect((await withVan({ wrap_text: ['Wave Goodbye to Pest!'] })).ok).toBe(false);
+  });
+
+  test('slight lettering variances pass — only contact details are read back, and an unreadable one is simply absent (owner, 2026-09-25)', async () => {
+    expect(await withVan({ phone_numbers: [], web_addresses: [] })).toMatchObject({ ok: true, reasons: [] });
+    expect(await withVan({ body: 'ford_transit_medium_roof', phone_numbers: [], web_addresses: [] })).toMatchObject({ ok: true, reasons: [] });
   });
 
   test('van body: a Sprinter/other body fails even when correctly wrapped; "unsure" and the Transit pass (Codex r2 P2 on #4785)', async () => {
-    const other = await withVan({ body: 'other' });
-    expect(other.reasons).toEqual(['van body is not a Ford Transit medium-roof cargo van']);
-    expect(other.logos).toEqual(['van body is not a Ford Transit medium-roof cargo van']);
+    const sprinter = await withVan({ body: 'mercedes_sprinter' });
+    expect(sprinter.reasons).toEqual(['van body is not a Ford Transit medium-roof cargo van']);
+    expect(sprinter.logos).toEqual(['van body is not a Ford Transit medium-roof cargo van']);
     expect(await withVan({ body: 'unsure' })).toMatchObject({ ok: true, reasons: [] });
     expect(await withVan({ body: 'ford_transit_medium_roof' })).toMatchObject({ ok: true, reasons: [] });
-    expect((await withVan({ body: 'other', wrap_mascot: false })).reasons).toEqual(['van body is not a Ford Transit medium-roof cargo van', 'van wrap missing the mascot']);
+    expect((await withVan({ body: 'mercedes_sprinter', wrap_mascot: false })).reasons).toEqual(['van body is not a Ford Transit medium-roof cargo van', 'van wrap missing the mascot']);
+    // "other" is no longer a valid body value (Codex r2 P2 on #4785 named the
+    // wrong bodies instead) — an unusable value fails the screen open, unchecked.
+    expect(await withVan({ body: 'other' })).toMatchObject({ ok: true, checked: false });
+  });
+
+  test('a clearly identified van of another make fails, named; a nameless or Transit-named "other_make" is unusable (Codex r3 P2 on #4822)', async () => {
+    expect(_internals.buildVanScreenPrompt()).toMatch(/"other_make" \(a van you can clearly identify as another make or model, such as a Chevrolet Express or a Nissan NV/);
+    const express = await withVan({ body: 'other_make', other_make: 'Chevrolet Express' });
+    expect(express.reasons).toEqual(['van body is a Chevrolet Express, not a Ford Transit medium-roof cargo van']);
+    expect(express.ok).toBe(false);
+    for (const name of [undefined, '', '  ', 'Ford Transit']) {
+      expect(await withVan({ body: 'other_make', other_make: name })).toMatchObject({ ok: true, checked: false });
+    }
+  });
+
+  test('a second van of any kind fails — a plain, partial or mirrored duplicate carries no mark the main screen would see (Codex r1 P2 on #4822)', async () => {
+    const two = await screen({ vanAnswer: { van_count: 2, van: van() } });
+    expect(two.reasons).toEqual(['2 vans in the frame, not one']);
+    expect(two.logos).toEqual(['2 vans in the frame, not one']);
+    expect(_internals.buildVanScreenPrompt()).toMatch(/van_count: how many vans of ANY kind appear in the frame — plain, wrapped, partial, mirrored, reflected or cut off at the edge each count/);
   });
 
   test('a van present WITHOUT the wrap fails; no van at all is clean (Codex r1 P2 on #4784)', async () => {
-    const plain = await withVan({ body: 'ford_transit_medium_roof', wrapped: false, wrap_text: [], wrap_mascot: false });
+    const plain = await withVan({ body: 'ford_transit_medium_roof', wrapped: false, wrap_mascot: false, phone_numbers: [], web_addresses: [] });
     expect(plain.reasons).toEqual(['van present without the wrap']);
     expect(plain.logos).toEqual(['van present without the wrap']);
-    expect(await screen({ vanAnswer: { van: null } })).toMatchObject({ ok: true, checked: true, reasons: [] });
+    expect(await screen({ vanAnswer: { van_count: 0, van: null } })).toMatchObject({ ok: true, checked: true, reasons: [] });
   });
 
-  test('a PARTIALLY applied wrap — no mascot — fails whatever text rendered (Codex r1 P2 on #4785)', async () => {
-    expect((await withVan({ wrap_mascot: false, wrap_text: [] })).reasons).toEqual(['van wrap missing the mascot']);
-    const both = await withVan({ wrap_mascot: false, wrap_text: ['941-XX9-ZZ59'] });
-    expect(both.reasons).toEqual(['van wrap missing the mascot', 'garbled van wrap text: 941-XX9-ZZ59']);
+  test('a PARTIALLY applied wrap — no mascot — fails whatever else rendered (Codex r1 P2 on #4785)', async () => {
+    expect((await withVan({ wrap_mascot: false, phone_numbers: [] })).reasons).toEqual(['van wrap missing the mascot']);
+    const both = await withVan({ wrap_mascot: false, phone_numbers: ['941-555-0100'] });
+    expect(both.reasons).toEqual(['van wrap missing the mascot', 'wrong phone number on the van: 941-555-0100']);
     expect(both.violations).toBe(2);
-  });
-
-  test('a clearly visible Transit must carry the WAVES lettering; a distant "unsure" van is not held to it (Codex r10 P2 on #4785)', async () => {
-    expect((await withVan({ body: 'ford_transit_medium_roof', wrap_text: [] })).reasons).toEqual(['van wrap missing the WAVES lettering']);
-    expect(await withVan({ body: 'ford_transit_medium_roof', wrap_text: ['WAVES Lawn & Pest'] })).toMatchObject({ ok: true, reasons: [] });
-    expect(await withVan({ body: 'unsure', wrap_text: [] })).toMatchObject({ ok: true, reasons: [] });
   });
 
   test('the wrap\'s marks OFF the van are ordinary violations to the main screen — no attribution exemption for "Ford", wrap text or Waves marks (Codex r11/r12 P2s on #4785)', async () => {
@@ -369,7 +416,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
   });
 
   test('with the uniform logo too: a correctly branded technician beside the wrapped van is clean — the uniform rules are unchanged (Codex r12 P2 on #4785)', async () => {
-    const tech = { cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'right chest'] };
+    const tech = { facing: 'camera', cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'chest'], placket_x: 500, chest_badges_x: [440] };
     const r = await screen({ allowUniformLogo: true, main: { ...CLEAN_MAIN, technicians: [tech], waves_logo_elsewhere: [], uniform_logo_lettering: [] } });
     expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
     const elsewhere = await screen({ allowUniformLogo: true, main: { ...CLEAN_MAIN, technicians: [tech], waves_logo_elsewhere: ['a sign on the fence'], uniform_logo_lettering: [] } });
@@ -377,7 +424,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
   });
 
   test('an unusable van answer — omitted key, malformed or contradictory van — fails the screen OPEN, never clean (Codex r1, r4 P2s on #4785)', async () => {
-    for (const vanAnswer of [{}, { van: { wrapped: true } }, { van: van({ body: 'sprinter' }) }, { van: van({ body: undefined }) }, { van: van({ wrap_text: 'WAVES' }) }, { van: 'none' }]) {
+    for (const vanAnswer of [{}, { van: van() }, { van_count: 1.5, van: van() }, { van_count: -1, van: van() }, { van_count: 0, van: van() }, { van_count: 2, van: null }, { van: { wrapped: true } }, { van: van({ body: 'sprinter' }) }, { van: van({ body: undefined }) }, { van: van({ phone_numbers: '941-241-2459' }) }, { van: van({ web_addresses: undefined }) }, { van: 'none' }]) {
       expect(await screen({ vanAnswer })).toMatchObject({ ok: true, checked: false });
     }
   });
@@ -385,7 +432,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
   test('either dispatch failing fails the screen open', async () => {
     mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? { ok: false, reason: 'timeout' } : answer(CLEAN_MAIN)));
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
-    mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer({ van: van() }) : { ok: false, reason: 'timeout' }));
+    mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer({ van_count: 1, van: van() }) : { ok: false, reason: 'timeout' }));
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
   });
 });

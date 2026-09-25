@@ -14522,7 +14522,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   const [urgency, setUrgency] = useState('routine');
   const [description, setDescription] = useState('');
   const [location, setLocation] = useState('');
-  const [photos, setPhotos] = useState([]); // array of { preview, data }
+  const [photos, setPhotos] = useState([]); // array of { preview, data? } or { preview, photoId }
+  const [photoIdSource, setPhotoIdSource] = useState(null);
   // FileReader is async — submitting while a selection is still being read
   // silently sent the request WITHOUT the photo. A COUNTER, not a boolean:
   // two overlapping handlePhoto calls each read files, and a boolean cleared
@@ -14570,15 +14571,20 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         setUrgency('routine');
         setLocation(initialValues.location || '');
         setPhotos(Array.isArray(initialValues.photos) ? initialValues.photos.slice(0, photoLimit) : []);
+        setPhotoIdSource(initialValues.photoIdSource || null);
       } else {
         seededByHandoffRef.current = false;
+        setPhotoIdSource(null);
       }
-    } else if (!open && wasOpenRef.current && seededByHandoffRef.current) {
-      setCategory('');
-      setDescription('');
-      setUrgency('routine');
-      setLocation('');
-      setPhotos([]);
+    } else if (!open && wasOpenRef.current) {
+      if (seededByHandoffRef.current) {
+        setCategory('');
+        setDescription('');
+        setUrgency('routine');
+        setLocation('');
+        setPhotos([]);
+      }
+      setPhotoIdSource(null);
       seededByHandoffRef.current = false;
     }
     wasOpenRef.current = open;
@@ -14857,7 +14863,17 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         description: description.trim(),
         urgency: isProblemCategory ? urgency : 'routine',
         locationOnProperty: location || null,
-        photos: photos.map(p => p.data),
+        // Newly captured/live Photo ID photos carry base64 data. Saved
+        // history attachments carry only a photoId and are copied from
+        // private storage by the server after ownership validation.
+        photos: photos.filter(p => p.data).map(p => p.data),
+        ...(photoIdSource?.type && photoIdSource?.id ? {
+          photoIdSource: {
+            type: photoIdSource.type,
+            id: photoIdSource.id,
+            photoIds: photos.filter(p => p.photoId).map(p => p.photoId),
+          },
+        } : {}),
         // The house shown in this overlay — the server refuses the ticket
         // when its resolved scope names another (uncapped codex r1o P1).
         // Pinned to the SELECTION when the list has no entry for it yet — the
@@ -14869,21 +14885,20 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         ...(currentEntry?.propertyId || selectedProperty?.propertyId
           ? { expectedPropertyId: String(currentEntry?.propertyId || selectedProperty.propertyId) } : {}),
       });
-      // The server's 60s dedupe path returns success against the EARLIER
-      // request with photoCount: 0 — if the customer attached photos this
-      // time, say so instead of implying they were received.
-      setSubmittedNote(
-        result?.deduped && photos.length > 0 && !(Number(result.photoCount) > 0)
-          ? 'We already had this request from a moment ago, so your new photos were not attached. Text them to us if they show something new.'
-          : '',
-      );
+      // A retry returns the original request without replacing its photos.
+      // Its count cannot prove that newly selected photos were saved.
+      const hadNote = result?.deduped && photos.length > 0;
+      const existingPhotoCount = Number(result?.request?.photoCount) || 0;
+      setSubmittedNote(hadNote
+        ? `We already received this request${existingPhotoCount > 0 ? ` with ${existingPhotoCount} photo${existingPhotoCount === 1 ? '' : 's'} attached` : ''}. This retry did not change its photos. Text us any additional photos.`
+        : '');
       setSubmitted(true);
       onSubmitted?.();
-      const hadNote = result?.deduped && photos.length > 0 && !(Number(result.photoCount) > 0);
       setTimeout(() => {
         setSubmitted(false);
         setCategory(''); setDescription('');
         setUrgency('routine'); setLocation(''); setPhotos([]); setSubmitError('');
+        setPhotoIdSource(null);
         setSubmittedNote('');
         onClose();
         // Give the photos-not-attached note time to be read before closing.
@@ -15392,14 +15407,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                     {!photos.length && <span>No photos added yet.</span>}
                     {photos.map((p, i) => (
                       <div key={`${p.name || 'photo'}-${i}`} style={{ position: 'relative', aspectRatio: '1 / 1', minWidth: 0 }}>
-                        <img src={p.preview} alt="" style={{
+                        {p.preview ? <img src={p.preview} alt="" style={{
                           width: '100%',
                           height: '100%',
                           objectFit: 'cover',
                           borderRadius: 8,
                           border: '1px solid #E7E2D7',
                           display: 'block',
-                        }} />
+                        }} /> : <div style={{ height: '100%', border: '1px solid #E7E2D7', borderRadius: 8, display: 'flex', alignItems: 'center', padding: 8, fontSize: 14, color: muted }}>Preview unavailable</div>}
                         <button
                           type="button"
                           onClick={() => removePhoto(i)}

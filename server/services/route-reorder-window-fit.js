@@ -47,6 +47,7 @@
 
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { premiseStampConflicts, effectiveServiceAddress } = require('./stamped-address');
+const { plannedWorkMinutes } = require('./scheduling/planning-minutes');
 const hhmmToMin = (hhmm) => {
   const [h, m] = String(hhmm).split(':').map(Number);
   return h * 60 + m;
@@ -133,6 +134,10 @@ function sequenceCount(total, timed, groupSizes) {
 }
 
 function workDuration(stop, fallback = 60) {
+  // Owner planning minutes replace the window span (a promise, not work)
+  // for the services they name, under GATE_SCHEDULING_CAPACITY.
+  const planned = plannedWorkMinutes(stop);
+  if (planned != null) return planned;
   const start = stop.window_start ? hhmmToMin(String(stop.window_start).slice(0, 5)) : null;
   const end = stop.window_end ? hhmmToMin(String(stop.window_end).slice(0, 5)) : null;
   const span = Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
@@ -287,6 +292,10 @@ function coVisitWork(chain, stop) {
  * what the co-visit sum reads.
  */
 function rawEstimateMinutes(stop) {
+  // A planned row's stored estimate is usually the legacy 60 default; the
+  // co-visit sum must add planned minutes (pest 25 + lawn 20), not defaults.
+  const planned = plannedWorkMinutes(stop);
+  if (planned != null) return planned;
   const raw = 'raw_estimate_minutes' in stop ? stop.raw_estimate_minutes : stop.estimated_duration_minutes;
   return Number(raw) || 0;
 }
