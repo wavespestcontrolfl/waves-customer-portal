@@ -97,22 +97,28 @@ function countTermVisits(rows, window) {
   }).length;
 }
 
-async function runPostCancelSeriesReseed({ db, serviceId, source = 'cancel' } = {}) {
-  if (!db || !serviceId) return;
+// `serviceId` for the single-visit surfaces; `serviceIds` for the bulk
+// cancel, which hands over the whole batch so the writer can group by
+// series and treat several cancels of one plan as the plan reduction it is.
+async function runPostCancelSeriesReseed({ db, serviceId, serviceIds, source = 'cancel' } = {}) {
+  const ids = [...new Set([...(serviceIds || []), serviceId].filter(Boolean).map(String))];
+  if (!db || !ids.length) return;
   try {
     const { cancelReseedsRecurringLive } = require('../config/feature-gates');
     if (!cancelReseedsRecurringLive()) return;
-    const { reseedRecurringSeriesAfterCancel } = require('../routes/admin-schedule');
-    if (typeof reseedRecurringSeriesAfterCancel !== 'function') {
-      logger.warn('[recurring-series-cancel-reseed] reseedRecurringSeriesAfterCancel export missing — skipping');
+    const { reseedRecurringSeriesAfterCancelBatch } = require('../routes/admin-schedule');
+    if (typeof reseedRecurringSeriesAfterCancelBatch !== 'function') {
+      logger.warn('[recurring-series-cancel-reseed] reseedRecurringSeriesAfterCancelBatch export missing — skipping');
       return;
     }
-    const result = await reseedRecurringSeriesAfterCancel(db, serviceId, { source });
-    if (result?.skipped) {
-      logger.info(`[recurring-series-cancel-reseed] no reseed for ${serviceId} (${source}): ${result.skipped}`);
+    const { results } = await reseedRecurringSeriesAfterCancelBatch(db, ids, { source });
+    for (const result of results || []) {
+      if (result?.skipped) {
+        logger.info(`[recurring-series-cancel-reseed] no reseed (${source}, parent=${result.parentId || '?'}): ${result.skipped}`);
+      }
     }
   } catch (e) {
-    logger.error(`[recurring-series-cancel-reseed] post-cancel series reseed failed (${source}, service=${serviceId}): ${e.message}`);
+    logger.error(`[recurring-series-cancel-reseed] post-cancel series reseed failed (${source}, services=${ids.join(',')}): ${e.message}`);
   }
 }
 

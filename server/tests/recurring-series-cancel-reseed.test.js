@@ -18,7 +18,7 @@ const path = require('path');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/admin-schedule', () => ({
-  reseedRecurringSeriesAfterCancel: jest.fn(),
+  reseedRecurringSeriesAfterCancelBatch: jest.fn(),
 }));
 
 const adminSchedule = require('../routes/admin-schedule');
@@ -46,27 +46,36 @@ describe('runPostCancelSeriesReseed bridge', () => {
   test('gate off → never touches the writer', async () => {
     process.env.GATE_CANCEL_RESEEDS_RECURRING = 'false';
     await runPostCancelSeriesReseed({ db: () => {}, serviceId: 'svc-1', source: 'test' });
-    expect(adminSchedule.reseedRecurringSeriesAfterCancel).not.toHaveBeenCalled();
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).not.toHaveBeenCalled();
   });
 
-  test('gate on → delegates to the shared writer with (db, serviceId, { source })', async () => {
-    adminSchedule.reseedRecurringSeriesAfterCancel.mockResolvedValue({ added: [{ id: 'new' }], skipped: null });
+  test('gate on → delegates to the shared batch writer with (db, [ids], { source })', async () => {
+    adminSchedule.reseedRecurringSeriesAfterCancelBatch.mockResolvedValue({ results: [{ added: [{ id: 'new' }], skipped: null }], skippedRoots: [] });
     const db = () => {};
     await runPostCancelSeriesReseed({ db, serviceId: 'svc-1', source: 'admin-dispatch-status-cancel' });
-    expect(adminSchedule.reseedRecurringSeriesAfterCancel).toHaveBeenCalledTimes(1);
-    expect(adminSchedule.reseedRecurringSeriesAfterCancel).toHaveBeenCalledWith(db, 'svc-1', { source: 'admin-dispatch-status-cancel' });
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledTimes(1);
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledWith(db, ['svc-1'], { source: 'admin-dispatch-status-cancel' });
+  });
+
+  test('bulk form hands the whole batch over once, deduped', async () => {
+    adminSchedule.reseedRecurringSeriesAfterCancelBatch.mockResolvedValue({ results: [], skippedRoots: [] });
+    const db = () => {};
+    await runPostCancelSeriesReseed({ db, serviceIds: ['a', 'b', 'a', null], source: 'admin-schedule-bulk-cancel' });
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledTimes(1);
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledWith(db, ['a', 'b'], { source: 'admin-schedule-bulk-cancel' });
   });
 
   test('NEVER throws — a failed reseed must not fail the committed cancel', async () => {
-    adminSchedule.reseedRecurringSeriesAfterCancel.mockRejectedValue(new Error('db exploded'));
+    adminSchedule.reseedRecurringSeriesAfterCancelBatch.mockRejectedValue(new Error('db exploded'));
     await expect(runPostCancelSeriesReseed({ db: () => {}, serviceId: 'svc-1', source: 'test' })).resolves.toBeUndefined();
   });
 
   test('no-ops without a db or a service id', async () => {
     await runPostCancelSeriesReseed({ db: null, serviceId: 'svc-1' });
     await runPostCancelSeriesReseed({ db: () => {}, serviceId: null });
+    await runPostCancelSeriesReseed({ db: () => {}, serviceIds: [] });
     await runPostCancelSeriesReseed();
-    expect(adminSchedule.reseedRecurringSeriesAfterCancel).not.toHaveBeenCalled();
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).not.toHaveBeenCalled();
   });
 });
 
@@ -144,6 +153,43 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(count(schedule, '../services/recurring-series-cancel-reseed')).toBe(1);
     expect(count(services, '../services/recurring-series-cancel-reseed')).toBe(1);
     expect(count(ib, '../recurring-series-cancel-reseed')).toBe(1);
+  });
+
+  test('bulk cancel: collects real transitions during the loop and calls the bridge ONCE after the batch settled', () => {
+    const route = schedule.slice(schedule.indexOf("router.post('/bulk-action'"));
+    const collect = route.indexOf("if (fromStatus !== 'cancelled') cancelReseedIds.push(id);");
+    const flush = route.indexOf('await flushDispatchQualityDates(qualityDates);');
+    const call = route.indexOf("serviceIds: cancelReseedIds, source: 'admin-schedule-bulk-cancel'");
+    const respond = route.indexOf('res.json({');
+    expect(collect).toBeGreaterThan(-1);
+    expect(flush).toBeGreaterThan(collect);
+    expect(call).toBeGreaterThan(flush);
+    expect(respond).toBeGreaterThan(call);
+    // no per-row call remains inside the loop
+    expect(route.slice(0, flush)).not.toMatch(/runPostCancelSeriesReseed/);
+  });
+
+  test('batch writer: several cancels of one plan in a batch = plan reduction, never a refill', () => {
+    const body = schedule.slice(
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancelBatch('),
+      schedule.indexOf('// PUT /api/admin/schedule/:id/status'),
+    );
+    expect(body).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?skipped: 'batch_series_cancel'/);
+    expect(body).toMatch(/results\.push\(await reseedRecurringSeriesAfterCancel\(conn, cancelledIds\[0\], \{ source \}\)\)/);
+    expect(schedule).toMatch(/module\.exports\.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfterCancelBatch;/);
+  });
+
+  test('locked body: a plan with nothing left upcoming ended — no lone visit is added', () => {
+    const body = schedule.slice(
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancelLocked('),
+      schedule.indexOf('async function reseedRecurringSeriesAfterCancel('),
+    );
+    const live = body.indexOf('const live = await liveUpcomingSeriesVisits(trx, parentId);');
+    const guard = body.indexOf("if (live.length === 0) return { added: [], skipped: 'no_live_visits'");
+    const reconcile = body.indexOf('reconcileRecurringSeriesVisitCount(trx, {');
+    expect(live).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(live);
+    expect(reconcile).toBeGreaterThan(guard);
   });
 
   test('dispatch: the hook sits in the single-visit cancelled branch, not the series-scope cancel', () => {

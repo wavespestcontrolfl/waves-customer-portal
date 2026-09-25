@@ -9269,6 +9269,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // slot (owner ruling 2026-08-25 — staff-side saves never block on
     // schedule conflicts): { id, warning } per stacked row.
     const overlapWarnings = [];
+    // Single-visit cancels whose series may need a visit added back
+    // (owner ruling 2026-09-24) — evaluated ONCE per series after the whole
+    // batch settled, so a bulk cancel that removes several visits of one
+    // plan reads as the plan reduction it is, not N single cancels.
+    const cancelReseedIds = [];
 
     const { transitionJobStatus } = require('../services/job-status');
 
@@ -9865,12 +9870,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // the voids restore any applied credit) — shared hook across
             // every cancellation path, so none can forget it.
             await voidOpenInvoicesForCancelledService(id);
-            // Counted-plan reseed (owner ruling 2026-09-24): a single-visit
-            // cancel inside a 9-application plan adds one back at the end of
-            // the series. Gated, failure-isolated, post-commit.
-            await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
-              db, serviceId: id, source: 'admin-schedule-bulk-cancel',
-            });
+            // Counted-plan reseed candidate — see cancelReseedIds above.
+            if (fromStatus !== 'cancelled') cancelReseedIds.push(id);
             // One-time card-on-file hold: charge in-window late-cancel fee or
             // release outside it — same as the single-cancel paths.
             // payload.waiveCardHoldFee = business-initiated cancel, release
@@ -9958,6 +9959,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       await flushDispatchQualityDates(qualityDates);
     } catch (e) {
       logger.error(`[admin-schedule] bulk-action route quality refresh failed: ${e.message}`);
+    }
+    // Counted-plan reseed (owner ruling 2026-09-24): once per series for the
+    // batch's single-visit cancels. Gated, failure-isolated, post-commit.
+    if (cancelReseedIds.length) {
+      await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+        db, serviceIds: cancelReseedIds, source: 'admin-schedule-bulk-cancel',
+      });
     }
 
     res.json({
@@ -17870,6 +17878,7 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 //     (TOPUP_SERIES_INELIGIBILITY_RULES);
 //   - the term is still whole (a deliberate "visit count" trim already
 //     reconciled it, or the cancelled visit was outside the counted term);
+//   - no upcoming visit is left (the plan ended, it was not interrupted);
 //   - the reconciler could not place a date (at MAX_SERIES_VISIT_COUNT, no
 //     placeable day).
 // An ongoing series keeps its flag on the added row; a counted (non-ongoing)
@@ -17929,6 +17938,10 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   if (counting >= expected) return { added: [], skipped: 'term_still_whole', counting, expected };
 
   const live = await liveUpcomingSeriesVisits(trx, parentId);
+  // Nothing left upcoming = the plan ended (its last visit was cancelled, or
+  // every remaining visit was), not a gap inside a running plan. Adding a
+  // lone visit to a plan nobody continued would be a surprise booking.
+  if (live.length === 0) return { added: [], skipped: 'no_live_visits', counting, expected };
   if (live.length >= MAX_SERIES_VISIT_COUNT) return { added: [], skipped: 'at_max_visit_count', counting, expected };
   const ongoingSeries = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
   const result = await reconcileRecurringSeriesVisitCount(trx, {
@@ -17989,6 +18002,36 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
     logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (term had ${result.counting}/${result.expected})`);
   }
   return result;
+}
+
+// Batch form for the bulk cancel: groups the cancelled ids by series root
+// and reseeds ONLY roots that lost exactly one visit in this batch. Two or
+// more of the same plan in one bulk cancel is the operator shortening or
+// ending that plan (fallback auditor P1 on def6002a84) — never something to
+// refill. Each single reseed opens its own transaction (the writer above).
+async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source = 'cancel' } = {}) {
+  const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return { results: [], skippedRoots: [] };
+  const rows = await conn('scheduled_services').whereIn('id', ids)
+    .select('id', 'is_recurring', 'recurring_parent_id');
+  const byRoot = new Map();
+  for (const row of rows) {
+    if (row.is_recurring !== true) continue;
+    const rootId = String(row.recurring_parent_id || row.id);
+    if (!byRoot.has(rootId)) byRoot.set(rootId, []);
+    byRoot.get(rootId).push(String(row.id));
+  }
+  const results = [];
+  const skippedRoots = [];
+  for (const [rootId, cancelledIds] of byRoot) {
+    if (cancelledIds.length > 1) {
+      skippedRoots.push({ rootId, cancelledIds, skipped: 'batch_series_cancel' });
+      logger.info(`[recurring-cancel-reseed] ${cancelledIds.length} visits of parent=${rootId} cancelled in one batch (${source}) — plan reduction, no reseed`);
+      continue;
+    }
+    results.push(await reseedRecurringSeriesAfterCancel(conn, cancelledIds[0], { source }));
+  }
+  return { results, skippedRoots };
 }
 
 // PUT /api/admin/schedule/:id/status — change status with automations.
@@ -23755,6 +23798,7 @@ module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
 // by services/recurring-series-cancel-reseed.js from the four single-visit
 // cancel surfaces, same avoid-a-route-load-cycle reason as above.
 module.exports.reseedRecurringSeriesAfterCancel = reseedRecurringSeriesAfterCancel;
+module.exports.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfterCancelBatch;
 // Shared "your appointment moved" notice (arrival-window copy, recipient
 // routing, terminal/slot recheck, guarded reminder close/re-arm) — consumed
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go
