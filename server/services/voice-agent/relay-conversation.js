@@ -53,6 +53,34 @@ function slotStartMinutes(slot) {
   return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
 }
 
+/**
+ * Was `<ConversationRelay events="…">` actually rendered for this session's
+ * TwiML, and did it include speaker-events / tokens-played? `relayProfileId`
+ * is the label the rendering TwiML put on a `<Parameter>` (relay-server.js
+ * reads it back off the setup frame) — the SAME untrusted-but-attributable
+ * label `_versionStamps` already stamps as `relay_profile_id`. Looked up
+ * against `RELAY_PROFILES` (relay-profiles.js is the only chooser of the
+ * `events` attribute), never re-derived from a guess, so a null result here
+ * means exactly what it says: no attribute was rendered, not "we forgot to
+ * check". A profile id this lookup does not recognize (a sandbox raw-JSON
+ * cell's synthesized `sandbox_raw_<hash>` id, or a future profile added after
+ * a deploy skew) is reported UNKNOWN — never guessed true or false — so an
+ * actually-received event (proof positive) is what later resolves it, not
+ * this lookup.
+ */
+function deriveRelayEventsSubscribed(relayProfileId) {
+  if (!relayProfileId) return { speaker: false, tokensPlayed: false };
+  let events = null;
+  try {
+    const { RELAY_PROFILES } = require('./relay-profiles');
+    const profile = RELAY_PROFILES[relayProfileId];
+    if (profile && profile.attrs) events = profile.attrs.events;
+  } catch { /* relay-profiles unavailable — fall through to unknown */ }
+  if (typeof events !== 'string') return { speaker: null, tokensPlayed: null };
+  const parts = events.trim().split(/\s+/).filter(Boolean);
+  return { speaker: parts.includes('speaker-events'), tokensPlayed: parts.includes('tokens-played') };
+}
+
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
@@ -551,7 +579,15 @@ class RelayConversation {
     this._clearedFailures = { model: false, tool: false };
     this._handoffForFailure = false; // the provider-failure handoff ran (once per call)
     this._failureCallbackPromised = false;
-    this._eventShapesSeen = new Set();
+    // Redacted-shape fixture (task: key names only, never values), keyed by
+    // classifyRelayEvent's `kind` so a call row alone can tell "we never saw
+    // an agent_speaking_end frame" from "we saw one and it had these keys".
+    this._eventShapesByKind = new Map();
+    // Every classified relay-event kind, counted — the RECEIVED half of the
+    // trustworthy-measurement pair below (SUBSCRIBED is the other half). A
+    // received event is proof of subscription no lookup can override.
+    this._eventCounts = Object.create(null);
+    this._relayEventsSubscribed = deriveRelayEventsSubscribed(relayProfileId);
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
     // version record, never acted on.
@@ -892,10 +928,16 @@ class RelayConversation {
   /** Relay notifications the `events` attribute adds (speaker / tokens-played). */
   handleRelayEvent(frame) {
     const ev = classifyRelayEvent(frame);
-    if (ev.shape && !this._eventShapesSeen.has(ev.shape)) {
+    // RECEIVED, per kind — proof of subscription no profile lookup can
+    // override, and the raw count a call row needs to tell "nothing arrived"
+    // from "one arrived and it was unusable" (see relay-transcript's reasons).
+    this._eventCounts[ev.kind] = (this._eventCounts[ev.kind] || 0) + 1;
+    if (ev.shape && !this._eventShapesByKind.has(ev.kind)) {
       // Key names only — never values — so the first sandbox call can pin the
       // undocumented payload shape without the log carrying spoken text.
-      this._eventShapesSeen.add(ev.shape);
+      // Deduped per KIND (not per shape): two kinds sharing an identical key
+      // set are still two distinct things a payload drift could break.
+      this._eventShapesByKind.set(ev.kind, ev.shape);
       logger.info(`[voice-relay] relay event shape seen callSid=${maskSid(this.callSid)} kind=${ev.kind} shape=${ev.shape}`);
     }
     const t = now();
@@ -946,12 +988,31 @@ class RelayConversation {
     }
     stat.logged = true;
     const ms = (a, b) => (Number.isFinite(a) && Number.isFinite(b) && b >= a ? `${Math.round(b - a)}ms` : 'n/a');
+    // Every null above is explainable from these two: `subscribed` says
+    // whether the relay was EVER going to send speaker/tokens-played events
+    // this call, `eventCounts` says how many of each actually arrived — so a
+    // reviewer never has to guess why endpoint/firstAudio read "n/a".
+    const counts = this._eventCounts;
+    const eventCounts = ['caller_speaking_end', 'agent_speaking_start', 'agent_speaking_end', 'tokens_played']
+      .map((kind) => `${kind}=${counts[kind] || 0}`).join(',');
+    // Three states, never a truthiness coin-flip on a null: `speaker` is
+    // true/false when the profile lookup resolved it, or null for an
+    // UNKNOWN profile (deriveRelayEventsSubscribed) — a null is not "none".
+    // When it's null but a speaker-kind event actually arrived this call,
+    // that arrival is proof positive (see reasonForMissingAudioMetric's same
+    // priority in relay-transcript), so the log says so instead of lying.
+    const speakerReceived = ['caller_speaking_end', 'agent_speaking_start', 'agent_speaking_end']
+      .some((kind) => (counts[kind] || 0) > 0);
+    const eventsState = this._relayEventsSubscribed.speaker === true ? 'subscribed'
+      : this._relayEventsSubscribed.speaker === false ? 'none'
+        : speakerReceived ? 'subscribed(observed)' : 'unknown';
     logger.info(
       `[voice-relay] turn=${stat.turn} callSid=${maskSid(this.callSid)} endpoint=${ms(stat.callerSpeechStoppedAt, stat.promptAt)} `
       + `firstToken=${ms(stat.promptAt, stat.firstTokenAt)} firstSend=${ms(stat.promptAt, stat.firstSendAt)} `
       + `firstAudio=${ms(stat.callerSpeechStoppedAt, stat.agentSpeakingStartAt)} model=${Math.round(stat.modelMs)}ms rounds=${stat.rounds} `
       + `tools=${stat.toolCount}/${Math.round(stat.toolMs)}ms effort=${stat.effort} renderer=${stat.renderer} `
-      + `interrupted=${stat.interrupted} timedOut=${stat.timedOut}`
+      + `interrupted=${stat.interrupted} timedOut=${stat.timedOut} `
+      + `events=${eventsState} eventCounts=${eventCounts}`
     );
   }
 
@@ -986,6 +1047,22 @@ class RelayConversation {
       tts_settings: tts.ttsSettings,
       renderer_version: RENDERER_VERSION,
       speech_format_version: null,
+    };
+  }
+
+  /**
+   * The session-level half of "trustworthy measurement" (relay-transcript's
+   * summarizeTurnStats needs it to turn a null audio metric into a reason
+   * instead of a shrug): whether speaker-events / tokens-played were
+   * SUBSCRIBED for this session, how many of each kind actually arrived, and
+   * the first redacted shape seen per kind. Read at close, so it reflects the
+   * whole call, not a snapshot.
+   */
+  _eventsTelemetry() {
+    return {
+      subscribed: { ...this._relayEventsSubscribed },
+      counts: { ...this._eventCounts },
+      shapes: Object.fromEntries(this._eventShapesByKind),
     };
   }
 
@@ -1140,6 +1217,13 @@ class RelayConversation {
     this._drainPlaying();
     const stat = {
       turn: this._userTurns.length,
+      // The PER-SOCKET generation this turn ran under (relay-server stamps
+      // it from the upgrade token's nonce on every authenticated socket,
+      // including the first leg of a call that never reconnects — this is
+      // NOT a reconnect-only field), so a metric survives being pulled out
+      // of the session and still ties back to its socket/leg: a call with N
+      // legs shows N distinct values here, one per leg.
+      segmentGeneration: this.sessionGeneration != null ? this.sessionGeneration : null,
       promptAt,
       callerSpeechStoppedAt: stoppedAt != null && promptAt - stoppedAt <= CALLER_STOP_STALE_MS ? stoppedAt : null,
       loopStartAt: null,
@@ -2234,7 +2318,7 @@ class RelayConversation {
           reason,
           text: buildTranscriptText(this._transcript),
           turns: this._transcript.length,
-          latency: summarizeTurnStats(this._turnStats),
+          latency: summarizeTurnStats(this._turnStats, this._eventsTelemetry()),
           turnCounts: Object.fromEntries([['caller_turns', 'caller'], ['agent_turns', 'agent'], ['tool_calls', 'tool']]
             .map(([key, role]) => [key, this._transcript.filter((turn) => turn.role === role).length])),
           turnStats: storedTurnStats(this._turnStats),
@@ -2329,7 +2413,7 @@ class RelayConversation {
           callSid: this.callSid,
           model: MODEL,
           startedAt: this._startedAt,
-          latency: summarizeTurnStats(this._turnStats),
+          latency: summarizeTurnStats(this._turnStats, this._eventsTelemetry()),
           versions: this._versionStamps(),
         });
         // PR 2B (codex r3 P2): on a reconnected call the summary covers the
