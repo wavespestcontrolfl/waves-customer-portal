@@ -90,6 +90,17 @@ function makeFakeDb(seed = {}) {
       whereIn(col, vals) { whereInClauses.push({ col, vals }); return api; },
       whereNotIn(col, vals) { whereNotInClauses.push({ col, vals }); return api; },
       whereNull(col) { eq[col] = null; return api; },
+      whereNot(obj) {
+        for (const [k, v] of Object.entries(obj)) rawPredicates.push((row) => row[k] !== v);
+        return api;
+      },
+      // Only the one raw shape the canonical email writer's conflict check
+      // uses (`LOWER(<col>) = ?`); anything else is ignored.
+      whereRaw(sql, bindings = []) {
+        const m = /LOWER\((\w+)\) = \?/.exec(String(sql));
+        if (m) rawPredicates.push((row) => String(row[m[1]] ?? '').toLowerCase() === bindings[0]);
+        return api;
+      },
       forUpdate() { return api; },
       forShare() { return api; },
       orderBy() { return api; },
@@ -133,6 +144,10 @@ function makeFakeDb(seed = {}) {
     return api;
   }
   const conn = (table) => builder(String(table).split(' ')[0]);
+  // The fake runs everything on one "connection" that is also the
+  // transaction handle — the canonical email writer refuses a
+  // non-transactional handle, so mark it as one.
+  conn.isTransaction = true;
   conn.transaction = async (fn) => fn(conn);
   conn.raw = (sql, bindings) => ({ __raw: sql, bindings });
   conn.schema = { hasTable: async (name) => Object.prototype.hasOwnProperty.call(tables, name) };
@@ -144,6 +159,44 @@ function wireDb(dbMock, { conn }) {
   dbMock.transaction = conn.transaction;
   dbMock.schema = conn.schema;
   dbMock.raw = conn.raw;
+}
+
+// Wraps a fake conn so lock acquisitions and the customer email write are
+// recorded in order. `onCallRowLock(n)` runs just before the n-th call_log
+// FOR UPDATE read — the moment a concurrent relink that committed while this
+// transaction waited on the call row becomes visible.
+function trackConn(conn, order, { onCallRowLock } = {}) {
+  let callRowLocks = 0;
+  const tracked = (table) => {
+    const name = String(table).split(' ')[0];
+    const api = conn(table);
+    const origForUpdate = api.forUpdate;
+    if (name === 'customers') {
+      api.forUpdate = (...a) => { order.push('customer-row-lock'); return origForUpdate.apply(api, a); };
+      const origUpdate = api.update;
+      api.update = async (patch, ...rest) => {
+        if (patch && Object.prototype.hasOwnProperty.call(patch, 'email')) order.push('customer-email-write');
+        return origUpdate(patch, ...rest);
+      };
+    }
+    if (name === 'call_log') {
+      api.forUpdate = (...a) => {
+        callRowLocks += 1;
+        if (onCallRowLock) onCallRowLock(callRowLocks);
+        order.push('call-row-lock');
+        return origForUpdate.apply(api, a);
+      };
+    }
+    return api;
+  };
+  tracked.isTransaction = true;
+  tracked.transaction = async (fn) => fn(tracked);
+  tracked.raw = (sql, bindings) => {
+    if (/pg_advisory_xact_lock\(hashtextextended/.test(String(sql))) order.push(`email-key:${bindings[0]}`);
+    return conn.raw(sql, bindings);
+  };
+  tracked.schema = conn.schema;
+  return tracked;
 }
 
 function appServer() {
@@ -552,7 +605,13 @@ describe('POST /admin/triage/:id/confirm-email', () => {
       expect(firstTwoLockedIds).toEqual([CALL_ID, OTHER_CALL_ID].sort());
     });
 
-    test('locks the customer row (FOR UPDATE) before taking any call advisory lock — same order as the Customer 360 edit path (Codex round-6 P2)', async () => {
+    // Codex round-8 restructure: the round-6 invariant (customer row before
+    // any call advisory lock — the Customer 360 order) still holds; the
+    // sequence now also shows the address key right after the row (row →
+    // key, the Customer 360 / bounce-recovery order), the call ROW lock the
+    // relink endpoint honors, and the canonical writer's re-entrant row +
+    // key before its email write.
+    test('lock order: customer row → address key → sorted call locks → call row → canonical writer (row, key, write)', async () => {
       const OTHER_CALL_ID = 'call-2';
       const order = [];
       const { conn } = fixture({
@@ -561,26 +620,8 @@ describe('POST /admin/triage/:id/confirm-email', () => {
           { id: OTHER_CALL_ID, review_status: 'open', customer_id: CUSTOMER_ID, twilio_call_sid: 'CA111' },
         ],
       });
-      // admin-customers.js's email edit locks the customer row (FOR UPDATE,
-      // ~admin-customers.js:3939) BEFORE propagateCustomerEmailChange waits
-      // on this customer's sorted call-lock set (customer-email-fanout.js:
-      // 255-257). Wrap the fake conn so a `customers` FOR UPDATE is
-      // recorded relative to each lockTriageCall — proves this route now
-      // takes the SAME order instead of the reverse (the AB-BA deadlock
-      // this fix removes).
-      const trackedConn = (table) => {
-        const api = conn(table);
-        if (String(table).split(' ')[0] === 'customers') {
-          const origForUpdate = api.forUpdate;
-          api.forUpdate = (...args) => { order.push('customer-row-lock'); return origForUpdate.apply(api, args); };
-        }
-        return api;
-      };
-      trackedConn.transaction = async (fn) => fn(trackedConn);
-      trackedConn.raw = conn.raw;
-      trackedConn.schema = conn.schema;
       lockTriageCall.mockImplementation(async (_trx, callId) => { order.push(`call-lock:${callId}`); });
-      wireDb(db, { conn: trackedConn });
+      wireDb(db, { conn: trackConn(conn, order) });
       try {
         await withServer(async (baseUrl) => {
           const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
@@ -590,8 +631,13 @@ describe('POST /admin/triage/:id/confirm-email', () => {
         });
         expect(order).toEqual([
           'customer-row-lock',
+          'email-key:customer-email:janedoe@example.com',
           `call-lock:${CALL_ID}`,
           `call-lock:${OTHER_CALL_ID}`,
+          'call-row-lock',
+          'customer-row-lock',
+          'email-key:customer-email:janedoe@example.com',
+          'customer-email-write',
         ]);
       } finally {
         lockTriageCall.mockImplementation(async () => {});
@@ -727,6 +773,275 @@ describe('POST /admin/triage/:id/confirm-email', () => {
       expect(tables.first_touch_holds[0].status).toBe('releasing');
       expect(tables.first_touch_holds[0].last_error).toBeNull();
       expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+    });
+  });
+
+  // Codex round-8 P1 (admin-triage.js:586): the customer was read before any
+  // lock the relink endpoint honors. The relink endpoint locks its TARGET
+  // customer row and then UPDATEs the call row; this handler now re-resolves
+  // the target under the call row lock and restarts when it moved.
+  describe('relink race: the target is revalidated under the call row lock', () => {
+    const OTHER_CUSTOMER_ID = 'cust-b';
+
+    test('a relink A→B that commits while the call row lock is awaited: rolls back, re-plans, writes B and repoints the hold at B', async () => {
+      const order = [];
+      const { conn, tables } = fixture({
+        customers: [{ id: CUSTOMER_ID, email: null }, { id: OTHER_CUSTOMER_ID, email: null }],
+      });
+      wireDb(db, {
+        conn: trackConn(conn, order, {
+          onCallRowLock: (n) => { if (n === 1) tables.call_log[0].customer_id = OTHER_CUSTOMER_ID; },
+        }),
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      // The stale customer is never written; B is, through the canonical writer.
+      expect(tables.customers.find((c) => c.id === CUSTOMER_ID).email).toBeNull();
+      expect(tables.customers.find((c) => c.id === OTHER_CUSTOMER_ID).email).toBe('janedoe@example.com');
+      expect(mockPropagateCustomerEmailChange).toHaveBeenCalledTimes(1);
+      expect(mockPropagateCustomerEmailChange.mock.calls[0][0].before).toMatchObject({ id: OTHER_CUSTOMER_ID });
+      expect(tables.first_touch_holds[0].customer_id).toBe(OTHER_CUSTOMER_ID);
+      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+      // Two attempts: the first stopped at its call row lock, before any write.
+      expect(order.filter((e) => e === 'call-row-lock')).toHaveLength(2);
+      expect(order.indexOf('customer-email-write')).toBeGreaterThan(order.lastIndexOf('call-row-lock'));
+      expect(resumeHeldFirstTouch).toHaveBeenCalledWith(expect.objectContaining({ customerId: OTHER_CUSTOMER_ID }));
+    });
+
+    test('a call that keeps moving refuses with 409 CALL_RELINKED after bounded attempts and writes nothing', async () => {
+      const { conn, tables } = fixture({
+        customers: [{ id: CUSTOMER_ID, email: null }, { id: OTHER_CUSTOMER_ID, email: null }],
+      });
+      wireDb(db, {
+        conn: trackConn(conn, [], {
+          onCallRowLock: () => {
+            tables.call_log[0].customer_id = tables.call_log[0].customer_id === CUSTOMER_ID ? OTHER_CUSTOMER_ID : CUSTOMER_ID;
+          },
+        }),
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('CALL_RELINKED');
+      });
+      expect(tables.customers.every((c) => c.email === null)).toBe(true);
+      expect(tables.first_touch_holds[0].held_email).toBe('');
+      expect(tables.triage_items[0].status).toBe('open');
+      expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
+    });
+  });
+
+  // Codex round-8 P1 (admin-triage.js:686): customers.email was assigned
+  // without the shared per-address key and with no ownership check. The
+  // canonical writer takes the key before the write (held to commit, through
+  // the fanout) and refuses an address another ACCOUNT holds — the Customer
+  // 360 contact_exists_on_another_account rule.
+  describe('address ownership: the canonical writer decides under the address key', () => {
+    test('an address another account already holds refuses with 409 EMAIL_IN_USE and writes nothing', async () => {
+      const { conn, tables } = fixture({
+        customers: [
+          { id: CUSTOMER_ID, email: null, account_id: 'acct-1' },
+          { id: 'cust-x', email: 'JaneDoe@example.com', account_id: 'acct-x', deleted_at: null },
+        ],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('EMAIL_IN_USE');
+      });
+      expect(tables.customers[0].email).toBeNull();
+      expect(tables.first_touch_holds[0].held_email).toBe('');
+      expect(tables.first_touch_holds[0].corrected_at).toBeUndefined();
+      expect(tables.triage_items[0].status).toBe('open');
+      expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
+      expect(resumeHeldFirstTouch).not.toHaveBeenCalled();
+    });
+
+    test('a same-account sibling profile sharing the address is allowed (customers.email is deliberately non-unique)', async () => {
+      const { conn, tables } = fixture({
+        customers: [
+          { id: CUSTOMER_ID, email: null, account_id: 'acct-1' },
+          { id: 'cust-sibling', email: 'janedoe@example.com', account_id: 'acct-1', deleted_at: null },
+        ],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.customers[0].email).toBe('janedoe@example.com');
+    });
+
+    test('the address key is taken on the customer-less lead path too (leads.email is an ownership source)', async () => {
+      const order = [];
+      const { conn } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [],
+        first_touch_holds: [],
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: null }],
+      });
+      wireDb(db, { conn: trackConn(conn, order) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(order[0]).toBe('email-key:customer-email:janedoe@example.com');
+    });
+  });
+
+  // Codex round-8 P1 (admin-triage.js:716): conversion/booking set
+  // leads.customer_id without relinking call_log, so a converted voicemail
+  // lead used to be treated as customer-less and only leads.email moved.
+  describe('converted lead: the authoritative lead\'s customer gets the canonical write', () => {
+    const CONVERTED_ID = 'cust-converted';
+
+    test('call has no customer, its lead converted: the customer email is written via the canonical fanout and the lead is stamped', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [{ id: CONVERTED_ID, email: 'old@example.com', deleted_at: null }],
+        first_touch_holds: [{ id: 'hold-1', call_log_id: CALL_ID, customer_id: null, status: 'pending', held_email: '' }],
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: null, customer_id: CONVERTED_ID }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.customers[0].email).toBe('janedoe@example.com');
+      expect(mockPropagateCustomerEmailChange).toHaveBeenCalledTimes(1);
+      const fanoutArgs = mockPropagateCustomerEmailChange.mock.calls[0][0];
+      expect(fanoutArgs.before).toMatchObject({ id: CONVERTED_ID, email: 'old@example.com' });
+      expect(fanoutArgs.after).toMatchObject({ id: CONVERTED_ID, email: 'janedoe@example.com' });
+      expect(tables.leads[0].email).toBe('janedoe@example.com');
+      expect(tables.leads[0].email_confirmed_at).toBeInstanceOf(Date);
+      // The hold keeps the CALL's customer (none): resumeHeldFirstTouch
+      // compares the hold's customer with call_log.customer_id.
+      expect(tables.first_touch_holds[0].customer_id).toBeNull();
+      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+      expect(tables.triage_items[0].status).toBe('resolved');
+      expect(resumeHeldFirstTouch).not.toHaveBeenCalled();
+    });
+
+    test('a lead converted while the call row lock was awaited: the attempt restarts and routes through the new customer', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [{ id: CONVERTED_ID, email: null, deleted_at: null }],
+        first_touch_holds: [],
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: null, customer_id: null }],
+      });
+      wireDb(db, {
+        conn: trackConn(conn, [], {
+          onCallRowLock: (n) => { if (n === 1) tables.leads[0].customer_id = CONVERTED_ID; },
+        }),
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.customers[0].email).toBe('janedoe@example.com');
+      expect(mockPropagateCustomerEmailChange).toHaveBeenCalledTimes(1);
+      expect(tables.leads[0].email).toBe('janedoe@example.com');
+    });
+
+    test('a lead whose customer was archived stays on the lead-only path', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [{ id: CONVERTED_ID, email: null, deleted_at: '2026-09-01T00:00:00.000Z' }],
+        first_touch_holds: [],
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: null, customer_id: CONVERTED_ID }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.customers[0].email).toBeNull();
+      expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
+      expect(tables.leads[0].email).toBe('janedoe@example.com');
+    });
+  });
+
+  // Codex round-8 P2 (admin-triage.js:630): a live 'releasing' row's
+  // updated_at is the claimant's lease stamp — resumeHeldFirstTouch settles
+  // only while it equals the claim — so the retarget must not bump it,
+  // mirroring customer-email-fanout's releasing-row retarget. A pending
+  // row's retarget still bumps it, as the fanout's pending retarget does.
+  describe('hold retarget leaves a live claim\'s lease stamp alone', () => {
+    const LEASE = new Date('2026-09-24T12:00:00.000Z');
+
+    test('a live releasing row is retargeted without touching updated_at', async () => {
+      const { conn, tables } = fixture({
+        first_touch_holds: [{
+          id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'releasing',
+          held_email: 'stale@example.com', last_error: null, updated_at: LEASE,
+        }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.first_touch_holds[0].updated_at).toBe(LEASE);
+      expect(tables.first_touch_holds[0].status).toBe('releasing');
+      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+      expect(tables.first_touch_holds[0].corrected_at).toBeInstanceOf(Date);
+    });
+
+    test('an ownerless deny-stamped releasing row flips to pending without a bump (same as the fanout)', async () => {
+      const { conn, tables } = fixture({
+        first_touch_holds: [{
+          id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'releasing',
+          held_email: 'stale@example.com', last_error: 'email_denied_await_correction', updated_at: LEASE,
+        }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.first_touch_holds[0].status).toBe('pending');
+      expect(tables.first_touch_holds[0].updated_at).toBe(LEASE);
+    });
+
+    test('a pending row\'s retarget still bumps updated_at', async () => {
+      const { conn, tables } = fixture({
+        first_touch_holds: [{
+          id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'pending',
+          held_email: '', last_error: null, updated_at: LEASE,
+        }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.first_touch_holds[0].updated_at).not.toBe(LEASE);
+      expect(tables.first_touch_holds[0].updated_at).toBeInstanceOf(Date);
     });
   });
 });

@@ -426,7 +426,11 @@ function VerdictBadge({ verdict, wrongFields }) {
   return <Badge tone="alert">Denied{labels ? ` · ${labels}` : ""}</Badge>;
 }
 
-export default function TriageInboxTabV2() {
+// `isAdmin` is the server-verified role from the shell's Outlet context
+// (CommunicationsPageV2 passes it; never localStorage). Admin-only actions
+// (confirm-email 403s non-admin staff) hide for everyone else — hidden when
+// absent/falsy so a caller that forgets it fails closed.
+export default function TriageInboxTabV2({ isAdmin }) {
   const [mode, setMode] = useState("triage"); // 'triage' | 'auto_routed'
   const [status, setStatus] = useState("open");
   // Terminal tabs only: show just the cards the nightly sweep closed.
@@ -674,9 +678,16 @@ export default function TriageInboxTabV2() {
       })
       .catch((err) => {
         setActioning(null);
-        if (err?.status === 409) {
+        // Only a stale card version reloads (same split as recordVerdict):
+        // every other 409 (LEAD_NOT_RESOLVED, EMAIL_IN_USE, CALL_RELINKED…)
+        // carries the server's own instruction, which a reload would bury.
+        if (err?.status === 409 && err?.code === "STALE_CARD_VERSION") {
           load(mode, status, autoOnly);
           setError("This card changed since it loaded — review the refreshed evidence before confirming.");
+          return;
+        }
+        if (err?.status === 409 && err?.message) {
+          setError(err.message);
           return;
         }
         if (err?.status === 400 && err?.message) {
@@ -948,7 +959,12 @@ export default function TriageInboxTabV2() {
 
                     {isTriage && <ConfirmEvidence payload={item.payload} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
-                    {isEmailDisagreementCard && isOpenView && (
+                    {isEmailDisagreementCard && isOpenView && !isAdmin && (
+                      <div className="mt-2 text-12 text-ink-tertiary">
+                        Confirming the email spelling needs an admin.
+                      </div>
+                    )}
+                    {isEmailDisagreementCard && isOpenView && isAdmin && (
                       <EmailConfirmForm
                         itemId={item.id}
                         payload={item.payload}

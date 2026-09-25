@@ -146,7 +146,7 @@ describe('email-disagreement confirm form', () => {
     adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
       ? { items: [disagreementCard], counts: { open: 1, resolved: 0, dismissed: 0 } }
       : { ok: true }));
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     const card = (await screen.findByText('Email Disagree')).closest('.py-4');
     expect(within(card).getByText('janedoee@example.com')).toBeInTheDocument();
     expect(within(card).getByText('janedoe@example.com')).toBeInTheDocument();
@@ -166,7 +166,7 @@ describe('email-disagreement confirm form', () => {
       }
       return { ok: true };
     });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     const card = (await screen.findByText('Email Disagree')).closest('.py-4');
     fireEvent.click(within(card).getByLabelText('janedoe@example.com'));
     fireEvent.click(within(card).getByRole('button', { name: /confirm email/i }));
@@ -185,7 +185,7 @@ describe('email-disagreement confirm form', () => {
       }
       return { ok: true };
     });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     const card = (await screen.findByText('Email Disagree')).closest('.py-4');
     const confirmButton = within(card).getByRole('button', { name: /confirm email/i });
     expect(confirmButton).toBeDisabled();
@@ -207,12 +207,42 @@ describe('email-disagreement confirm form', () => {
       }
       return { ok: true };
     });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     const card = (await screen.findByText('Email Disagree')).closest('.py-4');
     fireEvent.click(within(card).getByLabelText('janedoe@example.com'));
     fireEvent.click(within(card).getByRole('button', { name: /confirm email/i }));
     await waitFor(() => expect(listLoads).toBe(2));
     expect(screen.getByText(/review the refreshed evidence before confirming/i)).toBeInTheDocument();
+  });
+  it('any other 409 shows the server message and does NOT reload (LEAD_NOT_RESOLVED is not a stale card)', async () => {
+    let listLoads = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) {
+        listLoads += 1;
+        return { items: [disagreementCard], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      }
+      if (url === '/admin/triage/email-1/confirm-email') {
+        throw Object.assign(new Error('Could not identify a single lead for this call — reprocess the call or link it to a customer, then confirm again.'), { status: 409, code: 'LEAD_NOT_RESOLVED' });
+      }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Email Disagree')).closest('.py-4');
+    fireEvent.click(within(card).getByLabelText('janedoe@example.com'));
+    fireEvent.click(within(card).getByRole('button', { name: /confirm email/i }));
+    expect(await screen.findByText(/could not identify a single lead for this call/i)).toBeInTheDocument();
+    expect(listLoads).toBe(1);
+    expect(screen.queryByText(/review the refreshed evidence before confirming/i)).not.toBeInTheDocument();
+  });
+
+  it('non-admin staff see an "admin required" note instead of the confirm control (the endpoint 403s them)', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [disagreementCard], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const card = (await screen.findByText('Email Disagree')).closest('.py-4');
+    expect(within(card).queryByRole('button', { name: /confirm email/i })).not.toBeInTheDocument();
+    expect(within(card).getByText(/needs an admin/i)).toBeInTheDocument();
   });
 });
 
