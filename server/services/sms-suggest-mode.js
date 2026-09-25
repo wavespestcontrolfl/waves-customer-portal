@@ -289,12 +289,11 @@ async function getIntentMode(intent) {
 async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent }) {
   if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) return 'shadow';
   const mode = await getIntentMode(intent); // 'shadow' | 'suggest' | 'auto_send'; escalation forced shadow
-  // Gratitude never creates an unsolicited human-review card. It stays inert
-  // shadow storage unless both its intent rung and narrow send gate are live;
-  // the delayed sweep remains the only caller of its executor.
-  if (intent === require('./sms-gratitude').GRATITUDE_INTENT) {
-    return mode === AUTO_SEND_MODE && isEnabled('smsGratitudeReplies') ? AUTO_SEND_MODE : 'shadow';
-  }
+  // Gratitude is always inert shadow storage for the drafter, whatever its
+  // rung or gate: never an immediate send (the quiet window forbids it) and
+  // never a human-review card. The delayed sweep reads its own gate and mode
+  // and is the only caller of its executor.
+  if (intent === require('./sms-gratitude').GRATITUDE_INTENT) return 'shadow';
   if (mode === AUTO_SEND_MODE) {
     if (isEnabled('smsAutoSend')) return AUTO_SEND_MODE;
     return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';

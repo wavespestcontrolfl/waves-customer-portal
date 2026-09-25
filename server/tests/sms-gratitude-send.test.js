@@ -295,6 +295,13 @@ test('dark gratitude delivery resolution remains shadow and never falls back to 
     reply: buildGratitudeReply('Dana'), customerId: ID.customer, smsLogId: ID.inbound,
     intent: GRATITUDE_INTENT, schedulingIntent: false,
   })).resolves.toBe('shadow');
+  // Live gate + auto_send rung: still shadow, so no drafter immediate-send or
+  // suggestion fallback can take the row out of the delayed sweep.
+  mockState.intentMode = 'auto_send';
+  await expect(actualSuggestMode.resolveDeliveryMode({
+    reply: buildGratitudeReply('Dana'), customerId: ID.customer, smsLogId: ID.inbound,
+    intent: GRATITUDE_INTENT, schedulingIntent: false,
+  })).resolves.toBe('shadow');
 });
 
 test.each([
