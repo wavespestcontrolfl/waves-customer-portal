@@ -825,8 +825,10 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
 
   // Round-2 local-audit finding: a DECLARATIVE naming an unmet
   // authorization requirement carries no "if"/"unless"/"subject to" trigger
-  // word, so it must poison unconditionally (sentenceReferencesAuthorizationPartyOrAct),
-  // not only when phrased as a conditional.
+  // word, so it must poison unconditionally (the whitelist in
+  // otherSentenceIsClean already rejects it — "homeowner"/"sign"/"off" are
+  // in neither the base vocabulary nor the conditional carve-out), not only
+  // when phrased as a conditional.
   test('a DECLARATIVE naming an unmet authorization requirement (no conditional wording) still poisons the pinned commitment', () => {
     const turn = "That still needs the homeowner's sign-off. But yeah, we'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
@@ -887,10 +889,11 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  // The clause-scoped conditional check (sentenceHasUnmetCondition) only
-  // applies to a genuine CONDITIONAL sentence — a plain declarative that
-  // merely MENTIONS a weekday or unrelated topic in passing, naming no
-  // authorization party, must not poison just for naming one.
+  // The clause-scoped conditional carve-out (otherSentenceIsClean +
+  // clauseIsBenign) only applies to a genuine CONDITIONAL sentence — a
+  // plain declarative that merely MENTIONS a weekday or unrelated topic in
+  // passing, built entirely from the closed vocabulary, must not poison
+  // just for naming one.
   test('an adjacent sentence merely mentioning an unrelated topic (invoice email) does not poison the pinned commitment', () => {
     const turn = "I'll email you the invoice. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
@@ -910,8 +913,75 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Codex round 3, finding 1: a comma-less consequent ("I'll email you") sat
+  // in the SAME clause as the actual condition ("we have space") because
+  // extractConditionalClauses previously bounded a clause only at a comma —
+  // with no comma, "email" (a benign topic) rode along and laundered the
+  // real, unrelated condition (schedule capacity). extractConditionalClauses
+  // now also stops a clause at the first first-person consequent head.
+  test('Codex round-3 regression: a comma-less clause ("If we have space I\'ll email you.") still poisons on the isolated condition', () => {
+    const turn = "If we have space I'll email you. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 3, finding 2: a declarative CANCELLATION carries no
+  // conditional trigger and no authorization/unavailability term either —
+  // "cancel" simply is not, and was never meant to be, in the closed
+  // commitment vocabulary, so the whitelist rejects it with no new list.
+  test('Codex round-3 regression: an adjacent CANCELLATION ("Actually, we have to cancel.") still poisons', () => {
+    const turn = "We'll see you Sunday at noon. Actually, we have to cancel.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 3, finding 3: an IMPLICIT condition with no trigger word at
+  // all ("weather permitting", "contingent on the weather") slipped past
+  // every conditional-trigger-based screen. Neither "weather" nor
+  // "permitting" nor "contingent" is in the closed vocabulary, so the
+  // whitelist rejects all three shapes — as a separate other-sentence, and
+  // (via the pinned sentence's own affirmative-form + vocabulary checks)
+  // fused into the same sentence as the commitment.
+  test('Codex round-3 regression: "Weather permitting." as its own sentence still poisons', () => {
+    const turn = "Weather permitting. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-3 regression: "Contingent on the weather." as its own sentence still poisons', () => {
+    const turn = "Contingent on the weather. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-3 regression: "Weather permitting, we\'ll see you Sunday at noon." (same sentence) still poisons', () => {
+    const sameQuote = "Weather permitting, we'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, sameQuote);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: sameQuote }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round-3 whitelist inversion (otherSentenceIsClean): a non-
+  // conditional declarative now has to be BUILT from the closed vocabulary,
+  // not merely free of blacklisted words — "Adam works Sundays." (this
+  // test's pre-round-3 wording) used "Adam"/"works", neither of which is
+  // ordinary commitment-turn filler, so it would now conservatively poison
+  // (fail closed to triage) under the new design; that tightening is
+  // intended (see PR history for the false-positive shapes it closes).
+  // Reworded here to keep testing the same thing — a same-weekday mention
+  // that ISN'T conditional on it — using only vocabulary the closed set
+  // already carries.
   test('an adjacent sentence merely mentioning the SAME weekday (not conditional on it) does not poison the pinned commitment', () => {
-    const turn = "Adam works Sundays. We'll see you Sunday at noon.";
+    const turn = "We come out Sunday afternoon. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
     expect(r.allowed).toBe(true);

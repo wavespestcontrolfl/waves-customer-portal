@@ -671,14 +671,43 @@ const COMMITMENT_TURN_VOCAB = new Set([
   'just', 'let', 'us', 'know', 'anything', 'changes', 'if', 'comes', 'up',
   'need', 'needs', 'questions', 'thanks', 'thank', 'much', 'bye', 'talk',
   'soon', 'welcome', 'care', 'no', 'problem',
+  // Ordinary, clearly non-contingent filler (codex round-3 whitelist
+  // inversion — otherSentenceIsClean, below, requires every OTHER sentence
+  // in the turn to be built from this same closed vocabulary, so a handful
+  // of plain declarative words a non-conditional benign aside actually uses
+  // had to join it): "should"/"go" (ordinary modal + movement verb — "it
+  // should go to him", NOT the inverted "should the technician be
+  // unavailable" conditional, which is caught by CONDITIONAL_TOKENS/
+  // CONDITION_TRIGGER_RE's "should the" instead); "made"/"send"/
+  // "momentarily" (small-talk / "I'll send you a text momentarily" filler).
+  // (BENIGN_NON_BOOKING_TOPIC_TOKENS — notification/email/text/invoice/
+  // report/… — is merged in below, once that list exists.)
+  'should', 'go', 'made', 'send', 'momentarily',
 ]);
+// A tiny closed set of CONNECTOR words for a benign CONDITIONAL sentence
+// only (codex round-3 whitelist inversion) — never available to a plain
+// declarative sentence or the pinned commitment sentence itself. Unlocked
+// ONLY inside otherSentenceIsClean's carve-out, and only once the sentence
+// has already cleared BOTH gates: it has a conditional trigger, AND every
+// extracted clause is benign (clauseIsBenign). At that point the sentence's
+// remaining tokens are just how the agent phrases resolving a benign
+// routing mixup ("let me know", "goes to the wrong person/number", "I'll
+// make sure that gets figured out") — words too specific/generic to trust
+// unconditionally everywhere else in the turn, so they stay out of the
+// base COMMITMENT_TURN_VOCAB and only unlock here.
+const BENIGN_CONDITIONAL_GLUE_WORDS = new Set([
+  'me', 'tell', 'goes', 'wrong', 'person', 'number', 'make', 'sure', 'gets', 'figured',
+]);
+function turnVocabularyTokenOk(tok, extraSets) {
+  if (!tok) return true;
+  if (COMMITMENT_TURN_VOCAB.has(tok)) return true;
+  if (extraSets && extraSets.some((set) => set.has(tok))) return true;
+  if (/^\d{1,4}$/.test(tok)) return true;
+  if (/^\d{1,2}(st|nd|rd|th)$/.test(tok)) return true;
+  return false;
+}
 function commitmentTurnVocabularyOk(normalizedTurn) {
-  return normalizedTurn.split(' ').every((tok) => (
-    !tok
-    || COMMITMENT_TURN_VOCAB.has(tok)
-    || /^\d{1,4}$/.test(tok)
-    || /^\d{1,2}(st|nd|rd|th)$/.test(tok)
-  ));
+  return normalizedTurn.split(' ').every((tok) => turnVocabularyTokenOk(tok));
 }
 
 // Affirmative sentence FORM (codex P0, interrogatives): normalization strips
@@ -780,57 +809,37 @@ function normalizeCommitmentText(s) {
 // But yeah, we'll see him on Monday at 10 o'clock." — the pinned quote was
 // the last sentence, and an earlier round's turn-wide vocabulary/conditional
 // screen poisoned it over a CONDITIONAL ABOUT WHICH INBOX GETS THE EMAIL
-// NOTIFICATION, not about the booking) no longer need the closed commitment
-// vocabulary. Instead an other-sentence poisons the pinned commitment when
-// it itself:
-//   (a) contains a question mark (still asking, not committing — codex P1,
-//       round 7o, the tag-question case: "You're booked Sunday at noon.
-//       Right?"),
-//   (b) contains a negation/retraction/hedge (turnHasNegationOrHedge),
-//   (c) names an authorization PARTY or ACT, or a declarative UNAVAILABILITY
-//       statement — homeowner/owner/landlord/tenant, approve/approval,
-//       sign-off, authorize/authorization, permission, "check with",
-//       "confirm with", "run it by", "needs to okay", decision(-maker),
-//       "still required"/"still needs"/"needs approval"/"waiting on"/"get
-//       back to you", "unavailable"/"not available"/"booked up"/"cannot" —
-//       REGARDLESS of conditional structure
-//       (sentenceHasDeclarativePoisonVocabulary, below): a DECLARATIVE
-//       naming an unmet authorization requirement or unavailability, "That
-//       still needs the homeowner's sign-off. We'll see you Sunday at
-//       noon." or "The technician is unavailable. We'll see you Sunday at
-//       noon.", carries no "if"/"unless"/"subject to" trigger word and is
-//       just as disqualifying as a conditional one (codex P1, round 2 of
-//       this PR's local audit — an earlier draft gated this check on
-//       isConditional and missed exactly this declarative shape), or
-//   (d) is a conditional with ANY clause (extractConditionalClauses splits
-//       EVERY clause in the sentence, not just the first — codex P1: "If
-//       the email goes to you, let me know, and if the technician is
-//       available, I'll call you." has two clauses, and the first being
-//       benign never excuses the second) whose topic is NOT one of a small,
-//       curated set of known-benign non-booking topics (clauseIsBenign,
-//       below) — DEFAULT-POISON, not an allowlist of bad topics: "if we
-//       have space", "if the technician has time", "weather permitting" all
-//       still poison with NO term enumerated for each one, exactly like the
-//       pre-existing fail-closed design (round 7l/7m). The ONLY clauses
-//       that don't poison are ones IDENTIFIABLY about a benign topic (who a
-//       notification/email/text/invoice/report goes to) and that don't ALSO
-//       touch scheduling/staffing/availability/authorization anywhere in
-//       THAT CLAUSE (codex P1, round 2: a benign word in the sentence's
-//       CONSEQUENT, e.g. "email", never excuses a poisoned condition, e.g.
-//       "if the technician is available") — a sentence that merely MENTIONS
-//       a weekday or time in passing without being conditional ON it ("Adam
-//       works Sundays. We will see you Sunday at noon.") isn't even a
-//       conditional to begin with, so it never reaches this check at all.
-// This is what still fails closed the two Codex regressions "If the
-// homeowner approves. We will see you Sunday at noon." and "Subject to
-// homeowner approval. We will see you Sunday at noon." — both name the
-// homeowner's approval, so (c) alone already poisons them regardless of
-// their conditional wrapper. A sentence about a benign topic (notifications,
-// texts, emails, invoices) that names no authorization party and is either
-// not conditional or conditional only on that benign topic no longer
-// poisons — multi-sentence turns that discuss that alongside a clean
-// commitment sentence are the supported shape now, not just the
-// single-sentence turn.
+// NOTIFICATION, not about the booking) do not need the closed commitment
+// vocabulary VERBATIM — but codex round 3 converged this from a BLACKLIST
+// ("poison when it contains X/Y/Z") to a WHITELIST (otherSentenceIsClean,
+// below), the same inversion the pinned sentence's commitmentTurnVocabularyOk
+// already used. Three successive blacklist rounds (interrogatives, negation/
+// hedge, authorization/unavailability vocabulary, conditional-clause topic
+// scoping) kept missing shapes nobody had enumerated yet — "cancel",
+// "permitting", "contingent", "space", "actually" were never on any poison
+// list, so "Actually, we have to cancel.", "Weather permitting.", and "If we
+// have space I'll email you." (the consequent verb swallowing the actual
+// condition) all read as clean turns. A whitelist needs no such list: those
+// words simply aren't IN the closed vocabulary either.
+//
+// otherSentenceIsClean now requires, for every other sentence: not a
+// question, no negation/hedge (turnHasNegationOrHedge — still defense in
+// depth), and every token built from the closed COMMITMENT_TURN_VOCAB —
+// with ONE carve-out. A sentence that (a) has a conditional trigger AND
+// (b) every extracted clause is benign (clauseIsBenign — unchanged: still
+// runs the authorization/unavailability/scheduling-staffing poison-term
+// checks against the clause's own text, still requires a benign topic,
+// still falls back to the previous sentence only for a bare-pronoun clause)
+// may additionally draw from BENIGN_NON_BOOKING_TOPIC_TOKENS and the tiny
+// BENIGN_CONDITIONAL_GLUE_WORDS set for its remaining tokens. This is what
+// still lets "Yep, it should go to him, the notification. If it goes to
+// you, I'll make sure that gets figured out." ground (a non-conditional
+// declarative naming a benign topic, plus a bare-pronoun conditional that
+// resolves against it) while "If the homeowner approves. We will see you
+// Sunday at noon." and "If the technician is available, I'll email you."
+// still fail — "homeowner"/"approves"/"technician"/"available" are in
+// neither the base vocabulary nor the expanded carve-out set, so they fail
+// whether or not clauseIsBenign even runs.
 // Splits one speaker turn into its sentences. Sentence chunks KEEP their
 // terminator (codex P0, round 7n): splitting on [.!?;]+ discarded the "?"
 // that makes "So we will confirm it for noon on Sunday?" a QUESTION — an
@@ -864,9 +873,7 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
       const s = sentences[i];
       if (!s.ns.includes(q)) continue;
       const otherSentencesClean = sentences.every((other, j) => j === i
-        || (!other.interrogative
-          && !turnHasNegationOrHedge(other.ns)
-          && !sentenceHasUnmetCondition(other.ns, other.raw, sentences[j - 1]?.ns)));
+        || otherSentenceIsClean(other, sentences[j - 1]?.ns));
       containing.push({ ...s, otherSentencesClean });
     }
   }
@@ -912,6 +919,21 @@ const BENIGN_NON_BOOKING_TOPICS = [
   ' text ', ' texts ', ' invoice ', ' invoices ', ' report ', ' reports ',
   ' inbox ', ' confirmation text ',
 ];
+// Per-TOKEN form of the same curated list (codex round-3 whitelist
+// inversion): the token-by-token vocabulary check below needs individual
+// words, not the padded-substring phrases above. Derived, not duplicated,
+// so the two never drift. Naming a benign topic (who a notification/email/
+// text/invoice/report goes to) is never itself a scheduling risk — the risk
+// words are the ones NOT in this set: technician/available/schedule/
+// homeowner/approval/unavailable/cancel/… — so these tokens are safe to
+// merge into the BASE closed vocabulary (commitmentTurnVocabularyOk),
+// usable by a plain non-conditional declarative aside ("I'll email you the
+// invoice. We'll see you Sunday at noon.") too, not only by a conditional
+// sentence that also clears clauseIsBenign.
+const BENIGN_NON_BOOKING_TOPIC_TOKENS = new Set(
+  BENIGN_NON_BOOKING_TOPICS.flatMap((phrase) => phrase.trim().split(' ')).filter(Boolean)
+);
+BENIGN_NON_BOOKING_TOPIC_TOKENS.forEach((tok) => COMMITMENT_TURN_VOCAB.add(tok));
 // Declarative poison vocabulary (codex P1, rounds 1-2 of this PR's local+
 // Codex audit): a sentence naming who has to sign off, the act of
 // approving/authorizing, an unmet-approval DECLARATIVE ("Homeowner approval
@@ -942,14 +964,18 @@ const UNAVAILABILITY_TERMS = [
   ' cannot make ', ' cannot ', ' unable ', ' not free ', ' has no time ',
   ' doesn t have time ', ' does not have time ',
 ];
-// Unconditional declarative-poison check (finding 3/4 above): either list,
-// anywhere in the sentence, poisons regardless of whether the sentence is
-// structured as a conditional at all.
-function sentenceHasDeclarativePoisonVocabulary(ns) {
-  const padded = ` ${ns} `;
-  return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
-    || UNAVAILABILITY_TERMS.some((t) => padded.includes(t));
-}
+// Both lists above are also, by construction, already excluded from the
+// base COMMITMENT_TURN_VOCAB (codex round-3 whitelist inversion) — a
+// declarative sentence naming "homeowner"/"approval"/"unavailable"/etc.
+// fails otherSentenceIsClean's plain vocabulary check on its own, with no
+// separate unconditional scan needed here; the standalone
+// sentenceHasDeclarativePoisonVocabulary wrapper this comment used to
+// describe was retired for that reason. These two lists now do their work
+// entirely inside clauseIsBenign, below, where they still matter: a
+// CONDITIONAL sentence's clause is checked directly against them (clause
+// text is a raw-text substring, not yet vocabulary-tokenized) before the
+// clause is ever allowed to unlock the expanded conditional-carve-out
+// vocabulary in otherSentenceIsClean.
 // Scheduling/availability/staffing vocabulary for CONDITION CLAUSES (codex
 // P1, round 2 of this PR's local+Codex audit): a conditional clause is
 // non-benign the instant it touches scheduling/staffing/availability, no
@@ -974,14 +1000,24 @@ const CONDITION_CLAUSE_POISON_TERMS = [
 // ordinary modal usage, not a conditional; only the inverted "should the
 // technician be unavailable…" construction is.
 const CONDITION_TRIGGER_RE = /\b(if|unless|as long as|provided|once|when|assuming|subject to|depending|depends|pending|should the)\b/i;
+// A first-person consequent head ("I'll"/"we'll"/"I will"/"we will") ends a
+// condition clause the same way a comma does (codex P1, round 3: "If we
+// have space I'll email you." has NO comma, so a comma-only boundary swept
+// the benign consequent verb "email" into the SAME clause as the actual
+// condition "we have space", and clauseIsBenign then read the whole thing
+// as benign because "email" appears somewhere in it — the real condition,
+// scheduling capacity, was never isolated). Whichever boundary — comma or
+// consequent head — comes first in the raw text wins.
+const CONSEQUENT_HEAD_RE = /\b(i'?ll|we'?ll|i will|we will)\b/i;
 // Splits a raw sentence into EVERY condition clause it contains — not just
 // the first (codex P1, finding 1: "If the email goes to you, let me know,
 // AND IF the technician is available, I'll call you." has TWO clauses; a
 // single-match extractor read only the benign first one and missed the
 // technician-availability clause entirely). Each clause runs from just
-// after its trigger word to the next comma, the next trigger word, or the
-// end of the sentence — whichever comes first, so one clause never eats
-// into the next.
+// after its trigger word to the next comma, the next first-person
+// consequent head, the next trigger word, or the end of the sentence —
+// whichever comes first, so one clause never eats into the next or into
+// its own consequent.
 function extractConditionalClauses(rawSentence) {
   const s = String(rawSentence || '');
   const re = new RegExp(CONDITION_TRIGGER_RE.source, 'gi');
@@ -996,9 +1032,12 @@ function extractConditionalClauses(rawSentence) {
     const segStart = triggers[i].end;
     const segEnd = i + 1 < triggers.length ? triggers[i + 1].start : s.length;
     const segment = s.slice(segStart, segEnd);
+    let cut = segment.length;
     const commaIdx = segment.indexOf(',');
-    const clauseRaw = commaIdx === -1 ? segment : segment.slice(0, commaIdx);
-    const ns = normalizeCommitmentText(clauseRaw);
+    if (commaIdx !== -1) cut = Math.min(cut, commaIdx);
+    const headMatch = CONSEQUENT_HEAD_RE.exec(segment);
+    if (headMatch) cut = Math.min(cut, headMatch.index);
+    const ns = normalizeCommitmentText(segment.slice(0, cut));
     if (ns) clauses.push(ns);
   }
   return clauses;
@@ -1037,22 +1076,42 @@ function clauseIsBenign(clauseNs, prevNs) {
   }
   return false;
 }
-// Top-level poison test for ONE sentence OTHER than the pinned commitment
-// sentence (agentCommitmentSentenceVerified calls this for every sentence
-// in the turn). DEFAULT IS POISON: a declarative authorization/
-// unavailability statement poisons unconditionally; otherwise a sentence
-// with no conditional trigger at all is clean, and a conditional sentence
-// poisons unless EVERY one of its clauses (extractConditionalClauses) is
-// benign (clauseIsBenign) — one bad clause among several benign ones still
-// poisons the whole sentence (codex P1, finding 1).
-function sentenceHasUnmetCondition(ns, rawSentence, prevNs) {
-  if (sentenceHasDeclarativePoisonVocabulary(ns)) return true;
-  if (!turnHasUnresolvedConditional(ns)) return false;
-  const clauses = extractConditionalClauses(rawSentence);
-  // A conditional was detected but no clause could be isolated in the raw
-  // text (shouldn't normally happen — fail closed rather than guess).
-  if (!clauses.length) return true;
-  return !clauses.every((clause) => clauseIsBenign(clause, prevNs));
+// Top-level CLEARANCE test for ONE sentence OTHER than the pinned
+// commitment sentence (agentCommitmentSentenceVerified calls this for every
+// sentence in the turn). Codex round 3 converged this from a blacklist
+// ("poison on these words/shapes") to a WHITELIST, the same inversion the
+// pinned sentence already used: every other sentence must be POSITIVELY
+// cleared, built entirely from the closed COMMITMENT_TURN_VOCAB, with the
+// same interrogative/negation-hedge screens as before. A prior blacklist
+// design kept missing shapes it never enumerated — "cancel", "permitting",
+// "contingent", "space", "actually" were never on any poison list, so
+// "Actually, we have to cancel.", "Weather permitting.", and "If we have
+// space I'll email you." (the consequent verb swallowing the real
+// condition — see extractConditionalClauses) all read as clean. None of
+// those words are IN the closed vocabulary either, so the whitelist fails
+// them all with no new list to maintain.
+//
+// ONE carve-out: a sentence that (a) has a conditional trigger AND (b)
+// every extracted clause is benign (clauseIsBenign — this still runs the
+// authorization/unavailability/scheduling-staffing poison-term checks
+// against each clause's own text, and still requires a benign topic,
+// falling back to the previous sentence only for a bare-pronoun clause) may
+// ADDITIONALLY draw from BENIGN_NON_BOOKING_TOPIC_TOKENS and the tiny
+// BENIGN_CONDITIONAL_GLUE_WORDS set for its remaining tokens — the ordinary
+// way an agent phrases resolving a benign routing mixup ("let me know",
+// "goes to the wrong number", "I'll make sure that gets figured out"). A
+// sentence that fails (a) or (b) gets NO expanded vocabulary and must pass
+// on the base closed vocabulary alone, like any other declarative.
+function otherSentenceIsClean(other, prevNs) {
+  if (other.interrogative) return false;
+  if (turnHasNegationOrHedge(other.ns)) return false;
+  if (commitmentTurnVocabularyOk(other.ns)) return true;
+  if (!turnHasUnresolvedConditional(other.ns)) return false;
+  const clauses = extractConditionalClauses(other.raw);
+  if (!clauses.length || !clauses.every((clause) => clauseIsBenign(clause, prevNs))) return false;
+  return other.ns.split(' ').every((tok) => (
+    turnVocabularyTokenOk(tok, [BENIGN_NON_BOOKING_TOPIC_TOKENS, BENIGN_CONDITIONAL_GLUE_WORDS])
+  ));
 }
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves
