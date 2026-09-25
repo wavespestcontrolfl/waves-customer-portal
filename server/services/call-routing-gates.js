@@ -251,8 +251,13 @@ function checkTcpaConsent(extraction, opts = {}) {
 // v2-1.25.0 (codex round 17): a pending approval as a sentence subject ("The
 // okay will come in the email.") poisons, and a lone period initial after
 // the hour ("10 o'clock p.") fails binding — MORE RESTRICTIVE.
-const V2_DECISION_VERSION = 'v2-1.25.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0'];
+// v2-1.26.0 (codex round 18): "confirming"/"inspection" in OTHER sentences,
+// a booking consequent appended after a benign "let us know if…" closer, an
+// article-less pending approval ("Okay will come in the email."), and a
+// topic-less pronoun routing sentence ("It should go to him.") now poison —
+// MORE RESTRICTIVE.
+const V2_DECISION_VERSION = 'v2-1.26.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0'];
 
 function buildRouteDecision({
   callLogId,

@@ -1490,6 +1490,43 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // Codex round 18 (review of 0f5ba00c50): four P1s.
+  // P1 (:1375) — progressive "confirming" (and "inspection") is scheduling content.
+  // P1 (:1590) — a benign "let us know if…" closer must END its sentence.
+  // P1 (:1213) — an article-less pending approval subject.
+  // P1 (:746)  — a bare-pronoun routing sentence names no topic.
+  test.each([
+    "We need you confirming it. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon. You're set for the inspection.",
+    "Let us know if anything changes, and then we will put you down. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon, just let us know if anything changes and we'll put you down.",
+    "Okay will come in the email. We'll see you Sunday at noon.",
+    "Approval will come in the email. We'll see you Sunday at noon.",
+    "So okay will come through. We'll see you Sunday at noon.",
+    "It should go to him. We'll see you Sunday at noon.",
+    "That should go to the homeowner. We'll see you Sunday at noon.",
+    "It may go to him. We'll see you Sunday at noon.",
+  ])('Codex round-19 regression: confirming, trailing consequents, article-less approvals, and topic-less routing poison — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "We'll see you Sunday at noon. Just let us know if anything changes.",
+    "We'll see you Sunday at noon. Let us know if anything changes, thank you so much.",
+    "Okay, we'll see you Sunday at noon.",
+    "The notification should go to him. We'll see you Sunday at noon.",
+    "Yep, it should go to him, the notification. We'll see you Sunday at noon.",
+    "Yep, it may go to him, the notification. We'll see you Sunday at noon.",
+  ])('Codex round-19: benign closers, openers, and topic-named routing still ground — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",
@@ -1735,8 +1772,13 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // SUPERSEDED in part by codex round 18 (reported, not silently reworded):
+  // this list also asserted the bare "It may go to him." grounds. Round 18
+  // showed a topic-less pronoun can route the approval decision itself
+  // ("It should go to him." after "who has to okay it?"), so both routing
+  // forms now require the notification/email/text to be named; the bare
+  // form moved to the round-19 poison list above.
   test.each([
-    "It may go to him. We'll see you Sunday at noon.",
     "You may get a text. We'll see you Sunday at noon.",
     "If the confirmation text goes to the wrong number, let me know. We'll see you Sunday at noon.",
   ])('Codex round-16: benign modal routing and a conditional with its consequent still ground — %s', (turn) => {

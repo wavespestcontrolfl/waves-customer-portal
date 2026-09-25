@@ -635,7 +635,12 @@ const CONDITIONAL_TOKENS = [
 // even though the follower matches, so the follower alone is not enough:
 // the words BEFORE the "if" must be the let-us-know closer).
 const BENIGN_IF_PRECEDER_RE = /(?:^| )(?:just )?let us know $/;
-const BENIGN_IF_FOLLOWER_RE = /^if (anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)/;
+// Codex round 18, P1 (:1590): the follower was matched as a PREFIX, so
+// "Let us know if anything changes, and then we will put you down." read
+// as a closed conditional and its appended booking consequent was never
+// checked. The follower must now END the sentence — only a courtesy tail
+// ("thanks", "thank you so much", "bye") may follow it.
+const BENIGN_IF_FOLLOWER_RE = /^if (?:anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)(?: (?:thanks|thank you|so much|much|bye|talk to you soon))* $/;
 function turnHasUnresolvedConditional(normalizedTurn) {
   const padded = ` ${normalizedTurn} `;
   if (CONDITIONAL_TOKENS.some((t) => padded.includes(t))) return true;
@@ -743,7 +748,11 @@ const BENIGN_CONDITIONAL_GLUE_WORDS = new Set([
 // ("Yep, it should go to him, the notification."), matched whole-sentence,
 // never as a vocabulary token. Checked as an immediate pass in
 // otherSentenceIsClean, the same way REINFORCING_AFFIRMATION_RE is.
-const NOTIFICATION_ROUTING_RE = /^(?:ok|okay|yep|yes|yeah|so|and)? ?(?:it|that|the (?:notification|email|text|confirmation text)) should (?:go|be sent|be going) to (?:him|her|them|you|the (?:client|owner|homeowner|point of contact))(?: the (?:notification|email|text))?$/;
+// Codex round 18, P1 (:746): a bare "it"/"that" subject names no topic —
+// after "who has to approve this?", "It should go to him." routes the
+// DECISION, not a notification. A pronoun subject now grounds only when
+// the sentence itself names the notification/email/text after it.
+const NOTIFICATION_ROUTING_RE = /^(?:ok|okay|yep|yes|yeah|so|and)? ?(?:the (?:notification|email|text|confirmation text) should (?:go|be sent|be going) to (?:him|her|them|you|the (?:client|owner|homeowner|point of contact))(?: the (?:notification|email|text))?|(?:it|that) should (?:go|be sent|be going) to (?:him|her|them|you|the (?:client|owner|homeowner|point of contact)) the (?:notification|email|text))$/;
 function turnVocabularyTokenOk(tok, extraSets) {
   if (!tok) return true;
   if (COMMITMENT_TURN_VOCAB.has(tok)) return true;
@@ -1198,7 +1207,10 @@ const DELEGATED_DECISION_RE = new RegExp(`\\b(?:(?:(?:it s|it is|its|that s|that
 // "It may go to him." / "You may get a text." alone still leave only the
 // bare subject behind, so they stay benign.
 const MODAL_UNCERTAINTY_RE = /\b(?:we|i|you|it|that|this|he|she|they|and|or|but|then|so|also) (?:may(?= [a-z])(?! the \d)|might|could possibly|should be able to|may be able to|might be able to|could be able to)\b/;
-const BENIGN_MODAL_ROUTING_RE = /\b(?:(you) may (?:get|receive) (?:a|an|the) (?:text message|text|email|notification|confirmation text|confirmation email)|(it|that) may (?:go|be sent|be going) to (?:him|her|them|you))\b/g;
+// Codex round 18, P1 (:746), same rule as NOTIFICATION_ROUTING_RE: a bare
+// "It may go to him." names no topic and can route the decision itself, so
+// the pronoun form is benign only with the notification/email/text named.
+const BENIGN_MODAL_ROUTING_RE = /\b(?:(you) may (?:get|receive) (?:a|an|the) (?:text message|text|email|notification|confirmation text|confirmation email)|(it|that) may (?:go|be sent|be going) to (?:him|her|them|you) the (?:notification|email|text))\b/g;
 function sentenceHasModalUncertainty(ns) {
   return MODAL_UNCERTAINTY_RE.test(ns.replace(BENIGN_MODAL_ROUTING_RE, (_span, you, itThat) => you || itThat));
 }
@@ -1210,7 +1222,16 @@ function sentenceHasModalUncertainty(ns) {
 // (AUTHORIZATION_NOUN_ALT minus "confirmation", which names the ordinary
 // booking-confirmation message: "The confirmation will come by text.") + a
 // future/pending auxiliary.
-const PENDING_APPROVAL_SUBJECT_RE = /\b(?:the|your|his|her|their|that|this|an|a|our) (?:okay|ok|yes|approval|go ahead|green light|sign off|permission|authorization|blessing) (?:will|ll|would|should|shall|is going to|s going to|has to|needs to|still|is still|s still|is coming|s coming|comes|come|is pending|s pending)\b/;
+// Codex round 18, P1 (:1213): ASR drops the article — "Okay will come in
+// the email." The determiner is now optional for the unambiguous approval
+// nouns anywhere, and for okay/ok/yes (also ordinary discourse openers) at
+// the start of the sentence, after at most one opener.
+const PENDING_APPROVAL_AUX_ALT = '(?:will|ll|would|should|shall|is going to|s going to|has to|needs to|still|is still|s still|is coming|s coming|comes|come|is pending|s pending)';
+const PENDING_APPROVAL_SUBJECT_RE = new RegExp(
+  `\\b(?:(?:the|your|his|her|their|that|this|an|a|our) )?(?:approval|go ahead|green light|sign off|permission|authorization|blessing) ${PENDING_APPROVAL_AUX_ALT}\\b`
+  + `|\\b(?:the|your|his|her|their|that|this|an|a|our) (?:okay|ok|yes) ${PENDING_APPROVAL_AUX_ALT}\\b`
+  + `|^(?:(?:so|and|but|yeah|yep|yes|ok|okay|alright) )?(?:okay|ok|yes) ${PENDING_APPROVAL_AUX_ALT}\\b`,
+);
 function sentenceHasDeclarativePoisonVocabulary(ns) {
   const padded = ` ${ns} `;
   return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
@@ -1373,6 +1394,10 @@ function clauseIsBenign(clauseNs, prevNs) {
 // none of them collide with an ordinary English word the way "may" does.
 const SCHEDULING_PREDICATE_TERMS = [
   ' confirm ', ' confirms ', ' confirmed ', ' confirmation ',
+  // Codex round 18, P1 (:1375): COMMITMENT_TURN_VOCAB admits "confirming"
+  // and "inspection", so an OTHER sentence built on them ("We need you
+  // confirming it.") must count as scheduling content too.
+  ' confirming ', ' inspection ', ' inspections ',
   ' appointment ', ' appointments ',
   ' book ', ' booked ', ' booking ',
   ' schedule ', ' scheduled ', ' scheduling ', ' reschedule ', ' rescheduled ',
