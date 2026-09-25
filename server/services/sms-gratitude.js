@@ -107,26 +107,34 @@ const manualCourtesy = (text, manualReply) => manualReply
   && (isManualCourtesy(text) || isCourtesyOnly(text, { awaitingAnswer: false }));
 // A hand-typed text closes the exchange unless it asks for money; a typed
 // "your payment has been received" is a settlement, not a request.
-// Judged clause by clause, and settlement wording only cancels its own
-// words: it is replaced by a neutral token before the request test, so
-// "your old invoice was paid: please pay the new one here" still asks for
-// money however the two halves are joined. Splitting finer only refuses more. Links
-// are masked first so their dots do not split a clause, and a colon never
-// splits, so "Here is your invoice: <link>" keeps its label. A /pay/ link, or
-// an invoice/bill/payment clause carrying any link, is a request.
+// Settlement wording only cancels its own words: it is replaced by a
+// neutral token before the whole text is tested, so "your old invoice was
+// paid: please pay the new one here" still asks for money however the two
+// halves are joined, and nothing is split, so "here is your invoice and here
+// is the link: <link>" keeps its billing noun. A /pay/ link, or a billing
+// word followed by any link, is a request.
 // Stored text-only bodies have had https:// stripped (sms-link-policy.js), so
 // a bare host followed by a path, query, fragment, or port is a link too.
 const maskLinks = text => text.replace(/(?:https?:\/\/|www\.|(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]+(?=[:/?#]))[^\s<>"']*/giu, url => (/\/pay(?:[/?#]|$)/i.test(url) ? ' paylinktoken ' : ' linktoken '));
 const PAYMENT_LINK_RE = /\bpaylinktoken\b|\b(?:invoices?|bills?|billing|payments?|pay|balance|statement)\b.*\blinktoken\b/i;
-const asksForMoney = text => maskLinks(String(text || '')).split(/[.,!?;\n]+|\s[-–—]\s|\b(?:but|however|although|though|and|also|plus|then)\b/i)
-  .map(clause => clause.replace(PAYMENT_SETTLED_RE, ' settledtoken '))
-  .some(clause => MANUAL_PAYMENT_REQUEST_RE.test(clause) || PAYMENT_LINK_RE.test(clause));
+const asksForMoney = (text) => {
+  const masked = maskLinks(String(text || '')).replace(PAYMENT_SETTLED_RE, ' settledtoken ');
+  return MANUAL_PAYMENT_REQUEST_RE.test(masked) || PAYMENT_LINK_RE.test(masked);
+};
+// A typed link hands the customer something to act on (sign, pay, book,
+// accept, fill in) unless it is the one link in the text and is labelled a
+// report or receipt, the same evidence CLOSED_OUTBOUND_RE accepts from
+// templates. "Please sign: <contract link>" stays open.
+const typedLinkOpen = (text) => {
+  const links = (maskLinks(String(text || '')).match(/\b(?:pay)?linktoken\b/g) || []).length;
+  return links > 0 && !(links === 1 && CLOSED_OUTBOUND_RE.test(text));
+};
 // Text is the only evidence: an attachment (or an unknown media count) could
 // be an invoice or a form, so a typed send with media or no text abstains.
 const manualClosure = (text, manualReply, row) => manualReply && row.mediaCount === 0
-  && text.trim() !== '' && !asksForMoney(text);
+  && text.trim() !== '' && !asksForMoney(text) && !typedLinkOpen(text);
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
-  || (isHandTyped(row) && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text) || asksForMoney(text)));
+  || (isHandTyped(row) && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text) || asksForMoney(text) || typedLinkOpen(text)));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
 const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! We got your bank payment for invoice [\w-]+\. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does\.$/u;
 

@@ -203,6 +203,7 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Old balance cleared - please pay the new one here',
     'Your old invoice was paid: please pay the new invoice here',
     'Your old invoice was paid so please pay the new invoice here',
+    'Here is your invoice and here is the link: https://example.invalid/i/abc',
     'Invoice: https://example.invalid/i/abc',
     'Here is your invoice: https://example.invalid/i/abc',
     'Here you go https://portal.example.invalid/pay/abc',
@@ -254,6 +255,22 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
   });
   test('a stored scheme-less receipt link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme('Your receipt: https://portal.wavespestcontrol.com/receipt/abc'))] }).eligible).toBe(true);
+  });
+  test.each([
+    'Please sign: https://portal.wavespestcontrol.com/contract/abc',
+    'Book here https://portal.wavespestcontrol.com/book/abc',
+    'Your report: https://example.invalid/report/abc and please sign https://example.invalid/contract/abc',
+  ])('a typed action link stays open: %s', raw => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme(raw))] }).eligible).toBe(false);
+  });
+  test('an earlier typed action link is still open behind a later closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...manual('Please sign: https://portal.wavespestcontrol.com/contract/abc'), createdAt: '2030-01-10T14:58:00Z' },
+      report,
+    ] }).reason).toBe('earlier_open_context');
+  });
+  test('a hand-typed report link is still a closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Here is your report: https://example.invalid/report/abc')] }).eligible).toBe(true);
   });
   test('a hand-typed receipt link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Your receipt: https://example.invalid/receipt/abc')] }).eligible).toBe(true);
