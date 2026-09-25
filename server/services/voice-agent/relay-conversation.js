@@ -1419,8 +1419,12 @@ class RelayConversation {
     if (!state.entry) piece = piece.replace(/^\s+/, '');
     if (isLast) piece = piece.replace(/\s+$/, '');
     if (!piece && !isLast) return; // nothing new to anchor an entry on or to send
+    if (!state.entry && !piece) { state.closed = true; return; } // closing with nothing ever spoken this round
+    // Send FIRST: if it throws (a dead socket), the transcript and history
+    // never claim text that did not reach Twilio — the flush chain's catch
+    // then ends the round as `failed` with only what really went out.
+    this._send(piece, isLast === true);
     if (!state.entry) {
-      if (!piece) { state.closed = true; return; } // closing with nothing ever spoken this round
       const entry = {
         role: 'agent', text: piece, planned: piece, played: null,
         playedSource: 'assumed', interrupted: false, notPlayed: false, done: false, turn: stat.turn,
@@ -1440,7 +1444,6 @@ class RelayConversation {
       state.entry.planned += piece;
       state.entry.text = state.entry.planned;
     }
-    this._send(piece, isLast === true);
     if (isLast) {
       // Closing: no more growth coming. Re-evaluate retirement now in case a
       // played event arrived earlier and matched but was deferred by the
@@ -1461,6 +1464,10 @@ class RelayConversation {
   _closeStreamEntry(state) {
     if (!state || state.closed) return;
     if (!state.entry) { state.closed = true; return; }
+    // A barge-in already cut this utterance: Twilio stopped it and
+    // interrupt() recorded what was played. A trailing last:true or a
+    // planned/text rewrite here would clobber that record.
+    if (state.entry.interrupted) { state.closed = true; return; }
     this._send('', true);
     state.entry.planned = state.entry.planned.replace(/\s+$/, '');
     state.entry.text = state.entry.planned;
@@ -1533,7 +1540,7 @@ class RelayConversation {
    */
   _queueOrFlush(state, sentence, stat, isLast) {
     state.flushChain = state.flushChain.then(async () => {
-      if (state.withheld || state.closed || state.signal.aborted) return;
+      if (state.withheld || state.failed || state.closed || state.signal.aborted) return;
       const superseded = await this._sessionSuperseded().catch(() => false);
       if (state.closed || state.signal.aborted) return; // stale by the time the check settled
       if (superseded) {
@@ -1544,7 +1551,9 @@ class RelayConversation {
       this._flushStreamChunk(state, sentence, stat, isLast);
     }).catch((err) => {
       logger.error(`[voice-relay] stream renderer flush failed callSid=${maskSid(this.callSid)}: ${err.message}`);
-      state.withheld = true;
+      // NOT `withheld` — that means another socket owns the call. A failed
+      // send (most plausibly a dead socket) ends the round via its own path.
+      state.failed = true;
     });
     return state.flushChain;
   }
@@ -1574,9 +1583,43 @@ class RelayConversation {
    * read `streamState.entry` before every one of them has had its chance to
    * run.
    */
+  /**
+   * End a streamed round early — a barge-in (`interrupted`) or a failed send
+   * (`failed`) — keeping history to what was actually SENT: the sent prefix
+   * plus the round's tool_use blocks, each paired with a "not run" result so
+   * the next model call sees a valid, honest transcript. No tool runs, no
+   * further frame is sent, and an entry interrupt() already cut is left as
+   * interrupt() recorded it.
+   */
+  _closeStreamedRoundEarly(streamState, msg, reason) {
+    streamState.closed = true;
+    const sentText = streamState.entry ? streamState.entry.planned.trim() : '';
+    const toolUseBlocks = msg.content.filter((b) => b.type === 'tool_use');
+    const assistantMessage = {
+      role: 'assistant',
+      content: sentText ? [{ type: 'text', text: sentText }, ...toolUseBlocks] : toolUseBlocks,
+    };
+    if (assistantMessage.content.length) {
+      this.messages.push(assistantMessage);
+      if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
+    }
+    if (toolUseBlocks.length) {
+      const why = reason === 'failed' ? 'speech to the caller failed' : 'the current turn was interrupted';
+      this.messages.push({
+        role: 'user',
+        content: toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: `Not run — ${why}.` })),
+      });
+    }
+    return reason === 'failed' ? { failed: true } : { aborted: true };
+  }
+
   async _finalizeStreamedRound(streamState, msg, text, hasPendingWrite, stat) {
     await streamState.flushChain;
     if (streamState.withheld) return { withheld: true }; // the progressive chain already found this superseded
+    // A barge-in or a failed send during the chain await ends the round
+    // BEFORE either branch below touches the entry, the air, or history.
+    if (streamState.signal.aborted) return this._closeStreamedRoundEarly(streamState, msg, 'interrupted');
+    if (streamState.failed) return this._closeStreamedRoundEarly(streamState, msg, 'failed');
     const sent = streamState.entry ? streamState.entry.planned : '';
     const reconciled = !sent || text.startsWith(sent);
     if (!reconciled) {
@@ -1610,33 +1653,9 @@ class RelayConversation {
     // sent prefix, and — mirroring how the tool-result loop already ends a
     // stopped round — pair any tool_use block with a synthetic "not run"
     // result rather than leave it unpaired for the next model call.
-    if (streamState.signal.aborted) {
-      // interrupt() is the ONLY thing that can have set this signal once
-      // we're here (the round's own model-stream timeout is already
-      // cleared by this point) — it already fully closed out the
-      // transcript entry itself (interrupted flag, played-text sync,
-      // dropped from `_playing`). Do NOT touch the entry again (re-closing
-      // it would CLOBBER the played-text record interrupt() just computed)
-      // and do NOT send another frame (Twilio already knows the utterance
-      // was cut) — only fix up the MODEL's history, which interrupt() has
-      // no way to reach.
-      streamState.closed = true;
-      const toolUseBlocks = msg.content.filter((b) => b.type === 'tool_use');
-      const sentText = sent.trim();
-      const assistantMessage = {
-        role: 'assistant',
-        content: sentText ? [{ type: 'text', text: sentText }, ...toolUseBlocks] : toolUseBlocks,
-      };
-      this.messages.push(assistantMessage);
-      if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
-      if (toolUseBlocks.length) {
-        this.messages.push({
-          role: 'user',
-          content: toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current turn was interrupted.' })),
-        });
-      }
-      return { aborted: true };
-    }
+    // interrupt() already closed the transcript entry; _closeStreamedRoundEarly
+    // only fixes up the MODEL's history and never sends another frame.
+    if (streamState.signal.aborted) return this._closeStreamedRoundEarly(streamState, msg, 'interrupted');
     if (tail) this._flushStreamChunk(streamState, tail, stat, true);
     else this._closeStreamEntry(streamState);
     const assistantMessage = { role: 'assistant', content: msg.content };
@@ -2724,6 +2743,10 @@ class RelayConversation {
       // model-stream catch block uses for an ordinary barge-in: no ending,
       // no endSession — the session stays open for the caller's next turn.
       if (result.aborted) return;
+      if (result.failed) {
+        logger.error(`[voice-relay] stream renderer ended the round after a failed send callSid=${maskSid(this.callSid)}`);
+        return;
+      }
 
       if (msg.stop_reason === 'tool_use') {
         const results = [];

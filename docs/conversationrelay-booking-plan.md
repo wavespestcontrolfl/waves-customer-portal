@@ -321,10 +321,20 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    every later queued sentence outright, surface as an unhandled rejection
    (`_onStreamTextDelta` never awaits its own call into the chain), and
    abort `_finalizeStreamedRound`'s bare `await` instead of finalizing
-   cleanly — so a step that throws logs it, marks the round withheld (same
-   "stop speaking" response a superseded check gets), and returns normally,
-   keeping the chain itself fulfilled so the next sentence's own step still
-   runs (and correctly no-ops via the withheld guard).
+   cleanly — so a step that throws logs it, marks the round `failed` (its
+   own flag, NOT `withheld`: the call still belongs to this socket, so it
+   must never end as `superseded`), and returns normally, keeping the chain
+   itself fulfilled so every later step no-ops. Each chunk is sent BEFORE
+   it is recorded, so a send that throws leaves no transcript or history
+   claim for text that never reached Twilio.
+6. **Finalize checks barge-in and failure FIRST.** Right after awaiting the
+   flush chain — before the write-tool branch or the tail release touches
+   the entry, the air, or history — an aborted signal (barge-in) or a
+   `failed` round ends via `_closeStreamedRoundEarly`: history keeps only
+   the sent prefix plus any `tool_use` paired with a "not run" result, no
+   tool runs, and no further frame is sent. `_closeStreamEntry` is a no-op
+   on an entry `interrupt()` already cut, so a late close can never send a
+   stray `last:true` or overwrite the played-text record.
 
 Interruption: a barge-in aborts the round's own `AbortController` (unchanged
 mechanism); every send call in the streaming path checks that controller's

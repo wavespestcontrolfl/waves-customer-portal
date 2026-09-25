@@ -873,7 +873,55 @@ describe('stream renderer — full round loop', () => {
   // outright, this fire-and-forget call site would surface an unhandled
   // rejection, and _finalizeStreamedRound's bare `await streamState.
   // flushChain` would abort the whole turn instead of finalizing cleanly.
-  test('a send that throws mid-chain does not reject flushChain: no unhandled rejection, later sentences withheld, finalize completes', async () => {
+  test('a barge-in during the flush-chain await on a write-tool round: no stray last:true, interrupt record kept, tool not run', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-wb1', from: '+19415551234', send });
+    let releaseCheck;
+    let checks = 0;
+    convo._sessionSuperseded = jest.fn(() => {
+      checks += 1;
+      if (checks === 1) return Promise.resolve(false);
+      return new Promise((resolve) => { releaseCheck = () => resolve(false); });
+    });
+
+    const promptPromise = convo.handlePrompt('book me in');
+    await flush();
+    const round = captured[0];
+    round.textCb('Sure. '); // sentence 1 — check #1 resolves, flushes
+    await flush();
+    round.textCb('Let me check on that for you. '); // sentence 2 — check #2 stays pending
+    await flush();
+    round.resolve({
+      content: [
+        { type: 'text', text: 'Sure. Let me check on that for you.' },
+        { type: 'tool_use', id: 'tw1', name: 'request_booking', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await flush(); // finalize is now awaiting the flush chain
+    convo.interrupt({ utteranceUntilInterrupt: 'Sure.' }); // barge-in lands mid-await
+    const entry = convo._transcript.find((e) => e.role === 'agent');
+    const recorded = { text: entry.text, planned: entry.planned, interrupted: entry.interrupted };
+    const sendsAtInterrupt = send.mock.calls.length;
+    releaseCheck();
+    await promptPromise;
+
+    expect(send.mock.calls.length).toBe(sendsAtInterrupt); // no stray last:true after the cut
+    expect(send.mock.calls.some(([, last]) => last === true)).toBe(false);
+    expect({ text: entry.text, planned: entry.planned, interrupted: entry.interrupted }).toEqual(recorded);
+    expect(entry.interrupted).toBe(true);
+    // History: only the sent prefix, tool_use paired with a not-run result; no round 2.
+    const assistant = convo.messages.filter((m) => m.role === 'assistant');
+    expect(assistant[0].content[0]).toEqual({ type: 'text', text: 'Sure.' });
+    const resultMsg = convo.messages[convo.messages.indexOf(assistant[0]) + 1];
+    expect(resultMsg.content[0]).toEqual(expect.objectContaining({ type: 'tool_result', tool_use_id: 'tw1' }));
+    expect(resultMsg.content[0].content).toMatch(/^Not run/);
+    expect(captured[1]).toBeUndefined();
+  });
+
+  test('a send that throws mid-chain does not reject flushChain and is not reported as a supersession', async () => {
     const { IsolatedConvo, captured } = isolatedConvoFactory();
     process.env.VOICE_RELAY_RENDERER = 'stream';
     let sendCalls = 0;
@@ -901,15 +949,16 @@ describe('stream renderer — full round loop', () => {
 
       expect(sendCalls).toBe(1); // only the failing call — sentence 2 never sent
       expect(unhandled).toEqual([]); // no unhandled rejection surfaced anywhere
-      // The critical discriminator: a rejected flushChain propagates the
-      // throw all the way out of _finalizeStreamedRound/_runLoop (unwound
-      // before ever reaching the `result.withheld` branch), so the round
-      // loop's own withheld handling — including this endSession call —
-      // would NEVER run without the fix; the caller-facing `_chain.catch()`
-      // safety net masks the promise-resolves-vs-rejects difference, so
-      // this is the one assertion that actually distinguishes fixed from
-      // unfixed here.
-      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+      // A failed send is NOT a supersession: the call is still this socket's,
+      // so the round ends on its own failure path — never endSession('superseded').
+      expect(endSession).not.toHaveBeenCalled();
+      // Discriminator for the chain catch: without it the throw unwinds
+      // _finalizeStreamedRound/_runLoop before the early close runs. With it,
+      // the round closes via _closeStreamedRoundEarly: nothing reached
+      // Twilio (the send threw), so neither the transcript nor the model's
+      // history claims any agent text for this round.
+      expect(convo._transcript.filter((e) => e.role === 'agent')).toEqual([]);
+      expect(convo.messages.filter((m) => m.role === 'assistant')).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
     }
