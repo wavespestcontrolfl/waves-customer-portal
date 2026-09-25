@@ -30,8 +30,9 @@ const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { isOpenLeadRow } = require('./lead-statuses');
 const { isUsPhone } = require('./lead-consultation-link');
 const { leadWantsRecurringPlan } = require('./lead-recurring-intent');
-const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+const { mintLeadConsultationToken, TTL_SECONDS } = require('../utils/lead-consultation-token');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { createShortCode } = require('./short-url');
 const { ctaButton, blockPalette } = require('./email-template');
 
 const EMPTY_BLOCK = { html: '', text: '' };
@@ -47,9 +48,38 @@ function slotLabel(slot) {
   return `${slot.dayOfWeek}, ${slot.month} ${slot.dayNum} · ${slot.start_label}`;
 }
 
+// FAIL CLOSED (GH Codex #4702 r1 P1, same rule as lead-consultation-link.js):
+// the long URL carries the bearer token, so it must never ride an email
+// raw. Every link — see-all and each slot — goes through the short_codes
+// chokepoint (kind 'consultation', 14-day expiry matching the token). The
+// /l/:code redirect does not forward a query string, so each ?slot= link
+// needs its own code. createShortCode throws on insert failure and the
+// caller's catch turns that into the empty block, never the credential.
+async function shortWrap(longUrl, leadId, expiresAt) {
+  const { shortUrl } = await createShortCode(longUrl, {
+    kind: 'consultation',
+    entityType: 'leads',
+    entityId: leadId,
+    leadId,
+    expiresAt,
+  });
+  if (!shortUrl || shortUrl === longUrl) throw new Error('short-wrap failed');
+  return shortUrl;
+}
+
+async function shortLinksFor(longBase, leadId, slots) {
+  const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);
+  const seeAllUrl = await shortWrap(longBase, leadId, expiresAt);
+  const wrapped = [];
+  for (const slot of slots) {
+    wrapped.push({ ...slot, url: await shortWrap(slotUrl(longBase, slot), leadId, expiresAt) });
+  }
+  return { seeAllUrl, slots: wrapped };
+}
+
 function renderHtml(baseUrl, slots) {
   const P = blockPalette();
-  const buttons = slots.map((slot) => ctaButton(slotUrl(baseUrl, slot), slotLabel(slot))).join('<div style="height:10px;"></div>');
+  const buttons = slots.map((slot) => ctaButton(slot.url, slotLabel(slot))).join('<div style="height:10px;"></div>');
   return `
 <h2 style="color:${P.heading};font-family:${P.font};">${HEADING}</h2>
 <p style="color:${P.text};font-family:${P.font};">${SENTENCE}</p>
@@ -91,11 +121,12 @@ async function buildConsultationEmailBlock({ leadId } = {}) {
 
     const token = mintLeadConsultationToken(lead.id, undefined, 'email');
     if (!token) return EMPTY_BLOCK;
-    const baseUrl = `${publicPortalUrl()}/inspection/${token}`;
+    const longBase = `${publicPortalUrl()}/inspection/${token}`;
+    const links = await shortLinksFor(longBase, lead.id, result.needsAddress ? [] : result.slots);
 
     return {
-      html: renderHtml(baseUrl, result.needsAddress ? [] : result.slots),
-      text: renderText(baseUrl),
+      html: renderHtml(links.seeAllUrl, links.slots),
+      text: renderText(links.seeAllUrl),
     };
   } catch (err) {
     logger.warn(`[lead-consultation-email-block] build failed for lead ${leadId}: ${err.message}`);

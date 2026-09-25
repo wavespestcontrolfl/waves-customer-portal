@@ -9,6 +9,14 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.wavespestcontrol.com' }));
+// The short_codes chokepoint: records every (target, opts) and hands back a
+// branded /l/<code>. Tests assert the RAW token never reaches the email.
+const mockShortCalls = [];
+const mockCreateShortCode = jest.fn(async (targetUrl, opts) => {
+  mockShortCalls.push({ targetUrl, opts });
+  return { code: `c${mockShortCalls.length}`, shortUrl: `https://portal.wavespestcontrol.com/l/c${mockShortCalls.length}` };
+});
+jest.mock('../services/short-url', () => ({ createShortCode: (...args) => mockCreateShortCode(...args) }));
 
 let mockBuilders = {};
 const mockDb = jest.fn((table) => mockBuilders[table]);
@@ -49,6 +57,8 @@ const THREE_SLOTS = [
 ];
 
 beforeEach(() => {
+  mockShortCalls.length = 0;
+  mockCreateShortCode.mockClear();
   jest.clearAllMocks();
   mockBuilders = { leads: chainBuilder({ firstRow: OPEN_RECURRING_LEAD }) };
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
@@ -63,8 +73,13 @@ afterEach(() => {
   else process.env.LEAD_PREFILL_SECRET = originalSecret;
 });
 
-function slotLinksIn(html) {
-  return [...html.matchAll(/href="([^"]*\?slot=[^"]*)"/g)].map((m) => m[1]);
+// Slot links are short-wrapped in the email; the ?slot= targets live in the
+// short_codes rows, so read them back from the recorded createShortCode calls.
+function slotTargets() {
+  return mockShortCalls.map((c) => c.targetUrl).filter((u) => u.includes('?slot='));
+}
+function shortLinksIn(html) {
+  return [...html.matchAll(/href="([^"]*\/l\/[^"]*)"/g)].map((m) => m[1]);
 }
 
 describe('buildConsultationEmailBlock — hidden cases', () => {
@@ -151,11 +166,23 @@ describe('buildConsultationEmailBlock — full block', () => {
     expect(result.html).not.toBe('');
     expect(result.text).not.toBe('');
 
-    const links = slotLinksIn(result.html);
+    const links = slotTargets();
     expect(links).toHaveLength(3);
     expect(links[0]).toContain(`?slot=${encodeURIComponent('2026-09-26|09:00')}`);
     expect(links[1]).toContain(`?slot=${encodeURIComponent('2026-09-26|11:00')}`);
     expect(links[2]).toContain(`?slot=${encodeURIComponent('2026-09-27|10:00')}`);
+    // 4 short links in the HTML (3 slots + see-all), and the raw bearer
+    // token appears NOWHERE in either body.
+    expect(shortLinksIn(result.html)).toHaveLength(4);
+    expect(result.html).not.toContain('/inspection/');
+    expect(result.text).not.toContain('/inspection/');
+    expect(result.text).toContain('/l/');
+    for (const call of mockShortCalls) {
+      expect(call.opts).toMatchObject({ kind: 'consultation', entityType: 'leads', entityId: LEAD_ID, leadId: LEAD_ID });
+      const ttlMs = call.opts.expiresAt.getTime() - Date.now();
+      expect(ttlMs).toBeGreaterThan(13 * 24 * 3600 * 1000);
+      expect(ttlMs).toBeLessThanOrEqual(14 * 24 * 3600 * 1000);
+    }
 
     expect(result.html).toContain('See all open times');
     expect(result.html).not.toMatch(/Adam/);
@@ -179,7 +206,20 @@ describe('buildConsultationEmailBlock — full block', () => {
     const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
     expect(result.html).toContain('Pick a time for us to stop by');
     expect(result.html).toContain('See all open times');
-    expect(slotLinksIn(result.html)).toHaveLength(0);
+    expect(slotTargets()).toHaveLength(0);
+    expect(shortLinksIn(result.html)).toHaveLength(1);
     expect(result.text).toContain('Pick a time for us to stop by for a free consultation:');
+  });
+
+  test('short-wrap failure renders EMPTY — the raw token never falls through', async () => {
+    mockCreateShortCode.mockRejectedValueOnce(new Error('short_codes insert failed'));
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    expect(result).toEqual({ html: '', text: '' });
+  });
+
+  test('a short-url that hands the long URL back is treated as a failure', async () => {
+    mockCreateShortCode.mockImplementationOnce(async (targetUrl) => ({ code: null, shortUrl: targetUrl }));
+    const result = await buildConsultationEmailBlock({ leadId: LEAD_ID });
+    expect(result).toEqual({ html: '', text: '' });
   });
 });
