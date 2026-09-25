@@ -372,9 +372,22 @@ async function recheckDraftOffer({ customerId, flags }) {
   return { ok: true };
 }
 
+// The two fixed pitch closers photo-text-triage.js can write. A held draft
+// (recheckDraftOffer blocked it) gets its pitch replaced so a plain second
+// Approve cannot send the stale ask (pre-push audit r6) — the rest of the
+// text (label, advice) is kept verbatim.
+const QUOTE_PITCH_RE = /\s*(?:Want a quote for our [^?]+\? Just reply yes\.|Reply if you'd like a quote\.)\s*$/;
+const NO_PITCH_CLOSE = 'Reply if you have questions.';
+function stripQuotePitch(text) {
+  const base = String(text || '').replace(QUOTE_PITCH_RE, '').trim();
+  if (!base) return NO_PITCH_CLOSE;
+  return base.endsWith(NO_PITCH_CLOSE) ? base : `${base} ${NO_PITCH_CLOSE}`;
+}
+
 module.exports = {
   gaugeOpportunity,
   recheckDraftOffer,
+  stripQuotePitch,
   teaserOutcome,
   // The resolved { kind, label, cultural, uncertain } for any type — the
   // single source photo-text-triage.js reads its draft-copy label from

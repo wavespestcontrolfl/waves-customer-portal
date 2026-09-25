@@ -16,7 +16,7 @@ const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { gaugeOpportunity, recheckDraftOffer, _test } = require('../services/photo-triage-opportunity');
+const { gaugeOpportunity, recheckDraftOffer, stripQuotePitch, _test } = require('../services/photo-triage-opportunity');
 const { largeScope, priorTreatmentFailed, outcomeFor } = _test;
 
 const PRICED_OFFER = (serviceKey, overrides = {}) => ({
@@ -456,5 +456,17 @@ describe('recheckDraftOffer', () => {
   test('a lookup failure propagates (the route fails closed)', async () => {
     mockBuildOffer.mockRejectedValueOnce(new Error('down'));
     await expect(recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).rejects.toThrow('down');
+  });
+});
+
+describe('stripQuotePitch', () => {
+  test('replaces either fixed pitch closer, keeps label/advice, is idempotent', () => {
+    expect(stripQuotePitch("From what we can see, it's thin foliage. Want a quote for our tree & shrub program? Just reply yes."))
+      .toBe("From what we can see, it's thin foliage. Reply if you have questions.");
+    expect(stripQuotePitch("From what we can see, it's weed pressure. Reply if you'd like a quote."))
+      .toBe("From what we can see, it's weed pressure. Reply if you have questions.");
+    expect(stripQuotePitch("From what we can see, it's weed pressure. Reply if you have questions."))
+      .toBe("From what we can see, it's weed pressure. Reply if you have questions.");
+    expect(stripQuotePitch('')).toBe('Reply if you have questions.');
   });
 });

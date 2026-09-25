@@ -535,8 +535,8 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
   const flags = parseFlags(draft.flags);
   if (flags.origin !== 'photo_triage') return { blocked: false };
   let verdict;
+  const { recheckDraftOffer, stripQuotePitch } = require('../services/photo-triage-opportunity');
   try {
-    const { recheckDraftOffer } = require('../services/photo-triage-opportunity');
     verdict = await recheckDraftOffer({ customerId: draft.customer_id, flags });
   } catch (err) {
     logger.warn(`[admin-drafts] photo-triage offer recheck failed for draft ${draft.id} (code=${err?.code || 'none'})`);
@@ -555,10 +555,10 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
     return { blocked: true };
   }
   // Downgrade the stored gauge verdict on the released row so the owner's
-  // rewrite (revise) passes the recheck instead of being held forever
-  // (pre-push audit r6): mode → advise, the no-pitch reason recorded, the
-  // stale owner-only quote dropped. The customer text is untouched — the
-  // owner rewrites it.
+  // next click passes the recheck instead of being held forever (pre-push
+  // audit r6): mode → advise, the no-pitch reason recorded, the stale
+  // owner-only quote dropped, AND the pitch sentence replaced in the draft
+  // text itself — a plain second Approve must not send the stale ask.
   const heldReason = verdict.blocked === 'owned' ? 'already_owned'
     : verdict.blocked === 'unavailable' ? 'offer_unavailable' : 'quote_needs_review';
   const priorReasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
@@ -569,14 +569,18 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
     quote: null,
     offer_recheck_held_at: new Date().toISOString(),
   };
-  await releaseDraftClaim(draft.id, { ...releaseFields, flags: JSON.stringify(heldFlags) });
+  await releaseDraftClaim(draft.id, {
+    ...releaseFields,
+    flags: JSON.stringify(heldFlags),
+    draft_response: stripQuotePitch(draft.draft_response),
+  });
   const why = verdict.blocked === 'owned'
     ? `the customer now has ${verdict.family} on their plan`
     : verdict.blocked === 'unavailable'
       ? `ownership of ${verdict.family} could not be confirmed (live plan rate or lookup failure)`
       : `${verdict.family} can no longer be priced for this customer`;
   res.status(409).json({
-    error: `Photo-triage draft held: ${why} — rewrite it without the quote ask, then approve.`,
+    error: `Photo-triage draft held: ${why} — the quote ask was removed from the draft; review the new copy, then approve.`,
     code: 'PHOTO_TRIAGE_OFFER_STALE',
   });
   return { blocked: true };

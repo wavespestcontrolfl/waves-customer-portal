@@ -195,6 +195,9 @@ describe('approve — photo-triage offer recheck wiring', () => {
     expect(flags.opportunity_reasons).toContain('already_owned');
     expect(flags.quote).toBeNull();
     expect(flags.offer_recheck_held_at).toBeTruthy();
+    // The pitch sentence is gone from the text a second Approve would send.
+    expect(release.payload.draft_response).toBe('Thanks for the photo. Reply if you have questions.');
+    expect(release.payload.draft_response).not.toMatch(/quote/i);
   });
 
   test('figure drifted → 409 PHOTO_TRIAGE_REPRICED and the released row carries the refreshed owner-only figure', async () => {
