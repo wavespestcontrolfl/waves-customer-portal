@@ -197,8 +197,17 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Your balance due is on the portal',
     'Your old invoice was paid, but please pay your new invoice here',
     'Payment received for March. The April invoice is due Friday',
+    'Your old invoice was paid, please pay your new invoice here',
+    'Last month went through and the new invoice is due Friday',
+    'Old balance cleared - please pay the new one here',
   ])('a hand-typed payment request is not a closure: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(false);
+  });
+  test.each([
+    'Your invoice has been paid, no balance due. Thanks!',
+    'Payment received and applied, you are all set',
+  ])('a hand-typed settlement is still a closure: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
   });
   test('a hand-typed receipt link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Your receipt: https://example.invalid/receipt/abc')] }).eligible).toBe(true);

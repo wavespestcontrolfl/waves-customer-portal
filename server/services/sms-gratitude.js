@@ -107,9 +107,9 @@ const manualCourtesy = (text, manualReply) => manualReply
   && (isManualCourtesy(text) || isCourtesyOnly(text, { awaitingAnswer: false }));
 // A hand-typed text closes the exchange unless it asks for money; a typed
 // "your payment has been received" is a settlement, not a request.
-// Judged clause by clause: "your old invoice was paid, but please pay the
-// new one here" still asks for money.
-const asksForMoney = text => String(text || '').split(/[.!?;\n]+|\b(?:but|however|although|though)\b/i)
+// Judged clause by clause: "your old invoice was paid, please pay the new
+// one here" still asks for money. Splitting finer only refuses more.
+const asksForMoney = text => String(text || '').split(/[.,!?;:\n]+|\s[-–—]\s|\b(?:but|however|although|though|and|also|plus|then)\b/i)
   .some(clause => MANUAL_PAYMENT_REQUEST_RE.test(clause) && !PAYMENT_SETTLED_RE.test(clause));
 const manualClosure = (text, manualReply) => manualReply && !asksForMoney(text);
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
