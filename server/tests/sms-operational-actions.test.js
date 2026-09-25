@@ -864,6 +864,10 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(paid(1), lisa)).toBe(false);
     expect(admissibleWitness(paid(1), { kind: 'other', description: 'Please update my card on file' })).toBe(false);
     expect(admissibleWitness(paid(1), { kind: 'other', description: 'Set up autopay for me' })).toBe(false);
+    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Can you change the card on the account?' })).toBe(false);
+    // Naming the tender is not a method change (Codex r3).
+    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Did my card payment go through?' })).toBe(true);
+    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Was the autopay charged this month?' })).toBe(true);
     const francisco = { kind: 'other', description: 'What is the Zelle number?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
     expect(admissibleWitness(paid(2), francisco)).toBe(true);
     expect(systemEventFulfillment({ records: [paid(2)], failures: [] }, francisco)).toBeNull();
@@ -876,6 +880,8 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Did my payment go through?' })).toBe(true);
     const delivered = (message_type) => ({ type: 'sms', status: 'delivered', message_type, created_at: '2040-03-11T15:00:00Z' });
     expect(admissibleWitness(delivered('appointment_rescheduled'), { kind: 'send_appointment_confirmation' })).toBe(true);
+    // Estimate-acceptance bookings stamp this one (routes/estimate-public.js → send-customer-message).
+    expect(admissibleWitness(delivered('appointment_confirmation'), { kind: 'send_appointment_confirmation' })).toBe(true);
     expect(admissibleWitness(delivered('reschedule_series_confirmation'), { kind: 'send_appointment_confirmation' })).toBe(true);
     expect(admissibleWitness(delivered('reschedule_link_promise'), { kind: 'send_reschedule_link' })).toBe(true);
     expect(admissibleWitness(delivered('reschedule_link_promise'), { kind: 'send_appointment_confirmation' })).toBe(false);

@@ -41,15 +41,16 @@ const REQUIRED_TYPES = {
 // A SENT Gmail label is context only: it is not a delivery receipt.
 const ANSWER_TYPES = ['sms', 'call', 'email_delivery'];
 const HUMAN_SMS_TYPES = ['manual', 'ai_approved', 'ai_revised'];
-// System confirmation sends stamp message_type 'confirmation' (first booking)
-// or 'appointment_rescheduled' / 'reschedule_series_confirmation' (a move);
-// 'appointment_confirmation' is the send's PURPOSE and preference key, never
-// its message_type. The reschedule-link workflow stamps
-// 'reschedule_link_promise' (send-customer-message: original_message_type).
+// System confirmation sends stamp message_type 'confirmation' (booking via
+// appointment-reminders), 'appointment_confirmation' (booking confirmed
+// through estimate acceptance: routes/estimate-public.js passes it as
+// original_message_type, which send-customer-message persists as the
+// message_type) or 'appointment_rescheduled' / 'reschedule_series_confirmation'
+// (a move). The reschedule-link workflow stamps 'reschedule_link_promise'.
 // Codex #4816 r1: a kind that now times out (R5) must admit the production
 // send that answers it, or the deadline bells on finished work.
 const SMS_TYPES = {
-  send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirmation', 'appointment_rescheduled', 'reschedule_series_confirmation'],
+  send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirmation', 'appointment_confirmation', 'appointment_rescheduled', 'reschedule_series_confirmation'],
   send_reschedule_link: [...HUMAN_SMS_TYPES, 'reschedule_link_promise'],
 };
 // Owner ruling 2026-09-24: an "are you still coming" (other) or "call me
@@ -79,8 +80,10 @@ const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|recei
 // A request to change HOW the customer pays (Lisa Reed: "separate the
 // charges under two payment methods", "update my card", "set up autopay") is
 // not answered by money landing, so a payment is never a witness for it
-// (Codex #4816 r2). 'card' left PAYMENT_MENTION for the same reason.
-const METHOD_CHANGE = /\b(?:method|methods|card|split|separate|update|change|switch|set ?up|cancel|remove|add)\b/i;
+// (Codex #4816 r2). Only a change VERB near a tender/method word counts:
+// "did my card payment go through?" merely names the tender and stays a
+// payment question (Codex r3).
+const METHOD_CHANGE = /\b(?:payment methods?|split|separate|(?:update|change|switch|replace|remove|add|set ?up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:card|method|autopay|auto ?pay|payment|billing))\b/i;
 function askText(commitment) {
   const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((item) => item?.quote || '');
   return [commitment.description || '', ...quotes].join(' ');
