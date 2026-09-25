@@ -64,7 +64,7 @@ describe('service library list — new-appointment picker (codex r11)', () => {
           select() { return this; }, from(t) { calls.exists.push(t); return this; },
           whereRaw(sql) { calls.exists.push(sql); return this; },
           where(col, val) { calls.exists.push([col, val]); return this; },
-          whereNot() { return this; },
+          whereNotIn(col, vals) { calls.exists.push([col, 'NOT IN', vals]); return this; },
         };
         fn.call(inner);
         return this;
@@ -101,6 +101,10 @@ describe('service library list — new-appointment picker (codex r11)', () => {
     expect(calls.notIn).toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
     expect(calls.exists).toEqual(expect.arrayContaining([
       'scheduled_services', 'scheduled_services.service_id = services.id', ['scheduled_services.customer_id', CUSTOMER],
+      // Live recurring visits only — completed/skipped history does not
+      // grandfather (codex r13).
+      ['scheduled_services.status', 'NOT IN', expect.arrayContaining(['completed', 'cancelled', 'skipped'])],
+      ['scheduled_services.is_recurring', true],
     ]));
   });
 
@@ -121,28 +125,30 @@ describe('new-appointment write boundary (codex r12)', () => {
   const CUSTOMER = '5a3f2c1d-9b8e-4f6a-a1b2-c3d4e5f60789';
   const OTHER = '0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e';
 
-  const run = async ({ customerId, serviceIds, heldBy = [] }) => {
+  // heldBy: customers with a LIVE recurring visit on the retired row.
+  const run = async ({ customerId, serviceIds, serviceTypes, heldBy = [] }) => {
     const db = require('../models/db');
     db.mockImplementation((table) => {
       const q = { table, filters: {} };
       const b = {
-        whereIn(col, vals) { q.filters[col] = vals; return this; },
-        where(col, val) { q.filters[col] = [val]; return this; },
-        whereNot() { return this; },
+        whereIn(col, vals) { q.filters[col.replace('scheduled_services.', '')] = vals; return this; },
+        where(col, val) { q.filters[col.replace('scheduled_services.', '')] = [val]; return this; },
+        whereNotIn(col, vals) { q.filters[`not:${col.replace('scheduled_services.', '')}`] = vals; return this; },
         distinct() { return this; },
         select() {
-          const rows = [{ id: RETIRED_ID, service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care' }]
-            .filter((r) => q.filters.id.includes(r.id) && q.filters.service_key.includes(r.service_key));
+          const rows = [{ id: RETIRED_ID, service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care', short_name: 'Quarterly T&S' }]
+            .filter((r) => q.filters.service_key.includes(r.service_key));
           return Promise.resolve(rows);
         },
         pluck() {
-          return Promise.resolve(heldBy.includes(q.filters.customer_id[0]) ? [RETIRED_ID] : []);
+          const live = q.filters.is_recurring?.[0] === true && (q.filters['not:status'] || []).includes('completed');
+          return Promise.resolve(live && heldBy.includes(q.filters.customer_id[0]) ? [RETIRED_ID] : []);
         },
       };
       return b;
     });
     const { retiredServicesNotHeldBy } = require('../services/service-library');
-    return retiredServicesNotHeldBy({ customerId, serviceIds });
+    return retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes });
   };
 
   test('refuses the retired row for a customer not on the plan', async () => {
@@ -160,6 +166,15 @@ describe('new-appointment write boundary (codex r12)', () => {
     db.mockClear();
     expect(await require('../services/service-library').retiredServicesNotHeldBy({ customerId: OTHER, serviceIds: [null] })).toEqual([]);
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('free-text bookings match the retired row by exact name, never by substring (codex r13)', async () => {
+    const ids = async (serviceTypes) => (await run({ customerId: OTHER, serviceTypes })).map((r) => r.id);
+    expect(await ids(['  quarterly tree & SHRUB care '])).toEqual([RETIRED_ID]);
+    expect(await ids(['Quarterly T&S'])).toEqual([RETIRED_ID]);
+    expect(await ids(['tree shrub quarterly'])).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub Care', 'Quarterly Tree & Shrub Care visit'])).toEqual([]);
+    expect(await run({ customerId: CUSTOMER, serviceTypes: ['Quarterly T&S'], heldBy: [CUSTOMER] })).toEqual([]);
   });
 
   test('sellable picker results flag the retired row', async () => {

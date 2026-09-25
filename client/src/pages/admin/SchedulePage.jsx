@@ -4237,7 +4237,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#fff",
                 }}
               >
-                {serviceGroups.map((group) => {
+                {serviceGroups.map((rawGroup) => {
+                  // Retired-for-sale rows (quarterly T&S) stay listed only as
+                  // this visit's own current service; the server refuses a
+                  // switch to one for a customer not on that plan.
+                  const group = {
+                    ...rawGroup,
+                    items: rawGroup.items.filter(
+                      (svc) => !svc.retiredForSale || (svc.serviceKey && svc.serviceKey === service.serviceKey),
+                    ),
+                  };
+                  if (!group.items.length) return null;
                   const isOpen = expandedCategory === group.category;
                   return (
                     <div key={group.category} style={{ marginBottom: 4 }}>

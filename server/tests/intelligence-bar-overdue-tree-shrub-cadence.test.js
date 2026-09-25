@@ -64,6 +64,17 @@ test('not-yet-due longer-cadence rows cannot crowd an overdue 6-week customer ou
   expect(result.overdue_customers.map((c) => c.id)).toEqual(['six-week-due']);
 });
 
+test('the active recurring plan beats completed history (plan switch)', async () => {
+  db.__state.rows = [
+    // Quarterly history, now on the 9x plan: due at 42 days, not 90.
+    { ...row('switched-to-9x', 'Quarterly Tree & Shrub Care Service', 50), active_plan_service_type: 'Every 6 Weeks Tree & Shrub Care Service' },
+    // 9x history, now on bi-monthly: not due until 60.
+    { ...row('switched-to-6x', 'Every 6 Weeks Tree & Shrub Care Service', 50), active_plan_service_type: 'Bi-Monthly Tree & Shrub Care Service' },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['switched-to-9x', 42]]);
+});
+
 test('other categories keep their fixed interval', async () => {
   db.__state.rows = [{ ...row('pest', 'Quarterly Pest Control Service', 100) }];
   const result = await executeTool('find_overdue_customers', { service_category: 'pest' });

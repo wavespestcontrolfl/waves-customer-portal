@@ -540,6 +540,7 @@ async function queryCustomers(input, readCustomerIds = []) {
 
 
 async function findOverdueCustomers(input) {
+  const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
   const { service_category, overdue_days = 0, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 50, 200);
 
@@ -552,7 +553,9 @@ async function findOverdueCustomers(input) {
     termite: 365,    // annual
   };
   // T&S runs at the customer's own cadence (6x default, 9x upsell,
-  // grandfathered 4x) — read from their latest T&S service_type.
+  // grandfathered 4x) — read from their ACTIVE recurring T&S plan, falling
+  // back to their latest completed T&S service_type (codex r13: history lags
+  // a plan switch until the first new-cadence visit completes).
   const treeShrubIntervalDays = (serviceType) => {
     const t = String(serviceType || '').toLowerCase();
     if (/quarterly/.test(t)) return 90;
@@ -590,6 +593,7 @@ async function findOverdueCustomers(input) {
         'customers.monthly_rate', 'customers.active',
         db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) as last_service_date", [patterns[cat]]),
         db.raw("(SELECT service_type FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ? ORDER BY service_date DESC LIMIT 1) as last_service_type", [patterns[cat]]),
+        db.raw(`(SELECT service_type FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND service_type ~* ? AND is_recurring = true AND status NOT IN (${TERMINAL_STATUSES.map(() => '?').join(', ')}) ORDER BY scheduled_date ASC LIMIT 1) as active_plan_service_type`, [patterns[cat], ...TERMINAL_STATUSES]),
         db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ~* ?) as next_scheduled", [patterns[cat]]),
       )
       .where('customers.active', true)
@@ -612,7 +616,7 @@ async function findOverdueCustomers(input) {
       const daysSince = c.last_service_date
         ? Math.floor((Date.now() - new Date(c.last_service_date)) / 86400000)
         : null;
-      const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.last_service_type) : baseFreq;
+      const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type) : baseFreq;
       if (daysSince != null && daysSince < freq + overdue_days) continue;
 
       results.push({
@@ -2335,6 +2339,14 @@ async function createAppointment(input, actionContext = {}) {
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
+  // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
+  // already on that plan — the shared admin write gate (codex r13 on #4786).
+  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
+    customerId: customer_id, serviceTypes: [service_type],
+  });
+  if (notHeldRetired.length) {
+    return { error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan — nothing was booked.` };
+  }
   // Same live-customer bar as update_customer (GH r9 P1): a profile
   // merged/soft-deleted while the card was pending must not receive a new
   // appointment after its records were repointed.

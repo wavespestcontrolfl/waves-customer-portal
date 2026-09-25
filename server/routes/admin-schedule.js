@@ -48,6 +48,7 @@ const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, atta
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
+const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
@@ -7095,6 +7096,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
       customerId,
       serviceIds: [serviceId, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.serviceId) : [])],
+      serviceTypes: serviceId ? [] : [serviceType],
     });
     if (notHeldRetired.length) {
       return res.status(409).json({
@@ -12294,6 +12296,30 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           new Error('The total changed while saving — review the new total and save again.'),
           { statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'PREVIEW_TOTAL_DRIFT' },
         );
+      }
+    }
+    // Same retired-for-sale gate as POST / (codex r13 on #4786), on the
+    // catalog ids this save ADDS — the resolved primary service and any
+    // add-on line not already on the visit. A grandfathered visit that keeps
+    // its own service is never re-checked.
+    const postedCatalogIds = [updates.service_id, ...(Array.isArray(replaceAddons) ? replaceAddons.map((l) => l?.serviceId) : [])]
+      .filter(Boolean);
+    if (postedCatalogIds.length) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_id');
+      if (current) {
+        const currentAddonIds = await db('scheduled_service_addons')
+          .where({ scheduled_service_id: req.params.id }).pluck('service_id');
+        const onVisit = new Set([current.service_id, ...(currentAddonIds || [])].filter(Boolean).map(String));
+        const added = postedCatalogIds.filter((id) => !onVisit.has(String(id)));
+        const notHeldRetired = added.length
+          ? await require('../services/service-library').retiredServicesNotHeldBy({ customerId: current.customer_id, serviceIds: added })
+          : [];
+        if (notHeldRetired.length) {
+          return res.status(409).json({
+            error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+            code: 'RETIRED_SERVICE_NOT_SELLABLE',
+          });
+        }
       }
     }
     const addonsReplaced = Array.isArray(replaceAddons);
@@ -22247,6 +22273,9 @@ router.get('/services-dropdown', async (req, res, next) => {
             serviceKey: s.service_key || null,
             serviceCategory: s.category || null,
             excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key),
+            // Pickers hide it (the edit dialog keeps it only as the visit's
+            // current service); the write routes refuse it for non-holders.
+            ...(RETIRED_SALE_SERVICE_KEYS.has(s.service_key) ? { retiredForSale: true } : {}),
           });
         }
         groups = Object.values(byCategory);

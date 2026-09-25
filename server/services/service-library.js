@@ -326,10 +326,10 @@ async function getServices({ category, billingType, isActive, isArchived, includ
       this.whereNull('service_key').orWhereNotIn('service_key', retiredKeys);
       if (customerId) {
         this.orWhereExists(function () {
-          this.select(db.raw('1')).from('scheduled_services')
-            .whereRaw('scheduled_services.service_id = services.id')
-            .where('scheduled_services.customer_id', customerId)
-            .whereNot('scheduled_services.status', 'cancelled');
+          whereCustomerHoldsService(
+            this.select(db.raw('1')).from('scheduled_services').whereRaw('scheduled_services.service_id = services.id'),
+            customerId,
+          );
         });
       }
     });
@@ -377,27 +377,46 @@ async function getServices({ category, billingType, isActive, isArchived, includ
   return { services, total: parseInt(countResult.total, 10), limit: safeLimit, offset: safeOffset };
 }
 
+// The one "customer is still on this (retired) plan" test: a live recurring
+// visit on the service — waveguard-existing-services' active-recurring
+// predicate (TERMINAL_STATUSES + is_recurring). A completed, skipped or
+// one-off history row does not grandfather anyone (codex r13 on #4786).
+function whereCustomerHoldsService(qb, customerId) {
+  const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  return qb
+    .where('scheduled_services.customer_id', customerId)
+    .whereNotIn('scheduled_services.status', TERMINAL_STATUSES)
+    .where('scheduled_services.is_recurring', true);
+}
+
 /**
- * Write-boundary twin of getServices' sellable exception: of the given
- * service ids, the retired-for-sale rows this customer has NO non-cancelled
- * visits on (i.e. would be a new sale). Empty array = booking allowed.
+ * Write-boundary twin of getServices' sellable exception, shared by every
+ * booking write (create, edit): of the given service ids, the
+ * retired-for-sale rows this customer does not hold (i.e. would be a new
+ * sale). Empty array = booking allowed.
  */
-async function retiredServicesNotHeldBy({ customerId, serviceIds } = {}) {
-  const ids = [...new Set((serviceIds || []).filter((id) => UUID_RE.test(String(id || ''))).map(String))];
-  if (!ids.length) return [];
+async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes } = {}) {
+  const ids = new Set((serviceIds || []).filter((id) => UUID_RE.test(String(id || ''))).map(String));
+  // Free-text bookings (Intelligence Bar, lead booking without a catalog
+  // pick): exact key / name / short_name only, the first tier of
+  // resolveServiceType — a partial match would refuse unrelated services.
+  const names = new Set((serviceTypes || [])
+    .filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().toLowerCase()));
+  if (!ids.size && !names.size) return [];
   const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
-  const retired = await db('services')
-    .whereIn('id', ids)
+  const retiredRows = await db('services')
     .whereIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
-    .select('id', 'service_key', 'name');
+    .select('id', 'service_key', 'name', 'short_name');
+  const lower = (v) => String(v || '').trim().toLowerCase();
+  const retired = (Array.isArray(retiredRows) ? retiredRows : []).filter((r) => ids.has(String(r.id))
+    || names.has(lower(r.name)) || (r.short_name && names.has(lower(r.short_name)))
+    || [...names].some((n) => n.replace(/\s+/g, '_') === r.service_key));
   if (!retired.length) return [];
   const held = customerId && UUID_RE.test(String(customerId))
-    ? await db('scheduled_services')
-      .whereIn('service_id', retired.map((r) => r.id))
-      .where('customer_id', String(customerId))
-      .whereNot('status', 'cancelled')
-      .distinct('service_id')
-      .pluck('service_id')
+    ? await whereCustomerHoldsService(
+      db('scheduled_services').whereIn('scheduled_services.service_id', retired.map((r) => r.id)),
+      String(customerId),
+    ).distinct('scheduled_services.service_id').pluck('scheduled_services.service_id')
     : [];
   const heldSet = new Set(held.map(String));
   return retired.filter((r) => !heldSet.has(String(r.id)));
