@@ -870,6 +870,11 @@ describe('fulfillment proof', () => {
     // Codex #4816 r7: bare "split"/"separate" describe a payment, not a method change.
     expect(admissibleWitness(paid, { kind: 'other', description: 'I split the payment into two charges; did both payments go through?' })).toBe(true);
     expect(admissibleWitness(paid, { kind: 'other', description: 'Did you receive the separate payment?' })).toBe(true);
+    // Codex #4816 r11: naming the payment method is a settlement question, not a change request.
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Did that payment method work?' })).toBe(true);
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Was this payment method charged?' })).toBe(true);
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Can you bill this across two cards?' })).toBe(false);
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Please change my payment method' })).toBe(false);
   });
 
   test('Codex #4816 r7: a cancellation after the text answers a cancel ask for the model only; it never closes "still coming?"', () => {

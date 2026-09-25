@@ -25,7 +25,8 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 // 4: R1–R3 witness rules (#4816) — bumped so cached invalid_witness checks re-ground.
 // 5: payments are model-only evidence; cancellations answer cancel asks (#4816 r7).
 // 6: no no-model close at all; payer-billed money is not the customer's (#4816 r10).
-const FULFILLMENT_POLICY = 6;
+// 7: a bare "payment method" no longer makes a payment inadmissible (#4816 r11).
+const FULFILLMENT_POLICY = 7;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -97,8 +98,10 @@ const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'a
 // tender/method word counts, "did my card payment go through?" merely names
 // the tender — and money going the OTHER way (refund, dispute, chargeback).
 // Bare "split"/"separate" are not here: "did the separate payment go
-// through?" describes a payment; the model weighs those (r7).
-const NOT_ANSWERED_BY_PAYMENT = /\b(?:payment methods?|(?:update|change|switch|replace|remove|add|set ?up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:card|method|autopay|auto ?pay|payment|billing)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/i;
+// through?" describes a payment; the model weighs those (r7). Nor is a bare
+// "payment method" ("did that payment method work?" is a settlement
+// question, r11): billing across TWO methods/cards is the split request.
+const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set ?up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:card|method|autopay|auto ?pay|payment|billing)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/i;
 function askText(commitment) {
   const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((item) => item?.quote || '');
   return [commitment.description || '', ...quotes].join(' ');
