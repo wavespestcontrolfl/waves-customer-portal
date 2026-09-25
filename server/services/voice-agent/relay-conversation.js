@@ -48,9 +48,14 @@
  * run: one whole utterance per Twilio text frame, sent only after
  * `finalMessage()` resolves. 'stream' sends sentence-complete chunks as
  * `stream.on('text', …)` deltas arrive, holding any sentence that carries an
- * amount, a date/time, a negation, or a commitment verb until the full
- * reply is known — see relay-stream-renderer.js for the chunking/hold policy
- * and docs/conversationrelay-booking-plan.md for the narrative.
+ * amount, a date/time, a negation, or a commitment-or-success claim (an
+ * explicit verb like "booked", or a phrase like "you're all set" that
+ * asserts the same outcome) until the full reply is known — and, belt-and-
+ * braces, stops flushing the instant any tool_use content block starts
+ * streaming. Every progressive flush is also gated, once per round, on the
+ * same late-supersession recheck the block path runs immediately before
+ * speaking. See relay-stream-renderer.js for the chunking/hold policy and
+ * docs/conversationrelay-booking-plan.md for the narrative.
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
@@ -1345,9 +1350,19 @@ class RelayConversation {
    * "resurface" on a later round, reconnect, or transfer — see the file
    * header). `signal` is that round's own AbortController.signal, captured
    * once: the generation guard every send below checks.
+   *
+   * `gate` / `gateQueue` / `gateOpen` / `withheld` back the late-supersession
+   * recheck (`_gateFirstFlush`): the block renderer re-proves the session's
+   * claim IMMEDIATELY BEFORE SPEAKING (a reconnect can take the CallSid claim
+   * mid-round); streaming's first flushable sentence starts that SAME check
+   * once per round, queues anything ready to flush while it is in flight,
+   * and either releases the queue (in order) or withholds the whole round.
    */
   _newStreamState(signal) {
-    return { signal, buffer: '', holding: false, entry: null, closed: false };
+    return {
+      signal, buffer: '', holding: false, entry: null, closed: false,
+      gate: null, gateQueue: [], gateOpen: false, withheld: false,
+    };
   }
 
   /**
@@ -1402,12 +1417,13 @@ class RelayConversation {
 
   /**
    * One `stream.on('text', …)` delta. Buffers until a complete sentence is
-   * available, flushes every sentence that does not need to be held, and —
-   * the moment one DOES need holding — stops flushing for the rest of the
-   * round: that sentence and everything streamed after it accumulate in
-   * `state.buffer` untouched, released only at finalize (see the round loop)
-   * once finalMessage() and the write-tool check have cleared it. See
-   * relay-stream-renderer.js for the chunking/hold policy itself.
+   * available, routes every sentence that does not need to be held through
+   * `_queueOrFlush` (see below), and — the moment one DOES need holding —
+   * stops flushing for the rest of the round: that sentence and everything
+   * streamed after it accumulate in `state.buffer` untouched, released only
+   * at finalize (see the round loop) once finalMessage() and the write-tool
+   * check have cleared it. See relay-stream-renderer.js for the
+   * chunking/hold policy itself.
    */
   _onStreamTextDelta(state, delta, stat) {
     if (!state || state.closed || state.signal.aborted) return;
@@ -1421,8 +1437,57 @@ class RelayConversation {
         state.holding = true;
         return;
       }
-      this._flushStreamChunk(state, sentence, stat, false);
+      this._queueOrFlush(state, sentence, stat, false);
     }
+  }
+
+  /**
+   * The gate in front of a round's FIRST progressive flush: the same
+   * late-supersession recheck the block renderer runs immediately before
+   * `say()` ("a reconnect can take the claim mid-round, and this socket
+   * would then speak from cached account context"). Started at most ONCE
+   * per round (idempotent — a call while `state.gate` is already set just
+   * returns it) and cached on `state.gate` so `_finalizeStreamedRound` can
+   * await the same check if `finalMessage()` resolves before it settles.
+   * `.catch(() => false)` matches the block path's exact semantics: a check
+   * that itself errors is treated as NOT superseded, never as a reason to
+   * withhold speech on its own.
+   */
+  _gateFirstFlush(state, stat) {
+    if (state.gate) return state.gate;
+    state.gate = this._sessionSuperseded().catch(() => false).then((superseded) => {
+      // A barge-in or a round that already closed while this check was in
+      // flight — the queue belongs to a stale generation; drop it silently,
+      // never flush late text that arrives after abort/close.
+      if (state.closed || state.signal.aborted) return;
+      if (superseded) {
+        logger.warn(`[voice-relay] stream renderer speech withheld — session superseded mid-round callSid=${this.callSid}`);
+        state.withheld = true;
+        state.gateQueue = [];
+        return;
+      }
+      state.gateOpen = true;
+      const queued = state.gateQueue;
+      state.gateQueue = [];
+      for (const item of queued) this._flushStreamChunk(state, item.sentence, stat, item.isLast);
+    });
+    return state.gate;
+  }
+
+  /**
+   * Every progressive flush candidate passes through here rather than going
+   * straight to `_flushStreamChunk`, so the FIRST one in a round always
+   * clears the supersession gate first (see `_gateFirstFlush`) — once the
+   * gate has opened (`state.gateOpen`), later sentences in the same round
+   * flush immediately, exactly one check per round, not one per sentence.
+   * `state.withheld` (gate resolved superseded) is a permanent no-op for
+   * the rest of the round.
+   */
+  _queueOrFlush(state, sentence, stat, isLast) {
+    if (state.withheld) return;
+    if (state.gateOpen) { this._flushStreamChunk(state, sentence, stat, isLast); return; }
+    state.gateQueue.push({ sentence, isLast });
+    this._gateFirstFlush(state, stat);
   }
 
   /**
@@ -1440,9 +1505,15 @@ class RelayConversation {
    * further speech (the round loop's own `return` path), else
    * `{ assistantMessage }` — already pushed onto `this.messages` and, when
    * something was said, wired as `entry.historyMessage` for the barge-in
-   * history rewrite (`_noteInterruptForModel`) to find.
+   * history rewrite (`_noteInterruptForModel`) to find. If the round's own
+   * progressive-flush gate (`_gateFirstFlush`) is still settling when
+   * `finalMessage()` resolves, it is awaited here first — the gate's own
+   * callback is what flushes any queued sentences, so finalize must never
+   * read `streamState.entry` before that has had its chance to run.
    */
   async _finalizeStreamedRound(streamState, msg, text, hasPendingWrite, stat) {
+    if (streamState.gate) await streamState.gate;
+    if (streamState.withheld) return { withheld: true }; // the progressive gate already found this superseded
     const sent = streamState.entry ? streamState.entry.planned : '';
     const reconciled = !sent || text.startsWith(sent);
     if (!reconciled) {
@@ -2458,7 +2529,18 @@ class RelayConversation {
         // opens with tool_use has produced output, and stamping only text
         // would charge the tool's latency to the model (codex r9 P2). The
         // turn keeps its FIRST stamp, not the last round's.
-        stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
+        stream.on?.('streamEvent', (ev) => {
+          if (ev?.type !== 'content_block_start') return;
+          stat.firstTokenAt ??= now();
+          // PR C: the moment ANY tool call starts, stop flushing further
+          // progressive text this round — belt-and-braces alongside the
+          // widened commitment-or-success hold list (relay-stream-renderer.js):
+          // text already streamed before this point has already gone out as
+          // its own content block's deltas (this cannot un-send it), but any
+          // trailing text after a tool_use block waits for finalize, where
+          // the write-tool suppression check applies.
+          if (streamState && ev.content_block?.type === 'tool_use') streamState.holding = true;
+        });
         // PR C: progressive sends — see _onStreamTextDelta for the chunk/hold
         // policy. Only wired when this session pinned the stream renderer;
         // the block path below is otherwise untouched.

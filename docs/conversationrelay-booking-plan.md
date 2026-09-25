@@ -234,10 +234,20 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    just holds a little longer — never a guess.
 2. **Hold a sentence** — never send it progressively — when it contains a
    dollar amount (reusing `eval/voice-relay-spoken-checks`'s
-   `amountMentions`), a date/time expression, a negation, or a commitment
-   verb (booked/scheduled/sent/charged/refunded/confirmed/…). Once one
-   sentence in a round needs holding, every sentence after it in that same
-   round is held too — never reordered, never partially released.
+   `amountMentions`), a date/time expression, a negation, or a
+   **commitment-or-success claim**: an explicit commitment verb
+   (booked/scheduled/sent/charged/refunded/confirmed/reserved/created/
+   completed/done/processed/…) OR a success phrase that asserts the same
+   outcome without one — "you're all set", "taken care of", "got you
+   booked", "on the calendar", "locked in", "I've sent that over", "someone
+   will call you" (`COMMITMENT_OR_SUCCESS_RE`, full list in
+   `relay-stream-renderer.js`). Once one sentence in a round needs holding,
+   every sentence after it in that same round is held too — never
+   reordered, never partially released. Independently, the round loop also
+   stops flushing the instant ANY `tool_use` content block starts streaming
+   (belt-and-braces — text ahead of a tool call has usually already
+   streamed by the time that event fires, so the hold list above is the
+   real guard against a false "you're all set" before a booking tool runs).
 3. **Release the held tail only at `finalMessage()`**, under the exact same
    write-tool suppression check the block renderer already runs
    (`hasPendingWrite` / `WRITE_TOOLS` in `relay-conversation.js`): if the
@@ -246,6 +256,17 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    already flushed before the hold point stays spoken and stays in history,
    so the transcript agrees with what the caller actually heard. If not, the
    held tail is sent as the closing chunk.
+4. **Every progressive flush is gated, once per round**, on the SAME
+   late-supersession recheck the block renderer runs immediately before
+   `say()` (a reconnect can take the CallSid claim mid-round, and the old
+   socket must not speak from cached account context). The round's first
+   flushable sentence starts `_sessionSuperseded()` once and queues
+   whatever else arrives while it is in flight (`_gateFirstFlush` /
+   `_queueOrFlush` in `relay-conversation.js`); once it resolves, the queue
+   releases in order and later sentences in the same round flush
+   immediately (no further checks) — or, if the check finds the session
+   superseded, the round speaks nothing at all and ends through the same
+   superseded end-session path the block renderer's own recheck uses.
 
 Interruption: a barge-in aborts the round's own `AbortController` (unchanged
 mechanism); every send call in the streaming path checks that controller's

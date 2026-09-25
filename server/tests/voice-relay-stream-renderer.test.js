@@ -112,9 +112,35 @@ describe('relay-stream-renderer — pure chunking + hold policy', () => {
     expect(needsHold('I have scheduled that for you.')).toBe(true);
   });
 
+  // A success CLAIM makes the same promise a commitment verb does, without
+  // using one of those verbs — "you're all set" asserts what "booked" does.
+  test.each([
+    ['Great, you are all set.', /all set/i],
+    ["Perfect, you're set.", /you.re set/i],
+    ["You're all taken care of.", /taken care of/i],
+    ["I've got you down for Tuesday.", /got you down/i],
+    ["I've got you booked for that.", /got you booked/i],
+    ['Let me put you down for that.', /put you down/i],
+    ["You're on the calendar.", /on the calendar/i],
+    ["You're on the schedule now.", /on the schedule/i],
+    ['That is locked in.', /locked in/i],
+    ['I have set up your appointment.', /set up/i],
+    ['Your technician is on the way.', /on the way/i],
+    ["I've sent that over to the team.", /I.ve sent/i],
+    ["I've added the note to your file.", /I.ve added/i],
+    ['Someone will call you back shortly.', /someone will call/i],
+    ['That has been reserved for you.', /reserved/i],
+    ['Your ticket has been created.', /created/i],
+    ['That request has been processed.', /processed/i],
+    ['All done on my end.', /done/i],
+  ])('commitment-or-success claim needs holding: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(true);
+  });
+
   test('plain acknowledgement / filler text does not need holding', () => {
     expect(needsHold('Sure, one moment while I look that up.')).toBe(false);
     expect(needsHold('Great question!')).toBe(false);
+    expect(needsHold('Let me check on that for you.')).toBe(false);
   });
 });
 
@@ -263,6 +289,10 @@ describe('stream renderer — full round loop', () => {
     const round = captured[0];
     round.textCb('We handle pest control. '); // flushes
     round.textCb('We also do lawn care. '); // flushes
+    // The first progressive flush of a round is gated on an async
+    // late-supersession recheck (_gateFirstFlush) — let it settle before
+    // the caller can have "heard" anything to barge in over.
+    await flush();
 
     convo.interrupt({ utteranceUntilInterrupt: 'We handle pest control. We also do lawn care.' });
     // A chunk that arrives AFTER the abort must never reach Twilio.
@@ -288,6 +318,7 @@ describe('stream renderer — full round loop', () => {
     await flush();
     const round = captured[0];
     round.textCb('We cover Manatee and Sarasota. ');
+    await flush(); // let the progressive-flush gate settle so this actually sends
     round.reject(new Error('stream disconnected')); // NOT an abort — a genuine mid-stream failure
     await promptPromise;
 
@@ -316,6 +347,7 @@ describe('stream renderer — full round loop', () => {
     await flush();
     const round1 = captured[0];
     round1.textCb('Partial answer to the first question. ');
+    await flush(); // let the progressive-flush gate settle first
     convo.interrupt({ utteranceUntilInterrupt: 'Partial answer to the first question.' });
     await firstPrompt;
     const firstEntry = convo._transcript.find((e) => e.role === 'agent');
@@ -339,5 +371,125 @@ describe('stream renderer — full round loop', () => {
     // round's (interrupted, unrelated) text — no resurfacing across rounds.
     expect(agentEntries[1].planned).toBe('Answer to the second question.');
     expect(agentEntries[1].planned).not.toMatch(/first question/);
+  });
+
+  test('any tool_use content block starting mid-stream stops further progressive flushes (belt-and-braces)', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-s7', from: '+19415551234', send });
+
+    const promptPromise = convo.handlePrompt('what times are open');
+    await flush();
+    const round = captured[0];
+    round.textCb('Let me check that for you. ');
+    await flush(); // flushes via the gate
+    const sentAfterFiller = send.mock.calls.length;
+    expect(sentAfterFiller).toBeGreaterThan(0);
+
+    // A (read) tool call starts mid-stream — belt-and-braces: stop flushing
+    // anything further this round, even though this isn't a write tool.
+    round.streamCb({ type: 'content_block_start', content_block: { type: 'tool_use', name: 'get_availability' } });
+    round.textCb('Trailing text after the tool call. '); // must NOT flush now
+    await flush();
+    expect(send.mock.calls.length).toBe(sentAfterFiller); // no new sends
+
+    round.resolve({
+      content: [
+        { type: 'text', text: 'Let me check that for you. Trailing text after the tool call.' },
+        { type: 'tool_use', id: 't1', name: 'get_availability', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await flush();
+    const round2 = captured[1];
+    expect(round2).toBeTruthy();
+    round2.resolve({ content: [{ type: 'text', text: 'Tuesday at nine works.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    const spoken = send.mock.calls.map(([t]) => t).join('');
+    expect(spoken).toContain('Let me check that for you.');
+    // get_availability is a READ tool (not in WRITE_TOOLS), so the trailing
+    // text is delayed by the belt-and-braces stop, not suppressed — it
+    // still reaches the caller once finalMessage() clears it.
+    expect(spoken).toContain('Trailing text after the tool call.');
+  });
+
+  test('supersession found TRUE at the progressive-flush gate: zero sends, and the existing superseded end-session path runs', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-s8', from: '+19415551234', send, endSession });
+    convo._sessionSuperseded = jest.fn().mockResolvedValue(true);
+
+    const promptPromise = convo.handlePrompt('are you around');
+    await flush();
+    const round = captured[0];
+    round.textCb('Sure, let me check on that. ');
+    round.resolve({ content: [{ type: 'text', text: 'Sure, let me check on that.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    expect(send).not.toHaveBeenCalled(); // nothing was ever spoken
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+    expect(convo._sessionSuperseded).toHaveBeenCalledTimes(1);
+  });
+
+  test('supersession found FALSE: progressive flush proceeds normally, in order', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-s9', from: '+19415551234', send });
+    convo._sessionSuperseded = jest.fn().mockResolvedValue(false);
+
+    const promptPromise = convo.handlePrompt('what areas do you serve');
+    await flush();
+    const round = captured[0];
+    const finalText = 'Sure, let me check on that. We serve the whole county.';
+    round.textCb('Sure, ');
+    round.textCb('let me check on that. ');
+    round.textCb('We serve the whole county.');
+    round.resolve({ content: [{ type: 'text', text: finalText }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    expect(send.mock.calls.map(([t]) => t).join('')).toBe(finalText);
+    expect(convo._sessionSuperseded).toHaveBeenCalled();
+  });
+
+  test('the progressive-flush supersession gate is checked once per round, not once per sentence', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-s10', from: '+19415551234', send });
+    convo._sessionSuperseded = jest.fn().mockResolvedValue(false);
+
+    // A write-tool round: _finalizeStreamedRound's hasPendingWrite branch
+    // never calls _sessionSuperseded itself, so the ONLY call this round can
+    // produce is the progressive-flush gate's — isolating that count cleanly
+    // from the (separate, pre-existing) held-tail recheck.
+    const promptPromise = convo.handlePrompt('book me for tuesday');
+    await flush();
+    const round1 = captured[0];
+    round1.textCb('Sure. '); // sentence 1 — starts the gate
+    round1.textCb('One moment. '); // sentence 2 — queues behind the same gate
+    round1.textCb('Let me check on that. '); // sentence 3 — queues too
+    round1.resolve({
+      content: [
+        { type: 'text', text: 'Sure. One moment. Let me check on that.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await flush();
+    const round2 = captured[1];
+    expect(round2).toBeTruthy();
+    // Empty content on purpose: round 2 has nothing left to say, so its own
+    // (separate, pre-existing) held-tail recheck never triggers — isolating
+    // this assertion to ONLY the progressive-flush gate's call count.
+    round2.resolve({ content: [], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    expect(send.mock.calls.map(([t]) => t).join('')).toBe('Sure. One moment. Let me check on that. ');
+    expect(convo._sessionSuperseded).toHaveBeenCalledTimes(1);
   });
 });

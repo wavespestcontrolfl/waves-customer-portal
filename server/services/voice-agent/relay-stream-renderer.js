@@ -18,21 +18,35 @@
  *      it contains a dollar amount (reusing eval/voice-relay-spoken-checks's
  *      amountMentions — the one regex bank this repo already trusts to
  *      recognize digit and spelled-out amounts, EN + ES), a date/time
- *      expression, a negation, or a commitment verb (booked / scheduled /
- *      sent / charged / refunded / confirmed / ...). Once a sentence is
+ *      expression, a negation, or a COMMITMENT-OR-SUCCESS CLAIM: an explicit
+ *      commitment verb (booked / scheduled / sent / charged / refunded /
+ *      confirmed / ...) OR a success phrase that asserts the same thing
+ *      without one ("you're all set", "taken care of", "got you booked",
+ *      "on the calendar", "I've sent that over", ...) — see
+ *      COMMITMENT_OR_SUCCESS_RE below for the full list. Once a sentence is
  *      held, every sentence after it in the SAME model round is held too —
- *      never reordered, never partially released mid-round.
+ *      never reordered, never partially released mid-round. Independently,
+ *      relay-conversation.js's round loop also stops flushing the moment any
+ *      tool_use content block starts streaming (belt-and-braces for text
+ *      that might follow a tool call, though in practice a tool call's own
+ *      preceding text has usually already streamed by then — the hold list
+ *      above is what actually keeps a false "you're all set" off the air).
  *   3. The held tail is only ever spoken once the round's finalMessage() is
  *      known AND the write-tool suppression check the block renderer already
  *      runs (WRITE_TOOLS / hasPendingWrite in relay-conversation.js) has
  *      cleared it — so a caller can never hear an amount, a date, a
- *      negation, or a stated commitment before the tool call that would make
- *      it true has actually run. This is the "run the same checks the block
- *      path runs on it" step from the brief: today the block renderer's only
- *      pre-speech check IS that write-tool suppression (no per-sentence
- *      semantic grader runs in the live path — voice-relay-spoken-checks is
- *      an offline eval grader, not a live gate), so PR C reuses that exact
- *      check rather than inventing a second, parallel one.
+ *      negation, or a stated commitment/success claim before the tool call
+ *      that would make it true has actually run. This is the "run the same
+ *      checks the block path runs on it" step from the brief: today the
+ *      block renderer's only pre-speech check IS that write-tool suppression
+ *      (no per-sentence semantic grader runs in the live path —
+ *      voice-relay-spoken-checks is an offline eval grader, not a live
+ *      gate), so PR C reuses that exact check rather than inventing a
+ *      second, parallel one.
+ *   4. Every progressive send is also gated, ONCE per round, on the same
+ *      late-supersession recheck the block renderer runs immediately before
+ *      speaking (a reconnect can take the CallSid claim mid-round) — see
+ *      relay-conversation.js's `_gateFirstFlush`.
  */
 
 let _amountMentions = null;
@@ -62,7 +76,30 @@ const DATE_TIME_RE = new RegExp(
   'i',
 );
 
-const COMMITMENT_VERB_RE = /\b(booked|scheduled|re-?scheduled|sent|texted|emailed|charged|refunded|confirmed|cancell?ed|filed|submitted|transferred|saved|logged)\b/i;
+// A COMMITMENT-OR-SUCCESS CLAIM: an explicit commitment verb, OR a success
+// phrase that asserts the same outcome without using one of those verbs
+// ("you're all set" claims exactly what "booked" claims). Deliberately
+// broad — a false hold just delays a safe sentence to finalize (still spoken
+// the same call), where a missed one could speak a completed-action claim
+// before the tool that would make it true has run. See policy note 2 above.
+const COMMITMENT_OR_SUCCESS_RE = new RegExp(
+  '\\b('
+  + 'booked|scheduled|re-?scheduled|sent|texted|emailed|charged|refunded|confirmed|cancell?ed|filed|submitted|'
+  + 'transferred|saved|logged|reserved|created|completed|done|processed'
+  + ')\\b'
+  + '|\\ball set\\b'
+  + "|\\byou[’']re set\\b"
+  + '|\\btaken care of\\b'
+  + '|\\bgot you (?:down|in|scheduled|booked)\\b'
+  + '|\\bput you down\\b'
+  + '|\\bon the (?:calendar|schedule|books)\\b'
+  + '|\\blocked in\\b'
+  + '|\\bset up\\b'
+  + '|\\bon (?:its|the) way\\b'
+  + "|\\bI[’']ve (?:sent|booked|scheduled|added|noted|passed)\\b"
+  + '|\\bsomeone will (?:call|reach|text)\\b',
+  'i',
+);
 
 /**
  * Split a growing buffer into complete sentences (each carrying its own
@@ -91,8 +128,8 @@ function needsHold(sentence) {
   if (amountMentions(t).length) return true;
   if (DATE_TIME_RE.test(t)) return true;
   if (NEGATION_RE.test(t)) return true;
-  if (COMMITMENT_VERB_RE.test(t)) return true;
+  if (COMMITMENT_OR_SUCCESS_RE.test(t)) return true;
   return false;
 }
 
-module.exports = { splitSentences, needsHold, BOUNDARY_RE, NEGATION_RE, DATE_TIME_RE, COMMITMENT_VERB_RE };
+module.exports = { splitSentences, needsHold, BOUNDARY_RE, NEGATION_RE, DATE_TIME_RE, COMMITMENT_OR_SUCCESS_RE };
