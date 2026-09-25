@@ -14,6 +14,13 @@ jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_name, fn) => fn()),
   wasLockSkipped: jest.requireActual('../utils/cron-lock').wasLockSkipped,
 }));
+// The new_lead consultation-booking block — mocked here so the runner's
+// OWN behavior (skip when the placeholder is absent, read metadata.lead_id,
+// splice the result into html/text) is under test, not the block's own
+// eligibility rules (lead-consultation-email-block.test.js's contract).
+jest.mock('../services/lead-consultation-email-block', () => ({
+  buildConsultationEmailBlock: jest.fn(),
+}));
 
 const {
   renderAutomationStepContent,
@@ -21,9 +28,11 @@ const {
   automationSuppressionMatches,
   activeAutomationSuppressionFor,
   sendStep,
+  enrollCustomer,
 } = require('../services/automation-runner');
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
+const { buildConsultationEmailBlock } = require('../services/lead-consultation-email-block');
 
 function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   const q = {};
@@ -585,5 +594,255 @@ describe('advanceEnrollment', () => {
     expect(out).toMatchObject({ sent: true, done: true });
     expect(update.where).toHaveBeenCalledWith({ id: 'enr-1', current_step: 0 });
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', next_send_at: null, current_step: 1 }));
+  });
+});
+
+describe('renderAutomationStepContent — consultation-booking placeholders', () => {
+  test('splices consultationHtml/consultationText into their placeholders', () => {
+    const rendered = renderAutomationStepContent({
+      template: { asm_group: 'service' },
+      htmlBody: '<h2>Hi {{first_name}}</h2>{{consultation_booking}}<h2>What\'s next</h2>',
+      textBody: 'Hi {{first_name}}. {{consultation_booking_text}} Reply with your address.',
+      customer: { first_name: 'Sam', email: 'sam@example.com' },
+      consultationHtml: '<p>3 open slots</p>',
+      consultationText: 'Pick a time: https://example.com/x',
+    });
+    expect(rendered.html).toContain('<p>3 open slots</p>');
+    expect(rendered.text).toContain('Pick a time: https://example.com/x');
+  });
+
+  test('defaults both placeholders to empty when omitted (existing callers, e.g. testSequence)', () => {
+    const rendered = renderAutomationStepContent({
+      template: { asm_group: 'service' },
+      htmlBody: '<h2>Hi</h2>{{consultation_booking}}<p>after</p>',
+      textBody: '{{consultation_booking_text}} after',
+      customer: { email: 'sam@example.com' },
+    });
+    expect(rendered.html).toContain('<h2>Hi</h2><p>after</p>');
+    expect(rendered.text.trim()).toBe('after');
+  });
+});
+
+describe('enrollCustomer — context.leadId persists on automation_enrollments.metadata', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  test('a fresh enrollment stamps metadata.lead_id as a plain JSON insert', async () => {
+    const insertChain = chain({ returning: [{ id: 'enr-new' }] });
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'new_lead', name: 'New Lead', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [
+        chain({ first: undefined }), // no prior enrollment
+        insertChain,
+      ],
+    });
+
+    const result = await enrollCustomer({
+      templateKey: 'new_lead',
+      customer: { email: 'lead@example.com', first_name: 'Sam' },
+      context: { leadId: 'lead-123' },
+    });
+
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-new' });
+    const inserted = insertChain.insert.mock.calls[0][0];
+    expect(inserted.metadata).toBe(JSON.stringify({ lead_id: 'lead-123' }));
+  });
+
+  test('reactivating a prior enrollment MERGES lead_id via jsonb_set — never overwrites the whole metadata object', async () => {
+    const reactivateUpdate = chain();
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-1' }]);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'new_lead', name: 'New Lead', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [
+        chain({ first: { id: 'enr-1', status: 'cancelled', email: 'lead@example.com' } }),
+        reactivateUpdate,
+      ],
+    });
+
+    await enrollCustomer({
+      templateKey: 'new_lead',
+      customer: { email: 'lead@example.com', first_name: 'Sam' },
+      context: { leadId: 'lead-456' },
+    });
+
+    const patch = reactivateUpdate.update.mock.calls[0][0];
+    expect(patch.metadata).toEqual({ sql: expect.stringContaining('jsonb_set'), bindings: [JSON.stringify('lead-456')] });
+    // Table-qualified: the same payload is the ON CONFLICT merge, where a
+    // bare `metadata` is ambiguous with EXCLUDED (Codex #4813 r4 P1).
+    expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
+    expect(patch.metadata.sql).not.toMatch(/\(metadata,/);
+  });
+
+  test('a context-free reactivation DROPS a prior episode\'s lead_id, keeping unrelated metadata (Codex #4813 r1 P2)', async () => {
+    const reactivateUpdate = chain();
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-1' }]);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'new_lead', name: 'New Lead', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [
+        chain({ first: { id: 'enr-1', status: 'completed', email: 'lead@example.com', metadata: { lead_id: 'lead-A', cancel_reason: 'x' } } }),
+        reactivateUpdate,
+      ],
+    });
+
+    await enrollCustomer({ templateKey: 'new_lead', customer: { email: 'lead@example.com' } });
+
+    const patch = reactivateUpdate.update.mock.calls[0][0];
+    expect(patch.metadata).toEqual({ sql: expect.stringContaining("- 'lead_id'"), bindings: undefined });
+    expect(patch.metadata.sql).toContain('automation_enrollments.metadata');
+    expect(patch.metadata.sql).not.toContain('jsonb_set');
+  });
+
+  test('no context.leadId leaves metadata untouched (byte-identical to every pre-existing enroll site)', async () => {
+    const insertChain = chain({ returning: [{ id: 'enr-new' }] });
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'cold_lead', name: 'Cold Lead', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [
+        chain({ first: undefined }),
+        insertChain,
+      ],
+    });
+
+    await enrollCustomer({
+      templateKey: 'cold_lead',
+      customer: { email: 'lead@example.com' },
+    });
+
+    const inserted = insertChain.insert.mock.calls[0][0];
+    expect(inserted.metadata).toBeUndefined();
+  });
+});
+
+describe('sendStepLocked (via sendStep) — consultation-booking block wiring', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    sendgrid.isConfigured = jest.fn(() => true);
+  });
+
+  const ENROLLMENT_WITH_LEAD = {
+    id: 'enrollment-lead-1',
+    status: 'active',
+    template_key: 'new_lead',
+    customer_id: null,
+    current_step: 0,
+    email: 'lead@example.com',
+    first_name: 'Sam',
+    last_name: 'Lead',
+    metadata: { lead_id: 'lead-789' },
+  };
+
+  function queuesForNewLeadSend(step) {
+    return {
+      automation_enrollments: [
+        chain({ first: ENROLLMENT_WITH_LEAD }), // sendStep's `pre` read (no customer_id -> no lock)
+        chain({}), // advanceEnrollment's completion update
+      ],
+      automation_templates: [chain({ first: { key: 'new_lead', name: 'New Lead', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [step] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), chain({})],
+      email_suppressions: [chain({ result: [] })],
+    };
+  }
+
+  test('a step body carrying the placeholder builds the block from metadata.lead_id and splices it in', async () => {
+    buildConsultationEmailBlock.mockResolvedValue({ html: '<p>3 slots</p>', text: 'Pick a time: https://x' });
+    setDbQueues(queuesForNewLeadSend({
+      id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}',
+      html_body: '<h2>Hi {{first_name}}</h2>{{consultation_booking}}',
+      text_body: 'Hi {{first_name}}. {{consultation_booking_text}}',
+      from_email: 'automations@wavespestcontrol.com', enabled: true,
+    }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    const result = await sendStep('enrollment-lead-1');
+
+    expect(result.sent).toBe(true);
+    expect(buildConsultationEmailBlock).toHaveBeenCalledWith({ leadId: 'lead-789', recipientEmail: 'lead@example.com' });
+    const sentArgs = sendgrid.sendOne.mock.calls[0][0];
+    expect(sentArgs.html).toContain('<p>3 slots</p>');
+    expect(sentArgs.text).toContain('Pick a time: https://x');
+  });
+
+  test('a testRecipient send checks the block against the ACTUAL recipient, not the enrollment address', async () => {
+    buildConsultationEmailBlock.mockResolvedValue({ html: '', text: '' });
+    setDbQueues(queuesForNewLeadSend({
+      id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}',
+      html_body: '<h2>Hi {{first_name}}</h2>{{consultation_booking}}',
+      text_body: 'Hi {{first_name}}. {{consultation_booking_text}}',
+      from_email: 'automations@wavespestcontrol.com', enabled: true,
+    }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-t' });
+
+    await sendStep('enrollment-lead-1', { testRecipient: 'operator@wavespestcontrol.com' });
+
+    expect(buildConsultationEmailBlock).toHaveBeenCalledWith({ leadId: 'lead-789', recipientEmail: 'operator@wavespestcontrol.com' });
+    expect(sendgrid.sendOne.mock.calls[0][0].to).toBe('operator@wavespestcontrol.com');
+  });
+
+  test('the spaced form {{ consultation_booking }} still builds the block (Codex #4813 r4 P2)', async () => {
+    buildConsultationEmailBlock.mockResolvedValue({ html: '<p>3 slots</p>', text: 'Pick a time: https://x' });
+    setDbQueues(queuesForNewLeadSend({
+      id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}',
+      html_body: '<h2>Hi {{first_name}}</h2>{{ consultation_booking }}',
+      text_body: 'Hi {{first_name}}. {{ consultation_booking_text }}',
+      from_email: 'automations@wavespestcontrol.com', enabled: true,
+    }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-sp' });
+
+    await sendStep('enrollment-lead-1');
+
+    expect(buildConsultationEmailBlock).toHaveBeenCalledTimes(1);
+    const sentArgs = sendgrid.sendOne.mock.calls[0][0];
+    expect(sentArgs.html).toContain('<p>3 slots</p>');
+    expect(sentArgs.text).toContain('Pick a time: https://x');
+  });
+
+  test('a step body with NO placeholder never calls buildConsultationEmailBlock', async () => {
+    setDbQueues(queuesForNewLeadSend({
+      id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}',
+      html_body: '<h2>Hi {{first_name}}</h2><p>no block here</p>',
+      text_body: 'Hi {{first_name}}. Plain text.',
+      from_email: 'automations@wavespestcontrol.com', enabled: true,
+    }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-2' });
+
+    const result = await sendStep('enrollment-lead-1');
+
+    expect(result.sent).toBe(true);
+    expect(buildConsultationEmailBlock).not.toHaveBeenCalled();
+  });
+
+  test('a placeholder present but no metadata.lead_id renders empty without calling the block builder', async () => {
+    setDbQueues({
+      automation_enrollments: [
+        chain({ first: { ...ENROLLMENT_WITH_LEAD, metadata: {} } }),
+        chain({}),
+      ],
+      automation_templates: [chain({ first: { key: 'new_lead', name: 'New Lead', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{
+        id: 'step-1', step_order: 0, subject: 'Hi',
+        html_body: '<h2>Hi</h2>{{consultation_booking}}',
+        text_body: 'Hi. {{consultation_booking_text}}',
+        from_email: 'automations@wavespestcontrol.com', enabled: true,
+      }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-3' }] }), chain({})],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-3' });
+
+    const result = await sendStep('enrollment-lead-1');
+
+    expect(result.sent).toBe(true);
+    expect(buildConsultationEmailBlock).not.toHaveBeenCalled();
+    const sentArgs = sendgrid.sendOne.mock.calls[0][0];
+    expect(sentArgs.html).not.toContain('{{consultation_booking}}');
   });
 });
