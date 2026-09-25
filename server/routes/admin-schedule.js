@@ -17968,7 +17968,21 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
   const seriesRows = await trx('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date');
-  const counting = countTermVisits(seriesRows, window);
+  // Visits earlier reseeds added count in the term they REPLACED a visit in
+  // (the stamp's term_index), not the term their end-of-series date falls in
+  // (fallback auditor P1 on 81e8083efd): otherwise the next term reads one
+  // visit fuller than it is and a cancel there goes unreplaced.
+  const stamps = await trx('activity_log')
+    .where({ customer_id: parent.customer_id, action: 'recurring_cancel_reseed' })
+    .whereRaw("metadata->>'recurring_parent_id' = ?", [String(parentId)])
+    .select('metadata');
+  const termOverrides = new Map();
+  for (const stamp of stamps) {
+    const meta = typeof stamp.metadata === 'string' ? JSON.parse(stamp.metadata) : (stamp.metadata || {});
+    if (!Number.isInteger(meta.term_index)) continue;
+    for (const id of meta.added_service_ids || []) termOverrides.set(String(id), meta.term_index);
+  }
+  const counting = countTermVisits(seriesRows, window, termOverrides);
   if (counting >= expected) return { skipped: 'term_still_whole', counting, expected };
   // Nothing left upcoming = the plan ended (its last visit was cancelled, or
   // every remaining visit was), not a gap inside a running plan.

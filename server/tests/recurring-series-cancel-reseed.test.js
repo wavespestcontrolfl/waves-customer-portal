@@ -185,6 +185,24 @@ describe('term / count math (pure)', () => {
     expect(termWindowContaining('2026-07-10', planPositionDate(moved)).index).toBe(0);
   });
 
+  test('a visit an earlier reseed added counts in the term it replaced a visit in, not where its date falls (fallback P1)', () => {
+    const term0 = { index: 0, start: '2026-07-10', end: '2027-07-10' };
+    const term1 = { index: 1, start: '2027-07-10', end: '2028-07-10' };
+    const readded = { id: 'readded', scheduled_date: '2027-07-23', status: 'pending', is_recurring: true, recurring_parent_id: 'root' };
+    const term1Visit = { id: 't1', scheduled_date: '2027-09-03', status: 'pending', is_recurring: true, recurring_parent_id: 'root' };
+    const overrides = new Map([['readded', 0]]);
+    // by date it sits in term 1 …
+    expect(countTermVisits([readded, term1Visit], term1)).toBe(2);
+    expect(countTermVisits([readded, term1Visit], term0)).toBe(0);
+    // … with the stamp it counts in term 0 only
+    expect(countTermVisits([readded, term1Visit], term1, overrides)).toBe(1);
+    expect(countTermVisits([readded, term1Visit], term0, overrides)).toBe(1);
+    // a cancelled re-added visit never counts anywhere
+    expect(countTermVisits([{ ...readded, status: 'cancelled' }], term0, overrides)).toBe(0);
+    // ids compare as strings
+    expect(countTermVisits([{ ...readded, id: 42 }], term0, new Map([['42', 0]]))).toBe(1);
+  });
+
   test('hasUpcomingPlanRow reads the plan rows themselves, legacy null-flagged children included', () => {
     const today = '2026-09-25';
     expect(hasUpcomingPlanRow([{ scheduled_date: '2026-10-01', status: 'pending', is_recurring: null, recurring_parent_id: 'root' }], today)).toBe(true);
@@ -326,8 +344,12 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const t = termFn();
     expect(t).toMatch(/termWindowContaining\(parent\.scheduled_date, planPositionDate\(cancelled\)\)/);
     expect(t).toMatch(/'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date'\)/);
-    const count = t.indexOf('countTermVisits(seriesRows, window)');
+    const count = t.indexOf('countTermVisits(seriesRows, window, termOverrides)');
     const whole = t.indexOf("skipped: 'term_still_whole'");
+    // earlier reseeds' stamps pin their added rows to the term they served
+    expect(t).toMatch(/whereRaw\("metadata->>'recurring_parent_id' = \?", \[String\(parentId\)\]\)/);
+    expect(t).toMatch(/termOverrides\.set\(String\(id\), meta\.term_index\)/);
+    expect(t.indexOf("action: 'recurring_cancel_reseed' })")).toBeLessThan(count);
     const guard = t.indexOf("if (!hasUpcomingPlanRow(seriesRows, etDateString())) return { skipped: 'no_live_visits'");
     expect(count).toBeGreaterThan(-1);
     expect(whole).toBeGreaterThan(count);

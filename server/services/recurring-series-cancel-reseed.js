@@ -141,13 +141,19 @@ function planPositionDate(row) {
 
 // Rows (root + children) that still count toward the term: plan rows only
 // (no boosters), not cancelled/rescheduled/skipped/no_show, whose PLAN
-// position falls inside [start, end).
-function countTermVisits(rows, window) {
+// position falls inside [start, end). `termOverrides` (Map of row id →
+// term index) pins a row to the term it REPLACES a visit in: a re-added
+// visit lands at the end of the series — by date usually the NEXT term —
+// and counting it there would let that term read as whole after one of its
+// own visits is cancelled (fallback auditor P1 on 81e8083efd). The stamp
+// each reseed writes records the term it served.
+function countTermVisits(rows, window, termOverrides = null) {
   if (!window) return 0;
   return (rows || []).filter((row) => {
-    if (isBoosterRow(row)) return false;
+    if (isBoosterRow(row) || NON_COUNTING_STATUSES.includes(String(row.status))) return false;
+    if (termOverrides && termOverrides.has(String(row.id))) return termOverrides.get(String(row.id)) === window.index;
     const d = planPositionDate(row);
-    return d && d >= window.start && d < window.end && !NON_COUNTING_STATUSES.includes(String(row.status));
+    return d && d >= window.start && d < window.end;
   }).length;
 }
 
