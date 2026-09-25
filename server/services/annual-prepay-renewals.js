@@ -4732,6 +4732,11 @@ async function createTermForAnnualPrepay({
   coverageCadence = undefined,
   firstVisitDate = undefined,
   firstVisitWindowStart = undefined,
+  // Termite annual plan marker (codex #4819 r7 P1). Written WITH the row so
+  // the refreshTermSnapshot below already sees coverageAwaitsInstallation():
+  // stamped after this returns, the first refresh would seed a signature-day
+  // coverage visit before the installation ever anchors the term.
+  annualPlanVersion = undefined,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -4820,6 +4825,9 @@ async function createTermForAnnualPrepay({
     }
     if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
       updates.first_visit_window_start = normalizedFirstVisitWindowStart;
+    }
+    if (termCols.annual_plan_version && annualPlanVersion && !existing.annual_plan_version) {
+      updates.annual_plan_version = annualPlanVersion;
     }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // When the coverage window is edited (start/end actually supplied), detach
@@ -4977,6 +4985,9 @@ async function createTermForAnnualPrepay({
   }
   if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
     insert.first_visit_window_start = normalizedFirstVisitWindowStart;
+  }
+  if (termCols.annual_plan_version && annualPlanVersion) {
+    insert.annual_plan_version = annualPlanVersion;
   }
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');

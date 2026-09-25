@@ -2181,6 +2181,39 @@ describe('annual prepay renewal helpers', () => {
     expect(insertQuery.insert).not.toHaveBeenCalled();
   });
 
+  test('codex #4819 r7 P1: a term CREATED with annualPlanVersion carries the marker into its first refresh — no signature-day visit is seeded', async () => {
+    const termInsert = query({ returning: [termiteTerm({ status: 'payment_pending' })] });
+    const seedInsert = query({ returning: [{ id: 'never' }] });
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: { annual_plan_version: {}, coverage_service_type: {}, coverage_visit_count: {}, coverage_cadence: {} } }),
+        query({ first: undefined }), // existing lookup by source estimate
+        query({ first: undefined }), // existing lookup by customer + window
+        termInsert,
+        query({ first: termiteTerm({ status: 'payment_pending' }) }), // refreshTermSnapshot term read
+        query({ returning: [termiteTerm({ status: 'payment_pending' })] }),
+      ],
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        ...Array.from({ length: 6 }, () => query({ rows: [] })),
+        seedInsert,
+      ],
+    });
+
+    await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-termite',
+      sourceEstimateId: 'est-termite',
+      termStart: '2026-09-25',
+      coverageServiceType: 'Termite Bait',
+      coverageVisitCount: 1,
+      coverageCadence: 'annual',
+      annualPlanVersion: 'v3',
+    });
+
+    expect(termInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ annual_plan_version: 'v3' }));
+    expect(seedInsert.insert).not.toHaveBeenCalled();
+  });
+
   test('renewal successors and unstamped terms are never deferred — they reach the seeding path', async () => {
     const run = (t) => _private.ensureCoverageRowsForTerm(t, undefined, { today: '2026-01-01' });
     for (const term of [termiteTerm({ renewed_from_term_id: 'term-prior' }), termiteTerm({ annual_plan_version: null })]) {

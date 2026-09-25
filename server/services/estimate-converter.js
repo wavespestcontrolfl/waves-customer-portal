@@ -7498,6 +7498,12 @@ const EstimateConverter = {
               coverageServiceType,
               coverageVisitCount,
               coverageCadence,
+              // Sign-before-pay activation: the plan marker lands WITH the
+              // term so its first refresh already defers coverage seeding
+              // until installation (codex #4819 r7 P1).
+              annualPlanVersion: isTermiteAnnualPlanAccept && activationRun
+                ? (opts.annualPlanVersion || undefined)
+                : undefined,
               conn: database,
             });
             if (!annualPrepayTerm?.id) {

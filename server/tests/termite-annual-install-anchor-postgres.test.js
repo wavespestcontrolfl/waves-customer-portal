@@ -30,6 +30,7 @@ const MIGRATIONS = [
   '20260925000004_termite_annual_activation_attempt',
   '20260925000005_termite_annual_signature_charge',
   '20260925000006_termite_annual_install_anchor',
+  '20260925000007_termite_annual_anchor_attempt',
 ];
 
 async function createScratchDb() {
@@ -175,7 +176,7 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay, refreshTermSnapshot }));
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
     return {
-      sweep: () => reconcileTermiteAnnualActivations({ conn: db }),
+      sweep: (opts = {}) => reconcileTermiteAnnualActivations({ conn: db, ...opts }),
       notifyAdmin,
       createTermForAnnualPrepay,
       refreshTermSnapshot,
@@ -245,6 +246,49 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     expect((await sweep()).anchorScanned).toBe(0);
     expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
     expect((await readTerm(db)).installation_anchored_at).toBeNull();
+  });
+
+  test('a permanently failing anchor rotates out of the bounded batch instead of starving newer installations (codex #4819 r7 P2)', async () => {
+    const { sweep, createTermForAnnualPrepay, db } = load();
+    // The fixture's (older) term fails its window edit every time.
+    await addVisit(db, { scheduled_date: '2026-10-14' });
+    createTermForAnnualPrepay.mockImplementation(async ({ sourceEstimateId, termStart, termEnd, conn }) => {
+      if (sourceEstimateId === ids.estimateId) throw new Error('window edit refused');
+      const [updated] = await conn('annual_prepay_terms').where({ source_estimate_id: sourceEstimateId })
+        .update({ term_start: termStart, term_end: termEnd }).returning('*');
+      return updated;
+    });
+    // A second, newer activated plan with its own completed installation.
+    const otherCustomer = randomUUID();
+    const [otherEstimate] = await db('estimates').insert({
+      customer_id: otherCustomer,
+      annual_plan_activation_status: 'activated',
+      annual_plan_activated_at: new Date('2026-09-26T16:00:00Z'),
+      annual_plan_install_handoff_at: new Date('2026-09-26T16:00:05Z'),
+      annual_plan_signature_charge: JSON.stringify({ status: 'paid' }),
+    }).returning('*');
+    const [otherTerm] = await db('annual_prepay_terms').insert({
+      customer_id: otherCustomer,
+      source_estimate_id: otherEstimate.id,
+      plan_label: 'WaveGuard Bronze Annual Prepay',
+      term_start: '2026-09-26',
+      term_end: '2027-09-26',
+      status: 'active',
+      created_at: new Date('2026-09-26T16:00:00Z'),
+    }).returning('*');
+    await db('scheduled_services').insert({
+      customer_id: otherCustomer, status: 'completed', service_type: 'Termite Bait Station Installation', scheduled_date: '2026-10-20',
+    });
+
+    const first = await sweep({ limit: 1 });
+    expect(first).toMatchObject({ anchorScanned: 1, anchored: 0, anchorFailed: 1 });
+    expect((await readTerm(db)).installation_anchor_attempted_at).toBeInstanceOf(Date);
+
+    const second = await sweep({ limit: 1 });
+    expect(second).toMatchObject({ anchorScanned: 1, anchored: 1 });
+    const other = await db('annual_prepay_terms').where({ id: otherTerm.id }).first();
+    expect(other.installation_anchored_at).toBeInstanceOf(Date);
+    expect(ymd(other.term_start)).toBe('2026-10-20');
   });
 
   test('the schedule\'s "Termite Installation Setup" service anchors; a Bora-Care install does not', async () => {

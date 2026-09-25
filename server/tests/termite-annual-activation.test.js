@@ -185,6 +185,8 @@ describe('termite annual plan activation on sign', () => {
       deferFollowUpReminderRegistration: true,
       deferCommercialScheduleNotification: true,
       skipMembershipEmail: true,
+      // The plan marker rides term creation (codex #4819 r7 P1).
+      annualPlanVersion: 'v3',
     }));
     // convertEstimate ran on the SAME transaction handle this module opened.
     expect(typeof convertEstimate.mock.calls[0][1].database).toBe('function');

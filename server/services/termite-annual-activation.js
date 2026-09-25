@@ -386,6 +386,7 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         // Annual prepay sends no membership email on any accept path.
         skipMembershipEmail: true,
         skipWelcomeSms: acceptContext.skipWelcomeSms === true,
+        annualPlanVersion: contract.annual_plan_version || DEFAULT_ANNUAL_PLAN_VERSION,
       });
 
       // Defense in depth: convertEstimate either throws or returns
@@ -880,11 +881,25 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
           },
         );
       })
-      .orderBy('apt.created_at', 'asc', 'first')
+      // Least-recently-attempted first, never-attempted ahead of all, then
+      // oldest term (codex #4819 r7 P2) — a backlog of permanently failing
+      // anchors (overlap, thrown error) larger than the limit rotates
+      // instead of re-selecting the same oldest batch every day and
+      // starving newer completed installations.
+      .orderBy('apt.installation_anchor_attempted_at', 'asc', 'first')
+      .orderBy('apt.created_at', 'asc')
       .select('apt.id as term_id', 'e.id as estimate_id')
       .limit(limit);
     counts.anchorScanned = candidates.length;
     for (const row of candidates) {
+      // Stamped before the attempt and outside its transaction, so a
+      // failure (thrown or overlap) still rotates the row to the back.
+      try {
+        await conn('annual_prepay_terms').where({ id: row.term_id })
+          .update({ installation_anchor_attempted_at: new Date() });
+      } catch (stampErr) {
+        logger.warn(`[termite-annual-activation] anchor-attempt stamp failed for term ${row.term_id}: ${stampErr.message}`);
+      }
       try {
         const result = await anchorTermToInstallation({ termId: row.term_id, conn });
         if (result?.anchored) {
