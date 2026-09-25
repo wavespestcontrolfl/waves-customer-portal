@@ -220,6 +220,12 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
   ])('a hand-typed send is judged on its text alone, so %s abstains', (_label, body, mediaCount) => {
     expect(evaluateGratitudeContext({ ...context, history: [{ ...manual(body), mediaCount }] }).eligible).toBe(false);
   });
+  test('an earlier hand-typed payment request is still open behind a later closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...manual('Here is your invoice: https://example.invalid/i/abc'), createdAt: '2030-01-10T14:58:00Z' },
+      report,
+    ] }).reason).toBe('earlier_open_context');
+  });
   test('a hand-typed receipt link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Your receipt: https://example.invalid/receipt/abc')] }).eligible).toBe(true);
   });
