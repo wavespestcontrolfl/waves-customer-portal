@@ -1343,13 +1343,17 @@ function otherSentenceIsClean(other, prevNs) {
   if (NOTIFICATION_ROUTING_RE.test(other.ns)) return true;
   const stripped = stripBenignTopicPhrases(other.ns);
   if (sentenceHasSchedulingPredicate(stripped)) return false;
+  // The glue set unlocks ONLY for a sentence whose conditional clauses all
+  // cleared clauseIsBenign (codex round 9, P1 :713 root cause) — a plain
+  // declarative gets the base vocabulary alone, so "I will tell him to okay
+  // it." can never borrow "tell" from the conditional carve-out.
+  let extraSets = [];
   if (turnHasUnresolvedConditional(other.ns)) {
     const clauses = extractConditionalClauses(other.raw);
     if (!clauses.length || !clauses.every((clause) => clauseIsBenign(clause, prevNs))) return false;
+    extraSets = [BENIGN_CONDITIONAL_GLUE_WORDS];
   }
-  return stripped.split(' ').every((tok) => (
-    turnVocabularyTokenOk(tok, [BENIGN_CONDITIONAL_GLUE_WORDS])
-  ));
+  return stripped.split(' ').every((tok) => turnVocabularyTokenOk(tok, extraSets));
 }
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves

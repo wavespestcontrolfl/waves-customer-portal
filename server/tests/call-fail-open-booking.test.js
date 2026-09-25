@@ -1322,6 +1322,14 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  test('Codex round-9 root cause: conditional glue words never unlock for a plain declarative', () => {
+    const turn = "We tell them to make sure it gets figured out. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   test('Codex round-9 regression: "Ask her to approve it." still poisons (same shape, different trigger/party)', () => {
     const turn = "Ask her to approve it. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
