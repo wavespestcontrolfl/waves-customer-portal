@@ -99,6 +99,10 @@ describe('no pixel-watermarked providers (owner directive 2026-09-24)', () => {
     expect(r.model).toBe('gpt-image-2.5-sunburst');
     for (const call of mockFetch.mock.calls) expect(String(call[0])).not.toMatch(/generativelanguage|gemini/i);
   });
+  test('an all-invalid env chain falls back to the caller\'s defaultChain, not the blog default', () => {
+    const gen = new ImageGenerator({ envChain: 'gemini-image-best,not-a-model', defaultChain: 'gpt-image-2,gpt-image-1.5,gpt-image-1', fetchFn: jest.fn() });
+    expect(gen.chain).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+  });
   test('an exhausted OpenAI ladder throws — it never falls through to a watermarking model', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     process.env.GEMINI_API_KEY = 'gem-test';

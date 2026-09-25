@@ -722,15 +722,17 @@ class ImageGenerator {
   // vanWrap: [sideBuffer, rearBuffer] (the two references) | null (never
   // attach) | undefined (load the bundled assets lazily, honoring
   // BLOG_IMAGE_VAN_WRAP).
-  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed(), uniformLogo, vanWrap } = {}) {
+  // defaultChain: the caller's own no-env chain (social keeps an older one);
+  // an envChain with no valid slug falls back to it, never to the blog default.
+  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, defaultChain, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now, allowPixelWatermark = pixelWatermarkAllowed(), uniformLogo, vanWrap } = {}) {
     this.chain = parseChain(envChain, { allowPixelWatermark });
     this._uniformLogo = uniformLogo;
     this._vanWrapRefs = vanWrap;
     this._chainBudgetMs = chainBudgetMs;
     this._now = now;
     if (!this.chain.length) {
-      logger.warn('[image-generator] no valid providers in BLOG_IMAGE_PROVIDER; falling back to defaults');
-      this.chain = parseChain(undefined, { allowPixelWatermark });
+      logger.warn('[image-generator] no valid providers in the configured image chain; falling back to defaults');
+      this.chain = parseChain(defaultChain, { allowPixelWatermark });
     }
     this._fetchFn = fetchFn;
     this._capabilityChecked = false;
