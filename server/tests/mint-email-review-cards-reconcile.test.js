@@ -20,6 +20,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../utils/triage-locks', () => ({ lockTriageCall: jest.fn(async () => {}) }));
+jest.mock('../services/lead-first-touch-resume', () => ({ repenHoldsForFreshEmailReview: jest.fn(async () => 0) }));
 
 const db = require('../models/db');
 const { _test } = require('../services/call-recording-processor');
@@ -215,6 +216,54 @@ describe('mintEmailReviewCardsFenced — supersession (codex round 3)', () => {
     expect(tables.triage_items[0].status).toBe('resolved');
     expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
     expect(tables.call_log[0].review_status).toBe('resolved');
+  });
+
+  test('codex round 10: a pass fully satisfied by a confirmed card does NOT invalidate release claims even with invalidateClaims true', async () => {
+    const { repenHoldsForFreshEmailReview } = require('../services/lead-first-touch-resume');
+    repenHoldsForFreshEmailReview.mockClear();
+    const confirmed = { ...DISAGREEMENT_PAYLOAD, confirmed_email: 'janedoe@example.com', confirmed_source: 'candidate' };
+    const { conn, tables } = fixture({
+      triage_items: [disagreementCardRow({ status: 'resolved', resolution_source: 'human', payload: JSON.stringify(confirmed) })],
+      first_touch_holds: [{
+        id: 'hold-1', call_log_id: CALL_ID, customer_id: 'cust-1', status: 'releasing',
+        held_email: 'janedoe@example.com', corrected_at: '2026-09-24T09:05:00.000Z', last_error: null,
+      }],
+    });
+    wireDb(db, { conn });
+    const SAME_CARD = { call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open', payload: JSON.stringify(DISAGREEMENT_PAYLOAD) };
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [SAME_CARD], callSid: 'CA1', invalidateClaims: true,
+    });
+    // No live card retained or inserted → no fresh question → no repen: the
+    // releasing confirmation release is not converted into a forced resend.
+    expect(tables.triage_items.filter((c) => ['open', 'in_progress'].includes(c.status))).toHaveLength(0);
+    expect(repenHoldsForFreshEmailReview).not.toHaveBeenCalled();
+    expect(tables.first_touch_holds[0].status).toBe('releasing');
+  });
+
+  test('codex round 10: a pass that inserts a fresh live card still invalidates release claims', async () => {
+    const { repenHoldsForFreshEmailReview } = require('../services/lead-first-touch-resume');
+    repenHoldsForFreshEmailReview.mockClear();
+    const { conn, tables } = fixture({ triage_items: [] });
+    wireDb(db, { conn });
+    const SAME_CARD = { call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open', payload: JSON.stringify(DISAGREEMENT_PAYLOAD) };
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [SAME_CARD], callSid: 'CA1', invalidateClaims: true,
+    });
+    expect(tables.triage_items.filter((c) => c.status === 'open')).toHaveLength(1);
+    expect(repenHoldsForFreshEmailReview).toHaveBeenCalledWith(CALL_ID, expect.anything());
+  });
+
+  test('codex round 10: a retained identical live card still invalidates release claims', async () => {
+    const { repenHoldsForFreshEmailReview } = require('../services/lead-first-touch-resume');
+    repenHoldsForFreshEmailReview.mockClear();
+    const { conn } = fixture();
+    wireDb(db, { conn });
+    const SAME_CARD = { call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open', payload: JSON.stringify(DISAGREEMENT_PAYLOAD) };
+    await mintEmailReviewCardsFenced({
+      callLogId: CALL_ID, procToken: 'tok', cards: [SAME_CARD], callSid: 'CA1', invalidateClaims: true,
+    });
+    expect(repenHoldsForFreshEmailReview).toHaveBeenCalledTimes(1);
   });
 
   test('codex round 9: an auto-superseded card (no read-back confirmation) never satisfies the pass — the card is reopened', async () => {

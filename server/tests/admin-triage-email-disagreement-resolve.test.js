@@ -508,6 +508,32 @@ describe('POST /admin/triage/:id/verdict on a DIFFERENT card, with an email disa
     expect(tables.first_touch_holds[0].held_email).toBe('');
   });
 
+  // Pre-push audit (round 9): pin that a sibling card's verdict never
+  // RELEASES the first-touch hold while the disagreement card is still
+  // open — including a hold that already carries a (still unconfirmed)
+  // candidate spelling, so the blank-hold skip alone cannot be what keeps
+  // it held.
+  test.each([
+    ['accept', {}],
+    ['deny', { wrong_fields: ['address'] }],
+  ])('a %s on the OTHER card does not release the hold while the email card is open', async (verdict, extraBody) => {
+    for (const heldEmail of ['', 'janedoee@example.com']) {
+      const { conn, tables } = siblingFixture({
+        first_touch_holds: [{ id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'pending', held_email: heldEmail }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${OTHER_CARD_ID}/verdict`, { verdict, ...extraBody, expected_updated_at: CARD_UPDATED_AT });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.triage_items.find((c) => c.id === CARD_ID).status).toBe('open');
+      const hold = tables.first_touch_holds[0];
+      expect(hold.status).toBe('pending');
+      expect(hold.released_at).toBeUndefined();
+      expect(hold.held_email).toBe(heldEmail);
+    }
+  });
+
   test('Accept on the email card ITSELF still resolves it (self-click still works)', async () => {
     const { conn, tables } = siblingFixture({
       first_touch_holds: [{

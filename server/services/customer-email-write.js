@@ -44,17 +44,37 @@ function emailKeyOf(value) {
 
 // The Customer 360 email-conflict predicate (routes/admin-customers.js
 // findCrossAccountContactConflict delegates its email arm here): another
-// live customer on a DIFFERENT account already holds the address.
+// live customer on a DIFFERENT account already holds the address — by exact
+// address, or (Codex round-10 P1 on #4802) by Google MAILBOX IDENTITY:
+// Gmail ignores local-part dots and everything after '+', so
+// john.doe+calls@gmail.com delivers to the inbox of the account on file as
+// johndoe@gmail.com. The identity is the one the address lock
+// (customer-comms-lock.js googleMailboxIdentity — the key this check runs
+// under) and the bounce recovery's gmailMailboxOwnedByOther already use.
+// Non-Google addresses keep the exact comparison only: dots and tags are
+// significant everywhere else.
 async function findCrossAccountEmailConflict(conn, { customerId, accountId, email }) {
   const key = emailKeyOf(email);
   if (!key) return null;
   const normalizedAccountId = accountId ? String(accountId) : null;
+  const otherAccount = (row) => String(row.account_id || row.id) !== normalizedAccountId;
   const rows = await conn('customers')
     .whereNull('deleted_at')
     .whereNot({ id: customerId })
     .whereRaw('LOWER(email) = ?', [key])
     .select('id', 'account_id', 'first_name', 'last_name', 'email');
-  return rows.find((row) => String(row.account_id || row.id) !== normalizedAccountId) || null;
+  const exact = rows.find(otherAccount);
+  if (exact) return exact;
+  const { googleMailboxIdentity, GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
+  const identity = googleMailboxIdentity(key);
+  if (!identity) return null;
+  const mailbox = identity.split('@')[0];
+  const aliasRows = await conn('customers')
+    .whereNull('deleted_at')
+    .whereNot({ id: customerId })
+    .whereRaw(`${GOOGLE_MAILBOX_SQL.isGoogle('email')} AND ${GOOGLE_MAILBOX_SQL.mailbox('email')} = ?`, [mailbox])
+    .select('id', 'account_id', 'first_name', 'last_name', 'email');
+  return aliasRows.find(otherAccount) || null;
 }
 
 async function applyOperatorCustomerEmail(trx, { customerId, email, source = 'operator edit' }) {

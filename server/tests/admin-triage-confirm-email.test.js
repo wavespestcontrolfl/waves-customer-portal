@@ -1061,4 +1061,154 @@ describe('POST /admin/triage/:id/confirm-email', () => {
       expect(tables.first_touch_holds[0].updated_at).toBeInstanceOf(Date);
     });
   });
+
+  // Codex round-10 P2 (admin-triage.js :827): the fanout resolves the open
+  // card first (with no resolution_source), so an OPEN_STATES-only close was
+  // a no-op and the card was left un-attributed — the reprocess mint honors
+  // only a human-resolved card carrying payload.confirmed_email.
+  describe('the confirmed card ends human-resolved even when the fanout closed it first', () => {
+    test('fanout resolves the card in the same transaction → resolution_source human + read-back note + confirmed_email', async () => {
+      mockPropagateCustomerEmailChange.mockImplementationOnce(async (_args, trx) => {
+        await trx('triage_items').where({ id: CARD_ID }).whereIn('status', ['open', 'in_progress']).update({
+          status: 'resolved', resolution_note: 'Email corrected on the customer record (triage_confirm)',
+          resolved_at: new Date(), updated_at: new Date(),
+        });
+        return {};
+      });
+      const { conn, tables } = fixture();
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(mockPropagateCustomerEmailChange).toHaveBeenCalledTimes(1);
+      const card = tables.triage_items[0];
+      expect(card.status).toBe('resolved');
+      expect(card.resolution_source).toBe('human');
+      expect(card.resolution_note).toBe('Email confirmed via triage read-back: janedoe@example.com');
+      expect(card.assigned_to).toBe('tech-1');
+      expect(JSON.parse(card.payload).confirmed_email).toBe('janedoe@example.com');
+    });
+
+    test('a card already resolved before the request is refused as stale and never re-attributed', async () => {
+      const { conn, tables } = fixture({
+        triage_items: [{
+          id: CARD_ID, call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'resolved',
+          resolution_source: 'auto', category: 'lead_intake', severity: 'advisory', payload: DISAGREEMENT_PAYLOAD,
+          created_at: CARD_CREATED_AT, updated_at: CARD_UPDATED_AT,
+        }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(409);
+      });
+      expect(tables.triage_items[0].resolution_source).toBe('auto');
+    });
+  });
+
+  // Codex round-10 P2 (admin-triage.js :637): the lead FOR UPDATE re-read
+  // must repeat the live-row predicate.
+  describe('a lead archived between the lookup and its row lock', () => {
+    test('is never stamped: the attempt re-plans, refuses LEAD_NOT_RESOLVED, and the card stays open', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
+        customers: [],
+        first_touch_holds: [],
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: null }],
+      });
+      let archived = false;
+      const wrapped = (table) => {
+        const api = conn(table);
+        if (String(table).split(' ')[0] === 'leads') {
+          const origForUpdate = api.forUpdate;
+          api.forUpdate = (...a) => {
+            // The concurrent archive commits while this lock is awaited.
+            if (!archived) { archived = true; tables.leads[0].deleted_at = '2026-09-25T00:00:00.000Z'; }
+            return origForUpdate.apply(api, a);
+          };
+        }
+        return api;
+      };
+      wrapped.isTransaction = true;
+      wrapped.transaction = async (fn) => fn(wrapped);
+      wrapped.raw = conn.raw;
+      wrapped.schema = conn.schema;
+      wireDb(db, { conn: wrapped });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('LEAD_NOT_RESOLVED');
+      });
+      expect(archived).toBe(true);
+      expect(tables.leads[0].email).toBeNull();
+      expect(tables.leads[0].email_confirmed_at).toBeUndefined();
+      expect(tables.triage_items[0].status).toBe('open');
+    });
+  });
+
+  // Codex round-10 P2 (admin-triage.js :656): a customer-linked call that
+  // also created/reused a lead stamps that lead too — the fanout skips lead
+  // sync when the customer's old email was blank.
+  describe('customer-linked call with an authoritative lead', () => {
+    test('the metadata lead of the same customer is stamped alongside the canonical customer write', async () => {
+      const { conn, tables } = fixture({
+        call_log: [{
+          id: CALL_ID, review_status: 'open', customer_id: CUSTOMER_ID, twilio_call_sid: 'CA000',
+          metadata: JSON.stringify({ lead_id: 'lead-1' }),
+        }],
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: null, customer_id: CUSTOMER_ID }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.customers[0].email).toBe('janedoe@example.com');
+      expect(mockPropagateCustomerEmailChange).toHaveBeenCalledTimes(1);
+      expect(tables.leads[0].email).toBe('janedoe@example.com');
+      expect(tables.leads[0].email_confirmed_at).toBeInstanceOf(Date);
+      // The hold still carries the call's own customer.
+      expect(tables.first_touch_holds[0].customer_id).toBe(CUSTOMER_ID);
+      expect(tables.triage_items[0].status).toBe('resolved');
+    });
+
+    test('a SID-matched lead not yet linked to any customer is stamped too', async () => {
+      const { conn, tables } = fixture({
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: null, customer_id: null }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.leads[0].email).toBe('janedoe@example.com');
+    });
+
+    test('a lead owned by a DIFFERENT customer (the call was relinked away from it) is never written', async () => {
+      const { conn, tables } = fixture({
+        leads: [{ id: 'lead-1', twilio_call_sid: 'CA000', deleted_at: null, email: 'other@example.com', customer_id: 'cust-other' }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.customers[0].email).toBe('janedoe@example.com');
+      expect(tables.leads[0].email).toBe('other@example.com');
+      expect(tables.leads[0].email_confirmed_at).toBeUndefined();
+    });
+  });
 });

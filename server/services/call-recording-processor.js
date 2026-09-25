@@ -1750,6 +1750,7 @@ async function mintEmailReviewCardsFenced({
       // confirmed address (retargetConfirmedHold stamps corrected_at, which
       // deriveEmailHoldTarget honors).
       const pendingCards = cards.filter((c) => !satisfiedReasonCodes.has(c.reason_code));
+      const confirmedReasonCodes = new Set();
       if (pendingCards.length) {
         const confirmedCards = await trx('triage_items')
           .where({ call_log_id: callLogId, status: 'resolved', resolution_source: 'human' })
@@ -1762,6 +1763,7 @@ async function mintEmailReviewCardsFenced({
           if (desired && emailCardSignature(done.reason_code, donePayload)
             === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload))) {
             satisfiedReasonCodes.add(desired.reason_code);
+            confirmedReasonCodes.add(desired.reason_code);
           }
         }
       }
@@ -1810,7 +1812,21 @@ async function mintEmailReviewCardsFenced({
       await trx('call_log')
         .where({ id: callLogId })
         .update({ review_status: Number(stillOpen?.n || 0) > 0 ? 'open' : 'resolved', updated_at: new Date() });
-      if (invalidateClaims) {
+      // Invalidate release claims only when THIS transaction leaves a live
+      // email review question behind (Codex round-10 P1): the caller's
+      // invalidateClaims says the pass HAS email reasons, but when every
+      // desired card is satisfied by an operator's read-back confirmation
+      // (above) nothing is retained or inserted — there is no fresh question
+      // to wait on, and repenHoldsForFreshEmailReview would turn a
+      // 'releasing' confirmation release into a forced-resend marker, so a
+      // send that already succeeded could go again. Decided from this
+      // transaction's own card decisions, never the caller's reason list:
+      // every desired card is either retained (an identical live card), or
+      // inserted (any non-matching live card of its reason code was closed
+      // above, under the per-call advisory lock every card writer takes, so
+      // the insert cannot be ignored), or satisfied by a confirmation.
+      const leavesLiveEmailCard = cards.some((c) => !confirmedReasonCodes.has(c.reason_code));
+      if (invalidateClaims && leavesLiveEmailCard) {
         const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
         await repenHoldsForFreshEmailReview(callLogId, trx);
       }

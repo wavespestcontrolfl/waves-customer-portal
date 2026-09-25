@@ -632,7 +632,11 @@ async function resolveAuthoritativeLead(conn, call, { lock }) {
     if (sidLeads.length === 1) leadId = sidLeads[0].id;
   }
   if (!leadId) return null;
-  let leadQuery = conn('leads').where({ id: leadId });
+  // The live-row predicate is repeated on the (locking) re-read (Codex
+  // round-10 P2): a lead archived between the lookup above and this lock
+  // must read as NO lead, so the target-change retry/refusal path runs and
+  // the card stays open — never a stamp on an archived lead.
+  let leadQuery = conn('leads').where({ id: leadId }).whereNull('deleted_at');
   if (lock) leadQuery = leadQuery.forUpdate();
   const lead = await leadQuery.first('id', 'customer_id');
   return lead || null;
@@ -652,10 +656,21 @@ async function resolveConfirmTarget(conn, callLogId, { lock }) {
   if (lock) callQuery = callQuery.forUpdate();
   const call = await callQuery.first('customer_id', 'twilio_call_sid', 'metadata');
   const callCustomerId = call?.customer_id || null;
-  if (callCustomerId) {
-    return { call, callCustomerId, customerId: callCustomerId, customerSource: 'call', leadId: null };
-  }
+  // Lead FOR UPDATE after call_log in both branches (the documented order).
   const lead = await resolveAuthoritativeLead(conn, call, { lock });
+  if (callCustomerId) {
+    // A customer-linked call can ALSO have created/reused a lead (Codex
+    // round-10 P2): propagateCustomerEmailChange only syncs leads matching
+    // the customer's OLD email, so when that was blank the lead stayed
+    // email-less. Stamp the authoritative lead too — but only one that
+    // belongs to this customer (or to no one yet): a lead owned by a
+    // different customer (a relink moved the call away from it) is never
+    // written with this call's confirmed address.
+    const leadIsOurs = lead && (!lead.customer_id || String(lead.customer_id) === String(callCustomerId));
+    return {
+      call, callCustomerId, customerId: callCustomerId, customerSource: 'call', leadId: leadIsOurs ? lead.id : null,
+    };
+  }
   let customerId = null;
   if (lead?.customer_id) {
     const customer = await conn('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('id');
@@ -817,14 +832,22 @@ async function stampAndResolveConfirmedCard(trx, { id, item, livePayload, typedE
     confirmed_source: confirmedSource,
   };
   await trx('triage_items').where({ id }).update({ payload: JSON.stringify(confirmedPayload), updated_at: new Date() });
-  // Unconditional (not gated on affected-row count): the customer-email
-  // fanout above resolves EVERY open email review card for that customer as
-  // a side effect of the write it just made, which can already include this
-  // exact card — that is success, not a conflict, so this closes it if it
-  // is still open and is a no-op otherwise.
+  // The customer-email fanout above resolves EVERY open email review card
+  // for that customer as a side effect of the write it just made, which can
+  // already include this exact card — that is success, not a conflict. But
+  // the fanout's close carries no resolution_source, and the reprocess mint
+  // (mintEmailReviewCardsFenced) honors a confirmation only on a card that
+  // is resolved BY A HUMAN with payload.confirmed_email (Codex round-10 P2:
+  // an `OPEN_STATES`-only update here was a no-op after the fanout, so a
+  // reprocess reopened a card staff had just confirmed). So the card ends
+  // human-resolved whoever closed it first: 'resolved' is included because
+  // the version check above proved it was open when this transaction took
+  // the call lock, so a resolved row here can only be the fanout's close in
+  // this same transaction. The mint's predicate stays strict (human source
+  // AND confirmed_email) so an auto-superseded card still never counts.
   await trx('triage_items')
     .where({ id })
-    .whereIn('status', OPEN_STATES)
+    .whereIn('status', [...OPEN_STATES, 'resolved'])
     .update({
       status: 'resolved',
       resolution_source: 'human',
@@ -939,8 +962,11 @@ async function runConfirmEmailAttempt({ id, item, typedEmail, expectedUpdatedAt,
     }
     // Version-bound like every other single-card action — the client
     // already sends expected_updated_at.
-    const live = await trx('triage_items').where({ id }).first('updated_at', 'payload');
-    if (!live || !expectedUpdatedAt
+    const live = await trx('triage_items').where({ id }).first('updated_at', 'payload', 'status');
+    // Still open under the call lock, too: stampAndResolveConfirmedCard
+    // relies on it to tell the fanout's same-transaction close apart from a
+    // card that was already closed before this request.
+    if (!live || !OPEN_STATES.includes(live.status) || !expectedUpdatedAt
       || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
       throw new ConfirmEmailRefusal('stale_version');
     }

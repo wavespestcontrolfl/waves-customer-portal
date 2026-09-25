@@ -26,6 +26,13 @@ function fakeTrx(customers, { isTransaction = true } = {}) {
       whereNot(obj) { preds.push((r) => Object.entries(obj).every(([k, v]) => r[k] !== v)); return api; },
       whereRaw(sql, [value]) {
         const col = /LOWER\((\w+)\)/.exec(sql)[1];
+        if (/SPLIT_PART/.test(sql)) {
+          // The Google mailbox-identity predicate (GOOGLE_MAILBOX_SQL),
+          // evaluated with the shared JS identity it mirrors.
+          const { googleMailboxIdentity } = jest.requireActual('../utils/customer-comms-lock');
+          preds.push((r) => googleMailboxIdentity(String(r[col] ?? '').trim().toLowerCase()) === `${value}@gmail.com`);
+          return api;
+        }
         preds.push((r) => String(r[col] ?? '').toLowerCase() === value);
         return api;
       },
@@ -132,5 +139,42 @@ describe('findCrossAccountEmailConflict', () => {
     expect(await findCrossAccountEmailConflict(trx, { customerId: 'c2', accountId: 'a2', email: 'a@example.com' }))
       .toMatchObject({ id: 'c1' });
     expect(await findCrossAccountEmailConflict(trx, { customerId: 'c1', accountId: 'a1', email: '' })).toBeNull();
+  });
+
+  test('codex round 10: a Gmail dot/+tag variant of another account\'s mailbox conflicts (same inbox)', async () => {
+    const { trx } = fakeTrx([
+      { id: 'c1', email: 'mine@example.com', account_id: 'a1', deleted_at: null },
+      { id: 'c2', email: 'johndoe@gmail.com', account_id: 'a2', deleted_at: null },
+    ]);
+    expect(await findCrossAccountEmailConflict(trx, { customerId: 'c1', accountId: 'a1', email: 'john.doe+calls@gmail.com' }))
+      .toMatchObject({ id: 'c2' });
+    expect(await findCrossAccountEmailConflict(trx, { customerId: 'c1', accountId: 'a1', email: 'John.Doe@googlemail.com' }))
+      .toMatchObject({ id: 'c2' });
+  });
+
+  test('codex round 10: the Gmail identity still honors same-account siblings, archived holders, and non-Google domains', async () => {
+    const { trx } = fakeTrx([
+      { id: 'c1', email: 'mine@example.com', account_id: 'a1', deleted_at: null },
+      { id: 'c2', email: 'johndoe@gmail.com', account_id: 'a1', deleted_at: null },
+      { id: 'c3', email: 'john.doe@gmail.com', account_id: 'a3', deleted_at: '2026-09-01' },
+      { id: 'c4', email: 'janedoe@example.com', account_id: 'a4', deleted_at: null },
+    ]);
+    expect(await findCrossAccountEmailConflict(trx, { customerId: 'c1', accountId: 'a1', email: 'john.doe+x@gmail.com' })).toBeNull();
+    // Dots and tags are significant outside Google — no identity match.
+    expect(await findCrossAccountEmailConflict(trx, { customerId: 'c1', accountId: 'a1', email: 'jane.doe@example.com' })).toBeNull();
+  });
+});
+
+describe('applyOperatorCustomerEmail — Gmail mailbox identity (codex round 10)', () => {
+  test('refuses john.doe+calls@gmail.com when another account owns johndoe@gmail.com, before any write', async () => {
+    const { trx, rows, order } = fakeTrx([
+      { id: 'c1', email: 'old@example.com', account_id: 'a1' },
+      { id: 'c2', email: 'johndoe@gmail.com', account_id: 'a2' },
+    ]);
+    const result = await applyOperatorCustomerEmail(trx, { customerId: 'c1', email: 'john.doe+calls@gmail.com' });
+    expect(result).toEqual({ outcome: 'email_in_use', conflict: { id: 'c2', account_id: 'a2' } });
+    expect(order).not.toContain('email-write');
+    expect(rows[0].email).toBe('old@example.com');
+    expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
   });
 });
