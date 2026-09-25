@@ -19,7 +19,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'accepted' })),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (templateKey) => `sms body for ${templateKey}`),
@@ -194,6 +194,23 @@ describe('late-payment micro-deposit diversion', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(sendMicrodepositVerificationEmail).not.toHaveBeenCalled();
     expect(result.skipped).toBe(1);
+  });
+
+  test('does not stamp a truthy but unsent verification Text as delivered', async () => {
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'not_sent', code: 'OWNER_SILENCE' });
+    sendMicrodepositVerificationEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'missing_email' });
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: null }), activityInsert],
+      customers: [chain({ first: customer })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }));
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }), expect.anything());
+    expect(activityInsert.insert).not.toHaveBeenCalled();
   });
 
   test('retries only the pending verification Email after accepted Text', async () => {

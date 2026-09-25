@@ -146,13 +146,16 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch) {
   if (claim.delivered) return { sent: true, deduped: true };
   if (!claim.allowed) return { sent: false, deferred: true, code: 'PRIOR_TEXT_OUTCOME_UNCONFIRMED' };
   const result = await dispatch();
-  if (!result || result.deliveryOutcome === 'uncertain') {
+  const definitelyNotSent = result?.deliveryOutcome === 'not_sent'
+    || (result?.deliveryOutcome == null && result?.blocked === true);
+  if (!result || (result.deliveryOutcome !== 'accepted' && !definitelyNotSent)) {
     return { sent: false, deferred: true, code: 'TEXT_OUTCOME_UNCONFIRMED' };
   }
-  const stamped = result.sent === true
+  const accepted = result.deliveryOutcome === 'accepted';
+  const stamped = accepted
     ? (typeof ContactLedger.markDelivered === 'function' ? await ContactLedger.markDelivered(ledger) : true)
     : await ContactLedger.markSendFailed(ledger, { code: result.code || 'blocked' });
-  return stamped ? result : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
+  return stamped ? { ...result, sent: accepted } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
 }
 
 /**

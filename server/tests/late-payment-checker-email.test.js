@@ -21,7 +21,7 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'accepted' })),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (templateKey) => `sms body for ${templateKey}`),
@@ -96,6 +96,7 @@ describe('late-payment checker email sidecar', () => {
     jest.clearAllMocks();
     ContactLedger.recordContact.mockReset().mockResolvedValue({ id: 'led-1', metadata: {} });
     ContactLedger.claimAttempt.mockReset().mockResolvedValue({ allowed: true });
+    BalanceReminder.sendLatePaymentEmail.mockReset().mockResolvedValue({ ok: true });
   });
 
   afterEach(() => {
@@ -182,7 +183,7 @@ describe('late-payment checker email sidecar', () => {
 
     // The number bounced as a landline on a prior run → now hard-suppressed.
     sendCustomerMessage.mockResolvedValueOnce({
-      sent: false, blocked: true, code: 'SUPPRESSED_NON_MOBILE', retryable: false,
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'SUPPRESSED_NON_MOBILE', retryable: false,
     });
 
     setDbQueues({
@@ -227,7 +228,7 @@ describe('late-payment checker email sidecar', () => {
     const customer = { id: 'cust-1', first_name: 'Taylor', phone: '+18777175476' };
 
     sendCustomerMessage.mockResolvedValueOnce({
-      sent: false, blocked: true, code: 'SUPPRESSED_NON_MOBILE', retryable: false,
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'SUPPRESSED_NON_MOBILE', retryable: false,
     });
     // No billing email on file → the fallback email does not send.
     BalanceReminder.sendLatePaymentEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'missing_email' });
@@ -259,6 +260,37 @@ describe('late-payment checker email sidecar', () => {
     expect(result.notified).toBe(0);
     expect(result.emailedFallback).toBe(0);
     expect(result.skipped).toBe(1);
+  });
+
+  test.each([
+    ['definite non-send', { sent: true, deliveryOutcome: 'not_sent', code: 'OWNER_SILENCE' }, true],
+    ['unconfirmed outcome', { sent: true, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNCONFIRMED' }, false],
+    ['pre-provider lock refusal', { sent: false, blocked: true, code: 'LOCK_BUSY' }, true],
+  ])('does not count a Text result with %s as delivered', async (_label, textResult, definite) => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00.000Z',
+    };
+    sendCustomerMessage.mockResolvedValueOnce(textResult);
+    if (definite) BalanceReminder.sendLatePaymentEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'missing_email' });
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), ...Array(definite ? 4 : 2).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
+      activity_log: [chain({ first: null }), chain({ result: [] }), activityInsert],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, emailedFallback: 0, skipped: 1 });
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }));
+    if (definite) {
+      expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }), expect.anything());
+      expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalledTimes(1);
+    } else {
+      expect(ContactLedger.markSendFailed).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }), expect.anything());
+      expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    }
+    expect(activityInsert.insert).not.toHaveBeenCalled();
   });
 
   test('keeps a selected retryable Text leg alive after the selected Email succeeds', async () => {
