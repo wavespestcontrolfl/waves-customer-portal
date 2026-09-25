@@ -309,10 +309,7 @@ function matchExclusion(detection, exclusions) {
 function readableOffPermittedVan(parsed) {
   const v = parsed.van;
   if (!(v && v.wrapped && v.body !== 'other')) return parsed.readableText;
-  const vanPhrases = VAN_WRAP_ALLOWED_TEXT.filter((phrase) => {
-    const r = matchWrapText(v.wrapText || [], [phrase]);
-    return r.matched.length > 0 && r.incomplete.length === 0;
-  });
+  const vanPhrases = matchWrapText(v.wrapText || [], VAN_WRAP_ALLOWED_TEXT).complete;
   return vanPhrases.length ? parsed.readableText.filter((t) => !matchWrapText([t], vanPhrases).matched.length) : parsed.readableText;
 }
 // The verdict from a parsed answer — pure, so the screen itself stays the
@@ -527,6 +524,19 @@ function canonicalChunks(str) {
 //   matched — the fragments (subset of the input) that DID validly match —
 //   consumed by screenVerdict to exempt the same string from the generic
 //   readable-text OCR check when it appears there too (fix 2 on #4785).
+// Indices of whole allowed phrases whose chunks, concatenated in order,
+// equal `chunks` exactly — or null when no such split exists.
+function splitIntoWholePhrases(chunks, seqs, from = 0) {
+  if (from === chunks.length) return [];
+  for (let c = 0; c < seqs.length; c += 1) {
+    const seq = seqs[c];
+    if (from + seq.length <= chunks.length && seq.every((x, j) => chunks[from + j] === x)) {
+      const rest = splitIntoWholePhrases(chunks, seqs, from + seq.length);
+      if (rest) return [c, ...rest];
+    }
+  }
+  return null;
+}
 function matchWrapText(fragments, allowedText) {
   const allowedSeqs = allowedText.map(canonicalChunks).filter((seq) => seq.length);
   const covered = allowedSeqs.map(() => new Set());
@@ -553,11 +563,22 @@ function matchWrapText(fragments, allowedText) {
       for (let j = 0; j < chunks.length; j += 1) covered[c].add(at + j);
       cursor[c] = at + chunks.length;
     });
+    // One OCR entry may group ADJACENT wrap strings ("WAVES Lawn & Pest" off
+    // the stacked logo) — accept it when its chunks split exactly into whole,
+    // punctuation-exact wrap phrases (Codex r9 P2 on #4785).
+    if (!ok) {
+      const whole = splitIntoWholePhrases(chunks, allowedSeqs);
+      if (whole) {
+        ok = true;
+        for (const c of whole) { allowedSeqs[c].forEach((_, j) => covered[c].add(j)); cursor[c] = allowedSeqs[c].length; }
+      }
+    }
     if (ok) matched.push(raw);
     else strayText.push(raw);
   }
   const incomplete = allowedSeqs.map((seq, c) => (covered[c].size && covered[c].size < seq.length ? allowedText[c] : null)).filter(Boolean);
-  return { strayText, incomplete, matched };
+  const complete = allowedSeqs.map((seq, c) => (covered[c].size === seq.length ? allowedText[c] : null)).filter(Boolean);
+  return { strayText, incomplete, matched, complete };
 }
 // allowUniformLogo: a defensive belt matching the prompt's own exemption
 // (Codex r3 P2 on #4785) — an entry that is actually describing the

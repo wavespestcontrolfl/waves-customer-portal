@@ -553,6 +553,10 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     // The side panel's "Lawn & Pest!" is the same wrap lettering (Codex r8 P2 on #4785).
     expect(await run(['Lawn & Pest!'], ['Lawn & Pest!'])).toMatchObject({ ok: true, checked: true, reasons: [] });
     expect(await run(['Lawn &', 'Pest!'], [])).toMatchObject({ ok: true, checked: true, reasons: [] });
+    // One OCR entry grouping adjacent wrap strings is still valid; a grouped
+    // entry with a dropped "&" is not (Codex r9 P2 on #4785).
+    expect(await run(['WAVES Lawn & Pest'], ['WAVES Lawn & Pest'])).toMatchObject({ ok: true, checked: true, reasons: [] });
+    expect((await run(['WAVES Lawn Pest'], [])).reasons).toContain('garbled van wrap text: WAVES Lawn Pest');
     const bad = await run(['Lawn & Pest'], ['Lawn Pest']);
     expect(bad.ok).toBe(false);
     expect(bad.reasons).toContain('readable text: Lawn Pest');
