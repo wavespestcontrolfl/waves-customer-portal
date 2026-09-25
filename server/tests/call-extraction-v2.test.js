@@ -704,6 +704,46 @@ describe('normalize extraction v2', () => {
     expect(result.caller.email_raw).toBeNull();
   });
 
+  // caller_id_disclaimed / phone_note (schema 1.14.0, live miss 2026-09-25,
+  // call 6fee5f34) MUST survive normalizeCaller — normalizeCaller's return
+  // object spreads `...caller` first, so any field not explicitly
+  // overridden below passes through unchanged; caller_id_disclaimed is
+  // never explicitly overridden, so it survives. Asserted directly (rather
+  // than trusted from reading the source) because every OTHER test in this
+  // file that exercises caller_id_disclaimed constructs the extraction
+  // object by hand and never calls the real normalizer — pre-push review
+  // flagged the gap even though the field was never actually dropped.
+  test('normalizeExtractionV2 preserves caller_id_disclaimed and phone_note through normalizeCaller', () => {
+    const extraction = validModelOutput();
+    extraction.caller.caller_id_disclaimed = true;
+    extraction.caller.phone_note = 'office line, routes to me, I text back';
+    extraction.caller.phone_source = 'caller_id';
+    const result = normalizeExtractionV2(extraction);
+    expect(result.caller.caller_id_disclaimed).toBe(true);
+    expect(result.caller.phone_note).toBe('office line, routes to me, I text back');
+    // The normalized shape still validates end to end.
+    result.meta.schema_version = SCHEMA_VERSION;
+    result.meta.call_id = '550e8400-e29b-41d4-a716-446655440000';
+    result.meta.extracted_at = '2026-09-25T00:00:00.000Z';
+    result.meta.extraction_model = 'test-model';
+    expect(validatePersisted(result).valid).toBe(true);
+  });
+
+  test('normalizeExtractionV2 clamps an over-length phone_note to 160 chars', () => {
+    const extraction = validModelOutput();
+    extraction.caller.caller_id_disclaimed = true;
+    extraction.caller.phone_note = 'x'.repeat(200);
+    const result = normalizeExtractionV2(extraction);
+    expect(result.caller.phone_note).toHaveLength(160);
+  });
+
+  test('normalizeExtractionV2 leaves caller_id_disclaimed/phone_note null when absent', () => {
+    const extraction = validModelOutput();
+    const result = normalizeExtractionV2(extraction);
+    expect(result.caller.caller_id_disclaimed).toBeUndefined();
+    expect(result.caller.phone_note).toBeNull();
+  });
+
   test('normalizeExtractionV2 handles full extraction', () => {
     const extraction = validModelOutput();
     extraction.caller.phone_e164 = '9415551234';
