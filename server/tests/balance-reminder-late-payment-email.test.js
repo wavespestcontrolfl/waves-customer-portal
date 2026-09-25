@@ -591,6 +591,27 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     } finally { balanceRead.mockRestore(); send.mockRestore(); }
   });
 
+  test.each([
+    ['an unknown failure after the provider handoff', {}, 'uncertain'],
+    ['a definite provider refusal after the handoff', { status: 429 }, 'not_sent'],
+  ])('the late-payment email reports %s so only a definite refusal reopens its reservation', async (_label, errProps, expected) => {
+    setDbQueues({
+      invoices: [chain({ first: invoice() }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      notification_prefs: [chain({ first: { billing_channels: ['email'] } })],
+      customers: [chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (input) => {
+      await input.withProviderHandoff(async () => { throw Object.assign(new Error('SendGrid failed'), errProps); });
+    });
+    const result = await BalanceReminder.sendLatePaymentEmail({
+      customer: customer(), invoice: invoice(), balance: { totalBalance: 129, daysOverdue: 8 },
+      smsTemplateKey: 'late_payment_7d', invoiceTitle: 'Quarterly Pest Control', serviceDateClause: '',
+      payUrl: 'https://portal/pay/token-1', initialPrefs: { billing_channels: ['email'] },
+    });
+    expect(result).toMatchObject({ ok: false, deliveryOutcome: expected });
+  });
+
   test('a keyed Text is counted once, through its ledger episode, never again through its sms_log row', async () => {
     const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 3.5 * 86400000) });
     const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };

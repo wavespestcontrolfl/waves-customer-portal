@@ -168,20 +168,20 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch) {
   let result;
   try { result = await dispatch(); }
   catch (err) {
-    if (err.providerOutcome?.deliveryOutcome === 'accepted') {
-      result = { ...err.providerOutcome, sent: true };
-    } else if (err.providerOutcome?.deliveryOutcome === 'not_sent') {
-      result = { ...err.providerOutcome, sent: false, retryable: true };
-    } else {
+    // A throw that carries the provider's own outcome keeps it; anything
+    // else is an unconfirmed attempt.
+    result = err.providerOutcome || {};
+    if (!['accepted', 'not_sent'].includes(result.deliveryOutcome)) {
       return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
     }
+    result = { ...result, sent: result.deliveryOutcome === 'accepted', retryable: result.deliveryOutcome === 'not_sent' };
   }
-  const definitelyNotSent = result?.deliveryOutcome === 'not_sent'
-    || (result?.deliveryOutcome == null && result?.blocked === true);
-  if (!result || (result.deliveryOutcome !== 'accepted' && !definitelyNotSent)) {
+  // A legacy blocked result with no outcome is a definite non-send.
+  const outcome = result?.deliveryOutcome ?? (result?.blocked === true ? 'not_sent' : 'unconfirmed');
+  if (!['accepted', 'not_sent'].includes(outcome)) {
     return { sent: false, deferred: true, code: 'TEXT_OUTCOME_UNCONFIRMED' };
   }
-  const accepted = result.deliveryOutcome === 'accepted';
+  const accepted = outcome === 'accepted';
   const stamped = accepted
     ? (typeof ContactLedger.markDelivered === 'function' ? await ContactLedger.markDelivered(ledger) : true)
     : await ContactLedger.markSendFailed(ledger, { code: result.code || 'blocked' });

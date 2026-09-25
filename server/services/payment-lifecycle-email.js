@@ -355,13 +355,12 @@ async function sendLifecycleTemplate({
     // A definite provider refusal (SendGrid 4xx, 429 included) after handoff
     // is known not sent: the durable owner may clear its provider-start
     // marker and retry. Only an unknown post-handoff failure stays uncertain.
-    const providerRejected = providerStarted && isDefiniteRejection(err);
+    const deliveryOutcome = providerStarted && !isDefiniteRejection(err) ? 'uncertain' : 'not_sent';
     return { ok: false, error: err.message,
       ...(billingDeliveryCategory ? {
-        deliveryOutcome: providerStarted && !providerRejected ? 'uncertain' : 'not_sent',
-        retryable: !providerStarted || providerRejected,
-        ...(handoffGuardFailed ? { reason: 'pre_provider_handoff_failed' }
-          : providerRejected ? { reason: 'provider_rejected' } : {}),
+        deliveryOutcome,
+        retryable: deliveryOutcome === 'not_sent',
+        ...(handoffGuardFailed ? { reason: 'pre_provider_handoff_failed' } : {}),
       } : {}),
     };
   }

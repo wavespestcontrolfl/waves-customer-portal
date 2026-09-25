@@ -4042,10 +4042,17 @@ function initScheduledJobs() {
               || ((claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
                 ? claimMeta.consent_basis
                 : undefined),
+            // A deferred billing notice re-enters the same channel routing
+            // its immediate attempt used: the persisted delivery category
+            // and the branded-Email sidecar marker ride along (codex #4833
+            // r3), so an explicit Email / App choice is neither texted nor
+            // double-emailed on the morning replay.
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.billingDeliveryCategory ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory } : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,

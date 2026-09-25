@@ -355,7 +355,7 @@ describe('payment lifecycle email sender', () => {
     expect(provider).toHaveBeenCalledTimes(failure.includes('provider') ? 1 : 0);
     expect(beforeProviderHandoff).toHaveBeenCalledTimes(failure === 'preparation' ? 0 : 1);
     if (failure.includes('guard')) expect(result.reason).toBe('pre_provider_handoff_failed');
-    if (failure === 'rejected provider') expect(result.reason).toBe('provider_rejected');
+    if (failure === 'rejected provider') expect(result.reason).toBeUndefined();
     if (failure.includes('provider')) expect(beforeProviderHandoff.mock.invocationCallOrder[0])
       .toBeLessThan(provider.mock.invocationCallOrder[0]);
   });

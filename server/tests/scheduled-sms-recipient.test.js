@@ -56,6 +56,30 @@ test.each([false, true])('scheduled replay uses trusted row identities and regis
   }
 });
 
+test('a deferred billing notice replays with its delivery category and Email-sidecar marker', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: 'cust-1', message_body: 'Payment problem', message_type: 'payment_failed' },
+    claimMeta: { entry_point: 'stripe_webhook_billing_deferred', billingDeliveryCategory: 'payment_issue',
+      hasEmailLeg: true, notificationEventKey: 'payment-problem:attempt:pay-2:payment_failed', invoice_id: 'inv-1' },
+    toPhone: '+19415550101', purpose: 'payment_failure', replayConsentBasis: undefined,
+    sendCustomerMessage,
+    dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
+    SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+    Array,
+    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+  });
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    hasEmailLeg: true, invoiceId: 'inv-1',
+    metadata: expect.objectContaining({
+      billingDeliveryCategory: 'payment_issue', notificationEventKey: 'payment-problem:attempt:pay-2:payment_failed',
+    }),
+  }));
+});
+
 test('scheduled completion sends the body after the review guard strips its bundled ask', async () => {
   const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
   const start = source.indexOf('const sendReplay = () => {');
