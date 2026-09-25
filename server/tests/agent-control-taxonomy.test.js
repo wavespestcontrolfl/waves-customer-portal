@@ -214,6 +214,13 @@ describe('agent-control lane policies', () => {
     }
   });
 
+  it('adapter-backed satellite vision lanes are call-ledgered', () => {
+    for (const id of ['satellite', 'property_v2_vision']) {
+      expect(policies.LANE_RUNTIME[id]).toMatchObject({ ledger: 'call' });
+      expect(policies.LANE_RUNTIME[id]).not.toHaveProperty('unrecordable_reason');
+    }
+  });
+
   it('only the never-substitute lanes are measurement lanes', () => {
     const measurement = Object.entries(policies.LANE_RUNTIME).filter(([, e]) => e.fallback_class === 'measurement').map(([id]) => id).sort();
     expect(measurement).toEqual([...MEASUREMENT_LANES].sort());

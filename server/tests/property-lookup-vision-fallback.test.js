@@ -1,4 +1,18 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+const mockLedgerRows = [];
+jest.mock('../models/db', () => jest.fn((table) => {
+  if (table !== 'llm_dispatch_log') throw new Error(`Unexpected table: ${table}`);
+  return {
+    insert: (row) => {
+      const id = mockLedgerRows.length + 1;
+      mockLedgerRows.push({ id, ...row });
+      const saved = Promise.resolve([{ id }]);
+      saved.returning = () => saved;
+      return saved;
+    },
+    where: ({ id }) => ({ update: async (patch) => Object.assign(mockLedgerRows.find((row) => row.id === id), patch) }),
+  };
+}));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   getVerifiedOverrides: jest.fn(async () => null),
   getCachedLookup: jest.fn(async () => null),
@@ -26,7 +40,7 @@ const ANALYSIS = {
   imperviousSurfacePercent: 30, shadeCoveragePercent: 10, nearWater: 'NONE',
   overallPestPressureEstimate: 'LOW', analysisNotes: 'Clear satellite view.',
 };
-const KEYS = ['GOOGLE_MAPS_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY'];
+const KEYS = ['GOOGLE_MAPS_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_DISPATCH_METRICS'];
 const savedEnv = {};
 const savedFetch = global.fetch;
 let modelCalls;
@@ -37,6 +51,7 @@ beforeEach(() => {
     process.env[key] = `test-${key}`;
   }
   modelCalls = [];
+  mockLedgerRows.length = 0;
 });
 
 afterEach(() => {
@@ -93,6 +108,13 @@ test.each([
   ['out-of-range confidence', { ...ANALYSIS, confidenceScore: 101 }],
   ['missing measurement', { ...ANALYSIS, estimatedTurfSf: undefined }],
   ['invalid pricing feature', { ...ANALYSIS, pool: 'MAYBE' }],
+  ['blank measurement', { ...ANALYSIS, estimatedTurfSf: ' ' }],
+  ['null measurement', { ...ANALYSIS, estimatedTurfSf: null }],
+  ['boolean measurement', { ...ANALYSIS, estimatedTurfSf: false }],
+  ['non-finite measurement', { ...ANALYSIS, estimatedTurfSf: 'Infinity' }],
+  ['non-numeric measurement', { ...ANALYSIS, estimatedTurfSf: '4000 sqft' }],
+  ['negative numeric string', { ...ANALYSIS, estimatedTurfSf: '-1' }],
+  ['out-of-range numeric string', { ...ANALYSIS, confidenceScore: '101' }],
 ])('Gemini %s calls Sol once, with no third provider', async (_label, gemini) => {
   mockNetwork({ gemini, openai: { ...ANALYSIS, estimatedTurfSf: 4500 } });
   const result = await lookup();
@@ -108,6 +130,46 @@ test.each([
     gemini: { configured: true, available: false },
     openai: { configured: true, available: true },
   });
+});
+
+test.each(['gemini', 'openai'])('%s numeric strings are normalized without losing valid image analysis', async (provider) => {
+  const quoted = Object.fromEntries(Object.entries(ANALYSIS).map(([field, value]) => [field, typeof value === 'number' ? ` ${value} ` : value]));
+  mockNetwork({ gemini: provider === 'gemini' ? quoted : {}, openai: quoted });
+  const result = await lookup();
+  expect(modelCalls).toHaveLength(provider === 'gemini' ? 1 : 2);
+  expect(result.aiAnalysis._sources).toEqual([provider]);
+  for (const [field, value] of Object.entries(ANALYSIS)) {
+    if (typeof value === 'number') expect(result.aiAnalysis[field]).toBe(value);
+  }
+});
+
+test('schema rejection records a failed primary and a successful fallback in one ledger chain', async () => {
+  process.env.GATE_LLM_CALL_LEDGER = 'true';
+  // Dispatch metrics captures its gate at module load; enable that gate for
+  // this test while keeping the real recorder and call-ledger write path.
+  const gates = require('../config/feature-gates');
+  const isEnabled = gates.isEnabled;
+  jest.spyOn(gates, 'isEnabled').mockImplementation((gate) => gate === 'llmDispatchMetrics' || isEnabled(gate));
+  mockNetwork({ gemini: { ...ANALYSIS, estimatedTurfSf: undefined } });
+  const result = await lookup();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(result.aiAnalysis._sources).toEqual(['openai']);
+  const calls = mockLedgerRows.filter((row) => row.row_kind === 'call');
+  const chains = mockLedgerRows.filter((row) => row.row_kind === 'chain');
+  expect(calls.map(({ provider, ok, error_code }) => ({ provider, ok, error_code }))).toEqual([
+    { provider: 'gemini', ok: false, error_code: 'invalid_schema' },
+    { provider: 'openai', ok: true, error_code: null },
+  ]);
+  expect(chains).toHaveLength(1);
+  expect(chains[0]).toMatchObject({ ok: true, fallback_used: true, provider: 'openai', policy: MODELS.TEXT_POLICIES.estimateVision.name });
+  expect(JSON.parse(chains[0].failure_reasons)).toEqual([
+    expect.objectContaining({ provider: 'gemini', reason: 'invalid_schema', validator: true }),
+  ]);
+  expect(chains[0].chain_id).toMatch(/^[0-9a-f-]{36}$/);
+  for (const row of [...calls, ...chains]) {
+    expect(row.chain_id).toBe(chains[0].chain_id);
+    expect(row.lane_id).toBe('property_v2_vision');
+  }
 });
 
 test('a Gemini timeout leaves time for the Sol fallback within the lookup deadline', async () => {

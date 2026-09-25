@@ -907,6 +907,8 @@ MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
 estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
 on both paths; the response otherwise describes only the requested parcel).
+Operational `meta.providerStatus` (credential configuration and attempted-provider
+health) is staff-only; `publicLookupMeta` removes it from every public response.
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,

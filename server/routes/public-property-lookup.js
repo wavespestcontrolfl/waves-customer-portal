@@ -63,6 +63,14 @@ function publicPropertySummary(record) {
   };
 }
 
+function publicLookupMeta(meta) {
+  if (!meta || typeof meta !== 'object') return meta;
+  // Credential configuration and attempted-provider health are staff-only.
+  // Strip at the public boundary for both fresh and cached lookup results.
+  const { providerStatus: _providerStatus, ...rest } = meta;
+  return rest;
+}
+
 // Public copy of the enriched profile. The admin lookup's plat-median
 // estimate (subdivisionMedian: plat name, county, neighbor sample and
 // range for an unassessed vacant parcel) is staff-only context — this
@@ -680,7 +688,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         confidence: result.aiAnalysis._claudeConfidence || result.aiAnalysis.confidenceScore,
       } : null,
       errors: result.errors,
-      meta: result.meta,
+      meta: publicLookupMeta(result.meta),
     });
   } catch (err) {
     logger.error(`[public-property-lookup] failed: ${err.message}`, { stack: err.stack });
@@ -690,6 +698,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._test = {
+  publicLookupMeta,
   publicEnrichedProfile,
   normalizeServiceInterest,
   formatServiceInterestForFrequency,

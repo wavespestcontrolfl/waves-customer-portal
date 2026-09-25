@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { dispatch } = require('../services/llm/call');
+const { dispatchWithFallback } = require('../services/llm/call');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { isInServiceAreaBox } = require('../services/service-area');
@@ -745,48 +745,48 @@ async function performPropertyLookupCore(address, options = {}) {
       result.satellite._wideB64,
     ].filter(Boolean).map((data) => ({ data, mimeType: 'image/png' }));
     const policy = MODELS.TEXT_POLICIES.estimateVision;
-    const routes = [policy.primary, policy.fallback];
     // Keep the lookup's response deadline and the existing per-provider cap.
     // Reserve half the available time for Sol so a stalled Gemini request
     // cannot spend the whole budget before its fallback starts.
     const chainBudgetMs = options.prioritizeAccuracy
-      ? timing.visionProviderTimeoutMs * routes.length
-      : Math.min(visionBudgetMs, timing.visionProviderTimeoutMs * routes.length);
-    const deadline = Date.now() + chainBudgetMs;
-    const analyses = [];
-    for (const [index, route] of routes.entries()) {
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) break;
-      const response = await dispatch(route, {
-        text: buildSatelliteVisionPrompt(address, result.propertyRecord, visionContext),
-        images,
-        jsonMode: true,
-        maxTokens: 4096,
-        thinkingLevel: 'LOW',
-        timeoutMs: Math.max(1, Math.min(timing.visionProviderTimeoutMs, Math.floor(remainingMs / (routes.length - index)))),
-        laneId: 'property_v2_vision',
-        policyLabel: policy.name,
-      });
-      const analysis = response.ok ? normalizeSatelliteAnalysis(response.json) : null;
-      const available = !!analysis && isValidSatelliteVisionAnalysis(analysis);
-      result.meta.providerStatus.satelliteVision[route.provider] = {
-        configured: route.provider === 'gemini'
-          ? !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)
-          : !!process.env.OPENAI_API_KEY,
-        available,
+      ? timing.visionProviderTimeoutMs * 2
+      : Math.min(visionBudgetMs, timing.visionProviderTimeoutMs * 2);
+    const outcome = await dispatchWithFallback(policy, {
+      text: buildSatelliteVisionPrompt(address, result.propertyRecord, visionContext),
+      images,
+      jsonMode: true,
+      maxTokens: 4096,
+      thinkingLevel: 'LOW',
+      timeoutMs: chainBudgetMs,
+      laneId: 'property_v2_vision',
+    }, {
+      reserveFallbackBudget: true,
+      maxAttemptMs: timing.visionProviderTimeoutMs,
+      validate: (candidate) => {
+        candidate.json = normalizeSatelliteAnalysis(candidate.json);
+        return isValidSatelliteVisionAnalysis(candidate.json) ? null : 'invalid_schema';
+      },
+    });
+    const configured = {
+      gemini: !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+      openai: !!process.env.OPENAI_API_KEY,
+    };
+    for (const failure of outcome.failures || []) {
+      if (failure.reason === 'timeout_budget_exhausted') continue;
+      result.meta.providerStatus.satelliteVision[failure.provider] = {
+        configured: configured[failure.provider], available: false,
       };
-      if (available) {
-        analyses.push({ provider: route.provider, analysis });
-        break;
-      }
       result.errors.push({
-        source: route.provider,
-        message: `Satellite vision analysis failed: ${response.ok ? 'invalid_schema' : response.reason}`,
+        source: failure.provider,
+        message: `Satellite vision analysis failed: ${failure.reason}`,
       });
     }
 
-    if (analyses.length) {
-      result.aiAnalysis = mergeAiAnalyses(analyses);
+    if (outcome.ok) {
+      result.meta.providerStatus.satelliteVision[outcome.provider] = {
+        configured: configured[outcome.provider], available: true,
+      };
+      result.aiAnalysis = mergeAiAnalyses([{ provider: outcome.provider, analysis: outcome.json }]);
       // Reclassify a weak record from the satellite attachment read BEFORE the
       // turf cap: applyParcelTurfBound skips townhome/condo, so doing this first
       // keeps an attached unit's turf from being clamped to its small parcel and
@@ -5013,6 +5013,14 @@ function normalizeSatelliteAnalysis(analysis = {}) {
   }
   if (normalized.imperviosSurfacePercent == null && normalized.imperviousSurfacePercent != null) {
     normalized.imperviosSurfacePercent = normalized.imperviousSurfacePercent;
+  }
+  // Models sometimes quote measurements. Accept finite numeric strings,
+  // while leaving blanks, nulls and booleans for the validator to reject.
+  for (const field of ['estimatedTurfSf', 'estimatedBedAreaSf', 'estimatedPalmCount', 'estimatedTreeCount', 'sharedWallCount', 'outbuildingCount', 'confidenceScore', 'imperviousSurfacePercent', 'imperviosSurfacePercent', 'shadeCoveragePercent']) {
+    const value = normalized[field];
+    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) {
+      normalized[field] = Number(value);
+    }
   }
   if (!normalized.waterProximity && normalized.nearWater) normalized.waterProximity = normalized.nearWater;
   if (!normalized.nearWater && normalized.waterProximity) normalized.nearWater = normalized.waterProximity;
