@@ -73,7 +73,7 @@ function billingChannelsPayload(prefs = {}, { emailAvailable = true } = {}) {
 function mergeLegacyChannels(prefs, category) {
   const direct = prefs?.[LEGACY_FIELDS[category]];
   const legacy = category === 'payment_issue' && direct == null ? prefs?.billing_channel : direct;
-  if (direct === 'email') return ['email'];
+  if (direct === 'email' && ['billing', 'payment_receipt'].includes(category)) return ['email'];
   const intentional = ['email', 'both', 'push'].includes(legacy)
     || (category === 'payment_issue' && direct === 'sms');
   return intentional ? legacyChannels(prefs, category, true) : null;
@@ -81,6 +81,7 @@ function mergeLegacyChannels(prefs, category) {
 
 function channelEnabledAfterMerge(winner, loser, category, channel) {
   const enabled = (field) => [winner, loser].every((row) => row?.[field] !== false);
+  if (category === 'payment_receipt' && !enabled('payment_receipt')) return false;
   if (channel === 'email') return enabled('email_enabled');
   if (channel === 'push') return enabled('push_enabled');
   return enabled('sms_enabled')
