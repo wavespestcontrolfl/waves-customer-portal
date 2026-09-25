@@ -30,33 +30,38 @@ const SERVICE_LABEL_PATTERNS = [
   ['rodent_bait', /\brodent|rat|mouse|bait station\b/i],
 ];
 
-const REPO_CONTEXT_FILES = [
-  'wiki/business-strategy/waveguard-tier-logic.md',
-  'wiki/business-strategy/route-density-economics.md',
-  'wiki/services/service-dispatch-rules.md',
-  'wiki/protocols/routing-rules.md',
-  'docs/pricing/POLICY.md',
-  'docs/TERMITE-PRICING.md',
-  'docs/editorial-policy-v2.md',
-  'server/config/protocols.json',
-  'server/services/pricing-engine/README.md',
-];
-
-const REPO_CONTEXT_DIRS = ['wiki', 'docs'];
-const REPO_CONTEXT_FILE_LIMIT = 80;
-
-// The misting-system protocol competes with the mosquito BARRIER program's
-// own repo matches (waveguard-tier-logic.md, protocols.json, the pricing
-// README, ...) for the same 5-result cap in loadRepoContext below, and those
-// fixed/discovered files are scanned first — a misting question can lose the
-// one file that actually answers it before the loader ever reaches it. Guard
-// it in explicitly, but ONLY when the question (or a service label in
-// context) is actually about the misting SYSTEM (the shared
-// isMistingSystemService predicate — bare "misting", the barrier program's
-// own "21-day misting" cycle-length wording, must NOT trigger this, or a
-// barrier customer's question would pull the wrong protocol), so an
-// unrelated question never pays for it.
+// AW-04 fix (2026-09-25, Ask Waves audit): this used to be a fixed list of
+// repo files PLUS an open-ended scan of every .md/.mdx file under wiki/ and
+// docs/ (discoverMarkdownFiles, removed). Both directories are internal
+// engineering/business trees — staff dispatch and routing rules, technician
+// assignment profiles, job-priority scoring, pricing-engine margin policy,
+// per-visit material/labor cost protocol data (server/config/protocols.json)
+// — and any matching line was inserted verbatim into the customer-facing
+// estimate assistant's model prompt: buildAssistantUserContent in
+// estimate-assistant.js serializes the whole context object, including
+// context.supportContext.repositoryFiles, straight into the LLM input. A
+// customer question about material/labor cost pulled internal margin
+// targets and technician-assignment notes into that prompt.
+//
+// This is now an ALLOWLIST, not a denylist, so a new internal wiki/docs page
+// is invisible to the public estimate assistant by default. Add a path here
+// only after confirming the file is written for customers — no cost,
+// margin, staffing, or dispatch content. The misting protocol below meets
+// that bar: it is a pure safety/procedure document that explicitly states
+// "Pricing is owner-pending; nothing here sets a price." Everything else
+// customer-safe already comes from the structured, reviewed sources above
+// this loader (knowledge_base / knowledge_entries with TRUSTED_STATUSES,
+// the service library, and label-verified products_catalog rows) — those
+// are unaffected by this list and stay the primary customer-safe sources.
 const MISTING_PROTOCOL_FILE = 'wiki/protocols/mosquito-misting-systems.md';
+const CUSTOMER_SAFE_REPO_FILES = [MISTING_PROTOCOL_FILE];
+
+// Defense in depth ON TOP OF the allowlist above — never the boundary
+// itself. Drops a repo-file snippet that contains internal cost/margin or
+// staff-routing language even though its file is allowlisted, so a future
+// edit to an allowlisted file (or an allowlist mistake) can't leak that
+// material into the model prompt silently.
+const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cost\s*targets?|COGS|mark\s*-?ups?|labor\s*(?:cost|rate)s?|material\s*costs?|dispatch(?:ing)?|route\s*density)\b/i;
 
 const EXTERNAL_REFERENCES = {
   general: [
@@ -879,10 +884,6 @@ function snippetFromFile(relativePath, terms) {
 
 function loadRepoContext(terms, question = '') {
   if (!terms.length) return [];
-  const discovered = [];
-  for (const dir of REPO_CONTEXT_DIRS) {
-    discovered.push(...discoverMarkdownFiles(dir));
-  }
   // The raw question is checked too, not just `terms` — searchTermsFromContext
   // tokenizes free-text question words individually ("misting" and "system"
   // land as two separate single-word terms), so the two-word "misting
@@ -891,48 +892,23 @@ function loadRepoContext(terms, question = '') {
   const mistingRequested = isMistingSystemService({ text: question })
     || terms.some((term) => isMistingSystemService({ text: term }));
 
-  // Scored normally, the misting protocol can rank BEHIND five other
-  // matches (barrier-program repo hits sharing "mosquito") and never survive
-  // the cap below — pull it out of the normal scan and guarantee it a slot
-  // up front instead, but only on a question that is actually about
-  // misting; otherwise it competes for the cap like any other file.
-  const results = unique([...REPO_CONTEXT_FILES, ...discovered])
-    .filter((file) => !(mistingRequested && file === MISTING_PROTOCOL_FILE))
+  // The misting protocol is the one allowlisted file gated behind its own
+  // topic check: scored like any other file it would also match plain
+  // "mosquito"/"barrier" terms shared with the BARRIER program, so it is
+  // only even considered when the question (or a service label in context)
+  // is actually about the misting SYSTEM — bare "misting" (the barrier
+  // program's own "21-day misting" cycle-length wording) must NOT pull it
+  // in for an ordinary barrier customer's question.
+  const results = CUSTOMER_SAFE_REPO_FILES
+    .filter((file) => file !== MISTING_PROTOCOL_FILE || mistingRequested)
     .map((file) => snippetFromFile(file, terms))
-    .filter(Boolean);
-
-  if (mistingRequested) {
-    const mistingSnippet = snippetFromFile(MISTING_PROTOCOL_FILE, terms);
-    if (mistingSnippet) results.unshift(mistingSnippet);
-  }
+    .filter(Boolean)
+    // Defense in depth (see INTERNAL_CONTENT_MARKER_PATTERN above) — the
+    // allowlist is the real boundary; this only catches an allowlisted file
+    // whose content later drifts into internal cost/staffing territory.
+    .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.path || ''} ${row.snippet || ''}`));
 
   return results.slice(0, 5);
-}
-
-function discoverMarkdownFiles(relativeDir) {
-  const root = path.join(ROOT, relativeDir);
-  if (!root.startsWith(ROOT) || !fs.existsSync(root)) return [];
-  const out = [];
-  const walk = (dir) => {
-    if (out.length >= REPO_CONTEXT_FILE_LIMIT) return;
-    let entries = [];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (out.length >= REPO_CONTEXT_FILE_LIMIT) break;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-      } else if (entry.isFile() && /\.mdx?$/i.test(entry.name)) {
-        out.push(path.relative(ROOT, full));
-      }
-    }
-  };
-  walk(root);
-  return out;
 }
 
 function externalReferencesFor(serviceKeys) {

@@ -715,11 +715,10 @@ describe('estimate AI support context', () => {
   });
 
   test('misting-system questions always surface the misting protocol, past the repo-file cap', async () => {
-    // The fixed REPO_CONTEXT_FILES list and the mosquito BARRIER program's
-    // other repo matches (waveguard-tier-logic.md, protocols.json, the
-    // pricing README) are scanned first and share "mosquito" with the
-    // misting-system question — without an explicit guarantee, the misting
-    // protocol loses the 5-result cap to those before it's ever reached.
+    // The misting protocol is the ONLY entry in CUSTOMER_SAFE_REPO_FILES
+    // (AW-04 fix), gated behind its own isMistingSystemService check inside
+    // loadRepoContext — this pins that a genuine misting-system question
+    // still surfaces it and stays under the 5-result cap.
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({}),
       question: 'What happens at the design visit before you install the misting system?',
@@ -988,5 +987,100 @@ describe('estimate AI support context', () => {
     expect(result.every((source) => source.url && source.title && source.relevance)).toBe(true);
     expect(result.some((source) => source.source === 'repo_file')).toBe(false);
     expect(result.some((source) => source.snippet)).toBe(false);
+  });
+
+  // AW-04 (Ask Waves audit, 2026-09-25): the repo-file loader used to be a
+  // fixed list PLUS an open-ended wiki/docs directory scan that included
+  // business-strategy, dispatch/routing rules, and docs/pricing/POLICY.md.
+  // The audit's own reproduction (ask-waves-audit-20260925/estimates/
+  // repro_internal_context.js) asked this exact question against a tree_shrub
+  // estimate and captured wiki/services/service-dispatch-rules.md,
+  // wiki/protocols/routing-rules.md, and docs/pricing/POLICY.md in the
+  // model-bound context. The loader is now an allowlist
+  // (CUSTOMER_SAFE_REPO_FILES) — none of those internal files can match here
+  // no matter what search terms the question produces.
+  test('AW-04: a material/labor cost question never pulls an internal repo source', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: null,
+      question: 'What material cost and labor cost do you use for palm service?',
+      context: { services: [{ service: 'tree_shrub', label: 'Tree & Shrub' }], waveGuardTier: 'WaveGuard' },
+    });
+
+    expect(result.repositoryFiles).toEqual([]);
+
+    const INTERNAL_MARKERS = [
+      'margin', 'contribution margin', 'cost target', 'cogs', 'markup',
+      'labor rate', 'labor cost', 'material cost', 'dispatch', 'route density',
+      'adam only', 'pricing policy',
+    ];
+    const allSnippetText = [
+      ...result.repositoryFiles,
+      ...result.knowledgeBase,
+      ...result.agronomicWiki,
+      ...result.serviceLibrary,
+      ...result.productCatalog,
+    ].map((row) => `${row.path || ''} ${row.title || ''} ${row.snippet || ''}`.toLowerCase()).join(' | ');
+
+    for (const marker of INTERNAL_MARKERS) {
+      expect(allSnippetText).not.toContain(marker);
+    }
+
+    // The specific files the audit captured must never appear as a source.
+    const leakedPaths = [
+      'docs/pricing/POLICY.md',
+      'docs/TERMITE-PRICING.md',
+      'wiki/services/service-dispatch-rules.md',
+      'wiki/protocols/routing-rules.md',
+      'server/config/protocols.json',
+      'server/services/pricing-engine/README.md',
+    ];
+    for (const leaked of leakedPaths) {
+      expect(result.repositoryFiles.some((row) => row.path === leaked)).toBe(false);
+    }
+  });
+
+  // Companion to the AW-04 boundary test above: the fix must be an allowlist
+  // restriction, not a blanket removal of customer-safe support material.
+  test('AW-04: customer-safe sources still load after the allowlist restriction', async () => {
+    // Structured, reviewed DB sources are untouched by the repo-file allowlist.
+    const structured = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [{
+          path: 'wiki/services/lawn.md',
+          title: 'Lawn Program',
+          category: 'services',
+          summary: 'Seasonal lawn care guidance for Southwest Florida.',
+          content: 'Longer content',
+        }],
+        services: [{
+          service_key: 'lawn_care',
+          name: 'Lawn Care',
+          category: 'lawn_care',
+          description: 'Seasonal lawn care program.',
+          default_products: ['Celsius WG'],
+        }],
+        products_catalog: [{
+          name: 'Celsius WG',
+          category: 'herbicide',
+          active_ingredient: 'Thiencarbazone + Iodosulfuron + Dicamba',
+          active: true,
+          label_verified_by: 'waves-admin',
+        }],
+      }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer, weed, and fungus applications' }] },
+    });
+    expect(structured.knowledgeBase.length).toBe(1);
+    expect(structured.serviceLibrary.length).toBe(1);
+    expect(structured.productCatalog.length).toBe(1);
+
+    // The one allowlisted repo file (the misting-system safety protocol)
+    // still loads for the question it exists to answer.
+    const misting = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'How often do you refill the misting system?',
+      context: { services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', detail: 'Automatic misting system' }] },
+    });
+    expect(misting.repositoryFiles.some((row) => row.path === 'wiki/protocols/mosquito-misting-systems.md')).toBe(true);
   });
 });
