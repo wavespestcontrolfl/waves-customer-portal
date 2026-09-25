@@ -532,6 +532,29 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(wrongBody.reasons).toContain('logo or brand mark: Waves logo on the van');
   });
 
+  test('the Ford oval badge on the permitted van is not a stray brand; on an unwrapped or wrong-body van, or joined with another mark, it still fails (Codex r6 P2 on #4785)', async () => {
+    const run = async (mark, vanObj) => {
+      mockDispatch.mockResolvedValue({ ok: true, text: JSON.stringify({ readable_text: [], logos_or_brand_marks: [mark], van: vanObj, van_wrap_elsewhere: [], forbidden_scenes: [], notes: '' }) });
+      return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true });
+    };
+    expect(await run('Ford oval badge on the van grille', van({ wrap_text: [] }))).toMatchObject({ ok: true, checked: true, reasons: [] });
+    expect((await run('Ford oval badge on the van grille', van({ wrap_text: [], body: 'other' }))).reasons).toContain('logo or brand mark: Ford oval badge on the van grille');
+    expect((await run('Ford and Orkin logos on the van', van({ wrap_text: [] }))).reasons).toContain('logo or brand mark: Ford and Orkin logos on the van');
+    expect((await run('Ford logo on a truck', van({ wrap_text: [] }))).reasons).toContain('logo or brand mark: Ford logo on a truck');
+  });
+
+  test('valid wrap text segmented differently in readable_text than in van.wrap_text is still attributed to the wrap; malformed readable text still fails (Codex r6 P2 on #4785)', async () => {
+    const run = async (wrapText, readable) => {
+      mockDispatch.mockResolvedValue({ ok: true, text: JSON.stringify({ readable_text: readable, logos_or_brand_marks: [], van: van({ wrap_text: wrapText }), van_wrap_elsewhere: [], forbidden_scenes: [], notes: '' }) });
+      return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true });
+    };
+    expect(await run(['Lawn &', 'Pest'], ['Lawn & Pest'])).toMatchObject({ ok: true, checked: true, reasons: [] });
+    expect(await run(['Lawn & Pest'], ['Lawn &', 'Pest'])).toMatchObject({ ok: true, checked: true, reasons: [] });
+    const bad = await run(['Lawn & Pest'], ['Lawn Pest']);
+    expect(bad.ok).toBe(false);
+    expect(bad.reasons).toContain('readable text: Lawn Pest');
+  });
+
   test('only a detection attributable EXCLUSIVELY to the permitted van is exempted — a mixed entry naming another surface or brand still fails (Codex r5 P2 on #4785)', async () => {
     const wrapped = van({ wrap_text: [] });
     const run = async (mark) => {

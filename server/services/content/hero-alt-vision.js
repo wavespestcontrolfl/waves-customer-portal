@@ -304,7 +304,7 @@ function matchExclusion(detection, exclusions) {
 // guard + dispatch + parse (Codex r3 P2 on #4761: complexity).
 function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false } = {}) {
   const { reasons: logoReasons, misplaced } = allowUniformLogo ? uniformLogoReasons(parsed) : { reasons: [], misplaced: [] };
-  const { reasons: vanReasons, flagged: vanFlagged, matchedWrapText } = allowVanWrap ? vanWrapReasons(parsed, { allowUniformLogo }) : { reasons: [], flagged: [], matchedWrapText: [] };
+  const { reasons: vanReasons, flagged: vanFlagged } = allowVanWrap ? vanWrapReasons(parsed, { allowUniformLogo }) : { reasons: [], flagged: [] };
   // A generic brand-mark detection that explicitly names the one PERMITTED
   // wrapped van (the model reported the van's own legitimate branding under
   // logos_or_brand_marks too, instead of only under `van`) must not count
@@ -322,11 +322,18 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
   // garbled/mismatched punctuation into strayText/incomplete, never into
   // `matched`), the same attribution-set pattern the uniform logo already
   // uses for its own lettering (Codex r2 P2 on #4785, fix 2).
-  const attributed = new Set([
-    ...(allowUniformLogo ? parsed.uniformLettering.filter(isLogoWord).map(normalizeText) : []),
-    ...matchedWrapText.map(normalizeText),
-  ]);
-  const { strayText, incomplete, missing } = matchCaptions(parsed.readableText, allowedText, attributed);
+  // (Wrap text is attributed below by punctuation-exact matching, not by
+  // this punctuation-stripped set — "Lawn Pest" must not pass as
+  // "Lawn & Pest"; Codex r6 on #4785.)
+  const attributed = new Set(allowUniformLogo ? parsed.uniformLettering.filter(isLogoWord).map(normalizeText) : []);
+  // The same valid wrap lettering can come back segmented differently in
+  // van.wrap_text and readable_text ("Lawn &" + "Pest" vs "Lawn & Pest") —
+  // exact-string attribution missed that (Codex r6 P2 on #4785). On the
+  // permitted van, any readable_text entry that is itself a valid,
+  // punctuation-exact run of a wrap phrase is attributed to the wrap.
+  const permittedVan = allowVanWrap && parsed.van && parsed.van.wrapped && parsed.van.body !== 'other';
+  const readable = permittedVan ? parsed.readableText.filter((t) => !matchWrapText([t], VAN_WRAP_ALLOWED_TEXT).matched.length) : parsed.readableText;
+  const { strayText, incomplete, missing } = matchCaptions(readable, allowedText, attributed);
   const reasons = [...logoReasons, ...vanReasons];
   // misplaced marks are already in logoReasons; the rest are true brand marks
   const brandMarks = rawLogos.slice(misplaced.length);
@@ -393,7 +400,10 @@ const MIXED_DETECTION = /\b(and|or|plus|with|also|beside|besides|alongside|next|
 const isAttributedToPermittedVan = (t, van) => {
   if (!(Boolean(van) && van.wrapped && van.body !== 'other')) return false;
   const text = String(t || '');
-  if (!UNIFORM_LOGO_WORDS.test(text) || !/\bvan\b/i.test(text)) return false;
+  // The Ford oval is the manufacturer badge the Transit reference itself
+  // carries (and the screen's own body cue) — on the permitted van it is not
+  // a stray brand either (Codex r6 P2 on #4785).
+  if (!(UNIFORM_LOGO_WORDS.test(text) || /\bford\b/i.test(text)) || !/\bvan\b/i.test(text)) return false;
   const rest = text.replace(VAN_WRAP_STRING_RE, ' ');
   // Parts of the van itself (its door, rear, hood…) are still the van.
   return !MIXED_DETECTION.test(rest) && !OTHER_SURFACE.test(rest.replace(/\b(van|vans|door|doors|side|rear|back|hood|panel|panels|roof|windshield)\b/gi, ' '));
@@ -537,7 +547,6 @@ function matchWrapText(fragments, allowedText) {
 function vanWrapReasons({ van, vanWrapElsewhere }, { allowUniformLogo = false } = {}) {
   const reasons = [];
   const flagged = [];
-  let matchedWrapText = [];
   const elsewhere = allowUniformLogo ? vanWrapElsewhere.filter((t) => !isAllowedUniformLogo(t)) : vanWrapElsewhere;
   if (elsewhere.length) {
     reasons.push(`van wrap off the van: ${elsewhere.slice(0, 3).join(', ')}`);
@@ -567,8 +576,7 @@ function vanWrapReasons({ van, vanWrapElsewhere }, { allowUniformLogo = false } 
       flagged.push('van wrap missing the mascot');
     }
     if (Array.isArray(van.wrapText) && van.wrapText.length) {
-      const { strayText, incomplete, matched } = matchWrapText(van.wrapText, VAN_WRAP_ALLOWED_TEXT);
-      matchedWrapText = matched;
+      const { strayText, incomplete } = matchWrapText(van.wrapText, VAN_WRAP_ALLOWED_TEXT);
       const garbled = [...strayText, ...incomplete];
       if (garbled.length) {
         reasons.push(`garbled van wrap text: ${garbled.slice(0, 3).join(', ')}`);
@@ -576,7 +584,7 @@ function vanWrapReasons({ van, vanWrapElsewhere }, { allowUniformLogo = false } 
       }
     }
   }
-  return { reasons, flagged, matchedWrapText };
+  return { reasons, flagged };
 }
 // The caption match (Codex r1/r4 P2s on #3964): an allowed caption may come
 // back split ("1", "OFF") or joined. A detected string is the caption's only
