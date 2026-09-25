@@ -1186,10 +1186,18 @@ const DELEGATED_DECISION_RE = new RegExp(`\\b(?:(?:(?:it s|it is|its|that s|that
 // lookahead; "in May" has no subject), and the benign notification-routing
 // modals ("it may go to him", "you may get a text") are removed first by
 // BENIGN_MODAL_ROUTING_RE, an anchored phrase, before the test.
-const MODAL_UNCERTAINTY_RE = /\b(?:we|i|you|it|that|this|he|she|they) (?:may(?= [a-z])(?! the \d)|might|could possibly|should be able to|may be able to|might be able to|could be able to)\b/;
-const BENIGN_MODAL_ROUTING_RE = /\b(?:you may (?:get|receive) (?:a|an|the) (?:text message|text|email|notification|confirmation text|confirmation email)|(?:it|that) may (?:go|be sent|be going) to (?:him|her|them|you))\b/g;
+// Codex round 15, P1 (:1192): stripping the benign span whole also stripped
+// its SUBJECT, so a verb coordinated onto it — "It may go to him and may put
+// you down." / "…go to him, may put you down." — lost the subject the
+// regex keys on. The benign span is now replaced by its own subject (the
+// span is exempt, the subject is not), and a coordinator (and/or/but/then/
+// so/also) directly before the modal counts as carrying the subject over.
+// "It may go to him." / "You may get a text." alone still leave only the
+// bare subject behind, so they stay benign.
+const MODAL_UNCERTAINTY_RE = /\b(?:we|i|you|it|that|this|he|she|they|and|or|but|then|so|also) (?:may(?= [a-z])(?! the \d)|might|could possibly|should be able to|may be able to|might be able to|could be able to)\b/;
+const BENIGN_MODAL_ROUTING_RE = /\b(?:(you) may (?:get|receive) (?:a|an|the) (?:text message|text|email|notification|confirmation text|confirmation email)|(it|that) may (?:go|be sent|be going) to (?:him|her|them|you))\b/g;
 function sentenceHasModalUncertainty(ns) {
-  return MODAL_UNCERTAINTY_RE.test(ns.replace(BENIGN_MODAL_ROUTING_RE, ' '));
+  return MODAL_UNCERTAINTY_RE.test(ns.replace(BENIGN_MODAL_ROUTING_RE, (_span, you, itThat) => you || itThat));
 }
 function sentenceHasDeclarativePoisonVocabulary(ns) {
   const padded = ` ${ns} `;
@@ -1374,7 +1382,15 @@ const SCHEDULING_PREDICATE_TERMS = [
 // after "may", so "That's set for May the 3rd." bypassed it entirely; an
 // optional "the " between the month and the day covers the same date shape
 // spoken the other common way).
-const MAY_DATE_RE = /\bmay (?:the )?\d{1,2}(?:st|nd|rd|th)?\b|\b\d{1,2}(?:st|nd|rd|th)? (?:of )?may\b/;
+// Codex round 15, P1 (:1377): "We are set for May." names the month with no
+// day number. A month-context preposition or determiner directly before
+// "may" is the other unambiguous month shape — "for/in/by/until/through/
+// since/next/this/last/early/late/mid/end of/beginning of/middle of May" —
+// and is scheduling content too. Modal "may" never follows these words with
+// the meaning of a verb except "this may <verb>", which MODAL_UNCERTAINTY_RE
+// already poisons, so counting it here only ever fails closed; "it may go to
+// him" / "you may get a text" have no such word before "may" and stay benign.
+const MAY_DATE_RE = /\bmay (?:the )?\d{1,2}(?:st|nd|rd|th)?\b|\b\d{1,2}(?:st|nd|rd|th)? (?:of )?may\b|\b(?:for|in|by|until|till|through|since|next|this|last|early|late|mid|end of|beginning of|middle of) may\b/;
 // codex round 6, P2 (:1234): a purely REINFORCING affirmative in an OTHER
 // sentence ("You're confirmed.") was getting caught by the
 // SCHEDULING_PREDICATE_TERMS screen on "confirmed" — but it adds no new
@@ -1409,7 +1425,7 @@ const MAY_DATE_RE = /\bmay (?:the )?\d{1,2}(?:st|nd|rd|th)?\b|\b\d{1,2}(?:st|nd|
 const REINFORCING_AFFIRMATION_RE = /^(?:(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:(?:you re|you are|it s|it is|that s|that is) (?:all )?(?:confirmed|set|booked|good to go|on the books|locked in)|(?:we re|we are) (?:all )?(?:confirmed|set|good to go|on the books|locked in))|(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:we|i) (?:have )?(?:confirmed|booked|scheduled|got you (?:down|booked|scheduled)) (?:your|the|that|this) (?:appointment|visit|service|slot)(?: for you)?)$/;
 // True when a normalized sentence (already run through
 // stripBenignTopicPhrases) still talks about scheduling — either a term
-// from the phrase list above, the date-shaped "May" regex, or a bare 1-2
+// from the phrase list above, the date-shaped "May" regex, or a bare 1-4
 // digit "time-looking" token (an hour, a bare date number, OR — codex round
 // 9, P1 :1263 — that same date number spelled as an ORDINAL, "3rd"/"31st").
 // turnVocabularyTokenOk (the final whitelist check every OTHER sentence's
@@ -1474,17 +1490,28 @@ function trimConsequentFillers(consequentNs) {
   while (toks.length && CONSEQUENT_TRAILING_FILLERS.has(toks[toks.length - 1])) toks.pop();
   return toks.join(' ');
 }
+// Codex round 15, P1 (:1537): a DANGLING antecedent — a conditional sentence
+// with no consequent at all ("If the email goes to you." followed by "We're
+// all set.") — is unexempted too. Sentence punctuation had split the
+// consequent into the next sentence, where the reinforcing-affirmation
+// shape passed it on its own; the dangling half now poisons instead.
 function conditionalConsequentIsUnexempted(rawSentence) {
-  return splitConditionalSentence(rawSentence).consequents
+  const consequents = splitConditionalSentence(rawSentence).consequents
     .map(trimConsequentFillers)
-    .some((c) => c && !BENIGN_CONDITIONAL_CONSEQUENT_RES.some((re) => re.test(c)));
+    .filter(Boolean);
+  return !consequents.length
+    || consequents.some((c) => !BENIGN_CONDITIONAL_CONSEQUENT_RES.some((re) => re.test(c)));
 }
 function sentenceHasSchedulingPredicate(strippedNs) {
   const padded = ` ${strippedNs} `;
   if (MAY_DATE_RE.test(strippedNs)) return true;
   if (SCHEDULING_PREDICATE_TERMS.some((t) => padded.includes(t))) return true;
   if (sentenceContainsCommitmentHead(strippedNs)) return true;
-  return strippedNs.split(' ').some((tok) => /^\d{1,2}(?:st|nd|rd|th)?$/.test(tok));
+  // Codex round 15, P1 (:1487): the vocabulary whitelist admits 1-4 digit
+  // tokens, so the screen must reject the same width — "We are set for
+  // 2027." (a year) and "We're set for 1030." (a run-together time) named
+  // scheduling content through a 4-digit token this screen used to skip.
+  return strippedNs.split(' ').some((tok) => /^\d{1,4}(?:st|nd|rd|th)?$/.test(tok));
 }
 // Top-level CLEARANCE test for ONE sentence OTHER than the pinned
 // commitment sentence (agentCommitmentSentenceVerified calls this for every
