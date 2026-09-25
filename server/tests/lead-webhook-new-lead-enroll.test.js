@@ -65,3 +65,27 @@ describe('enrollNewLeadAutomation', () => {
     expect(result).toEqual({ enrolled: false, reason: 'already enrolled' });
   });
 });
+
+// Structural pin for the relocation (pre-push audit P1): between the old
+// enroll position (right after the auto-reply block) and the new call site
+// (after leadRecord exists) the handler must contain no early return /
+// throw / response, and every try must have its catch, so every submission
+// that enrolled before the move still enrolls.
+describe('enroll relocation keeps every prior enrollment path', () => {
+  test('no early exit between the auto-reply block and the enroll call', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/lead-webhook.js'), 'utf8');
+    const start = src.indexOf('Lead auto-reply failed');
+    const end = src.indexOf('// Enroll in the local new_lead automation sequence', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const span = src.slice(start, end);
+    expect(span).not.toMatch(/\n {4}(return|throw)\b/);
+    expect(span).not.toMatch(/\n {4,6}res\.(status|json|send)\(/);
+    const tries = (span.match(/\n {4}try \{/g) || []).length;
+    const catches = (span.match(/\n {4}\} catch/g) || []).length;
+    expect(tries).toBeGreaterThan(0);
+    expect(catches).toBe(tries);
+  });
+});

@@ -11,12 +11,14 @@ const SEEDED_HTML = require('fs')
 
 function makeKnex(rows, { hasUpdatedAt = true, hasTable = true } = {}) {
   const updates = [];
+  const selects = [];
   const knex = jest.fn((table) => {
     if (table !== 'automation_steps') throw new Error(`unexpected table ${table}`);
     let rowId;
     const q = {
       where: jest.fn((criteria) => {
         if (criteria.id !== undefined) rowId = criteria.id;
+        else selects.push(criteria);
         return q;
       }),
       select: jest.fn(async () => rows),
@@ -28,13 +30,19 @@ function makeKnex(rows, { hasUpdatedAt = true, hasTable = true } = {}) {
     hasTable: jest.fn(async () => hasTable),
     hasColumn: jest.fn(async () => hasUpdatedAt),
   };
-  return { knex, updates };
+  return { knex, updates, selects };
 }
 
 describe('new_lead consultation-booking placeholder migration', () => {
   test('the seed still carries both anchors — pins the coupling so drift is a loud test failure', () => {
     expect(SEEDED_HTML).toContain("<h2>What's next</h2>");
     expect(SEEDED_HTML).toContain('Reply with your address');
+  });
+
+  test('selects every new_lead step (frozen scope — 20260924020001 narrows it to step 0)', async () => {
+    const { knex, selects } = makeKnex([]);
+    await migration.up(knex);
+    expect(selects).toEqual([{ template_key: 'new_lead' }]);
   });
 
   test('inserts both placeholders right before their anchors', async () => {
