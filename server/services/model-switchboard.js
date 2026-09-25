@@ -66,6 +66,7 @@ const SELECTORS = [
   { key: 'OPENAI_REPORT_WRITER', env: 'MODEL_OPENAI_REPORT_WRITER', description: 'Reports + high-stakes backup (Sol)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_BALANCED', env: 'MODEL_OPENAI_BALANCED', description: 'Q&A + customer-copy backup; OpenAI leg of the vision route (Terra)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FRONTIER', env: 'MODEL_OPENAI_FRONTIER', description: 'Frontier OpenAI vision — lawn visit assessment backup leg (Astra)', accepts: { providers: ['openai'], cap: 'vision' } },
+  { key: 'OPENAI_IMAGE_SCREEN', env: 'MODEL_OPENAI_IMAGE_SCREEN', description: 'Generated-image screen (Sol) — blog image text/logo/uniform/van check', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FAST', env: 'MODEL_OPENAI_FAST', description: 'Cheap structured classification (Luna)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_SMS_DRAFT', env: 'MODEL_OPENAI_SMS_DRAFT', description: 'Sealed-eval Luna leg (follows OPENAI_FAST unless set)', derivesFrom: 'OPENAI_FAST', accepts: { providers: ['openai'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'GEMINI_VISION_BEST', env: 'MODEL_GEMINI_VISION', description: 'Gemini leg of the photo lanes', accepts: { providers: ['gemini'], cap: 'vision' } },
@@ -110,6 +111,7 @@ const POLICY_SELECTOR = {
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
+  imageScreen: { primary: 'OPENAI_IMAGE_SCREEN', fallback: 'VISION' },
   voiceJudge: { primary: 'VOICE_JUDGE', fallback: 'OPENAI_REPORT_WRITER' },
 };
 
@@ -190,6 +192,27 @@ function nthImageChainModel(n) {
 }
 const firstImageChainModel = nthImageChainModel(0);
 const secondImageChainModel = nthImageChainModel(1);
+
+// Social keeps its OWN default chain (SOCIAL_DEFAULT_CHAIN, social-media.js's
+// engine — not moved to the blog chain, no gpt-image-2.5-sunburst leg
+// yet). image-generator's parseChain/MODEL_MAP do the parsing (same slugs,
+// same pixel-watermark filter) but its OWN no-env default is the BLOG chain,
+// so a bare `parseChain(value)` call here would silently report the blog
+// lane's default whenever SOCIAL_IMAGE_PROVIDER is unset. Falling back to the
+// social engine's own default (watermark-allowed variant included, mirroring
+// CREATIVE_FLAGS.chain's own env-override logic) keeps the no-env case honest.
+function nthSocialImageChainModel(n) {
+  return (value) => {
+    const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
+    const { SOCIAL_DEFAULT_CHAIN, SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN } = require('./social-creative-engine');
+    const allowWatermark = process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS === 'true';
+    const noEnvChain = allowWatermark ? SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN : SOCIAL_DEFAULT_CHAIN;
+    const slug = parseChain(value || noEnvChain)[n];
+    return slug ? MODEL_MAP[slug].model : null;
+  };
+}
+const firstSocialImageChainModel = nthSocialImageChainModel(0);
+const secondSocialImageChainModel = nthSocialImageChainModel(1);
 
 // Lane extras: `retry` = the leg tried after the fallback leg (the fan-out
 // photo lanes re-run Gemini on GEMINI_VISION_FALLBACK; the sequential caption
@@ -274,6 +297,10 @@ const LANES = [
   L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
   L('lawn_challenge', 'Lawn diagnostic · adversarial challenge', 'lawn-diagnostic-prompt.js', 'multimodal', T('LAWN_CHALLENGE')),
   L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
+  // Generated-image screen (owner ruling 2026-09-25: Sol first, Claude
+  // backup) — the blog image text/logo/uniform/van check, a separate call
+  // from the hero_alt alt-text pass above (which stays on visionAnalysis).
+  L('image_screen', 'Generated image screen', 'content/hero-alt-vision.js', 'multimodal', P('imageScreen', 'primary'), P('imageScreen', 'fallback'), { note: 'blog image text/logo/uniform/van check; Sol first, Claude VISION backs it up' }),
   L('wdo_project_brief', 'WDO project brief + treatment-photo read', 'routes/admin-projects.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'text-only briefs ride contentDraft' }),
   L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('FLAGSHIP'), null, { inbound: true }),
   L('contact_dictation', 'Contact dictation decoder', 'contact-dictation.js', 'multimodal', D('GEMINI_CONTACT_DECODER_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
@@ -389,7 +416,16 @@ const LANES = [
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
-  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-1.5', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2 → gpt-image-1.5 → gpt-image-1 (owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs and this lane then reports that Gemini backup.' }),
+  // Blog image generation (content/image-generator.js, env BLOG_IMAGE_PROVIDER).
+  // Literals are the REAL no-env defaults — computed through the same
+  // firstImageChainModel/secondImageChainModel parse helpers the env-override
+  // path uses, not a hand-typed slug, so a chain reorder (Images 2.5 leading
+  // since 2026-09-25) can't drift the card out of sync with image-generator.js.
+  L('image_gen', 'Blog image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', firstImageChainModel(undefined) || 'gpt-image-2.5-sunburst', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-2', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2.5-sunburst → gpt-image-2 → gpt-image-1.5 → gpt-image-1 (Images 2.5 leads since 2026-09-25; owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs further down the chain (out of this card\'s first two legs) during a deliberate run.' }),
+  // Social image generation (social-creative-engine.js, env SOCIAL_IMAGE_PROVIDER)
+  // keeps the OLDER chain — no gpt-image-2.5-sunburst leg (the 2026-09-25
+  // Images 2.5 switch covered the blog generator only; social was not moved).
+  L('social_image_gen', 'Social image generation', 'social-creative-engine.js', 'locked', D('SOCIAL_IMAGE_PROVIDER', firstSocialImageChainModel(undefined) || 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstSocialImageChainModel }), D('SOCIAL_IMAGE_PROVIDER', secondSocialImageChainModel(undefined) || 'gpt-image-1.5', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondSocialImageChainModel }), { lock: LOCK.provider('image chain, env SOCIAL_IMAGE_PROVIDER'), note: 'social keeps the older chain (no Images 2.5 leg): gpt-image-2 → gpt-image-1.5 → gpt-image-1. ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs further down the chain during a deliberate run.' }),
   L('video_gen', 'Reels video generation', 'content/video-generator.js', 'locked', T('GEMINI_VIDEO_FAST'), T('GEMINI_VIDEO_QUALITY'), { lock: LOCK.provider('video chain') }),
   L('mentions_prober', 'LLM mentions prober (Claude, OpenAI, Gemini, Perplexity arms)', 'seo/llm-mention-prober.js', 'locked', E('MODEL_MENTIONS', T('WORKHORSE'), { live: true }), null, { lock: LOCK.measurement('each engine is probed directly; a fallback would falsify the measurement'), note: 'OPENAI_MENTIONS_MODEL gpt-4o-search-preview · GEMINI_MENTIONS_MODEL gemini-2.5-flash · PERPLEXITY_MENTIONS_MODEL sonar' }),
   L('sealed_eval', 'SMS sealed-eval exam legs', 'sms-sealed-eval.js', 'locked', T('SMS_SONNET'), T('OPENAI_REPORT_WRITER'), { lock: LOCK.measurement('frozen exam; Gemini / Luna / Opus / Fable measurement legs too') }),
@@ -501,6 +537,7 @@ const LANE_AREA = {
   review_reply: 'content',
   review_gate_text: 'content',
   hero_alt: 'content',
+  image_screen: 'content',
   editorial_review: 'content',
   editorial_repair: 'content',
   editorial_plan_review: 'content',
@@ -519,6 +556,7 @@ const LANE_AREA = {
   mentions_prober: 'content',
   mentions_sentiment: 'content',
   image_gen: 'content',
+  social_image_gen: 'content',
   video_gen: 'content',
   events: 'content',
   events_editorial: 'content',
@@ -636,6 +674,7 @@ const LANE_DESCRIBE = {
   review_reply: 'Replies to Google reviews',
   review_gate_text: 'Drafts the review text for a customer',
   hero_alt: 'Writes alt text for hero images',
+  image_screen: 'Screens a generated blog image for a wrong text mark, logo, uniform badge or van wrap',
   editorial_review: 'Audits complete article evidence and editorial quality',
   editorial_repair: 'Repairs editorial findings while preserving document structure',
   editorial_plan_review: 'Checks answer-first section plans before drafting',
@@ -653,7 +692,8 @@ const LANE_DESCRIBE = {
   link_investigator: 'Investigates internal link paths',
   mentions_prober: 'Asks each AI engine whether it mentions Waves',
   mentions_sentiment: 'Scores those mentions',
-  image_gen: 'Generates blog and social images',
+  image_gen: 'Generates blog images',
+  social_image_gen: 'Generates social post images',
   video_gen: 'Generates Reels clips',
   events: 'Finds community events',
   events_editorial: 'Scores community events and cleans up their venue details',
@@ -691,7 +731,7 @@ const LANE_DESCRIBE = {
 const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "response_drafter_high_stakes", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {

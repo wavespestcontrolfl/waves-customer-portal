@@ -148,6 +148,37 @@ describe('invoice SMS provider handoff', () => {
     ))).toBe(false);
   });
 
+  test('a combined send stamps its accepted Text leg without finalizing before Email starts', async () => {
+    const invoiceQueries = [];
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = query({ first: invoiceReads.shift() || invoice });
+        invoiceQueries.push(q);
+        return q;
+      }
+      if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+      if (table === 'activity_log') return query();
+      if (table === 'sms_log') return query({ returning: [] });
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(
+      async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }),
+    ));
+    withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, invoice));
+
+    await expect(InvoiceService.sendViaSMS('inv-1', {
+      allowClaimed: true,
+      claimToken: 'claim-1',
+      hasEmailLeg: true,
+    })).resolves.toMatchObject({ sent: true });
+
+    const deliveryStamp = invoiceQueries.flatMap((q) => q.update.mock.calls.map(([change]) => change))
+      .find((change) => change.sms_sent_at);
+    expect(deliveryStamp).toEqual(expect.objectContaining({ sms_sent_at: expect.any(Date) }));
+    expect(deliveryStamp).not.toHaveProperty('status');
+    expect(deliveryStamp).not.toHaveProperty('scheduled_send_at');
+  });
+
   test('uses the fresh pre-handoff row after a partial credit applied behind the claim snapshot', async () => {
     const credited = {
       ...invoice,

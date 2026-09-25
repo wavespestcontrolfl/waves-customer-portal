@@ -401,3 +401,84 @@ describe('the conversation side', () => {
       expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-silent', expect.objectContaining({ session_key: 'silent', text: '', turns: 0 }), { allowUnclaimed: true });
     } finally { register.mockRestore(); append.mockRestore(); }
   });
+
+describe('summarizeSegments — each leg\'s own observability survives aggregation (codex r1 P1)', () => {
+  test('events subscribed and received on leg 1 only: the final call-level summary keeps the counts/shapes and the right audio-metrics reason, not a blind reset to unknown', () => {
+    const { summarizeTurnStats, storedTurnStats } = require('../services/voice-agent/relay-transcript');
+    // Leg 1: subscribed to both, one of each relevant speaker kind arrived —
+    // but this leg's own turn never carried both boundary stamps together,
+    // so its audio-derived fields are still null (insufficient_turns, not a
+    // blind not-subscribed/no-events guess).
+    const leg1Stats = [{ turn: 1, promptAt: 100, callerSpeechStoppedAt: null, firstSendAt: 120, firstTokenAt: 110,
+      agentSpeakingStartAt: null, modelMs: 20, toolMs: 0, toolCount: 0, rounds: 1, effort: 'low', renderer: 'block', playedSource: 'assumed' }];
+    const leg1Meta = { subscribed: { speaker: true, tokensPlayed: true },
+      counts: { caller_speaking_end: 1, agent_speaking_start: 1 },
+      shapes: { caller_speaking_end: 'speaker-event:event,speaking,type' } };
+    const leg1 = segmentStore.buildSegment({ sessionKey: 'leg1', generation: 1, turns: 1,
+      turnStats: storedTurnStats(leg1Stats), turnCounts: { caller_turns: 1, agent_turns: 1, tool_calls: 0 },
+      latency: summarizeTurnStats(leg1Stats, leg1Meta) });
+
+    // Leg 2 (the resumed leg): no events at all arrived on this leg.
+    const leg2Stats = [{ turn: 2, promptAt: 300, callerSpeechStoppedAt: null, firstSendAt: 330, firstTokenAt: 320,
+      agentSpeakingStartAt: null, modelMs: 20, toolMs: 0, toolCount: 0, rounds: 1, effort: 'low', renderer: 'block', playedSource: 'assumed' }];
+    const leg2 = segmentStore.buildSegment({ sessionKey: 'leg2', generation: 2, turns: 1,
+      turnStats: storedTurnStats(leg2Stats), turnCounts: { caller_turns: 1, agent_turns: 1, tool_calls: 0 },
+      latency: summarizeTurnStats(leg2Stats) }); // no meta passed ⇒ this leg alone reports unknown/empty
+
+    const summary = segmentStore.summarizeSegments({ relay_segment_owners: ['leg1', 'leg2'], relay_segments: [leg1, leg2] });
+    // Recomputed across BOTH legs' turn_stats (2 turns)...
+    expect(summary.latency.turns).toBe(2);
+    // ...but the events evidence is leg 1's alone, and it must survive the
+    // recompute instead of being overwritten by leg 2's blank telemetry.
+    expect(summary.latency.observability.events_subscribed).toEqual({ speaker: true, tokens_played: true });
+    expect(summary.latency.observability.events_received).toEqual({ caller_speaking_end: 1, agent_speaking_start: 1 });
+    expect(summary.latency.observability.event_shapes).toEqual({ caller_speaking_end: 'speaker-event:event,speaking,type' });
+    // Events DID arrive this call (leg 1) — the right reason is
+    // insufficient_turns, never the no_events_received a meta-less
+    // recompute (flattened turn_stats with no per-leg observability) would
+    // have produced.
+    expect(summary.latency.audio_metrics_reason).toBe('insufficient_turns');
+  });
+
+  test('a pre-instrumentation leg (latency without observability) makes the call instrumentation_unknown, never zero events (codex r2)', () => {
+    const { summarizeTurnStats, storedTurnStats } = require('../services/voice-agent/relay-transcript');
+    const stats = (turn, base) => [{ turn, promptAt: base, callerSpeechStoppedAt: null, firstSendAt: base + 20, firstTokenAt: base + 10,
+      agentSpeakingStartAt: null, modelMs: 20, toolMs: 0, toolCount: 0, rounds: 1, effort: 'low', renderer: 'block', playedSource: 'assumed' }];
+    const legacyLatency = summarizeTurnStats(stats(1, 100));
+    delete legacyLatency.observability; // what a row persisted before this instrumentation looks like
+    const legacy = segmentStore.buildSegment({ sessionKey: 'old', generation: 1, turns: 1,
+      turnStats: storedTurnStats(stats(1, 100)), turnCounts: { caller_turns: 1, agent_turns: 1, tool_calls: 0 }, latency: legacyLatency });
+    const fresh = segmentStore.buildSegment({ sessionKey: 'new', generation: 2, turns: 1,
+      turnStats: storedTurnStats(stats(2, 300)), turnCounts: { caller_turns: 1, agent_turns: 1, tool_calls: 0 },
+      latency: summarizeTurnStats(stats(2, 300), { subscribed: { speaker: null, tokensPlayed: null }, counts: {}, shapes: {} }) });
+    const summary = segmentStore.summarizeSegments({ relay_segment_owners: ['old', 'new'], relay_segments: [legacy, fresh] });
+    expect(summary.latency.audio_metrics_reason).toBe('instrumentation_unknown');
+    expect(summary.latency.observability.instrumentation_unknown).toBe(true);
+  });
+
+  test('event shapes merge in generation order, not append order: the shape seen first in the CALL wins (codex r2)', () => {
+    const { summarizeTurnStats, storedTurnStats } = require('../services/voice-agent/relay-transcript');
+    const stats = (turn, base) => [{ turn, promptAt: base, callerSpeechStoppedAt: null, firstSendAt: base + 20, firstTokenAt: base + 10,
+      agentSpeakingStartAt: null, modelMs: 20, toolMs: 0, toolCount: 0, rounds: 1, effort: 'low', renderer: 'block', playedSource: 'assumed' }];
+    const mk = (key, generation, base, shape) => segmentStore.buildSegment({ sessionKey: key, generation, turns: 1,
+      turnStats: storedTurnStats(stats(generation, base)), turnCounts: { caller_turns: 1, agent_turns: 1, tool_calls: 0 },
+      latency: summarizeTurnStats(stats(generation, base), { subscribed: { speaker: true, tokensPlayed: true },
+        counts: { caller_speaking_end: 1 }, shapes: { caller_speaking_end: shape } }) });
+    const first = mk('first', 1, 100, 'speaker-event:event,type');
+    const resumed = mk('resumed', 2, 300, 'speaker-event:event,speaking,type');
+    // Appended out of order: the resumed socket landed before the first one drained.
+    const summary = segmentStore.summarizeSegments({ relay_segment_owners: ['first', 'resumed'], relay_segments: [resumed, first] });
+    expect(summary.latency.observability.event_shapes).toEqual({ caller_speaking_end: 'speaker-event:event,type' });
+  });
+
+  test('no leg ever saw an event: aggregation reports unknown/empty, not a false subscription', () => {
+    const { summarizeTurnStats, storedTurnStats } = require('../services/voice-agent/relay-transcript');
+    const stats = [{ turn: 1, promptAt: 100, callerSpeechStoppedAt: 50, firstSendAt: 120, firstTokenAt: 110,
+      agentSpeakingStartAt: null, modelMs: 20, toolMs: 0, toolCount: 0, rounds: 1, effort: 'low', renderer: 'block', playedSource: 'assumed' }];
+    const leg = segmentStore.buildSegment({ sessionKey: 'only', generation: 1, turns: 1,
+      turnStats: storedTurnStats(stats), turnCounts: { caller_turns: 1, agent_turns: 1, tool_calls: 0 },
+      latency: summarizeTurnStats(stats) });
+    const summary = segmentStore.summarizeSegments({ relay_segment_owners: ['only'], relay_segments: [leg] });
+    expect(summary.latency.observability).toEqual({ events_subscribed: { speaker: null, tokens_played: null }, events_received: {}, event_shapes: {} });
+  });
+});

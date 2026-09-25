@@ -898,6 +898,22 @@ function windowGuardSignature(stop, { repairDurationFallback = false } = {}) {
   return `${range ? `${range.startMin}-${range.endMin}` : 'open'}|${dur}|${raw}|${locked}|${stop.visit_id || ''}|${stop.customer_id ?? ''}|${premise}`;
 }
 
+/**
+ * A stored order that is not a whole order: some stop carries no
+ * route_order, or two stops share one. Numbers linger from earlier writers
+ * while newer bookings stay null, so the board's sequence is partly an
+ * accident of sort fallbacks rather than a plan anyone chose. The savings
+ * floor exists to avoid reshuffling a deliberate order for noise; with
+ * GATE_ROUTE_REORDER_COMPLETE_ORDER on, it is waived here (owner 2026-09-25:
+ * a promise-safe order beats a stale one) and any strictly shorter legal
+ * order is written. A complete order keeps the floor, so a day is completed
+ * once and not reshuffled nightly.
+ */
+function hasIncompleteStoredOrder(stops) {
+  const positions = stops.map((s) => s.route_order);
+  return positions.some((p) => p == null) || new Set(positions.map(Number)).size !== positions.length;
+}
+
 async function runRouteReorder(opts = {}, conn = db) {
   const config = getRouteReorderConfig(opts);
   const now = opts.now || new Date();
@@ -908,6 +924,7 @@ async function runRouteReorder(opts = {}, conn = db) {
   if (opts.repairOnly) repairGates.push('GATE_ROUTE_REORDER');
   const repairEnabled = repairGates.every(gateEnvValue);
   if (opts.repairOnly && !repairEnabled) return { status: 'gate_off' };
+  const completeOrderEnabled = gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER');
   const lastDate = etDateString(addETDays(now, 30));
   const dates = opts.repairOnly
     ? [...new Set((opts.dates || []).map(toDateStr))].filter(date => validCalendarDate(date) && date > today && date <= lastDate).sort()
@@ -1144,7 +1161,10 @@ async function runRouteReorder(opts = {}, conn = db) {
           // through to the skip below so the ledger still records the
           // conflict plus `fallback: 'CALIBRATION_OFF'`.
           const gateStoodDown = guardOutcome.reason === 'WINDOW_FIT_GATE_OFF';
-          if (!repair && savedMeters < config.minSavingsMeters
+          // Waived floor still demands a strictly shorter order (1 m).
+          const floorWaived = completeOrderEnabled && hasIncompleteStoredOrder(techStops);
+          const floorMeters = floorWaived ? 1 : config.minSavingsMeters;
+          if (!repair && savedMeters < floorMeters
               && (guardOutcome.conflict === null || guardOutcome.gateOff === 'WINDOW_FIT')) {
             summary.skipped.push({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
             continue;
@@ -1170,10 +1190,10 @@ async function runRouteReorder(opts = {}, conn = db) {
             // before accepting it (nightly-only bookkeeping, not a duplicate
             // safety decision).
             const fallbackSaved = Math.max(0, guardOutcome.beforeMeters - guardOutcome.afterMeters);
-            if (fallbackSaved < config.minSavingsMeters) {
+            if (fallbackSaved < floorMeters) {
               // The constrained search DID find and certify a legal order;
               // the nightly pass declines it only because it saves less than
-              // the owner-ruled 805 m floor. Keep the original Google-order
+              // this day's savings floor. Keep the original Google-order
               // conflict as evidence, but do not mislabel this as an
               // impossible schedule / missing feasible improvement.
               summary.skipped.push({
@@ -1371,7 +1391,12 @@ async function runRouteReorder(opts = {}, conn = db) {
             }
             throw writeErr;
           }
-          summary.applied.push({ ...entryBase, ...appliedMetrics });
+          summary.applied.push({
+            ...entryBase,
+            ...appliedMetrics,
+            ...(!repair && appliedMetrics.saved_meters < config.minSavingsMeters
+              ? { floor_waived: 'INCOMPLETE_STORED_ORDER' } : {}),
+          });
           if (qualityEnabled) {
             // Record the order that actually committed as well as the loaded
             // baseline, so later performance does not compare against the
@@ -1480,6 +1505,7 @@ async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, conf
           waypoint_cap: GOOGLE_WAYPOINT_CAP,
           freeze_hours: FREEZE_HOURS,
           repair_enabled: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
+          complete_order: gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER'),
           ...(includeMeasurements ? { day_quality_version: 2, code_revision: process.env.RAILWAY_GIT_COMMIT_SHA || null } : {}),
         }),
         result: JSON.stringify({

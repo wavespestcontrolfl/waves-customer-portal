@@ -39,8 +39,15 @@ function substitute(text, customer) {
 // The consultation-booking placeholders, whitespace-tolerant like every
 // other {{merge}} field here. ONE definition for the preflight (does this
 // step need the block built?) and the render (where does it go?).
-const CONSULTATION_HTML_RE = /\{\{\s*consultation_booking\s*\}\}/g;
-const CONSULTATION_TEXT_RE = /\{\{\s*consultation_booking_text\s*\}\}/g;
+// Each swallows the ONE separator newline the placeholder migration wrote
+// after it, and the render puts it back only when the block is non-empty —
+// so a hidden block leaves the email byte-identical to the pre-placeholder
+// body instead of a stray blank line (Codex #4821 r1 P2).
+const CONSULTATION_HTML_RE = /\{\{\s*consultation_booking\s*\}\}\n?/g;
+const CONSULTATION_TEXT_RE = /\{\{\s*consultation_booking_text\s*\}\}\n?/g;
+function withSeparator(block) {
+  return block ? `${block}\n` : '';
+}
 const CONSULTATION_PLACEHOLDER_RE = /\{\{\s*consultation_booking(?:_text)?\s*\}\}/;
 
 const AUTOMATION_FROM_ALLOWLIST = (process.env.AUTOMATION_FROM_ALLOWLIST
@@ -135,8 +142,8 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
 // whose body never carries the placeholder) renders byte-identical to
 // before these params existed.
 function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId, consultationHtml = '', consultationText = '' }) {
-  const rawHtml = substitute(htmlBody || '', customer).replace(CONSULTATION_HTML_RE, consultationHtml);
-  const rawText = substitute(textBody || '', customer).replace(CONSULTATION_TEXT_RE, consultationText);
+  const rawHtml = substitute(htmlBody || '', customer).replace(CONSULTATION_HTML_RE, withSeparator(consultationHtml));
+  const rawText = substitute(textBody || '', customer).replace(CONSULTATION_TEXT_RE, withSeparator(consultationText));
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
   // Every automation renders the service chrome — "Waves Newsletter"
   // header is reserved for actual newsletter sends (owner call 2026-07-10;
