@@ -1074,13 +1074,11 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
       // generation's verdict is a fresh decision and rewrites the marker,
       // dropping superseded_at with it. Generation-less writers cannot prove
       // they are no newer, so they keep the plain rewrite.
-      // Both values are INLINED so the marker JSON stays the one binding:
-      // the reason is a ROW_SCOPED_DRAFT_BLOCK_REASONS constant ([a-z_]
-      // only, sanitized like SCOPED_REASON_SQL_LIST) and the generation a
-      // validated integer.
+      // The writer's reason and generation are read back out of the BOUND
+      // marker JSON (never interpolated into the SQL text), so the marker
+      // stays the first binding and every value stays parameterized.
       const keepSupersession = isRowScopedDraftBlockReason(reason)
         && procGeneration != null && Number.isSafeInteger(Number(procGeneration));
-      const scopedReasonSql = `'${String(reason).replace(/[^a-z_]/g, '')}'`;
       const wrote = await q.update({
         metadata: db.raw(
           // A ROW-SCOPED verdict never DOWNGRADES a standing call-wide one
@@ -1091,11 +1089,11 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
           isRowScopedDraftBlockReason(reason)
             ? `CASE WHEN COALESCE(metadata->'estimator_draft_block'->>'reason', '') NOT IN ('', ${SCOPED_REASON_SQL_LIST})
                     THEN COALESCE(metadata, '{}'::jsonb)
-                    ${keepSupersession ? `WHEN COALESCE(metadata->'estimator_draft_block'->>'reason', '') = ${scopedReasonSql}
+                    ${keepSupersession ? `WHEN COALESCE(metadata->'estimator_draft_block'->>'reason', '') = (?::jsonb->>'reason')
                      AND COALESCE(metadata->'estimator_draft_block'->>'superseded_at', '') <> ''
                      AND (CASE WHEN (metadata->'estimator_draft_block'->>'superseded_by_generation') ~ '^[0-9]+$'
                                THEN (metadata->'estimator_draft_block'->>'superseded_by_generation')::bigint
-                               ELSE -1 END) >= ${Number(procGeneration)}
+                               ELSE -1 END) >= (?::jsonb->>'generation')::bigint
                     THEN COALESCE(metadata, '{}'::jsonb)` : ''}
                     ELSE ${stamp} END`
             : stamp,
@@ -1103,7 +1101,7 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
           // clear can distinguish "older verdict, mine to retire" from "a
           // concurrent NEWER verdict I must not delete" without trusting
           // wall clocks (PR #3304 — same doctrine as leads.lead_stamp_seq).
-          [markerJson],
+          keepSupersession ? [markerJson, markerJson, markerJson] : [markerJson],
         ),
         updated_at: new Date(),
       });
