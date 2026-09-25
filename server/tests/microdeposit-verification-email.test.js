@@ -13,6 +13,7 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal
 
 const db = require('../models/db');
 const EmailTemplateLibrary = require('../services/email-template-library');
+const invoiceHelpers = require('../services/invoice-helpers');
 const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
 
@@ -35,6 +36,7 @@ describe('sendMicrodepositVerificationEmail', () => {
       throw new Error(`Unexpected db table ${table}`);
     });
   });
+  afterEach(() => jest.restoreAllMocks());
 
   test('sends the branded payment.microdeposit_verification template, keyed to the touch', async () => {
     const result = await sendMicrodepositVerificationEmail({ invoice, customer, touchKey: 'd7_reminder' });
@@ -68,6 +70,55 @@ describe('sendMicrodepositVerificationEmail', () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/sendgrid down/);
+    expect(result.deliveryOutcome).toBe('uncertain');
+  });
+
+  test('early template read failure is definitely not sent when preference-enforced handoff has not begun', async () => {
+    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('template read unavailable'));
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+    expect(result).toEqual({ ok: false, error: 'template read unavailable', deliveryOutcome: 'not_sent' });
+  });
+
+  test('in-progress collision stays uncertain even before this caller starts a handoff', async () => {
+    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('in progress'), {
+      code: 'EMAIL_SEND_IN_PROGRESS', retryable: true,
+    }));
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+    expect(result.deliveryOutcome).toBe('uncertain');
+  });
+
+  test('structured uncertain outcome wins over an unstarted local handoff', async () => {
+    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('handoff state unknown'), {
+      providerOutcome: { deliveryOutcome: 'uncertain' },
+    }));
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+    expect(result.deliveryOutcome).toBe('uncertain');
+  });
+
+  test('unknown error after provider handoff remains uncertain', async () => {
+    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) =>
+      withProviderHandoff(async () => { throw new Error('provider response lost'); }));
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+    expect(result.deliveryOutcome).toBe('uncertain');
+  });
+
+  test('provider acceptance evidence survives a later thrown error', async () => {
+    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('audit failed'), {
+      providerOutcome: { deliveryOutcome: 'accepted' },
+    }));
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+    expect(result).toEqual({ ok: true, providerAccepted: true });
   });
 
   test.each(['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'])(

@@ -22,7 +22,7 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(() => 'INV'),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, providerMessageId: 'sms-1' })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'sms-1' })),
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({
@@ -69,6 +69,8 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
+    if ((!queue || !queue.length) && table === 'notification_prefs') return chain({ first: undefined });
+    if ((!queue || !queue.length) && table === 'collections_contact_ledger') return chain({ result: [] });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });

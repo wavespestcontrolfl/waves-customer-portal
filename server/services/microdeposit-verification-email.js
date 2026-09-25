@@ -47,6 +47,7 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
 
   const amountDue = invoiceAmountDue(invoice);
   const touch = String(touchKey || 'default');
+  let providerHandoffStarted = false;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'payment.microdeposit_verification',
@@ -69,6 +70,7 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
           if (ownership.ok !== true) return ownership;
           const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
           if (billingChannelAllowed(freshPrefs || {}, 'payment_issue', 'email') === false) return { ok: false };
+          providerHandoffStarted = true;
           await dispatch();
           return { ok: true };
         },
@@ -79,13 +81,20 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
       blocked: !!result.blocked,
       deduped: !!result.deduped,
       reason: result.reason || null,
+      ...(result.deliveryOutcome ? { deliveryOutcome: result.deliveryOutcome } : {}),
+      ...(result.retryable ? { retryable: true } : {}),
+      ...(result.deferred ? { deferred: true } : {}),
     };
   } catch (e) {
     logger.warn(`[microdeposit-email] send failed for invoice ${invoice.id}: ${e.message}`);
+    if (e.providerOutcome?.deliveryOutcome === 'accepted') return { ok: true, providerAccepted: true };
     if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(e.code)) {
       return { ok: false, skipped: true, reason: 'template_unavailable' };
     }
-    return { ok: false, error: e.message };
+    const definitelyNotSent = e.providerOutcome?.deliveryOutcome === 'not_sent'
+      || (e.providerOutcome?.deliveryOutcome !== 'uncertain'
+        && enforceBillingPreference && !providerHandoffStarted && e.code !== 'EMAIL_SEND_IN_PROGRESS');
+    return { ok: false, error: e.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
   }
 }
 
