@@ -5042,7 +5042,13 @@ const InvoiceService = {
     const finalizeInvoiceAfterSms = () => whereSendClaimOwned(
       db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
       invoice.send_claim_token,
-    ).update({
+    ).update(allowClaimed && hasEmailLeg ? {
+      // The combined owner finalizes only after every selected sidecar has
+      // either started durably or completed. Keep its claim retryable while
+      // recording this accepted Text/App leg so an Email retry skips it.
+      sms_sent_at: new Date(),
+      updated_at: new Date(),
+    } : {
         status: db.raw(
           "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
         ),
@@ -5496,6 +5502,12 @@ const InvoiceService = {
     if (claim.invoice?.payer_id) {
       sms.error = "Suppressed — invoice billed to a third-party payer";
       sms.code = "payer_billed";
+    } else if (!operatorInitiated && claim.invoice.sms_sent_at) {
+      // A prior automated attempt delivered Text/App but could not start its
+      // selected Email leg. Retry only that missing leg; the channel event is
+      // already durably represented by sms_sent_at.
+      sms.ok = true;
+      sms.deduped = true;
     } else {
       try {
         // The nested call does not adopt (adoptsQueuedInvoiceSend: false
@@ -5755,7 +5767,8 @@ const InvoiceService = {
       }
     }
 
-    const ok = sms.ok || email.ok;
+    const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    const ok = !emailMustRetry && (sms.ok || email.ok);
     // An adopted queued pay-link text is discharged by the SMS leg's OWN
     // outcome only: provider acceptance or a replacement on the scheduled
     // rail. Email success says nothing about it — a definite SMS failure
@@ -5899,7 +5912,7 @@ const InvoiceService = {
       // no-op and the row is still 'sending', so reverseAppliedCredit would refuse
       // — the caller (processScheduledSends) restores 'scheduled' then reverses
       // creditApplied from the result.
-      if (restored && !allowClaimed && sendCreditResult?.applied > 0) {
+      if (restored && !allowClaimed && !sms.ok && sendCreditResult?.applied > 0) {
         try {
           const { reverseAppliedCredit } = require("./customer-credit");
           await reverseAppliedCredit({ invoiceId, amount: sendCreditResult.applied, createdBy: "system:send_failed" });
@@ -5971,7 +5984,7 @@ const InvoiceService = {
         );
       }
     }
-    return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0,
+    return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
       ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
       ...(terminalVisitRefused

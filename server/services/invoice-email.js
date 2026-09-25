@@ -752,6 +752,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
       if (result?.blocked) {
         return { ok: false, error: result.reason || 'Email suppressed', blocked: true };
       }
+      if (result?.sent === false) {
+        return { ok: false, error: result.reason || 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' };
+      }
       if (result?.deduped) {
         logger.info(`[invoice-email] Receipt email deduped for ${invoice.invoice_number} (idempotencyKey=${idempotencyKey})`);
         return { ok: true, deduped: true, messageId: result.message?.provider_message_id || null };

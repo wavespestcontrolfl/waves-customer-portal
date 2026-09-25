@@ -561,10 +561,9 @@ describe('payment lifecycle email sender', () => {
 
   test('propagates an unavailable preference read instead of acknowledging it as legacy', async () => {
     const firstPrefs = chain();
-    const routingPrefs = chain();
+    const routingPrefs = chain({ first: { email_enabled: true, payment_issue_channels: ['email'] } });
     firstPrefs.first.mockRejectedValueOnce(new Error('database unavailable'));
-    routingPrefs.first.mockRejectedValueOnce(new Error('database unavailable'));
-    setDbQueues({
+    const queues = setDbQueues({
       invoices: [chain({ first: invoice() })],
       payments: [chain({ first: payment() })],
       customers: [chain({ first: customer() })],
@@ -578,6 +577,8 @@ describe('payment lifecycle email sender', () => {
       invoiceId: 'inv-1',
       customerInitiated: true,
     })).rejects.toMatchObject({ code: 'BILLING_PREFS_UNAVAILABLE', retryable: true });
+    expect(queues.get('notification_prefs')).toEqual([routingPrefs]);
+    expect(db.mock.calls.some(([table]) => table === 'sms_log')).toBe(false);
   });
 
   test('sends payment plan confirmation through the shared lifecycle sender', async () => {

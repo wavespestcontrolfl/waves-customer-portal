@@ -447,6 +447,76 @@ describe('processScheduledSends send-window handling', () => {
     }
   });
 
+  test('a transient automated Email preference read keeps a delivered Text leg retryable', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockResolvedValue({ sent: true });
+    sendInvoiceEmail.mockResolvedValueOnce({
+      ok: false,
+      code: 'billing_prefs_unavailable',
+      error: 'Invoice delivery preferences unavailable',
+    });
+    const sendingInvoice = {
+      ...dueRow,
+      status: 'sending',
+      send_claim_token: 'claim-1',
+    };
+    queueMocks(db, [
+      chain({ first: { payer_statement_id: null } }),
+      chain({ first: sendingInvoice }),
+      adoptionNoOp(),
+      chain({ first: { id: 'inv-1' } }),
+    ]);
+    try {
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+        allowClaimed: true,
+        claimToken: 'claim-1',
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        sms: { ok: true },
+        email: { code: 'billing_prefs_unavailable' },
+        creditApplied: 0,
+      });
+      expect(smsSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
+  test('an automated Email retry skips the already delivered Text leg', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS');
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: true, messageId: 'email-retry' });
+    const sendingInvoice = {
+      ...dueRow,
+      status: 'sending',
+      send_claim_token: 'claim-1',
+      sms_sent_at: new Date('2026-09-25T02:45:00.000Z'),
+    };
+    queueMocks(db, [
+      chain({ first: { payer_statement_id: null } }),
+      chain({ first: sendingInvoice }),
+      adoptionNoOp(),
+      chain(),
+    ]);
+    try {
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+        allowClaimed: true,
+        claimToken: 'claim-1',
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        sms: { ok: true, deduped: true },
+        email: { ok: true, messageId: 'email-retry' },
+      });
+      expect(smsSpy).not.toHaveBeenCalled();
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
   test('combined terminal refusal skips email and delegates exact-token cleanup to its claim owner', async () => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const terminal = Object.assign(new Error('linked visit cancelled'), {

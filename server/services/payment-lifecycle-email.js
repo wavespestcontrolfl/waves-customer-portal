@@ -8,6 +8,7 @@ const { currency } = require('./email-template');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -595,6 +596,12 @@ async function sendPaymentFailed({
     idempotencyKey: dedupeKey,
     billingDeliveryCategory: 'payment_issue',
   });
+  if (emailResult?.retryable) {
+    const err = new Error('Payment-issue delivery preferences are unavailable');
+    err.code = 'BILLING_PREFS_UNAVAILABLE';
+    err.retryable = true;
+    throw err;
+  }
 
   // Legacy rows stay email-only. Explicit Text/App work is first persisted on
   // the scheduled-message rail; Stripe can redeliver the same event after a
@@ -644,7 +651,7 @@ async function sendPaymentFailed({
       db,
       effectiveCustomerId,
       async (trx) => {
-        const existing = await trx('sms_log')
+        const existing = await excludeUnresolvedSendReservations(trx('sms_log'))
           .where({ customer_id: effectiveCustomerId })
           .whereRaw("metadata->>'entry_point' = ?", ['stripe_webhook_billing_deferred'])
           .whereRaw("metadata->>'notificationEventKey' = ?", [eventKey])
