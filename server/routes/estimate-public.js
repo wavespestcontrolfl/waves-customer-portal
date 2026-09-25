@@ -55,7 +55,8 @@ const slotReservation = require('../services/slot-reservation');
 const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
-const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, TREE_SHRUB } = require('../services/pricing-engine/constants');
+const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS } = require('../services/pricing-engine/constants');
+const { isRetiredTreeShrubTier, isRetiredSaleServiceKey } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
 const {
@@ -17875,42 +17876,40 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
 // 9x Enhanced (every 6 weeks, tree_shrub_6week) was un-retired 2026-07-23
 // (owner upsell directive) and is a live cadence again — the seeder/
 // plan-sync path (every_6_weeks, 42-day interval) has been live since the
-// multiservice booking lane. Detection mirrors the accept restamp: a
-// Premium-era stored row carries a 12 visit count, a monthly cadence field,
-// or 12-visit wording; a Light-era row carries a 4 visit count, a quarterly
-// cadence field, or 4-visit/quarterly wording. The one existing grandfathered
-// quarterly customer's ALREADY-SCHEDULED visits are untouched by this
-// function — it only gates a stored/open ESTIMATE from silently reaccepting
-// at a retired cadence, never scheduled_services rows.
+// multiservice booking lane. The one existing grandfathered quarterly
+// customer's ALREADY-SCHEDULED visits are untouched by this function — it
+// only gates a stored/open ESTIMATE from silently reaccepting at a retired
+// cadence, never scheduled_services rows.
 function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
   if (!estDataLike || typeof estDataLike !== 'object') return false;
   const { recurringSvcList } = acceptanceServiceLists(estDataLike);
-  const { normalizeRecurringPattern } = require('../services/recurring-appointment-seeder');
+  const converter = require('../services/estimate-converter');
   return (recurringSvcList || []).some((svc) => {
     if (recurringServiceKey(svc) !== 'tree_shrub') return false;
-    // Explicit cadence FIELDS first — the converter reads these before any
-    // visit count or display text (explicitServiceCadence), so a crafted
-    // row like { frequency: 'monthly' } with no visit count would schedule
-    // the retired 12x Premium cadence while passing the checks below
-    // (codex P2 r1). every_6_weeks is now a first-class seeder pattern
-    // (9x Enhanced un-retired 2026-07-24) and passes alongside bimonthly.
-    // 'quarterly' no longer passes (Light retired 2026-09-24).
-    const fieldPattern = [svc?.frequency, svc?.frequencyKey, svc?.frequency_key, svc?.recurringPattern, svc?.recurring_pattern]
-      .map((value) => normalizeRecurringPattern(value))
-      .find(Boolean) || null;
-    if (fieldPattern && !['bimonthly', 'every_6_weeks'].includes(fieldPattern)) return true;
-    // Same alias set the converter's visitsPerYearForRecurringService reads
-    // (codex P2 r2: a stale row shaped { appsPerYear: 9 } slipped through).
-    const visits = Number(
-      svc?.visitsPerYear ?? svc?.appsPerYear ?? svc?.visits ?? svc?.apps ?? svc?.treatmentsPerYear ?? svc?.v,
-    );
-    if (Number.isFinite(visits) && visits > 0) return visits !== 6 && visits !== 9;
-    // Same keyText precedent as the lawn backstop above (codex P0 r1): a
-    // row shaped { serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub
-    // Care' } carries no cadence text on `name`/`label`/`displayName` at
-    // all — the retired identity lives ONLY on the catalog key fields,
-    // which the converter's remainingUnitCatalogKey preserves verbatim.
-    // Checking `text` alone let it slip through this backstop.
+    // The CONVERTER'S OWN cadence reader first — same reader the lawn
+    // backstop above uses (explicitServiceCadence: cadence FIELDS, then
+    // visit-count aliases, then label/name/displayName/service_type TEXT
+    // via normalizeRecurringPattern) — so this can never drift from what
+    // scheduling actually does. This is what catches a legacy abbreviated
+    // label like '4x applications/yr' (codex P0 round 2): the prior manual
+    // regex here required whitespace directly before "applications", which
+    // "4x applications/yr" never has (the "x" sits in the way), but
+    // normalizeRecurringPattern matches the bare "4x" substring anywhere in
+    // the text and maps it to 'quarterly' — exactly how the converter
+    // itself would read it.
+    const pattern = converter.explicitServiceCadence(svc);
+    if (pattern) return !['bimonthly', 'every_6_weeks'].includes(pattern);
+    // Aliases/wording the converter's reader doesn't cover: bare `v`
+    // visit-count shorthand (tier-row style — visitCountAliasValues has no
+    // `.v`), "N visits/apps/applications" WORDY phrasing
+    // (normalizeRecurringPattern only recognizes the abbreviated "Nx" form
+    // or exact words like "quarterly"/"monthly", never "12 visits"), and
+    // the catalog-identity fields (service/serviceKey/service_key — codex
+    // P0 round 1: a row whose ONLY retired signal is its catalog key, e.g.
+    // { serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub Care' },
+    // which explicitServiceCadence's own text fallback never reads).
+    const vAlias = Number(svc?.v);
+    if (Number.isFinite(vAlias) && vAlias > 0) return vAlias !== 6 && vAlias !== 9;
     const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
     const keyText = [svc?.service, svc?.serviceKey, svc?.service_key]
       .filter(Boolean).join(' ').toLowerCase();
@@ -20079,21 +20078,19 @@ function isRetiredLawnTierKey(tierKey) {
   return LAWN_TIERS?.[key]?.hidden === true;
 }
 
-// Tree & Shrub twin of REMOVED_LAWN_TIER_KEYS/isRetiredLawnTierKey. 'premium'
-// (12x) is a legacy alias only — it was never given a TREE_SHRUB.tiers entry,
-// so it can't carry a hidden flag and must be named explicitly, same as
-// lawn's fully-removed 'basic'. 'light' (4x/quarterly) is retired for new
-// sales (owner directive 2026-09-24: "remove quarterly tree and shrub care
-// from the estimates and services") via TREE_SHRUB.tiers.light.hidden — kept
-// as a real tier (not removed) because the one existing quarterly customer's
-// booked visits still resolve through it; hidden:true only drops it from new
-// offers.
-const REMOVED_TS_TIER_KEYS = new Set(['premium']);
-function isRetiredTreeShrubTierKey(tierKey) {
-  const key = String(tierKey || '').trim().toLowerCase();
-  if (REMOVED_TS_TIER_KEYS.has(key)) return true;
-  return TREE_SHRUB?.tiers?.[key]?.hidden === true;
-}
+// Tree & Shrub twin of REMOVED_LAWN_TIER_KEYS/isRetiredLawnTierKey. Shared
+// chokepoint (codex round 2 pre-push, 2026-09-24 — "one more surface still
+// sells Light, fix it at the chokepoint"): every new-sale boundary that
+// needs to know whether a T&S tier is retired reads
+// pricing-engine/retired-sale-catalog.js's isRetiredTreeShrubTier, never a
+// local copy. 'light' (4x/quarterly) is retired for new sales via
+// TREE_SHRUB.tiers.light.hidden — kept as a real tier (not removed) because
+// the one existing quarterly customer's booked visits still resolve through
+// it; hidden:true only drops it from new offers. 'premium' (12x) is a
+// legacy alias only — it was never given a TREE_SHRUB.tiers entry, so it
+// can't carry a hidden flag and is named explicitly inside that module,
+// same as lawn's fully-removed 'basic' here.
+const isRetiredTreeShrubTierKey = isRetiredTreeShrubTier;
 
 // Per-estimate cost-floor arm state: an estimate generated with an explicit
 // useLawnCostFloor input (the adapter forwards options.useLawnCostFloor into

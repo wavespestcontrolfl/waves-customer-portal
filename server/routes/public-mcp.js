@@ -34,7 +34,7 @@ const logger = require('../services/logger');
 const { createMcpRpc, createBodyErrorHandler } = require('../services/mcp-rpc');
 const { getPublicPricingRangesResult } = require('./public-pricing-ranges');
 const { PUBLIC_QUOTE_SERVICE_KEYS } = require('./public-quote');
-const { FORMERLY_PUBLIC_KEYS } = require('../services/public-services-menu');
+const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 
 const router = express.Router();
 
@@ -82,20 +82,24 @@ const publicMcpLimiter = rateLimit({
 // Agents get service copy from the governed website pages / llms.txt.
 const SERVICE_COLUMNS = ['service_key', 'name', 'short_name', 'category', 'subcategory', 'billing_type', 'frequency', 'visits_per_year'];
 
-// FORMERLY_PUBLIC_KEYS (codex P1 pre-push, 2026-09-24): tree_shrub_quarterly
-// keeps customer_visible=true — the grandfathered quarterly customer's
+// RETIRED_SALE_SERVICE_KEYS, NOT public-services-menu.js's
+// FORMERLY_PUBLIC_KEYS (codex P1 round 2 pre-push, 2026-09-24 — the round-1
+// fix used the wrong set): FORMERLY_PUBLIC_KEYS is the much broader "left
+// the public QUOTE MENU" compatibility list (foam_drill,
+// termite_pretreatment, the rodent one-time keys, …) — real, fully active
+// and bookable services that simply aren't on the cold-sale quote menu for
+// their own unrelated reasons. Filtering this anonymous catalog with that
+// set falsely reported them as nonexistent. tree_shrub_quarterly keeps
+// customer_visible=true — the grandfathered quarterly customer's
 // track-public.js / tracking.js "Today's visit" summary joins that exact
 // flag (services.description via customer_visible), so flipping it false
 // would blank their tracking page even though nothing about their existing
-// plan changed. Excluding it here (a code-side, MCP-only filter) is what
-// actually keeps it off this anonymous public catalog, the same denylist
-// public-services-menu.js already maintains for every other key retired
-// from public selection while its row stays customer_visible for other
-// reasons.
+// plan changed — so it needs its OWN, MCP-specific exclusion instead of
+// relying on customer_visible=false.
 async function listServices() {
   const rows = await db('services')
     .where({ is_active: true, is_archived: false, customer_visible: true })
-    .whereNotIn('service_key', [...FORMERLY_PUBLIC_KEYS])
+    .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
     .orderBy('category')
     .orderBy('name')
     .select(SERVICE_COLUMNS);
@@ -104,7 +108,7 @@ async function listServices() {
 
 async function getService(serviceKey) {
   const key = String(serviceKey || '');
-  if (FORMERLY_PUBLIC_KEYS.has(key)) return { error: 'service not found' };
+  if (RETIRED_SALE_SERVICE_KEYS.has(key)) return { error: 'service not found' };
   const row = await db('services')
     .where({
       service_key: key, is_active: true, is_archived: false, customer_visible: true,

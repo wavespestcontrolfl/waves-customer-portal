@@ -682,7 +682,13 @@ async function ensureTable() {
       { config_key: 'global_conditional_ceiling', name: 'Conditional Material Ceiling', category: 'global', sort_order: 6, data: JSON.stringify({ value: 60, unit: '$/property/yr', description: 'Max conditional material spend before reprice flag' }) },
 
       // Tree & Shrub
-      { config_key: 'ts_material_rates', name: 'T&S Material Model (annual)', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ fixed: 15, per_tree: 4, per_sqft: 0.055, light_factor: 0.75, note: 'v4.6 protocol-derived annual material model: fixed foliar/micros load + 8-2-12 per tree/palm + Snapshot/13-0-13/spray per bed sqft. Light 4x runs light_factor of the spend. 6-visit Standard is the mandated default; Light 4x is a downsell. Enhanced 9x / Premium 12x retired.' }) },
+      // note text kept in sync with migration 20260924020020's NEW_NOTE — a
+      // fresh install must seed the CURRENT ladder description, not the
+      // pre-2026-09-24 "Light is a downsell / Enhanced retired" text an
+      // existing production row needed that read-modify-write migration to
+      // correct (ensureTable's onConflict('config_key').ignore() never
+      // updates an existing row's note).
+      { config_key: 'ts_material_rates', name: 'T&S Material Model (annual)', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ fixed: 15, per_tree: 4, per_sqft: 0.055, light_factor: 0.75, note: 'v4.6 protocol-derived annual material model: fixed foliar/micros load + 8-2-12 per tree/palm + Snapshot/13-0-13/spray per bed sqft. Light 4x runs light_factor of the spend. 6-visit Standard is the mandated default. Light 4x is RETIRED for new sales (owner directive 2026-09-24) — grandfathered/legacy pricing only, never offered or auto-recommended. Enhanced 9x is a live, customer-selectable upsell (owner directive 2026-07-23), never auto-recommended. Premium 12x stays retired.' }) },
       { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ light: 22, standard: 35, note: 'Backstops, not expected prices — the v4.6 formula prices nearly all real properties above these. Keep light <= 2/3 of standard so a floored Light never exceeds Standard per month.' }) },
 
       // Palm

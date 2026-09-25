@@ -1,0 +1,73 @@
+// Single chokepoint for "is this a NEW sale of something the owner retired?"
+// (codex round 2 pre-push, 2026-09-24, PR #4786: "one more surface still
+// sells Light" — the first round fixed this one surface at a time across
+// estimate-public.js, property-lookup-v2.js, customer-pricing-ai.js,
+// public-services-menu.js, public-quote.js, and public-mcp.js; round 2 found
+// two MORE surfaces — the Intelligence Bar agent estimate tools and the
+// social-content-studio campaign-context builder — plus a P0 gap in the
+// round-1 cadence-text matcher. This module exists so a THIRD surface never
+// needs its own bespoke copy of the same check).
+//
+// Two distinct, deliberately separate concerns:
+//
+//   RETIRED_SALE_SERVICE_KEYS — catalog `service_key`s that must never be
+//   offered, advertised, or created as a NEW sale, full stop. Distinct from
+//   `services/public-services-menu.js`'s FORMERLY_PUBLIC_KEYS, which is
+//   about "left the public QUOTE MENU" (a much broader compatibility set —
+//   foam_drill, termite_pretreatment, the rodent one-time keys, etc. — rows
+//   that are still perfectly bookable/customer-visible, just not on the
+//   public quote-to-calculate menu). Conflating the two hid real, live
+//   services from the public MCP catalog (codex P1 round 2). Every new-sale
+//   boundary that needs "don't sell/advertise this exact retired product"
+//   (public MCP catalog, social campaign context, lead/booking tools) reads
+//   THIS set, never FORMERLY_PUBLIC_KEYS.
+//
+//   isRetiredTreeShrubTier(tier) — is a Tree & Shrub TIER KEY (as opposed to
+//   a catalog service_key) retired for new sales? Mirrors
+//   TREE_SHRUB.tiers[key].hidden (light, 2026-09-24) plus the legacy
+//   'premium' alias (12x, fully removed from TREE_SHRUB.tiers — never
+//   resurrected, so it can't carry a `hidden` flag and must be named
+//   explicitly). Every new-sale boundary that accepts a `treeShrub.tier`
+//   value from a caller (property-lookup-v2.js, public-quote.js,
+//   customer-pricing-ai.js, the Intelligence Bar agent estimate tools, the
+//   voice-agent relay files) should reject on this check for a NEW
+//   quote/draft. It is deliberately NOT applied inside `priceTreeShrub`
+//   itself, or the scheduling/converter/seeder readers of an ALREADY
+//   selected or stored cadence (estimate-converter.js,
+//   self-booking-plan-sync.js, slot-reservation.js) — those must keep
+//   pricing/reading tier:'light' correctly for the one grandfathered
+//   quarterly customer's existing plan on replay.
+//
+// Both sets are intentionally tiny and named explicitly rather than derived
+// from a broader flag (e.g. `!public_quote_selectable`) — see the PR body /
+// round-2 review thread for why a flag-derived set risks hiding an
+// unrelated, still-fully-sold service that merely isn't on the public quote
+// menu for its own reasons.
+
+const { TREE_SHRUB } = require('./constants');
+
+const RETIRED_SALE_SERVICE_KEYS = new Set(['tree_shrub_quarterly']);
+
+function isRetiredSaleServiceKey(serviceKey) {
+  return RETIRED_SALE_SERVICE_KEYS.has(String(serviceKey || '').trim());
+}
+
+// 'premium' (12x T&S) was fully removed from TREE_SHRUB.tiers well before
+// the 2026-09-24 Light retirement — it never carried (and can never carry)
+// a `hidden` flag, so it must be named here explicitly, the same way
+// estimate-public.js's REMOVED_LAWN_TIER_KEYS names lawn's fully-removed
+// 'basic'.
+const REMOVED_TREE_SHRUB_TIER_ALIASES = new Set(['premium']);
+
+function isRetiredTreeShrubTier(tier) {
+  const key = String(tier || '').trim().toLowerCase();
+  if (!key) return false;
+  if (REMOVED_TREE_SHRUB_TIER_ALIASES.has(key)) return true;
+  return TREE_SHRUB?.tiers?.[key]?.hidden === true;
+}
+
+module.exports = {
+  RETIRED_SALE_SERVICE_KEYS,
+  isRetiredSaleServiceKey,
+  isRetiredTreeShrubTier,
+};

@@ -1555,6 +1555,60 @@ describe('Agent Estimate compute input boundary', () => {
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 
+  // codex P1 round 2 pre-push (2026-09-24): treeShrub is an unconstrained
+  // object in this tool's schema, and priceTreeShrub intentionally keeps
+  // pricing an explicit tier:'light' for legacy stored-plan replay
+  // elsewhere — so nothing here stopped a brand-new four-visit draft from
+  // pricing and persisting. This is a new-draft boundary (every Agent
+  // Estimate draft is source='ai_agent'), never a replay of the one
+  // grandfathered customer's real plan.
+  test('rejects tier:"light" (retired 2026-09-24) on a new compute_estimate draft', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { treeShrub: { tier: 'light' } },
+    });
+
+    expect(result.error).toMatch(/retired/i);
+    expect(result.error).toMatch(/light/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('rejects the already-retired tier:"premium" too, and still allows the sold tiers', async () => {
+    const retired = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { treeShrub: { tier: 'premium' } },
+    });
+    expect(retired.error).toMatch(/retired/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+
+    mockGenerateEstimate.mockReturnValueOnce(LAWN_TREE_ENGINE_RESULT);
+    const sold = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { treeShrub: { tier: 'enhanced' } },
+    });
+    expect(sold.error).toBeUndefined();
+    expect(mockGenerateEstimate).toHaveBeenCalled();
+  });
+
+  // validateAgentEngineInput gates the revision path (computeAgentDraftPreview,
+  // used by both create_agent_estimate_draft and the revise-after-feedback
+  // flow) — the same retired-tier check, tested directly since it's a pure
+  // function.
+  test('validateAgentEngineInput rejects retired T&S tiers, allows the sold ones and an absent tier', () => {
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: { tier: 'light' } },
+    })).toMatch(/retired/i);
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: { tier: 'premium' } },
+    })).toMatch(/retired/i);
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: { tier: 'enhanced' } },
+    })).toBeNull();
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: {} },
+    })).toBeNull();
+  });
+
   test('rejects a forbidden pricing override even if create draft is called directly', async () => {
     const { database, writes } = makeDatabase();
     mockDb.mockImplementation(database);

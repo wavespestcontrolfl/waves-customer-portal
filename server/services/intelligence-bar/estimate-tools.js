@@ -38,6 +38,7 @@ const {
   normalizeLawnTrack,
   normalizeProtocolKey,
 } = require('../protocol-reader');
+const { isRetiredTreeShrubTier } = require('../pricing-engine/retired-sale-catalog');
 const { agentEstimatePreviewFingerprint, agentEngineResultDigest } = require('../agent-estimate-preview');
 const { clearEstimatePricingCache } = require('../estimate-pricing-cache');
 const { executeProcurementTool } = require('./procurement-tools');
@@ -1352,6 +1353,25 @@ function unknownServiceKeysError(services = {}) {
   return `Unknown service key(s): ${unknown.join(', ')}. The pricing engine ignores unrecognized services, which would list a service the customer is never charged for. Use the documented service keys only (rodent control is rodentBait or rodentTrapping).`;
 }
 
+// codex P1 round 2 pre-push (2026-09-24): `treeShrub` is an unconstrained
+// object in both compute_estimate and create_pending_estimate's schema, and
+// priceTreeShrub intentionally keeps pricing an explicit tier:'light' for
+// legacy stored-plan replay elsewhere in the app — so nothing upstream of
+// generateEstimate stopped an operator/model input like
+// `{ services: { treeShrub: { tier: 'light' } } }` from pricing AND
+// persisting a brand-new four-visit draft. This is unambiguously a NEW-draft
+// boundary (every Agent Estimate draft is `source='ai_agent'`, never a
+// replay of the one grandfathered customer's real plan, which lives outside
+// this tool entirely), so reject outright rather than carve out a replay
+// exception. Shared chokepoint: isRetiredTreeShrubTier
+// (pricing-engine/retired-sale-catalog.js) — never a local copy.
+function retiredTreeShrubTierError(services = {}) {
+  const tier = services?.treeShrub?.tier;
+  if (tier === undefined || tier === null || tier === '') return null;
+  if (!isRetiredTreeShrubTier(tier)) return null;
+  return `Tree & Shrub tier '${tier}' is retired for new sales (owner directive 2026-09-24) and cannot be quoted on a new draft. Use 'enhanced' (9x, upsell) or omit tier for the mandated 'standard' (6x) default.`;
+}
+
 function optionalBoundedNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (value === undefined || value === null || value === '') return undefined;
   const number = Number(value);
@@ -1367,6 +1387,8 @@ function validateAgentEngineInput(input) {
   }
   const unknownServices = unknownServiceKeysError(input.services);
   if (unknownServices) return unknownServices;
+  const treeShrubTierError = retiredTreeShrubTierError(input.services);
+  if (treeShrubTierError) return treeShrubTierError;
   const home = optionalBoundedNumber(input.homeSqFt, { min: 500, max: 10000000 });
   const building = optionalBoundedNumber(input.buildingSqFt, { min: 500, max: 10000000 });
   if (home === null || building === null || (home === undefined && building === undefined)) {
@@ -1493,6 +1515,8 @@ async function computeEstimate(rawInput, { includeRawEngineResult = false } = {}
   }
   const unknownServices = unknownServiceKeysError(services);
   if (unknownServices) return { error: unknownServices };
+  const treeShrubTierError = retiredTreeShrubTierError(services);
+  if (treeShrubTierError) return { error: treeShrubTierError };
 
   const measuredTurfSf = optionalBoundedNumber(input.measuredTurfSf ?? input.lawnSqFt, { min: 0, max: 10000000 });
   if (measuredTurfSf === null) return { error: 'measuredTurfSf must be 0-10000000 when provided' };
