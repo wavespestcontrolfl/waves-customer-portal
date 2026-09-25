@@ -395,7 +395,14 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
             if (ownership.ok !== true) return ownership;
           }
           if (options.billingDeliveryCategory && !current.payer_id) {
-            const freshPrefs = await trx('notification_prefs').where({ customer_id: current.customer_id }).first();
+            let freshPrefs;
+            try {
+              freshPrefs = await trx('notification_prefs').where({ customer_id: current.customer_id }).first();
+            } catch {
+              boundaryRefusal = { code: 'billing_prefs_unavailable',
+                reason: 'Invoice delivery preferences unavailable', retryable: true };
+              return { ok: false, ...boundaryRefusal };
+            }
             if (billingChannelAllowed(freshPrefs || {}, options.billingDeliveryCategory, 'email') === false) {
               return { ok: false, reason: 'billing_email_not_selected' };
             }
@@ -421,6 +428,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       // provider-error recovery run instead of reporting a pre-dispatch guard
       // refusal and making the queued attempt immediately retryable.
       if (providerStarted) throw err;
+      if (boundaryRefusal) return { ok: false, ...boundaryRefusal };
       return { ok: false, reason: err.message, code: err.code };
     }
   };
@@ -475,6 +483,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         logger.warn(`[invoice-email] Template invoice email NOT delivered for ${invoice.invoice_number} (${refusal.reason || 'blocked/suppressed'})`);
         return { ok: false, blocked: !!result.blocked, error: refusal.reason || 'Email suppressed',
           code: refusal.code, deliveryOutcome: boundaryRefusal ? 'not_sent' : result.deliveryOutcome,
+          ...(refusal.retryable ? { retryable: true } : {}),
           recipient: recipientPayload };
       }
       await markEmailDelivered();
@@ -511,7 +520,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       }],
     }));
     if (verdict.ok !== true) return { ok: false, error: verdict.reason, code: verdict.code,
-      deliveryOutcome: verdict.code === 'INVOICE_VISIT_TERMINAL' ? 'not_sent' : undefined,
+      deliveryOutcome: boundaryRefusal ? 'not_sent' : undefined,
+      ...(verdict.retryable ? { retryable: true } : {}),
       recipient: recipientPayload };
     await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
