@@ -8,6 +8,12 @@
  * created, in the SAME transaction as the resolve. Dismissing the card must
  * NOT clear anything: "leave the note" is not a verified number.
  */
+// The /verdict clear check's lazy require of call-recording-processor.js
+// (finding #3, round 4) pulls in that file's own huge require graph — a
+// one-time Babel transform cost the FIRST test to reach it pays, which can
+// exceed Jest's default 5000ms on a cold run. Same fix as the other slow
+// first-import suites in this repo (see jest.setTimeout usage elsewhere).
+jest.setTimeout(30000);
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   return fn;
@@ -23,6 +29,15 @@ jest.mock('../middleware/admin-auth', () => ({
     next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
+  // Finding #3 (round 4 P1, PR #4807): the /verdict route's callback-number
+  // clear check now lazily requires call-recording-processor.js (for its
+  // direction-aware resolveCallContactPhone) — that module's own require
+  // chain (messaging/send-customer-message -> twilio-sms -> twilio.js)
+  // reaches routes/admin-sms-templates.js, which destructures requireAdmin
+  // from this same mock at its own require time. Without it here the whole
+  // chain throws at require() (undefined route middleware), not inside this
+  // test's own code.
+  requireAdmin: (_req, _res, next) => next(),
 }));
 
 const express = require('express');
@@ -300,5 +315,53 @@ describe('POST /admin/triage/:id/verdict on a callback_number_needed card', () =
       expect(res.status).toBe(409);
     });
     expect(tables.triage_items[0].status).toBe('open');
+  });
+
+  /**
+   * Finding #3 (round 4 P1, PR #4807): an OUTBOUND auto-booking call has
+   * from_phone as the Waves Twilio number, not the caller's disclaimed
+   * number — the processor's resolveCallContactPhone uses to_phone for
+   * outbound. Comparing the customer's on-file phone against a bare
+   * from_phone made an unchanged phone look like a verified replacement.
+   */
+  const WAVES_NUMBER = '9412975749'; // TWILIO_NUMBERS.mainLine, an internal/owned number.
+  const DISCLAIMED_DESTINATION = '9415557777'; // to_phone on the outbound leg — the disclaimed number.
+
+  test('outbound call: customer phone unchanged from the DIALED (to_phone) number still refuses 409 — from_phone (Waves) is not the disclaimed number', async () => {
+    const { conn, tables } = fixture({
+      call_log: [{
+        id: CALL_ID, review_status: 'open', customer_id: CUSTOMER_ID,
+        direction: 'outbound-api', from_phone: WAVES_NUMBER, to_phone: DISCLAIMED_DESTINATION,
+      }],
+      customers: [{ id: CUSTOMER_ID, phone: DISCLAIMED_DESTINATION }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('CALLBACK_NUMBER_UNVERIFIED');
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+    const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
+    expect(held.call_sms_cleared_at).toBeNull();
+  });
+
+  test('outbound call: a genuinely corrected phone (different from to_phone) clears the hold', async () => {
+    const { conn, tables } = fixture({
+      call_log: [{
+        id: CALL_ID, review_status: 'open', customer_id: CUSTOMER_ID,
+        direction: 'outbound-api', from_phone: WAVES_NUMBER, to_phone: DISCLAIMED_DESTINATION,
+      }],
+      customers: [{ id: CUSTOMER_ID, phone: '9415559999' }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items[0].status).toBe('resolved');
+    const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
+    expect(held.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
   });
 });

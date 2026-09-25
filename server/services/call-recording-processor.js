@@ -9350,6 +9350,24 @@ const CallRecordingProcessor = {
             );
           } catch (_e) { /* fall back to model flags only */ }
         }
+        // Finding #4 (round 4 P1, PR #4807): the enforce branch above arms
+        // v2SmsBlocked + callbackNumberNeededHoldActive the moment
+        // callback_number_needed is in finalFlags, but that branch is
+        // guarded off in shadow mode (CALL_EXTRACTION_V2_DRIVES_ROUTING
+        // false) — this documented prod posture (V2_ENABLED=true,
+        // DRIVES_ROUTING=false) was arming NEITHER, so a disclaimed ANI
+        // kept getting confirmation/reminder texts with no durable hold and
+        // no review card. v2SmsBlocked/callbackNumberNeededHoldActive are
+        // read by the SAME common code (confirmation send gate,
+        // registerScheduleSideEffects) regardless of which branch set them
+        // — arm them here, from the SAME merged bridgeTriageFlags the card
+        // below is about to file from, so shadow mode behaves exactly like
+        // enforce mode for this one signal.
+        if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {
+          v2SmsBlocked = true;
+          v2SmsClearedByImpliedConsent = false;
+          callbackNumberNeededHoldActive = true;
+        }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the
         // ORIGINAL AV verdict plus the recovery result and applies its own
@@ -19180,6 +19198,16 @@ CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMP
 // ET-offset-vs-instant rule would drift from it.
 CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
 CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
+
+// Production contract for admin-triage.js's callback_number_needed clear
+// check (finding #3, round 4 P1, PR #4807 — NOT test-only): the direction-
+// aware ANI-vs-dialed-number resolution used to decide whether a customer's
+// on-file phone is a genuine replacement for the disclaimed number must be
+// the SAME one the call pipeline used to resolve the contact at hold time,
+// or the two can drift (an outbound call's disclaimed number is to_phone,
+// not from_phone). It lived only under `_test` — every real caller outside
+// this file got `undefined`.
+CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

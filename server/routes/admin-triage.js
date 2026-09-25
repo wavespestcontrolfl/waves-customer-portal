@@ -1115,14 +1115,26 @@ router.post('/:id/verdict', async (req, res) => {
           .whereIn('status', OPEN_STATES)
           .first('id');
         if (openCallbackCard) {
-          const callRow = await trx('call_log').where({ id: item.call_log_id }).first('from_phone', 'customer_id');
+          const callRow = await trx('call_log').where({ id: item.call_log_id })
+            .first('from_phone', 'to_phone', 'direction', 'metadata', 'source', 'customer_id');
           const customerRow = callRow?.customer_id
             ? await trx('customers').where({ id: callRow.customer_id }).first('phone')
             : null;
           const { phoneKey } = require('../services/customer-contact-fanout');
-          const aniDigits = phoneKey(callRow?.from_phone);
+          // Finding #3 (round 4 P1): from_phone is the Waves Twilio number
+          // on an OUTBOUND auto-booking call — the disclaimed destination
+          // there is to_phone (the number Waves dialed, per the processor's
+          // own resolveCallContactPhone). Comparing against a bare
+          // from_phone made an unchanged customer phone look like a
+          // verified replacement for every outbound-call card. Reuse the
+          // processor's direction-aware resolver (no dictated number here —
+          // the card exists BECAUSE none resolved) so this can never drift
+          // from the number the hold was actually placed on.
+          const { resolveCallContactPhone } = require('../services/call-recording-processor');
+          const disclaimedNumber = resolveCallContactPhone(callRow || {}, null);
+          const aniDigits = phoneKey(disclaimedNumber);
           const customerDigits = phoneKey(customerRow?.phone);
-          const verifiedReplacementNumber = !!customerDigits && customerDigits !== aniDigits;
+          const verifiedReplacementNumber = !!aniDigits && !!customerDigits && customerDigits !== aniDigits;
           if (!verifiedReplacementNumber) {
             callbackNumberUnverified = true;
             return;

@@ -386,13 +386,15 @@ function callbackNumberHoldFromRow(row) {
 // existing external caller) or { scheduledServiceId, visitId } for a
 // grouped occurrence check.
 //
-// FAILS CLOSED (finding #3): this gates whether we have CONSENT to text a
-// number, not whether the visit is merely available — an unreadable result
-// (rolling deploy, a transiently missing column, a DB hiccup) must never
-// read as "safe to text". Every caller already has an email fallback for
-// the true-held case, so failing closed here costs a held text, never a
-// lost customer contact.
-async function callbackNumberHoldActiveForVisit(idsOrScheduledServiceId) {
+// Shared row resolution for both readers below — grouped-occurrence lookup
+// (finding #5, round 2 — a pre-existing sibling row, not the call-created
+// one, can be the notification owner) and the owner-visitId backfill
+// (finding #4, round 3 — a plain `undefined` visitId key must never read as
+// "confirmed no group") live here ONCE so the fail-closed and tri-state
+// readers below can never disagree on which rows they looked at, only on
+// what a read FAILURE means. Returns [] (never throws) when there is no
+// visit context at all — both callers treat that as "not held".
+async function resolveCallbackNumberHoldRows(idsOrScheduledServiceId) {
   const isPlainId = typeof idsOrScheduledServiceId === 'string' || idsOrScheduledServiceId == null;
   const scheduledServiceId = isPlainId ? idsOrScheduledServiceId : idsOrScheduledServiceId.scheduledServiceId;
   // A caller that already resolved visitId — even to null, "confirmed
@@ -402,29 +404,55 @@ async function callbackNumberHoldActiveForVisit(idsOrScheduledServiceId) {
   // (a bare scheduledServiceId string, or an object that never set it —
   // confirmation/reschedule/cancellation/no-show/series cancellation, and
   // twilio.js's en-route/arrival) gets it resolved from the service row
-  // itself (finding #4, round 3): a plain `undefined` must never be read
-  // as "confirmed no group".
+  // itself (finding #4, round 3).
   const visitIdSupplied = !isPlainId && Object.prototype.hasOwnProperty.call(idsOrScheduledServiceId, 'visitId');
   let visitId = visitIdSupplied ? idsOrScheduledServiceId.visitId : null;
-  if (!scheduledServiceId && !visitId) return false; // no visit context at all — nothing to hold.
+  if (!scheduledServiceId && !visitId) return []; // no visit context at all — nothing to hold.
+  if (!visitIdSupplied && scheduledServiceId) {
+    const owner = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
+    visitId = owner?.visit_id || null;
+  }
+  return db('scheduled_services')
+    .where(function idOrVisitId() {
+      if (scheduledServiceId) this.orWhere('id', scheduledServiceId);
+      if (visitId) this.orWhere('visit_id', visitId);
+    })
+    .select('callback_number_hold_at', 'call_sms_cleared_at');
+}
+
+// FAILS CLOSED (finding #3): this gates whether we have CONSENT to text a
+// number, not whether the visit is merely available — an unreadable result
+// (rolling deploy, a transiently missing column, a DB hiccup) must never
+// read as "safe to text". Every caller already has an email fallback for
+// the true-held case, so failing closed here costs a held text, never a
+// lost customer contact.
+async function callbackNumberHoldActiveForVisit(idsOrScheduledServiceId) {
   try {
-    // Finding #5 (round 2) resolved a caller-supplied visitId to sibling
-    // members; finding #4 (round 3) closes the gap for every caller that
-    // only ever had the owner service id.
-    if (!visitIdSupplied && scheduledServiceId) {
-      const owner = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
-      visitId = owner?.visit_id || null;
-    }
-    const rows = await db('scheduled_services')
-      .where(function idOrVisitId() {
-        if (scheduledServiceId) this.orWhere('id', scheduledServiceId);
-        if (visitId) this.orWhere('visit_id', visitId);
-      })
-      .select('callback_number_hold_at', 'call_sms_cleared_at');
+    const rows = await resolveCallbackNumberHoldRows(idsOrScheduledServiceId);
     return rows.some((row) => callbackNumberHoldFromRow(row));
   } catch (err) {
-    logger.warn(`[appt-remind] callback-number hold read failed for visit ${scheduledServiceId || visitId} — failing CLOSED (treating as held): ${err.message}`);
+    logger.warn(`[appt-remind] callback-number hold read failed — failing CLOSED (treating as held): ${err.message}`);
     return true;
+  }
+}
+
+// TRI-STATE reader (finding #1, round 4): callbackNumberHoldActiveForVisit's
+// fail-CLOSED boolean is right for an SMS leg (an email fallback exists for
+// a truly-held visit), but it is WRONG for appointment-card-request's
+// delivery:'none' path — there, "held" mints a /secure bearer token and
+// sends the card-enrollment EMAIL, the last channel left. That path must
+// authorize the email only on a CONFIRMED persisted hold, never on "we
+// couldn't tell": an ordinary TCPA/do-not-contact suppression plus a
+// transient read error must never be read as a proven callback-number hold.
+// Returns true (confirmed held), false (confirmed not held — including "no
+// visit context"), or null (read failed — treat as NOT authorized).
+async function callbackNumberHoldConfirmedForVisit(idsOrScheduledServiceId) {
+  try {
+    const rows = await resolveCallbackNumberHoldRows(idsOrScheduledServiceId);
+    return rows.some((row) => callbackNumberHoldFromRow(row));
+  } catch (err) {
+    logger.warn(`[appt-remind] callback-number hold read failed — returning UNKNOWN (not authorizing the email-only path): ${err.message}`);
+    return null;
   }
 }
 
@@ -1574,12 +1602,39 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
   // The canonical sender resolves App again and may fall back to SMS. Run
   // the appointment landline guard on that actual SMS leg, even when the
   // optional proactive lookup gate is off or the channel changed mid-send.
-  const dispatchCheck = appSelected ? async ({ channel } = {}) => {
+  const dispatchCheckBase = appSelected ? async ({ channel } = {}) => {
     if (channel === 'sms' && await isLandline(customerId, phone)) {
       return { ok: false, code: 'NON_MOBILE_SMS_RECIPIENT', reason: 'Appointment recipient cannot receive SMS' };
     }
     return typeof preDispatchCheck === 'function' ? preDispatchCheck() : { ok: true };
   } : preDispatchCheck;
+
+  // Finding #2 (Codex round-4 P1): safeSendAppointment's entry check reads
+  // the callback-number hold ONCE, before the contact fan-out starts. A
+  // disclaimed-ANI call that attaches to a pre-existing, already-armed
+  // reminder can commit callback_number_hold_at AFTER that entry read but
+  // before THIS contact's provider handoff — the loop never rereads it, so
+  // the race wins and the disclaimed number gets texted anyway. Recheck the
+  // SAME predicate right here, at the last checkpoint before the provider
+  // call, composed ahead of any caller-supplied preDispatchCheck. Fail
+  // CLOSED (callbackNumberHoldActiveForVisit's default): this is an SMS
+  // leg, and every caller already has (or degrades gracefully without) an
+  // email fallback for a visit that turns out to be genuinely held.
+  const dispatchCheck = (metaExtra?.scheduled_service_id || metaExtra?.visit_id)
+    ? async (...args) => {
+      const callbackHeld = await callbackNumberHoldActiveForVisit({
+        scheduledServiceId: metaExtra.scheduled_service_id,
+        ...(metaExtra.visit_id !== undefined ? { visitId: metaExtra.visit_id } : {}),
+      });
+      if (callbackHeld) {
+        // retryable: true mirrors the entry check above — the hold can
+        // clear later, so a caller with no email fallback must not
+        // finalize this as a permanent suppression.
+        return { ok: false, code: 'CALLBACK_NUMBER_HOLD', reason: 'Caller disclaimed this number (callback_number_needed)', retryable: true };
+      }
+      return typeof dispatchCheckBase === 'function' ? dispatchCheckBase(...args) : { ok: true };
+    }
+    : dispatchCheckBase;
 
   // (The grouped-move hold for appointment notices is enforced inside
   // sendCustomerMessage itself — the canonical path every SMS leg passes,
@@ -5721,6 +5776,7 @@ AppointmentReminders._test = {
   buildMergedServiceLabel,
   appendHeldEstimateAcceptLine,
   callbackNumberHoldActiveForVisit,
+  callbackNumberHoldConfirmedForVisit,
   callbackNumberHoldFromRow,
 };
 
@@ -5753,5 +5809,9 @@ AppointmentReminders.visitPrefsRow = visitPrefsRow;
 // Shared with twilio.js's en-route/arrival senders (owner ruling
 // 2026-09-25) — see the function's own comment.
 AppointmentReminders.callbackNumberHoldActiveForVisit = callbackNumberHoldActiveForVisit;
+// Tri-state reader for appointment-card-request's email-only path (finding
+// #1, round 4) — see the function's own comment for why a fail-closed
+// boolean is wrong there.
+AppointmentReminders.callbackNumberHoldConfirmedForVisit = callbackNumberHoldConfirmedForVisit;
 
 module.exports = AppointmentReminders;

@@ -1843,21 +1843,26 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
     expect(mockSendSetupInvitation).not.toHaveBeenCalled();
   });
 
-  test('a hold-read failure FAILS CLOSED — treated as held, tried by email rather than silently suppressed (codex round-2 finding #3)', async () => {
-    // Only the hold-check's own query (callbackNumberHoldActiveForVisit
+  test('a hold-read failure stays SILENT — never authorizes the email-only path on an unproven hold (codex round-4 finding #1)', async () => {
+    // Only the hold-check's own query (callbackNumberHoldConfirmedForVisit
     // reads via .select(...)) throws — the visit-load .first() a few lines
     // above it in requestCardForAppointment must keep resolving normally,
     // or the whole request wrongly aborts with a generic 'error:...' skip
-    // instead of exercising this specific failure path. An unreadable hold
-    // state is a consent question, not an availability one: it must never
-    // read as "safe to text", so it takes the SAME email-only path a
-    // genuine hold would.
+    // instead of exercising this specific failure path. Round-2's fix
+    // (fail CLOSED here, treating an unreadable result as held) was itself
+    // the round-4 bug: this delivery:'none' path mints a /secure bearer
+    // token and sends the card-enrollment EMAIL — the LAST channel left —
+    // so a transient read error on an ordinary TCPA-suppressed call must
+    // never be read as a CONFIRMED hold. Only a proven persisted hold may
+    // authorize the email; an unreadable result now falls through to the
+    // exact same delivery_suppressed outcome a plain TCPA block gets.
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT });
     mockTableHandlers.scheduled_services.select = () => { throw new Error('db down'); };
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
-    expect(res.reason).toBe('sent_email_only_disclaimed_ani');
+    expect(res.reason).toBe('delivery_suppressed');
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-    expect(mockSendSetupInvitation).toHaveBeenCalledTimes(1);
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
   });
 
   test('once the invitation email has gone out, clearing the hold later does not re-send a second one', async () => {

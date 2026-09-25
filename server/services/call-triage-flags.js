@@ -1562,6 +1562,16 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // the review card enforce mode no longer raises. Only an explicit third
   // party (tenant, agent, manager, other) carries the ask.
   if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)) needsConfirmation.push('caller_not_authorized');
+  // Finding #4 (round 4 P1, PR #4807): callback_number_needed reaches this
+  // function inside bridgeTriageFlags (the processor already merges
+  // computeDeterministicTriageFlags's output in before calling this), but
+  // nothing here ever copied it into needsConfirmation — the shadow bridge
+  // filed no Needs Review card and the processor's SMS-hold arming (keyed
+  // on callbackNumberNeededBlocksSms) only ran in the enforce-only branch,
+  // so a disclaimed ANI kept getting texted while V2 is in shadow. Same
+  // ADVISORY posture as every other flag here — this never holds the
+  // booking, only the confirmation/reminder SMS leg (see SMS_ONLY_FLAGS).
+  if (flags.includes('callback_number_needed')) needsConfirmation.push('callback_number_needed');
   // The V2 deterministic pass (fed the same AV verdict) may also flag the
   // missing unit — consume it under the SAME corroboration rule, deduped
   // against the branch's own push.

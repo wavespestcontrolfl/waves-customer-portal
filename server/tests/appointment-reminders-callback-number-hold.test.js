@@ -265,3 +265,60 @@ test('clearing the hold (call_sms_cleared_at stamped) resumes normal SMS sending
     expect.objectContaining({ reminder_72h_sent: true }),
   );
 });
+
+/**
+ * Finding #2 (round 4 P1, PR #4807): safeSendAppointment's hold check above
+ * only reads callback_number_hold_at ONCE, before the contact fan-out
+ * starts. A disclaimed-ANI call that attaches to a pre-existing, already-
+ * armed reminder can commit the hold AFTER that entry read but BEFORE this
+ * contact's provider handoff — the fix recheck the SAME predicate inside
+ * safeSend's dispatchCheck, composed ahead of any caller preDispatchCheck,
+ * right before sendCustomerMessage is called.
+ */
+test('finding #2: a hold committed AFTER the entry check but BEFORE the provider handoff still blocks the send', async () => {
+  // A real preDispatchCheck-honoring stand-in — the module-level mock
+  // normally ignores preDispatchCheck entirely, which is exactly why this
+  // recheck was previously untested: nothing in the mock ever INVOKED it.
+  sendCustomerMessage.mockImplementationOnce(async ({ preDispatchCheck, channel }) => {
+    if (typeof preDispatchCheck === 'function') {
+      const verdict = await preDispatchCheck({ channel: channel || 'sms' });
+      if (!verdict || verdict.ok !== true) {
+        return {
+          sent: false, blocked: true, code: verdict?.code || 'PRE_DISPATCH_CHECK_FAILED',
+          reason: verdict?.reason, ...(verdict?.retryable === true ? { retryable: true } : {}),
+        };
+      }
+    }
+    return { sent: true };
+  });
+
+  wireDb({
+    scheduled_services: [
+      // Entry check (safeSendAppointment, before the fan-out starts): NOT
+      // held yet — the owner-visitId backfill read, then the rows read.
+      chain({ first: jest.fn().mockResolvedValue({ visit_id: null }) }),
+      chain({ select: jest.fn().mockResolvedValue([{ callback_number_hold_at: null, call_sms_cleared_at: null }]) }),
+      // Provider-handoff recheck (safeSend's dispatchCheck, immediately
+      // before sendCustomerMessage): a concurrent disclaimed-ANI attach
+      // committed the hold in between the two reads.
+      chain({ first: jest.fn().mockResolvedValue({ visit_id: null }) }),
+      chain({ select: jest.fn().mockResolvedValue([{ callback_number_hold_at: new Date(), call_sms_cleared_at: null }]) }),
+    ],
+    customers: [
+      chain({ first: jest.fn().mockResolvedValue(CUSTOMER) }), // isLandline's customer read
+    ],
+  });
+
+  const sendOutcome = {};
+  const sent = await AppointmentReminders.safeSendAppointment(
+    CUSTOMER, {}, 'test body', 'appointment_confirmation', 'appointment',
+    { scheduled_service_id: 'svc-1' }, { sendOutcome },
+  );
+
+  expect(sent).toBe(false);
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(sendOutcome.lastCode).toBe('CALLBACK_NUMBER_HOLD');
+  // Retryable, not a permanent suppression — the hold can clear later and
+  // this send re-arms on the next attempt (same posture as the entry check).
+  expect(sendOutcome.retryable).toBe(true);
+});

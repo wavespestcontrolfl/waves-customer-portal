@@ -776,18 +776,29 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       // untouched by this check) — ONLY the callback_number_needed
       // disclaimed-ANI hold (a visit-specific, durably-stamped column) is
       // eligible to fall through and try the customer's email instead of
-      // staying silent. `callbackNumberHoldActiveForVisit` reads
+      // staying silent. `callbackNumberHoldConfirmedForVisit` reads
       // scheduled_services.callback_number_hold_at, which is stamped
       // ONLY for that hold (call-recording-processor.js P1-C) — a plain
       // TCPA block never sets it, so this can never widen delivery:'none'
       // beyond the disclaimed-ANI case it was built for.
-      const holdActive = await require('./appointment-reminders')
-        .callbackNumberHoldActiveForVisit(visit.id)
+      //
+      // Finding #1 (round 4 P1): this path mints a /secure bearer token and
+      // sends the card-enrollment EMAIL — the last channel left once
+      // messaging is suppressed — so it must authorize on a CONFIRMED
+      // persisted hold only. The plain fail-closed reader
+      // (callbackNumberHoldActiveForVisit) is right for an SMS leg but
+      // wrong here: it would turn a transient read error on an ordinary
+      // TCPA-suppressed call into a positive hold and email a card link
+      // nothing actually proved. The tri-state reader returns true only on
+      // a confirmed row; a read failure (null) falls through with
+      // everything else to the same silent delivery_suppressed skip.
+      const holdConfirmed = await require('./appointment-reminders')
+        .callbackNumberHoldConfirmedForVisit(visit.id)
         .catch((err) => {
           logger.warn(`[appt-card-request] callback-number hold read failed for visit ${visit.id} — staying silent (delivery_suppressed): ${err.message}`);
-          return false;
+          return null;
         });
-      if (holdActive) {
+      if (holdConfirmed === true) {
         // Don't return — fall through to the SAME funnel below (existing-
         // capture dedupe, token mint, template render, one-text-ever
         // claim) so the eventual invitation is byte-identical in every
