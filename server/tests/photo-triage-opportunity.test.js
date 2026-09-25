@@ -42,6 +42,9 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     'every plant has spots',
     'bugs on the front and back of the house',
     'bugs all around the house',
+    // our/the determiners (codex #4810 r16).
+    'all of our hedges have spots',
+    'all the shrubs are dying',
   ])('%p reads as large scope', (body) => expect(largeScope(body)).toBe(true));
 
   // codex review 2026-09-25: hedge(s)/border(s) ALONE (no quantifier or
@@ -101,6 +104,9 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     "I used the app but it didn't work, what is this?",
     // "couldn't fix" needs the pest problem as its object (codex #4810 r15).
     "I couldn't fix the sprinkler; what are these lawn spots?",
+    // A future attempt is not a prior one (codex #4810 r16).
+    'this patch keeps coming back; should I spray it?',
+    "it still won't go away—what product should I use?",
   ])('%p is not a prior failure', (body) => expect(priorTreatmentFailed(body)).toBe(false));
 });
 

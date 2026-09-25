@@ -563,13 +563,28 @@ const PHOTO_TRIAGE_STALE_HOLDS = {
   no_longer_priced: { reason: 'quote_needs_review', why: (family) => `${family} can no longer be priced for this customer` },
 };
 
+// The customer a photo-triage draft is going to NOW. The SMS row's current
+// linkage wins: resolveDraftRecipient prefers the draft's own customer_id,
+// which a later re-link of the SMS row never updates (codex #4810 r15). A
+// NULL there is not an unlink signal — the draft's customer came from the
+// phone lookup, not this column, so it may never have been set.
+async function currentPhotoTriageCustomer(draft, customerId) {
+  if (draft.sms_log_id) {
+    const smsRow = await db('sms_log').where({ id: draft.sms_log_id }).first();
+    if (smsRow?.customer_id) return smsRow.customer_id;
+  }
+  return customerId || draft.customer_id;
+}
+
 // The send-time hook form of the recheck (preDispatchCheck/preProviderCheck
 // contract): stale → blocked; an outage → the same retryable code the
 // route-level 503 uses, never a raw exception message.
-function photoTriageLateCheck(recheckDraftOffer, customerId, flags) {
+// The customer is re-resolved on every call — the SMS row can be re-linked
+// while the send pipeline awaits (codex #4810 r16).
+function photoTriageLateCheck(recheckDraftOffer, draft, customerId, flags) {
   return async () => {
     try {
-      const late = await recheckDraftOffer({ customerId, flags });
+      const late = await recheckDraftOffer({ customerId: await currentPhotoTriageCustomer(draft, customerId), flags });
       return late.ok ? { ok: true } : { ok: false, code: 'PHOTO_TRIAGE_OFFER_STALE', reason: 'photo-triage offer changed before dispatch — draft left pending' };
     } catch {
       return { ok: false, code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE', reason: 'Photo-triage offer recheck unavailable — draft left pending, try again', retryable: true };
@@ -585,14 +600,7 @@ async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id
   let verdict;
   const { recheckDraftOffer, stripQuotePitch, priceContextSentence, replacePriceContext } = require('../services/photo-triage-opportunity');
   try {
-    // The SMS row's CURRENT linkage wins: resolveDraftRecipient prefers the
-    // draft's own customer_id, which a later re-link of the SMS row never
-    // updates (codex #4810 r15).
-    if (draft.sms_log_id) {
-      const smsRow = await db('sms_log').where({ id: draft.sms_log_id }).first();
-      customerId = smsRow?.customer_id || customerId;
-    }
-    verdict = await recheckDraftOffer({ customerId: customerId || draft.customer_id, flags });
+    verdict = await recheckDraftOffer({ customerId: await currentPhotoTriageCustomer(draft, customerId), flags });
   } catch (err) {
     logger.warn(`[admin-drafts] photo-triage offer recheck failed for draft ${draft.id} (code=${err?.code || 'none'})`);
     await releaseDraftClaim(draft.id);
@@ -610,7 +618,7 @@ async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id
     // preProviderCheck (at the Twilio handoff, after the provider's own
     // awaits; codex #4810 r13). An outage there answers the same retryable
     // code the route-level 503 uses, never a raw exception message.
-    const lateCheck = photoTriageLateCheck(recheckDraftOffer, customerId || draft.customer_id, flags);
+    const lateCheck = photoTriageLateCheck(recheckDraftOffer, draft, customerId, flags);
     return { blocked: false, preDispatchCheck: lateCheck, preProviderCheck: lateCheck };
   }
   const plainHold = PHOTO_TRIAGE_PLAIN_HOLDS[verdict.blocked];

@@ -329,6 +329,29 @@ describe('approve — the SMS row\'s current linkage wins over the draft\'s own 
   });
 });
 
+describe('approve — the late hooks re-read the SMS row linkage on every call (codex #4810 r16)', () => {
+  test('a re-link during the send pipeline is seen by preDispatchCheck', async () => {
+    enqueue('message_drafts', { returning: [photoDraft({ sms_log_id: 'sms-9', customer_id: 'cust-A' })] });
+    enqueue('sms_log', { first: { id: 'sms-9', from_phone: '+19415550142', to_phone: '+19415550000', customer_id: 'cust-A' } }); // recipient resolve
+    enqueue('sms_log', { first: { id: 'sms-9', customer_id: 'cust-A' } });   // route-level guard
+    enqueue('sms_log', { first: { id: 'sms-9', customer_id: 'cust-B' } });   // late hook — re-linked meanwhile
+    enqueue('message_drafts', { update: 1 });
+    mockRecheck.mockImplementation(async ({ customerId }) => (customerId === 'cust-A' ? { ok: true } : { blocked: 'recipient_changed', family: 'tree_shrub' }));
+    let late;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      late = await input.preDispatchCheck({ channel: 'sms' });
+      return { sent: false, blocked: true, code: late.code, reason: late.reason };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+    });
+    expect(mockRecheck.mock.calls.map((c) => c[0].customerId)).toEqual(['cust-A', 'cust-B']);
+    expect(late).toMatchObject({ ok: false, code: 'PHOTO_TRIAGE_OFFER_STALE' });
+  });
+});
+
 describe('approve — recipient changed since the draft was gauged', () => {
   test('→ 409 PHOTO_TRIAGE_RECIPIENT_CHANGED, claim released, flags and text untouched, nothing sent', async () => {
     enqueue('message_drafts', { returning: [photoDraft()] });

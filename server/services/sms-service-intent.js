@@ -232,10 +232,17 @@ function normalizeLawnPests(lower) {
   return LAWN_PEST_PHRASES.reduce((text, [re, token]) => text.replace(re, token), lower);
 }
 
+// "in my yard" / "on the lawn" is WHERE a named tree or shrub stands, not a
+// second subject — "what's wrong with this tree in my yard?" is a tree
+// question (codex #4810 r16). Stripped only when a tree/shrub word is
+// present; "the grass under my tree" keeps its real lawn subject.
+const LAWN_LOCATION_RE = /\b(?:in|around|on|by) (?:my|the|our) (?:front |back )?(?:yard|lawn)\b/g;
+
 function photoAssessmentType(lower) {
-  const lawnScore = countTokens(lower, PHOTO_LAWN_WORDS);
-  const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
   const treeShrubScore = countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
+  const lawnText = treeShrubScore > 0 ? lower.replace(LAWN_LOCATION_RE, ' ') : lower;
+  const lawnScore = countTokens(lawnText, PHOTO_LAWN_WORDS);
+  const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
   if (lawnScore > pestScore + treeShrubScore) return 'lawn';
   if (treeShrubScore > 0 && pestScore === 0) {
     // Lawn and tree/shrub words with no pest word and no clear winner

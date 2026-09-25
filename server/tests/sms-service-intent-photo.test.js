@@ -125,6 +125,18 @@ describe('regex fast path', () => {
   });
 });
 
+describe('a named tree beats incidental yard/lawn location words (codex #4810 r16)', () => {
+  test("\"what's wrong with this tree in my yard?\" runs the tree & shrub assessment on the regex path", async () => {
+    await expect(classifyPhotoDiagnosisIntent("what's wrong with this tree in my yard?")).resolves.toMatchObject({ assessmentType: 'tree_shrub', method: 'regex' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('"the grass under my tree" stays the classifier\'s call (real lawn subject)', async () => {
+    await classifyPhotoDiagnosisIntent('what is wrong with the grass under my tree?').catch(() => null);
+    expect(mockDispatch).toHaveBeenCalled();
+  });
+});
+
 describe('Claude FAST fallback', () => {
   test('an unplaced caption asks the sms_intent lane with the structured schema', async () => {
     mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'lawn' } });
