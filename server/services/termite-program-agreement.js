@@ -664,6 +664,28 @@ function isAnnualPlanEstimate(estData) {
   return selectedTermiteAnnualPlanRows(estData).length > 0;
 }
 
+// Durable proof that an annual-plan estimate is on the prepay track when the
+// caller cannot tell us the billing term: the annual_prepay_terms row (exists
+// after activation), or the sign-before-pay deferral stamp on the estimate
+// (exists from the accept transaction on; column-guarded because it ships in
+// a later slice). true / false / 'error' like isAnnualPrepayAccept.
+async function annualPlanDurableEvidence(estimate, conn = db) {
+  if (!estimate?.id) return false;
+  try {
+    const term = await conn('annual_prepay_terms').where({ source_estimate_id: estimate.id }).first('id');
+    if (term) return true;
+    if (estimate.annual_plan_activation_status) return true;
+    if (await conn.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
+      const row = await conn('estimates').where({ id: estimate.id }).first('annual_plan_activation_status');
+      return !!row?.annual_plan_activation_status;
+    }
+    return false;
+  } catch (err) {
+    logger.warn(`[termite-agreement] annual-plan evidence lookup failed for estimate ${estimate.id}: ${err.message}`);
+    return 'error';
+  }
+}
+
 // Commercial / multi-unit accepts never auto-draft: Florida gives them
 // different retreat windows (180 vs 90 days, Rule 5E-14.105), tenants add
 // business-interruption exposure, and the seeded residential wording
@@ -964,6 +986,36 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (annual plan billing mismatch) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'annual_plan_billing_mismatch', belled: mismatchBelled, retireFailed: mismatchRetireFailed };
+    }
+
+    if (annualPlan && !explicitBillingTerm) {
+      // Reconciliation / reissue callers pass no billingTerm. The prepaid
+      // v3 wording is only right when the account really is on the annual
+      // plan's prepay track, so require DURABLE evidence before drafting:
+      // an annual_prepay_terms row for this estimate, or the sign-before-pay
+      // deferral stamp (estimates.annual_plan_activation_status, written in
+      // the accept transaction before any agreement work — slice 3a; read
+      // column-guarded so this file works before that migration lands).
+      // No evidence → park with the billing-mismatch bell; lookup error →
+      // fail closed and let the sweep retry (Codex #4811 r4).
+      const evidence = await annualPlanDurableEvidence(estimate);
+      if (evidence === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
+      if (!evidence) {
+        logger.warn(`[termite-agreement] annual plan for estimate ${estimate.id} has no durable prepay evidence (no term, no deferral stamp) — parking for manual prep.`);
+        const unverifiedBelled = await ringAdminBellDeduped(NotificationService, {
+          lockKey: `termite-agreement:${customerId}`,
+          titleLike: 'Termite agreement needs manual prep%',
+          ...(reissueSourceContractId
+            ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+            : { metaKey: 'estimateId', metaValue: estimate.id }),
+        }, [
+          'estimate',
+          'Termite agreement needs manual prep (annual plan billing)',
+          `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but no annual prepay record exists for the estimate — confirm billing before preparing the agreement manually.${propertyClause}`,
+          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        ], `manual-prep (annual plan billing unverified) for estimate ${estimate.id}`);
+        return { ok: false, skipped: 'annual_plan_billing_unverified', belled: unverifiedBelled };
+      }
     }
 
     const prepay = annualPlan ? false : await isAnnualPrepayAccept(estimate, billingTerm);
@@ -1918,6 +1970,7 @@ module.exports = {
   estimateMayDiscount,
   isAnnualPlanEstimate,
   annualPlanNetFee,
+  annualPlanDurableEvidence,
   maybeCreateTermiteProgramAgreement,
   normalizeAddress,
   reconcileTermiteProgramAgreements,

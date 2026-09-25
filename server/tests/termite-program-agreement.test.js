@@ -22,6 +22,9 @@ const {
 const { DEFAULT_TEMPLATES } = require('../models/migrations/20260729000001_seed_termite_program_agreements');
 const { TEMPLATE_V2 } = require('../models/migrations/20260730000001_termite_program_agreements_v2');
 const { TEMPLATE_V3_ANNUAL } = require('../models/migrations/20260924030002_termite_annual_protection_agreement_v3');
+const { TEMPLATE_V3_ANNUAL_R2_BODY, ORIGINAL_SIGNATURE_BLOCK } = require('../models/migrations/20260924030003_termite_annual_v3_signature_block');
+// The body as it stands after every migration in this branch (030002 seed + 030003 revision).
+const V3_BODY = TEMPLATE_V3_ANNUAL_R2_BODY;
 const {
   buildCustomerDocumentContext,
   renderDocumentTemplate,
@@ -679,25 +682,32 @@ describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)'
 });
 
 describe('Annual v3 template body (seeded DRAFT — owner review pending, plan §A2-A4)', () => {
+  test('signature block promises only what the e-sign flow captures — no blank operator ink lines (Codex #4811 r4)', () => {
+    expect(V3_BODY).not.toContain(ORIGINAL_SIGNATURE_BLOCK);
+    expect(V3_BODY).not.toContain('License: ________');
+    expect(V3_BODY).toContain('Issued by Waves Pest Control, LLC (FL business license JB351547)');
+    expect(V3_BODY).toContain('ELECTRONIC SIGNATURE: By signing, the customer confirms');
+  });
+
   function renderAnnual(prepared) {
     const context = buildCustomerDocumentContext(CUSTOMER, prepared.values);
     return renderDocumentTemplate({
       template: { template_key: TEMPLATE_V3_ANNUAL.template_key, name: TEMPLATE_V3_ANNUAL.name },
-      version: { title: TEMPLATE_V3_ANNUAL.title, body: TEMPLATE_V3_ANNUAL.body },
+      version: { title: TEMPLATE_V3_ANNUAL.title, body: V3_BODY },
       context,
     });
   }
 
   test('first page states Formosan inclusion, drywood exclusion, and retreatment-only/no-repair coverage', () => {
-    expect(TEMPLATE_V3_ANNUAL.body).toContain('SUBTERRANEAN TERMITES, including Formosan');
-    expect(TEMPLATE_V3_ANNUAL.body).toContain('DRYWOOD TERMITES');
-    expect(TEMPLATE_V3_ANNUAL.body).toContain('RETREATMENT ONLY — NO REPAIR');
+    expect(V3_BODY).toContain('SUBTERRANEAN TERMITES, including Formosan');
+    expect(V3_BODY).toContain('DRYWOOD TERMITES');
+    expect(V3_BODY).toContain('RETREATMENT ONLY — NO REPAIR');
   });
 
   test('states the auto-renew (Section 501.165) and auto-charge renewal consent with the literal 30-day grace (A-13 Option 2)', () => {
-    expect(TEMPLATE_V3_ANNUAL.body).toContain('AUTOMATIC RENEWAL (Section 501.165, Florida Statutes)');
-    expect(TEMPLATE_V3_ANNUAL.body).toContain('authorizes Waves to charge the renewal fee');
-    expect(TEMPLATE_V3_ANNUAL.body).toContain('not paid within 30 days coverage lapses');
+    expect(V3_BODY).toContain('AUTOMATIC RENEWAL (Section 501.165, Florida Statutes)');
+    expect(V3_BODY).toContain('authorizes Waves to charge the renewal fee');
+    expect(V3_BODY).toContain('not paid within 30 days coverage lapses');
   });
 
   test('carries no leftover editor scaffolding — no unresolved {…} notes, no Option 1 / invoice-and-wait text', () => {
@@ -705,10 +715,10 @@ describe('Annual v3 template body (seeded DRAFT — owner review pending, plan �
     // no stray { or } behind (an editor note like "{v2 clause…}" or
     // "{A-13 — choose ONE:}" would fail this).
     expect(TEMPLATE_V3_ANNUAL.body.replace(/\{\{[^}]*\}\}/g, '')).not.toMatch(/[{}]/);
-    expect(TEMPLATE_V3_ANNUAL.body).not.toContain('Option 1');
-    expect(TEMPLATE_V3_ANNUAL.body).not.toContain('Option 2');
-    expect(TEMPLATE_V3_ANNUAL.body).not.toContain('invoice-and-wait');
-    expect(TEMPLATE_V3_ANNUAL.body).not.toContain('choose ONE');
+    expect(V3_BODY).not.toContain('Option 1');
+    expect(V3_BODY).not.toContain('Option 2');
+    expect(V3_BODY).not.toContain('invoice-and-wait');
+    expect(V3_BODY).not.toContain('choose ONE');
   });
 
   test('declared variables exactly match what the body uses (customer/program/agreement fields only)', () => {
