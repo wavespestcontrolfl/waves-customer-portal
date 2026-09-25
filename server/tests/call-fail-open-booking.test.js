@@ -4,7 +4,7 @@
 // garbled-email name_email_mismatch; low confidence on a short familiar call).
 const {
   canAutoRoute, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, SMS_ONLY_FLAGS,
-  hasAgentCommittedEvidence,
+  hasAgentCommittedEvidence, quoteBindsConfirmedSlot, normalizeCommitmentText,
 } = require('../services/call-triage-flags');
 const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-gates');
 
@@ -785,51 +785,29 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  // Live miss 2026-09-24, call 17ed9362: a lender booking a WDO inspection
-  // for a homeowner ("Manuel Costa", the point of contact) on behalf of the
-  // caller ("Hannah"). The model pinned the closing agent sentence — a
-  // third-party "see him", a bare "o'clock", and an adjacent conditional
-  // about which inbox gets the notification email — and the OLD grounding
-  // rejected all three; hasAgentCommittedEvidence must now ground it.
-  // Real transcript, synthetic ids only.
-  test('the real Hannah transcript grounds "we\'ll see him on Monday at 10 o\'clock" (live miss 17ed9362)', () => {
+  // Live miss 2026-09-24, call 17ed9362: a lender arranging a WDO inspection
+  // for the homeowner (the point of contact) on behalf of the caller. The
+  // model pinned the closing agent sentence — a third-party "see him", a
+  // bare "o'clock", and an adjacent conditional about which inbox gets the
+  // notification email — and the OLD grounding rejected all three;
+  // hasAgentCommittedEvidence must now ground it. Shape only: every name,
+  // address, phone and email in the live call is replaced with the same
+  // kind of clearly-fictitious placeholder this file already uses elsewhere
+  // (AGENTS.md "Customer PII in the repo" — no realistic identifying detail
+  // in tests, even synthetic).
+  test('hasAgentCommittedEvidence grounds a third-party "see him ... 10 o\'clock" commitment past a notification-routing conditional (live miss 17ed9362 shape)', () => {
     const transcript = [
       'Agent: Waves Pest Control, this is Adam.',
-      'Caller: Hi, my name is Hannah. Do you guys do wood destroying insect reports?',
-      'Agent: Yes.',
-      "Caller: Okay, fantastic. I'm helping a client in your area with a refinance, and I need to set up one. How much do you charge?",
-      'Agent: Two fifty.',
-      'Caller: Okay, and do you require that be in a time of service, or are you okay being paid escrow?',
-      "Agent: Yes, it's fine escrow.",
-      'Caller: Escrow is okay?',
-      'Agent: Yep.',
-      'Caller: Okay. Do you have availability for Monday or Tuesday of next week?',
-      "Agent: Uh, yeah. Where's the location?",
-      "Caller: It's in Bradenton, Florida.",
-      'Agent: Yep.',
-      "Caller: Okay, so I'd like to schedule with you for Monday or Tuesday.",
-      'Agent: Okay. Let me pop to my calendar real quick. Just give me half a second. Do you have a preference on time frames, in terms of morning, afternoon?',
-      "Caller: Let's do morning.",
-      'Agent: Okay. And what zip code is that? Just give me the full address, please.',
-      'Caller: 11813 Mallory Park Ave in Bradenton, Florida. Three four two one one.',
-      "Agent: Great, yep, we have a location there. So we can actually do 10 o'clock on Monday, September 28th.",
-      'Caller: Okay.',
-      'Agent: That work for you?',
-      'Caller: That works.',
-      "Agent: Awesome. So point of contact will be yourself. So it's your first, last name and your best email address, and then I'll send you a confirmation text for 10 o'clock on Monday.",
-      "Caller: If you could give my client the point of contact, just I'll let him know. You can take my number and my email. I want the report and the invoice emails over to me, but we'll make him point of contact just so you can reach him with any appointment updates.",
+      'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
+      'Agent: Sure — what area?',
+      'Caller: 100 Example Street in Venice.',
+      "Agent: We can do 10 o'clock on Monday.",
+      'Caller: That works for me.',
+      "Caller: Please make my client the point of contact so you can reach him with any appointment updates. I'll take the report and invoice.",
       'Agent: Okay.',
-      'Caller: So his name is Manuel Costa, C-O-S-T-A.',
-      'Agent: Okay.',
-      'Caller: And his phone number is 732-910-8191.',
-      "Agent: Okay, and then I just need his email address, and then it should, the notification should go to him. If it does go to you, I'll make sure that gets figured out for Monday.",
-      'Caller: Okay, so you want his email address and mine?',
-      'Agent: Yes.',
-      'Caller: Okay, his email is Hatch, H-A-T-C-H, Boss, B-O-S-S, 76 at gmail dot com.',
-      'Agent: Awesome.',
-      "Caller: My email address is H Muller, M-U-L-L-E-R, at— Independence, I-N-D-E-P-E-N-D-E-N-C-E, H-L as in home loans dot com.",
-      "Agent: Awesome. Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. But yeah, we'll see him on Monday at 10 o'clock.",
-      "Caller: All right, perfect. I'll let him know. Thank you. Bye-bye.",
+      "Agent: Okay, and then it should, the notification should go to him. If it does go to you, I'll make sure that gets figured out for Monday.",
+      "Agent: But yeah, we'll see him on Monday at 10 o'clock.",
+      "Caller: All right, perfect. I'll let him know. Thank you.",
       'Agent: Thank you. Bye.',
     ].join('\n');
     const extraction = {
@@ -838,9 +816,64 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
         speaker: 'agent',
         quote: "But yeah, we'll see him on Monday at 10 o'clock.",
       }],
-      scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' },
+      scheduling: { confirmed_start_at: '2026-08-03T10:00:00-04:00' }, // Monday
     };
-    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:06.711Z')).toBe(true);
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-07-30T15:50:00-04:00')).toBe(true);
+  });
+
+  // P1 coverage gap (local fallback auditor): AT_WEEKDAY_RE (the bare
+  // "at N" path) shared no test with the "N o'clock" path above it.
+  test('a bare "at N" immediately before the end of the sentence infers "am" from business hours and binds', () => {
+    // No trailing benign closer here on purpose — "at 10, and just let us
+    // know..." puts "and" right after the number, so it is no longer
+    // immediately before the end of the sentence.
+    const bareEnd = "So we'll see you Sunday at 10.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, bareEnd);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: bareEnd });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('a bare "at N" immediately before "on <weekday>" infers "pm" from business hours and binds', () => {
+    const bareOnWeekday = "So we'll see you at 1 on Sunday, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, bareOnWeekday);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: bareOnWeekday });
+    ex.scheduling.confirmed_start_at = '2026-08-02T13:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
+  test('the same bare "at N" does NOT bind a mismatched period — "at 10" never books a 10 PM slot', () => {
+    const bareEnd = "So we'll see you Sunday at 10.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, bareEnd);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: bareEnd });
+    ex.scheduling.confirmed_start_at = '2026-08-02T22:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // AT_WEEKDAY_RE false-positive guards, exercised directly against
+  // quoteBindsConfirmedSlot (bypassing the closed-vocabulary/form gates,
+  // which only ever admit "at <N>" glued right before the sentence end or
+  // "on <weekday>" anyway — these pin the regex boundary itself: a number
+  // followed by anything else, like an address, is never read as a time).
+  test('AT_WEEKDAY_RE: "at N" followed by an unrelated trailing clause adds no time mention — does not bind', () => {
+    const ns = normalizeCommitmentText('We will see you Sunday at 10 for the appointment.');
+    expect(quoteBindsConfirmedSlot(ns, '2026-08-02T10:00:00-04:00', '2026-07-30T15:50:00-04:00')).toBe(false);
+  });
+
+  test('AT_WEEKDAY_RE: "at N" not glued to the sentence end or "on <weekday>" adds no second time mention — the real one still binds', () => {
+    // "at 12 sharp" deliberately reuses the slot's own hour (12) so the
+    // separate positional-numeric-shape guard (round 7j/7k, "every
+    // standalone number must explain itself") does not also reject this for
+    // an unrelated reason — this isolates AT_WEEKDAY_RE's own boundary: "at
+    // 12" is followed by "sharp", not end-of-sentence or "on <weekday>", so
+    // it must not add a conflicting second time mention alongside "noon".
+    const ns = normalizeCommitmentText('We will see you Sunday at noon, and we open at 12 sharp.');
+    expect(quoteBindsConfirmedSlot(ns, '2026-08-02T12:00:00-04:00', '2026-07-30T15:50:00-04:00')).toBe(true);
   });
 });
 

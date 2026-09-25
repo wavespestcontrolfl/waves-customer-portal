@@ -780,24 +780,31 @@ function normalizeCommitmentText(s) {
 // the last sentence, and an earlier round's turn-wide vocabulary/conditional
 // screen poisoned it over a CONDITIONAL ABOUT WHICH INBOX GETS THE EMAIL
 // NOTIFICATION, not about the booking) no longer need the closed commitment
-// vocabulary. Instead an other-sentence poisons the pinned commitment only
-// when it itself:
+// vocabulary. Instead an other-sentence poisons the pinned commitment when
+// it itself:
 //   (a) contains a question mark (still asking, not committing — codex P1,
 //       round 7o, the tag-question case: "You're booked Sunday at noon.
 //       Right?"),
 //   (b) contains a negation/retraction/hedge (turnHasNegationOrHedge), or
-//   (c) is a conditional that references authorization/approval/decision
-//       terms or scheduling terms (sentenceHasAuthOrSchedulingConditional,
-//       below) — this is what still fails closed the two Codex regressions
-//       "If the homeowner approves. We will see you Sunday at noon." and
-//       "Subject to homeowner approval. We will see you Sunday at noon.":
-//       both adjacent sentences are conditionals that name the homeowner's
-//       approval, which is exactly the authorization the commitment can't
-//       yet have.
-// A conditional about anything else in the turn (notifications, texts,
-// emails, invoices) no longer poisons — multi-sentence turns that discuss
-// unrelated logistics alongside a clean commitment sentence are the
-// supported shape now, not just the single-sentence turn.
+//   (c) is a conditional whose topic is NOT one of a small, curated set of
+//       known-benign non-booking topics (sentenceIsBenignNonBookingConditional,
+//       below) — DEFAULT-POISON, not an allowlist of bad topics: "if the
+//       homeowner approves", "subject to approval", "if we have space", "if
+//       the technician has time", "weather permitting" all still poison with
+//       NO term enumerated for each one, exactly like the pre-existing
+//       fail-closed design (round 7l/7m). The ONLY conditionals that don't
+//       poison are ones IDENTIFIABLY about a benign topic (who a
+//       notification/email/text/invoice/report goes to) and that don't ALSO
+//       touch authorization or the scheduling itself — this is what still
+//       fails closed the two Codex regressions "If the homeowner approves.
+//       We will see you Sunday at noon." and "Subject to homeowner approval.
+//       We will see you Sunday at noon.": both adjacent sentences name the
+//       homeowner's approval, which is exactly the authorization the
+//       commitment can't yet have, and neither is a benign topic.
+// A conditional about a benign topic (notifications, texts, emails,
+// invoices) no longer poisons — multi-sentence turns that discuss that
+// alongside a clean commitment sentence are the supported shape now, not
+// just the single-sentence turn.
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);
   if (!q || q.length < 12) return false;
@@ -827,7 +834,7 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
       const otherSentencesClean = sentences.every((other, j) => j === i
         || (!other.interrogative
           && !turnHasNegationOrHedge(other.ns)
-          && !sentenceHasAuthOrSchedulingConditional(other.ns)));
+          && !sentenceHasNonBenignConditional(other.ns, sentences[j - 1]?.ns)));
       containing.push({ ...s, otherSentencesClean });
     }
   }
@@ -855,16 +862,31 @@ const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', '
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
   'august', 'september', 'october', 'november', 'december'];
 
-// Other-sentence poison list for agentCommitmentSentenceVerified (codex P1,
-// live miss 17ed9362): a conditional elsewhere in the grounding turn only
-// poisons the pinned commitment when it references authorization/approval
-// language ("if the HOMEOWNER approves", "subject to APPROVAL"), whether the
-// SLOT ITSELF exists ("if we HAVE SPACE", "if we have ROOM" — the visit
-// isn't certain until that resolves, same shape as an approval conditional:
-// see call-reschedule-apply.test.js "agent evidence must ground..."), or the
-// scheduling itself (a weekday/month/time, or "see you"/"book"/"schedule"/
-// "appointment") — a conditional about something else entirely (which inbox
-// a notification lands in, an email, a text, an invoice) does not.
+// Adjacent-sentence poisoning for agentCommitmentSentenceVerified (codex P1,
+// live miss 17ed9362; hardened after a local-fallback-auditor P1 on an
+// earlier allowlist-of-bad-topics draft of this check). DEFAULT IS POISON —
+// a conditional elsewhere in the grounding turn poisons the pinned
+// commitment unless it is IDENTIFIABLY about one of a small, curated set of
+// known-benign, non-booking topics (who a notification/email/text/invoice/
+// report goes to). This is the same "blacklists can't enumerate everything,
+// so fail closed by default" shape as the closed commitment vocabulary
+// above: "if we have space", "if the technician has time", "weather
+// permitting" all still poison with NO term enumerated for any of them —
+// unlike an allowlist of bad topics (homeowner/approval/schedule/…), a
+// denylist of GOOD topics never needs to anticipate every way a booking can
+// still be conditional.
+const BENIGN_NON_BOOKING_TOPICS = [
+  ' notification ', ' notifications ', ' notify ', ' email ', ' e mail ',
+  ' text ', ' texts ', ' invoice ', ' invoices ', ' report ', ' reports ',
+  ' inbox ', ' confirmation text ',
+];
+// A conditional that ALSO touches authorization or the scheduling itself
+// still poisons even when a benign word is present too (mixed content fails
+// closed rather than being read charitably) — this is what still fails
+// closed the two Codex regressions "If the homeowner approves. We will see
+// you Sunday at noon." and "Subject to homeowner approval. We will see you
+// Sunday at noon.": both name the homeowner's approval, and neither is a
+// benign topic to begin with.
 const AUTH_OR_SCHEDULING_TERMS = [
   ' homeowner ', ' owner ', ' approve ', ' approves ', ' approved ', ' approval ',
   ' authorize ', ' authorizes ', ' authorized ', ' authorization ',
@@ -872,24 +894,37 @@ const AUTH_OR_SCHEDULING_TERMS = [
   ' decision ', ' okay with ', ' ok with ',
   ' see you ', ' book ', ' booked ', ' booking ', ' schedule ', ' scheduled ',
   ' scheduling ', ' appointment ',
-  ' space ', ' room ', ' availability ', ' available ', ' capacity ',
-  ' opening ', ' openings ', ' fit you in ', ' squeeze you in ', ' slot ',
   ' noon ', ' midnight ', ' am ', ' pm ', ' o clock ', ' oclock ',
 ];
+function sentenceReferencesAuthOrScheduling(ns) {
+  const padded = ` ${ns} `;
+  if (AUTH_OR_SCHEDULING_TERMS.some((t) => padded.includes(t))) return true;
+  if (WEEKDAY_NAMES.some((w) => padded.includes(` ${w} `))) return true;
+  if (MONTH_NAMES.some((m) => padded.includes(` ${m} `))) return true;
+  return /(?:^| )\d{1,2}(?: 00)? ?(am|pm)(?= |$)/.test(padded);
+}
 // "Subject to homeowner approval." (codex round 7m regression) is a
 // conditional with no "if"/"unless"/etc. trigger word — turnHasUnresolvedConditional
 // alone would call it clean. "subject to" is added here as an additional
 // conditional trigger, scoped to this other-sentence screen only (it stays
 // out of CONDITIONAL_TOKENS/turnHasUnresolvedConditional so quoteBindsConfirmedSlot's
 // own "subject to" is never touched).
-function sentenceHasAuthOrSchedulingConditional(ns) {
+//
+// A benign topic word can land in the sentence BEFORE the conditional
+// ("Yep, it should go to him, the NOTIFICATION. ... so if it goes to you,
+// I'll make sure that's rectified." — the referent "it" is the notification
+// named one sentence earlier), so the benign-topic lookup checks the
+// conditional sentence itself AND the one immediately before it in the same
+// turn, not the whole turn (an unbounded turn-wide scan would let a benign
+// word anywhere in a long turn launder an unrelated conditional).
+function sentenceHasNonBenignConditional(ns, prevNs) {
   const padded = ` ${ns} `;
   const isConditional = turnHasUnresolvedConditional(ns) || padded.includes(' subject to ');
   if (!isConditional) return false;
-  if (AUTH_OR_SCHEDULING_TERMS.some((t) => padded.includes(t))) return true;
-  if (WEEKDAY_NAMES.some((w) => padded.includes(` ${w} `))) return true;
-  if (MONTH_NAMES.some((m) => padded.includes(` ${m} `))) return true;
-  return /(?:^| )\d{1,2}(?: 00)? ?(am|pm)(?= |$)/.test(padded);
+  if (sentenceReferencesAuthOrScheduling(ns)) return true;
+  const context = ` ${prevNs ? `${prevNs} ` : ''}${ns} `;
+  const isBenign = BENIGN_NON_BOOKING_TOPICS.some((t) => context.includes(t));
+  return !isBenign;
 }
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves
