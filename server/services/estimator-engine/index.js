@@ -23,7 +23,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { deliveryClaimFresh } = require('../admin-estimate-persistence');
-const { buildCallContext, existingDraftForCall } = require('./context-builder');
+const contextBuilder = require('./context-builder');
+const { buildCallContext, existingDraftForCall } = contextBuilder;
 const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
 const { hasWrongPremiseFlag } = require('../lookup-confidence');
 
@@ -1360,6 +1361,58 @@ async function strictExistingDraftForCall(callLogId) {
     .select('id', 'status', 'estimate_data');
 }
 
+// Same rule as resolveCallAgreedPrice in call-recording-processor.js
+// (owner ruling 2026-09-24 — a price already accepted on the call must
+// never be re-priced by the estimator engine), re-derived here from the
+// call row directly so the refusal below holds at THIS entry point for
+// every caller, not only the one call site that already checks first.
+// Keep the two in sync: V2 `service_request.price.accepted === true` (the
+// normalizer has already selected the accepted prices[] entry into
+// `price` at parse time) or V1 `quoted_price` + `appointment_confirmed`
+// (the extraction prompt defines quoted_price as an already-accepted
+// total, never a bare ask).
+async function resolveAgreedPriceForCall(callLogId) {
+  if (!callLogId) return null;
+  // A test double for context-builder (jest.mock) commonly stubs only the
+  // public buildCallContext/existingDraftForCall pair, with no _private —
+  // fail open (no agreed-price signal available) rather than throw, same
+  // fail-open contract as the try/catch below.
+  const extractionFromCall = contextBuilder._private && contextBuilder._private.extractionFromCall;
+  if (typeof extractionFromCall !== 'function') return null;
+  try {
+    const call = await db('call_log').where({ id: callLogId })
+      .first('ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
+    if (!call) return null;
+    const { extraction, source } = extractionFromCall(call);
+    if (source === 'enriched') {
+      const price = extraction?.service_request?.price;
+      if (price && price.accepted === true
+        && typeof price.amount_usd === 'number'
+        && Number.isFinite(price.amount_usd)
+        && price.amount_usd > 0) {
+        return price.amount_usd;
+      }
+      return null;
+    }
+    if (source === 'v1' && extraction
+      && extraction.appointment_confirmed === true
+      && typeof extraction.quoted_price === 'number'
+      && Number.isFinite(extraction.quoted_price)
+      && extraction.quoted_price > 0) {
+      return extraction.quoted_price;
+    }
+    return null;
+  } catch (err) {
+    // Fail OPEN on the pre-check itself — a read failure here must not
+    // silently eat a genuine quote-promised draft; it just loses this one
+    // defensive layer, and the call-recording-processor's own upstream
+    // check (which already skipped calling in for a plain agreed-price
+    // call) still stands.
+    logger.warn(`[estimator-engine] agreed-price pre-check failed for call ${callLogId}: ${err.message}`);
+    return null;
+  }
+}
+
 async function maybeDraftEstimateForCall({
   callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null, ownerProcGeneration = null,
   // Clarify-reply re-draft for a VOICE-origin draft: re-run from the
@@ -1369,6 +1422,23 @@ async function maybeDraftEstimateForCall({
   supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
 }) {
   const result = { callLogId, dryRun, lane: null, created: false };
+  // Owner ruling 2026-09-24 (the $300 flea call — a price agreed live on
+  // the call still spawned a $387 estimator draft two minutes later): a
+  // call that already carries an agreed price refuses to draft here UNLESS
+  // the caller asserts quotePromised — an assessment/booking delegation or
+  // a clarify re-price both mean a written quote is still genuinely owed
+  // even though a verbal price was also agreed, and that path is kept.
+  // This mirrors (and backstops) the check the call-recording-processor
+  // already makes before invoking this function at all, so every OTHER
+  // caller — booking-predraft, admin re-draft, the replay CLI — gets the
+  // same refusal without having to duplicate the check itself.
+  if (quotePromised !== true && !supersedeEstimateId) {
+    const agreedPrice = await resolveAgreedPriceForCall(callLogId);
+    if (agreedPrice != null) {
+      logger.info(`[estimator-engine] skipped call ${callLogId} — price agreed on call ($${agreedPrice.toFixed(2)}), skipped:'price_agreed_on_call'`);
+      return { ...result, skipped: 'price_agreed_on_call', reasons: ['price_agreed_on_call'] };
+    }
+  }
   let context = null;
   // Clarify write-back, read from the call row's unit-answer fence below
   // (never a caller argument — one owned path, so the adoption identity
@@ -2713,6 +2783,6 @@ module.exports = {
   notify,
   _private: {
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
-    parcelSignalsDescribeGatheredAddress,
+    parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall,
   },
 };

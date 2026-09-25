@@ -1732,6 +1732,45 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
   };
 }
 
+// Owner ruling 2026-09-24 (the $300 flea call — "just to confirm one more
+// time, it's $300, that's two treatments" / "Yep" — still spawned a $387
+// estimator-engine draft two minutes later): a price the caller ALREADY
+// agreed to on the call must never be re-priced by the estimator engine.
+// The spoken word beats the estimator (see resolveCallQuoteSignals's
+// quote-requested/-promised split above, and the call-booking precedence
+// ruling this codifies). Returns the agreed USD amount, or null when no
+// price was accepted on the call.
+//
+// V2: service_request.price is the schema's single canonical primary entry
+// — normalizeServiceRequestPricing (utils/normalize-extraction-v2.js) has
+// ALREADY selected the accepted prices[] entry (by caller_response
+// 'accepted') into `price` at parse time (finalizeV2Extraction normalizes
+// before persisted-schema validation), so reading `price.accepted` alone
+// here also covers the prices[] shape — there is no separate array to walk.
+// V1: quoted_price is defined by the extraction prompt itself as the total
+// the agent quoted AND THE CALLER ACCEPTED (never a bare, undecided ask —
+// see the prompt's "quoted_price" field description), so it already IS an
+// agreed price; appointment_confirmed is required alongside it as
+// corroborating evidence that a real visit was actually booked around that
+// agreement, not as the acceptance signal itself (V2 needs no such pairing
+// because `accepted` already is that signal).
+function resolveCallAgreedPrice(extracted = {}, v2Extraction = null) {
+  const v2Price = v2Extraction?.service_request?.price;
+  if (v2Price && v2Price.accepted === true
+    && typeof v2Price.amount_usd === 'number'
+    && Number.isFinite(v2Price.amount_usd)
+    && v2Price.amount_usd > 0) {
+    return v2Price.amount_usd;
+  }
+  if (extracted.appointment_confirmed === true
+    && typeof extracted.quoted_price === 'number'
+    && Number.isFinite(extracted.quoted_price)
+    && extracted.quoted_price > 0) {
+    return extracted.quoted_price;
+  }
+  return null;
+}
+
 // One quote-promised bell per call PER PATH. Reprocessing the same recording
 // (stale-lock reclaim, hung-fetch retry) re-enters both notify sites — one
 // real call has rung three bells, with the early runs on the no-lead path
@@ -9660,6 +9699,7 @@ const CallRecordingProcessor = {
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
+    const callAgreedPrice = resolveCallAgreedPrice(extracted, v2CanonicalExtraction);
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
     const callSecondaryContact = callSecondaryContacts[0] || null;
     // Capture the caller's email BEFORE the secondary-contact scrub below clears
@@ -13663,10 +13703,24 @@ const CallRecordingProcessor = {
     // processing or eat the promise. The settled chain is retained so the
     // assessment pre-draft hook below can sequence AFTER it (never a second
     // concurrent composer run for the same call).
+    //
+    // callAgreedPrice != null excludes the engine even when quote-flavored
+    // (owner ruling 2026-09-24 — the spoken word beats the estimator): a
+    // price already accepted on the call must not be re-priced from
+    // scratch. This covers BOTH the plain quote-requested case AND the
+    // quote-promised case (a written quote can still be owed even with a
+    // verbal price already agreed) — seeding the agreed amount into the
+    // composer so a genuine quote-promised call could still draft a
+    // LOCKED estimate at that figure was judged not cleanly reachable
+    // within this fix's scope (the pricing pipeline has no "lock at this
+    // amount" entry point), so it skips here too; the synchronous
+    // quote-promised bell above is unaffected and stays the cue to send
+    // the written quote by hand.
     let estimatorEnginePromise = null;
     let reconcileOnlyDraftLinksPending = false;
     if (estimatorEngineOn() && !extracted.is_spam
-      && (callQuotePromised || callQuoteRequested)) {
+      && (callQuotePromised || callQuoteRequested)
+      && callAgreedPrice == null) {
       // Fire-and-forget: the DEEP composer + property pipeline can take
       // minutes, and the scheduling/confirmation work below must not wait on
       // a drafting pass. The engine's own dedupe guards make re-entry safe
@@ -13734,14 +13788,18 @@ const CallRecordingProcessor = {
     } else {
       // Reconcile-only pass (codex P1, PR #3304 GH r6): even when this run
       // is not an eligible drafting run — gate off, retry no longer
-      // quote-flavored, spam-classified — a linkage correction must still
-      // invalidate any existing draft for this call, or the stale draft
-      // keeps its old lead links and a live public token indefinitely.
-      // It runs AFTER the token-fenced finalization (codex P0 GH r7b):
-      // this pass still holds processing_token here, and the fallback
-      // linkage context deliberately refuses a call with a live token, so
-      // firing now would silently no-op on exactly the transient-context
-      // case it exists for. See the post-finalization hook below.
+      // quote-flavored, spam-classified, OR a price was agreed on the call
+      // — a linkage correction must still invalidate any existing draft for
+      // this call, or the stale draft keeps its old lead links and a live
+      // public token indefinitely. It runs AFTER the token-fenced
+      // finalization (codex P0 GH r7b): this pass still holds
+      // processing_token here, and the fallback linkage context
+      // deliberately refuses a call with a live token, so firing now would
+      // silently no-op on exactly the transient-context case it exists for.
+      // See the post-finalization hook below.
+      if (callAgreedPrice != null) {
+        logger.info(`[call-proc] estimator engine skipped for ${maskSid(callSid)} — price agreed on call ($${callAgreedPrice.toFixed(2)}), skipped:'price_agreed_on_call'`);
+      }
       reconcileOnlyDraftLinksPending = true;
     }
 
@@ -18941,6 +18999,7 @@ CallRecordingProcessor._test = {
   snapshotStampedLeadStates,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
+  resolveCallAgreedPrice,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
   resolveCallBillingPayer,

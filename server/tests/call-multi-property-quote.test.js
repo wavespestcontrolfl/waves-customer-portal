@@ -23,6 +23,7 @@ const {
   convertCallLeadOnPhoneBooking,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
+  resolveCallAgreedPrice,
   normalizeCallExtraction,
 } = _test;
 const { flatView, mapAdditionalPropertiesToLegacy } = require('../utils/extraction-compat');
@@ -138,6 +139,57 @@ describe('resolveCallAdditionalProperties / resolveCallQuoteSignals', () => {
       .toEqual({ quoteRequested: true, quotePromised: false });
     expect(resolveCallQuoteSignals({ quote_promised: 'yes' }, { service_request: { quote_promised: null } }))
       .toEqual({ quoteRequested: false, quotePromised: false });
+  });
+});
+
+// ─── owner ruling 2026-09-24: the spoken word beats the estimator ──────────
+// The $300 flea call — "just to confirm one more time, it's $300, that's
+// two treatments" / "Yep" — still spawned a $387 estimator-engine draft two
+// minutes later. resolveCallAgreedPrice must return the accepted amount so
+// the engine can be skipped for exactly that call, and null for every call
+// where the caller has not actually accepted a price yet.
+describe('resolveCallAgreedPrice', () => {
+  test('V2: an accepted price with a finite positive amount is returned', () => {
+    const v2 = { service_request: { price: { amount_usd: 300, accepted: true, caller_response: 'accepted', stated_by: 'agent' } } };
+    expect(resolveCallAgreedPrice({}, v2)).toBe(300);
+  });
+
+  test('V2: a stated price the caller declined or is still considering returns null', () => {
+    const declined = { service_request: { price: { amount_usd: 387, accepted: false, caller_response: 'declined' } } };
+    expect(resolveCallAgreedPrice({}, declined)).toBeNull();
+    const considering = { service_request: { price: { amount_usd: 387, accepted: null, caller_response: 'not_at_issue' } } };
+    expect(resolveCallAgreedPrice({}, considering)).toBeNull();
+  });
+
+  test('V2: accepted but non-finite/zero/negative amount returns null (never a fabricated price)', () => {
+    expect(resolveCallAgreedPrice({}, { service_request: { price: { amount_usd: null, accepted: true } } })).toBeNull();
+    expect(resolveCallAgreedPrice({}, { service_request: { price: { amount_usd: 0, accepted: true } } })).toBeNull();
+    expect(resolveCallAgreedPrice({}, { service_request: { price: { amount_usd: -50, accepted: true } } })).toBeNull();
+    expect(resolveCallAgreedPrice({}, { service_request: { price: { amount_usd: NaN, accepted: true } } })).toBeNull();
+  });
+
+  test('no price at all (quote requested only, nothing agreed) returns null', () => {
+    expect(resolveCallAgreedPrice({}, { service_request: { quote_requested: true } })).toBeNull();
+    expect(resolveCallAgreedPrice({}, null)).toBeNull();
+    expect(resolveCallAgreedPrice({}, {})).toBeNull();
+  });
+
+  test('V1: quoted_price + appointment_confirmed together are an agreed price', () => {
+    expect(resolveCallAgreedPrice({ quoted_price: 300, appointment_confirmed: true }, null)).toBe(300);
+  });
+
+  test('V1: quoted_price WITHOUT a confirmed appointment is not treated as agreed', () => {
+    expect(resolveCallAgreedPrice({ quoted_price: 300, appointment_confirmed: false }, null)).toBeNull();
+    expect(resolveCallAgreedPrice({ quoted_price: 300 }, null)).toBeNull();
+  });
+
+  test('V1: no quoted_price at all returns null even with a confirmed appointment', () => {
+    expect(resolveCallAgreedPrice({ appointment_confirmed: true, quoted_price: null }, null)).toBeNull();
+  });
+
+  test('V2 takes priority over a conflicting V1 signal', () => {
+    const v2 = { service_request: { price: { amount_usd: 300, accepted: true } } };
+    expect(resolveCallAgreedPrice({ quoted_price: 387, appointment_confirmed: true }, v2)).toBe(300);
   });
 });
 
