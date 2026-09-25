@@ -47,6 +47,25 @@ const SMS_TYPES = { send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirm
 // job — en route, on site, or completed all count as visible progress.
 const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'],
   technician_follow_up: ['completed'], other: ['en_route', 'on_site', 'completed'], callback: ['en_route', 'on_site', 'completed'] };
+// SMS ops closure lane (R2, owner ruling 2026-09-24 — Francisco Cruz "What is
+// the Zelle number?"): the actual literal sms_log.message_type values a
+// payment settling stamps on the confirmation it sends (grepped
+// `message_type: '...'` / explicit `messageType:` across server/services,
+// 2026-09-25). Deliberately excluded: 'confirmation' (invoice-followups /
+// balance-reminder reuse this exact string for the payment thank-you, but
+// call-recording-processor and others use the SAME string for an ordinary
+// APPOINTMENT confirmation — too ambiguous to trust as payment evidence);
+// 'payment_failed' / 'payment_expiry' (a failure or an expiring card, not a
+// receipt); 'ach_payment_processing' (mid-flight acknowledgment — the
+// invoice is still 'processing', not proof money landed); 'invoice' (the
+// bill went out, not that it was paid).
+const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'autopay_charge_success', 'autopay_retry_success'];
+// A payment record is only ever evidence for an `other` ask that is itself
+// about money — never a blanket "any payment closes any open ask".
+const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay|card|check)\b/i;
+function mentionsPayment(commitment) {
+  return PAYMENT_MENTION.test(`${commitment.description || ''} ${JSON.stringify(commitment.evidence ?? [])}`);
+}
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
@@ -85,6 +104,30 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     invoice: conn('invoices').where({ customer_id: customerId }).where('sent_at', '>', after)
       .where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id'),
+    // R2 (owner ruling 2026-09-24): a payment question is answered by money
+    // actually landing, not by a staff reply — either the invoice the
+    // customer asked about went paid, or a payment-confirmation SMS the
+    // system sent (never Adam's own reply) went out, after the request.
+    // Two distinct tables share one witness type; each row is tagged with
+    // its source table so admissibility/quoting/revalidation know which.
+    payment: Promise.all([
+      conn('invoices').where({ customer_id: customerId }).where('paid_at', '>', after).where('paid_at', '<=', now)
+        .orderBy('paid_at', 'desc').limit(LIMIT + 1)
+        .select('id', 'title', 'invoice_number', 'paid_at'),
+      conn('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'delivered' })
+        .whereIn('message_type', PAYMENT_SMS_TYPES)
+        .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
+        .where('created_at', '>', after).where('created_at', '<=', now)
+        .orderBy('created_at', 'desc').limit(LIMIT + 1)
+        .select('id', 'status', 'message_type', 'message_body', 'created_at'),
+      // A truncated leg here still lands in the combined array below, so its
+      // own overflow always trips the shared LIMIT check the generic loop
+      // already runs on `payment` — a mixed-source customer can over-flag as
+      // truncated (fails closed to review) but never under-flags.
+    ]).then(([invoicesPaid, paymentSms]) => [
+      ...invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice' })),
+      ...paymentSms.map((row) => ({ ...row, payment_source: 'sms' })),
+    ]),
     visit: conn('scheduled_services').where({ customer_id: customerId })
       .where('created_at', '<=', now)
       .modify((q) => { if (commitment.sms_context?.property_id) q.where({ property_id: commitment.sms_context.property_id }); })
@@ -149,7 +192,12 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     if (result.value.length > LIMIT) failures.push(`${type}_truncated`);
     for (const row of result.value.slice(0, LIMIT)) {
       const visitText = type === 'visit' ? `${row.service_type} on ${row.scheduled_date} at ${row.window_start}; status ${row.status}${row.moved_at ? '; moved after the request' : ''}${row.progressed_at ? '; en route/on site/completed after the request' : ''}` : '';
-      const text = row.message_body || row.transcription || row.body_text || row.text_snapshot || row.service_interest || row.title || visitText;
+      // An invoice-sourced payment row has no message body; compose one so
+      // the quote/fingerprint have something concrete to ground on. An
+      // sms-sourced payment row already has message_body (falls through above).
+      const paymentText = type === 'payment' && row.payment_source === 'invoice'
+        ? `Invoice ${row.title || row.invoice_number || row.id} paid ${new Date(row.paid_at).toISOString().slice(0, 10)}` : '';
+      const text = row.message_body || row.transcription || row.body_text || row.text_snapshot || paymentText || row.service_interest || row.title || visitText;
       if (text.length > 16000) failures.push(`${type}_body_truncated`);
       records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, 16000) });
     }
@@ -242,6 +290,10 @@ function admissibleWitness(record, commitment, records = []) {
       && (!estimateDelivery || deliveredEstimate()),
     estimate: () => !!witnessAt(record, new Date(commitment.sms_context?.source_at)),
     visit: () => VISIT_STATUSES[commitment.kind].includes(record.status) && !!visitWitnessAt(record, commitment),
+    // R2: the query already scopes both legs (invoice paid_at / sms
+    // delivered created_at) to strictly after the request, so only the
+    // subject-matter and kind gates are checked here.
+    payment: () => commitment.kind === 'other' && mentionsPayment(commitment),
   };
   // Invoice sends are context, never evidence that a question was answered.
   return witnesses[record.type]?.() === true;
@@ -262,13 +314,18 @@ const ORDERING_TIME = {
 };
 function witnessTypes(commitment) {
   if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
+  // R3 (owner ruling 2026-09-24, Lisa Reed "separate the charges" — Adam's
+  // own staff reply "Done: ... is now the Auto Pay method" does NOT close
+  // this): a human staff text/call/email no longer closes an `other` ask by
+  // itself. Only a visit event (R1) or a payment landing (R2) does.
+  if (commitment.kind === 'other') return ['visit', 'payment'];
+  // `callback` keeps its existing mix: a real call back, or the same visible
+  // field progress that answers an "other" ask (owner ruling 2026-09-24).
+  if (commitment.kind === 'callback') return [...REQUIRED_TYPES.callback, 'visit'];
   // An EMPTY allowlist (reports, paperwork) is deliberate: no channel is a
-  // witness until the artifact/recipient proof exists.
-  const base = REQUIRED_TYPES[commitment.kind] ?? ANSWER_TYPES;
-  // Owner ruling 2026-09-24: visible field progress also nullifies an
-  // "other" or "callback" ask — added on top of whatever channels already
-  // apply (callback: ['call'] → ['call', 'visit']; other: ANSWER_TYPES → +visit).
-  return ['other', 'callback'].includes(commitment.kind) ? [...base, 'visit'] : base;
+  // witness until the artifact/recipient proof exists. Every other kind is
+  // unchanged by R3.
+  return REQUIRED_TYPES[commitment.kind] ?? ANSWER_TYPES;
 }
 // The estimate an estimate-delivery email names, when that estimate is
 // itself admissible post-request evidence for the requested property.
@@ -305,7 +362,11 @@ function groundFulfillment(parsed, evidence, commitment) {
   if (quote.length < 3 || !normalized(witness.text).includes(quote)) return { verdict: 'uncertain', reason: 'ungrounded_witness' };
   const matchedAt = witness.type === 'estimate' ? witnessAt(witness, new Date(commitment.sms_context?.source_at))
     : witness.type === 'visit' ? visitWitnessAt(witness, commitment)
-      : witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at;
+      // Invoice-sourced payment rows carry no delivered_at/sent_at (that
+      // would be the INVOICE's own send time, not when it was paid); an
+      // sms-sourced row has no paid_at. Never mix the two up.
+      : witness.type === 'payment' ? (witness.paid_at || witness.created_at)
+        : witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at;
   const matched = new Date(matchedAt);
   const failures = fatalFailures(evidence, commitment, { type: witness.type, matched_at: matched });
   if (failures.length) return { verdict: 'uncertain', reason: 'incomplete_sources', failures };
@@ -313,8 +374,33 @@ function groundFulfillment(parsed, evidence, commitment) {
     ? linkedEstimate(witness, commitment, evidence.records) : null;
   return { verdict: 'fulfilled', record_type: witness.type, record_id: witness.id,
     ...(linked ? { linked_record_type: 'estimate', linked_record_id: linked.id } : {}),
+    // Revalidation (below) needs to know which table a 'payment' record_id
+    // actually lives in.
+    ...(witness.type === 'payment' ? { payment_source: witness.payment_source } : {}),
     matched_at: matchedAt, quote: parsed.quote,
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
+}
+
+// R1 (owner ruling 2026-09-24, "you still coming this morning?" / "still saw
+// ants" — a real-world event that already happened does not need a model's
+// opinion): a `visit` or `payment` witness that is admissible for this
+// commitment closes it deterministically, with no LLM call. Reuses
+// groundFulfillment's own witness/quote/property grounding by handing it the
+// witness's own text back as the "quote" — trivially self-grounded — so a
+// system-event closure gets exactly the same property-scope, truncation and
+// revalidation guarantees as a model-grounded one.
+const SYSTEM_EVENT_TYPES = ['visit', 'payment'];
+function systemEventFulfillment(evidence, commitment) {
+  const witness = evidence.records.find((record) => SYSTEM_EVENT_TYPES.includes(record.type)
+    && admissibleWitness(record, commitment, evidence.records));
+  if (!witness) return null;
+  const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+  if (grounded.verdict !== 'fulfilled') return null;
+  // Same shape verifySmsFulfillment produces (evidence_hash for the cache/
+  // revalidation check, no retry_after) so revalidateSmsFulfillment's
+  // under-transaction re-check and the persisted sms_context.fulfillment_check
+  // work identically whether the verdict came from the model or from here.
+  return { ...grounded, reason: 'system_event', evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash, retry_after: null };
 }
 
 function fulfillmentFingerprint(commitment, evidence) {
@@ -346,7 +432,10 @@ async function holdsLeadOwnership(trx, estimateId, customerId) {
 // re-read the same evidence before allowing a delayed verdict to close work.
 async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
   const tables = { sms: 'sms_log', call: 'call_log', email_delivery: 'email_messages',
-    estimate: 'estimates', visit: 'scheduled_services' };
+    estimate: 'estimates', visit: 'scheduled_services',
+    // A 'payment' witness is one of two distinct rows (R2); which table to
+    // lock depends on which leg matched, carried on the verdict as payment_source.
+    payment: verdict.payment_source === 'invoice' ? 'invoices' : 'sms_log' };
   const table = tables[verdict.record_type];
   if (!table || !verdict.record_id || !verdict.evidence_hash) return false;
   // Customer/source locks are already held. Estimate writers lock estimate
@@ -419,4 +508,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, truncated_channels: ev
   return groundFulfillment(result.json, evidence, commitment);
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, systemEventFulfillment, FULFILLMENT_POLICY, PAYMENT_SMS_TYPES };

@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, systemEventFulfillment } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -269,6 +269,34 @@ async function appliedSmsProfileFields(conn, message) {
     ...proposals.filter((proposal) => ['approved', 'auto_applied', 'reverted'].includes(proposal.status)).map((proposal) => proposal.field)]);
 }
 
+// R5 — per-kind default deadlines (owner ruling 2026-09-24: "actions vs
+// follow-ups should have different timeframes"). Applied only when the
+// extractor could not resolve an explicit stated due_at (groundExtraction
+// keeps a bare "this morning"/"mid Oct" undated on purpose). Quick
+// request/response asks get a same-day window; deliverables that take real
+// work get a day or two; a technician follow-up gets the longest window.
+const DEFAULT_DEADLINE_HOURS = Object.freeze({
+  callback: 4, send_appointment_confirmation: 4,
+  schedule_visit: 24, send_estimate: 24, other: 24,
+  send_report: 48, send_paperwork: 48,
+  technician_follow_up: 72,
+});
+// Owner ruling 2026-09-24 (late): a promise Adam made himself is the ask
+// most likely to embarrass him if it slips, so it always gets the tighter
+// 48h window — overriding the per-kind table above, regardless of kind.
+const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
+
+// due_basis: 'stated' when the extractor grounded an explicit deadline in
+// the source text; 'default_kind' when this per-kind/basis table filled one
+// in instead; null when the kind has no default and nothing was stated
+// (legacy behavior — refreshSmsCommitments' null-due branch still applies).
+function resolveDueDeadline(item, messageCreatedAt) {
+  if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
+  const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
+  if (hours == null) return { due_at: null, due_basis: null };
+  return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
+}
+
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   const replay = matchedContext.replay === true;
   if (replay && message.direction !== 'inbound') return { skipped: 'source_changed' };
@@ -316,10 +344,11 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       : null;
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
+      const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at);
       return {
         sms_log_id: message.id, commitment_key: keyOf({ ...item, property_id: propertyId }), party: item.party, kind: item.kind,
-        description: item.description, channel: 'sms', due_at: item.due_at,
-        due_basis: item.due_at ? 'stated' : null, source: 'ai', extractor_version: VERSION,
+        description: item.description, channel: 'sms', due_at: dueAt,
+        due_basis: dueBasis, source: 'ai', extractor_version: VERSION,
         evidence: JSON.stringify([{ quote: item.quote, sms_log_id: message.id, matched: true,
           speaker: { inbound: 'caller', outbound: 'agent' }[message.direction] }]),
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
@@ -328,7 +357,14 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
     // with the proposals, while execution hashes the same dedupe decision.
-    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome));
+    // Owner ruling 2026-09-24 (R4, Bill Graham "my son should be there" —
+    // a temporary access note is not urgent): a fact the durability/wording
+    // check already labelled temporary_instruction never rings the bell on
+    // its own. It still rides in `analysis.facts` with that outcome, and
+    // still counts toward `unverified_count` on a bell that fires for some
+    // OTHER real exception in the same message.
+    const temporaryFacts = facts.filter((f) => f.outcome === 'temporary_instruction');
+    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied', 'temporary_instruction'].includes(f.outcome));
     let notification = null;
     // Owner ruling 2026-09-24: dropped model proposals (rejected by the
     // grounding filter) are not, on their own, a real exception — only a
@@ -341,7 +377,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
           link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
           metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
-            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
+            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped + temporaryFacts.length,
             reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif.id) throw new Error('sms_operations_bell_not_persisted');
       notification = notif.deduped
@@ -545,7 +581,10 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       skippedNoWitness += 1;
       continue;
     }
-    const verdict = await verify(current, evidence, { now });
+    // R1 (owner ruling 2026-09-24): a visit or payment system event that
+    // already answers this ask closes it deterministically — no model call,
+    // and `verify` is never invoked for it.
+    const verdict = systemEventFulfillment(evidence, current) || await verify(current, evidence, { now });
     if (verdict.verdict === 'uncertain') unverified += 1;
     await conn.transaction(async (trx) => {
       // Match merge and intake: customer, source, then commitment. A relink
@@ -667,4 +706,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate };
+module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline };

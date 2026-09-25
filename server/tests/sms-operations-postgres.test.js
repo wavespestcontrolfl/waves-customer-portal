@@ -249,10 +249,15 @@ postgres('SMS operations on PostgreSQL', () => {
     const notifier = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
     // A dropped model proposal alone never bells (owner ruling 2026-09-24); a
-    // real exception (here: a non-durable irrigation fact) still does.
-    const exceptionFact = { field: 'irrigation_controller_location', value: 'The controller is beside the garage',
-      quote: 'The controller is beside the garage', duration: 'visit_only', property_id: context.properties[0].id };
-    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [exceptionFact], dropped: 1 }) };
+    // real exception (here: two conflicting facts for the same field —
+    // R4 deliberately excludes only temporary_instruction, not this) still does.
+    const exceptionFacts = [
+      { field: 'irrigation_controller_location', value: 'The controller is beside the garage',
+        quote: 'The controller is beside the garage', duration: 'durable', property_id: context.properties[0].id },
+      { field: 'irrigation_controller_location', value: 'The controller is by the fence',
+        quote: 'The controller is by the fence', duration: 'durable', property_id: context.properties[0].id },
+    ];
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: exceptionFacts, dropped: 1 }) };
     const preview = await replaySmsProfile(args);
     expect(preview).toMatchObject({ dry_run: true, notification: { action: 'create_notification' } });
     expect(await mockPg('notifications')).toHaveLength(0);
@@ -271,9 +276,13 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const notifier = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
-    const exceptionFact = { field: 'irrigation_controller_location', value: 'The controller is beside the garage',
-      quote: 'The controller is beside the garage', duration: 'visit_only', property_id: context.properties[0].id };
-    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [exceptionFact], dropped: 1 }) };
+    const exceptionFacts = [
+      { field: 'irrigation_controller_location', value: 'The controller is beside the garage',
+        quote: 'The controller is beside the garage', duration: 'durable', property_id: context.properties[0].id },
+      { field: 'irrigation_controller_location', value: 'The controller is by the fence',
+        quote: 'The controller is by the fence', duration: 'durable', property_id: context.properties[0].id },
+    ];
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: exceptionFacts, dropped: 1 }) };
     const preview = await replaySmsProfile(args);
     expect(await mockPg('notifications')).toHaveLength(0);
     expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toMatchObject({ applied: 0, proposed: 0 });
@@ -403,7 +412,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
   });
 
-  test('preview exposes validation dispositions without persisting an exception bell or failed receipt', async () => {
+  test('R4 owner ruling 2026-09-24: a visit_only/temporary fact never rings the review bell, even in preview', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const notifier = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
@@ -413,7 +422,7 @@ postgres('SMS operations on PostgreSQL', () => {
       .toMatchObject({ dry_run: true, applied: 0, proposed: 0, outcomes: [
         { field: 'irrigation_controller_location', action: 'temporary_instruction' },
       ] });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(await mockPg('notifications')).toHaveLength(0);
     expect(await mockPg('sms_log').first()).toEqual(before);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
@@ -901,7 +910,21 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
-    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+    // R4 owner ruling 2026-09-24 (Bill Graham "my son should be there"): a
+    // temporary-instruction-only message is not urgent and never bells.
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('R4 owner ruling 2026-09-24: an existing-value conflict still rings the review bell', async () => {
+    await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_controller_location: 'Behind the shed' });
+    context = await loadMessageContext(mockPg, message);
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('existing_value_conflict');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0]).toMatchObject([
+      'alert', 'SMS instructions need review', expect.any(String),
+      { metadata: expect.objectContaining({ reasons: ['existing_value_conflict'] }) },
+    ]);
   });
 
   test('an excluded source type discovered under lock cannot update the profile', async () => {

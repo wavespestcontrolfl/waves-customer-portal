@@ -11,7 +11,7 @@ jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => w
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
 const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence } = require('../services/sms-operational-extractor');
-const { eligibleMessage, factVerdict, runSmsOperationalActions } = require('../services/sms-operational-actions');
+const { eligibleMessage, factVerdict, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
@@ -695,6 +695,35 @@ describe('private profile writes', () => {
   });
 });
 
+describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
+  const at = new Date('2040-03-10T15:00:00Z');
+  test.each(Object.entries(DEFAULT_DEADLINE_HOURS))('a %s request with no stated due_at defaults to +%ih (due_basis default_kind)', (kind, hours) => {
+    const item = { kind, basis: 'request', due_at: null };
+    expect(resolveDueDeadline(item, at)).toEqual({
+      due_at: new Date(at.getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind',
+    });
+  });
+
+  test('any basis=promise obligation defaults to +48h regardless of kind', () => {
+    for (const kind of [...Object.keys(DEFAULT_DEADLINE_HOURS), 'call_back', 'make_payment']) {
+      expect(resolveDueDeadline({ kind, basis: 'promise', due_at: null }, at)).toEqual({
+        due_at: new Date(at.getTime() + PROMISE_DEFAULT_DEADLINE_HOURS * 3600000).toISOString(), due_basis: 'default_kind',
+      });
+    }
+  });
+
+  test('a stated due_at is kept verbatim with due_basis "stated", never replaced by a default', () => {
+    const stated = '2040-03-11T09:00:00.000Z';
+    expect(resolveDueDeadline({ kind: 'callback', basis: 'promise', due_at: stated }, at))
+      .toEqual({ due_at: stated, due_basis: 'stated' });
+  });
+
+  test('a kind outside the table with no stated due_at falls back to the legacy null-due behavior', () => {
+    expect(resolveDueDeadline({ kind: 'send_reschedule_link', basis: 'request', due_at: null }, at))
+      .toEqual({ due_at: null, due_basis: null });
+  });
+});
+
 describe('fulfillment proof', () => {
   const commitment = { kind: 'send_estimate', sms_context: { property_id: PROPERTY_ID, source_at: '2040-03-10T15:00:00Z' } };
   const record = { id: 'estimate-id', ref: 'estimate:estimate-id', type: 'estimate', property_id: PROPERTY_ID,
@@ -738,7 +767,10 @@ describe('fulfillment proof', () => {
   });
 
   test('provider acceptance or a SENT label cannot close an answer before delivery succeeds', () => {
-    const answer = { kind: 'other' };
+    // R3 (owner ruling 2026-09-24) drops sms/email_delivery from `other`'s
+    // witness types entirely; this test's own subject is generic
+    // delivery-status gating, so it runs against a kind that still has them.
+    const answer = { kind: 'send_appointment_confirmation' };
     const sms = { type: 'sms', message_type: 'manual' };
     const email = { type: 'email_delivery', recipient_email_snapshot: 'synthetic@example.invalid', sent_at: '2040-03-11T15:00:00Z' };
     const emailAnswer = { ...answer, evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
@@ -752,14 +784,65 @@ describe('fulfillment proof', () => {
   });
 
   test('email completion requires the exact single recipient in the grounded request', () => {
-    const request = { kind: 'other', evidence: [{ quote: 'Send the answer to desired@example.invalid' }] };
+    // R3: `other` no longer admits email_delivery at all — this test's own
+    // subject is the recipient-matching gate, so it runs against a kind
+    // that still has email_delivery in its witness types.
+    const request = { kind: 'send_appointment_confirmation', evidence: [{ quote: 'Send the answer to desired@example.invalid' }] };
     const email = { type: 'email_delivery', status: 'delivered', sent_at: '2040-03-11T15:00:00Z',
       recipient_email_snapshot: 'old@example.invalid' };
     expect(admissibleWitness(email, request)).toBe(false);
     expect(admissibleWitness({ ...email, recipient_email_snapshot: 'DESIRED@example.invalid' }, request)).toBe(true);
-    expect(admissibleWitness(email, { kind: 'other', evidence: [{ quote: 'Send the answer to my manager' }] })).toBe(false);
+    expect(admissibleWitness(email, { kind: 'send_appointment_confirmation', evidence: [{ quote: 'Send the answer to my manager' }] })).toBe(false);
     expect(admissibleWitness(email, { ...request, evidence: [{ quote: 'Send to old@example.invalid and desired@example.invalid' }] })).toBe(false);
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, request)).toBe(false);
+  });
+
+  test('R3 owner ruling 2026-09-24: an "other" ask no longer admits a staff sms or email reply at all (Lisa Reed "separate the charges")', () => {
+    const other = { kind: 'other' };
+    expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, other)).toBe(false);
+    expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, other)).toBe(false);
+    const emailOther = { kind: 'other', evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
+    expect(admissibleWitness({ type: 'email_delivery', status: 'delivered', sent_at: '2040-03-11T15:00:00Z',
+      recipient_email_snapshot: 'synthetic@example.invalid' }, emailOther)).toBe(false);
+    // `callback` keeps its existing call/visit mix — unaffected by R3.
+    expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
+  });
+
+  test('R2 owner ruling 2026-09-24: a payment record only answers an "other" ask that is itself about money', () => {
+    const invoicePaid = { type: 'payment', payment_source: 'invoice', id: 'invoice-1', paid_at: '2040-03-11T15:00:00Z' };
+    const smsReceipt = { type: 'payment', payment_source: 'sms', id: 'sms-1', status: 'delivered', message_type: 'receipt' };
+    const paymentOther = { kind: 'other', description: 'What is the Zelle number?' };
+    const nonPaymentOther = { kind: 'other', description: 'My son should be there for the visit' };
+    expect(admissibleWitness(invoicePaid, paymentOther)).toBe(true);
+    expect(admissibleWitness(smsReceipt, paymentOther)).toBe(true);
+    // Not about money at all: the same record type is inadmissible.
+    expect(admissibleWitness(invoicePaid, nonPaymentOther)).toBe(false);
+    // Payment evidence is `other`-only — even a payment-worded ask of
+    // another kind does not admit it.
+    expect(admissibleWitness(invoicePaid, { kind: 'callback', description: 'Call me about my payment' })).toBe(false);
+    // A quote-only mention (evidence array) counts as much as description.
+    expect(admissibleWitness(invoicePaid, { kind: 'other', evidence: [{ quote: 'Can I get an invoice for this?' }] })).toBe(true);
+  });
+
+  test('R1 owner ruling 2026-09-24: a visit or payment system event is fulfilled deterministically, with no model call', () => {
+    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
+    const other = { kind: 'other', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed',
+      created_at: '2040-03-09T15:00:00Z', progressed_at: '2040-03-11T15:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status completed' };
+    const fulfilled = systemEventFulfillment({ records: [visitWitness], failures: [] }, other);
+    expect(fulfilled).toMatchObject({ verdict: 'fulfilled', reason: 'system_event', record_type: 'visit', record_id: 'visit-1' });
+    expect(typeof fulfilled.evidence_hash).toBe('string');
+    // No admissible visit/payment witness: no system-event verdict, and the
+    // caller falls through to its own `verify`.
+    expect(systemEventFulfillment({ records: [{ ...visitWitness, progressed_at: null }], failures: [] }, other)).toBeNull();
+    expect(systemEventFulfillment({ records: [], failures: [] }, other)).toBeNull();
+    // A non-visit/payment witness (e.g. a delivered staff sms) is never a
+    // system event, even if it happens to be otherwise admissible for some
+    // other kind.
+    const smsWitness = { id: 'sms-1', ref: 'sms:sms-1', type: 'sms', status: 'delivered', message_type: 'confirmation',
+      text: 'Your appointment is confirmed' };
+    expect(systemEventFulfillment({ records: [smsWitness], failures: [] }, { kind: 'send_appointment_confirmation' })).toBeNull();
   });
 
   test('a visit needs post-request scheduling or completion activity', () => {
