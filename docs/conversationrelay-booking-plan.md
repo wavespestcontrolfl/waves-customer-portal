@@ -250,7 +250,11 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    verb (check/look/look up/take a look/pull up/see/find/double-check —
    NEVER a write verb) and an optional object, or a bare "one moment" /
    "hang on" / "bear with me" — optional trailing "please"; or (b) the
-   sentence is a question (ends in `?`). "Let me check on that and I'll
+   sentence is a ONE-CLAUSE question: an optional acknowledgment, then a
+   question word or auxiliary (what/when/where/how/is/are/do/can/would/
+   anything/…), and no clause joiner (, ; : dashes, and/so/but/because)
+   before the final `?` (`QUESTION_RE`) — so "I've handled that, anything
+   else?" holds. "Let me check on that and I'll
    take care of it." does NOT match (two clauses; the grammar allows
    exactly one). This costs nothing real: the actual latency win was always
    the LEADING acknowledgment/filler ahead of the model's real content, not

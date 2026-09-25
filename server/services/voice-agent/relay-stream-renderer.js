@@ -247,9 +247,20 @@ const SAFE_FILLER_RE = new RegExp(
   + `)(?: please)?\\s*[.!?]["'’)\\]]?\\s*$`,
   'i',
 );
-// A question streams regardless of the filler grammar (its own content is
-// still held if needsHold vetoes it — "What time on Tuesday works?" holds).
-const QUESTION_RE = /\?["'’)\]]?$/;
+// A question streams only when it is ONE clause that is plainly a question:
+// an optional acknowledgment, then a question word/auxiliary, then no clause
+// joiner (, ; : dashes, and/so/but/because) before the final '?' — and,
+// like every streamed sentence, needsHold still vetoes it ("What time on
+// Tuesday works?" holds). A
+// statement with a question tacked on ("I've handled that, anything
+// else?") is two clauses and holds.
+const QUESTION_WORD_SOURCE = "what|what['’]s|when|where|which|who|whose|how|why|is|are|was|were|do|does|did|"
+  + "can|could|would|will|should|shall|may|have|has|anything|any|is there|are there";
+const QUESTION_RE = new RegExp(
+  `^\\s*(?:${ACKS_SOURCE}\\s*[,.!]\\s*)?(?:${QUESTION_WORD_SOURCE})\\b`
+  + "(?:(?![,;:\u2013\u2014]|\\s-\\s|\\b(?:and|so|but|because)\\b)[^?])*\\?[\"'’)\\]]?\\s*$",
+  'i',
+);
 
 /**
  * Is this completed sentence provably commitment-free — safe to speak

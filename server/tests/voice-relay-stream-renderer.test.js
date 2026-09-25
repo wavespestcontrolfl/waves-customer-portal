@@ -286,8 +286,20 @@ describe('isStreamSafe — allowlist grammar (structural fix, replaces the block
     expect(isStreamSafe(sentence)).toBe(true);
   });
 
+  test.each([
+    "I've handled that, anything else?",
+    'All done, anything else?',
+    "It's taken care of — anything else?",
+    "I'll get that over to the team and is there anything else?",
+    'Consider it handled?',
+  ])('a claim with a question tacked on does not stream: %s', (sentence) => {
+    expect(isStreamSafe(sentence)).toBe(false);
+  });
+
   test('a plain question streams', () => {
     expect(isStreamSafe("What's the address there?")).toBe(true);
+    expect(isStreamSafe('Great, what is the address there?')).toBe(true);
+    expect(isStreamSafe('Is there anything else I can help with?')).toBe(true);
   });
 
   test('a question carrying a date/amount still holds — needsHold vetoes isStreamSafe', () => {
