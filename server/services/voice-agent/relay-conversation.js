@@ -140,6 +140,23 @@ function resolveSessionModel({ sandbox } = {}) {
   return { model: MODEL, fallbackReason };
 }
 
+/**
+ * The PRODUCTION (non-sandbox) inbound resolution, for reporting only (the
+ * Models switchboard tab) — never call-site-pinning, never logging. Genuinely
+ * pure: always reads the live env, no memoization, no side effect, safe to
+ * call on every switchboard read without duplicating the one warning a real
+ * session already logs once at construction via resolveSessionModel(). Mirrors
+ * that function's non-sandbox branch exactly (VOICE_RELAY_INBOUND_MODEL,
+ * allowlist-checked, else the shared MODEL default) so the two can never
+ * silently diverge on what a real inbound call would pin.
+ */
+function resolveInboundModelForReporting() {
+  const raw = process.env[INBOUND_MODEL_ENV];
+  if (!raw) return { model: MODEL, fallbackReason: null };
+  if (isAllowedOverrideModel(raw)) return { model: raw, fallbackReason: null };
+  return { model: MODEL, fallbackReason: `unknown_model_override:${INBOUND_MODEL_ENV}=${raw}` };
+}
+
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
@@ -2954,4 +2971,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, resolveSessionModel, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, resolveSessionModel, resolveInboundModelForReporting, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

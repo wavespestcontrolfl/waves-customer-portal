@@ -120,10 +120,14 @@ const POLICY_SELECTOR = {
 //   P(policy, leg)     MODELS.TEXT_POLICIES[policy][leg].model
 //   E(env, ref)        process.env[env] || resolve(ref)      (pin over a selector)
 //   D(env, literal)    process.env[env] || literal           (out-of-registry lane)
+// `opts.parse` on E works like D's: for the rare env whose call site validates
+// the raw value (an allowlist, not a bare pass-through) before running it.
+// Called with the raw string; returns the id to report, or null to report the
+// same fallback the call site itself would use for a rejected value.
 const T = (tier) => ({ kind: 'tier', key: tier });
 const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
-const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live });
+const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null });
 // D(env | [env, ...aliases], literal): the call site reads the first set var
 // in order (satellite: OPENAI_VISION_MODEL || OPENAI_MODEL || 'gpt-5-mini').
 // The composer writes the FIRST (specific) name; aliases only report.
@@ -208,6 +212,19 @@ const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by eight photo lane
 // an inbound lane onto Gemini widens the prompt-injection surface — the tab
 // warns on that specific move.
 const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ id, name, file, policy, primary, fallback, ...extra });
+
+// voice_relay's E() parse hook (below): VOICE_RELAY_INBOUND_MODEL is the one
+// pin here the call site itself allowlist-checks. Lazy require — this file
+// loads at server boot, well before any inbound call; relay-conversation.js
+// pulls in the Anthropic SDK, db and other heavier deps this module has no
+// other reason to load. resolveInboundModelForReporting() is pure (always
+// reads the live env, never memoized) and mirrors exactly what a session
+// pins on `this.model`, so this can only ever report what actually runs.
+function inboundOverrideParse(raw) {
+  const { resolveInboundModelForReporting } = require('./voice-agent/relay-conversation');
+  const { model } = resolveInboundModelForReporting();
+  return model === raw ? raw : null;
+}
 
 // The audited call-site map (server/, 2026-09-02). Grouped by the kind of
 // work the lane does — NOT by the model it happens to run — so a routine lane
@@ -312,7 +329,13 @@ const LANES = [
   // (pinned once per session at conversation construction), else the shared
   // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
   // directly (row below) and never sees the inbound-only override.
-  L('voice_relay_inbound', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE'))), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  // Unlike every other E() pin here, VOICE_RELAY_INBOUND_MODEL is allowlist
+  // -checked by the call site itself (relay-conversation.js
+  // resolveSessionModel) — a raw value outside config/models.js MODEL_CATALOG
+  // never runs. inboundOverrideParse() reuses that same live resolver instead
+  // of re-deriving the allowlist here, so this row can never show a model the
+  // runtime would actually refuse.
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE')), { parse: inboundOverrideParse }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
@@ -452,7 +475,7 @@ const LANE_AREA = {
   address_recovery: 'calls',
   tech_dictation: 'calls',
   parse_when: 'calls',
-  voice_relay_inbound: 'voice',
+  voice_relay: 'voice',
   voice_relay_collections: 'voice',
   voice_relay_judge: 'voice',
   pest_id: 'photos',
@@ -588,7 +611,7 @@ const LANE_DESCRIBE = {
   address_recovery: 'Recovers a street address that did not validate',
   tech_dictation: 'Transcribes field notes from the tech',
   parse_when: 'Reads "next Tuesday morning" into a date',
-  voice_relay_inbound: 'Speaks with callers on the phone line (Sandy)',
+  voice_relay: 'Speaks with callers on the phone line (Sandy)',
   voice_relay_collections: 'Speaks with customers on collections calls',
   voice_relay_judge: 'Grades Sandy\'s eval calls against each scenario\'s spec',
   pest_id: 'Identifies the pest in a customer photo',
@@ -789,7 +812,12 @@ function resolveRef(ref) {
         return { model, selector: null, via, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
       }
       const base = resolveRef(ref.ref);
-      const model = (setName && process.env[setName]) || base.model;
+      const raw = (setName && process.env[setName]) || null;
+      // ref.parse is set only for an env the call site validates (see E()
+      // above) — a rejected raw value reports the same fallback the call
+      // site itself falls back to, never the rejected string.
+      const parsed = raw && ref.parse ? ref.parse(raw) : raw;
+      const model = parsed || base.model;
       return { model, selector: base.selector, via: setName ? `${setName} (pinned)` : `${primaryName} → ${base.via}`, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts: base.accepts };
     }
     default:
