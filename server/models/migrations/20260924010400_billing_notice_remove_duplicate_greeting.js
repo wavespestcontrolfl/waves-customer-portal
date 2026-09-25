@@ -11,6 +11,8 @@ const OLD_BLOCKS = [
   { type: 'cta', label: 'Open billing', url_variable: 'billing_url' },
 ];
 const NEW_BLOCKS = OLD_BLOCKS.filter((block) => block.content !== 'Hi {{first_name}},');
+const OLD_REQUIRED = ['first_name', 'category_label', 'notification_body', 'billing_url'];
+const NEW_REQUIRED = OLD_REQUIRED.filter((variable) => variable !== 'first_name');
 const OLD_FIXTURE = {
   first_name: 'Customer',
   category_label: 'Billing reminder',
@@ -36,6 +38,7 @@ exports.up = async function up(knex) {
   if (!active) return;
 
   let publishedVersionId = null;
+  let requiredVariablesCorrected = false;
   const exactSeed = active.status === 'active'
     && active.subject === '{{category_label}} from Waves'
     && active.preview_text === '{{notification_body}}'
@@ -59,9 +62,14 @@ exports.up = async function up(knex) {
     }).returning('id');
     publishedVersionId = published.id;
     await knex('email_template_versions').where({ id: active.id }).update({ status: 'archived', updated_at: new Date() });
-    await knex('email_templates').where({ id: template.id }).update({
+    const templateUpdate = {
       active_version_id: published.id, last_published_at: new Date(), updated_at: new Date(),
-    });
+    };
+    if (isDeepStrictEqual(json(template.required_variables, []), OLD_REQUIRED)) {
+      templateUpdate.required_variables = JSON.stringify(NEW_REQUIRED);
+      requiredVariablesCorrected = true;
+    }
+    await knex('email_templates').where({ id: template.id }).update(templateUpdate);
   }
 
   let fixtureCorrected = false;
@@ -80,7 +88,7 @@ exports.up = async function up(knex) {
       resource_type: 'email_template',
       resource_id: template.id,
       metadata: { templateKey: KEY, migration: MIGRATION, priorVersionId: active.id,
-        publishedVersionId, fixtureCorrected },
+        publishedVersionId, fixtureCorrected, requiredVariablesCorrected },
       trx: knex,
       critical: true,
     });

@@ -58,17 +58,25 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
     try {
       await seed.up(editedProbe);
       const editedTemplate = await editedProbe('email_templates').where({ template_key: 'billing.notice' }).first();
-      await editedProbe('email_template_versions').where({ id: editedTemplate.active_version_id }).update({ status: 'archived' });
+      const customRequired = ['first_name', 'category_label', 'notification_body', 'billing_url', 'operator_note'];
+      await editedProbe('email_templates').where({ id: editedTemplate.id })
+        .update({ required_variables: JSON.stringify(customRequired) });
+      await correction.up(editedProbe);
+      const correctedTemplate = await editedProbe('email_templates').where({ id: editedTemplate.id }).first();
+      expect(correctedTemplate.required_variables).toEqual(customRequired);
+      await editedProbe('email_template_versions').where({ id: correctedTemplate.active_version_id }).update({ status: 'archived' });
       const [edited] = await editedProbe('email_template_versions').insert({
-        template_id: editedTemplate.id, version_number: 2, status: 'active',
+        template_id: editedTemplate.id, version_number: 3, status: 'active',
         subject: 'Operator subject', preview_text: 'Operator preview', blocks: [],
       }).returning('*');
       await editedProbe('email_templates').where({ id: editedTemplate.id }).update({ active_version_id: edited.id });
       await editedProbe('email_template_fixtures').where({ template_id: editedTemplate.id })
         .update({ payload: { notification_body: 'Operator fixture' } });
       await correction.up(editedProbe);
-      expect(await editedProbe('email_template_versions').where({ template_id: editedTemplate.id })).toHaveLength(2);
+      expect(await editedProbe('email_template_versions').where({ template_id: editedTemplate.id })).toHaveLength(3);
       expect((await editedProbe('email_templates').where({ id: editedTemplate.id }).first()).active_version_id).toBe(edited.id);
+      expect((await editedProbe('email_templates').where({ id: editedTemplate.id }).first()).required_variables)
+        .toEqual(customRequired);
       expect((await editedProbe('email_template_fixtures').where({ template_id: editedTemplate.id }).first()).payload)
         .toEqual({ notification_body: 'Operator fixture' });
     } finally {
@@ -87,7 +95,7 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
       name: 'Billing notice', mode: 'service', purpose: 'billing', status: 'active',
       legal_classification: 'transactional_relationship', active_version_id: versions[1].id,
       allowed_variables: ['first_name', 'category_label', 'notification_body', 'billing_url'],
-      required_variables: ['first_name', 'category_label', 'notification_body', 'billing_url'],
+      required_variables: ['category_label', 'notification_body', 'billing_url'],
     });
     expect(versions).toHaveLength(2);
     expect(versions[0]).toMatchObject({
@@ -120,7 +128,8 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
     expect(corrections[0]).toMatchObject({
       actor_type: 'system', resource_type: 'email_template', resource_id: template.id,
       metadata: { templateKey: 'billing.notice', migration: '20260924010400_billing_notice_remove_duplicate_greeting',
-        priorVersionId: versions[0].id, publishedVersionId: versions[1].id, fixtureCorrected: true },
+        priorVersionId: versions[0].id, publishedVersionId: versions[1].id, fixtureCorrected: true,
+        requiredVariablesCorrected: true },
     });
 
     await db('email_template_versions').where({ id: versions[1].id }).update({ status: 'archived' });
