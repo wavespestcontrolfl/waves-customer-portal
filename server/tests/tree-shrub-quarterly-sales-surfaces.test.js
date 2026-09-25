@@ -32,6 +32,21 @@ describe('admin pricing calculators (/estimate, /quick-quote) input', () => {
   test.each([undefined, null, '', 'standard', 'enhanced'])('accepts tier %p', async (tier) => {
     await expect(resolvePricingQuoteInput({ services: { treeShrub: { tier } } })).resolves.toBeTruthy();
   });
+
+  // codex r17 P2: absent for the check above must be absent for the engine
+  // too — normalizeTreeShrubTier trims '   ' to an empty key and throws.
+  test('a whitespace-only tier reaches the engine as absent, so Standard prices (codex r17)', async () => {
+    const body = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, services: { treeShrub: { tier: '   ', access: 'easy', treeCount: 4 } } };
+    const input = await resolvePricingQuoteInput(body);
+    expect(input.services.treeShrub).not.toHaveProperty('tier');
+    expect(input.services.treeShrub.access).toBe('easy');
+    // The caller's body is left untouched.
+    expect(body.services.treeShrub.tier).toBe('   ');
+    const { generateEstimate } = require('../services/pricing-engine');
+    expect(() => generateEstimate(input)).not.toThrow();
+    const line = (generateEstimate(input).lineItems || []).find((l) => /tree/i.test(l.service || l.label || ''));
+    expect(line?.tier).toBe('standard');
+  });
 });
 
 describe('knowledge index service connector (codex r8)', () => {
@@ -130,7 +145,10 @@ describe('new-appointment write boundary (codex r12)', () => {
 
   // heldBy: customers with a LIVE recurring visit on the retired row, as the
   // visit's primary line (heldVia 'primary') or an add-on line ('addon').
-  const run = async ({ customerId, serviceIds, serviceTypes, heldBy = [], heldVia = 'primary' }) => {
+  // addonPattern: the add-on line's own recurring_pattern (null = rides the
+  // parent's cadence); the fake only counts an add-on line as held when the
+  // query gated on it (codex r17).
+  const run = async ({ customerId, serviceIds, serviceTypes, heldBy = [], heldVia = 'primary', addonPattern = null }) => {
     const db = require('../models/db');
     const bare = (col) => col.replace(/^scheduled_services\.|^scheduled_service_addons\./, '');
     db.mockImplementation((table) => {
@@ -138,7 +156,15 @@ describe('new-appointment write boundary (codex r12)', () => {
       const b = {
         join() { return this; },
         whereIn(col, vals) { q.filters[bare(col)] = vals; return this; },
-        where(col, val) { q.filters[bare(col)] = [val]; return this; },
+        where(col, val) {
+          if (typeof col === 'function') {
+            const grouped = { whereNull(c) { q.filters[`null:${bare(c)}`] = true; return this; }, orWhereNot(c, v) { q.filters[`not:${bare(c)}`] = [v]; return this; } };
+            col.call(grouped, grouped);
+            return this;
+          }
+          q.filters[bare(col)] = [val];
+          return this;
+        },
         whereNotIn(col, vals) { q.filters[`not:${bare(col)}`] = vals; return this; },
         distinct() { return this; },
         select() {
@@ -149,7 +175,10 @@ describe('new-appointment write boundary (codex r12)', () => {
         pluck() {
           const live = q.filters.is_recurring?.[0] === true && (q.filters['not:status'] || []).includes('completed');
           const via = table === 'scheduled_service_addons' ? 'addon' : 'primary';
-          return Promise.resolve(live && via === heldVia && heldBy.includes(q.filters.customer_id[0]) ? [RETIRED_ID] : []);
+          const lineIsPlan = via !== 'addon'
+            || (q.filters['null:recurring_pattern'] === true && (q.filters['not:recurring_pattern'] || []).includes('one_time')
+              && (addonPattern === null || addonPattern !== 'one_time'));
+          return Promise.resolve(live && lineIsPlan && via === heldVia && heldBy.includes(q.filters.customer_id[0]) ? [RETIRED_ID] : []);
         },
       };
       return b;
@@ -170,6 +199,13 @@ describe('new-appointment write boundary (codex r12)', () => {
   test('a customer holding the plan as an add-on line is still grandfathered (codex r14)', async () => {
     expect(await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon' })).toEqual([]);
     expect((await run({ customerId: OTHER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon' })).map((r) => r.id)).toEqual([RETIRED_ID]);
+  });
+
+  test('a one_time add-on line is not grandfathering evidence (codex r17)', async () => {
+    expect((await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon', addonPattern: 'one_time' })).map((r) => r.id)).toEqual([RETIRED_ID]);
+    // An add-on with its own recurring pattern, or none (rides the parent), still holds.
+    expect(await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon', addonPattern: 'quarterly' })).toEqual([]);
+    expect(await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon', addonPattern: null })).toEqual([]);
   });
 
   test('live services and missing ids pass without a lookup', async () => {

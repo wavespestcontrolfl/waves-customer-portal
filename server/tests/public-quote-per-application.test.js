@@ -19,7 +19,7 @@
 const { generateEstimate } = require('../services/pricing-engine');
 const { _internals } = require('../routes/public-quote');
 
-const { derivePerApplication, resolveRealLotSqFt, publicQuoteTreeShrubTierRejection } = _internals;
+const { derivePerApplication, resolveRealLotSqFt, publicQuoteTreeShrubTierRejection, publicQuoteTreeShrubTierInput } = _internals;
 
 const BASE_PROPERTY = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
 
@@ -293,6 +293,26 @@ describe('publicQuoteTreeShrubTierRejection — Light (4x/quarterly) refused on 
   test('present-but-falsy values (false, 0) are rejected, not treated as absent (codex P0 r4)', () => {
     expect(publicQuoteTreeShrubTierRejection(false)).toMatch(/standard or enhanced/i);
     expect(publicQuoteTreeShrubTierRejection(0)).toMatch(/standard or enhanced/i);
+  });
+
+  // codex r17 P2: the rejection treats a whitespace-only tier as absent,
+  // but the route forwarded the raw value and normalizeTreeShrubTier trimmed
+  // it to an empty key and threw — a 500 instead of Standard.
+  test('a tier the rejection treats as absent reaches the engine as absent (codex r17)', () => {
+    expect(publicQuoteTreeShrubTierInput('   ')).toBeUndefined();
+    expect(publicQuoteTreeShrubTierInput('')).toBeUndefined();
+    expect(publicQuoteTreeShrubTierInput(null)).toBeUndefined();
+    expect(publicQuoteTreeShrubTierInput(undefined)).toBeUndefined();
+    expect(publicQuoteTreeShrubTierInput('standard')).toBe('standard');
+    expect(publicQuoteTreeShrubTierInput(' Enhanced ')).toBe(' Enhanced ');
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    expect(source).toMatch(/tier: publicQuoteTreeShrubTierInput\(services\.treeShrub\.tier\)/);
+    expect(() => generateEstimate({ ...BASE_PROPERTY, services: { treeShrub: { tier: '   ', access: 'easy', treeCount: 4 } } })).toThrow(/Unknown T&S tier/);
+    const priced = generateEstimate({ ...BASE_PROPERTY, services: { treeShrub: { tier: publicQuoteTreeShrubTierInput('   '), access: 'easy', treeCount: 4 } } });
+    const line = (priced.lineItems || []).find((l) => /tree/i.test(l.service || l.label || ''));
+    expect(line?.tier).toBe('standard');
   });
 
   test('end-to-end: generateEstimate would otherwise price an explicit light request unchanged (why the route boundary — not the engine — must reject it)', () => {

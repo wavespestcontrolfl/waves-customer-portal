@@ -1067,6 +1067,15 @@ function publicQuoteTreeShrubTierRejection(tier) {
   return null;
 }
 
+// The tier /calculate forwards to the engine once the rejection above has
+// passed: absent (undefined / null / blank-after-trim) stays ABSENT so the
+// engine's own default runs. A whitespace-only tier used to be forwarded
+// verbatim and normalizeTreeShrubTier trimmed it to an empty key and threw
+// `Unknown T&S tier` — a server error instead of Standard (codex r17 P2).
+function publicQuoteTreeShrubTierInput(tier) {
+  return typeof tier === 'string' && tier.trim() ? tier : undefined;
+}
+
 const quoteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -1733,7 +1742,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         return res.status(400).json({ error: 'Palm count must be a whole number between 1 and 200.' });
       }
       engineInput.services.treeShrub = {
-        tier: services.treeShrub.tier,
+        tier: publicQuoteTreeShrubTierInput(services.treeShrub.tier),
         access: services.treeShrub.access || 'easy',
         ...(Number.isFinite(treeShrubCount) && treeShrubCount > 0 ? { treeCount: treeShrubCount } : {}),
         ...(palmsSupplied ? { palmCount: treeShrubPalms } : {}),
@@ -4342,6 +4351,7 @@ module.exports._internals = {
   unitOnMultiUnitParcelForcesSiteQuote,
   lotPricedServiceRequested,
   publicQuoteTreeShrubTierRejection,
+  publicQuoteTreeShrubTierInput,
 };
 module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;
 module.exports.KEYED_ONLY_SERVICE_KEYS = KEYED_ONLY_SERVICE_KEYS;

@@ -32,7 +32,10 @@ jest.mock('../services/invoice', () => ({
   sendReceipt: jest.fn(),
 }));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn() }));
+// The retired-plan gate reads the real cadence inference (codex r17 P1);
+// term creation stays faked.
 jest.mock('../services/annual-prepay-renewals', () => ({
+  inferCoverageCadence: (...args) => jest.requireActual('../services/annual-prepay-renewals').inferCoverageCadence(...args),
   createTermForAnnualPrepay: jest.fn(async ({ conn, customerId, prepayInvoiceId, prepayAmount, termStart, termEnd }) => {
     const [term] = await conn('annual_prepay_terms').insert({
       id: 'term-1', customer_id: customerId, prepay_invoice_id: prepayInvoiceId,
@@ -40,6 +43,9 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     }).returning('*');
     return term;
   }),
+}));
+jest.mock('../services/service-library', () => ({
+  retiredServicesNotHeldBy: jest.fn(async () => []),
 }));
 jest.mock('../services/receipt-delivery-queue', () => ({
   ...jest.requireActual('../services/receipt-delivery-queue'),
@@ -54,6 +60,8 @@ const { scheduleReceiptDeliveryDrain, processReceiptDeliveryJob } = require('../
 const { checkSendWindow } = require('../services/messaging/validators/send-window');
 const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
 const { recordAuditEvent } = require('../services/audit-log');
+const { retiredServicesNotHeldBy } = require('../services/service-library');
+const { retiredSaleKeyForLabel } = require('../services/pricing-engine/retired-sale-catalog');
 const router = require('../routes/admin-customers');
 const route = router.stack.find((layer) => layer.route?.path === '/:id/annual-prepay' && layer.route.methods.post);
 const handler = route.route.stack.at(-1).handle;
@@ -291,5 +299,54 @@ describe('_private.deliverySettledLiveCredit — the annual-prepay-invoice route
 
   test('a null delivery (skipped when settledByDepositCredit was already true) is NOT settled', () => {
     expect(deliverySettledLiveCredit(null)).toBe(false);
+  });
+});
+
+// Codex r17 P1 on #4786: an omitted visitCount defaults to 4, and four stored
+// "Tree & Shrub Care" visits make annual-prepay-renewals infer a quarterly
+// schedule — the retired plan. The gate must see the plan as the term will
+// run it, on both prepay endpoints.
+describe('retired-plan gate reads the effective count/cadence (codex r17)', () => {
+  const { annualPrepayRetiredPlanLabels } = router._private;
+  const namesRetired = (labels) => labels.map(retiredSaleKeyForLabel).filter(Boolean);
+
+  test('a defaulted four-visit Tree & Shrub prepay names the retired plan', () => {
+    const labels = annualPrepayRetiredPlanLabels({
+      coverageServiceType: 'Tree & Shrub Care', planLabel: 'Tree & Shrub Care Annual Prepay', coverageCadence: null, visitCount: 4,
+    });
+    expect(namesRetired(labels)).toEqual(['tree_shrub_quarterly']);
+  });
+
+  test('the sold six-visit plan and other quarterly services do not', () => {
+    expect(namesRetired(annualPrepayRetiredPlanLabels({
+      coverageServiceType: 'Tree & Shrub Care', planLabel: 'Tree & Shrub Care Annual Prepay', coverageCadence: null, visitCount: 6,
+    }))).toEqual([]);
+    expect(namesRetired(annualPrepayRetiredPlanLabels({
+      coverageServiceType: 'Tree & Shrub Care', planLabel: 'Tree & Shrub Care Annual Prepay', coverageCadence: 'bimonthly', visitCount: 6,
+    }))).toEqual([]);
+    expect(namesRetired(annualPrepayRetiredPlanLabels({
+      coverageServiceType: 'Quarterly Pest Control', planLabel: 'Quarterly Pest Control Annual Prepay', coverageCadence: null, visitCount: 4,
+    }))).toEqual([]);
+  });
+
+  test('both prepay endpoints read the one helper', () => {
+    const source = require('fs').readFileSync(require.resolve('../routes/admin-customers'), 'utf8');
+    const sites = source.match(/serviceTypes: annualPrepayRetiredPlanLabels\(\{ coverageServiceType, planLabel, coverageCadence, visitCount \}\)/g) || [];
+    expect(sites).toHaveLength(2);
+  });
+
+  test('POST /:id/annual-prepay refuses a non-holder\'s defaulted Tree & Shrub prepay before any write', async () => {
+    retiredServicesNotHeldBy.mockImplementationOnce(async ({ serviceTypes }) => (
+      serviceTypes.some((t) => retiredSaleKeyForLabel(t) === 'tree_shrub_quarterly')
+        ? [{ id: 'svc-retired', service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care' }]
+        : []
+    ));
+    const { res, next } = await recordPrepay({ serviceType: 'Tree & Shrub Care', visitCount: undefined, coverageCadence: undefined });
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'RETIRED_SERVICE_NOT_SELLABLE' }));
+    expect(retiredServicesNotHeldBy).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'customer-1' }));
+    expect(committed.invoices).toHaveLength(0);
+    expect(committed.annual_prepay_terms).toHaveLength(0);
   });
 });

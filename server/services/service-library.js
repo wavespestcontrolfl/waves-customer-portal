@@ -432,11 +432,17 @@ async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes }
         db('scheduled_services').whereIn('scheduled_services.service_id', retiredIds),
         String(customerId),
       ).distinct('scheduled_services.service_id').pluck('scheduled_services.service_id'),
-      // Held as an add-on line of a combined recurring visit.
+      // Held as an add-on line of a combined recurring visit. The line rides
+      // its parent's cadence unless it carries its own pattern, and a
+      // one_time line is not a plan (admin-schedule lineDueOnRecurringDate)
+      // — codex r17 on #4786.
       ...await whereCustomerHoldsService(
         db('scheduled_service_addons')
           .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
-          .whereIn('scheduled_service_addons.service_id', retiredIds),
+          .whereIn('scheduled_service_addons.service_id', retiredIds)
+          .where((line) => line
+            .whereNull('scheduled_service_addons.recurring_pattern')
+            .orWhereNot('scheduled_service_addons.recurring_pattern', 'one_time')),
         String(customerId),
       ).distinct('scheduled_service_addons.service_id').pluck('scheduled_service_addons.service_id'),
     ]

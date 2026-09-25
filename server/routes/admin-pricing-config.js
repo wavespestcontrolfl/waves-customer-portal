@@ -1496,7 +1496,8 @@ async function resolvePricingQuoteInput(body) {
   // These calculators mint NEW quotes: only a currently-sold T&S program is
   // accepted (4x Light retired 2026-09-24). Absent means the engine default.
   const tsTier = input.services?.treeShrub?.tier;
-  if (tsTier !== undefined && tsTier !== null && !(typeof tsTier === 'string' && tsTier.trim() === '')) {
+  const tsTierAbsent = tsTier === undefined || tsTier === null || (typeof tsTier === 'string' && tsTier.trim() === '');
+  if (!tsTierAbsent) {
     const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
     if (!isSellableTreeShrubTier(tsTier)) {
       const err = new Error('Tree & Shrub program must be standard or enhanced.');
@@ -1505,6 +1506,13 @@ async function resolvePricingQuoteInput(body) {
       err.isOperational = true;
       throw err;
     }
+  } else if (tsTier !== undefined) {
+    // Absent here must be absent for the engine too: normalizeTreeShrubTier
+    // trims a whitespace-only tier to an empty key and throws instead of
+    // pricing Standard (codex r17 P2). Copied, never mutated in place — the
+    // nested services object is still the caller's request body.
+    input.services = { ...input.services, treeShrub: { ...input.services.treeShrub } };
+    delete input.services.treeShrub.tier;
   }
   const customerId = input.existingCustomerId || input.customerId;
   if (!customerId) return input;

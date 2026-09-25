@@ -5732,6 +5732,11 @@ module.exports = {
   // term as "still deciding" add PAYMENT_PENDING_STATUS explicitly.
   ACTIVE_STATUSES,
   PAYMENT_PENDING_STATUS,
+  // The cadence a term will actually run at (explicit cadence, else the
+  // service-type wording, else the stored visit count) — the prepay
+  // routes' retired-plan gate reads the same inference the coverage
+  // schedule is built from (codex r17 on #4786).
+  inferCoverageCadence,
   _private: {
     PENDING_COMPLETION_REVERSAL_IDENTITIES,
     dateOnly,

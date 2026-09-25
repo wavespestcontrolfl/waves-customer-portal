@@ -1505,6 +1505,25 @@ function parseAnnualPrepayVisitCount(value) {
   return { visitCount: Math.min(count, 24) };
 }
 
+// Retired-for-sale plans (quarterly T&S) prepay only for a customer already
+// on that plan — the shared booking gate (codex r16 on #4786). The labels
+// handed to it: the posted service type and plan label, plus the plan AS THE
+// TERM WILL RUN IT — inferCoverageCadence over the same three fields
+// createTermForAnnualPrepay stores. An omitted visitCount defaults to 4 and
+// four stored "Tree & Shrub Care" visits infer a quarterly schedule, so the
+// effective count and cadence must reach the gate, never only the posted
+// ones (codex r17 P1). Both prepay endpoints (invoice and recorded payment)
+// read this one helper.
+function annualPrepayRetiredPlanLabels({ coverageServiceType, planLabel, coverageCadence, visitCount }) {
+  const { inferCoverageCadence } = require('../services/annual-prepay-renewals');
+  const effectiveCadence = inferCoverageCadence({
+    coverage_cadence: coverageCadence,
+    coverage_service_type: coverageServiceType,
+    coverage_visit_count: visitCount,
+  });
+  return [coverageServiceType, planLabel, `${coverageServiceType} ${effectiveCadence} ${visitCount}x`];
+}
+
 function parseDateOnlyInput(value, field) {
   if (value === undefined || value === null || value === '') return { date: null };
   const text = String(value).slice(0, 10);
@@ -4827,16 +4846,12 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
-    // Retired-for-sale plans (quarterly T&S) prepay only for a customer
-    // already on that plan — the shared booking gate (codex r16 on #4786).
+    // Retired-for-sale plans prepay only for a customer already on that plan
+    // (annualPrepayRetiredPlanLabels — the effective count/cadence included).
     {
       const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
         customerId: req.params.id,
-        serviceTypes: [
-          coverageServiceType, planLabel,
-          // The posted count only — visitCount defaults to 4 when omitted.
-          `${coverageServiceType} ${coverageCadence || ''} ${req.body?.visitCount != null ? `${parsedVisitCount.visitCount}x` : ''}`,
-        ],
+        serviceTypes: annualPrepayRetiredPlanLabels({ coverageServiceType, planLabel, coverageCadence, visitCount }),
       });
       if (notHeldRetired.length) {
         return res.status(409).json({
@@ -5363,16 +5378,12 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
-    // Retired-for-sale plans (quarterly T&S) prepay only for a customer
-    // already on that plan — the shared booking gate (codex r16 on #4786).
+    // Retired-for-sale plans prepay only for a customer already on that plan
+    // (annualPrepayRetiredPlanLabels — the effective count/cadence included).
     {
       const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
         customerId: req.params.id,
-        serviceTypes: [
-          coverageServiceType, planLabel,
-          // The posted count only — visitCount defaults to 4 when omitted.
-          `${coverageServiceType} ${coverageCadence || ''} ${req.body?.visitCount != null ? `${parsedVisitCount.visitCount}x` : ''}`,
-        ],
+        serviceTypes: annualPrepayRetiredPlanLabels({ coverageServiceType, planLabel, coverageCadence, visitCount }),
       });
       if (notHeldRetired.length) {
         return res.status(409).json({
@@ -5964,6 +5975,7 @@ router._private = {
   normalizeAdminAddressInput,
   parseAnnualPrepayAmount,
   parseAnnualPrepayVisitCount,
+  annualPrepayRetiredPlanLabels,
   deliverySettledLiveCredit,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
