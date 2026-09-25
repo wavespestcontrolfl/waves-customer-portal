@@ -325,11 +325,12 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const [location, setLocation] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
-  const [resultData, setResultData] = useState(null); // { id, type, created_at, result, next_step }
+  const [resultData, setResultData] = useState(null); // { id, type, created_at, result, next_step, photos? }
   // 'live' (just identified, note/location are this session's own inputs) or
-  // 'history' (opened from a past item — GET never returns photos/note/
-  // location, so there is nothing of the customer's to fall back to).
+  // 'history' (opened from a past item — GET returns saved photo references,
+  // but not the original note/location inputs).
   const [resultSource, setResultSource] = useState(null);
+  const [unavailableHistoryPhotoIds, setUnavailableHistoryPhotoIds] = useState([]);
   const [historyError, setHistoryError] = useState('');
   const [loadingHistoryId, setLoadingHistoryId] = useState(null);
 
@@ -355,6 +356,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       setBusyPhotos(false);
       setResultData(null);
       setResultSource(null);
+      setUnavailableHistoryPhotoIds([]);
       setHistoryError('');
       setLoadingHistoryId(null);
     }
@@ -374,6 +376,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     setNote('');
     setLocation('');
     setSubmitError('');
+    setUnavailableHistoryPhotoIds([]);
     setStep('photos');
   };
 
@@ -468,10 +471,11 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     const myGen = genRef.current;
     setHistoryError('');
     setLoadingHistoryId(item.id);
-    // A history item's photos were never returned by GET (contract has no
-    // photo data) — clear the live flow's photos so a later "Request
-    // service" tap can't attach a DIFFERENT identification's pictures to
-    // this one (Codex r1 P1).
+    setUnavailableHistoryPhotoIds([]);
+    // Clear this session's live photos before the history GET starts so a
+    // later "Request service" tap can never attach a DIFFERENT
+    // identification's pictures to this one. History evidence comes only
+    // from the response's signed photo references.
     setPhotos([]);
     try {
       const result = await api.getPhotoId(item.type, item.id);
@@ -503,15 +507,28 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     // back to (GET never returns it), so it stays limited to whatever the
     // server actually sent (Codex r7 P2).
     const isLive = resultSource === 'live';
+    const historyPhotos = isLive
+      ? []
+      : (Array.isArray(resultData?.photos) ? resultData.photos : [])
+        .filter((photo) => photo?.id && photo?.url && !unavailableHistoryPhotoIds.includes(photo.id))
+        .slice(0, PHOTO_LIMIT)
+        .map((photo, index) => ({
+          preview: photo.url,
+          photoId: photo.id,
+          name: `Photo ID photo ${index + 1}`,
+        }));
     onOpenRequest?.({
       category: prefill.category || (isLive ? (TYPE_TO_CATEGORY[selectedType] || '') : ''),
       location: prefill.location || (isLive ? location : ''),
       note: prefill.note || (isLive ? note : ''),
-      // Same shape as ReportIssueOverlay's own `photos` state ({ preview,
-      // data, name }) — the New Request form seeds it directly, so the
-      // customer never has to re-attach what they just took. Already empty
-      // for a history result (openHistoryItem clears it on open).
-      photos,
+      // Live captures retain their base64 data. History photos carry only
+      // their server-owned id and signed preview URL; the request endpoint
+      // validates those ids and copies the private bytes itself.
+      photos: isLive ? photos : historyPhotos,
+      photoIdSource: {
+        type: resultData?.type || selectedType,
+        id: resultData?.id,
+      },
     });
   };
 
@@ -604,6 +621,15 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
         {step === 'result' && resultData && (
           <ResultStep
             data={resultData}
+            photos={resultSource === 'history'
+              ? (Array.isArray(resultData.photos) ? resultData.photos : [])
+              : photos.map((photo) => ({ url: photo.preview }))}
+            unavailablePhotoIds={resultSource === 'history' ? unavailableHistoryPhotoIds : []}
+            onPhotoUnavailable={resultSource === 'history'
+              ? (photoId) => setUnavailableHistoryPhotoIds((current) => (
+                current.includes(photoId) ? current : [...current, photoId]
+              ))
+              : undefined}
             onOpenRequestCta={handleNextStepRequest}
             onDone={onClose}
           />
@@ -921,13 +947,46 @@ function TreeShrubResult({ result }) {
 
 const RESULT_BODY_BY_TYPE = { pest: PestResult, lawn: LawnResult, tree_shrub: TreeShrubResult };
 
-function ResultStep({ data, onOpenRequestCta, onDone }) {
+function ResultPhotos({ photos, unavailablePhotoIds, onPhotoUnavailable }) {
+  if (!Array.isArray(photos) || photos.length === 0) return null;
+  const unavailable = new Set(unavailablePhotoIds || []);
+  const available = photos.filter((photo) => photo?.url && !unavailable.has(photo.id));
+  const unavailableCount = photos.length - available.length;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {available.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {available.map((photo, index) => (
+            <img
+              key={photo.id || `${photo.url}-${index}`}
+              src={photo.url}
+              alt={`Saved photo ${index + 1}`}
+              onError={() => { if (photo.id) onPhotoUnavailable?.(photo.id); }}
+              style={{ width: 84, height: 84, objectFit: 'cover', borderRadius: 8, border: `1px solid ${SHELL.border}` }}
+            />
+          ))}
+        </div>
+      )}
+      {unavailableCount > 0 && (
+        <div role="status" style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.45 }}>
+          {unavailableCount === 1
+            ? 'One saved photo could not be loaded.'
+            : `${unavailableCount} saved photos could not be loaded.`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResultStep({ data, photos, unavailablePhotoIds, onPhotoUnavailable, onOpenRequestCta, onDone }) {
   const result = data.result || {};
   const ResultBody = RESULT_BODY_BY_TYPE[data.type];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <section data-glass="card" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <ResultPhotos photos={photos} unavailablePhotoIds={unavailablePhotoIds} onPhotoUnavailable={onPhotoUnavailable} />
         {ResultBody && <ResultBody result={result} />}
       </section>
 

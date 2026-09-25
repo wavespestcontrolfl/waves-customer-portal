@@ -14364,7 +14364,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   const [urgency, setUrgency] = useState('routine');
   const [description, setDescription] = useState('');
   const [location, setLocation] = useState('');
-  const [photos, setPhotos] = useState([]); // array of { preview, data }
+  const [photos, setPhotos] = useState([]); // array of { preview, data? } or { preview, photoId }
+  const [photoIdSource, setPhotoIdSource] = useState(null);
   // FileReader is async — submitting while a selection is still being read
   // silently sent the request WITHOUT the photo. A COUNTER, not a boolean:
   // two overlapping handlePhoto calls each read files, and a boolean cleared
@@ -14412,15 +14413,20 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         setUrgency('routine');
         setLocation(initialValues.location || '');
         setPhotos(Array.isArray(initialValues.photos) ? initialValues.photos.slice(0, photoLimit) : []);
+        setPhotoIdSource(initialValues.photoIdSource || null);
       } else {
         seededByHandoffRef.current = false;
+        setPhotoIdSource(null);
       }
-    } else if (!open && wasOpenRef.current && seededByHandoffRef.current) {
-      setCategory('');
-      setDescription('');
-      setUrgency('routine');
-      setLocation('');
-      setPhotos([]);
+    } else if (!open && wasOpenRef.current) {
+      if (seededByHandoffRef.current) {
+        setCategory('');
+        setDescription('');
+        setUrgency('routine');
+        setLocation('');
+        setPhotos([]);
+      }
+      setPhotoIdSource(null);
       seededByHandoffRef.current = false;
     }
     wasOpenRef.current = open;
@@ -14699,7 +14705,17 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         description: description.trim(),
         urgency: isProblemCategory ? urgency : 'routine',
         locationOnProperty: location || null,
-        photos: photos.map(p => p.data),
+        // Newly captured/live Photo ID photos carry base64 data. Saved
+        // history attachments carry only a photoId and are copied from
+        // private storage by the server after ownership validation.
+        photos: photos.filter(p => p.data).map(p => p.data),
+        ...(photoIdSource?.type && photoIdSource?.id ? {
+          photoIdSource: {
+            type: photoIdSource.type,
+            id: photoIdSource.id,
+            photoIds: photos.filter(p => p.photoId).map(p => p.photoId),
+          },
+        } : {}),
         // The house shown in this overlay — the server refuses the ticket
         // when its resolved scope names another (uncapped codex r1o P1).
         // Pinned to the SELECTION when the list has no entry for it yet — the
@@ -14726,6 +14742,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         setSubmitted(false);
         setCategory(''); setDescription('');
         setUrgency('routine'); setLocation(''); setPhotos([]); setSubmitError('');
+        setPhotoIdSource(null);
         setSubmittedNote('');
         onClose();
         // Give the photos-not-attached note time to be read before closing.

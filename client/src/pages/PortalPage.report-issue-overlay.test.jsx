@@ -162,6 +162,91 @@ describe('ReportIssueOverlay mount safety', () => {
     expect(screen.queryByLabelText('Remove photo 1')).not.toBeInTheDocument();
   });
 
+  it('submits only live photo data and the remaining saved Photo ID references after removal', async () => {
+    echo.value = undefined;
+    const api = (await import('../utils/api')).default;
+    const { fireEvent } = await import('@testing-library/react');
+    api.createRequest.mockClear();
+    render(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{
+          category: 'pest_issue',
+          location: 'inside_home',
+          note: 'Found ants by the sink',
+          photos: [
+            { preview: 'https://signed.example/one.jpg', photoId: 'saved-1', name: 'Photo ID photo 1' },
+            { preview: 'https://signed.example/two.jpg', photoId: 'saved-2', name: 'Photo ID photo 2' },
+            { preview: 'data:image/jpeg;base64,live', data: 'data:image/jpeg;base64,live', name: 'live.jpg' },
+          ],
+          photoIdSource: { type: 'pest', id: 'photo-id-1' },
+        }}
+      />,
+    );
+
+    const submit = await screen.findByRole('button', { name: /submit request/i });
+    fireEvent.click(screen.getByLabelText('Remove photo 1'));
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(api.createRequest).toHaveBeenCalledTimes(1));
+    expect(api.createRequest).toHaveBeenCalledWith(expect.objectContaining({
+      photos: ['data:image/jpeg;base64,live'],
+      photoIdSource: { type: 'pest', id: 'photo-id-1', photoIds: ['saved-2'] },
+    }));
+  });
+
+  it('submits a live Photo ID capture with an empty saved-photo id list', async () => {
+    echo.value = undefined;
+    const api = (await import('../utils/api')).default;
+    const { fireEvent } = await import('@testing-library/react');
+    api.createRequest.mockClear();
+    render(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{
+          category: 'lawn_concern', location: 'front_yard', note: 'Yellow patch by the driveway',
+          photos: [{ preview: 'data:image/jpeg;base64,live', data: 'data:image/jpeg;base64,live', name: 'live.jpg' }],
+          photoIdSource: { type: 'lawn', id: 'photo-id-live' },
+        }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /submit request/i }));
+
+    await waitFor(() => expect(api.createRequest).toHaveBeenCalledTimes(1));
+    expect(api.createRequest).toHaveBeenCalledWith(expect.objectContaining({
+      photos: ['data:image/jpeg;base64,live'],
+      photoIdSource: { type: 'lawn', id: 'photo-id-live', photoIds: [] },
+    }));
+  });
+
+  it('clears the Photo ID source on close so a later manual request does not submit it', async () => {
+    echo.value = undefined;
+    const api = (await import('../utils/api')).default;
+    const { fireEvent } = await import('@testing-library/react');
+    api.createRequest.mockClear();
+    const { rerender } = render(
+      <ReportIssueOverlay
+        open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope
+        initialValues={{
+          category: 'pest_issue', location: '', note: 'From Photo ID', photos: [],
+          photoIdSource: { type: 'pest', id: 'photo-id-1' },
+        }}
+      />,
+    );
+    await screen.findByRole('button', { name: /submit request/i });
+
+    rerender(<ReportIssueOverlay open={false} onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope initialValues={null} />);
+    rerender(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope initialValues={null} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /pest issue/i }));
+    fireEvent.change(screen.getByLabelText("Describe what's happening"), { target: { value: 'Manual follow-up request' } });
+    fireEvent.click(screen.getByRole('button', { name: /submit request/i }));
+
+    await waitFor(() => expect(api.createRequest).toHaveBeenCalledTimes(1));
+    expect(api.createRequest.mock.calls[0][0]).not.toHaveProperty('photoIdSource');
+  });
+
   // Photo ID's 'request' / 'inspection' / 'unclear' next steps land here
   // specifically because the server decided this is NOT an automatic
   // re-service (a 'reservice' next step links straight to /reservice/:token

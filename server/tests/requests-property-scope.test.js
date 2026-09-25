@@ -18,6 +18,8 @@ jest.mock('../services/cancellation-resolution/resolve', () => ({ situationalHar
 jest.mock('../services/messaging/gsm-normalize', () => ({ gsmSafeName: (s) => s }));
 jest.mock('../services/reservice-link', () => ({ reserviceStreamlineAccess: jest.fn(async () => ({ token: 'tok-reservice', lanes: ['pest'] })) }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/customer-photo-id-evidence', () => ({ requestPhotoIdEvidence: jest.fn() }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
   return { ...actual, resolveSessionScope: jest.fn(async () => global.__SCOPE__) };
@@ -146,5 +148,38 @@ test('the same covered issue under the PRIMARY selection is still steered to the
   const res = await post({ category: 'pest_issue', subject: 'Ants in the kitchen' });
   expect(res.status).toBe(409);
   expect(res.body.code).toBe('use_reservice_picker');
+  expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
+});
+
+test('Photo ID handoff copies saved evidence and keeps the durable source alongside property metadata', async () => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  const source = { type: 'pest', id: '11111111-1111-4111-8111-111111111111', photoIds: ['22222222-2222-4222-8222-222222222222'] };
+  const saved = 'data:image/jpeg;base64,/9j/2w==';
+  requestPhotoIdEvidence.mockResolvedValueOnce({ photos: [saved] });
+  const res = await post({ category: 'other', subject: 'Photo ID follow-up', photoIdSource: source });
+  expect(res.status).toBe(201);
+  const insert = log.find((e) => e[0] === 'insert')[1];
+  expect(JSON.parse(insert.photos)).toEqual([saved]);
+  expect(JSON.parse(insert.metadata)).toMatchObject({ propertyId: 'prop-b', photoIdSource: source });
+});
+
+test.each([404, 409, 503])('an unavailable Photo ID source (%s) never files a request without its evidence', async (status) => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  requestPhotoIdEvidence.mockResolvedValueOnce({ status, error: 'Saved evidence unavailable' });
+  const res = await post({ category: 'other', subject: 'Photo follow-up', photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+  expect(res.status).toBe(status);
+  expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
+  expect(notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('combined new and saved attachments still obey the shared photo cap', async () => {
+  global.__SCOPE__ = SECONDARY;
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  const photo = 'data:image/jpeg;base64,/9j/2w==';
+  requestPhotoIdEvidence.mockResolvedValueOnce({ photos: [photo] });
+  const res = await post({ category: 'other', subject: 'Photo follow-up', photos: [photo, photo, photo], photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+  expect(res.status).toBe(400);
   expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
 });
