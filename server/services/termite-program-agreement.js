@@ -29,11 +29,22 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { formatDisplayDate } = require('../utils/date-only');
+const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
+const { selectedTermiteAnnualPlanRows, authoritativeMappedTermiteEnvelope } = require('./estimate-termite-program-rows');
 
 const PURCHASE_TEMPLATE_KEY = 'service_agreement.termite_bait_program_purchase';
 const RENTAL_TEMPLATE_KEY = 'service_agreement.termite_bait_program_rental';
-const PROGRAM_TEMPLATE_KEYS = [PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY];
+// Annual Protection plan (v3, owner rulings 2026-09-24 — plan doc §A2-A4).
+// Seeded as a DRAFT by 20260924030002 — no active version until the owner's
+// own review activates it. Included in PROGRAM_TEMPLATE_KEYS because every
+// use of that list below is a customer-scoped LOOKUP ("does this customer
+// already have an open/active program agreement, of either shape") — never
+// the thing that DECIDES which template a given estimate renders. Template
+// SELECTION stays entirely inside buildTermiteProgramAgreementValues, which
+// picks purchase/rental/annual off the estimate's OWN termite line, so
+// adding the annual key here cannot change what the quarterly prep picks.
+const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
+const PROGRAM_TEMPLATE_KEYS = [PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY, ANNUAL_TEMPLATE_KEY];
 
 // The delivery workflow's real status vocabulary: signed/cancelled/voided
 // are terminal (its TERMINAL_STATUSES), and expireDocumentRequests writes
@@ -272,12 +283,81 @@ function estimateMayDiscount(estimate = {}, estData = null) {
   return !!(data.manualDiscount || data.manual_discount || data.result?.manualDiscount);
 }
 
+// Calendar-exact "+ N months" on a YYYY-MM-DD string, clamped to the target
+// month's last day (mirrors annual-prepay-renewals.js#addMonthsSameDay —
+// reimplemented locally rather than reaching into that module's internals
+// for a one-line date add). Returns null for an unparseable input.
+function daysInMonthUTC(year, month1) {
+  return new Date(Date.UTC(year, month1, 0)).getUTCDate();
+}
+function addYmdMonths(ymd, months) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const totalMonths = (month - 1) + Number(months || 0);
+  const targetYear = year + Math.floor(totalMonths / 12);
+  const targetMonth = (((totalMonths % 12) + 12) % 12) + 1;
+  const targetDay = Math.min(day, daysInMonthUTC(targetYear, targetMonth));
+  return `${targetYear}-${String(targetMonth).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
+}
+
+// Build the Annual Protection plan's template values (setup fee, annual fee,
+// 12-month coverage window), or null when the figures can't be resolved.
+// Same fail-closed posture as the quarterly builder below: an unresolvable
+// price parks for manual prep rather than signing a wrong number. A missing
+// RAW start date (no visit booked yet at accept time — the common case) does
+// NOT fail closed — like the quarterly agreement's start_date, both dates
+// fall back to the honest "confirmed at installation" text; the template has
+// no active version yet regardless (draft, seeded 20260924030002), so
+// nothing can be sent on either value until the owner activates it.
+function buildAnnualProgramAgreementValues(estimate = {}, data = null, { startDateLabel = null, startDateRaw = null } = {}) {
+  const mapped = authoritativeMappedTermiteEnvelope(data);
+  if (!mapped) return null;
+
+  const setupPrice = money(mapped.setupFee);
+  const annualPrice = money(mapped.annualFee);
+  if (!setupPrice || !annualPrice) return null;
+
+  const rawStart = dateOnlyString(startDateRaw);
+  const endDateLabel = rawStart
+    ? (formatDisplayDate(addYmdMonths(rawStart, 12), { fallback: '' }) || null)
+    : null;
+
+  return {
+    templateKey: ANNUAL_TEMPLATE_KEY,
+    ownership: 'annual_protection',
+    values: {
+      program: {
+        system: systemLabelFor(mapped.selectedSystem || mapped.system),
+        setup_price: setupPrice,
+        annual_price: annualPrice,
+      },
+      service: { name: 'Waves Subterranean Termite Protection — Annual' },
+      agreement: {
+        start_date: startDateLabel || START_DATE_FALLBACK,
+        end_date: endDateLabel || START_DATE_FALLBACK,
+      },
+      estimate: { id: estimate.id || null, address: estimate.address || null },
+    },
+  };
+}
+
 // Build the template values for the matching ownership variant, or null when
 // the required figures can't be resolved (fail-closed — see header).
 // startDateLabel comes from the accepted/booked first visit when one exists;
 // otherwise the merge field says the start is confirmed at installation.
-function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { startDateLabel = null } = {}) {
+function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { startDateLabel = null, startDateRaw = null } = {}) {
   const data = estData || parseEstimateData(estimate.estimate_data);
+
+  // Annual Protection plan (ruling A-1/A-2): a distinct product from the
+  // quarterly purchase/rental program — checked FIRST and returned early,
+  // never falling through to the quarterly ownership logic below.
+  if (selectedTermiteAnnualPlanRows(data).length > 0) {
+    return buildAnnualProgramAgreementValues(estimate, data, { startDateLabel, startDateRaw });
+  }
+
   const facts = collectTermiteFacts(data);
   if (!facts.hasProgram) return null;
 
@@ -446,8 +526,11 @@ async function existingBlockingProgramAgreement(customerId, estimate, conn = db,
 }
 
 // First upcoming non-cancelled visit booked from this estimate — the honest
-// program start date when acceptance also booked the installation.
-async function scheduledStartDateLabel(estimateId, conn = db) {
+// program start date when acceptance also booked the installation. Returns
+// the raw scheduled_date alongside the display label so the annual plan's
+// end_date (start + 12 months) can be computed off the actual calendar day,
+// never off parsed display text.
+async function scheduledStartDate(estimateId, conn = db) {
   try {
     const row = await conn('scheduled_services')
       .where({ source_estimate_id: estimateId })
@@ -457,15 +540,19 @@ async function scheduledStartDateLabel(estimateId, conn = db) {
       .whereRaw("LOWER(service_type) LIKE '%termite%'")
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
-    if (!row?.scheduled_date) return null;
+    if (!row?.scheduled_date) return { raw: null, label: null };
     // scheduled_date is a pg DATE (hydrates as UTC midnight) — the repo's
     // date-only formatter renders the stored calendar day, never the prior
     // ET day.
-    return formatDisplayDate(row.scheduled_date, { fallback: '' }) || null;
+    return {
+      raw: dateOnlyString(row.scheduled_date),
+      label: formatDisplayDate(row.scheduled_date, { fallback: '' }) || null,
+    };
   } catch {
-    return null;
+    return { raw: null, label: null };
   }
 }
+
 
 // Annual-prepay accepts are billed as one annual invoice, but the seeded
 // templates state per-application billing — a signable contract must not
@@ -788,9 +875,19 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     // to the estimate (linkCreatedRowsToEstimate runs after acceptance), so
     // it passes the booked termite date explicitly — the DB lookup would
     // race the linking and permanently snapshot the fallback label.
-    const startDateLabel = startDateLabelOverride
-      || (estimate.id ? await scheduledStartDateLabel(estimate.id) : null);
-    const prepared = buildTermiteProgramAgreementValues(estimate, estData, { startDateLabel });
+    // The raw scheduled date (for the annual plan's end_date = start + 12
+    // months) is only available from the DB lookup — an admin-supplied
+    // startDateLabelOverride is display text only, so startDateRaw stays
+    // null on that path (the annual builder falls back to the honest
+    // "confirmed at installation" text for both dates, same as today).
+    const resolvedStartDate = (!startDateLabelOverride && estimate.id)
+      ? await scheduledStartDate(estimate.id)
+      : { raw: null, label: null };
+    const startDateLabel = startDateLabelOverride || resolvedStartDate.label;
+    const prepared = buildTermiteProgramAgreementValues(estimate, estData, {
+      startDateLabel,
+      startDateRaw: resolvedStartDate.raw,
+    });
 
     if (!prepared) {
       // Termite program present but figures unresolvable — park the
@@ -819,6 +916,46 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
+    }
+
+    if (prepared.templateKey === ANNUAL_TEMPLATE_KEY) {
+      // The annual template is seeded as a DRAFT (20260924030002) with no
+      // active version until the owner's own review activates it (plan
+      // §A-11). Fail closed exactly like a missing template — and NEVER
+      // fall back to the quarterly purchase/rental wording, which would
+      // misstate the sold plan. Checked explicitly (rather than relying on
+      // the generic template_missing branch below, which today is
+      // unreachable defensive code for the always-active quarterly
+      // templates) so this EXPECTED park gets its own log line and bell.
+      const annualTemplateActive = await db('document_templates')
+        .where({ template_key: ANNUAL_TEMPLATE_KEY, status: 'active' })
+        .whereNotNull('active_version_id')
+        .first('id');
+      if (!annualTemplateActive) {
+        logger.warn(`[termite-agreement] annual plan accepted for estimate ${estimate.id}, but the v3 agreement template has no active version yet — parking for manual prep.`);
+        let annualReplacementKept = false;
+        let annualRetireFailed = false;
+        try {
+          ({ keptReplacement: annualReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+        } catch (err) {
+          annualRetireFailed = true;
+          logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+        }
+        if (annualReplacementKept) return { ok: false, skipped: 'annual_template_not_active', belled: true };
+        const annualBelled = await ringAdminBellDeduped(NotificationService, {
+          lockKey: `termite-agreement:${customerId}`,
+          titleLike: 'Termite agreement needs manual prep%',
+          ...(reissueSourceContractId
+            ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+            : { metaKey: 'estimateId', metaValue: estimate.id }),
+        }, [
+          'estimate',
+          'Termite agreement needs manual prep (annual plan)',
+          `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but the v3 agreement template is not active yet — prepare and send the agreement manually.${propertyClause}`,
+          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        ], `manual-prep (annual template not active) for estimate ${estimate.id}`);
+        return { ok: false, skipped: 'annual_template_not_active', belled: annualBelled, retireFailed: annualRetireFailed };
+      }
     }
 
     // Deliberately NO pre-transaction "already exists" fast path: a blocker
@@ -1645,6 +1782,7 @@ module.exports = {
   reconcileSupersededProgramAgreements,
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
+  ANNUAL_TEMPLATE_KEY,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,
