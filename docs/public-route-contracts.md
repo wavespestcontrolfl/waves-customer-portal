@@ -274,6 +274,33 @@ row still resolves to a retired lawn cadence — any tier hidden via
 removed 4x/quarterly — by explicit cadence, visit count, or the cadence's
 catalog key (`lawn_care_recurring` for 6x). The customer picks a current lawn
 option or the office requotes; the accept never silently reprices at 9x.
+option or the office requotes; the accept never silently reprices at 9x.
+
+Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
+or an annual-plan offer already delivered before the gate turned off): a
+`prepay_annual` accept of the Subterranean Termite Protection annual plan
+PARKS — the estimate is stamped `annual_plan_activation_status =
+'awaiting_signature'` with the accept-time opts and the frozen accepted
+price (annual fee net of discount, setup lines, tax, total) and nothing is
+billed, booked or charged. The in-lane prepay charge quote never applies to
+it (no `402 PREPAY_CHARGE_QUOTE` round-trip, no card capture, no due-today);
+a selected slot hold is released, not committed, and an existing
+appointment is not adopted — the pick is kept only as a staff scheduling
+preference. The success payload carries `invoiceKind:
+'annual_prepay_deferred'`, `invoiceId`/`invoicePayUrl` null, `billingTerm:
+'prepay_annual'` and `nextStep: 'sign_agreement'`; the accept notifications
+tell the customer to sign, never "approved, invoice to follow". The
+already-accepted retry returns the same shape while the agreement is
+unsigned, and `invoiceKind: 'annual_prepay_activation_pending'` with
+`nextStep: 'activation_pending'` once it is signed but the plan has not
+finished activating (the signing link is burned by then). Signing the
+annual agreement at `/api/contracts/:token/sign` activates the plan after
+the sign transaction commits (`termite-annual-activation.js`, retried by the
+daily reconcile sweep): it bills exactly the frozen price, charges the
+customer's enrolled payment method once (capped at the frozen total; owner
+ruling 2026-09-25, behind `GATE_PREPAY_CARD_AND_CHARGE`), and sends the pay
+link only when there is no enrolled method, charging is off, or the charge
+definitively failed. The sign response itself is unchanged.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned

@@ -1561,9 +1561,29 @@ describe('SuccessCard — already-accepted retry', () => {
       />,
     );
 
-    expect(screen.getByText(/Please sign your agreement to activate your plan/)).toBeInTheDocument();
+    expect(screen.getByText('Next step: sign your plan agreement.')).toBeInTheDocument();
+    // Channel-neutral (codex round 3): the agreement may go out by email
+    // only, or be drafted for the office to send.
+    expect(screen.getByText("We'll send you the signing link — your plan starts once it's signed.")).toBeInTheDocument();
+    expect(screen.queryByText(/text and email/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/approved/i)).not.toBeInTheDocument();
     expect(screen.queryByText("You're booked!")).not.toBeInTheDocument();
     expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
+  });
+
+  it('activation_pending (signed, plan still being set up): acknowledges the signature and never asks to sign again', () => {
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true, nextStep: 'activation_pending', billingTerm: 'prepay_annual',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('We received your signature.')).toBeInTheDocument();
+    expect(screen.getByText(/setting up your plan/)).toBeInTheDocument();
+    expect(screen.queryByText(/sign your plan agreement/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/pay/i)).not.toBeInTheDocument();
   });
 });
 

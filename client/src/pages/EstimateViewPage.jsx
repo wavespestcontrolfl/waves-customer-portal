@@ -3927,10 +3927,26 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
     return (
       <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
         <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
-          You're approved — one step left.
+          Next step: sign your plan agreement.
         </div>
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-          Please sign your agreement to activate your plan. We'll text and email you a link to sign, then confirm your schedule and send your invoice.
+          We'll send you the signing link — your plan starts once it's signed.
+        </div>
+      </div>
+    );
+  }
+
+  if (nextStep === 'activation_pending') {
+    // Signed, but the plan is still being set up (activation running, or
+    // with the office) — the signing link is already used, so never ask
+    // for a signature again.
+    return (
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          We received your signature.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          We're setting up your plan now and will follow up with the next steps.
         </div>
       </div>
     );
