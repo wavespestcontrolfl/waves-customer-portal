@@ -106,13 +106,19 @@ function isSellableTreeShrubTier(tier) {
 }
 
 // Free-text labels that name a retired row without its exact catalog name
-// ("Quarterly Tree & Shrub", "T&S 4x", "tree and shrub - quarterly"), keyed
-// by the retired service_key they mean. Used by the shared booking gate
-// (service-library retiredServicesNotHeldBy) for id-less writes.
+// ("Quarterly Tree & Shrub", "T&S 4x", "tree and shrub - quarterly", the
+// catalog short name "Tree & Shrub (Light)", "four applications", a
+// structured cadence rendered as "quarterly" / "every 90 days" — codex r16/
+// r20 on #4786), keyed by the retired service_key they mean. Used by the
+// shared booking gate (service-library retiredServicesNotHeldBy) for
+// id-less writes.
 const TREE_SHRUB_LABEL_RE = /\btree\s*(?:&|and|\+|\/)?\s*shrubs?\b|\bt\s*&\s*s\b/i;
-const QUARTERLY_CADENCE_RE = /\bquarterly\b|\b4\s*x\b|\b4\s*visits?\b|\bevery\s+(?:3|three)\s+months?\b/i;
+const QUARTERLY_CADENCE_RE = /\bquarterly\b|\b(?:4|four)[\s-]*(?:x|visits?|applications?)\b|\bevery\s+(?:3|three)\s+months?\b|\bevery\s+(?:8[4-9]|9[0-7])\s+days?\b/i;
+// The retired tier's own name: the catalog row is short-named
+// "Tree & Shrub (Light)" (20260718300000_tree_shrub_quarterly_catalog.js).
+const LIGHT_TIER_RE = /\blight\b/i;
 const RETIRED_SALE_LABEL_MATCHERS = {
-  tree_shrub_quarterly: (text) => TREE_SHRUB_LABEL_RE.test(text) && QUARTERLY_CADENCE_RE.test(text),
+  tree_shrub_quarterly: (text) => TREE_SHRUB_LABEL_RE.test(text) && (QUARTERLY_CADENCE_RE.test(text) || LIGHT_TIER_RE.test(text)),
 };
 
 function retiredSaleKeyForLabel(text) {

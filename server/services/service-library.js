@@ -408,20 +408,36 @@ function whereCustomerHoldsService(qb, customerId) {
     .where('scheduled_services.is_recurring', true);
 }
 
+// The words a booking's structured recurrence adds to its free-text labels
+// (codex r20 on #4786): "Tree & Shrub Care" + { pattern: 'quarterly' } or
+// { intervalDays: 90 } names the retired quarterly plan just as the label
+// "Quarterly Tree & Shrub Care" does. Null when nothing structured was posted.
+function recurrenceWords(recurrence) {
+  if (!recurrence || typeof recurrence !== 'object') return '';
+  const pattern = typeof recurrence.pattern === 'string' ? recurrence.pattern.trim().replace(/_/g, ' ') : '';
+  const days = Number.parseInt(recurrence.intervalDays, 10);
+  return [pattern, Number.isInteger(days) && days > 0 ? `every ${days} days` : ''].filter(Boolean).join(' ');
+}
+
 /**
  * Write-boundary twin of getServices' sellable exception, shared by every
  * booking write (create, edit): of the given service ids, the
  * retired-for-sale rows this customer does not hold (i.e. would be a new
- * sale). Empty array = booking allowed.
+ * sale). Empty array = booking allowed. `recurrence` ({ pattern,
+ * intervalDays }) is the booking's structured cadence: each label is also
+ * read with those words appended, so an ID-less "Tree & Shrub Care" booked
+ * quarterly cannot bypass the label matcher.
  */
-async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes } = {}) {
+async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes, recurrence = null } = {}) {
   const ids = new Set((serviceIds || []).filter((id) => UUID_RE.test(String(id || ''))).map(String));
   // Free-text bookings (Intelligence Bar, lead booking without a catalog
   // pick): exact key / name / short_name only, the first tier of
   // resolveServiceType — a partial match would refuse unrelated services.
   const { RETIRED_SALE_SERVICE_KEYS, retiredSaleKeyForLabel, labelMayNameRetiredSale } = require('./pricing-engine/retired-sale-catalog');
+  const cadence = recurrenceWords(recurrence);
+  const labels = (serviceTypes || []).filter((t) => typeof t === 'string' && t.trim());
   // Only names that could be a retired row cost a catalog read.
-  const names = new Set((serviceTypes || [])
+  const names = new Set([...labels, ...(cadence ? labels.map((t) => `${t} ${cadence}`) : [])]
     .filter(labelMayNameRetiredSale).map((t) => t.trim().toLowerCase()));
   if (!ids.size && !names.size) return [];
   // Loose variants ("Quarterly Tree & Shrub", "T&S 4x") name the row too.

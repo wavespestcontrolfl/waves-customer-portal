@@ -1,4 +1,4 @@
-// Codex r17/r18/r19 on #4786: the visit-edit retired-for-sale gate must see every
+// Codex r17/r18/r19/r20 on #4786: the visit-edit retired-for-sale gate must see every
 // line the save ADDS — catalog ids, a changed primary label, and the name of
 // an ID-less add-on line (normalizeUpdateDetailsAddons keeps an unresolved
 // serviceName and persists it by name alone) — and nothing the visit already
@@ -45,20 +45,21 @@ describe('retiredGateInputsForVisitEdit', () => {
     })).toEqual({ serviceIds: [RETIRED_ID], serviceTypes: ['Quarterly Tree & Shrub Care'] });
   });
 
-  // codex r18 P1: turning a one-off visit into a recurring one sells its
-  // retained lines as a plan, so they go through the gate as if added.
+  // codex r18/r20 P1: turning a one-off visit into a recurring one (or
+  // changing the cadence of one that already recurs) sells its retained
+  // lines as a plan, so they go through the gate as if added.
   test('activating recurrence gates the retained primary line and add-ons', () => {
     const oneOff = { ...current, service_id: RETIRED_ID, service_type: 'Quarterly Tree & Shrub Care' };
     expect(retiredGateInputsForVisitEdit({
       current: oneOff, currentAddons: [{ service_id: LIVE_ID, service_name: 'Quarterly Pest Control' }, { service_id: null, service_name: 'Mosquito add-on' }],
-      postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care', becomesRecurring: true,
+      postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care', plansRetainedLines: true,
     })).toEqual({
       serviceIds: [RETIRED_ID, LIVE_ID],
       serviceTypes: ['Quarterly Tree & Shrub Care', 'Mosquito add-on'],
     });
     // Already recurring, or a save that does not post recurrence: nothing retained is re-checked.
     expect(retiredGateInputsForVisitEdit({
-      current: oneOff, currentAddons: [], postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care', becomesRecurring: false,
+      current: oneOff, currentAddons: [], postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care', plansRetainedLines: false,
     })).toEqual({ serviceIds: [], serviceTypes: [] });
   });
 
@@ -99,10 +100,14 @@ describe('retiredGateInputsForVisitEdit', () => {
     const source = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
     expect(source).toMatch(/const postedAddons = Array\.isArray\(replaceAddons\) \? replaceAddons\.filter\(Boolean\) : \[\];/);
     expect(source).toMatch(/where\(\{ scheduled_service_id: req\.params\.id \}\)\.select\('service_id', 'service_name', 'recurring_pattern'\)/);
-    expect(source).toMatch(/current, currentAddons, postedServiceId: updates\.service_id, postedAddons, serviceType, becomesRecurring,/);
-    // Activation is confirmed against the row's own flag, never the posted one alone.
-    expect(source).toMatch(/first\('customer_id', 'service_id', 'service_type', 'is_recurring'\)/);
-    expect(source).toMatch(/const becomesRecurring = recurrencePosted && !current\.is_recurring;/);
+    expect(source).toMatch(/current, currentAddons, postedServiceId: updates\.service_id, postedAddons, serviceType, plansRetainedLines,/);
+    // Activation / cadence change is confirmed against the row's own flag and
+    // stored pattern, never the posted values alone (codex r18/r20).
+    expect(source).toMatch(/\.first\('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern'\)/);
+    expect(source).toMatch(/const plansRetainedLines = recurrencePosted\s*&& \(!current\.is_recurring \|\| \(!!recurringPattern && recurringPattern !== current\.recurring_pattern\)\);/);
+    // The posted cadence reaches the gate on both write paths (codex r20).
+    const recurrenceArg = /recurrence: (?:recurrencePosted|isRecurring) \? \{ pattern: recurringPattern, intervalDays: recurringIntervalDays \} : null,/g;
+    expect((source.match(recurrenceArg) || []).length).toBe(2);
   });
 });
 

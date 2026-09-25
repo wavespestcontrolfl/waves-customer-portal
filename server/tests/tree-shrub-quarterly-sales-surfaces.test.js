@@ -157,7 +157,7 @@ describe('new-appointment write boundary (codex r12)', () => {
   // addonPattern: the add-on line's own recurring_pattern (null = rides the
   // parent's cadence); the fake only counts an add-on line as held when the
   // query gated on it (codex r17).
-  const run = async ({ customerId, serviceIds, serviceTypes, heldBy = [], heldVia = 'primary', addonPattern = null }) => {
+  const run = async ({ customerId, serviceIds, serviceTypes, recurrence = null, heldBy = [], heldVia = 'primary', addonPattern = null }) => {
     const db = require('../models/db');
     const bare = (col) => col.replace(/^scheduled_services\.|^scheduled_service_addons\./, '');
     db.mockImplementation((table) => {
@@ -186,7 +186,7 @@ describe('new-appointment write boundary (codex r12)', () => {
       return b;
     });
     const { retiredServicesNotHeldBy } = require('../services/service-library');
-    return retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes });
+    return retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes, recurrence });
   };
 
   test('refuses the retired row for a customer not on the plan', async () => {
@@ -201,6 +201,30 @@ describe('new-appointment write boundary (codex r12)', () => {
   test('a customer holding the plan as an add-on line is still grandfathered (codex r14)', async () => {
     expect(await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon' })).toEqual([]);
     expect((await run({ customerId: OTHER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon' })).map((r) => r.id)).toEqual([RETIRED_ID]);
+  });
+
+  test('the retired tier\'s own name and four-application wording are recognized (codex r20)', async () => {
+    const ids = async (serviceTypes) => (await run({ customerId: OTHER, serviceTypes })).map((r) => r.id);
+    // The catalog row's real short name (20260718300000_tree_shrub_quarterly_catalog.js).
+    expect(await ids(['Tree & Shrub (Light)'])).toEqual([RETIRED_ID]);
+    expect(await ids(['tree & shrub care – light tier'])).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub Care, four applications'])).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub 4-visit program'])).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub Care every 90 days'])).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub Care every 60 days', 'Light Pest Control', 'Tree & Shrub Care (Standard)'])).toEqual([]);
+  });
+
+  test('a structured cadence names the retired plan just as the label would (codex r20)', async () => {
+    const ids = async (serviceTypes, recurrence) => (await run({ customerId: OTHER, serviceTypes, recurrence })).map((r) => r.id);
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'quarterly' })).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'custom', intervalDays: 90 })).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'bimonthly' })).toEqual([]);
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'custom', intervalDays: 42 })).toEqual([]);
+    expect(await ids(['Tree & Shrub Care'], null)).toEqual([]);
+    // The cadence alone never names a retired row: it must pair with the service.
+    expect(await ids(['Quarterly Pest Control'], { pattern: 'quarterly' })).toEqual([]);
+    // The grandfathered customer still books their plan by cadence.
+    expect(await run({ customerId: CUSTOMER, serviceTypes: ['Tree & Shrub Care'], recurrence: { pattern: 'quarterly' }, heldBy: [CUSTOMER] })).toEqual([]);
   });
 
   test('a one_time add-on line is not grandfathering evidence (codex r17)', async () => {

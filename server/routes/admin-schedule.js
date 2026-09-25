@@ -7253,6 +7253,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
       serviceIds: [serviceId, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.serviceId) : [])],
       // Names too, id or not: an ID-less add-on persists by name alone.
       serviceTypes: [serviceType, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.name || a?.serviceName) : [])],
+      // The structured cadence too (codex r20): an ID-less "Tree & Shrub
+      // Care" booked quarterly is the retired plan by another name.
+      recurrence: isRecurring ? { pattern: recurringPattern, intervalDays: recurringIntervalDays } : null,
     })).filter((r) => !vouchedByQuote.has(r.service_key));
     if (notHeldRetired.length) {
       return res.status(409).json({
@@ -11763,18 +11766,20 @@ async function computeUpdateDetailsFinancialPlan({
   };
 }
 
-// The retired-for-sale gate's inputs for a visit EDIT (codex r13/r17/r18/r19
-// on #4786): only what the save ADDS to the visit — catalog ids not already
-// on it (primary or add-on line), a changed primary label, and the name of
-// every ID-less add-on line not already on the visit by name. A
+// The retired-for-sale gate's inputs for a visit EDIT (codex r13/r17/r18/r19/
+// r20 on #4786): only what the save ADDS to the visit — catalog ids not
+// already on it (primary or add-on line), a changed primary label, and the
+// name of every ID-less add-on line not already on the visit by name. A
 // grandfathered visit that keeps its own lines is never re-checked — with
-// two exceptions that sell a retained line as a PLAN: the edit turns a
-// one-off visit into a recurring one (`becomesRecurring`: every retained
-// line is gated as if newly added), or, on a visit that already recurs, a
-// retained add-on whose stored pattern is one_time is reposted with a plan
-// pattern (null rides the recurring parent) and so joins the plan.
+// two exceptions that sell a retained line as a PLAN: `plansRetainedLines`
+// (the edit turns a one-off visit into a recurring one, or changes the
+// cadence of one that already recurs — every retained line is gated as if
+// newly added, the route adding the posted cadence words), or, on a visit
+// that already recurs, a retained add-on whose stored pattern is one_time is
+// reposted with a plan pattern (null rides the recurring parent) and so
+// joins the plan.
 function retiredGateInputsForVisitEdit({
-  current, currentAddons = [], postedServiceId = null, postedAddons = [], serviceType, becomesRecurring = false,
+  current, currentAddons = [], postedServiceId = null, postedAddons = [], serviceType, plansRetainedLines = false,
 }) {
   const norm = (v) => String(v || '').trim().toLowerCase();
   const lines = postedAddons.filter(Boolean);
@@ -11784,14 +11789,14 @@ function retiredGateInputsForVisitEdit({
   const onVisit = new Set([current.service_id, ...currentAddons.map((a) => a?.service_id)].filter(Boolean).map(String));
   const namesOnVisit = new Set(currentAddons.map((a) => norm(a?.service_name)).filter(Boolean));
   const renamed = typeof serviceType === 'string' && !!serviceType.trim() && norm(serviceType) !== norm(current.service_type);
-  const retainedIds = becomesRecurring ? [...onVisit] : [];
-  const retainedNames = becomesRecurring
+  const retainedIds = plansRetainedLines ? [...onVisit] : [];
+  const retainedNames = plansRetainedLines
     ? [current.service_type, ...currentAddons.filter((a) => !a?.service_id).map((a) => a?.service_name)]
       .filter((name) => typeof name === 'string' && name.trim())
     : [];
   const storedAsOneTime = (l) => currentAddons.some((a) => a?.recurring_pattern === 'one_time'
     && (l.serviceId ? String(a.service_id || '') === String(l.serviceId) : (!a.service_id && norm(a.service_name) === norm(l.serviceName))));
-  const promoted = current.is_recurring && !becomesRecurring
+  const promoted = current.is_recurring && !plansRetainedLines
     ? lines.filter((l) => (l.recurringPattern || null) !== 'one_time' && storedAsOneTime(l))
     : [];
   return {
@@ -12377,21 +12382,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // service_type and service_id are written independently, so a changed
     // label goes through the gate by name whether or not an id rides along.
     const labelPosted = typeof serviceType === 'string' && !!serviceType.trim();
-    // Making the visit recurring sells its retained lines as a plan (codex
-    // r18 P1): confirmed against the row's own is_recurring below.
+    // Making the visit recurring, or changing the cadence of one that already
+    // recurs, sells its retained lines as a plan (codex r18/r20 P1):
+    // confirmed against the row's own is_recurring / recurring_pattern below.
     const recurrencePosted = !!isRecurring;
     if (updates.service_id || labelPosted || postedAddons.length || recurrencePosted) {
-      const current = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_id', 'service_type', 'is_recurring');
+      const current = await db('scheduled_services').where({ id: req.params.id })
+        .first('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern');
       if (current) {
-        const becomesRecurring = recurrencePosted && !current.is_recurring;
-        const currentAddons = updates.service_id || postedAddons.length || becomesRecurring
+        const plansRetainedLines = recurrencePosted
+          && (!current.is_recurring || (!!recurringPattern && recurringPattern !== current.recurring_pattern));
+        const currentAddons = updates.service_id || postedAddons.length || plansRetainedLines
           ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).select('service_id', 'service_name', 'recurring_pattern')
           : [];
         const gate = retiredGateInputsForVisitEdit({
-          current, currentAddons, postedServiceId: updates.service_id, postedAddons, serviceType, becomesRecurring,
+          current, currentAddons, postedServiceId: updates.service_id, postedAddons, serviceType, plansRetainedLines,
         });
         const notHeldRetired = gate.serviceIds.length || gate.serviceTypes.length
-          ? await require('../services/service-library').retiredServicesNotHeldBy({ customerId: current.customer_id, ...gate })
+          ? await require('../services/service-library').retiredServicesNotHeldBy({
+            customerId: current.customer_id,
+            ...gate,
+            recurrence: recurrencePosted ? { pattern: recurringPattern, intervalDays: recurringIntervalDays } : null,
+          })
           : [];
         if (notHeldRetired.length) {
           return res.status(409).json({
