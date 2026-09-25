@@ -176,6 +176,11 @@ const PHOTO_PEST_WORDS = [
 const PHOTO_TREE_SHRUB_WORDS = [
   'tree', 'trees', 'shrub', 'shrubs', 'bush', 'bushes', 'plant', 'plants',
   'palm', 'palms', 'leaf', 'leaves',
+  // codex #4810 r4: hedges/ornamentals are the commonest tree & shrub
+  // subjects customers actually type.
+  'hedge', 'hedges', 'hedgerow', 'ornamental', 'ornamentals', 'hibiscus',
+  'vine', 'vines', 'flower', 'flowers', 'foliage', 'branch', 'branches',
+  'trunk', 'bark', 'frond', 'fronds',
 ];
 // Subject words that say "diagnose this" without leaning lawn or pest.
 const PHOTO_NEUTRAL_WORDS = ['fungus', 'fungi', 'mold', 'mushroom', 'mushrooms'];

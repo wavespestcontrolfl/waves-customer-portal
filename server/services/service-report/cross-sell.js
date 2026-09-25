@@ -1086,7 +1086,13 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
     // Owns everything → nothing to offer (owner matrix: the referral card
     // fills the slot, which needs no offer payload).
     if (!targetKey) return null;
-    if (offerVocabulary(planRateFamilies).has(targetKey)) return null;
+    if (offerVocabulary(planRateFamilies).has(targetKey)) {
+      // A live plan rate on the requested family is fail-closed evidence
+      // the customer may already pay for it — say so (mode 'unavailable')
+      // rather than a bare null, so the photo lane drops its quote CTA
+      // (codex #4810 r4). The ladder path keeps returning null.
+      return requestedTargetKey ? unavailableBasis(requestedTargetKey, customer, ownedKeys, primaryStreet) : null;
+    }
 
     const evidencedOwnedKeys = [...ownedKeys, ...planRateFamilies];
 
@@ -1186,6 +1192,16 @@ async function buildPortalOffer(customerId, database, opts = {}) {
   }
 }
 
+// Fail-closed answer for a REQUESTED family (never the ladder): the offer
+// core could not establish that pitching this family is safe. No option, no
+// price, no fingerprint (never customer-facing).
+function unavailableBasis(targetKey, customer = null, ownedKeys = [], primaryStreet = null) {
+  return {
+    payload: { serviceKey: targetKey, label: OFFER_LABELS[targetKey] || targetKey, mode: 'unavailable', relationship: 'unknown', option: null },
+    option: null, result: null, customer, ownedKeys, propertySeed: null, primaryStreet,
+  };
+}
+
 // buildOfferForFamily(customerId, database, targetKey) → offer payload | null.
 // The photo-triage lane's entry point (owner ruling 2026-09-25): the
 // customer texted a photo of a specific thing, so the family is known and
@@ -1194,13 +1210,19 @@ async function buildPortalOffer(customerId, database, opts = {}) {
 // customer already owns answers mode 'owned' (never re-priced); an
 // unprovable premises or an ownership failure returns null — the caller
 // advises instead of quoting either way.
+// Answers: a priced/quote_cta offer; mode 'owned' (family on the plan);
+// mode 'unavailable' (fail closed: ownership lookup threw, or a live plan
+// rate sits on the family — the customer MAY already pay for it, so the
+// caller must not pitch it); or null (nothing to offer: no recurring plan,
+// inactive row, commercial, unprovable premises — a manual-quote
+// conversation is fine).
 async function buildOfferForFamily(customerId, database, targetKey, opts = {}) {
   try {
     const basis = await composePortalOffer(customerId, database, { ...opts, targetKey });
     return basis ? basis.payload : null;
   } catch (err) {
-    logger.warn(`[family-offer] suppressed (code=${err?.code || 'none'})`);
-    return null;
+    logger.warn(`[family-offer] fail closed (code=${err?.code || 'none'})`);
+    return OFFER_PROMPTS[targetKey] ? unavailableBasis(targetKey).payload : null;
   }
 }
 

@@ -195,9 +195,21 @@ describe('buildOfferForFamily', () => {
     expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toBeNull();
   });
 
-  test('a live plan-rate on the requested family suppresses it', async () => {
+  test('a live plan-rate on the requested family fails closed → mode unavailable, no option (the ladder still returns null)', async () => {
     const db = dbFor({ serviceTypes: ['Lawn Care Program'], planRates: [{ family_key: 'tree_shrub', monthly_rate: 40 }] });
-    expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toBeNull();
+    expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
+    const ladderDb = dbFor({ serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'], planRates: [{ family_key: 'tree_shrub', monthly_rate: 40 }] });
+    expect(await buildPortalOffer('cust-1', ladderDb, { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('an ownership lookup failure fails closed → mode unavailable, never null', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    const broken = Object.assign((table) => {
+      if (table === 'scheduled_services as s') throw new Error('catalog join down');
+      return db(table);
+    }, { schema: db.schema });
+    const offer = await buildOfferForFamily('cust-1', broken, 'tree_shrub', { propertyLookup: missLookup });
+    expect(offer).toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
   });
 
   test('a verified correction on file demotes to the quote CTA, same as the card', async () => {

@@ -112,6 +112,13 @@ describe('outcomeFor tree_shrub', () => {
     expect(outcome.kind).not.toBe('harmless');
   });
 
+  test('attention reads the worst CATEGORY status from the contract, not the five-category average (codex #4810 r4)', () => {
+    const contract = JSON.stringify({ worst_signal: { key: 'foliage_fullness', label: 'Foliage', score: 40, status: 'needs_attention' } });
+    expect(outcomeFor('tree_shrub', { worst_signal: 'foliage_fullness', overall_score: 78, report_contract: contract }).kind).toBe('actionable');
+    const watch = JSON.stringify({ worst_signal: { key: 'foliage_fullness', label: 'Foliage', score: 62, status: 'watch' } });
+    expect(outcomeFor('tree_shrub', { worst_signal: 'foliage_fullness', overall_score: 45, report_contract: watch }).kind).toBe('watch');
+  });
+
   test('any signal at attention level (score <= 50) is actionable even off pest/disease', () => {
     expect(outcomeFor('tree_shrub', { worst_signal: 'foliage_fullness', overall_score: 40 }).kind).toBe('actionable');
   });
@@ -150,7 +157,7 @@ describe('gaugeOpportunity', () => {
 
   test('existing customer, one tree under cultural stress, offer core prices tree & shrub → quote (the quoted-T&S reference shape)', async () => {
     mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub'));
-    const customer = { id: 'existing-lawn-1', pipeline_stage: 'active_customer' };
+    const customer = { id: 'existing-lawn-1', pipeline_stage: 'active_customer', active: true };
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('water_heat_mechanical_stress', 62),
@@ -176,7 +183,7 @@ describe('gaugeOpportunity', () => {
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('pest_activity', 45),
-      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
       body: 'bugs on one of my shrubs',
       images: [],
     });
@@ -193,7 +200,7 @@ describe('gaugeOpportunity', () => {
     const result = await gaugeOpportunity({
       type: 'lawn',
       analysis: lawnRow([{ name: 'Chinch bug pressure', confidence: 'moderate' }], 55),
-      customer: { id: 'existing-lawn-3', pipeline_stage: 'active_customer' },
+      customer: { id: 'existing-lawn-3', pipeline_stage: 'active_customer', active: true },
       body: 'weeds are spreading in the yard',
       images: [],
     });
@@ -211,7 +218,7 @@ describe('gaugeOpportunity', () => {
     const result = await gaugeOpportunity({
       type: 'lawn',
       analysis: lawnRow([{ name: 'Chinch bug pressure', confidence: 'moderate' }], 55),
-      customer: { id: 'existing-lawn-4', pipeline_stage: 'active_customer' },
+      customer: { id: 'existing-lawn-4', pipeline_stage: 'active_customer', active: true },
       body: 'weeds are spreading in the yard',
       images: [],
     });
@@ -221,12 +228,63 @@ describe('gaugeOpportunity', () => {
     expect(result.quote).toBeNull();
   });
 
+  test('offer core fails closed (mode unavailable) → advise with offer_unavailable, no pitch', async () => {
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', label: 'x', mode: 'unavailable', relationship: 'unknown', option: null });
+    const result = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('pest_activity', 45),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
+      body: 'bugs on one of my shrubs',
+      images: [],
+    });
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toContain('offer_unavailable');
+    expect(result.quote).toBeNull();
+  });
+
+  test('a palm photo never reaches the tree & shrub offer (assessment-first family)', async () => {
+    const result = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('pest_activity', 45),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
+      body: 'something is eating my palm fronds',
+      images: [],
+    });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toContain('palm_assessment_first');
+  });
+
+  test('the owner-visible per-application amount keeps cents', async () => {
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub', { perVisit: 83.33 }));
+    const result = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('pest_activity', 45),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
+      body: 'bugs on one of my shrubs',
+      images: [],
+    });
+    expect(result.quote.per_visit).toBe(83.33);
+  });
+
+  test('an inactive row that still says active_customer is a lead (live-customer predicate)', async () => {
+    const result = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('pest_activity', 45),
+      customer: { id: 'former-1', pipeline_stage: 'active_customer', active: false },
+      body: 'the spray we put down on the hedges on both sides did not work',
+      images: [],
+    });
+    expect(result.reasons).toContain('lead');
+    expect(result.mode).toBe('onsite');
+  });
+
   test('a priced offer for a DIFFERENT family than the photo never becomes this quote', async () => {
     mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('pest_control'));
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('pest_activity', 45),
-      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
       body: 'bugs on one of my shrubs',
       images: [],
     });
@@ -239,7 +297,7 @@ describe('gaugeOpportunity', () => {
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('pest_activity', 45),
-      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
       body: 'bugs on one of my shrubs',
       images: [],
     });
@@ -252,7 +310,7 @@ describe('gaugeOpportunity', () => {
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('pest_activity', 45),
-      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
       body: 'bugs on one of my shrubs',
       images: [],
     });
@@ -264,7 +322,7 @@ describe('gaugeOpportunity', () => {
     const result = await gaugeOpportunity({
       type: 'pest',
       analysis: { report_contract: JSON.stringify({ identification: { category: 'insect' } }) },
-      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
       body: 'found this on the patio',
       images: [],
     });
@@ -301,7 +359,7 @@ describe('gaugeOpportunity', () => {
   });
 
   test('prior_treatment_failed + large_scope sends to onsite even for an existing customer (not gated on lead)', async () => {
-    const customer = { id: 'existing-2', pipeline_stage: 'active_customer', lot_sqft: 8000 };
+    const customer = { id: 'existing-2', pipeline_stage: 'active_customer', active: true, lot_sqft: 8000 };
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('pest_activity', 40),

@@ -496,6 +496,8 @@ describe('draft text builder', () => {
   const ADVISE_HARMLESS = { mode: 'advise', reasons: ['harmless'], quote: null };
   const ADVISE_OWNED = { mode: 'advise', reasons: ['actionable', 'already_owned'], quote: null };
   const ONSITE = { mode: 'onsite', reasons: ['lead', 'actionable', 'large_scope'], quote: null };
+  const ONSITE_FAILED = { mode: 'onsite', reasons: ['lead', 'actionable', 'prior_treatment_failed'], quote: null };
+  const ADVISE_UNAVAILABLE = { mode: 'advise', reasons: ['actionable', 'offer_unavailable'], quote: null };
   const QUOTE = (overrides = {}) => ({
     mode: 'quote',
     reasons: ['actionable', 'quoted'],
@@ -554,6 +556,19 @@ describe('draft text builder', () => {
       + "With that much to cover we'd rather see it in person before quoting. What day this week works for a quick visit?",
     );
     expect(text).not.toMatch(/\$\d|quote/i);
+    // Prior-treatment-only trigger: the explanation names the failed
+    // treatment, never invents "that much to cover" (codex #4810 r4).
+    const failed = draft('Riley', 'pest-pressure signals', ONSITE_FAILED);
+    expect(failed).toBe(
+      "Thanks for the photo, Riley. From what we can see, it's pest-pressure signals. "
+      + "Since what's been tried hasn't held, we'd rather see it in person before quoting. What day this week works for a quick visit?",
+    );
+    expect(failed).not.toMatch(/that much to cover/i);
+  });
+
+  test('advise when the offer core failed closed: no quote pitch (the customer may already pay for it)', () => {
+    const text = draft('Dana', 'chinch bug activity', ADVISE_UNAVAILABLE);
+    expect(text).toBe("Thanks for the photo, Dana. From what we can see, it's chinch bug activity. Reply if you have questions.");
   });
 
   test('promises nothing Approve does not send: no report, no link', () => {

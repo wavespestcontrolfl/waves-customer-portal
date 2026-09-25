@@ -141,16 +141,35 @@ const TREE_SHRUB_HEALTHY_LABEL = 'a healthy tree or shrub';
 // exists yet — photo-assessment-create.js#TYPES.tree_shrub.customerPreview
 // is null); the admin assessment's own worst_signal + overall_score already
 // carry everything the draft or the gauge needs.
+// Attention level reads the WORST CATEGORY's own status/score from the
+// report contract (photo-assessment-create.js#worstTreeShrubSignal stores
+// { key, label, score, status }), not the five-category average — one
+// needs_attention category can hide behind four healthy ones in
+// overall_score (codex #4810 r4). overall_score is the fallback only when
+// the contract carries no category (older rows).
+function treeShrubAttention(analysis, worstSignal) {
+  let contract = null;
+  try {
+    contract = typeof analysis?.report_contract === 'string' ? JSON.parse(analysis.report_contract) : (analysis?.report_contract || null);
+  } catch (_err) { contract = null; }
+  const worst = contract?.worst_signal;
+  if (worst && typeof worst === 'object' && worst.key === worstSignal) {
+    if (worst.status === 'needs_attention') return true;
+    const catScore = Number(worst.score);
+    if (Number.isFinite(catScore)) return catScore <= 50;
+  }
+  const scoreRaw = Number(analysis?.overall_score);
+  return Number.isFinite(scoreRaw) && scoreRaw <= 50;
+}
+
 function treeShrubOutcome(analysis) {
   const worstSignal = analysis?.worst_signal || null;
-  const scoreRaw = Number(analysis?.overall_score);
-  const score = Number.isFinite(scoreRaw) ? scoreRaw : null;
   const label = worstSignal ? (TREE_SHRUB_SIGNAL_PHRASE[worstSignal] || 'a few things worth a look') : TREE_SHRUB_HEALTHY_LABEL;
   if (!worstSignal) return { kind: 'harmless', label, cultural: false, uncertain: false };
   if (worstSignal === 'water_heat_mechanical_stress') {
     return { kind: 'cultural', label, cultural: true, uncertain: false };
   }
-  const attentionLevel = score !== null && score <= 50;
+  const attentionLevel = treeShrubAttention(analysis, worstSignal);
   const actionable = attentionLevel || worstSignal === 'pest_activity' || worstSignal === 'disease_leaf_spot';
   return {
     kind: actionable ? 'actionable' : 'watch',
@@ -187,6 +206,12 @@ function outcomeFor(type, analysis) {
 // conversation ("Reply if you'd like a quote"), not an engine quote.
 const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care' };
 
+// Palms are their own assessment-first family (injections), never the
+// standard tree & shrub program — same palm-first veto the offer ladder
+// applies (cross-sell.js#startFamilyForIdentity). A palm caption stays on
+// advice + manual quoting (codex #4810 r4).
+const PALM_RE = /\bpalms?\b/i;
+
 // Compute-only pricing for one service — NEVER inserts an estimates row,
 // NEVER sends anything. Existing customers go through buildOfferForFamily
 // (the portal-offer core with the family fixed to what the photo shows):
@@ -196,29 +221,36 @@ const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care' };
 //   'no_customer_record'  — a lead with no customer row has nothing to
 //                           price against (and leads never get engine
 //                           quotes anyway)
+//   'palm_assessment_first' — a palm photo: never the T&S program offer
 //   'already_owned'       — the family is on the customer's plan (never
 //                           re-priced; the draft carries no quote CTA)
-//   'no_offer'            — the offer core declined: ownership unknown
-//                           (fail closed), no recurring plan, unprovable
-//                           premises, commercial, or a live plan rate on
-//                           the family
+//   'offer_unavailable'   — fail closed: ownership lookup failed or a live
+//                           plan rate sits on the family — the customer may
+//                           already pay for it, so no quote CTA either
+//   'no_offer'            — the offer core declined: no recurring plan,
+//                           inactive row, unprovable premises, commercial —
+//                           a manual-quote ask is fine
 //   'quote_needs_review'  — offer composed but demoted to the unpriced CTA
 //                           (review-worthy facts, verified correction on
 //                           file, baseline mismatch, ambiguous tree count)
-// quote.per_visit is the per-application amount — the only price field
-// the offer payload carries, and the only one the draft copy may state.
-async function priceForCustomer(type, customer) {
+// quote.per_visit is the per-application amount to the cent, exactly as
+// the offer core derived it (owner-only metadata — the draft text carries
+// no price; rounding it here would hand the owner a wrong figure, codex
+// #4810 r4).
+async function priceForCustomer(type, customer, body) {
   const serviceKey = SERVICE_KEY[type];
   if (!serviceKey) return { reason: 'no_offer' };
+  if (type === 'tree_shrub' && PALM_RE.test(body || '')) return { reason: 'palm_assessment_first' };
   if (!customer?.id) return { reason: 'no_customer_record' };
   const offer = await buildOfferForFamily(customer.id, db, serviceKey);
   if (!offer || offer.serviceKey !== serviceKey) return { reason: 'no_offer' };
   // The family is already on the customer's plan: the draft must not pitch
   // it (codex #4810 r2 P1) — photo-text-triage.js drops the quote CTA on
-  // this reason.
+  // this reason, and on the fail-closed one below (r4).
   if (offer.mode === 'owned') return { reason: 'already_owned' };
+  if (offer.mode === 'unavailable') return { reason: 'offer_unavailable' };
   if (offer.mode !== 'priced' || !offer.option) return { reason: 'quote_needs_review' };
-  const perApplication = Math.round(Number(offer.option.perVisit) || 0);
+  const perApplication = Math.round((Number(offer.option.perVisit) || 0) * 100) / 100;
   if (!(perApplication > 0)) return { reason: 'quote_needs_review' };
   return {
     quote: {
@@ -247,7 +279,11 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
   const reasons = [];
   const text = typeof body === 'string' ? body : '';
 
-  const lead = !customer || !CUSTOMER_STAGES.includes(customer.pipeline_stage);
+  // Same live-customer predicate as customer-stages.js#scopeLiveCustomers
+  // (active + not deleted + a customer stage): an inactive row that still
+  // carries 'active_customer' is a former customer and follows the lead
+  // path (codex #4810 r4).
+  const lead = !customer || customer.active !== true || !!customer.deleted_at || !CUSTOMER_STAGES.includes(customer.pipeline_stage);
   if (lead) reasons.push('lead');
   const scopeIsLarge = largeScope(text);
   if (scopeIsLarge) reasons.push('large_scope');
@@ -274,7 +310,7 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
   if (actionable || outcome.cultural) {
     let priced;
     try {
-      priced = await priceForCustomer(type, customer);
+      priced = await priceForCustomer(type, customer, text);
     } catch (err) {
       logger.error(`[photo-triage-opportunity] pricing failed for customer ${customer?.id || 'none'}: ${err.message}`);
       priced = { reason: 'no_offer' };

@@ -249,10 +249,13 @@ function composeBody({ label, advice, opportunity }) {
   const lead = `From what we can see, it's ${label}.`;
 
   if (opportunity.mode === 'onsite') {
-    return joinSentences([
-      lead,
-      "With that much to cover we'd rather see it in person before quoting. What day this week works for a quick visit?",
-    ]);
+    // The explanation names the reason that actually fired (codex #4810
+    // r4): scope when the caption described one, otherwise the failed
+    // prior treatment — never "that much to cover" for one shrub.
+    const why = opportunity.reasons.includes('large_scope')
+      ? "With that much to cover we'd rather see it in person before quoting."
+      : "Since what's been tried hasn't held, we'd rather see it in person before quoting.";
+    return joinSentences([lead, why, 'What day this week works for a quick visit?']);
   }
 
   if (opportunity.mode === 'quote' && opportunity.quote) {
@@ -274,10 +277,12 @@ function composeBody({ label, advice, opportunity }) {
   // that the program covers this finding either (r3 P2: owning the family
   // says nothing about whether this condition is in the program — T&S
   // injections and premium add-ons are quoted separately).
-  const owned = opportunity.reasons.includes('already_owned');
+  // offer_unavailable (r4): the offer core failed closed — the customer
+  // MAY already pay for this family, so no pitch either.
+  const noPitch = opportunity.reasons.includes('already_owned') || opportunity.reasons.includes('offer_unavailable');
   const close = harmless
     ? 'No treatment is needed.'
-    : owned ? 'Reply if you have questions.' : "Reply if you'd like a quote.";
+    : noPitch ? 'Reply if you have questions.' : "Reply if you'd like a quote.";
   return joinSentences([lead, advice, close]);
 }
 
@@ -331,7 +336,7 @@ async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, cr
     context_summary: `Photo triage ran a ${created.type} assessment on this text's photo and gauged it as ${opportunity.mode}`
       + ` (${opportunity.reasons.join(', ') || 'no signals'}).`
       + (opportunity.quote?.per_visit
-        ? ` Offer core priced ${opportunity.quote.service} at about $${opportunity.quote.per_visit} per application — owner-only; the draft text carries no price.`
+        ? ` Offer core priced ${opportunity.quote.service} at $${Number(opportunity.quote.per_visit).toFixed(2)} per application — owner-only; the draft text carries no price.`
         : '')
       + ' Review the assessment before approving.',
     flags: JSON.stringify({

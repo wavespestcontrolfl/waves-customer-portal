@@ -44,6 +44,9 @@ describe('regex fast path', () => {
     expect(TREE_SHRUB_TRIAGE_TYPE).toBe('tree_shrub');
     const result = await classifyPhotoDiagnosisIntent('what is wrong with my palm tree leaves');
     expect(result).toEqual({ intent: 'photo_diagnosis', assessmentType: TREE_SHRUB_TRIAGE_TYPE, method: 'regex' });
+    // Hedges/ornamentals are tree & shrub subjects too (codex #4810 r4).
+    await expect(classifyPhotoDiagnosisIntent('what is wrong with my hedges?'))
+      .resolves.toMatchObject({ assessmentType: TREE_SHRUB_TRIAGE_TYPE, method: 'regex' });
     // Tree words outvote a single lawn word (lawn must strictly outnumber
     // the combined pest + tree/shrub words to win).
     await expect(classifyPhotoDiagnosisIntent('shrubs and bushes next to the lawn are dying'))
