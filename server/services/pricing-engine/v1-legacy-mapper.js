@@ -12,7 +12,6 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
-const { pricedTreeShrubPalmCount } = require('./tree-shrub-palm-priced');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -826,22 +825,16 @@ function mapV1ToLegacyShape(v1Result) {
     // recurring row and `detail` is the no-visits fallback / JSON field.
     ...(pestLI?.scopeNote ? { detail: pestLI.scopeNote, scopeNote: pestLI.scopeNote } : {}),
   });
-  // Palm count rides the mapped row so the customer-facing card can render
-  // the palm-care inclusion bullet (owner 2026-09-24: palms priced inside
-  // T&S via routine palm-care reserve, no separate line item) — but ONLY
-  // when the quote actually PRICED those palms. While the reserve is
-  // unarmed, priceTreeShrub folds SERVICE-LINE palms into the legacy
-  // per-tree term (still priced) but PROPERTY-sourced palms price nothing
-  // at all — showing the bullet for those would claim care the quote never
-  // charged for (Codex round 2 P0 on #4789). pricedTreeShrubPalmCount gates
-  // at this SOURCE so every downstream reader of the mapped row (shapeFromV1,
-  // frequencyFromTreatmentRow/frequencyFromRecurringService) can trust a
-  // positive palmCount here without re-checking evidence.
-  const tsPricedPalmCount = pricedTreeShrubPalmCount(tsLI);
-  svcAdd('Tree & Shrub', tsLI, {
-    service: 'tree_shrub',
-    ...(tsPricedPalmCount ? { palmCount: tsPricedPalmCount } : {}),
-  });
+  // NOTE (Codex round 4 P0 on #4789): palmCount is deliberately NOT carried
+  // onto this row any more (rounds 1-3 tried gating it here, but
+  // one-tap-purchase.js writes a RAW engine line straight into
+  // result.recurring.services[] for its own recurring row, so a downstream
+  // reader can never tell a gated mapper row from an ungated raw one just by
+  // looking at it). The palm-care bullet's ONE evidence/stamping chokepoint
+  // now lives entirely in estimate-public.js (treeShrubPalmCountForEstData +
+  // stampTreeShrubPalmCount) — R.tsMeta.palmCount below (unconditional, as
+  // always) is the evidence that chokepoint reads for a mapped estimate.
+  svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)
       || (mqLI.tiers || []).find(t => t.selected || t.isSelected)
