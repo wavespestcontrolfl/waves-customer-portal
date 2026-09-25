@@ -73,7 +73,22 @@ function validDeferredInvoiceSnapshot(raw) {
   return snapshot;
 }
 
-async function ringActivationBell(NotificationService, { estimateId, contractId, reason }) {
+// Codex P1 (2 of the last round): one stable key per estimate + failure
+// kind, so a sweep that re-drives the SAME stuck estimate every tick (or a
+// caller that retries inline) rings exactly once per distinct problem — not
+// once per attempt. Uses notifyAdmin's own built-in dedupeKey mechanism
+// (notification-service.js: opt-in, advisory-locked, no dedupeKey = today's
+// unchanged behavior for every other caller) rather than hand-rolling a
+// second dedupe path — falls back to the contract id when no estimate id is
+// known yet (a failure before sourceEstimateIdFromContract resolves one).
+function bellDedupeKey(estimateId, contractId, kind) {
+  const subject = estimateId || (contractId ? `contract-${contractId}` : null);
+  return subject ? `termite-annual-activation:${subject}:${kind}` : undefined;
+}
+
+async function ringActivationBell(NotificationService, {
+  estimateId, contractId, reason, kind = 'activation_error',
+}) {
   try {
     await NotificationService.notifyAdmin(
       'estimate',
@@ -83,11 +98,68 @@ async function ringActivationBell(NotificationService, { estimateId, contractId,
         icon: '⚠️',
         link: estimateId ? `/admin/estimates?estimateId=${estimateId}` : undefined,
         bell: true,
+        dedupeKey: bellDedupeKey(estimateId, contractId, kind),
         metadata: { estimateId, contractId, reason },
       },
     );
   } catch (bellErr) {
     logger.error(`[termite-annual-activation] admin bell failed for contract ${contractId}: ${bellErr.message}`);
+  }
+}
+
+// Codex P1 (1 of the last round): a delivery failure used to be silent and
+// unretried — the estimate reads 'activated' (money is real) but nobody
+// hears about it. Rings its OWN deduped bell (distinct 'delivery_failed'
+// kind from the activation-failure bell above) and reports ok:false so the
+// caller can decide what to do; it never throws. Shared by both the
+// immediate post-activation attempt and the reconciliation sweep's retry
+// pass, so both paths bell and report identically.
+async function deliverAnnualInvoiceOrBell({
+  estimateId, contractId = null, invoiceId, termId,
+}) {
+  try {
+    const InvoiceService = require('./invoice');
+    const { canAutoSendDraftInvoice } = require('./estimate-converter');
+    if (!canAutoSendDraftInvoice({ billingTerm: 'prepay_annual', annualPrepayTermId: termId })) {
+      // Shouldn't happen once a term exists (canAutoSendDraftInvoice for
+      // prepay_annual is just !!annualPrepayTermId) — fail-soft rather than
+      // silently pretending success.
+      return { ok: false, invoiceDelivery: { ok: false, error: 'delivery gate refused (no term)' } };
+    }
+    const invoiceDelivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
+      payUrlParams: {
+        source: 'estimate',
+        saveCard: '1',
+        saveRequired: '1',
+        billingTerm: 'prepay_annual',
+      },
+    });
+    // sendViaSMSAndEmail can resolve a failure descriptor WITHOUT throwing
+    // (a claim fence, a suppressed send, a missing template) — treat that
+    // exactly like a thrown error: bell + report not-ok so the sweep
+    // retries, rather than only catching the throw case.
+    if (!invoiceDelivery || invoiceDelivery.ok === false) {
+      const NotificationService = require('./notification-service');
+      await ringActivationBell(NotificationService, {
+        estimateId, contractId, kind: 'delivery_failed', reason: invoiceDelivery?.error || 'delivery reported not ok',
+      });
+      return { ok: false, invoiceDelivery };
+    }
+    return { ok: true, invoiceDelivery };
+  } catch (deliveryErr) {
+    logger.error(`[termite-annual-activation] invoice delivery failed for estimate ${estimateId} (invoice ${invoiceId}): ${deliveryErr.message}`);
+    const invoiceDelivery = {
+      ok: false, sms: { ok: false }, email: { ok: false }, error: deliveryErr.message,
+    };
+    try {
+      const NotificationService = require('./notification-service');
+      await ringActivationBell(NotificationService, {
+        estimateId, contractId, kind: 'delivery_failed', reason: deliveryErr.message,
+      });
+    } catch (bellErr) {
+      logger.error(`[termite-annual-activation] delivery-failure bell failed for estimate ${estimateId}: ${bellErr.message}`);
+    }
+    return { ok: false, invoiceDelivery };
   }
 }
 
@@ -138,7 +210,7 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         try {
           const NotificationService = require('./notification-service');
           await ringActivationBell(NotificationService, {
-            estimateId, contractId, reason: 'no valid annual_plan_deferred_invoice snapshot on the estimate',
+            estimateId, contractId, kind: 'no_deferred_snapshot', reason: 'no valid annual_plan_deferred_invoice snapshot on the estimate',
           });
         } catch (bellErr) {
           logger.error(`[termite-annual-activation] bell setup failed for contract ${contractId}: ${bellErr.message}`);
@@ -233,25 +305,18 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
     // outer 'already activated' guard means this code only ever runs once
     // per estimate anyway.
     if (result?.activated) {
-      try {
-        const InvoiceService = require('./invoice');
-        const { canAutoSendDraftInvoice } = require('./estimate-converter');
-        if (canAutoSendDraftInvoice({ billingTerm: 'prepay_annual', annualPrepayTermId: result.termId })) {
-          result.invoiceDelivery = await InvoiceService.sendViaSMSAndEmail(result.invoiceId, {
-            payUrlParams: {
-              source: 'estimate',
-              saveCard: '1',
-              saveRequired: '1',
-              billingTerm: 'prepay_annual',
-            },
-          });
-        }
-      } catch (deliveryErr) {
-        result.invoiceDelivery = {
-          ok: false, sms: { ok: false }, email: { ok: false }, error: deliveryErr.message,
-        };
-        logger.error(`[termite-annual-activation] invoice delivery failed for contract ${contractId} (estimate ${estimateId}, invoice ${result.invoiceId}): ${deliveryErr.message}`);
-      }
+      // Codex P1 (last round): a delivery failure here used to be silent
+      // and unretried. deliverAnnualInvoiceOrBell rings its own deduped
+      // bell on failure and reports ok:false — the reconciliation sweep's
+      // second pass (below) finds this exact case (an 'activated' estimate
+      // whose invoice never got sent_at) and retries it, so nothing is lost
+      // even though this attempt doesn't persist a "delivery failed" flag
+      // anywhere (estimates.annual_plan_* is frozen; invoices.sent_at IS
+      // NULL already IS that flag).
+      const { invoiceDelivery } = await deliverAnnualInvoiceOrBell({
+        estimateId, contractId, invoiceId: result.invoiceId, termId: result.termId,
+      });
+      result.invoiceDelivery = invoiceDelivery;
     }
 
     if (result?.skipped) return result;
@@ -268,61 +333,104 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
   }
 }
 
-// Codex P1-B: the minimal retry for a failed activation. Signing burns the
-// contract's share token, so there is no "sign again" path once
-// activateTermiteAnnualPlanForSignedContract bells and leaves an estimate
-// 'awaiting_signature' — this sweep re-drives it for exactly that stuck
-// case. Idempotent by construction (activateTermiteAnnualPlanForSignedContract
-// itself no-ops on anything not 'awaiting_signature'), bounded batch, and a
-// single row's failure never stops the rest — mirrors
-// reconcileTermiteProgramAgreements' own shape (termite-program-agreement.js).
-// Abandoned-signature EXPIRY (an estimate that never gets signed at all)
-// stays out of scope for 3b, same as noted throughout this slice.
+// Codex P1-B (prior round) + codex P1 (this round, item 3): the minimal
+// retry for a failed activation. Signing burns the contract's share token,
+// so there is no "sign again" path once activateTermiteAnnualPlanForSignedContract
+// bells and leaves an estimate 'awaiting_signature' — this sweep re-drives
+// it for exactly that stuck case. Idempotent by construction
+// (activateTermiteAnnualPlanForSignedContract itself no-ops on anything not
+// 'awaiting_signature'), bounded batch, and a single row's failure never
+// stops the rest — mirrors reconcileTermiteProgramAgreements' own shape
+// (termite-program-agreement.js). Abandoned-signature EXPIRY (an estimate
+// that never gets signed at all) stays out of scope for 3b, same as noted
+// throughout this slice.
+//
+// Query direction (codex P1, this round): drives from SIGNED CONTRACTS
+// (bounded + ordered by signed_at), not from awaiting estimates. The
+// earlier shape scanned up to `limit` awaiting-signature estimates first,
+// unordered — with more than `limit` awaiting estimates outstanding, an
+// unlucky page could be ALL unsigned ones, starving a genuinely-signed
+// estimate sitting just past the cutoff forever (every tick re-draws the
+// same unlucky page). Starting from signed contracts joined to
+// still-awaiting estimates, ordered oldest-signed-first, makes every row
+// this query returns immediately actionable, and processes the
+// longest-waiting customers first.
 async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}) {
   const counts = {
     scanned: 0, activated: 0, skipped: 0, failed: 0,
+    deliveryScanned: 0, delivered: 0, deliveryFailed: 0,
   };
-  let awaitingEstimates;
-  try {
-    awaitingEstimates = await conn('estimates')
-      .where('annual_plan_activation_status', 'awaiting_signature')
-      .select('id')
-      .limit(limit);
-  } catch (err) {
-    logger.error(`[termite-annual-activation] reconciliation estimate scan failed: ${err.message}`);
-    return { ...counts, error: err.message };
-  }
-  if (!awaitingEstimates.length) return counts;
-  const estimateIds = awaitingEstimates.map((row) => String(row.id));
 
-  let signedContracts;
   try {
-    signedContracts = await conn('customer_contracts')
-      .where('document_template_key', ANNUAL_TEMPLATE_KEY)
-      .where('status', 'signed')
+    const actionable = await conn('customer_contracts as cc')
       // Matched the same way activateTermiteAnnualPlanForSignedContract
       // resolves its own source estimate — document_variables_snapshot's
       // JSONB estimate.id, never a new column (see the module header).
-      .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ANY(?)", [estimateIds])
-      .select('id');
-  } catch (err) {
-    logger.error(`[termite-annual-activation] reconciliation contract scan failed: ${err.message}`);
-    return { ...counts, error: err.message };
-  }
-  counts.scanned = signedContracts.length;
+      .join('estimates as e', conn.raw("e.id::text = cc.document_variables_snapshot -> 'estimate' ->> 'id'"))
+      .where('cc.document_template_key', ANNUAL_TEMPLATE_KEY)
+      .where('cc.status', 'signed')
+      .where('e.annual_plan_activation_status', 'awaiting_signature')
+      .orderBy('cc.signed_at', 'asc')
+      .select('cc.id as contract_id')
+      .limit(limit);
+    counts.scanned = actionable.length;
 
-  for (const row of signedContracts) {
-    try {
-      // Never throws by construction, but this loop guards anyway so one
-      // truly unexpected failure can't take the rest of the batch down.
-      const result = await activateTermiteAnnualPlanForSignedContract({ contractId: row.id, conn });
-      if (result?.activated) counts.activated += 1;
-      else counts.skipped += 1;
-    } catch (err) {
-      counts.failed += 1;
-      logger.error(`[termite-annual-activation] reconciliation activation errored for contract ${row.id}: ${err.message}`);
+    for (const row of actionable) {
+      try {
+        // Never throws by construction, but this loop guards anyway so one
+        // truly unexpected failure can't take the rest of the batch down.
+        const result = await activateTermiteAnnualPlanForSignedContract({ contractId: row.contract_id, conn });
+        if (result?.activated) counts.activated += 1;
+        else counts.skipped += 1;
+      } catch (err) {
+        counts.failed += 1;
+        logger.error(`[termite-annual-activation] reconciliation activation errored for contract ${row.contract_id}: ${err.message}`);
+      }
     }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] reconciliation activation scan failed: ${err.message}`);
+    counts.activationScanError = err.message;
   }
+
+  // Codex P1 (this round, item 1): the sweep's second job — an already-
+  // ACTIVATED estimate whose invoice never got delivered (a prior
+  // sendViaSMSAndEmail failure, or the process dying between activation and
+  // delivery). Found via the invoice's own existing links — no new column:
+  // annual_prepay_terms.source_estimate_id -> the estimate,
+  // annual_prepay_terms.prepay_invoice_id -> the invoice, and
+  // invoices.sent_at IS NULL is the same "never delivered" signal
+  // sendViaSMSAndEmail itself stamps on success (invoice.js). Only ever
+  // matches a termite-annual term: source_estimate_id only points at an
+  // estimate carrying annual_plan_activation_status at all for this program.
+  try {
+    const undelivered = await conn('estimates as e')
+      .join('annual_prepay_terms as apt', conn.raw('apt.source_estimate_id = e.id'))
+      .join('invoices as inv', conn.raw('inv.id = apt.prepay_invoice_id'))
+      .where('e.annual_plan_activation_status', 'activated')
+      .whereNull('inv.sent_at')
+      .select('e.id as estimate_id', 'apt.id as term_id', 'inv.id as invoice_id')
+      .limit(limit);
+    counts.deliveryScanned = undelivered.length;
+
+    for (const row of undelivered) {
+      try {
+        const outcome = await deliverAnnualInvoiceOrBell({
+          estimateId: row.estimate_id, invoiceId: row.invoice_id, termId: row.term_id,
+        });
+        if (outcome.ok) counts.delivered += 1;
+        else counts.deliveryFailed += 1;
+      } catch (err) {
+        // deliverAnnualInvoiceOrBell never throws by construction; guarded
+        // anyway for the same reason as the activation loop above.
+        counts.deliveryFailed += 1;
+        logger.error(`[termite-annual-activation] reconciliation delivery errored for estimate ${row.estimate_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] reconciliation delivery scan failed: ${err.message}`);
+    counts.deliveryScanError = err.message;
+  }
+
   return counts;
 }
 

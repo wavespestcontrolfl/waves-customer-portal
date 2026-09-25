@@ -185,10 +185,12 @@ describe('termite annual plan activation on sign', () => {
     }));
   });
 
-  test('codex P1-A: a delivery failure does not undo activation — the estimate is still activated, just invoiceDelivery reports the failure', async () => {
+  test('codex P1 (latest round, item 1): a delivery failure does not undo activation, rings a bell, and reports invoiceDelivery.ok=false', async () => {
     const contract = makeContract();
     const estimate = makeEstimate();
-    const { activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate } = setup({
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate, notifyAdmin,
+    } = setup({
       contract, estimate, deliveryImpl: async () => { throw new Error('sms provider down'); },
     });
 
@@ -197,6 +199,42 @@ describe('termite annual plan activation on sign', () => {
     expect(result.activated).toBe(true);
     expect(result.invoiceDelivery).toMatchObject({ ok: false, error: 'sms provider down' });
     expect(estimateUpdate).toHaveBeenCalledWith(expect.objectContaining({ annual_plan_activation_status: 'activated' }));
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate', expect.any(String), expect.any(String),
+      expect.objectContaining({ bell: true, dedupeKey: `termite-annual-activation:${ESTIMATE_ID}:delivery_failed` }),
+    );
+  });
+
+  test('codex P1 (latest round, item 1): a delivery outcome that resolves ok:false WITHOUT throwing still bells and reports failure', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, notifyAdmin } = setup({
+      contract, estimate, deliveryImpl: async () => ({ ok: false, error: 'payer_billed', sms: { ok: false }, email: { ok: false } }),
+    });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result.activated).toBe(true);
+    expect(result.invoiceDelivery).toMatchObject({ ok: false, error: 'payer_billed' });
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate', expect.any(String), expect.any(String),
+      expect.objectContaining({ dedupeKey: `termite-annual-activation:${ESTIMATE_ID}:delivery_failed` }),
+    );
+  });
+
+  test('codex P1 (latest round, item 2): the activation-failure bell also carries a stable per-estimate dedupeKey', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, notifyAdmin } = setup({
+      contract, estimate, term: null, // forces "Annual prepay term was not created"
+    });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate', expect.any(String), expect.any(String),
+      expect.objectContaining({ dedupeKey: `termite-annual-activation:${ESTIMATE_ID}:activation_error` }),
+    );
   });
 
   test('codex P1-A: idempotent on re-run — a second call (already activated) never delivers again', async () => {
