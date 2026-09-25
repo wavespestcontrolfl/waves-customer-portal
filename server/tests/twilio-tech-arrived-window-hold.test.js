@@ -131,3 +131,32 @@ test("the scheduled service id is forwarded as appointmentId on every arrival se
   await TwilioService.sendTechArrived("cust-1", "Adam");
   expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty("appointmentId");
 });
+
+// The arrival text names the visit (owner 2026-09-24): the visit row's
+// service_type rides into the template as {service_type}, "service" when
+// there is no visit to read it from.
+test("the visit's service_type is passed to the tech_arrived template, 'service' without a visit", async () => {
+  getAppointmentContacts.mockReturnValue([{ phone: customer.phone, name: "Pat Q", role: "primary" }]);
+  sendCustomerMessage.mockResolvedValue({ sent: true, success: true });
+  db.mockImplementation((table) => {
+    if (table === "customers") return firstQuery(customer);
+    if (table === "notification_prefs") return firstQuery(prefs);
+    if (table === "scheduled_services") return firstQuery({ service_type: "Pest Control Re-Service" });
+    return firstQuery(null);
+  });
+
+  await TwilioService.sendTechArrived("cust-1", "Adam", { scheduledServiceId: "svc-9" });
+  expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+    "tech_arrived",
+    expect.objectContaining({ first_name: "Pat", tech_name: "Adam", service_type: "Pest Control Re-Service" }),
+    expect.anything(),
+  );
+
+  smsTemplates.getTemplate.mockClear();
+  await TwilioService.sendTechArrived("cust-1", "Adam");
+  expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+    "tech_arrived",
+    expect.objectContaining({ service_type: "service" }),
+    expect.anything(),
+  );
+});

@@ -24,6 +24,21 @@ const { publicPortalUrl } = require("../utils/portal-url");
 // or set to anything else → restore.
 const HARDCODED_OWNER_FALLBACKS = ["+19413187612", "+19415993489"];
 
+// Name the visit in the arrival text ("has arrived for your Pest Control
+// Re-Service"), not a bare "your service" (owner 2026-09-24). Same source and
+// fallback as the reminder texts: the visit row's service_type, else
+// "service". Best-effort: a failed lookup must not drop the arrival notice.
+async function arrivedServiceType(scheduledServiceId) {
+  if (!scheduledServiceId) return "service";
+  try {
+    const visit = await db("scheduled_services").where({ id: scheduledServiceId }).first("service_type");
+    return visit?.service_type || "service";
+  } catch (err) {
+    logger.warn(`[twilio] tech_arrived service_type lookup failed for ${scheduledServiceId}: ${err.message}`);
+    return "service";
+  }
+}
+
 function normalizePhone(p) {
   if (!p || typeof p !== "string") return "";
   // Canonicalize to bare digits. SMS recipient strings arrive in mixed
@@ -1778,6 +1793,7 @@ const TwilioService = {
     const results = [];
     const { sendCustomerMessage } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
+    const serviceType = await arrivedServiceType(scheduledServiceId);
     const attemptSmsLegs = async () => {
       for (const contact of contacts) {
         // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
@@ -1788,6 +1804,7 @@ const TwilioService = {
           body = await smsTemplatesRouter.getTemplate("tech_arrived", {
             first_name: firstName,
             tech_name: customerTechName,
+            service_type: serviceType,
           }, { workflow: "tech_arrived", entity_type: "customer", entity_id: customerId });
         }
         if (!body) {

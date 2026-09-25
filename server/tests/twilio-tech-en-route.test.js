@@ -334,6 +334,7 @@ describe("TwilioService.sendTechEnRoute", () => {
       {
         first_name: "Sam",
         tech_name: "Bryan",
+        service_type: "service",
       },
       { workflow: "tech_arrived", entity_type: "customer", entity_id: "cust-1" },
     );
