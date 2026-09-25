@@ -242,49 +242,17 @@ export default function TimeTrackingPage() {
         }}
         ariaLabel="Staff section"
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
+        secondarySections={
+          activeGroup.tabs.length > 1
+            ? activeGroup.tabs
+                .filter((key) => key !== "pay-growth" || payGrowthGateOpen)
+                .map((key) => STAFF_LEAF_BY_KEY[key])
+            : []
+        }
+        secondaryActiveKey={tab}
+        onSecondaryChange={setTab}
+        secondaryAriaLabel="Staff sub-section"
       />
-      {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "nowrap",
-            overflowX: "auto",
-            gap: 8,
-            marginBottom: 16,
-            paddingBottom: 2,
-          }}
-        >
-          {activeGroup.tabs.filter((key) => key !== "pay-growth" || payGrowthGateOpen).map((key) => {
-            const leaf = STAFF_LEAF_BY_KEY[key];
-            const active = tab === key;
-            const LeafIcon = leaf.Icon;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setTab(key)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  minHeight: 44,
-                  padding: "0 14px",
-                  borderRadius: 4,
-                  fontSize: 14,
-                  fontWeight: 500,
-                  cursor: "pointer",
-                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
-                  background: active ? "#18181B" : "#FFFFFF",
-                  color: active ? "#fff" : "#27272A",
-                }}
-              >
-                <LeafIcon size={14} strokeWidth={1.9} />
-                {leaf.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
       {tab === "dashboard" && <DashboardTab showToast={showToast} />}
       {tab === "timesheet" && (
         <TimesheetTab

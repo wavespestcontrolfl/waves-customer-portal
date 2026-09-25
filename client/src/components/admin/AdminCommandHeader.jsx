@@ -43,7 +43,7 @@ export default function AdminCommandHeader({
   className,
   headingLevel = 1,
   sticky = true,
-  variant = "framed",
+  variant = "workspace",
 }) {
   const density = useUiDensity();
   const presentation = PRESENTATIONS[variant];
@@ -82,10 +82,8 @@ export default function AdminCommandHeader({
           onClick={() => onChange?.(key)}
           aria-current={isActive ? "page" : undefined}
           className={cn(
-            // Below md: one underline tab in a horizontally scrolling strip
-            // (shrink-0 + nowrap so the row overflows instead of wrapping
-            // into the 2-column tile grid that ate ~60% of a phone screen).
-            // md+: the boxed tile grid, unchanged.
+            // Workspace sections stay on one row and scroll when the
+            // available width cannot fit every section target.
             presentation.item,
             isActive ? presentation.selected : presentation.idle,
             sectionClassName,
@@ -175,8 +173,8 @@ export default function AdminCommandHeader({
             ref={primaryNavRef}
             aria-label={ariaLabel || `${title} section`}
             className={cn(
-              // p-1 on mobile leaves room for the 2px focus ring inside the
-              // strip's clip box (the outline sits 2px outside the button).
+              // Each navigation landmark owns one row. Its presentation
+              // keeps the focus ring inside the horizontal scrollport.
               presentation.nav,
               navGridClassName,
             )}
