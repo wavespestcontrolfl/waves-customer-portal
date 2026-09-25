@@ -1,7 +1,7 @@
 /** PostgreSQL regression checks. Run only with an isolated Waves QA database. */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => true }));
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => true }));
 
 const knex = require('knex');
 const db = require('../models/db');

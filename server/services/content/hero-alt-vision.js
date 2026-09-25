@@ -112,10 +112,29 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 // only, or on the left chest fails — Codex r1 P1 on #4761) and still
 // forbidden anywhere else. The model reports where it sees the mark under
 // waves_logo_placements; its own lettering is never readable_text there.
+// allowVanWrap: the image was generated WITH the two van wrap reference
+// photos (owner ruling 2026-09-24). The one wrapped van is judged by its OWN
+// narrow question (buildVanScreenPrompt, a second vision call in parallel):
+// its body must not be a different van than the Ford Transit medium roof,
+// the wrap must be applied with its mascot, and its lettering must be the
+// wrap's own exact strings. The main screen is told to leave that one van out
+// of every field, so its marks are never reported there at all. Deciding
+// after the fact which free-text detections belonged to the van (a keyword
+// allowlist over "Waves logo on the van door") produced a new edge case every
+// Codex round (r2–r12 on #4785); the model's own split between the two
+// questions replaces it. The same marks anywhere off that van are still
+// ordinary readable text and brand marks to the main screen.
 const SCREEN_MAX_TOKENS = 400;
 const SCREEN_MAX_TOKENS_WITH_LOGO = 1200;
+const VAN_SCREEN_MAX_TOKENS = 600;
 const UNIFORM_LOGO_DESCRIPTION = 'the Waves company logo (a smiling blue wave mascot in a red-and-blue shield, lettered "WAVES" and "LAWN & PEST")';
-function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniformLogo = false } = {}) {
+const VAN_WRAP_DESCRIPTION = 'the Waves van wrap (a light-colored cargo van with a sky-blue gradient, halftone dots, a cartoon wave-character mascot, "WAVES" / "Lawn & Pest" lettering, a phone number and a web address)';
+// The wrap's own exact strings (owner ruling 2026-09-24): wrap text on the
+// van that is not one of these, whole, is gibberish lettering.
+const VAN_WRAP_ALLOWED_TEXT = ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'];
+// The only acceptable `van.body` verdicts (Codex r2 P2 on #4785).
+const VAN_BODY_VALUES = new Set(['ford_transit_medium_roof', 'other', 'unsure']);
+function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false } = {}) {
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
   const shape = allowUniformLogo
@@ -128,20 +147,57 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniform
 - uniform_logo_lettering: the lettering you can read INSIDE that Waves logo on a technician's cap or chest ("WAVES", "LAWN & PEST"), listed here and NOT under readable_text. Empty array if none is legible.
 EXCEPTION: that Waves logo on a technician's cap or shirt chest is expected — do not list it under logos_or_brand_marks. Any OTHER lettering (including "WAVES" on a sign, vehicle or wall), and the Waves logo anywhere other than a cap or chest, must still be listed.`
     : '';
+  const vanWrapRule = allowVanWrap
+    ? `
+VAN EXCEPTION (overrides every field above): when exactly ONE van in the frame carries ${VAN_WRAP_DESCRIPTION}, that one van is checked separately — leave everything painted or mounted on it, including its maker's badge, out of every field. The same marks anywhere else (a second van, another vehicle, a sign, a wall, equipment, floating on its own) must still be listed; if two or more vans carry the wrap, list them all.`
+    : '';
   return `Inspect this generated blog image and answer as strict JSON only, shape ${shape}.
 - readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
-- logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.${uniformLogoRule}
+- logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.${uniformLogoRule}${vanWrapRule}
 - forbidden_scenes: the NUMBERS of the FORBIDDEN items below the image clearly depicts (e.g. [1]). Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
 - notes: one short sentence.
 ${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}
 ${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t, i) => `${i + 1}. "${t}"`).join('; ')}.` : ''}`;
 }
+// The van's own question — asked only when the van wrap reference was
+// attached. The model reports ANY van in frame separately from whether the
+// wrap applied (a van left plain fails — Codex r1 P2 on #4784), judges the
+// BODY against the Ford Transit medium roof specifically (a wrap reproduced
+// onto a Sprinter still fails — Codex r2 P2 on #4785; "unsure" passes for a
+// distant van), and reads the wrap's lettering on its own, apart from the
+// maker's badge.
+function buildVanScreenPrompt() {
+  return `Inspect ONLY the van in this generated blog image and answer as strict JSON only, shape {"van": {"body": "ford_transit_medium_roof" | "other" | "unsure", "wrapped": boolean, "wrap_text": string[], "wrap_mascot": boolean} | null}.
+- van: null if there is NO van of any kind in the frame; otherwise an object describing the van that carries ${VAN_WRAP_DESCRIPTION} (or, if none does, the largest van):
+- body: judges the van's make/roof against a Ford Transit medium-roof cargo van specifically — Transit cues: a short hood, a black hexagon-mesh grille with a Ford oval badge, and a MEDIUM roof (taller than a car, shorter than a walk-in van). "ford_transit_medium_roof" only when those cues are clearly visible; "other" when the van is clearly a DIFFERENT body (e.g. a Mercedes Sprinter's long sloped nose and no Ford grille, a noticeably taller high-roof, or a different make entirely); "unsure" when the van is too small, distant, angled, or obscured to judge either way.
+- wrapped: true only if the van visibly carries that graphic wrap rather than a plain, unmarked body — false if the van is there but plain.
+- wrap_text: every distinct string of readable text on the wrap graphics, each as its own array entry, spelled and punctuated exactly as painted — not the maker's badge. Empty if wrapped is false or none is legible.
+- wrap_mascot: true only if the wave mascot character (a blue wave shape wearing a red cap and overalls) is painted on the van.`;
+}
+function parseJsonObject(text) {
+  const raw = String(text || '').replace(/```[a-z]*|```/gi, '').trim();
+  return JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+}
+// → { van } (van null = no van in frame) or null for an unusable answer. The
+// `van` key must be PRESENT: JSON mode does not guarantee every requested key
+// comes back, so an omitted key is an incomplete answer, never "no van"
+// (Codex r1 P2 on #4785). A malformed van object is unusable too — fail-open
+// as unchecked, never clean.
+function parseVanScreen(text) {
+  try {
+    const obj = parseJsonObject(text);
+    if (!obj || !Object.prototype.hasOwnProperty.call(obj, 'van')) return null;
+    const v = obj.van;
+    if (v === null) return { van: null };
+    if (!(v && typeof v === 'object' && VAN_BODY_VALUES.has(v.body) && typeof v.wrapped === 'boolean' && Array.isArray(v.wrap_text) && typeof v.wrap_mascot === 'boolean')) return null;
+    return { van: { body: v.body, wrapped: v.wrapped, wrapText: v.wrap_text.map((t) => String(t || '').trim()).filter(Boolean), wrapMascot: v.wrap_mascot } };
+  } catch {
+    return null;
+  }
+}
 function parseScreen(text, { requireForbidden = false, requirePlacements = false } = {}) {
   try {
-    const raw = String(text || '').replace(/```[a-z]*|```/gi, '').trim();
-    const start = raw.indexOf('{');
-    const end = raw.lastIndexOf('}');
-    const obj = JSON.parse(raw.slice(start, end + 1));
+    const obj = parseJsonObject(text);
     // Both lists must be arrays: a scalar or missing field is an unusable
     // answer (→ fail-open as unchecked), never a clean verdict (Codex r1 P2
     // on #3964).
@@ -198,12 +254,14 @@ function matchExclusion(detection, exclusions) {
 }
 // The verdict from a parsed answer — pure, so the screen itself stays the
 // guard + dispatch + parse (Codex r3 P2 on #4761: complexity).
-function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUniformLogo = false } = {}) {
+// `van` is the van question's answer (null: none asked, or no van in frame).
+function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUniformLogo = false, van = null } = {}) {
   const { reasons: logoReasons, misplaced } = allowUniformLogo ? uniformLogoReasons(parsed) : { reasons: [], misplaced: [] };
+  const { reasons: vanReasons, flagged: vanFlagged } = vanWrapReasons(van);
   const logos = allowUniformLogo ? [...misplaced, ...parsed.logos.filter((t) => !isAllowedUniformLogo(t))] : parsed.logos;
   const attributed = new Set(allowUniformLogo ? parsed.uniformLettering.filter(isLogoWord).map(normalizeText) : []);
   const { strayText, incomplete, missing } = matchCaptions(parsed.readableText, allowedText, attributed);
-  const reasons = [...logoReasons];
+  const reasons = [...logoReasons, ...vanReasons];
   // misplaced marks are already in logoReasons; the rest are true brand marks
   const brandMarks = logos.slice(misplaced.length);
   if (brandMarks.length) reasons.push(`logo or brand mark: ${brandMarks.slice(0, 3).join(', ')}`);
@@ -219,12 +277,12 @@ function screenVerdict(parsed, { allowedText = [], avoidDepicting = [], allowUni
   const forbidden = [...new Set(parsed.forbidden.map((t) => matchExclusion(t, named)).filter(Boolean))];
   if (forbidden.length) reasons.push(`forbidden scene: ${forbidden.slice(0, 3).join('; ')}`);
   // violations counts what actually failed — stray strings, missing or
-  // incomplete captions, logos, forbidden scenes — never an allowed
-  // caption the image rendered correctly; the caller ranks two failed
+  // incomplete captions, logos, van wrap faults, forbidden scenes — never an
+  // allowed caption the image rendered correctly; the caller ranks two failed
   // candidates on it (Codex r11 P2 on #3964).
-  const violations = logoReasons.length + brandMarks.length + strayText.length + incomplete.length + missing.length + forbidden.length;
+  const violations = logoReasons.length + vanReasons.length + brandMarks.length + strayText.length + incomplete.length + missing.length + forbidden.length;
   const placements = allowUniformLogo ? [...parsed.technicians.flatMap((p) => p.logoOn), ...parsed.elsewhere.map((t) => `elsewhere: ${t}`)] : [];
-  return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos, forbidden, reasons, violations, placements };
+  return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: [...logos, ...vanFlagged], forbidden, reasons, violations, placements };
 }
 
 /**
@@ -290,6 +348,95 @@ function uniformLogoReasons({ technicians, elsewhere }) {
   });
   return { reasons, misplaced };
 }
+// The van wrap's lettering is matched PUNCTUATION-SENSITIVELY — case- and
+// whitespace-insensitive, but &, -, . and ! must sit exactly where the real
+// wrap has them ("Lawn Pest" and "GoWavesFL-com" are not the wrap; Codex r2
+// P2 on #4785). A string splits into chunks on whitespace ONLY, so a
+// reported fragment boundary is legitimate only where the wrap itself has a
+// space: "Lawn &" + "Pest" is fine, "941-241" + "2459" and "GoWavesFL" +
+// "com" never are (Codex r3 P2 on #4785). The side panel's "Lawn & Pest!"
+// is the same lettering as the rear's "Lawn & Pest" wherever it appears in
+// an entry (Codex r8, r12 P2s on #4785) — never "Pests!", the tagline's own.
+function canonicalChunks(str) {
+  return String(str || '').replace(/\bpest!/gi, 'pest').trim().split(/\s+/).filter(Boolean).map((c) => c.toLowerCase());
+}
+// Indices of whole allowed phrases whose chunks, concatenated in order,
+// equal `chunks` exactly — or null. One OCR entry may group ADJACENT wrap
+// strings ("WAVES Lawn & Pest" off the stacked logo — Codex r9 P2 on #4785).
+function splitIntoWholePhrases(chunks, seqs, from = 0) {
+  if (from === chunks.length) return [];
+  for (let c = 0; c < seqs.length; c += 1) {
+    const seq = seqs[c];
+    if (from + seq.length <= chunks.length && seq.every((x, j) => chunks[from + j] === x)) {
+      const rest = splitIntoWholePhrases(chunks, seqs, from + seq.length);
+      if (rest) return [c, ...rest];
+    }
+  }
+  return null;
+}
+// matchWrapText(fragments) → { strayText, incomplete, complete }
+//   strayText — fragments that are no in-order chunk run of any wrap string
+//   (wrong or dropped punctuation included);
+//   incomplete — wrap strings some fragment(s) partially covered but never
+//   completed ("Lawn" + "Pest" with the "&" dropped at their boundary);
+//   complete — wrap strings fully covered.
+function matchWrapText(fragments) {
+  const allowedSeqs = VAN_WRAP_ALLOWED_TEXT.map(canonicalChunks);
+  const covered = allowedSeqs.map(() => new Set());
+  const cursor = allowedSeqs.map(() => 0);
+  const runAt = (chunks, seq, from) => {
+    for (let i = from; i + chunks.length <= seq.length; i += 1) {
+      if (chunks.every((c, j) => seq[i + j] === c)) return i;
+    }
+    return -1;
+  };
+  const strayText = fragments.filter((raw) => {
+    const chunks = canonicalChunks(raw);
+    let ok = false;
+    allowedSeqs.forEach((seq, c) => {
+      const at = runAt(chunks, seq, cursor[c]);
+      if (!chunks.length || at < 0) return;
+      ok = true;
+      for (let j = 0; j < chunks.length; j += 1) covered[c].add(at + j);
+      cursor[c] = at + chunks.length;
+    });
+    const whole = ok ? null : splitIntoWholePhrases(chunks, allowedSeqs);
+    for (const c of whole || []) { allowedSeqs[c].forEach((_, j) => covered[c].add(j)); cursor[c] = allowedSeqs[c].length; }
+    return !ok && !(whole && whole.length);
+  });
+  const incomplete = VAN_WRAP_ALLOWED_TEXT.filter((_, c) => covered[c].size && covered[c].size < allowedSeqs[c].length);
+  const complete = VAN_WRAP_ALLOWED_TEXT.filter((_, c) => covered[c].size === allowedSeqs[c].length);
+  return { strayText, incomplete, complete };
+}
+// The van question's verdict → { reasons, flagged } (flagged rides into the
+// screen's `logos` so the caller's "fewest marks" ranking sees each fault).
+//   - the wrap on the WRONG body (a Sprinter, a high-roof, any generic cargo
+//     van) fails; "unsure" passes (Codex r2 P2 on #4785);
+//   - a van left plain fails — the reference exists so the van carries the
+//     wrap (Codex r1 P2 on #4784);
+//   - a wrap without its mascot fails, whatever text rendered (Codex r1 P2
+//     on #4785);
+//   - wrap lettering that is not the wrap's own strings, whole — garbled or
+//     truncated — fails (owner ruling 2026-09-24; Codex r1 P2 on #4784);
+//   - a van close enough to confirm as the Transit is close enough to read,
+//     so it must carry at least "WAVES" (Codex r10 P2 on #4785).
+function vanWrapReasons(van) {
+  const flagged = [];
+  const reasons = [];
+  const fail = (reason, items = [reason]) => { reasons.push(reason); flagged.push(...items); };
+  if (!van) return { reasons, flagged };
+  if (van.body === 'other') fail('van body is not a Ford Transit medium-roof cargo van');
+  if (!van.wrapped) {
+    fail('van present without the wrap');
+    return { reasons, flagged };
+  }
+  if (!van.wrapMascot) fail('van wrap missing the mascot');
+  const { strayText, incomplete, complete } = matchWrapText(van.wrapText);
+  const garbled = [...strayText, ...incomplete];
+  if (garbled.length) fail(`garbled van wrap text: ${garbled.slice(0, 3).join(', ')}`, garbled.map((t) => `garbled van wrap text: ${t}`));
+  if (van.body === 'ford_transit_medium_roof' && !complete.includes('WAVES')) fail('van wrap missing the WAVES lettering');
+  return { reasons, flagged };
+}
 // The caption match (Codex r1/r4 P2s on #3964): an allowed caption may come
 // back split ("1", "OFF") or joined. A detected string is the caption's only
 // when it is a contiguous, in-order run of ONE allowed caption — never a
@@ -326,7 +473,7 @@ function matchCaptions(readableText, allowedText, attributed = new Set()) {
   return { strayText, incomplete, missing };
 }
 
-async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], avoidDepicting = [], allowUniformLogo = false, timeoutMs = null } = {}) {
+async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false, timeoutMs = null } = {}) {
   const open = { ok: true, checked: false, readableText: [], logos: [], forbidden: [], reasons: [], violations: 0 };
   if (!Buffer.isBuffer(buffer) || !buffer.length) return open;
   // timeoutMs bounds the whole vision chain (both legs) — the caller passes
@@ -337,26 +484,34 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     return open;
   }
   try {
-    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
-      text: buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo }),
+    const ask = (text, maxTokens) => dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+      text,
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: true,
+      maxTokens,
+      ...(timeoutMs > 0 ? { timeoutMs } : {}),
+    });
+    // The van question runs beside the main one, inside the same deadline.
+    // Either answer failing or unusable fails the whole screen open.
+    const [res, vanRes] = await Promise.all([
       // The per-technician answer (technicians[], placements, lettering) is
       // several times the plain one; a truncated JSON would fail OPEN as
       // unusable, so give it room (pre-push fallback P1 on 8860b77737).
-      maxTokens: allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS,
-      ...(timeoutMs > 0 ? { timeoutMs } : {}),
-    });
-    if (!res.ok) {
-      logger.warn(`[hero-alt-vision] image screen failed (${res.reason}) — accepting image (fail-open)`);
+      ask(buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo, allowVanWrap }), allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS),
+      allowVanWrap ? ask(buildVanScreenPrompt(), VAN_SCREEN_MAX_TOKENS) : null,
+    ]);
+    const failed = [res, vanRes].find((r) => r && !r.ok);
+    if (failed) {
+      logger.warn(`[hero-alt-vision] image screen failed (${failed.reason}) — accepting image (fail-open)`);
       return open;
     }
     const parsed = parseScreen(res.text, { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()), requirePlacements: allowUniformLogo });
-    if (!parsed) {
+    const vanAnswer = vanRes ? parseVanScreen(vanRes.text) : { van: null };
+    if (!parsed || !vanAnswer) {
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
     }
-    return screenVerdict(parsed, { allowedText, avoidDepicting, allowUniformLogo });
+    return screenVerdict(parsed, { allowedText, avoidDepicting, allowUniformLogo, van: vanAnswer.van });
   } catch (err) {
     logger.warn(`[hero-alt-vision] image screen threw — accepting image (fail-open): ${err.message}`);
     return open;
@@ -364,4 +519,4 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
 }
 
 module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt, screenGeneratedImage, buildScreenPrompt, parseScreen };
-module.exports._internals = { SCREEN_MAX_TOKENS, SCREEN_MAX_TOKENS_WITH_LOGO, isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, matchCaptions, isLogoWord, UNIFORM_LOGO_DESCRIPTION };
+module.exports._internals = { SCREEN_MAX_TOKENS, SCREEN_MAX_TOKENS_WITH_LOGO, VAN_SCREEN_MAX_TOKENS, VAN_WRAP_ALLOWED_TEXT, isAllowedUniformLogo, classifyPlacement, uniformLogoReasons, vanWrapReasons, buildVanScreenPrompt, parseVanScreen, matchWrapText, matchCaptions, isLogoWord, UNIFORM_LOGO_DESCRIPTION };

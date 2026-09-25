@@ -261,6 +261,24 @@ describe('callAnthropic prompt caching', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
   });
 
+  // Anthropic 400s on array cardinality keywords ("For 'array' type, property
+  // 'maxItems' is not supported"); the wire copy drops them, nested too, and
+  // the caller's schema (still used by its own Ajv validator) is untouched.
+  test('Anthropic wire schema drops array and string bounds without mutating the caller schema', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"items":[]}' }] });
+    const schema = { type: 'object', additionalProperties: false, required: ['items'], properties: {
+      items: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'object', additionalProperties: false, required: ['tags'],
+        properties: { tags: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 40 } } } } } } };
+    const before = JSON.stringify(schema);
+    await callAnthropic({ model: FLAGSHIP, text: 'classify', jsonMode: true, jsonSchema: schema });
+    const wire = mockAnthropicCreate.mock.calls.at(-1)[0].output_config.format.schema;
+    expect(JSON.stringify(wire)).not.toMatch(/m(in|ax)(Items|Length)/);
+    expect(wire.properties.items.items.properties.tags.items).toEqual({ type: 'string' });
+    expect(wire.properties.items.items).toEqual({ type: 'object', additionalProperties: false, required: ['tags'],
+      properties: { tags: { type: 'array', items: { type: 'string' } } } });
+    expect(JSON.stringify(schema)).toBe(before);
+  });
+
   test('anthropicText reads the first TEXT block, skipping a leading thinking block', () => {
     const { anthropicText } = require('../services/llm/call');
     expect(anthropicText({ content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '{"ok":true}' }] })).toBe('{"ok":true}');
@@ -317,6 +335,17 @@ describe('callOpenAI jsonMode parsing', () => {
     const r = await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: true });
     expect(r.ok).toBe(true);
     expect(r.json).toEqual({ summary: 'ok' });
+  });
+
+  // OpenAI strict mode accepts minItems/maxItems (probed 2026-09-24; its one
+  // rule is that `required` lists every property key), so unlike the
+  // Anthropic leg the wire copy is the caller's schema verbatim.
+  test('jsonSchema goes out verbatim, array cardinality keywords included', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"items":[]}' }) });
+    const schema = { type: 'object', additionalProperties: false, required: ['items'],
+      properties: { items: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'string', maxLength: 40 } } } };
+    await callOpenAI({ model: OPENAI_BEST, text: 'classify', jsonMode: true, jsonSchema: schema });
+    expect(JSON.parse(fetchSpy.mock.calls.at(-1)[1].body).text.format).toEqual({ type: 'json_schema', name: 'structured_response', schema, strict: true });
   });
 
   test('non-JSON output → empty_json so the caller can fall back', async () => {

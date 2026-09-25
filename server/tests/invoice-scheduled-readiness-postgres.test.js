@@ -33,7 +33,7 @@ jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssued
 jest.mock('../services/inspection-credit', () => ({ reverseInspectionCreditForBooking: jest.fn(async () => null) }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: async () => null }));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async () => null }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => ({ enrolled: true })) }));
 const { randomUUID } = require('node:crypto');
 const Invoice = require('../services/invoice');

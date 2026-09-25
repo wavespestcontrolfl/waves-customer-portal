@@ -53,12 +53,23 @@ function withoutOptionalFooter(body) {
 }
 
 const PENDING_OUTBOUND_RE = /\b(?:will|we'll|i'll|we’ll|i’ll|going to|need to|have to|working on|momentarily|shortly|soon|tentativ\w*|pencil\w*)\b|\b(?:sorry|apologi\w*|cancel\w*|refund\w*|disput\w*|complaint|late|delay\w*|unpaid|overdue|outstanding|past due)\b/i;
+// Owner decision 2026-09-24: thanks in reply to our own automated
+// appointment/estimate/review templates is a closure too. Keyed on the
+// persisted message type, never on body text. The needs-attention and
+// earlier-open-context guards still apply to these messages. Billing and
+// payment reminders are deliberately absent: thanks after a payment request
+// is not a closure.
+const AUTOMATED_CLOSURE_TYPES = new Set([
+  'reminder_72h', 'reminder_24h', 'appointment_reminder', 'appointment_confirmation',
+  'tech_en_route', 'tech_arrived', 'estimate_sent', 'review_request',
+]);
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
 const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! We got your bank payment for invoice [\w-]+\. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does\.$/u;
 
 /**
  * Conservative first release: explicit thanks following a delivered report,
- * receipt, completed service or bank-payment acknowledgement. Ordinary
+ * receipt, completed service, bank-payment acknowledgement, or one of our
+ * automated appointment/estimate/review templates (AUTOMATED_CLOSURE_TYPES). Ordinary
  * conversational answers without positive closure evidence abstain. The
  * existing agent still handles those normally. Caller supplies the complete
  * recent SAME-ENDPOINT thread and authoritative first name; no name mining.
@@ -90,7 +101,8 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
   const bankAcknowledgement = BANK_ACK_RE.test(body);
   const invalidClosure = [
     [() => !bankAcknowledgement && (outboundAsksForReply(body) || PENDING_OUTBOUND_RE.test(body)), 'outbound_needs_attention'],
-    [() => !bankAcknowledgement && !CLOSED_OUTBOUND_RE.test(body), 'closure_not_established'],
+    [() => !bankAcknowledgement && !AUTOMATED_CLOSURE_TYPES.has(previous.messageType)
+      && !CLOSED_OUTBOUND_RE.test(body), 'closure_not_established'],
   ].find(([invalid]) => invalid());
   if (invalidClosure) return deny(invalidClosure[1]);
   // A later template cannot erase an earlier unanswered operational message.
