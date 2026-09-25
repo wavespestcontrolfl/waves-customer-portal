@@ -71,19 +71,41 @@ function sanitizeWrongFields(input) {
 // still be a GROUPED SIBLING of the visit the customer was rebooked onto
 // (see scheduled-service-statuses.js's own doc comment on
 // CLEARABLE_SCHEDULED_SERVICE_STATUSES).
-async function clearCallbackNumberHold(trx, callLogId) {
+//
+// Codex round 6 (PR #4807, structural): the SMS hold itself is now keyed on
+// the disclaimed NUMBER (disclaimed_number_holds — every SMS `to` is
+// checked in sendCustomerMessage), so no send decision reads
+// scheduled_services.callback_number_hold_at any more; the per-visit
+// update below survives only for call_sms_cleared_at, the call-level
+// clearance the pre-visit card-request sweep and outbound-review-confirm
+// read (that is also why round-6 P2's "retained terminal member strands
+// its siblings" can no longer happen — the group pre-check resolves the
+// customer's number, not any member's hold column).
+//
+// Both card resolutions also lift the NUMBER hold for this call — they
+// are the one human clearance path. (A customer phone edit on its own
+// clears nothing: customer-contact-fanout.js leaves the disclaimed number
+// held, and the replacement simply has no hold row.) The bulk path only
+// reaches here once the customer's phone has already moved to a replacement
+// number (its CALLBACK_NUMBER_UNVERIFIED pre-check), and leaving the old
+// number held after the card is gone would strand it with no remaining way
+// to lift it.
+async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null } = {}) {
   const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
-  return trx('scheduled_services')
+  const visits = await trx('scheduled_services')
     .where({ source_call_log_id: callLogId })
     .whereIn('status', CLEARABLE_SCHEDULED_SERVICE_STATUSES)
     .whereNotNull('callback_number_hold_at')
     .update({
       // call_sms_cleared_at >= callback_number_hold_at by construction
-      // (GREATEST), matching the timestamp rule the hold predicate reads
-      // (appointment-reminders.js's callbackNumberHoldFromRow).
+      // (GREATEST) so the call-level clearance post-dates the hold stamp.
       call_sms_cleared_at: trx.raw('GREATEST(callback_number_hold_at, now())'),
       updated_at: new Date(),
     });
+  const numbers = await require('../services/disclaimed-number-holds').clearDisclaimedNumberHoldsForCall({
+    callLogId, clearedBy, reason: 'callback_card_resolved', conn: trx,
+  });
+  return { visits, numbers };
 }
 
 // Upsert the single current verdict for a call (re-review overwrites). Links to
@@ -342,7 +364,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // the bulk call-verdict route below, which gates its own clearing
       // attempt on an actual phone-on-file check — codex round-4 P2), so it
       // clears unconditionally on Resolve, unchanged from round 2/3.
-      await clearCallbackNumberHold(trx, item.call_log_id);
+      await clearCallbackNumberHold(trx, item.call_log_id, { clearedBy: assignedTo });
     }
     if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
       // A promise exception is not closed by generic bookkeeping alone: the
@@ -1244,9 +1266,10 @@ router.post('/:id/verdict', async (req, res) => {
       // blanket, no-fields-named Deny never reached this far attempting to
       // clear (attemptsCallbackNumberClear false), matching Dismiss's
       // "leave the note, no verified number" semantics on the single-card
-      // path. Same shared helper transitionCore's /resolve uses.
+      // path. Same shared helper transitionCore's /resolve uses (number
+      // hold included — see the helper).
       if (attemptsCallbackNumberClear && resolvedRows.some((r) => r?.reason_code === 'callback_number_needed')) {
-        await clearCallbackNumberHold(trx, item.call_log_id);
+        await clearCallbackNumberHold(trx, item.call_log_id, { clearedBy: req.technicianId });
       }
       if (verdict === 'deny' && denyRejectsUnitEvidence(wrongFields) && resolvedRows.some((r) => r?.reason_code === 'missing_unit_number')) {
         // The call-level Deny is the same human verdict the card's Dismiss

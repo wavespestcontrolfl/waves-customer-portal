@@ -105,35 +105,34 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
-// callback_number_needed hold — STRUCTURAL fix (round 5, PR #4807). Rounds
-// 2 and 4 patched this per sender (safeSendAppointment's one-time entry
-// read, then safeSend's own provider-handoff recheck composed into
-// dispatchCheck) and round 5 caught ANOTHER path doing the same
-// read-once-then-text-later thing (twilio.js's en-route/arrival senders,
-// which dispatch outside safeSend entirely). Rather than keep chasing
-// senders one at a time, the recheck now lives HERE — the one place every
-// appointment-linked SMS passes immediately before the provider handoff —
-// keyed on whichever shape the caller carries the visit id in:
-// appointmentId (en-route, arrival, safeSend/safeSendAppointment) or
-// metadata.scheduled_service_id / metadata.visit_id (appointment-card-
-// request, which never sets a top-level appointmentId at all). A caller
-// that supplies neither has no visit context to check, same as the move
-// hold above.
-function callbackNumberHoldKeyForSend(input) {
-  const scheduledServiceId = input.appointmentId || input.metadata?.scheduled_service_id || null;
-  const visitIdSupplied = input.metadata && Object.prototype.hasOwnProperty.call(input.metadata, 'visit_id');
-  if (!scheduledServiceId && !visitIdSupplied) return null;
-  return visitIdSupplied ? { scheduledServiceId, visitId: input.metadata.visit_id } : scheduledServiceId;
-}
+// callback_number_needed hold — keyed on the DESTINATION NUMBER (codex
+// round 6 on PR #4807, structural). Rounds 2–5 keyed it on the visit
+// (appointmentId / metadata.scheduled_service_id / metadata.visit_id), and
+// every round found another sender with no visit context at all — estimate
+// and invoice follow-ups text customers.phone, which for a call-created
+// customer IS the number the caller disclaimed. The check now reads
+// disclaimed_number_holds for the send's own `to`, so it covers EVERY SMS
+// this pipeline sends regardless of what metadata the caller threads.
+// Checked at step 6.45 (audited block) AND again inside
+// providerPreparationCheck at the provider handoff (round-6 P1: a hold
+// committed during preDispatchCheck or the provider's own async
+// preparation must still stop the send). twilio.js's sendSMS dispatch()
+// runs the same predicate once more as its LAST await before
+// messages.create() — on the caller's handoff transaction when there is
+// one — which is also what covers the legacy callers that reach sendSMS
+// without this pipeline. SMS only — push never dials the number. Fails
+// CLOSED (see disclaimed-number-holds.js).
+const CALLBACK_NUMBER_HOLD_BLOCK = Object.freeze({
+  ok: false,
+  code: 'CALLBACK_NUMBER_HOLD',
+  reason: 'Caller disclaimed this number (callback_number_needed)',
+  // Durable-but-liftable (the office resolving the callback card clears
+  // it) — a retryable miss, never a permanent suppression.
+  retryable: true,
+});
 async function callbackNumberHoldBlocksSend(input) {
-  const key = callbackNumberHoldKeyForSend(input);
-  if (!key) return false;
-  const AppointmentReminders = require('../appointment-reminders');
-  // Defensive only: every real caller gets the function from the actual
-  // module — a test double that mocks appointment-reminders.js without it
-  // degrades to "not held", the pre-round-5 behavior.
-  if (typeof AppointmentReminders.callbackNumberHoldActiveForVisit !== 'function') return false;
-  return AppointmentReminders.callbackNumberHoldActiveForVisit(key);
+  if (input.channel !== 'sms') return false;
+  return require('../disclaimed-number-holds').disclaimedNumberBlocksSend({ to: input.to });
 }
 
 // Annual-offer delivery guard (delivery-guards slice, re-cut of #4569): no
@@ -647,16 +646,11 @@ async function sendCustomerMessageCore(input) {
   }
 
   // 6.45 callback_number_needed hold (see callbackNumberHoldBlocksSend
-  //      above for why this lives here, not in each sender). SMS only —
-  //      channel may already have flipped to 'push' above, and push never
-  //      dials the disclaimed number. Fails CLOSED like the underlying
-  //      predicate: a read error blocks the SMS leg, never clears it —
-  //      every caller here already has (or degrades gracefully without) an
-  //      email fallback for the true-held case. retryable: true because the
-  //      hold is durable-but-liftable (call_sms_cleared_at), matching the
-  //      posture every prior per-sender check already used.
-  if (sendInput.channel === 'sms' && await callbackNumberHoldBlocksSend(sendInput)) {
-    const blocked = { code: 'CALLBACK_NUMBER_HOLD', reason: 'Caller disclaimed this number (callback_number_needed)' };
+  //      above) — every SMS, keyed on `to`. Re-checked at the provider
+  //      boundary below (providerPreparationCheck) and in twilio.js's
+  //      dispatch().
+  if (await callbackNumberHoldBlocksSend(sendInput)) {
+    const blocked = { code: CALLBACK_NUMBER_HOLD_BLOCK.code, reason: CALLBACK_NUMBER_HOLD_BLOCK.reason };
     const audit = await persistAudit({
       input: sendInput,
       policy,
@@ -805,6 +799,14 @@ async function sendCustomerMessageCore(input) {
         { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true },
         'move_hold_boundary',
       );
+    }
+    // callback_number_needed boundary re-check (codex round-6 P1): step
+    // 6.45 ran before preDispatchCheck and the provider's own async
+    // preparation — a hold committed in between (the call pipeline's
+    // booking transaction landing while a follow-up was mid-flight) must
+    // still stop the send here, the same way the move hold above does.
+    if (await callbackNumberHoldBlocksSend(sendInput)) {
+      return rememberBoundaryBlock({ ...CALLBACK_NUMBER_HOLD_BLOCK }, 'callback_number_hold_boundary');
     }
     const callerVerdict = await runCallerPreSendCheck();
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');

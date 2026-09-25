@@ -483,8 +483,15 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
   // the hold. Every LIVE visit for this customer, not just call-linked
   // ones: the corrected number is now the account's phone regardless of
   // which visit's call disclaimed the old one. call_sms_cleared_at >=
-  // callback_number_hold_at by construction (GREATEST), matching the
-  // timestamp rule the hold predicate reads (callbackNumberHoldFromRow).
+  // callback_number_hold_at by construction (GREATEST).
+  // Codex round 6 (structural): the SMS hold itself is now keyed on the
+  // disclaimed NUMBER (disclaimed_number_holds), and this edit deliberately
+  // clears NOTHING there — the old number was never verified. The visits
+  // stop reading as held because the customer's phone on file is now the
+  // new number, which has no hold row (appointment-reminders.js's
+  // callbackNumberHoldActiveForVisit resolves the customer's number). What
+  // this update still carries is call_sms_cleared_at, the call-level SMS
+  // clearance the pre-visit card-request sweep reads.
   // CLEARABLE, not just pending/confirmed (codex round-3 P2, shared with
   // admin-triage.js's clearance writer so the two can never drift): a
   // visit already en_route/on_site is still live and its arrival text must

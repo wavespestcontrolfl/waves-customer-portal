@@ -2552,7 +2552,7 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   return null;
 }
 
-async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false }) {
+async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
   // Codex round-2 finding #4 (PR #4807), tightened round 3: the AUTHORITATIVE
   // stamp for the two main call-booking paths (fresh insert, idempotency-
   // conflict reuse) now lands INSIDE the booking transaction itself
@@ -2576,8 +2576,7 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   // hold_at) keeps reading as cleared while a new review card opens. Fixed
   // by widening the guard to "install a fresh hold whenever this row is not
   // CURRENTLY held" — null hold_at (never held) OR a hold_at that the
-  // row's own cleared_at already satisfies (callbackNumberHoldFromRow's
-  // predicate, inverted) — so a reprocess that raises the flag again always
+  // row's own cleared_at already satisfies — so a reprocess that raises the flag again always
   // gets a hold_at newer than any leftover clearance. Idempotent WITHIN one
   // pass on purpose, not on every retry: once this update lands, hold_at is
   // non-null and cleared_at is null, so the widened guard reads "currently
@@ -2599,6 +2598,13 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
           call_sms_cleared_at: null,
           call_sms_cleared_recipient: null,
         });
+      // Codex round 6 (structural): the number-keyed hold every SMS is
+      // actually checked against (disclaimed-number-holds.js). Idempotent
+      // with the in-transaction write for the main booking paths; this is
+      // the fallback for paths that never ran that transaction.
+      await require('./disclaimed-number-holds').recordDisclaimedNumberHold({
+        phone: disclaimedPhone, customerId, callLogId,
+      });
     } catch (holdErr) {
       holdStampFailed = true;
       logger.error(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId} — refusing to arm messaging: ${holdErr.code || holdErr.name || 'db_error'}`);
@@ -11466,6 +11472,28 @@ const CallRecordingProcessor = {
       );
     }
 
+    // callback_number_needed — NUMBER-keyed hold (codex round 6, PR #4807,
+    // structural). Written here, once the customer is resolved and BEFORE
+    // anything below can text (secondary-contact opt-ins, the booking and
+    // its confirmation, card links, and every later sender that reads
+    // customers.phone or a lead's phone — estimate/invoice follow-ups carry
+    // no visit id at all): sendCustomerMessage checks every SMS `to` against
+    // this row, so the hold no longer depends on a booking existing.
+    // customerId may still be null (shared-phone ambiguity, explicit
+    // unlink) — the hold is number-scoped either way. The booking
+    // transaction writes the same row again (idempotent) and aborts on
+    // failure; a failure HERE is logged loudly and retried by that write
+    // when a booking follows.
+    if (callbackNumberNeededHoldActive) {
+      try {
+        await require('./disclaimed-number-holds').recordDisclaimedNumberHold({
+          phone: contactPhone, customerId: customerId || call.customer_id || null, callLogId: call.id,
+        });
+      } catch (holdErr) {
+        logger.error(`[call-proc] disclaimed-number hold write failed for ${maskSid(callSid)}: ${holdErr.code || holdErr.name || 'db_error'}`);
+      }
+    }
+
     // Secondary-contact persistence (additive, gated, non-blocking). Runs
     // BEFORE the appointment step so a booking made on this same call already
     // fans its confirmation out to the new contact. Kill switch = unset the gate;
@@ -14856,6 +14884,13 @@ const CallRecordingProcessor = {
                 // rather than bumping the timestamp a second time.
                 const stampCallbackNumberHoldForCall = async () => {
                   if (!callbackNumberNeededHoldActive) return;
+                  // Codex round 6 (structural): the NUMBER-keyed hold every
+                  // SMS is checked against, in this same transaction — a
+                  // failure aborts the booking exactly like the visit stamp
+                  // below. Idempotent per (number, call).
+                  await require('./disclaimed-number-holds').recordDisclaimedNumberHold({
+                    phone: contactPhone, customerId, callLogId: call.id, conn: trx,
+                  });
                   await trx('scheduled_services')
                     .where({ source_call_log_id: call.id })
                     .where((qb) => {
@@ -15844,6 +15879,8 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                   callbackNumberHoldActive: callbackNumberNeededHoldActive,
+                  disclaimedPhone: contactPhone,
+                  callLogId: call.id,
                 });
               } else if (attachedManualBookingId) {
                 if (disputeHeldReuse) await noteRetainedVisit();
@@ -15934,6 +15971,8 @@ const CallRecordingProcessor = {
                   serviceType: svc.service_type,
                   closeReminderWindows: !replaySlotStart,
                   callbackNumberHoldActive: callbackNumberNeededHoldActive,
+                  disclaimedPhone: contactPhone,
+                  callLogId: call.id,
                 });
                 // Post-registration slot verify (Codex #3361 r26 P2): the
                 // fresh read above still leaves a gap before the reminder

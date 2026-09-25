@@ -1130,6 +1130,28 @@ const TwilioService = {
             throw err;
           }
         }
+        // callback_number_needed — disclaimed-number hold (PR #4807 codex
+        // round 6, structural). The LAST await before messages.create()
+        // for EVERY SMS, on the caller's handoff transaction when there is
+        // one: sendCustomerMessage checks the same predicate earlier (its
+        // audited step 6.45 and providerPreparationCheck), but legacy
+        // callers reach sendSMS directly, and a hold committed during any
+        // await above must still stop the send. Fails CLOSED (an unreadable
+        // hold reads as held). Internal staff alerts are exempt — they only
+        // ever reach known owner/admin phones (the guard above) and are not
+        // texts to a caller. Mapped through the providerPreSendCheckFailed
+        // shape both catch sites below already translate into a retryable,
+        // never-attempted refusal.
+        if (!isInternalAdminAlertType(options.messageType)) {
+          const { disclaimedNumberBlocksSend } = require('./disclaimed-number-holds');
+          if (await disclaimedNumberBlocksSend({ to, conn: trx || db })) {
+            const err = new Error('Caller disclaimed this number (callback_number_needed)');
+            err.code = 'CALLBACK_NUMBER_HOLD';
+            err.retryable = true;
+            err.providerPreSendCheckFailed = true;
+            throw err;
+          }
+        }
         // Pre-push audit P1 (round 5): the guard above just awaited its own
         // DB reads — real time the send-window boundary re-check (the
         // caller's own preSendCheck, run once, earlier, before this

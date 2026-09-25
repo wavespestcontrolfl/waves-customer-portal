@@ -126,6 +126,13 @@ jest.mock('../routes/admin-sms-templates', () => ({
 jest.mock('../config/twilio-numbers', () => ({
   getOutboundNumber: () => '+19410000000',
 }));
+// callback_number_needed (PR #4807, round 6): the visit-level hold read
+// lives in disclaimed-number-holds.js (number-keyed: is the visit's
+// customer phone an actively held number?). Default: not held.
+const mockDisclaimedNumberHeldForVisit = jest.fn(async () => false);
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberHeldForVisit: (...a) => mockDisclaimedNumberHeldForVisit(...a),
+}));
 
 const {
   requestCardForAppointment,
@@ -1751,12 +1758,17 @@ describe('the email leg (owner delivery rule 2026-07-23: both channels)', () => 
 describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)', () => {
   const HELD_VISIT = { ...VISIT, callback_number_hold_at: new Date(Date.now() - 3600000), call_sms_cleared_at: null };
 
-  // callbackNumberHoldActiveForVisit reads via .select(...), not .first(...)
-  // — keep both handlers in sync so the mock reflects the same row either
-  // query style asks for.
+  beforeEach(() => {
+    mockDisclaimedNumberHeldForVisit.mockReset();
+    mockDisclaimedNumberHeldForVisit.mockResolvedValue(false);
+  });
+
+  // Round 6: "held" is now a property of the customer's NUMBER
+  // (disclaimed_number_holds), read through disclaimedNumberHeldForVisit;
+  // the visit row itself still backs requestCardForAppointment's own load.
   function setHeldVisitFixture(row = HELD_VISIT) {
     mockTableHandlers.scheduled_services.first = () => ({ ...row });
-    mockTableHandlers.scheduled_services.select = () => [{ ...row }];
+    mockDisclaimedNumberHeldForVisit.mockResolvedValue(true);
   }
 
   test('disclaimed ANI + email on file: one invitation email, zero SMS, the claim consumed exactly once', async () => {
@@ -1844,8 +1856,8 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
   });
 
   test('a hold-read failure stays SILENT — never authorizes the email-only path on an unproven hold (codex round-4 finding #1)', async () => {
-    // Only the hold-check's own query (callbackNumberHoldConfirmedForVisit
-    // reads via .select(...)) throws — the visit-load .first() a few lines
+    // Only the hold-check's own read (callbackNumberHoldConfirmedForVisit →
+    // disclaimedNumberHeldForVisit) throws — the visit-load .first() a few lines
     // above it in requestCardForAppointment must keep resolving normally,
     // or the whole request wrongly aborts with a generic 'error:...' skip
     // instead of exercising this specific failure path. Round-2's fix
@@ -1857,7 +1869,7 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
     // authorize the email; an unreadable result now falls through to the
     // exact same delivery_suppressed outcome a plain TCPA block gets.
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT });
-    mockTableHandlers.scheduled_services.select = () => { throw new Error('db down'); };
+    mockDisclaimedNumberHeldForVisit.mockRejectedValue(new Error('db down'));
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
     expect(res.reason).toBe('delivery_suppressed');
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();

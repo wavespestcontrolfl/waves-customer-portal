@@ -43,7 +43,16 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   confirmation/reminder SMS leg for that call (`call-recording-processor.js`
   forces `v2SmsBlocked = true` when the flag is present, regardless of what
   TCPA consent decided — someone else answering that line never gave THIS
-  caller's consent). Never auto-resolved (human verdict only, same as
+  caller's consent). The hold is keyed on the NUMBER, not the visit: the
+  processor records the disclaimed number in `disclaimed_number_holds`
+  (`disclaimed-number-holds.js`), and every SMS — `sendCustomerMessage`
+  (step 6.45 + its provider-boundary recheck) and `twilio.js` `sendSMS`'s
+  final dispatch, so legacy direct callers too — is refused
+  (`CALLBACK_NUMBER_HOLD`, retryable; read errors fail closed) while an
+  uncleared row exists for its destination. Visit notices with an email on
+  file fall back to email. Only resolving the `callback_number_needed` card
+  clears the row; a customer phone edit clears nothing (the new number just
+  has no hold). Never auto-resolved (human verdict only, same as
   `missing_unit_number`) — the office gets a real cell number on the
   callback. The new customer this call creates also gets a `crm_notes` stamp
   (`callerIdDisclaimedNoteText` in `extraction-compat.js`) marking the phone

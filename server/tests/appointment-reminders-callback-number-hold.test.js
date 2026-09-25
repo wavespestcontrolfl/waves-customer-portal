@@ -16,17 +16,14 @@
  * covers that, alongside the crm_notes stamp already written when the
  * customer record was created).
  *
- * The mechanism: call-recording-processor.js persists the hold onto
- * scheduled_services.callback_number_hold_at at booking time; this cron
- * reads it back and, while active, treats the SMS leg as unreachable
- * (returns a plain, non-"held" false from smsAttempt) so the ALREADY
- * EXISTING fallback machinery in deliverAppointmentNotice runs unchanged.
- * The hold is lifted by the SAME durable signal the card-request backstop
- * already honors — call_sms_cleared_at — so once anything stamps that
- * column for the visit (there is currently no dedicated "resolve this
- * callback_number_needed card" UI action that does so; this reuses the
- * general clearance column on purpose so any future resolution flow
- * inherits the reminder fix for free), the very next scan sends normally.
+ * The mechanism (round 6, number-keyed): call-recording-processor.js
+ * records the disclaimed number in disclaimed_number_holds; while the
+ * visit customer's phone on file is an actively held number,
+ * safeSendAppointment treats the SMS leg as unreachable (returns a plain,
+ * non-"held" false from smsAttempt) so the ALREADY EXISTING fallback
+ * machinery in deliverAppointmentNotice runs unchanged. The hold lifts when
+ * the office resolves the callback_number_needed card (the number row is
+ * cleared) or the customer's phone moves to a number with no hold.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -66,11 +63,19 @@ jest.mock('../services/appointment-email', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({})),
 }));
+// Round 6 (PR #4807, structural): "held" is a property of the customer's
+// NUMBER (disclaimed_number_holds), read by safeSendAppointment's pre-check
+// through disclaimedNumberHeldForVisit. Each test sets it explicitly; the
+// row-level read itself is covered in callback-number-hold-boundary.test.js.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberHeldForVisit: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentEmail = require('../services/appointment-email');
 const AppointmentReminders = require('../services/appointment-reminders');
+const { disclaimedNumberHeldForVisit } = require('../services/disclaimed-number-holds');
 
 function chain(overrides = {}) {
   const builder = {};
@@ -144,10 +149,6 @@ function wireSendPathViaEmailFallback(reminderRow, flagUpdate, svcRow) {
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue(svcRow) }), // live-status guard
       chain({ first: jest.fn().mockResolvedValue({ tech_name: null }) }), // getCustomerAndTech join
-      // safeSendAppointment's own callback_number_needed hold check (codex
-      // round-2 finding #7 — the boundary now re-reads the columns itself
-      // rather than trusting a value computed earlier in the scan).
-      chain({ select: jest.fn().mockResolvedValue([svcRow]) }),
     ],
     notification_prefs: [chain({ first: jest.fn().mockResolvedValue(null) })],
     customers: [
@@ -173,8 +174,6 @@ function wireSendPathPlainSms(reminderRow, flagUpdate, svcRow) {
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue(svcRow) }), // live-status guard
       chain({ first: jest.fn().mockResolvedValue({ tech_name: null }) }), // getCustomerAndTech join
-      // safeSendAppointment's own callback_number_needed hold check.
-      chain({ select: jest.fn().mockResolvedValue([svcRow]) }),
     ],
     notification_prefs: [chain({ first: jest.fn().mockResolvedValue(null) })],
     customers: [
@@ -187,6 +186,7 @@ function wireSendPathPlainSms(reminderRow, flagUpdate, svcRow) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  disclaimedNumberHeldForVisit.mockResolvedValue(false);
   AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValue({ ok: true });
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
@@ -199,6 +199,7 @@ afterEach(() => {
 });
 
 test('disclaimed ANI + email on file: the 72h reminder is delivered by email, never texted to the ANI', async () => {
+  disclaimedNumberHeldForVisit.mockResolvedValue(true);
   const reminderRow = row72();
   const flagUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
   wireSendPathViaEmailFallback(reminderRow, flagUpdate, {
@@ -221,6 +222,7 @@ test('disclaimed ANI + email on file: the 72h reminder is delivered by email, ne
 
 test('disclaimed ANI + no email on file: neither channel reaches the customer — held, no SMS to the ANI', async () => {
   AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValueOnce({ skipped: true, reason: 'missing_email' });
+  disclaimedNumberHeldForVisit.mockResolvedValue(true);
   const reminderRow = row72();
   const flagUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
   wireSendPathViaEmailFallback(reminderRow, flagUpdate, {
@@ -242,18 +244,17 @@ test('disclaimed ANI + no email on file: neither channel reaches the customer �
   expect(results.sent72h).toBe(1);
 });
 
-test('clearing the hold (call_sms_cleared_at stamped) resumes normal SMS sending', async () => {
+test('once the number hold is lifted (card resolved, or the customer phone moved to an unheld number) the reminder texts normally', async () => {
+  disclaimedNumberHeldForVisit.mockResolvedValue(false);
   const reminderRow = row72();
   const flagUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
   wireSendPathPlainSms(reminderRow, flagUpdate, {
     status: 'confirmed',
-    // A prior call stamped the hold, but this visit's call-level SMS
-    // clearance has SINCE been recorded (call_sms_cleared_at set) — the
-    // durable signal any clearance flow uses (call-recording-processor.js's
-    // own confirm-leg stamp, or an office-confirm hook). The hold reads as
-    // resolved regardless of when callback_number_hold_at was set.
+    // The per-visit stamp is still there (it is an audit trail now) — no
+    // send decision reads it, so it cannot keep the visit held once the
+    // number itself is no longer held.
     callback_number_hold_at: new Date(Date.now() - 3600000),
-    call_sms_cleared_at: new Date(),
+    call_sms_cleared_at: null,
   });
 
   const results = await AppointmentReminders.checkAndSendReminders();
@@ -268,27 +269,17 @@ test('clearing the hold (call_sms_cleared_at stamped) resumes normal SMS sending
 
 /**
  * Finding #2 (round 4 P1, PR #4807) used to close the entry-read/provider-
- * handoff race by rechecking the hold a second time inside safeSend's own
- * dispatchCheck, composed ahead of any caller preDispatchCheck. Round 5
- * found the identical race shape in a sender that never went through
- * safeSend at all (twilio.js's en-route/arrival) — a structural signal
- * that per-sender rechecks would keep needing to be chased one at a time.
- * The recheck now lives ONCE, inside sendCustomerMessage itself (the
- * actual provider chokepoint every one of these sends passes, keyed on the
- * appointmentId every safeSend call already threads — see
- * callback-number-hold-boundary and send-customer-message-callback-
- * number-hold for the coverage this test used to provide here). This file
- * keeps only the entry-read tests above (which safeSendAppointment still
- * owns, for the email-fallback decision) plus the structural check below
- * that safeSend still threads appointmentId through to sendCustomerMessage
- * so the chokepoint has something to key on.
+ * handoff race by rechecking the hold inside safeSend's own dispatchCheck;
+ * round 5 moved that recheck into sendCustomerMessage keyed on the visit,
+ * and round 6 re-keyed it on the send's own destination number (every
+ * SMS, with or without visit metadata — see send-customer-message-
+ * callback-number-hold.test.js). This file keeps the entry-read tests
+ * above (safeSendAppointment still owns the email-fallback decision) plus
+ * this check that the pre-check is asked about the right visit and the
+ * chokepoint gets the real destination number.
  */
-test('safeSend threads appointmentId (from metaExtra.scheduled_service_id) into sendCustomerMessage, so the chokepoint recheck has a key', async () => {
+test('safeSendAppointment asks the hold about THIS visit, and hands sendCustomerMessage the contact number the chokepoint keys on', async () => {
   wireDb({
-    scheduled_services: [
-      chain({ first: jest.fn().mockResolvedValue({ visit_id: null }) }), // owner-visitId backfill (entry check)
-      chain({ select: jest.fn().mockResolvedValue([{ callback_number_hold_at: null, call_sms_cleared_at: null }]) }), // entry check's hold read
-    ],
     customers: [
       chain({ first: jest.fn().mockResolvedValue(CUSTOMER) }), // isLandline's customer read
     ],
@@ -300,7 +291,8 @@ test('safeSend threads appointmentId (from metaExtra.scheduled_service_id) into 
   );
 
   expect(sent).toBe(true);
+  expect(disclaimedNumberHeldForVisit).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1' });
   expect(sendCustomerMessage).toHaveBeenCalledWith(
-    expect.objectContaining({ appointmentId: 'svc-1' }),
+    expect.objectContaining({ to: CUSTOMER.phone, appointmentId: 'svc-1' }),
   );
 });

@@ -230,3 +230,42 @@ describe('round-5 P1 — a reprocess that re-raises the hold always refreshes ca
     }
   });
 });
+
+describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the visit hold is, plus before any non-booking send', () => {
+  test('stampCallbackNumberHoldForCall records the disclaimed number on the booking trx (uncaught — a failure aborts the booking)', () => {
+    const idx = src.indexOf('const stampCallbackNumberHoldForCall');
+    const body = src.slice(idx, src.indexOf("await trx('scheduled_services')", idx));
+    expect(body).toMatch(/recordDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId, callLogId: call\.id, conn: trx,\s*\}\)/);
+    expect(body).not.toMatch(/catch/);
+  });
+
+  test('registerScheduleSideEffects records it inside the same try whose failure refuses to arm messaging', () => {
+    const idx = src.indexOf('async function registerScheduleSideEffects');
+    const body = src.slice(idx, src.indexOf('if (!holdStampFailed)', idx));
+    const rec = body.indexOf('recordDisclaimedNumberHold');
+    expect(rec).toBeGreaterThan(-1);
+    expect(body.indexOf('holdStampFailed = true')).toBeGreaterThan(rec);
+    expect(body).toMatch(/disclaimedPhone = null, callLogId = null/);
+  });
+
+  test('both registerScheduleSideEffects call sites pass the disclaimed number and the call id', () => {
+    const sites = src.split('callbackNumberHoldActive: callbackNumberNeededHoldActive,').slice(1);
+    expect(sites).toHaveLength(2);
+    for (const site of sites) {
+      expect(site.slice(0, 200)).toMatch(/disclaimedPhone: contactPhone,\s*callLogId: call\.id,/);
+    }
+  });
+
+  test('a write lands once the customer is resolved and BEFORE secondary-contact opt-ins and the booking — so a call that books nothing (estimate/invoice follow-ups later text customers.phone) is still held', () => {
+    const write = src.indexOf("callback_number_needed — NUMBER-keyed hold (codex round 6");
+    expect(write).toBeGreaterThan(src.indexOf('// Step 3: Create or update customer'));
+    expect(write).toBeLessThan(src.indexOf('// Secondary-contact persistence (additive, gated, non-blocking)'));
+    expect(write).toBeLessThan(src.indexOf('const stampCallbackNumberHoldForCall'));
+    const block = src.slice(write, src.indexOf('// Secondary-contact persistence', write));
+    expect(block).toMatch(/if \(callbackNumberNeededHoldActive\)/);
+    expect(block).toMatch(/phone: contactPhone, customerId: customerId \|\| call\.customer_id \|\| null, callLogId: call\.id/);
+    // Code/name only — never a message that could echo the number.
+    expect(block).toMatch(/holdErr\.code \|\| holdErr\.name/);
+    expect(block).not.toMatch(/holdErr\.message/);
+  });
+});

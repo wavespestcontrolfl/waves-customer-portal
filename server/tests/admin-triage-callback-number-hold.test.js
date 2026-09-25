@@ -205,9 +205,19 @@ function fixture(extra = {}) {
       // after the office confirms the number here.
       { id: RESCHEDULED_VISIT_ID, source_call_log_id: CALL_ID, status: 'rescheduled', callback_number_hold_at: new Date('2030-01-07T10:00:00Z'), call_sms_cleared_at: null },
     ],
+    // Round 6 (structural): the NUMBER-keyed hold this call placed — the
+    // row every SMS `to` is actually checked against. Plus a hold a
+    // DIFFERENT call placed on another number, which no action on this
+    // card may touch.
+    disclaimed_number_holds: [
+      { id: 'hold-1', phone_e164: '+19415551234', source_call_log_id: CALL_ID, customer_id: CUSTOMER_ID, cleared_at: null },
+      { id: 'hold-other', phone_e164: '+19415550000', source_call_log_id: 'call-other', customer_id: 'cust-other', cleared_at: null },
+    ],
     ...extra,
   });
 }
+
+const numberHold = (tables, id = 'hold-1') => tables.disclaimed_number_holds.find((h) => h.id === id);
 
 beforeEach(() => { db.mockReset(); });
 
@@ -228,6 +238,19 @@ describe('PUT /admin/triage/:id/resolve on a callback_number_needed card', () =>
     // A cancelled (non-live) visit from the SAME call is untouched.
     const cancelled = tables.scheduled_services.find((s) => s.id === CANCELLED_VISIT_ID);
     expect(cancelled.call_sms_cleared_at).toBeNull();
+  });
+
+  test('round 6: resolving lifts the NUMBER hold this call placed (cleared_at + who + why), and no other call\'s', async () => {
+    const { conn, tables } = fixture();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Confirmed her cell — texts should go there now.' });
+      expect(res.status).toBe(200);
+    });
+    expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
+    expect(numberHold(tables).cleared_by).toBe('tech-1');
+    expect(numberHold(tables).clear_reason).toBe('callback_card_resolved');
+    expect(numberHold(tables, 'hold-other').cleared_at).toBeNull();
   });
 
   test('codex round-3 P2: an en_route visit (tech already rolling) still clears — nonterminal, not just pending/confirmed', async () => {
@@ -278,6 +301,7 @@ describe('PUT /admin/triage/:id/dismiss on a callback_number_needed card', () =>
     expect(tables.triage_items[0].status).toBe('dismissed');
     const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
     expect(held.call_sms_cleared_at).toBeNull();
+    expect(numberHold(tables).cleared_at).toBeNull();
   });
 });
 
@@ -305,6 +329,10 @@ describe('POST /admin/triage/:id/verdict on a callback_number_needed card', () =
     expect(held.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
     const enRoute = tables.scheduled_services.find((s) => s.id === EN_ROUTE_VISIT_ID);
     expect(enRoute.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
+    // Round 6: the card is the one human clearance path for the number hold
+    // too — leaving it held after the card is gone would strand it.
+    expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
+    expect(numberHold(tables, 'hold-other').cleared_at).toBeNull();
   });
 
   test('Accept with the customer phone still == the disclaimed ANI refuses 409 CALLBACK_NUMBER_UNVERIFIED — nothing resolves, nothing clears', async () => {
@@ -322,6 +350,7 @@ describe('POST /admin/triage/:id/verdict on a callback_number_needed card', () =
     expect(tables.triage_items[0].status).toBe('open');
     const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
     expect(held.call_sms_cleared_at).toBeNull();
+    expect(numberHold(tables).cleared_at).toBeNull();
   });
 
   test('a differently-formatted but equal ANI (dashes, leading 1) still counts as unverified — digits compare, not string compare', async () => {
