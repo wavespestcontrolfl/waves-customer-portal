@@ -825,15 +825,6 @@ function mapV1ToLegacyShape(v1Result) {
     // recurring row and `detail` is the no-visits fallback / JSON field.
     ...(pestLI?.scopeNote ? { detail: pestLI.scopeNote, scopeNote: pestLI.scopeNote } : {}),
   });
-  // NOTE (Codex round 4 P0 on #4789): palmCount is deliberately NOT carried
-  // onto this row any more (rounds 1-3 tried gating it here, but
-  // one-tap-purchase.js writes a RAW engine line straight into
-  // result.recurring.services[] for its own recurring row, so a downstream
-  // reader can never tell a gated mapper row from an ungated raw one just by
-  // looking at it). The palm-care bullet's ONE evidence/stamping chokepoint
-  // now lives entirely in estimate-public.js (treeShrubPalmCountForEstData +
-  // stampTreeShrubPalmCount) — R.tsMeta.palmCount below (unconditional, as
-  // always) is the evidence that chokepoint reads for a mapped estimate.
   svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)

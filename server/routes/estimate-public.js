@@ -3785,15 +3785,6 @@ function recurringServicesWithSupplements(estResult = {}) {
           : {}),
         perTreatment: firstPositiveNumber(item.perApp, item.perVisit),
         visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
-        // NOTE (Codex round 4 P0 on #4789): palmCount is deliberately NOT
-        // carried here any more — one-tap-purchase.js stores a RAW engine
-        // line straight into result.recurring.services[], so this row can
-        // be either a gated mapper row OR an ungated raw one depending on
-        // the save path, and no per-builder carry can tell them apart. The
-        // ONE place palmCount is ever set on a bundle row is
-        // stampTreeShrubPalmCount (buildPricingBundle's chokepoint), which
-        // overwrites/strips it on every tree_shrub row unconditionally —
-        // any value a producer puts here is inert and gets replaced.
         // Carry cadence (foam) so pattern inference / cadence-aware shapers don't
         // fall back to the monthly billing key; null for services without one.
         cadence: item.cadence || null,
@@ -17016,10 +17007,6 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         // copy (owner ruling 2026-08-11 #5) — the React card renders it
         // under the treatment row, same as renderPage's card note.
         ...(li.scopeNote ? { scopeNote: String(li.scopeNote) } : {}),
-        // NOTE (Codex round 4 P0 on #4789): palmCount is deliberately NOT
-        // carried here — see recurringServicesWithSupplements' upsertSupplement
-        // above for why per-builder carries were removed. The ONE place it's
-        // ever set is stampTreeShrubPalmCount, buildPricingBundle's chokepoint.
       };
     });
   const sameDayTreatmentTotal = perServiceTreatments.reduce(
@@ -21691,20 +21678,6 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     included: includedRowsForServiceFrequency(baseFrequency, key, recurringService),
     addOns: allowAddOns && Array.isArray(baseFrequency.addOns) ? baseFrequency.addOns : [],
     quoteRequired: false,
-    // NOTE (Codex round 4 P0 on #4789): palmCount is deliberately NOT carried
-    // here any more — a split single-service T&S card is ROWLESS by
-    // construction (no perServiceTreatments), and the client's row-level
-    // palm bullet can't fire for it, so the count must ride on
-    // frequency.palmCount instead — but every upstream row/service shape
-    // that could feed `row` here can be either a gated mapper row or an
-    // ungated raw one (one-tap-purchase.js), so no per-builder carry can
-    // tell them apart. buildPricingBundle's chokepoint (stampTreeShrubPalmCount)
-    // sets frequency.palmCount directly on this exact shape post-hoc, once
-    // it is nested under a services[] section classified tree_shrub — see
-    // its own comment for the classification rule and why a synthetic
-    // perServiceTreatments row here would be higher risk (it would flip
-    // PriceCard's isRowless/price-display and booking-math branches for a
-    // card whose price/behavior must stay unchanged).
   };
 }
 
@@ -21738,9 +21711,6 @@ function frequencyFromRecurringService(recurringService = {}, key, recurringDisc
     included: includedRowsForServiceFrequency({}, key, recurringService),
     addOns: [],
     quoteRequired: false,
-    // NOTE (Codex round 4 P0 on #4789): no palmCount carry here either — see
-    // frequencyFromTreatmentRow's comment. This is the no-matching-row
-    // fallback path (same rowless T&S shape).
   };
 }
 
@@ -23922,13 +23892,6 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
         monthlyBase: hasMonthly ? rawMonthly : null,
         monthly: hasMonthly ? roundMonthly(discountMonthly(rawMonthly, svc)) : null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(svc),
-        // NOTE (Codex round 4 P0 on #4789): palmCount is deliberately NOT
-        // carried here any more — v1.services can be either a gated mapper
-        // row or an ungated raw one (one-tap-purchase.js stores a raw engine
-        // line straight into result.recurring.services[]), and no per-builder
-        // carry can tell them apart from this vantage point. The ONE place
-        // palmCount is ever set is stampTreeShrubPalmCount, buildPricingBundle's
-        // chokepoint, applied to the FINAL bundle after this function returns.
       });
     });
   }
