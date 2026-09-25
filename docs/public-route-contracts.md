@@ -909,6 +909,8 @@ estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
 on both paths; the response otherwise describes only the requested parcel).
 Operational `meta.providerStatus` (credential configuration and attempted-provider
 health) is staff-only; `publicLookupMeta` removes it from every public response.
+The public `errors` array includes only the known outside-service-area verdict;
+`publicLookupErrors` removes provider failures and internal diagnostic messages.
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,
