@@ -435,6 +435,39 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 
+  test('codex #4819 r6 P2: a deferred (sign-before-pay) accept quotes the park\'s FROZEN total — Station Setup included — never the setup-less display figure', async () => {
+    resetStore(recurringPestEstimate());
+    // Prepay requires a picked appointment; a sign-before-pay accept keeps it
+    // only as a preference (nothing is committed).
+    const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+    db.__state.tables.scheduled_services = [{
+      id: 'ss-prepay-hold', source_estimate_id: 'est-atomic-1',
+      customer_id: null, technician_id: null, status: 'pending',
+      scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00',
+      estimated_duration_minutes: 60,
+      reservation_expires_at: new Date(Date.now() + 15 * 60000),
+    }];
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      annualPlanActivationStatus: 'awaiting_signature',
+      annualPlanDeferredTotal: 448,
+    });
+
+    const response = await putAccept('tok-atomic-1-x0123456789', {
+      paymentMethodPreference: 'prepay_annual',
+      slotId: `${scheduledDate}_09-00_unassigned`,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.data.nextStep).toBe('sign_agreement');
+    expect(response.data.invoiceAmount).toBe(448);
+    expect(response.data.prepayInvoiceAmount).toBe(448);
+    expect(response.data.invoicePayUrl == null).toBe(true);
+    const NotificationService = require('../services/notification-service');
+    const estimateNotice = NotificationService.notifyAdmin.mock.calls.find((call) => call[0] === 'estimate');
+    expect(estimateNotice[2]).toContain('($448.00)');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
   test('conversion failure rolls the acceptance back (5xx, estimate stays retryable) and a retry succeeds', async () => {
     resetStore(recurringPestEstimate());
     EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
