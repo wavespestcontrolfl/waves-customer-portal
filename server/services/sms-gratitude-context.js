@@ -46,6 +46,16 @@ function gratitudeActivation() {
 // its 24-hour window after the gate is disabled. Clear the stamp only after
 // that window. Never stamped and gate off means no claim can exist, so those
 // paths stay an exact pass-through while the lane is dark.
+// First enable (gate + activation stamp set by a rolling deployment): old
+// instances still read both unset and do not coordinate. A process therefore
+// makes no gratitude claim until it has run longer than any deploy overlap,
+// by which time every instance serving sends reads the same stamp.
+const GRATITUDE_ROLLOUT_SETTLE_MS = 15 * 60 * 1000;
+
+function gratitudeRolloutSettled() {
+  return process.uptime() * 1000 >= GRATITUDE_ROLLOUT_SETTLE_MS;
+}
+
 function gratitudeClaimsPossible() {
   return require('../config/feature-gates').isEnabled('smsGratitudeReplies')
     || gratitudeActivation() !== null;
@@ -303,6 +313,8 @@ module.exports = {
   jsonArray,
   gratitudeActivation,
   gratitudeClaimsPossible,
+  gratitudeRolloutSettled,
+  GRATITUDE_ROLLOUT_SETTLE_MS,
   validateGratitudeDraftContract,
   mediaCountFromMetadata,
   pendingGratitudeWork,

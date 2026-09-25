@@ -52,6 +52,7 @@ const {
   pendingGratitudeWork,
   readGratitudeContext,
   gratitudeThreadAdvanced,
+  gratitudeRolloutSettled,
 } = require('./sms-gratitude-context');
 
 const AUTOSEND_WORKFLOW = 'sms_house_voice_auto_send';
@@ -296,6 +297,8 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
  * not conceal operational work.
  */
 async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Date() }) {
+  // Process-local, so it needs no lock: see GRATITUDE_ROLLOUT_SETTLE_MS.
+  if (!gratitudeRolloutSettled()) return null;
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     const anchor = await trx('sms_log').where({ id: smsLogId, direction: 'inbound' })
@@ -621,6 +624,15 @@ async function pinDraftVoiceProfile({ intent, voiceProfileVersion = null }) {
  */
 function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
   return async ({ dbi = db } = {}) => {
+    // Shared readiness first; the mutable thread reads are the LAST awaits
+    // before provider entry, because inbound webhooks do not take the lock.
+    const modeRow = await dbi('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
+    const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
+      intent: GRATITUDE_INTENT,
+      dbi,
+      voiceProfileVersion: eligibilityPin.voiceProfileVersion ?? null,
+      gratitudeSourceDigest: eligibilityPin.sourceDigest,
+    });
     const pendingWork = await pendingGratitudeWork(dbi, {
       customerId: claim.customerId,
       threadKey: claim.threadKey,
@@ -636,13 +648,6 @@ function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
       inboundCreatedAt: claim.inboundCreatedAt,
       now: new Date(),
       activatedAt: gratitudeActivation(),
-    });
-    const modeRow = await dbi('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
-    const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
-      intent: GRATITUDE_INTENT,
-      dbi,
-      voiceProfileVersion: eligibilityPin.voiceProfileVersion ?? null,
-      gratitudeSourceDigest: eligibilityPin.sourceDigest,
     });
     const reason = pendingWork ? 'pending_work'
       : advanced ? 'thread_advanced'
@@ -829,6 +834,9 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
     .where('s.created_at', '>', activatedAt)
     .where('s.created_at', '>=', new Date(now.getTime() - MAX_REPLY_AGE_MS))
     .where('s.created_at', '<=', new Date(now.getTime() - QUIET_WINDOW_MS))
+    // A draft is written after its inbound, so the same floor bounds the
+    // draft side too (served by the message_drafts created_at index).
+    .where('md.created_at', '>=', new Date(now.getTime() - MAX_REPLY_AGE_MS))
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'source' = 'live_webhook'")
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'policy_version' = ?", [GRATITUDE_POLICY_VERSION])
     .whereRaw("md.intended_actions::jsonb->'gratitude'->>'actions_verified_safe' = 'true'")
@@ -893,6 +901,7 @@ async function processGratitudeAutoSendCandidates({ now = new Date(), pageSize =
   if (!activatedAt || activatedAt.getTime() > now.getTime()) {
     return { scanned: 0, attempted: 0, sent: 0, reason: 'activation_unset' };
   }
+  if (!gratitudeRolloutSettled()) return { scanned: 0, attempted: 0, sent: 0, reason: 'rollout_settling' };
   const totals = { scanned: 0, attempted: 0, sent: 0 };
   const seenInbounds = new Set();
   let gratitudeSourceDigest = null;

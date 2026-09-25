@@ -256,10 +256,14 @@ function attempt(overrides = {}) {
   });
 }
 
+let uptime;
 beforeEach(() => {
   jest.clearAllMocks();
   resetFixture();
+  // Past the rollout-settle window unless a test says otherwise.
+  uptime = jest.spyOn(process, 'uptime').mockReturnValue(60 * 60);
 });
+afterEach(() => uptime.mockRestore());
 
 test('gratitude gate is independent: gate off blocks even when general auto-send is on', async () => {
   mockState.gratitudeGate = false;
@@ -584,6 +588,30 @@ test.each([
   expect(graduation.evaluateAutoSendEligibility).toHaveBeenLastCalledWith(expect.objectContaining({
     intent: GRATITUDE_INTENT, dbi: db, voiceProfileVersion: null,
   }));
+});
+
+test('a freshly started instance makes no gratitude claim until the rollout settles', async () => {
+  uptime.mockReturnValue(14 * 60);
+  mockState.candidateRows = [sweepCandidate()];
+  await expect(autoSend.processGratitudeAutoSendCandidates({ now: new Date() }))
+    .resolves.toEqual({ scanned: 0, attempted: 0, sent: 0, reason: 'rollout_settling' });
+  // The claim itself enforces the same window for any other caller.
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'guarded_or_claimed' });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
+test('a new inbound landing during the boundary eligibility read still blocks the handoff', async () => {
+  sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
+    graduation.evaluateAutoSendEligibility.mockImplementationOnce(async () => {
+      mockState.threadAdvanced = true;
+      return { eligible: true, blockers: [] };
+    });
+    const check = await providerPreSendCheck({ dbi: db });
+    return check.ok
+      ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'1'.repeat(32)}` }
+      : { sent: false, deliveryOutcome: 'not_sent', code: check.code };
+  });
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'thread_advanced' });
 });
 
 test('demoting the intent during provider preparation blocks the final handoff', async () => {
