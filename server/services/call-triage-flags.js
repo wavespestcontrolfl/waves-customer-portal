@@ -1134,7 +1134,15 @@ const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = /\b(?:tell|ask|have|get) (?:him|her|th
 // set. The auxiliary + authorization-verb anchor is unchanged: "We have
 // confirmed" / "I have okayed it" never match ("confirm"/"okay" must end at
 // a word boundary), so the past-tense reinforcement forms still ground.
-const SUBJECT_LED_APPROVAL_NEED_RE = /\b(?:i|we|you|he|she|they|someone|the owner|the homeowner|the client|y all|you guys) (?:need|needs|have|has|got|gotta|must)(?: to)? (?:confirm|approve|sign off|sign|okay|ok|authorize|give the go ahead)(?: it| on it)?\b/;
+// Codex round 12, P1 (:1137): a FUTURE/MODAL auxiliary between the subject
+// and the need-auxiliary — "You'll need to okay it." normalizes to "you ll
+// need to okay it", and "ll"/"will" are whitelisted, so the subject was never
+// directly followed by "need". Up to two modal/adverb tokens (ll/will/would/
+// d/should/may/might/shall/re going to/are going to/going to/gonna/still/
+// also/just) may now sit between them — "you'll need to", "you will have
+// to", "they're going to need to", "he'll still have to". Only widens what
+// poisons; the auxiliary + authorization-verb anchor is unchanged.
+const SUBJECT_LED_APPROVAL_NEED_RE = /\b(?:i|we|you|he|she|they|someone|the owner|the homeowner|the client|y all|you guys) (?:(?:ll|will|would|d|should|may|might|shall|re going to|are going to|is going to|going to|re gonna|are gonna|gonna|still|also|just) ){0,2}(?:need|needs|have|has|got|gotta|must)(?: to)? (?:confirm|approve|sign off|sign|okay|ok|authorize|give the go ahead)(?: it| on it)?\b/;
 // Unconditional declarative-poison check (codex rounds 2, 4, 7, 9 and this
 // round): either term list, or any anchored shape, anywhere in the sentence
 // poisons regardless of conditional structure. Restored as a real function

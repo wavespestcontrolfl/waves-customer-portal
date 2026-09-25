@@ -1469,6 +1469,18 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   test.each([
+    "You'll need to okay it. We'll see you Sunday at noon.",
+    "You will have to sign off on it. We'll see you Sunday at noon.",
+    "They're going to need to approve it. We'll see you Sunday at noon.",
+    "He'll still have to confirm. We'll see you Sunday at noon.",
+  ])('Codex round-13 regression: modal subject-led approval requirement poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
     "We'll see you Sunday at noon. We are all booked.",
     "We'll see you Sunday at noon. We're booked.",
   ])('Codex round-12 regression: "We are (all) booked." is a capacity statement and poisons — %s', (turn) => {
