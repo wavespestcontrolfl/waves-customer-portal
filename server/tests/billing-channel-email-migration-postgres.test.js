@@ -6,6 +6,7 @@ const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const seed = require('../models/migrations/20260924010300_billing_notice_email_template');
 const correction = require('../models/migrations/20260924010400_billing_notice_remove_duplicate_greeting');
+const requiredVariables = require('../models/migrations/20260924010500_billing_notice_required_variables');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -43,6 +44,7 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
     try {
       await seed.up(probe);
       await correction.up(probe);
+      await requiredVariables.up(probe);
       expect(await probe('email_templates').where({ template_key: 'billing.notice' })).toHaveLength(1);
       expect(await probe('email_template_versions')).toHaveLength(2);
       expect(await probe('audit_log').where({ action: 'email_template.seeded' })).toHaveLength(1);
@@ -62,6 +64,7 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
       await editedProbe('email_templates').where({ id: editedTemplate.id })
         .update({ required_variables: JSON.stringify(customRequired) });
       await correction.up(editedProbe);
+      await requiredVariables.up(editedProbe);
       const correctedTemplate = await editedProbe('email_templates').where({ id: editedTemplate.id }).first();
       expect(correctedTemplate.required_variables).toEqual(customRequired);
       await editedProbe('email_template_versions').where({ id: correctedTemplate.active_version_id }).update({ status: 'archived' });
@@ -73,6 +76,7 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
       await editedProbe('email_template_fixtures').where({ template_id: editedTemplate.id })
         .update({ payload: { notification_body: 'Operator fixture' } });
       await correction.up(editedProbe);
+      await requiredVariables.up(editedProbe);
       expect(await editedProbe('email_template_versions').where({ template_id: editedTemplate.id })).toHaveLength(3);
       expect((await editedProbe('email_templates').where({ id: editedTemplate.id }).first()).active_version_id).toBe(edited.id);
       expect((await editedProbe('email_templates').where({ id: editedTemplate.id }).first()).required_variables)
@@ -86,6 +90,7 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
     await db.transaction(async (trx) => {
       await seed.up(trx); await seed.up(trx);
       await correction.up(trx); await correction.up(trx);
+      await requiredVariables.up(trx); await requiredVariables.up(trx);
     });
     const template = await db('email_templates').where({ template_key: 'billing.notice' }).first();
     const versions = await db('email_template_versions').where({ template_id: template.id }).orderBy('version_number');
@@ -128,9 +133,9 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
     expect(corrections[0]).toMatchObject({
       actor_type: 'system', resource_type: 'email_template', resource_id: template.id,
       metadata: { templateKey: 'billing.notice', migration: '20260924010400_billing_notice_remove_duplicate_greeting',
-        priorVersionId: versions[0].id, publishedVersionId: versions[1].id, fixtureCorrected: true,
-        requiredVariablesCorrected: true },
+        priorVersionId: versions[0].id, publishedVersionId: versions[1].id, fixtureCorrected: true },
     });
+    expect(await db('audit_log').where({ action: 'email_template.required_variables_corrected' })).toHaveLength(1);
 
     await db('email_template_versions').where({ id: versions[1].id }).update({ status: 'archived' });
     const [operatorVersion] = await db('email_template_versions').insert({
@@ -143,7 +148,10 @@ postgres('billing.notice email-template migration (PostgreSQL)', () => {
 
     await db('email_template_fixtures').where({ template_id: template.id })
       .update({ payload: { notification_body: 'Operator fixture after correction' } });
-    await db.transaction(async (trx) => { await seed.up(trx); await correction.up(trx); });
+    await db.transaction(async (trx) => {
+      await seed.up(trx); await correction.up(trx); await requiredVariables.up(trx);
+    });
+    await requiredVariables.down(db);
     await correction.down(db);
     await seed.down(db);
     expect(await db('email_templates').where({ id: template.id }).first()).toMatchObject({
