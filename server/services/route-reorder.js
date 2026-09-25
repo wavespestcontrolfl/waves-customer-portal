@@ -606,7 +606,11 @@ const ROUTE_WRITE_GUARD_COLUMNS = ['window_start', 'window_end', 'time_window',
   // them must find them on BOTH sides of the lock, or every write aborts as
   // stale (codex round 5 P1).
   'customer_id', 'service_address_line1', 'service_address_line2',
-  'service_address_city', 'service_address_zip'];
+  'service_address_city', 'service_address_zip',
+  // Planning-minute inputs (scheduling/planning-minutes.js): with
+  // GATE_SCHEDULING_CAPACITY on, workDuration reads them, so both sides of
+  // the lock must carry them or every signature differs.
+  'service_type', 'is_recurring', 'is_callback'];
 
 /** The customer's primary premise, aliased the way effectiveServiceAddress
  *  (and stampedAddressDiverges) expect. An UNSTAMPED row resolves its premise
@@ -978,6 +982,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             'scheduled_services.estimated_duration_minutes',
             'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
             'scheduled_services.service_type',
+            'scheduled_services.is_recurring', 'scheduled_services.is_callback',
             'scheduled_services.zone', 'scheduled_services.created_at',
             ...guardedCoordSelects(conn),
           ],
@@ -1302,6 +1307,9 @@ async function runRouteReorder(opts = {}, conn = db) {
                     customer_city: 'customers.city',
                     customer_state: 'customers.state',
                     customer_zip: 'customers.zip' },
+                  // Planning-minute inputs, as selected at day-load.
+                  'scheduled_services.service_type', 'scheduled_services.is_recurring',
+                  'scheduled_services.is_callback',
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
               // Full guard-input signature (shared with the admin optimize

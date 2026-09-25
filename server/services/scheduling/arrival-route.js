@@ -35,6 +35,8 @@ const COLUMNS = [
   // all four (street, unit, zip, city).
   'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
   'reservation_service_mix', 'reservation_policy_version',
+  // Planning-minute inputs (planning-minutes.js), with service_type above.
+  'is_recurring', 'is_callback',
 ];
 
 function arrivalWindowRoutingEnabled() {
@@ -181,6 +183,23 @@ function unverified(target, date) {
   };
 }
 
+/** A stored order that is not a whole, window-ordered sequence: a stop with
+ *  no position, two stops sharing one, or a later promise numbered ahead of
+ *  an earlier one. */
+function storedOrderStale(rows) {
+  const positions = rows.map(row => row.route_order);
+  if (positions.some(p => p == null) || new Set(positions.map(Number)).size !== positions.length) return true;
+  const starts = currentOrder(rows).map(row => (row.arrivalRange || effectiveWindowRange(row))?.startMin)
+    .filter(Number.isFinite);
+  return starts.some((start, i) => i > 0 && start < starts[i - 1]);
+}
+
+/** The day in promised-window order, ignoring stored positions. */
+function clockOrder(rows) {
+  const byId = new Map(rows.map(row => [row.id, row]));
+  return currentOrder(rows.map(row => ({ ...row, route_order: null }))).map(row => byId.get(row.id));
+}
+
 function routeDriveMinutes(stops, origin) {
   let prev = origin;
   let total = 0;
@@ -208,6 +227,9 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     // r3/r4 P1). A genuinely long service is still covered: the chain's
     // floor is the longest member's workDuration, which includes it.
     raw_estimate_minutes: Number(context.target?.estimated_duration_minutes) || 0,
+    // The placed visit keeps its caller's allowance; owner planning minutes
+    // (planning-minutes.js) apply to the stops already on the route.
+    planning_exempt: true,
     estimated_duration_minutes: context.prospective ? Number(durationMinutes)
       : Math.max(workDuration(context.target), Number(durationMinutes) || 0),
   };
@@ -239,17 +261,24 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (!hasCoords(origin) || pending.some(row => !hasCoords(row))) return unverified(target, date);
   const groupedPending = capacity ? groupRouteStops(pending) : pending;
   if (!groupedPending) return unverified(target, date);
-  const baseline = currentOrder(groupedPending);
-  const orders = capacity && allowInsertion && (context.prospective || context.insertTarget)
-    ? Array.from({ length: baseline.length + 1 }, (_, i) => [...baseline.slice(0, i), target, ...baseline.slice(i)])
-    : [currentOrder([...baseline, target])];
+  // Clock-order fallback (owner 2026-09-25): a stored order with gaps,
+  // duplicates or an afternoon stop ahead of a morning one is leftover
+  // numbering, not a plan. Simulate the day in promised-window order too and
+  // certify whichever fits better; commit persists the certified order. A
+  // complete, window-ordered dispatch order stays the only baseline.
+  const sequencers = capacity && storedOrderStale(groupedPending) ? [currentOrder, clockOrder] : [currentOrder];
+  const insert = capacity && allowInsertion && (context.prospective || context.insertTarget);
+  const orders = sequencers.flatMap((sequence) => {
+    const baseline = sequence(groupedPending);
+    const baselineDrive = routeDriveMinutes(baseline, origin);
+    return (insert
+      ? Array.from({ length: baseline.length + 1 }, (_, i) => [...baseline.slice(0, i), target, ...baseline.slice(i)])
+      : [sequence([...baseline, target])]).map(order => ({ order, baselineDrive }));
+  });
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
-  let winner = null;
-  let returnTooLate = false;
-  for (const order of orders) {
-    const usedLegs = [];
+  const simulate = (order, usedLegs) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
-    const simulation = simulateArrivalRoute(RouteOptimizer, rangeForStop,
+    return simulateArrivalRoute(RouteOptimizer, rangeForStop,
       // raw_estimate_minutes keeps the UNTOUCHED estimate for the co-visit
       // sum: the rewrite below hands every ungrouped row its window span as
       // a duration, which would otherwise read as a real estimate and sum a
@@ -275,6 +304,12 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
           return metric.minutes;
         } } : {}),
       });
+  };
+  let winner = null;
+  let returnTooLate = false;
+  for (const { order, baselineDrive } of orders) {
+    const usedLegs = [];
+    const simulation = simulate(order, usedLegs);
     if (collectLegs) collectLegs.push(...usedLegs);
     if (!simulation) continue;
     if (Number.isFinite(returnByMin) && simulation.returnAtMin > returnByMin) {
@@ -309,21 +344,27 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     if (hitsFixed) continue;
     if (!winner || simulation.travelMin < winner.simulation.travelMin
       || (simulation.travelMin === winner.simulation.travelMin && simulation.waitingMin < winner.simulation.waitingMin)) {
-      winner = { simulation, order, usedLegs };
+      winner = { simulation, order, usedLegs, baselineDrive };
     }
   }
   const fail = {
     feasible: false, target, reason: 'arrival_window',
     warning: `The route on ${date} cannot keep every promised arrival window with the planned service and driving times. Review the stop order or choose another window.`,
   };
-  if (!winner) return returnTooLate
-    ? { ...fail, reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` }
-    : fail;
-  const { simulation, order, usedLegs } = winner;
+  if (!winner && returnTooLate) {
+    return { ...fail, reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` };
+  }
+  // Tell "this visit breaks the day" apart from "the day is already broken":
+  // the existing stops alone cannot keep their promises in any order tried.
+  if (!winner && capacity && sequencers.every(sequence => !simulate(sequence(groupedPending), []))) {
+    return { ...fail, reason: 'day_overcommitted',
+      warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` };
+  }
+  if (!winner) return fail;
+  const { simulation, order, usedLegs, baselineDrive } = winner;
   // Fixed blockers remain immovable; selected-technician holds are included
   // in the capacity route alongside that technician's appointments.
   const arrival = simulation.arrivals.find(row => row.id === target.id);
-  const baselineDrive = routeDriveMinutes(currentOrder(pending), origin);
   return {
     feasible: true, target,
     estimatedArrival: hhmm(arrival.arrivalMin + (target.arrivalOffsetMinutes || 0)),
