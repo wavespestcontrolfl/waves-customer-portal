@@ -8,7 +8,30 @@
  *
  * Model: MODELS.VOICE — the repo's warm customer-facing tier (CLAUDE.md: never
  * hardcode model IDs; concrete IDs live only in server/config/models.js).
- * Overridable via VOICE_RELAY_MODEL.
+ * Overridable via VOICE_RELAY_MODEL (shared with the collections outbound
+ * flow — do not read that env expecting it to move only this lane).
+ *
+ * Inbound-only override: VOICE_RELAY_INBOUND_MODEL takes precedence over
+ * VOICE_RELAY_MODEL for THIS file only (collections-conversation.js never
+ * reads it). VOICE_RELAY_SANDBOX_MODEL applies only to sandbox test calls
+ * (this.sandbox === true) and takes precedence over the inbound override, so
+ * the owner can A/B a candidate model on the sandbox line without touching
+ * production inbound calls. Precedence, highest first:
+ *   sandbox session:      VOICE_RELAY_SANDBOX_MODEL → VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
+ *   production inbound:                                VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
+ * Every override is checked against an allowlist derived from
+ * MODELS.MODEL_CATALOG (Anthropic, text-capable, not `requires: 'deep'` —
+ * this lane always runs `thinking: 'disabled'`, which Fable/Mythos ids
+ * reject). An unknown override id is never silently substituted: it is
+ * rejected with one logged warning and the session falls back down the
+ * chain, stamping `model_fallback_reason` in `_versionStamps()` so the
+ * record shows what actually ran. The model is resolved ONCE per session at
+ * construction and pinned on `this.model` — every request in that call uses
+ * the pinned value, so a mid-call env change or two concurrent calls under
+ * different env values can never leak into each other. The module-level
+ * MODEL export stays the plain VOICE_RELAY_MODEL/MODELS.VOICE resolution for
+ * any other importer (e.g. collections-conversation.js's own independent
+ * read of the same env).
  * Thinking is DISABLED: this is a live phone call where a "thinking" pause reads
  * as dead air; tool-use + a tight system prompt carry the structure instead.
  * Streaming (.stream + .finalMessage) per the claude-api skill — avoids HTTP
@@ -54,6 +77,69 @@ function slotStartMinutes(slot) {
 }
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+
+// Env names for the two inbound-only override levers (see the file header).
+// Never read by collections-conversation.js — it keeps reading VOICE_RELAY_MODEL
+// directly, so these two vars have no effect on that flow.
+const INBOUND_MODEL_ENV = 'VOICE_RELAY_INBOUND_MODEL';
+const SANDBOX_MODEL_ENV = 'VOICE_RELAY_SANDBOX_MODEL';
+
+// Allowlist for the override envs above — derived from the shared catalog
+// (config/models.js MODEL_CATALOG) rather than a locally hand-typed list, so
+// a new/retired Anthropic id needs no change here. Anthropic + text-capable
+// only (this lane never sends images); `requires: 'deep'` ids (Fable/Mythos)
+// are excluded because only services/llm/deep.js knows how to run them — this
+// lane sends `thinking: { type: 'disabled' }`, which those models reject.
+const ALLOWED_OVERRIDE_MODEL_IDS = new Set(
+  Object.entries(MODELS.MODEL_CATALOG)
+    .filter(([, meta]) => meta
+      && meta.provider === 'anthropic'
+      && Array.isArray(meta.caps) && meta.caps.includes('text')
+      && meta.status !== 'unavailable'
+      && !meta.requires)
+    .map(([id]) => id)
+);
+
+function isAllowedOverrideModel(id) {
+  return typeof id === 'string' && id.length > 0 && ALLOWED_OVERRIDE_MODEL_IDS.has(id);
+}
+
+/**
+ * Resolve the ONE model this session pins for its whole lifetime. Called once
+ * at RelayConversation construction; the caller stores the result on
+ * `this.model` (and `this._modelFallbackReason`) so every later model
+ * request and version stamp in this call reads the same value, immune to a
+ * mid-call env change or a concurrent call under a different env.
+ *
+ * Walks the override chain highest-precedence first (sandbox model, then the
+ * inbound override), returning the first value that passes the allowlist.
+ * The FIRST rejected value along the way is logged once and recorded as
+ * `fallbackReason` even if a lower-precedence override or the shared default
+ * ends up running instead — the version stamp must show a rejection happened
+ * even when the call still ran on a legitimate (if less-preferred) model.
+ */
+function resolveSessionModel({ sandbox } = {}) {
+  const candidates = [];
+  if (sandbox === true) {
+    const sandboxRaw = process.env[SANDBOX_MODEL_ENV];
+    if (sandboxRaw) candidates.push({ source: SANDBOX_MODEL_ENV, value: sandboxRaw });
+  }
+  const inboundRaw = process.env[INBOUND_MODEL_ENV];
+  if (inboundRaw) candidates.push({ source: INBOUND_MODEL_ENV, value: inboundRaw });
+
+  let fallbackReason = null;
+  for (const { source, value } of candidates) {
+    if (isAllowedOverrideModel(value)) {
+      return { model: value, fallbackReason };
+    }
+    if (!fallbackReason) {
+      fallbackReason = `unknown_model_override:${source}=${value}`;
+      logger.warn(`[voice-relay] ignoring unknown model override ${source}=${value} — falling back (allowlist: ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')})`);
+    }
+  }
+  return { model: MODEL, fallbackReason };
+}
+
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
@@ -501,6 +587,14 @@ class RelayConversation {
     // the hangup capture floor stays down. A profile test or a stranger
     // dialling the test number can never create dispatch work.
     this.sandbox = sandbox === true;
+    // Resolved ONCE, here, and pinned for the rest of this session — see the
+    // file header + resolveSessionModel(). Every model request and version
+    // stamp below reads this.model, never the module-level MODEL, so a
+    // mid-call env change or a concurrent call under a different env can
+    // never leak into an in-flight session.
+    const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
+    this.model = modelResolution.model;
+    this._modelFallbackReason = modelResolution.fallbackReason;
     // The upgrade token's nonce — the per-session key the CallSid claim is
     // owned by, so a fresh-token reconnect can reclaim the live call — and
     // its expiry, the monotonic generation a takeover must beat.
@@ -971,7 +1065,8 @@ class RelayConversation {
     const language = !/[-_]/.test(raw) && isSpanish(raw) ? require('./relay-protocol').SPANISH_LANGUAGE : raw;
     return {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
-      model: MODEL,
+      model: this.model,
+      model_fallback_reason: this._modelFallbackReason || null,
       effort: VOICE_EFFORT,
       prompt_sha: this._promptSha,
       context_snapshot_sha: this._contextSnapshotSha,
@@ -2015,7 +2110,7 @@ class RelayConversation {
       try {
         const stream = anthropic.messages.stream(
           {
-            model: MODEL,
+            model: this.model,
             max_tokens: MAX_TOKENS,
             system: this._systemBlocks,
             thinking: { type: 'disabled' },
@@ -2239,7 +2334,7 @@ class RelayConversation {
             .map(([key, role]) => [key, this._transcript.filter((turn) => turn.role === role).length])),
           turnStats: storedTurnStats(this._turnStats),
           versions: this._versionStamps(),
-          model: MODEL,
+          model: this.model,
           leadId: this._leadId,
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
@@ -2327,7 +2422,7 @@ class RelayConversation {
           leadCaptured: capturedLead,
           reserviceFiled: this._reserviceFiled,
           callSid: this.callSid,
-          model: MODEL,
+          model: this.model,
           startedAt: this._startedAt,
           latency: summarizeTurnStats(this._turnStats),
           versions: this._versionStamps(),
@@ -2859,4 +2954,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, resolveSessionModel, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

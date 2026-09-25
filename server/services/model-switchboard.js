@@ -308,7 +308,12 @@ const LANES = [
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
   L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD, dark' }),
-  L('voice_relay', 'Voice relay + collections calls', 'voice-agent/relay-conversation.js, collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'one env for both call flows' }),
+  // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
+  // (pinned once per session at conversation construction), else the shared
+  // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
+  // directly (row below) and never sees the inbound-only override.
+  L('voice_relay_inbound', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE'))), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
   // ── Report writer ──
@@ -447,7 +452,8 @@ const LANE_AREA = {
   address_recovery: 'calls',
   tech_dictation: 'calls',
   parse_when: 'calls',
-  voice_relay: 'voice',
+  voice_relay_inbound: 'voice',
+  voice_relay_collections: 'voice',
   voice_relay_judge: 'voice',
   pest_id: 'photos',
   lawn_assess: 'photos',
@@ -582,7 +588,8 @@ const LANE_DESCRIBE = {
   address_recovery: 'Recovers a street address that did not validate',
   tech_dictation: 'Transcribes field notes from the tech',
   parse_when: 'Reads "next Tuesday morning" into a date',
-  voice_relay: 'Speaks with callers on the phone line and collections calls',
+  voice_relay_inbound: 'Speaks with callers on the phone line (Sandy)',
+  voice_relay_collections: 'Speaks with customers on collections calls',
   voice_relay_judge: 'Grades Sandy\'s eval calls against each scenario\'s spec',
   pest_id: 'Identifies the pest in a customer photo',
   lawn_assess: 'Assesses lawn health from a customer photo',
