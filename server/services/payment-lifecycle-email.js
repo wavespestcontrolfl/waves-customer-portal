@@ -201,6 +201,7 @@ async function sendLifecycleTemplate({
   paymentPlanId = null,
   categories = [],
   billingDeliveryCategory = null,
+  beforeProviderHandoff = null,
 }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
@@ -246,6 +247,8 @@ async function sendLifecycleTemplate({
     ...payload,
   };
 
+  let providerStarted = false;
+  let handoffGuardFailed = false;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -274,6 +277,16 @@ async function sendLifecycleTemplate({
           const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
             .filter((entry) => isEmailLike(entry.email));
           if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
+          if (beforeProviderHandoff) {
+            try {
+              const guard = await beforeProviderHandoff();
+              if (guard === false || guard?.ok === false) throw new Error('Delivery handoff was not acquired');
+            } catch (err) {
+              handoffGuardFailed = true;
+              throw err;
+            }
+          }
+          providerStarted = true;
           await dispatch();
           return { ok: true };
         },
@@ -286,6 +299,7 @@ async function sendLifecycleTemplate({
         deduped: true,
         blocked: !!result.blocked,
         messageId: result.message?.provider_message_id || null,
+        ...(billingDeliveryCategory ? { deliveryOutcome: result.sent ? 'accepted' : 'not_sent' } : {}),
       };
     }
 
@@ -305,9 +319,10 @@ async function sendLifecycleTemplate({
       failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
     });
 
+    const outcome = billingDeliveryCategory ? { deliveryOutcome: result.sent ? 'accepted' : 'not_sent' } : {};
     return result.sent
-      ? { ok: true, messageId: result.message?.provider_message_id || null }
-      : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
+      ? { ok: true, messageId: result.message?.provider_message_id || null, ...outcome }
+      : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent', ...outcome };
   } catch (err) {
     await logPaymentLifecycleEmailAttempt({
       customerId: customer.id,
@@ -322,7 +337,13 @@ async function sendLifecycleTemplate({
       failureReason: err.message,
     });
     logger.error(`[payment-lifecycle-email] ${eventType} failed for ${customer.id}: ${err.message}`);
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.message,
+      ...(billingDeliveryCategory ? {
+        deliveryOutcome: providerStarted ? 'uncertain' : 'not_sent',
+        retryable: !providerStarted,
+        ...(handoffGuardFailed ? { reason: 'pre_provider_handoff_failed' } : {}),
+      } : {}),
+    };
   }
 }
 
@@ -499,6 +520,7 @@ async function sendPaymentRetryNotice({
   invoiceId = null,
   retryDate,
   idempotencyKey,
+  beforeProviderHandoff,
 } = {}) {
   const payment = paymentId ? await db('payments').where({ id: paymentId }).first() : null;
   if (!payment) return { ok: false, skipped: true, reason: 'payment_not_found' };
@@ -533,6 +555,7 @@ async function sendPaymentRetryNotice({
     paymentMethodId: payment.payment_method_id || null,
     idempotencyKey: idempotencyKey || `payment.retry_notice:${invoice?.id || invoiceId || 'no_invoice'}:${payment.id}:${stableDateKey(effectiveRetryDate)}`,
     billingDeliveryCategory: 'payment_issue',
+    beforeProviderHandoff,
   });
 }
 
@@ -618,6 +641,7 @@ async function sendPaymentFailed({
   const explicit = explicitBillingChannels(prefs || {}, 'payment_issue');
   if (!explicit || !explicit.some((channel) => channel === 'sms' || channel === 'push')) return emailResult;
   const customer = await loadCustomer(effectiveCustomerId);
+  if (!customer) return emailResult;
   if (!customer?.phone && !explicit.includes('push')) return emailResult;
   const body = await require('./sms-template-renderer').renderSmsTemplate('payment_failed', {
     first_name: customer.first_name || 'there',

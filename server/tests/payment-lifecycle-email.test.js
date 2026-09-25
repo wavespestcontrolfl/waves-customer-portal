@@ -315,6 +315,38 @@ describe('payment lifecycle email sender', () => {
     }));
   });
 
+  test.each(['preparation', 'refused guard', 'failed guard', 'provider'])('retry notice preserves %s failure evidence for its durable owner', async (failure) => {
+    const prefs = { payment_issue_channels: ['email'] };
+    setDbQueues({
+      payments: [chain({ first: payment() })],
+      payment_methods: [chain({ first: paymentMethod() })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
+      customer_interactions: [chain()],
+    });
+    const beforeProviderHandoff = jest.fn(async () => {
+      if (failure === 'failed guard') throw new Error('queue write failed');
+      return failure !== 'refused guard';
+    });
+    const provider = jest.fn(async () => { throw new Error('provider response unavailable'); });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async (input) => {
+      if (failure === 'preparation') throw new Error('template unavailable');
+      await input.withProviderHandoff(provider);
+    });
+    const result = await PaymentLifecycleEmail.sendPaymentRetryNotice({
+      customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23', beforeProviderHandoff,
+    });
+    expect(result).toMatchObject({ ok: false,
+      deliveryOutcome: failure === 'provider' ? 'uncertain' : 'not_sent',
+      retryable: failure !== 'provider',
+    });
+    expect(provider).toHaveBeenCalledTimes(failure === 'provider' ? 1 : 0);
+    expect(beforeProviderHandoff).toHaveBeenCalledTimes(failure === 'preparation' ? 0 : 1);
+    if (failure.includes('guard')) expect(result.reason).toBe('pre_provider_handoff_failed');
+    if (failure === 'provider') expect(beforeProviderHandoff.mock.invocationCallOrder[0])
+      .toBeLessThan(provider.mock.invocationCallOrder[0]);
+  });
+
   test('retry and failure notices name a removed bank method from the payment snapshot (GH codex r6 P2)', async () => {
     // payment_method_id was nulled by the method's removal; the delete
     // trigger left the tender on the payment itself.
@@ -467,6 +499,23 @@ describe('payment lifecycle email sender', () => {
       metadata: expect.stringContaining('"billingDeliveryCategory":"payment_issue"'),
     }));
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('does not queue an App payment failure after the customer is removed', async () => {
+    const explicitPrefs = { email_enabled: true, payment_issue_channels: ['push'] };
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      customers: [chain({ first: customer() }), chain({ first: null })],
+      notification_prefs: [chain({ first: explicitPrefs }), chain({ first: explicitPrefs })],
+    });
+
+    await expect(PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1', paymentIntentId: 'pi_removed', attemptId: 'ch_removed', invoiceId: 'inv-1',
+    })).resolves.toMatchObject({ skipped: true });
+    expect(db).not.toHaveBeenCalledWith('sms_log');
+    expect(require('../services/sms-template-renderer').renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test.each([
