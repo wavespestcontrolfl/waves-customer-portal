@@ -45,6 +45,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
+const { BILLING_MESSAGE_CATEGORIES } = require('./billing-channel-routing');
+const { explicitBillingChannels } = require('../billing-delivery-channels');
 
 // messageType (services/twilio.js vocabulary) → routing policy.
 //   push_first   — push replaces SMS when delivery is proven; SMS fallback.
@@ -194,6 +196,7 @@ async function hasFreshPushDevice(customerId, knex = db) {
 // An explicit App choice also lets reminders replace their automatic
 // companion text, while the default PUSH_ROUTING_POLICY stays unchanged.
 const APP_FIRST_TYPES = new Set([
+  ...Object.keys(BILLING_MESSAGE_CATEGORIES),
   'service_request_received', 'service_request_updated',
   ...PAYMENT_ISSUE_TYPES,
   'invoice', 'payment_link', 'invoice_followup',
@@ -245,34 +248,40 @@ function normalizeDigits(phone) {
 /**
  * Runtime eligibility beyond the pure decision — both checks fail toward
  * SMS:
- *   1. `to` must be the ACCOUNT HOLDER's own phone. Reminder/en-route
- *      flows can address secondary authorized contacts under the same
- *      customer id; replacing THEIR text with a push to the account
- *      holder's devices would notify the wrong person (and push_and_sms
- *      would duplicate contact-personalized pushes onto one account).
+ *   1. A supplied `to` must be the ACCOUNT HOLDER's own phone. Reminder/
+ *      en-route flows can address secondary authorized contacts under the
+ *      same customer id; replacing THEIR text with a push to the account
+ *      holder's devices would notify the wrong person. Explicit billing
+ *      App choices may omit `to`: the exact customer id owns that delivery,
+ *      and no Text fallback is allowed on that leg.
  *   2. A NON-DEFAULT channel value ('email' or 'both') on the account's
  *      PRIMARY-profile prefs row is an unambiguous explicit choice and
  *      vetoes routing. Rows at the seeded 'sms' default (or absent)
  *      route normally — presence and timestamps are not provenance
  *      (rows were globally backfilled; unrelated writes restamp them).
  */
-async function pushEligibleRuntime(customerId, to, messageType, knex = db, { requireExplicit = false } = {}) {
+async function pushEligibleRuntime(customerId, to, messageType, knex = db, { requireExplicit = false, billingDeliveryCategory } = {}) {
   const toDigits = normalizeDigits(to);
-  if (toDigits.length < 10) return false;
+  const suppliedRecipient = String(to || '').trim();
+  if (suppliedRecipient && toDigits.length < 10) return false;
   const customer = await knex('customers')
     .where({ id: customerId })
     .first('phone', 'account_id')
     .catch(() => null);
-  if (!customer || normalizeDigits(customer.phone) !== toDigits) return false;
-  const preference = await readChannelPreference(customerId, messageType, knex, customer, { pushEligibility: true }).catch(() => null);
+  if (!customer) return false;
+  if (suppliedRecipient && normalizeDigits(customer.phone) !== toDigits) return false;
+  if (!suppliedRecipient && !['invoice', 'payment_issue', 'billing', 'payment_receipt'].includes(billingDeliveryCategory)) return false;
+  const preference = await readChannelPreference(customerId, messageType, knex, customer, { pushEligibility: true, billingDeliveryCategory }).catch(() => null);
   if (preference === null || preference === 'email' || preference === 'both') return false;
   return !requireExplicit || preference === 'push';
 }
 
 // Appointment channels follow the primary profile; receipt channels follow
 // the charged profile. Both routed notices and lifecycle bells use this read.
-async function readChannelPreference(customerId, messageType, knex = db, customer = null, { pushEligibility = false } = {}) {
-  const col = PREF_CHANNEL_COLUMN[messageType];
+async function readChannelPreference(customerId, messageType, knex = db, customer = null, { pushEligibility = false, billingDeliveryCategory } = {}) {
+  const category = ['invoice', 'payment_issue', 'billing', 'payment_receipt'].includes(billingDeliveryCategory)
+    ? billingDeliveryCategory : BILLING_MESSAGE_CATEGORIES[messageType];
+  const col = category ? `${category}_channel` : PREF_CHANNEL_COLUMN[messageType];
   if (!col) return 'sms';
   customer ||= await knex('customers').where({ id: customerId }).first('account_id');
   if (!customer) return null;
@@ -281,7 +290,10 @@ async function readChannelPreference(customerId, messageType, knex = db, custome
     ? await resolvePrimaryProfileId({ customerId, accountId: customer.account_id }, knex, { onError: 'throw' })
     : customerId;
   const columns = col === 'payment_issue_channel' ? [col, 'billing_channel'] : [col];
+  if (category) columns.push(`${category === 'payment_receipt' ? 'payment_receipt' : category}_channels`);
   const prefs = await knex('notification_prefs').where({ customer_id: ownerId }).first(...columns);
+  const explicit = explicitBillingChannels(prefs, category);
+  if (explicit !== null) return explicit.includes('push') ? 'push' : (pushEligibility ? null : 'email');
   // A new explicit Text choice vetoes companion push; null retains legacy behavior.
   if (pushEligibility && col === 'payment_issue_channel' && prefs?.[col] === 'sms') return null;
   // Preserve legacy Email/Both vetoes for companion push until explicitly edited.
@@ -292,6 +304,13 @@ async function readChannelPreference(customerId, messageType, knex = db, custome
 // Other saved channels retain the pre-existing bell behavior; shared event
 // keys suppress a bell push when the routed notice already created its row.
 async function bellPushAllowed(customerId, messageType) {
+  const category = BILLING_MESSAGE_CATEGORIES[messageType];
+  if (category) {
+    try {
+      const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+      if (explicitBillingChannels(prefs, category) !== null) return false;
+    } catch { return false; }
+  }
   if (!gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return true;
   const preference = await readChannelPreference(customerId, messageType).catch(() => null);
   return preference !== null && preference !== 'push';
@@ -301,7 +320,7 @@ async function bellPushAllowed(customerId, messageType) {
 // Only the account holder can opt into this lane. Secondary contacts and
 // explicit staff Text actions retain their own destination/channel.
 async function wantsAppFirst(input) {
-  if (!gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') || input.metadata?.appFallbackReason) return false;
+  if (!gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') || input.metadata?.appFallbackReason || input.metadata?.billingDeliveryLeg) return false;
   if (input.audience !== 'customer' || input.channel !== 'sms' || !input.customerId) return false;
   const meta = input.metadata || {};
   if (meta.humanAuthored || meta.media || meta.mediaUrls?.length || meta.bundled_review_request_id || meta.mms_fallback_reason) return false;
@@ -397,17 +416,20 @@ async function recordBell(customerId, messageType, body, dedupeKey, appointmentI
  * Twilio entirely. Any failure returns { delivered: false } and the SMS
  * proceeds untouched.
  */
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
-    if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly }))) return { delivered: false, reason: 'preference_changed' };
+    if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
     const fresh = await hasFreshPushDevice(customerId);
     let appNotification = null;
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);
-      if (PAYMENT_ISSUE_TYPES.has(messageType)) {
+      if (billingDeliveryCategory === 'payment_receipt') presentation = PRESENTATION.receipt;
+      if (billingDeliveryCategory === 'billing') presentation = BILLING_UPDATE;
+      if (PAYMENT_ISSUE_TYPES.has(messageType) || billingDeliveryCategory === 'payment_issue') {
+        presentation = PAYMENT_ISSUE;
         presentation = { ...presentation, link: '/?tab=billing&focus=payment-methods' };
       }
       if (PREF_CHANNEL_COLUMN[messageType] === 'request_channel') {
@@ -421,7 +443,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           return { delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'request_lookup_failed' };
         }
       }
-      if (PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel') {
+      if (billingDeliveryCategory === 'invoice' || (!billingDeliveryCategory && PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel')) {
         let invoice;
         try {
           invoice = invoiceId && await db('invoices')
@@ -464,7 +486,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // These App notices have durable replay owners. Other App-first
       // families retain their existing fallback policy.
       if (explicitPushOnly && appNotification?.push?.retryable
-        && ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType])) {
+        && (billingDeliveryCategory || ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType]))) {
         return { delivered: false, retryable: true, deliveryOutcome: 'uncertain', reason: 'native_provider_retryable',
           retryAfterMs: appNotification.push.retryAfterMs || 60000 };
       }

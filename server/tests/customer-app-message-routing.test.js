@@ -1,6 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
+jest.mock('../services/billing-channel-email', () => ({ sendBillingChannelEmail: jest.fn() }));
 jest.mock('../services/messaging/audit', () => ({ persistAudit: jest.fn(async () => ({ id: 'audit-test' })) }));
 jest.mock('../services/messaging/validators/line-type', () => ({
   ...jest.requireActual('../services/messaging/validators/line-type'),
@@ -25,6 +26,7 @@ jest.mock('../services/disclaimed-number-holds', () => ({
 
 const db = require('../models/db');
 const Twilio = require('../services/twilio');
+const { sendBillingChannelEmail } = require('../services/billing-channel-email');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { persistAudit } = require('../services/messaging/audit');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -36,6 +38,7 @@ let prefs;
 let prefsError;
 let suppression;
 let suppressionError;
+let customerPhone;
 const input = {
   to: '+19415550142', body: 'Your payment receipt is ready in the portal.',
   channel: 'sms', audience: 'customer', purpose: 'payment_receipt', customerId,
@@ -52,11 +55,12 @@ beforeEach(() => {
   prefsError = false;
   suppression = null;
   suppressionError = false;
+  customerPhone = input.to;
   db.mockImplementation((table) => {
     const q = {
       where: jest.fn(() => q), whereIn: jest.fn(() => q),
       first: jest.fn(async () => {
-        if (table === 'customers') return { id: customerId, account_id: customerId, phone: input.to, is_primary_profile: true };
+        if (table === 'customers') return { id: customerId, account_id: customerId, phone: customerPhone, is_primary_profile: true };
         if (table === 'notification_prefs') {
           if (prefsError) throw new Error('preferences unavailable');
           return { ...prefs };
@@ -71,6 +75,7 @@ beforeEach(() => {
     return q;
   });
   Twilio.sendSMS.mockResolvedValue({ success: true, pushRouted: true, sid: 'push:test-event' });
+  sendBillingChannelEmail.mockResolvedValue({ sent: true, provider: 'email', providerMessageId: 'email:qa', deliveryOutcome: 'accepted' });
 });
 afterEach(() => { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; delete process.env.GATE_SMS_SEND_WINDOW; });
 
@@ -464,4 +469,222 @@ test('request delivery forwards the queued status and transition identity to the
   } })).toMatchObject({ sent: true, channel: 'push' });
   expect(Twilio.sendSMS.mock.calls[0][2]).toMatchObject({ explicitPushOnly: true,
     requestNotification: { id: 'request-1', status: 'acknowledged', version: 1 }, notificationEventKey });
+});
+
+describe('explicit billing channel combinations', () => {
+  const combinations = [
+    ['email'], ['sms'], ['push'], ['email', 'sms'],
+    ['email', 'push'], ['sms', 'push'], ['email', 'sms', 'push'],
+  ];
+  beforeEach(() => {
+    Twilio.sendSMS.mockImplementation(async (_to, _body, options) => ({
+      success: true, deliveryOutcome: 'accepted', sid: options.explicitPushOnly ? 'push:billing-qa' : `SM${'1'.repeat(32)}`,
+      pushRouted: options.explicitPushOnly,
+    }));
+  });
+
+  describe.each([
+    ['invoice', 'payment_link', 'invoice_channels'],
+    ['payment_failed', 'payment_failure', 'payment_issue_channels'],
+    ['billing_reminder', 'billing', 'billing_channels'],
+    ['receipt', 'payment_receipt', 'payment_receipt_channels'],
+  ])('%s', (type, purpose, column) => {
+    test.each(combinations.map((channels) => [channels.join('+'), channels]))('%s sends precisely those channels', async (_name, channels) => {
+      prefs[column] = channels;
+      const result = await sendCustomerMessage({ ...input, purpose,
+        metadata: { original_message_type: type, notificationEventKey: 'qa:billing:combination' } });
+      expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+      expect(Object.keys(result.channelResults).sort()).toEqual([...channels].sort());
+      expect(sendBillingChannelEmail).toHaveBeenCalledTimes(channels.includes('email') ? 1 : 0);
+      const calls = Twilio.sendSMS.mock.calls;
+      expect(calls.filter(([, , options]) => options.explicitPushOnly)).toHaveLength(channels.includes('push') ? 1 : 0);
+      expect(calls.filter(([, , options]) => !options.explicitPushOnly)).toHaveLength(channels.includes('sms') ? 1 : 0);
+      expect(calls.every(([, , options]) => options.skipPushRouting === true)).toBe(true);
+    });
+  });
+
+  test('Email and App still work when Text is opted out, without resetting consent', async () => {
+    prefs.payment_receipt_channels = ['email', 'sms', 'push'];
+    prefs.sms_enabled = false;
+    prefs.payment_confirmation_sms = false;
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults).toMatchObject({ email: { sent: true }, push: { sent: true }, sms: { sent: false, code: 'SMS_OPTED_OUT' } });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(prefs.sms_enabled).toBe(false);
+  });
+
+  test('a disabled email leg does not prevent the selected text', async () => {
+    prefs.payment_receipt_channels = ['email', 'sms'];
+    prefs.email_enabled = false;
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults).toMatchObject({ email: { sent: false, code: 'EMAIL_OPTED_OUT' }, sms: { sent: true } });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
+  test.each([['push'], ['email', 'push']])('unavailable App never creates an unselected text: %j', async (...channels) => {
+    prefs.payment_receipt_channels = channels;
+    Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'no_fresh_device' });
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults.push).toMatchObject({ sent: false, code: 'APP_UNAVAILABLE' });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+  });
+
+  test('a provider failure does not prevent the other selected channels', async () => {
+    prefs.payment_receipt_channels = ['email', 'sms', 'push'];
+    sendBillingChannelEmail.mockRejectedValue(new Error('email unavailable'));
+    const result = await sendCustomerMessage(input);
+    expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted', channel: 'sms' });
+    expect(result.channelResults.email).toMatchObject({ sent: false, retryable: true });
+    expect(result.channelResults.push.sent).toBe(true);
+  });
+
+  test('an accepted email preserves the selected overnight text deferral', async () => {
+    prefs.payment_receipt_channels = ['email', 'sms'];
+    jest.useFakeTimers().setSystemTime(new Date('2035-01-10T02:00:00Z'));
+    try {
+      const result = await sendCustomerMessage({ ...input, customerInitiated: false });
+      expect(result).toMatchObject({ sent: false, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: expect.any(String) });
+      expect(result.channelResults.email).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+      expect(Twilio.sendSMS).not.toHaveBeenCalled();
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('a failing email provider does not hold back an available selected text', async () => {
+    prefs.payment_receipt_channels = ['email', 'sms'];
+    sendBillingChannelEmail.mockResolvedValue({ sent: false, provider: 'email',
+      deliveryOutcome: 'not_sent', retryable: true, error: 'provider unavailable' });
+    const result = await sendCustomerMessage(input);
+    expect(result).toMatchObject({ sent: true, channel: 'sms', deliveryOutcome: 'accepted' });
+    expect(result.channelResults.email).toMatchObject({ sent: false, retryable: true });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  });
+
+  test('a deferred App leg holds Text until replay, so an accepted text cannot be duplicated', async () => {
+    prefs.payment_receipt_channels = ['sms', 'push'];
+    Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true });
+    const result = await sendCustomerMessage(input);
+    expect(result).toMatchObject({ sent: false, deferred: true, code: 'PUSH_IN_FLIGHT' });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+  });
+
+  test('separate payments with identical receipt copy have separate event identities', () => {
+    const { billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
+    expect(billingNotificationEventKey({ ...input, paymentId: 'payment-one' }))
+      .not.toBe(billingNotificationEventKey({ ...input, paymentId: 'payment-two' }));
+  });
+
+  test('unlisted receipt types forward their saved billing category to the App provider', async () => {
+    prefs.payment_receipt_channels = ['push'];
+    expect(await sendCustomerMessage({ ...input, metadata: { original_message_type: 'autopay_charge_success' } }))
+      .toMatchObject({ sent: true, channel: 'push' });
+    expect(Twilio.sendSMS.mock.calls[0][2].billingDeliveryCategory).toBe('payment_receipt');
+    const { pushEligibleRuntime } = require('../services/messaging/push-channel-routing')._test;
+    expect(await pushEligibleRuntime(customerId, input.to, 'autopay_charge_success', db, {
+      requireExplicit: true, billingDeliveryCategory: 'payment_receipt',
+    })).toBe(true);
+  });
+
+  test('a real email sidecar owns Email and does not get a generic duplicate', async () => {
+    prefs.payment_receipt_channels = ['email'];
+    expect(await sendCustomerMessage({ ...input, hasEmailLeg: true })).toMatchObject({ sent: false, code: 'CHANNEL_EMAIL_ONLY' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('an invoice App leg retains the invoice lock around its provider handoff', async () => {
+    prefs.invoice_channels = ['push'];
+    const withProviderHandoff = jest.fn(async dispatch => dispatch());
+    const result = await sendCustomerMessage({ ...input, purpose: 'payment_link',
+      entryPoint: 'invoice_send_via_sms', hasEmailLeg: true, withProviderHandoff,
+      metadata: { original_message_type: 'invoice' } });
+    expect(result).toMatchObject({ sent: true, channel: 'push' });
+    expect(withProviderHandoff).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+  });
+
+  test('fresh channel changes are enforced at the provider boundary', async () => {
+    prefs.payment_receipt_channels = ['sms'];
+    Twilio.sendSMS.mockImplementation(async (_to, _body, options) => {
+      prefs.payment_receipt_channels = ['email'];
+      const verdict = await options.preSendCheck();
+      expect(verdict).toMatchObject({ ok: false, code: 'CHANNEL_NOT_SELECTED' });
+      return { success: false, preSendBlocked: true, code: verdict.code, error: verdict.reason };
+    });
+    expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, blocked: true, code: 'CHANNEL_NOT_SELECTED' });
+  });
+
+  test('billing choices cannot copy a secondary contact’s text to the account holder', async () => {
+    prefs.payment_receipt_channels = ['email', 'sms', 'push'];
+    await sendCustomerMessage({ ...input, to: '+19415550143' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(false);
+  });
+
+  test('Email works from the verified customer id when no phone recipient exists', async () => {
+    prefs.payment_receipt_channels = ['email'];
+    customerPhone = null;
+    const result = await sendCustomerMessage({ ...input, to: null });
+    expect(result.channelResults).toMatchObject({ email: { sent: true, deliveryOutcome: 'accepted' } });
+    expect(sendBillingChannelEmail).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('App works from the verified customer id when no phone recipient exists', async () => {
+    prefs.payment_receipt_channels = ['push'];
+    customerPhone = null;
+    const result = await sendCustomerMessage({ ...input, to: null });
+    expect(result.channelResults).toMatchObject({ push: { sent: true, deliveryOutcome: 'accepted' } });
+    expect(Twilio.sendSMS).toHaveBeenCalledWith(null, input.body, expect.objectContaining({ explicitPushOnly: true }));
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
+  test('a missing phone suppresses only the selected Text leg', async () => {
+    prefs.payment_receipt_channels = ['email', 'sms'];
+    customerPhone = null;
+    const result = await sendCustomerMessage({ ...input, to: '' });
+    expect(result.channelResults).toMatchObject({
+      email: { sent: true },
+      sms: { sent: false, blocked: true, code: 'MISSING_SMS_RECIPIENT' },
+    });
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('a no-phone Text-only choice is suppressed without fabricating a destination', async () => {
+    prefs.payment_receipt_channels = ['sms'];
+    customerPhone = null;
+    const result = await sendCustomerMessage({ ...input, to: null });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'MISSING_SMS_RECIPIENT' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('a no-phone legacy billing row fails safely before any provider call', async () => {
+    customerPhone = null;
+    const result = await sendCustomerMessage({ ...input, to: null });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'MISSING_BILLING_RECIPIENT' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('App runtime eligibility accepts no phone only for an explicit billing category', async () => {
+    prefs.payment_receipt_channels = ['push'];
+    customerPhone = null;
+    const { pushEligibleRuntime } = require('../services/messaging/push-channel-routing')._test;
+    await expect(pushEligibleRuntime(customerId, null, 'receipt', db, {
+      requireExplicit: true, billingDeliveryCategory: 'payment_receipt',
+    })).resolves.toBe(true);
+    await expect(pushEligibleRuntime(customerId, null, 'receipt', db, { requireExplicit: true }))
+      .resolves.toBe(false);
+  });
+
+  test('explicit billing selections suppress the independent lifecycle push', async () => {
+    const { bellPushAllowed } = require('../services/messaging/push-channel-routing');
+    prefs.invoice_channels = ['sms'];
+    expect(await bellPushAllowed(customerId, 'invoice')).toBe(false);
+    prefs.invoice_channels = ['push'];
+    expect(await bellPushAllowed(customerId, 'invoice')).toBe(false);
+  });
 });

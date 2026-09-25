@@ -364,7 +364,7 @@ async function sendCustomerMessageCore(input) {
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
   // intent even when the saved choice or gate changes before dispatch.
-  if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
+  if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') sendInput.channel = 'push';
   // The locked handoff holds a caller's authority rows through the actual
   // provider request. Immediate lead replies and the visit-summary bearer
   // link (its immediate send and its scheduled replay), plus promised
@@ -410,7 +410,7 @@ async function sendCustomerMessageCore(input) {
   // use the stronger recipient/consent handoffs above, whose transaction is
   // also threaded into their fresh suppression reads.
   const providerHandoffAllowed = input.audience === 'customer'
-    && sendInput.channel === 'sms'
+    && (sendInput.channel === 'sms' || (sendInput.channel === 'push' && input.metadata?.billingDeliveryLeg === 'push'))
     && input.purpose === 'payment_link'
     && input.entryPoint === 'invoice_send_via_sms';
   if (withProviderHandoff
@@ -511,7 +511,27 @@ async function sendCustomerMessageCore(input) {
 
   // 4. Load contact state once (consent + suppression share the lookup)
   let contactState = await loadContactState(sendInput);
-  contactState = await loadSuppressionState(sendInput, contactState);
+  const suppressionInput = !sendInput.to && sendInput.metadata?.billingDeliveryLeg
+    && String(contactState.customer?.id) === String(sendInput.customerId)
+    ? { ...sendInput, to: contactState.customer.phone || null }
+    : sendInput;
+  contactState = await loadSuppressionState(suppressionInput, contactState);
+  if (!suppressionInput.to && sendInput.metadata?.billingDeliveryLeg) contactState.suppressionLoaded = true;
+  const BillingRouting = require('./billing-channel-routing');
+  const { explicitBillingChannels } = require('../billing-delivery-channels');
+  const billingCategory = BillingRouting.billingDeliveryCategory(sendInput);
+  if (!sendInput.metadata?.billingDeliveryLeg && !contactState.lookupFailed
+    && BillingRouting.usesBillingDeliveryPreferences(sendInput, contactState)
+    && explicitBillingChannels(contactState.prefs, billingCategory) !== null) {
+    return BillingRouting.dispatchBillingChannels(input, contactState.prefs, sendCustomerMessageCore);
+  }
+  if (!sendInput.to && !sendInput.metadata?.billingDeliveryLeg
+    && BillingRouting.isBillingDeliveryCandidate(sendInput)) {
+    return {
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'MISSING_BILLING_RECIPIENT',
+      reason: 'Billing delivery requires an explicit Email, Text, or App selection when no phone recipient is available',
+    };
+  }
   const PushRouting = require('./push-channel-routing');
   if (await PushRouting.wantsAppFirst(sendInput)) {
     if (!validateNoCustomerEmoji({ ...sendInput, channel: 'push' }, policy).ok) {
@@ -786,6 +806,21 @@ async function sendCustomerMessageCore(input) {
     }
   };
   const providerPreparationCheck = async () => {
+    if (sendInput.metadata?.billingDeliveryLeg) {
+      // Settings can change while a provider prepares its request. Never
+      // send a leg the customer removed after the initial preference read.
+      let latest = await loadContactState(sendInput);
+      const latestSuppressionInput = !sendInput.to
+        && String(latest.customer?.id) === String(sendInput.customerId)
+        ? { ...sendInput, to: latest.customer.phone || null }
+        : sendInput;
+      latest = await loadSuppressionState(latestSuppressionInput, latest);
+      if (!latestSuppressionInput.to) latest.suppressionLoaded = true;
+      const suppressionVerdict = await checkSuppression(sendInput, policy, latest);
+      if (!suppressionVerdict.ok) return rememberBoundaryBlock(suppressionVerdict, 'check_suppression_boundary');
+      const consentVerdict = await checkConsentForPurpose(sendInput, policy, latest);
+      if (!consentVerdict.ok) return rememberBoundaryBlock(consentVerdict, 'check_consent_boundary');
+    }
     const windowVerdict = checkSendWindow(sendInput, policy, contactState);
     if (!windowVerdict || windowVerdict.ok !== true) {
       return rememberBoundaryBlock(windowVerdict, 'check_send_window_boundary');
@@ -983,7 +1018,7 @@ async function sendCustomerMessageCore(input) {
   }
 
   if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
-    if (sendInput.metadata?.appOnly === true) {
+    if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
       return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
     }
     if (providerOutcome.error === 'preference_changed'
@@ -1119,7 +1154,10 @@ function validateContract(input) {
   if (!input || typeof input !== 'object') {
     return { ok: false, reason: 'input must be an object' };
   }
-  if (!input.to || typeof input.to !== 'string') {
+  const missingRecipient = input.to == null || (typeof input.to === 'string' && !input.to.trim());
+  const billingRecipientCanResolve = missingRecipient
+    && require('./billing-channel-routing').isBillingDeliveryCandidate(input);
+  if ((!input.to || typeof input.to !== 'string') && !billingRecipientCanResolve) {
     return { ok: false, reason: 'to (recipient) is required' };
   }
   const hasMedia = Array.isArray(input.metadata?.mediaUrls) && input.metadata.mediaUrls.length > 0;
@@ -1162,6 +1200,9 @@ function validateContract(input) {
  * portal_chat dispatchers land when the corresponding call sites migrate.
  */
 async function dispatchToProvider(input, hooks = {}) {
+  if (input.channel === 'email' && input.metadata?.billingDeliveryLeg === 'email') {
+    return require('../billing-channel-email').sendBillingChannelEmail(input, hooks);
+  }
   if (input.channel === 'sms' || input.channel === 'push') {
     return sendViaTwilio(input, hooks);
   }

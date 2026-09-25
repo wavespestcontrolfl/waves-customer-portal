@@ -173,10 +173,28 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // (the invoice receipt path) opt in.
   // The visit's saved property owns the appointment toggles when it decided
   // them (app property scope, PR 3); everything else stays the customer row.
+  const { billingDeliveryCategory, usesBillingDeliveryPreferences } = require('../billing-channel-routing');
+  const { explicitBillingChannels } = require('../../billing-delivery-channels');
+  const usesExplicitBilling = usesBillingDeliveryPreferences(input, contactState);
+  if (input.metadata?.billingDeliveryLeg && !usesExplicitBilling) {
+    return { ok: false, code: 'BILLING_RECIPIENT_CHANGED', reason: 'Billing recipient no longer matches the selected delivery route' };
+  }
+  const explicitChannels = usesExplicitBilling
+    ? explicitBillingChannels(prefs, billingDeliveryCategory(input)) : null;
+  if (input.metadata?.billingDeliveryLeg && explicitChannels === null) {
+    return { ok: false, code: 'BILLING_PREFERENCES_CHANGED', reason: 'Billing delivery choices changed before delivery' };
+  }
+  if (explicitChannels && !explicitChannels.includes(input.channel)) {
+    return { ok: false, code: 'CHANNEL_NOT_SELECTED', reason: 'Recipient has not selected this billing delivery channel' };
+  }
+  if (input.channel === 'email' && prefs.email_enabled === false) {
+    return { ok: false, code: 'EMAIL_OPTED_OUT', reason: 'Recipient has disabled email notifications' };
+  }
   const toggles = contactState?.propertyToggles || prefs;
   const purposeToggledOff = [].concat(policy.prefsColumn || [])
     .some((prefsColumn) => toggles[prefsColumn] === false);
   const channelGateApplies = policy.channelColumn
+    && explicitChannels === null
     && input.channel === 'sms'
     && !purposeToggledOff
     && (policy.channelGate !== 'opt_in' || input.hasEmailLeg === true);
@@ -200,7 +218,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
 
   // Master kill-switch. Set to false on STOP keyword (existing twilio-webhook
   // logic) and on any opt-out detection by detectOptOut().
-  if (input.channel !== 'push' && prefs.sms_enabled === false) {
+  if (!['push', 'email'].includes(input.channel) && prefs.sms_enabled === false) {
     return {
       ok: false,
       code: 'SMS_OPTED_OUT',
@@ -215,7 +233,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // A policy may name several (payment_receipt honors both the legacy
   // receipt kill switch and the portal texts toggle) — ALL must be non-false.
   for (const prefsColumn of [].concat(policy.prefsColumn || [])) {
-    if (input.channel === 'push' && prefsColumn === 'payment_confirmation_sms') continue;
+    if (['push', 'email'].includes(input.channel) && prefsColumn === 'payment_confirmation_sms') continue;
     if (toggles[prefsColumn] === false) {
       return {
         ok: false,

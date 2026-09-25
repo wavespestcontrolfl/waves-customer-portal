@@ -712,6 +712,18 @@ const REGISTRY = {
           return { eligible: true };
         }
         if (!invoiceId) {
+          // Generic card-failure notices can belong to off-session charges
+          // without an invoice (for example a no-show fee). Their payment row
+          // is the durable state: replay only while that exact attempt is
+          // still failed, and suppress after a later settlement changes it.
+          if (meta.original_message_type === 'payment_failed' && meta.payment_id) {
+            const payment = await db('payments')
+              .where({ id: meta.payment_id, customer_id: meta.customer_id })
+              .first('status');
+            return payment?.status === 'failed'
+              ? { eligible: true }
+              : { eligible: false, reason: payment ? `payment-${payment.status}` : 'payment-missing' };
+          }
           // A notice that CARRIED a PaymentIntent but resolves to no
           // invoice is a superseded association, not an invoice-less
           // notice (codex r21): the replacement-tender flow repoints the
@@ -734,7 +746,7 @@ const REGISTRY = {
           }
           return { eligible: true };
         }
-        return invoiceStillCollectible({ invoice_id: invoiceId });
+        return invoiceStillCollectible({ ...meta, invoice_id: invoiceId });
       } catch (err) {
         return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);
       }
@@ -1413,6 +1425,10 @@ async function invoiceStillCollectible(meta) {
     const { isTerminalInvoice } = require('../invoice-followups');
     const inv = await db('invoices').where({ id: meta.invoice_id }).first();
     if (!inv) return { eligible: false, reason: 'invoice-missing' };
+    if (meta.original_message_type === 'payment_failed' && meta.customer_id
+      && String(inv.customer_id) !== String(meta.customer_id)) {
+      return { eligible: false, reason: 'invoice-customer-changed' };
+    }
     if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
     // Third-party Bill-To adopted overnight: payer-billed invoices route
     // AR to the payer's AP inbox (email) and billing texts must never

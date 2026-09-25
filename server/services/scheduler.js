@@ -96,6 +96,12 @@ async function resolveScheduledRecipient(msg, claimMeta) {
   }
 }
 
+function canReplayBillingWithoutPhone(msg, claimMeta) {
+  return Boolean(msg.customer_id
+    && ['invoice', 'payment_issue', 'billing', 'payment_receipt']
+      .includes(claimMeta?.billingDeliveryCategory));
+}
+
 // Deposit-receipt replays re-check payment_receipt_channel at send time —
 // the immediate send honors the channel choice, and a customer who switches
 // to email-only between the hold and scheduled_for must not be texted by the
@@ -106,7 +112,12 @@ async function scheduledDepositReceiptAllowed(msg) {
   try {
     const prefs = await db('notification_prefs')
       .where({ customer_id: msg.customer_id })
-      .first('payment_receipt_channel');
+      .first('payment_receipt_channel', 'payment_receipt_channels');
+    if (require('./billing-delivery-channels').explicitBillingChannels(prefs, 'payment_receipt') !== null) {
+      // The central router will fan out the current explicit combination.
+      // The legacy scalar must not intercept a queued App/Email selection.
+      return true;
+    }
     const channel = prefs?.payment_receipt_channel || 'sms';
     return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
@@ -3886,7 +3897,7 @@ function initScheduledJobs() {
           }
 
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
-          if (!toPhone) {
+          if (!toPhone && !canReplayBillingWithoutPhone(msg, claimMeta)) {
             // Refresh-required row whose current customer phone can't be
             // verified right now — retry on the bounded attempt rail rather
             // than sending to the frozen snapshot under customer trust.
@@ -4014,6 +4025,7 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
@@ -4033,6 +4045,9 @@ function initScheduledJobs() {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.billingDeliveryCategory
+                ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory }
+                : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,
@@ -7134,6 +7149,7 @@ module.exports = {
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,
+  canReplayBillingWithoutPhone,
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
   holdFinalReviewUncertainty,

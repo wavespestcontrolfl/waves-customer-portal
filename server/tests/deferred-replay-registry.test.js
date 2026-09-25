@@ -828,6 +828,15 @@ describe('deferred-replay registry', () => {
     });
     expect(stillOwed.eligible).toBe(true);
 
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', customer_id: 'cust-new', status: 'sent', payer_id: null }));
+    const reassigned = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'payment_failed',
+      customer_id: 'cust-original',
+      invoice_id: 'inv-1',
+      stripe_payment_intent_id: 'pi_old',
+    });
+    expect(reassigned).toEqual({ eligible: false, reason: 'invoice-customer-changed' });
+
     // Setup-intent notices never carried a PI — unaffected by the guard.
     db.mockReturnValueOnce(firstChain(null));
     const setupFailure = await recheckDeferredReplay('stripe_webhook_billing_deferred', {

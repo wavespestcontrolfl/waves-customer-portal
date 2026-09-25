@@ -17,7 +17,12 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const db = require('../models/db');
-const { resolveScheduledRecipient, scheduledDepositReceiptAllowed, classifyDepositReplayFallback } = require('../services/scheduler');
+const {
+  resolveScheduledRecipient,
+  canReplayBillingWithoutPhone,
+  scheduledDepositReceiptAllowed,
+  classifyDepositReplayFallback,
+} = require('../services/scheduler');
 
 test.each([false, true])('scheduled replay uses trusted row identities and registered dispatch: %s', async (registered) => {
   // Exercise the actual dispatch block without starting cron jobs or importing
@@ -173,6 +178,20 @@ describe('resolveScheduledRecipient', () => {
   });
 });
 
+describe('canReplayBillingWithoutPhone', () => {
+  test('requires a customer row and a recognized explicit billing category', () => {
+    expect(canReplayBillingWithoutPhone(
+      { customer_id: 'cust-1' }, { billingDeliveryCategory: 'payment_issue' },
+    )).toBe(true);
+    expect(canReplayBillingWithoutPhone(
+      { customer_id: null }, { billingDeliveryCategory: 'payment_issue' },
+    )).toBe(false);
+    expect(canReplayBillingWithoutPhone(
+      { customer_id: 'cust-1' }, { billingDeliveryCategory: 'appointment' },
+    )).toBe(false);
+  });
+});
+
 describe('scheduledDepositReceiptAllowed', () => {
   afterEach(() => db.mockReset());
 
@@ -191,6 +210,11 @@ describe('scheduledDepositReceiptAllowed', () => {
     mockPrefsLookup({ payment_receipt_channel: 'push' });
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
     mockPrefsLookup(null);
+    await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
+  });
+
+  test('leaves explicit receipt combinations to the central billing router', async () => {
+    mockPrefsLookup({ payment_receipt_channel: 'email', payment_receipt_channels: ['push'] });
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
   });
 
