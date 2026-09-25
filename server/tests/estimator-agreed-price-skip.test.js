@@ -46,7 +46,8 @@ jest.mock('../services/estimator-engine/context-builder', () => ({
   _private: { extractionFromCall: (...args) => mockExtractionFromCall(...args) },
 }));
 
-const { maybeDraftEstimateForCall, _private: { formatAgreedPriceLabel } } = require('../services/estimator-engine');
+const { maybeDraftEstimateForCall, _private: { resolveAgreedPriceForCall } } = require('../services/estimator-engine');
+const logger = require('../services/logger');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -213,9 +214,32 @@ describe('maybeDraftEstimateForCall — agreed-price refusal (owner ruling 2026-
   });
 });
 
-describe('estimator-engine formatAgreedPriceLabel (mirrors the processor\'s own formatter)', () => {
-  test('exact vs range, same contract as call-recording-processor.js', () => {
-    expect(formatAgreedPriceLabel({ amount: 90 })).toBe('$90.00');
-    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 100 })).toBe('$90.00–$100.00');
+describe('estimator-engine agreed terms (codex #4815 r6 P2 — the SAME shared resolver as the processor)', () => {
+  test('the billing unit and every accepted component reach the tri-state result and the skip log', async () => {
+    const upfront = { amount_usd: 150, unit: 'one_time', accepted: true, caller_response: 'accepted' };
+    const recurring = { amount_usd: 50, unit: 'per_month', accepted: true, caller_response: 'accepted' };
+    mockExtractionFromCall.mockReturnValue({
+      source: 'enriched',
+      extraction: { service_request: { price: upfront, prices: [upfront, recurring] } },
+    });
+
+    await expect(resolveAgreedPriceForCall('call-1')).resolves.toEqual({
+      status: 'agreed', amount: 150, unit: 'one_time', additionalTerms: [{ amount: 50, unit: 'per_month' }],
+    });
+    const result = await maybeDraftEstimateForCall({ callLogId: 'call-1', quotePromised: false });
+    expect(result.skipped).toBe('price_agreed_on_call');
+    const skipLog = logger.info.mock.calls.map((c) => c[0]).find((m) => m.includes('price agreed on call'));
+    expect(skipLog).toContain('$150.00 one-time + $50.00/month');
+  });
+
+  test('an accepted per-quarter price is logged with its unit, never as a bare amount', async () => {
+    mockExtractionFromCall.mockReturnValue({
+      source: 'enriched',
+      extraction: { service_request: { price: { amount_usd: 90, unit: 'per_quarter', accepted: true } } },
+    });
+
+    await maybeDraftEstimateForCall({ callLogId: 'call-1', quotePromised: false });
+    const skipLog = logger.info.mock.calls.map((c) => c[0]).find((m) => m.includes('price agreed on call'));
+    expect(skipLog).toContain('($90.00/quarter)');
   });
 });

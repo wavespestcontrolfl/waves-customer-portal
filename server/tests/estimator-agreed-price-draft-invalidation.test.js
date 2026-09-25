@@ -201,7 +201,7 @@ describe('invalidateDraftForCall(reason: price_agreed_on_call, scope: nontermina
     expect(call).toBeTruthy();
     const [column, statuses] = call.args;
     expect(column).toBe('status');
-    expect(statuses.sort()).toEqual(['accepted', 'declined', 'expired']);
+    expect([...statuses].sort()).toEqual(['accepted', 'declined', 'expired']);
   });
 
   test.each(['accepted', 'declined', 'expired'])('an %s estimate is left COMPLETELY untouched — no update, no linkage_invalidated_at, token still viewable', async (status) => {

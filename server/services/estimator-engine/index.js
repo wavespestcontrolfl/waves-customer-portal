@@ -27,6 +27,14 @@ const contextBuilder = require('./context-builder');
 const { buildCallContext, existingDraftForCall } = contextBuilder;
 const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
 const { hasWrongPremiseFlag } = require('../lookup-confidence');
+const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../../utils/call-agreed-price');
+// Terminal, money-bearing estimate statuses + the row-scoped verdict
+// reasons — ONE shared definition each (utils/estimate-claim-sql.js; see its
+// doc for why an agreed-price cleanup must never stamp a terminal row,
+// codex #4815 r2 P0, and why its call marker is row-scoped, r6 P0).
+const {
+  TERMINAL_ESTIMATE_STATUSES, isRowScopedDraftBlockReason, ROW_SCOPED_DRAFT_BLOCK_REASONS,
+} = require('../../utils/estimate-claim-sql');
 
 // A wrong-premise lookup poisons the RECORD leg too, not just the enriched
 // payload buildEngineInput already rejects: an 'address' flag means the
@@ -746,7 +754,11 @@ const CALL_ORIGIN = {
 // acted on. Terminal rows are excluded from the scan itself, and re-checked
 // under the per-row lock in case a status changed between the two (a
 // concurrent accept). Omitted (default), every row is in scope — the
-// identity-conflict and spam/voicemail callers are unaffected.
+// identity-conflict and spam/voicemail callers are unaffected. The CALL
+// marker this scope writes is row-scoped to match (codex #4815 r6 P0): its
+// reason is in ROW_SCOPED_DRAFT_BLOCK_REASONS, so every reader
+// (callDraftVerdict) applies it only to the rows this pass stamped, never
+// to the terminal or booking-linked rows it deliberately skipped.
 //
 // The same scope also excludes a row already linked to a live booking via
 // estimate_data.scheduled_service_id (codex #4815 r5 P2) — the exact stamp
@@ -1049,9 +1061,18 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
         // the caller reads as ownership lost and defers.
         q.where('processing_generation', procGeneration);
       }
+      const stamp = "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)";
       const wrote = await q.update({
         metadata: db.raw(
-          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)",
+          // A ROW-SCOPED verdict never DOWNGRADES a standing call-wide one
+          // (codex #4815 r6 P0): an agreed-price marker only blocks the rows
+          // it marked, so overwriting a live identity-conflict or rejection
+          // marker with it would silently re-open every other draft of the
+          // call. The call-wide verdict stays; the scoped scan still runs.
+          isRowScopedDraftBlockReason(reason)
+            ? `CASE WHEN COALESCE(metadata->'estimator_draft_block'->>'reason', '') NOT IN ('', ${SCOPED_REASON_SQL_LIST})
+                    THEN COALESCE(metadata, '{}'::jsonb) ELSE ${stamp} END`
+            : stamp,
           // The marker records its writer's generation so a later pass's
           // clear can distinguish "older verdict, mine to retire" from "a
           // concurrent NEWER verdict I must not delete" without trusting
@@ -1083,6 +1104,68 @@ async function markDraftBlockOnCall(callLogId, reason, { procToken = null, procG
   throw new Error(`draft-block marker write failed for call ${callLogId}: ${lastErr?.message || 'unknown'}`);
 }
 
+// The row-scoped reasons as a SQL literal list — constants of [a-z_] only,
+// so inlining them is safe (and keeps the marker JSON the first binding).
+const SCOPED_REASON_SQL_LIST = ROW_SCOPED_DRAFT_BLOCK_REASONS.map((r) => `'${r.replace(/[^a-z_]/g, '')}'`).join(', ');
+
+// Which markers a pass may RETIRE (clear or supersede): a marker that
+// recorded its writer's generation only by a pass of the same or a later
+// generation — monotonic, wall-clock-free; a generation-less marker (pre-
+// column, or generation-less maintenance) only when it was stamped no later
+// than the instant this pass started. A pass with no generation can never
+// retire a generation-stamped marker (fail closed).
+function markerRetirableSql(key, generation) {
+  return `(
+    CASE WHEN (metadata->'${key}'->>'generation') ~ '^[0-9]+$'
+         THEN ${generation != null ? `(metadata->'${key}'->>'generation')::int <= ?` : 'FALSE'}
+         ELSE COALESCE(metadata->'${key}'->>'at', '') <= ?
+    END
+  )`;
+}
+
+function markerRetirableBindings(generation, fenceAt) {
+  return generation != null ? [generation, fenceAt] : [fenceAt];
+}
+
+// RE-QUALIFICATION supersedes a row-scoped (agreed-price) block BEFORE the
+// creators' in-lock guard (codex #4815 r6 P1). The block used to be
+// retired only AFTER pipelineResult.created — but the creator's own
+// callRejectedForDrafting refused every insert while it stood, so created
+// could never become true: a call whose agreed price was later corrected
+// away (or that earned the Waves Assessment exception) could never draft
+// again. Superseding is a durable stamp on the marker, not a delete:
+//   - creators read a superseded row-scoped block as "no longer refusing
+//     new drafts" (callDraftVerdict forNewDraft);
+//   - the stale drafts the verdict ALREADY marked stay dead through their
+//     own per-row stamps (linkage_invalidated_at / invalidation_pending_*),
+//     which every read path checks — so they are never reused;
+//   - the queued estimator_quarantine_pending entry is NOT superseded: its
+//     invalidation never landed, so the stale rows are not yet marked and
+//     a fresh draft must wait for the drainer to land or retire it.
+// Generation-fenced exactly like the post-create clear: only a marker this
+// pass may retire, never a NEWER pass's verdict. A NEW agreed-price verdict
+// rewrites the whole marker, which drops superseded_at with it. Callers run
+// this only after the existing-draft branch, so a reusable draft is always
+// returned as-is rather than superseded past. THROWS on a failed write: the
+// caller fails the run rather than compose a draft its own guard refuses.
+async function supersedeRowScopedDraftBlock(callLogId, { notNewerThan, generation = null }) {
+  const fenceAt = notNewerThan || new Date().toISOString();
+  return db('call_log').where({ id: callLogId })
+    .whereRaw(`COALESCE(metadata->'estimator_draft_block'->>'reason', '') IN (${SCOPED_REASON_SQL_LIST})`)
+    .whereRaw("COALESCE(metadata->'estimator_draft_block'->>'superseded_at', '') = ''")
+    .whereRaw(markerRetirableSql('estimator_draft_block', generation), markerRetirableBindings(generation, fenceAt))
+    .update({
+      metadata: db.raw(
+        "jsonb_set(metadata, '{estimator_draft_block}', (metadata->'estimator_draft_block') || ?::jsonb, true)",
+        [JSON.stringify({
+          superseded_at: new Date().toISOString(),
+          ...(generation != null ? { superseded_by_generation: Number(generation) } : {}),
+        })],
+      ),
+      updated_at: new Date(),
+    });
+}
+
 // Cleared the moment a pass reads a CONCLUSIVELY clean context — the
 // verdict is gone and drafting must resume. Both call-side keys go
 // together (codex P1, PR #3304 GH r8g): a leftover quarantine-queue entry
@@ -1101,13 +1184,8 @@ async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = nul
   // keep the original timestamp fence: `notNewerThan` is the ISO instant
   // this pass started, and a marker stamped after it survives untouched.
   const fenceAt = notNewerThan || new Date().toISOString();
-  const markerClearable = (key) => `(
-    CASE WHEN (metadata->'${key}'->>'generation') ~ '^[0-9]+$'
-         THEN ${generation != null ? `(metadata->'${key}'->>'generation')::int <= ?` : 'FALSE'}
-         ELSE COALESCE(metadata->'${key}'->>'at', '') <= ?
-    END
-  )`;
-  const markerBindings = generation != null ? [generation, fenceAt] : [fenceAt];
+  const markerClearable = (key) => markerRetirableSql(key, generation);
+  const markerBindings = markerRetirableBindings(generation, fenceAt);
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -1463,18 +1541,6 @@ async function invalidateDraftForCallWithRetry(callLogId, options, attempts = 3)
   return last;
 }
 
-// Terminal, money-bearing estimate statuses — a customer has already
-// accepted or declined, or the row expired. estimateOffCustomerSurface
-// (utils/estimate-claim-sql.js) reads estimatorEngine.linkage_invalidated_at
-// BEFORE the accepted/declined early-allow in isEstimateCustomerViewable, so
-// stamping it on one of these rows revokes the customer's PERMANENT access
-// to an estimate they already acted on — correct for an identity-conflict
-// or rejected-call verdict (the whole call's identity is in question, so an
-// acceptance built on it is too), never correct for a mere agreed-price
-// cleanup (codex #4815 r2 P0): the estimate itself, and whoever accepted or
-// declined it, are unaffected by a price also being agreed on the call.
-const TERMINAL_ESTIMATE_STATUSES = ['accepted', 'declined', 'expired'];
-
 // existingDraftForCall's error-tolerant sibling for the paths where a
 // lookup failure must NOT read as "no draft" (codex P0, PR #3304 GH r8c).
 // Same predicate: this call's draft, not archived, not already invalidated.
@@ -1507,35 +1573,23 @@ async function strictExistingDraftForCall(callLogId, { excludeTerminal = false, 
   return q.orderBy('created_at', 'asc').select('id', 'status', 'estimate_data');
 }
 
-// Same rule as resolveCallAgreedPrice in call-recording-processor.js
-// (owner ruling 2026-09-24 — a price already accepted on the call must
-// never be re-priced by the estimator engine), re-derived here from the
-// call row directly so the refusal below holds at THIS entry point for
-// every caller, not only the one call site that already checks first.
-// Keep the two in sync: V2 ONLY (codex #4815 r1 P1) — a V1-only call
-// (extractionFromCall source !== 'enriched') never gates the engine, since
-// downstream composer decisions read the validated V2 extraction plus the
-// raw transcript, never the unvalidated V1 blob. Either of two independent
-// V2 signals is enough: `service_request.quoted_price_usd` (the schema's
-// own narrower accepted-total-only field — unchanged semantics since V1,
-// per validate-extraction.js's 1.12.0 note; never a range — the prompt
-// nulls it out for one), or `service_request.price.accepted === true` (the
-// normalizer has already selected the accepted prices[] entry into `price`
-// at parse time) — amount_usd is the LOW end of a stated range and
-// amount_max_usd the HIGH end, so amountMax rides along whenever the
-// caller accepted a genuine range (codex #4815 r3 P2): the engine still
-// has no single number to draft from either way, but a caller who
-// consumes this for a log/notification must not collapse "$90 to $100
-// agreed" into "$90 agreed".
+// The call-recording-processor's own agreed-price rule (owner ruling
+// 2026-09-24 — a price already accepted on the call must never be re-priced
+// by the estimator engine), re-derived here from the call row directly so
+// the refusal below holds at THIS entry point for every caller, not only
+// the one call site that already checks first. Both gates read the ONE
+// shared resolver (utils/call-agreed-price.js, codex #4815 r6 P2 — the two
+// mirrored copies both dropped the billing unit), fed the SAME V2-only
+// extraction: a V1-only call (extractionFromCall source !== 'enriched')
+// never gates the engine (codex #4815 r1 P1).
 //
-// TRI-STATE return (codex #4815 r3 P1): { status: 'agreed', amount,
-// amountMax? } | { status: 'none' } | { status: 'error' }. A bare null
-// used to mean BOTH "genuinely no agreed price" and "the read itself
-// failed" — sweepPendingQuarantines's drainer read a transient DB error
-// the exact same way as a later pass's genuine correction and deleted the
-// durable block + retry marker on nothing more than a blip. The two
-// verdicts are now distinguishable; only 'none' (a SUCCESSFUL read proving
-// no agreed price) may clear anything.
+// TRI-STATE return (codex #4815 r3 P1): { status: 'agreed', ...terms } |
+// { status: 'none' } | { status: 'error' }. A bare null used to mean BOTH
+// "genuinely no agreed price" and "the read itself failed" —
+// sweepPendingQuarantines's drainer read a transient DB error the exact
+// same way as a later pass's genuine correction and deleted the durable
+// block + retry marker on nothing more than a blip. Only 'none' (a
+// SUCCESSFUL read proving no agreed price) may clear anything.
 async function resolveAgreedPriceForCall(callLogId) {
   if (!callLogId) return { status: 'none' };
   // A test double for context-builder (jest.mock) commonly stubs only the
@@ -1551,27 +1605,8 @@ async function resolveAgreedPriceForCall(callLogId) {
     if (!call) return { status: 'none' };
     const { extraction, source } = extractionFromCall(call);
     if (source !== 'enriched') return { status: 'none' };
-    const svc = extraction?.service_request;
-    if (!svc) return { status: 'none' };
-    if (typeof svc.quoted_price_usd === 'number'
-      && Number.isFinite(svc.quoted_price_usd)
-      && svc.quoted_price_usd > 0) {
-      return { status: 'agreed', amount: svc.quoted_price_usd };
-    }
-    const price = svc.price;
-    if (price && price.accepted === true
-      && typeof price.amount_usd === 'number'
-      && Number.isFinite(price.amount_usd)
-      && price.amount_usd > 0) {
-      const agreed = { status: 'agreed', amount: price.amount_usd };
-      if (typeof price.amount_max_usd === 'number'
-        && Number.isFinite(price.amount_max_usd)
-        && price.amount_max_usd > price.amount_usd) {
-        agreed.amountMax = price.amount_max_usd;
-      }
-      return agreed;
-    }
-    return { status: 'none' };
+    const agreed = resolveCallAgreedPrice(extraction);
+    return agreed ? { status: 'agreed', ...agreed } : { status: 'none' };
   } catch (err) {
     // A READ FAILURE — distinct from a successful read that finds no
     // agreed price (codex #4815 r3 P1). Callers must never treat this as
@@ -1579,19 +1614,6 @@ async function resolveAgreedPriceForCall(callLogId) {
     logger.warn(`[estimator-engine] agreed-price pre-check failed for call ${callLogId}: ${err.message}`);
     return { status: 'error' };
   }
-}
-
-// One shared formatter, same contract as call-recording-processor.js's
-// formatAgreedPriceLabel (codex #4815 r3 P2) — never collapses an accepted
-// RANGE to its low end in a log line.
-function formatAgreedPriceLabel(agreed) {
-  const amount = agreed?.amount;
-  if (typeof amount !== 'number' || !Number.isFinite(amount)) return '$0.00';
-  const amountMax = agreed?.amountMax;
-  if (typeof amountMax === 'number' && Number.isFinite(amountMax) && amountMax > amount) {
-    return `$${amount.toFixed(2)}–$${amountMax.toFixed(2)}`;
-  }
-  return `$${amount.toFixed(2)}`;
 }
 
 async function maybeDraftEstimateForCall({
@@ -1618,8 +1640,15 @@ async function maybeDraftEstimateForCall({
   // …but the written-quote exception below needs an EXPLICIT assertion
   // (codex #4815 r4 P2): the replay CLI omits the flag, and inheriting the
   // default let a dry-run compose a price the live processor never would.
+  // Whether THIS pass has positively re-qualified the call past an earlier
+  // agreed-price verdict (codex #4815 r6 P1): an explicit written-quote
+  // assertion (the assessment exception), a clarify re-price, or a
+  // SUCCESSFUL read proving no agreed price. A read ERROR fails open below
+  // but proves nothing, so it never supersedes the durable block.
+  let requalifiedPastAgreedPrice = quotePromisedArg === true || !!supersedeEstimateId;
   if (quotePromisedArg !== true && !supersedeEstimateId) {
     const agreedPrice = await resolveAgreedPriceForCall(callLogId);
+    requalifiedPastAgreedPrice = agreedPrice.status === 'none';
     // Fail OPEN on a READ ERROR here (codex #4815 r3 P1, made explicit):
     // this check is a BACKSTOP behind the call-recording-processor's own
     // PRIMARY check — the processor gate is authoritative and already
@@ -1910,6 +1939,15 @@ async function maybeDraftEstimateForCall({
         }
       }
     }
+    // Supersede a row-scoped (agreed-price) block this pass re-qualified
+    // past — HERE, after the existing-draft branch above returned any
+    // reusable draft and BEFORE the creators' in-lock guard reads the
+    // marker (codex #4815 r6 P1; see supersedeRowScopedDraftBlock). A
+    // failed write throws into the catch below: the run degrades to the
+    // RED fallback rather than compose a draft its own guard refuses.
+    if (!dryRun && requalifiedPastAgreedPrice) {
+      await supersedeRowScopedDraftBlock(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration });
+    }
   } catch (err) {
     logger.error(`[estimator-engine] unexpected failure: ${err.message}`);
     // A failed identity QUARANTINE is not an ordinary engine error (codex
@@ -1952,6 +1990,9 @@ async function maybeDraftEstimateForCall({
   // lands RED with nothing drafted (e.g. pricing failed) — the prior verdict
   // stays in place for another pass to resolve, which is the same
   // conservative direction the block already takes everywhere else.
+  // (A re-qualified pass reaches a successful insert at all only because
+  // the supersede above lifted a row-scoped block for NEW drafts first —
+  // codex #4815 r6 P1; this clear then retires the superseded marker.)
   if (!dryRun && pipelineResult.created === true) {
     await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration })
       .catch((clearErr) => {
@@ -3001,6 +3042,6 @@ module.exports = {
   notify,
   _private: {
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
-    parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, formatAgreedPriceLabel,
+    parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, supersedeRowScopedDraftBlock,
   },
 };

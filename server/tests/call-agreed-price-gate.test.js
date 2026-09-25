@@ -235,9 +235,15 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(hookBlock).toContain('return outcome;');
   });
 
-  test('resolveCallAgreedPrice is exported for reuse/testing (contract with the engine-entry backstop)', () => {
-    const CallRecordingProcessor = require('../services/call-recording-processor');
-    expect(typeof CallRecordingProcessor._test.resolveCallAgreedPrice).toBe('function');
+  test('the processor gate and the engine-entry backstop read ONE shared resolver + formatter (codex #4815 r6 P2)', () => {
+    // Two mirrored copies both dropped the billing unit; the shared module
+    // is the only definition now.
+    const engineSource = fs.readFileSync(require.resolve('../services/estimator-engine/index.js'), 'utf8');
+    expect(source).toContain("const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');");
+    expect(engineSource).toContain("const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../../utils/call-agreed-price');");
+    expect(source).not.toMatch(/function resolveCallAgreedPrice\(/);
+    expect(source).not.toMatch(/function formatAgreedPriceLabel\(/);
+    expect(engineSource).not.toMatch(/function formatAgreedPriceLabel\(/);
   });
 
   test('the identity-conflict quarantine catch reuses the SAME shared retry-lane fallback, not its own inline copy (codex #4815 r3 P1)', () => {

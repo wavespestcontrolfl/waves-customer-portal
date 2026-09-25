@@ -23,11 +23,12 @@ const {
   convertCallLeadOnPhoneBooking,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
-  resolveCallAgreedPrice,
-  formatAgreedPriceLabel,
   bookingPreDraftAssessmentDrafted,
   normalizeCallExtraction,
 } = _test;
+// ONE shared resolver + formatter for the processor gate and the engine
+// backstop (codex #4815 r6 P2).
+const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');
 const { flatView, mapAdditionalPropertiesToLegacy } = require('../utils/extraction-compat');
 const { validateModelOutput } = require('../schemas/validate-extraction');
 const { canAutoRoute, ADVISORY_TRIAGE_FLAGS } = require('../services/call-triage-flags');
@@ -217,6 +218,33 @@ describe('resolveCallAgreedPrice', () => {
     expect(resolveCallAgreedPrice({ service_request: {} })).toBeNull();
   });
 
+  // codex #4815 r6 P2: the accepted billing unit and every accepted
+  // component (upfront + recurring) ride along — "$90 per quarter" agreed
+  // is never reported as a bare "$90.00".
+  test('the accepted billing UNIT rides along (and "unknown" is dropped, not rendered)', () => {
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 90, unit: 'per_quarter', accepted: true } } }))
+      .toEqual({ amount: 90, unit: 'per_quarter' });
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 90, amount_max_usd: 100, unit: 'per_month', accepted: true } } }))
+      .toEqual({ amount: 90, amountMax: 100, unit: 'per_month' });
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 300, unit: 'unknown', accepted: true } } }))
+      .toEqual({ amount: 300 });
+  });
+
+  test('quoted_price_usd borrows the unit of the accepted price entry with the SAME amount', () => {
+    const v2 = { service_request: { quoted_price_usd: 150, price: { amount_usd: 150, unit: 'per_application', accepted: true } } };
+    expect(resolveCallAgreedPrice(v2)).toEqual({ amount: 150, unit: 'per_application' });
+  });
+
+  test('an upfront + recurring agreement keeps EVERY accepted component, primary first', () => {
+    const upfront = { amount_usd: 150, unit: 'one_time', accepted: true, caller_response: 'accepted' };
+    const recurring = { amount_usd: 50, unit: 'per_month', accepted: true, caller_response: 'accepted' };
+    const declinedAlt = { amount_usd: 400, unit: 'per_year', accepted: false, caller_response: 'declined' };
+    const v2 = { service_request: { price: upfront, prices: [upfront, recurring, declinedAlt] } };
+    expect(resolveCallAgreedPrice(v2)).toEqual({
+      amount: 150, unit: 'one_time', additionalTerms: [{ amount: 50, unit: 'per_month' }],
+    });
+  });
+
   test('with no valid V2 extraction, V1-shaped fields (quoted_price/appointment_confirmed) are NEVER honored — always null', () => {
     // codex #4815 r1 P1: downstream composer decisions never read V1.
     // resolveCallAgreedPrice takes the V2 extraction alone; passing a
@@ -239,6 +267,15 @@ describe('formatAgreedPriceLabel', () => {
   test('an amountMax that is not actually higher is ignored (defense in depth)', () => {
     expect(formatAgreedPriceLabel({ amount: 90, amountMax: 90 })).toBe('$90.00');
     expect(formatAgreedPriceLabel({ amount: 90, amountMax: 50 })).toBe('$90.00');
+  });
+
+  test('renders the full agreed terms — billing unit and every accepted component (codex #4815 r6 P2)', () => {
+    expect(formatAgreedPriceLabel({ amount: 90, unit: 'per_quarter' })).toBe('$90.00/quarter');
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 100, unit: 'per_month' })).toBe('$90.00–$100.00/month');
+    expect(formatAgreedPriceLabel({ amount: 150, unit: 'per_application' })).toBe('$150.00 per application');
+    expect(formatAgreedPriceLabel({ amount: 300, unit: 'per_year' })).toBe('$300.00/year');
+    expect(formatAgreedPriceLabel({ amount: 150, unit: 'one_time', additionalTerms: [{ amount: 50, unit: 'per_month' }] }))
+      .toBe('$150.00 one-time + $50.00/month');
   });
 });
 

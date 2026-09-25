@@ -1732,85 +1732,15 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
   };
 }
 
-// Owner ruling 2026-09-24 (the $300 flea call — "just to confirm one more
-// time, it's $300, that's two treatments" / "Yep" — still spawned a $387
-// estimator-engine draft two minutes later): a price the caller ALREADY
-// agreed to on the call must never be re-priced by the estimator engine.
-// The spoken word beats the estimator (see resolveCallQuoteSignals's
-// quote-requested/-promised split above, and the call-booking precedence
-// ruling this codifies). Returns { amount, amountMax } — amountMax present
-// only for a genuine accepted RANGE — or null when no price was accepted
-// on the call.
-//
-// V2 ONLY (codex #4815 r1 P1): downstream composer decisions read the V2
-// canonical extraction plus the raw transcript, never the unvalidated V1
-// blob (same contract as context-builder's "ENRICHED (V2 valid)
-// extractions only" email-identity guard) — a hallucinated V1 price must
-// never suppress a legitimate draft. With no valid V2 extraction this
-// returns null and the engine runs exactly as it did before this feature.
-//
-// Two independent V2 signals, either one enough:
-//   - service_request.quoted_price_usd: the SCHEMA'S OWN narrower
-//     "accepted-total-only" field (call-extraction-v1.js prompt: "The
-//     total price... that the agent quoted AND the caller accepted"; V2
-//     kept this exact semantic when service_request.price was added later
-//     specifically to capture prices the caller had NOT accepted —
-//     validate-extraction.js 1.12.0 note: "quoted_price_usd keeps its
-//     existing semantics and consumers unchanged"). A valid V2 extraction
-//     can carry this while leaving the broader `price` object null. NEVER
-//     a range (codex #4815 r3 P2 — checked against the prompt: "null when
-//     no price was quoted, the caller didn't accept, or the amount is
-//     uncertain or a range"), so this leg is always reported exact.
-//   - service_request.price.accepted === true: normalizeServiceRequestPricing
-//     (utils/normalize-extraction-v2.js) has ALREADY selected the accepted
-//     prices[] entry (by caller_response 'accepted') into `price` at parse
-//     time (finalizeV2Extraction normalizes before persisted-schema
-//     validation), so reading `price.accepted` alone here also covers the
-//     prices[] shape — there is no separate array to walk. amount_usd is
-//     the LOW end of a stated range and amount_max_usd the HIGH end
-//     (schema description on amount_max_usd, verified against the prompt's
-//     own "$90 to 100" example) — a caller who accepted "$90 to 100" agreed
-//     to a RANGE, not to $90, so amountMax rides along whenever it's a
-//     genuinely higher, finite number. The engine still gates on a range
-//     (no engine number to draft from either way); only the reported label
-//     must never collapse it to the low end.
-function resolveCallAgreedPrice(v2Extraction = null) {
-  const svc = v2Extraction?.service_request;
-  if (!svc) return null;
-  if (typeof svc.quoted_price_usd === 'number'
-    && Number.isFinite(svc.quoted_price_usd)
-    && svc.quoted_price_usd > 0) {
-    return { amount: svc.quoted_price_usd };
-  }
-  const price = svc.price;
-  if (price && price.accepted === true
-    && typeof price.amount_usd === 'number'
-    && Number.isFinite(price.amount_usd)
-    && price.amount_usd > 0) {
-    const result = { amount: price.amount_usd };
-    if (typeof price.amount_max_usd === 'number'
-      && Number.isFinite(price.amount_max_usd)
-      && price.amount_max_usd > price.amount_usd) {
-      result.amountMax = price.amount_max_usd;
-    }
-    return result;
-  }
-  return null;
-}
-
-// codex #4815 r3 P2: one shared formatter for the agreed-price label in
-// every log line and notification body — never lets a range collapse to
-// its low end ("$90 agreed" when the caller actually accepted "$90 to
-// $100"). Exact price ⇒ "$90.00"; a genuine range ⇒ "$90.00–$100.00".
-function formatAgreedPriceLabel(agreedPrice) {
-  const amount = agreedPrice?.amount;
-  if (typeof amount !== 'number' || !Number.isFinite(amount)) return '$0.00';
-  const amountMax = agreedPrice?.amountMax;
-  if (typeof amountMax === 'number' && Number.isFinite(amountMax) && amountMax > amount) {
-    return `$${amount.toFixed(2)}–$${amountMax.toFixed(2)}`;
-  }
-  return `$${amount.toFixed(2)}`;
-}
+// Owner ruling 2026-09-24 (the $300 flea call): a price the caller ALREADY
+// agreed to on the call must never be re-priced by the estimator engine —
+// the spoken word beats the estimator (see resolveCallQuoteSignals's
+// quote-requested/-promised split above). ONE shared resolver + label
+// formatter (utils/call-agreed-price.js, codex #4815 r6 P2), the same pair
+// the estimator engine's entry backstop reads, so the two gates can never
+// disagree and every log line and bell renders the full agreed terms —
+// range, billing unit, and every accepted component.
+const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');
 
 // codex #4815 r2 P2 (refined r3 P2): whether the post-finalization
 // price-agreed sweep must stand down because the booking-triggered
@@ -1818,7 +1748,7 @@ function formatAgreedPriceLabel(agreedPrice) {
 // assessment booking IS an owed quote, regardless of any price also agreed
 // on the call) OWNS a live estimate for this same call. Chains onto the
 // SAME settled promise the hook itself sequences on (bookingPreDraftPromise)
-// rather than racing it: that hook can clear this call's same-generation
+// rather than racing it: that hook can supersede this call's same-generation
 // estimator_draft_block while composing, and the sweep re-stamping it
 // mid-composer made the exception's outcome timing-dependent — sometimes a
 // legitimate assessment-booking insert bounced off the very block the
@@ -13901,7 +13831,7 @@ const CallRecordingProcessor = {
     // Set below, by the booking-triggered pre-draft hook, ONLY when
     // GATE_ESTIMATOR_BOOKING_PREDRAFTS is on for THIS call (codex #4815 r2
     // P2): the price-agreed sweep chains onto this SAME settled promise
-    // instead of racing it — that hook can clear the same-generation
+    // instead of racing it — that hook can supersede the same-generation
     // estimator_draft_block (quotePromised:true, the documented assessment
     // exception) while composing, and the sweep re-stamping it mid-composer
     // made the exception's outcome timing-dependent instead of
@@ -17345,7 +17275,7 @@ const CallRecordingProcessor = {
           const preDraftBookingId = appointmentResult.scheduledServiceId;
           // Tracked (not void-discarded) so the price-agreed sweep below
           // can chain onto this SAME settled promise (codex #4815 r2 P2)
-          // instead of racing it — this hook can clear the same-generation
+          // instead of racing it — this hook can supersede the same-generation
           // estimator_draft_block (quotePromised:true, the documented
           // assessment exception) while composing, and the sweep
           // re-stamping it mid-composer made that exception's outcome
@@ -18493,7 +18423,7 @@ const CallRecordingProcessor = {
       // itself already uses for estimatorEnginePromise a few thousand lines
       // up), so this pass returns immediately while the sweep still never
       // runs before the pre-draft hook settles. That hook (quotePromised:
-      // true, the documented assessment exception) can clear this call's
+      // true, the documented assessment exception) can supersede this call's
       // same-generation estimator_draft_block while composing, and the
       // sweep re-stamping it mid-composer made the exception's outcome
       // timing-dependent — sometimes a legitimate assessment-booking
@@ -19362,8 +19292,6 @@ CallRecordingProcessor._test = {
   snapshotStampedLeadStates,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
-  resolveCallAgreedPrice,
-  formatAgreedPriceLabel,
   bookingPreDraftAssessmentDrafted,
   pushCallToRetryLaneAfterQuarantineFailure,
   retirePriceAgreedEstimatorBell,

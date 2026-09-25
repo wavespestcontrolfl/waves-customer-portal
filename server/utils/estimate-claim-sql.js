@@ -86,6 +86,72 @@ async function callPassStillOwned(dbc, callLogId, { ownerProcToken = null, owner
       && Number(row.processing_generation) === Number(ownerProcGeneration));
 }
 
+// Terminal, money-bearing estimate statuses — a customer has already
+// accepted or declined, or the row expired. estimateOffCustomerSurface
+// reads estimatorEngine.linkage_invalidated_at BEFORE the accepted/declined
+// early-allow, so stamping it on one of these rows revokes the customer's
+// PERMANENT access to an estimate they already acted on — correct for an
+// identity-conflict or rejected-call verdict (the whole call's identity is
+// in question, so an acceptance built on it is too), never correct for a
+// mere agreed-price cleanup (codex #4815 r2 P0).
+const TERMINAL_ESTIMATE_STATUSES = Object.freeze(['accepted', 'declined', 'expired']);
+
+// Verdicts whose call-side estimator_draft_block is ROW-SCOPED (codex #4815
+// r6 P0, structural): an agreed-price cleanup is a verdict about specific
+// stale DRAFTS, not about the call's identity or workability. Its marker
+// therefore (a) refuses NEW drafts for the call — until a re-qualifying
+// pass explicitly supersedes it — and (b) blocks EXISTING estimates only
+// when that row carries this same verdict's own per-row stamp (the exact
+// rows invalidateDraftForCall marked, archived or deferred). An accepted /
+// declined / expired row, a booking-linked assessment draft, or a fresh
+// re-qualified draft is never one of those rows, so the call marker can no
+// longer revoke its public token the way a call-wide verdict does. Every
+// other reason (identity conflict, spam / voicemail / no-attribution) stays
+// CALL-WIDE, exactly as before.
+const ROW_SCOPED_DRAFT_BLOCK_REASONS = Object.freeze(['price_agreed_on_call']);
+
+function isRowScopedDraftBlockReason(reason) {
+  return ROW_SCOPED_DRAFT_BLOCK_REASONS.includes(String(reason || ''));
+}
+
+// THE one reading of the call-side draft-verdict markers
+// (estimator_draft_block + the queued estimator_quarantine_pending). Every
+// reader — callSideBlockForEstimateData and staleCallLinkageReason for an
+// EXISTING estimate, callRejectedForDrafting for a NEW draft — goes through
+// here instead of interpreting the raw marker itself (codex #4815 r6 P0: the
+// P0 appeared twice because three readers each applied the marker
+// call-wide on their own). Returns { marker, reason } or null.
+//   forNewDraft  — true when the caller (a draft creator's in-lock guard)
+//                  is deciding whether a NEW draft may be inserted;
+//   estimateData — otherwise, the judged EXISTING row's estimate_data.
+//   supersededBelowGeneration — ignore a marker whose recorded writer
+//                  generation is OLDER than this (see callRejectedForDrafting).
+// The QUEUED marker stays call-wide for both purposes: it means the
+// invalidation itself has not landed, so no row can be proven unaffected —
+// the drainer lands (or retires) it on its next sweep.
+function callDraftVerdict(md, { forNewDraft = false, estimateData = null, supersededBelowGeneration = null } = {}) {
+  const current = (marker) => marker?.reason && (supersededBelowGeneration == null
+    || marker.generation == null
+    || Number(marker.generation) >= Number(supersededBelowGeneration));
+  const block = md?.estimator_draft_block;
+  if (current(block)) {
+    const reason = String(block.reason);
+    // A re-qualifying pass stamps superseded_at BEFORE the creators'
+    // in-lock guard (codex #4815 r6 P1) so its fresh draft can land; the
+    // rows the verdict already marked stay dead via their own per-row
+    // stamps, which are all an existing row is judged by.
+    const eng = estimateData?.estimatorEngine || {};
+    const markedThisRow = eng.invalidation_pending_reason === reason
+      || (!!eng.linkage_invalidated_at && eng.invalidation_reason === reason);
+    const applies = !isRowScopedDraftBlockReason(reason)
+      || (forNewDraft ? !block.superseded_at : markedThisRow);
+    if (applies) return { marker: 'draft_block', reason };
+  }
+  const queued = md?.estimator_quarantine_pending;
+  if (current(queued)) return { marker: 'quarantine_pending', reason: String(queued.reason) };
+  return null;
+}
+
 // The DURABLE call-side verdict as seen from an ESTIMATE row: when a
 // quarantine could not write its estimate-side marker, the block lives on
 // the call, and the public surfaces — which only ever read the estimate —
@@ -104,8 +170,8 @@ async function callSideBlockForEstimateData(dbc, data) {
     // call is gone has no provenance left to validate.
     if (!row) return 'call_missing';
     const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
-    if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
+    const verdict = callDraftVerdict(md, { estimateData: data });
+    if (verdict) return verdict.reason;
     // An IN-FLIGHT call — a held claim token OR a queued retry lane — is
     // mid-decision: its block marker may be milliseconds (or one sweep)
     // away, and the marker read above ran before that write. The public
@@ -317,6 +383,10 @@ module.exports = {
   callReprocessInFlight,
   callPassStillOwned,
   callSideBlockForEstimateData,
+  callDraftVerdict,
+  isRowScopedDraftBlockReason,
+  ROW_SCOPED_DRAFT_BLOCK_REASONS,
+  TERMINAL_ESTIMATE_STATUSES,
   stampCallUnitAnswer,
   clearCallUnitAnswer,
   callUnitAnswer,
