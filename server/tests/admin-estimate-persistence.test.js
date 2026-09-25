@@ -1447,6 +1447,16 @@ describe('serverRecomputeFromEstimateData — retired Tree & Shrub tier on raw e
     expect(d.generateEstimate).toHaveBeenCalledTimes(1);
   });
 
+  test('a whitespace-only tier reaches the engine as absent, and the posted payload is untouched (codex r24)', async () => {
+    const d = deps();
+    const payload = inputs('   ');
+    await serverRecomputeFromEstimateData(payload, d);
+    expect(d.generateEstimate).toHaveBeenCalledTimes(1);
+    expect(d.generateEstimate.mock.calls[0][0].services.treeShrub).not.toHaveProperty('tier');
+    expect(d.generateEstimate.mock.calls[0][0].services.treeShrub.access).toBe('easy');
+    expect(payload.engineInputs.services.treeShrub.tier).toBe('   ');
+  });
+
   test('a declared persisted replay of the grandfathered quote still prices light', async () => {
     const d = deps();
     await serverRecomputeFromEstimateData(inputs('light'), { ...d, replaySavedPricingKnobs: true });

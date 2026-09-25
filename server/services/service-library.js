@@ -327,7 +327,7 @@ async function getServices({ category, billingType, isActive, isArchived, includ
       if (customerId) {
         this.orWhereExists(function () {
           whereCustomerHoldsService(
-            this.select(db.raw('1')).from('scheduled_services').whereRaw('scheduled_services.service_id = services.id'),
+            this.select(db.raw('1')).from('scheduled_services').whereRaw(HOLDER_VISIT_IS_SERVICE_SQL),
             customerId,
           );
         }).orWhereExists(function () {
@@ -337,7 +337,7 @@ async function getServices({ category, billingType, isActive, isArchived, includ
           whereCustomerHoldsService(
             this.select(db.raw('1')).from('scheduled_service_addons')
               .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
-              .whereRaw('scheduled_service_addons.service_id = services.id')
+              .whereRaw(HOLDER_ADDON_IS_SERVICE_SQL)
               .whereRaw(ADDON_LINE_IS_PLAN_SQL),
             customerId,
           );
@@ -400,11 +400,27 @@ const ADDON_LINE_IS_PLAN_SQL = "(scheduled_service_addons.recurring_pattern IS N
 // waveguard-existing-services' active-recurring predicate (TERMINAL_STATUSES
 // + is_recurring). A completed, skipped or one-off history row does not
 // grandfather anyone (codex r13 on #4786).
+// A holder row is identified by the catalog id OR — for a plan booked
+// through a legacy / free-text path with no catalog link — its stable key
+// snapshot or its label (codex r24 on #4786). The picker joins these to the
+// catalog row; the write gate matches them to the retired rows in JS.
+const HOLDER_VISIT_IS_SERVICE_SQL = '(scheduled_services.service_id = services.id'
+  + ' OR scheduled_services.service_key_snapshot = services.service_key'
+  + ' OR lower(scheduled_services.service_type) IN (lower(services.name), lower(services.short_name)))';
+const HOLDER_ADDON_IS_SERVICE_SQL = '(scheduled_service_addons.service_id = services.id'
+  + ' OR scheduled_service_addons.service_key_snapshot = services.service_key'
+  + ' OR lower(scheduled_service_addons.service_name) IN (lower(services.name), lower(services.short_name)))';
+
 function whereCustomerHoldsService(qb, customerId) {
   const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  // TERMINAL_STATUSES is a COVERAGE view: 'rescheduled' is a phantom row
+  // until SmartRebooker actions it. For OWNERSHIP it is an open obligation
+  // (cancellation-resolution/restart.js), so it stays holder evidence here
+  // (codex r24 on #4786).
+  const TERMINAL_HISTORY_STATUSES = TERMINAL_STATUSES.filter((status) => status !== 'rescheduled');
   return qb
     .where('scheduled_services.customer_id', customerId)
-    .whereNotIn('scheduled_services.status', TERMINAL_STATUSES)
+    .whereNotIn('scheduled_services.status', TERMINAL_HISTORY_STATUSES)
     .where('scheduled_services.is_recurring', true);
 }
 
@@ -458,25 +474,34 @@ async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes, 
     || labelKeys.has(r.service_key));
   if (!retired.length) return [];
   const retiredIds = retired.map((r) => r.id);
+  const retiredKeys = retired.map((r) => r.service_key);
+  const retiredLabels = retired.flatMap((r) => [lower(r.name), lower(r.short_name)]).filter(Boolean);
+  // A live row identified by catalog id, key snapshot or label (codex r24).
+  const holderIdentity = (table, labelCol) => (row) => row
+    .whereIn(`${table}.service_id`, retiredIds)
+    .orWhereIn(`${table}.service_key_snapshot`, retiredKeys)
+    .orWhereRaw(`lower(${table}.${labelCol}) = ANY(?)`, [retiredLabels]);
   const held = customerId && UUID_RE.test(String(customerId))
     ? [
       ...await whereCustomerHoldsService(
-        db('scheduled_services').whereIn('scheduled_services.service_id', retiredIds),
+        db('scheduled_services').where(holderIdentity('scheduled_services', 'service_type')),
         String(customerId),
-      ).distinct('scheduled_services.service_id').pluck('scheduled_services.service_id'),
+      ).select('scheduled_services.service_id as service_id', 'scheduled_services.service_key_snapshot as service_key_snapshot', 'scheduled_services.service_type as label'),
       // Held as an add-on line of a combined recurring visit (a one_time
       // add-on line is not a plan — codex r17 on #4786).
       ...await whereCustomerHoldsService(
         db('scheduled_service_addons')
           .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
-          .whereIn('scheduled_service_addons.service_id', retiredIds)
+          .where(holderIdentity('scheduled_service_addons', 'service_name'))
           .whereRaw(ADDON_LINE_IS_PLAN_SQL),
         String(customerId),
-      ).distinct('scheduled_service_addons.service_id').pluck('scheduled_service_addons.service_id'),
+      ).select('scheduled_service_addons.service_id as service_id', 'scheduled_service_addons.service_key_snapshot as service_key_snapshot', 'scheduled_service_addons.service_name as label'),
     ]
     : [];
-  const heldSet = new Set(held.map(String));
-  return retired.filter((r) => !heldSet.has(String(r.id)));
+  const holds = (r) => held.some((row) => (row.service_id && String(row.service_id) === String(r.id))
+    || (row.service_key_snapshot && row.service_key_snapshot === r.service_key)
+    || [lower(r.name), lower(r.short_name)].filter(Boolean).includes(lower(row.label)));
+  return retired.filter((r) => !holds(r));
 }
 
 /**

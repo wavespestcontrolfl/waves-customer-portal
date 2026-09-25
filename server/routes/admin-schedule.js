@@ -11812,31 +11812,34 @@ function retiredGateInputsForVisitEdit({
   const postedFor = (a) => lines.find((l) => (a?.service_id
     ? String(l.serviceId || '') === String(a.service_id)
     : (!l.serviceId && norm(l.serviceName) === norm(a?.service_name))));
+  // The cadence a retained add-on will actually run at: the reposted line's
+  // own, else the stored one (null rides the parent).
+  const storedRecurrence = (a) => addonLineRecurrence({ recurringPattern: a?.recurring_pattern, recurringIntervalDays: a?.recurring_interval_days });
+  const effectiveRecurrence = (a) => { const posted = postedFor(a); return posted ? addonLineRecurrence(posted) : storedRecurrence(a); };
+  // A one_time add-on line never rides the parent's cadence, so a parent
+  // cadence change does not sell it as a plan (codex r24).
+  const ridesPlan = (a) => (effectiveRecurrence(a)?.pattern || null) !== 'one_time';
   // Every retained add-on name — catalog-backed or not (codex r23: a live
   // 6x T&S add-on riding a parent that just turned quarterly is the retired
-  // plan by name + cadence, while its id stays live) — with the cadence it
-  // will actually run at: the reposted line's own, else the stored one
-  // (null rides the parent).
-  const retainedIds = plansRetainedLines ? [...onVisit] : [];
+  // plan by name + cadence, while its id stays live).
+  const retainedIds = plansRetainedLines
+    ? [current.service_id, ...currentAddons.filter(ridesPlan).map((a) => a?.service_id)].filter(Boolean).map(String)
+    : [];
   const retainedNames = plansRetainedLines
     ? [
       ...(typeof current.service_type === 'string' && current.service_type.trim() ? [current.service_type] : []),
-      ...currentAddons.filter((a) => typeof a?.service_name === 'string' && a.service_name.trim())
-        .map((a) => {
-          const posted = postedFor(a);
-          return {
-            label: a.service_name,
-            recurrence: posted
-              ? addonLineRecurrence(posted)
-              : addonLineRecurrence({ recurringPattern: a.recurring_pattern, recurringIntervalDays: a.recurring_interval_days }),
-          };
-        }),
+      ...currentAddons.filter((a) => ridesPlan(a) && typeof a?.service_name === 'string' && a.service_name.trim())
+        .map((a) => ({ label: a.service_name, recurrence: effectiveRecurrence(a) })),
     ]
     : [];
+  // A retained add-on reposted with a different cadence than its stored one
+  // — pattern OR interval (codex r24: custom every 60 days → every 90 days)
+  // — joins the plan at the new cadence.
+  const cadenceKey = (r) => (r ? `${r.pattern || ''}|${r.intervalDays || ''}` : '');
   const repatterned = current.is_recurring && !plansRetainedLines
     ? lines.filter((l) => {
       const stored = storedLine(l);
-      return stored && (l.recurringPattern || null) !== 'one_time' && (stored.recurring_pattern || null) !== (l.recurringPattern || null);
+      return stored && (l.recurringPattern || null) !== 'one_time' && cadenceKey(storedRecurrence(stored)) !== cadenceKey(addonLineRecurrence(l));
     })
     : [];
   return {

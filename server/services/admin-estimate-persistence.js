@@ -1111,6 +1111,15 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
       err.failClosed = true;
       throw err;
     }
+    // Absent here must be absent for the engine too (codex r24): a
+    // whitespace-only tier is trimmed to an unknown key by
+    // normalizeTreeShrubTier, and that ordinary engine error would become
+    // ENGINE_ERROR → the browser preview persisted as CLIENT_FALLBACK. Copied,
+    // never mutated in place — engineInputs is still the caller's payload.
+    if (typeof tsTier === 'string' && tsTier.trim() === '') {
+      v1Input = { ...v1Input, services: { ...v1Input.services, treeShrub: { ...v1Input.services.treeShrub } } };
+      delete v1Input.services.treeShrub.tier;
+    }
   }
 
   // SERVER-AUTHORITATIVE identity override. priorQualifyingServices (the

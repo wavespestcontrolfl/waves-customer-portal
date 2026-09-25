@@ -1,4 +1,4 @@
-// Codex r17/r18/r19/r20/r22/r23 on #4786: the visit-edit retired-for-sale gate must see every
+// Codex r17/r18/r19/r20/r22/r23/r24 on #4786: the visit-edit retired-for-sale gate must see every
 // line the save ADDS — catalog ids, a changed primary label, and the name of
 // an ID-less add-on line (normalizeUpdateDetailsAddons keeps an unresolved
 // serviceName and persists it by name alone) — and nothing the visit already
@@ -137,6 +137,32 @@ describe('retiredGateInputsForVisitEdit', () => {
       current: recurring, currentAddons: stored, postedServiceId: null, serviceType: 'Monthly Lawn Care', plansRetainedLines: true,
       postedAddons: [{ serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'bimonthly' }],
     }).serviceTypes).toContainEqual({ label: 'Bi-Monthly Tree & Shrub Care', recurrence: { pattern: 'bimonthly', intervalDays: null } });
+  });
+
+  // codex r24: a retained add-on's interval change is a cadence change too,
+  // and a one_time add-on never rides the parent's cadence.
+  test('an add-on interval change is re-gated; a one_time add-on is skipped on a parent cadence change', () => {
+    const recurring = { ...current, is_recurring: true, service_type: 'Monthly Lawn Care', recurring_pattern: 'monthly' };
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: [{ service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: 'custom', recurring_interval_days: 60 }],
+      postedServiceId: null, serviceType: 'Monthly Lawn Care',
+      postedAddons: [{ serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'custom', recurringIntervalDays: 90 }],
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: [{ label: 'Bi-Monthly Tree & Shrub Care', recurrence: { pattern: 'custom', intervalDays: 90 } }] });
+    // Same interval reposted: nothing to gate.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: [{ service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: 'custom', recurring_interval_days: 60 }],
+      postedServiceId: null, serviceType: 'Monthly Lawn Care',
+      postedAddons: [{ serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'custom', recurringIntervalDays: '60' }],
+    })).toEqual({ serviceIds: [], serviceTypes: [] });
+    // Parent cadence change: the one_time retired add-on stays out of the gate.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, postedServiceId: null, serviceType: 'Monthly Lawn Care', plansRetainedLines: true,
+      currentAddons: [
+        { service_id: RETIRED_ID, service_name: 'Quarterly T&S', recurring_pattern: 'one_time', recurring_interval_days: null },
+        { service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: null, recurring_interval_days: null },
+      ],
+      postedAddons: [],
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: ['Monthly Lawn Care', { label: 'Bi-Monthly Tree & Shrub Care', recurrence: null }] });
   });
 
   test('addonLineRecurrence reads a line\'s own pattern or interval, else null', () => {

@@ -116,13 +116,15 @@ describe('service library list — new-appointment picker (codex r11)', () => {
     const calls = await run({ isActive: 'true', sellable: 'true', sellableCustomerId: CUSTOMER });
     expect(calls.notIn).toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
     expect(calls.exists).toEqual(expect.arrayContaining([
-      'scheduled_services', 'scheduled_services.service_id = services.id', ['scheduled_services.customer_id', CUSTOMER],
+      // Identified by catalog id, key snapshot or label (codex r24).
+      'scheduled_services', expect.stringMatching(/^\(scheduled_services\.service_id = services\.id OR scheduled_services\.service_key_snapshot = services\.service_key OR lower\(scheduled_services\.service_type\) IN \(lower\(services\.name\), lower\(services\.short_name\)\)\)$/), ['scheduled_services.customer_id', CUSTOMER],
       // Live recurring visits only — completed/skipped history does not
       // grandfather (codex r13).
+      ['scheduled_services.status', 'NOT IN', expect.not.arrayContaining(['rescheduled'])],
       ['scheduled_services.status', 'NOT IN', expect.arrayContaining(['completed', 'cancelled', 'skipped'])],
       ['scheduled_services.is_recurring', true],
       // ...or as an add-on line of a combined recurring visit (codex r14).
-      'scheduled_service_addons', ['join', 'scheduled_services'], 'scheduled_service_addons.service_id = services.id',
+      'scheduled_service_addons', ['join', 'scheduled_services'], expect.stringMatching(/^\(scheduled_service_addons\.service_id = services\.id OR scheduled_service_addons\.service_key_snapshot = services\.service_key OR lower\(scheduled_service_addons\.service_name\) IN /),
       // ...that is not its own one_time line — the write gate's predicate,
       // so the picker never offers what the save refuses (codex r18).
       require('../services/service-library').ADDON_LINE_IS_PLAN_SQL,
@@ -153,34 +155,53 @@ describe('new-appointment write boundary (codex r12)', () => {
   const OTHER = '0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e';
 
   // heldBy: customers with a LIVE recurring visit on the retired row, as the
-  // visit's primary line (heldVia 'primary') or an add-on line ('addon').
+  // visit's primary line (heldVia 'primary') or an add-on line ('addon') —
+  // identified by catalog id, or (codex r24) by key snapshot ('snapshot') or
+  // label ('label') on an ID-less legacy row.
   // addonPattern: the add-on line's own recurring_pattern (null = rides the
   // parent's cadence); the fake only counts an add-on line as held when the
   // query gated on it (codex r17).
+  let lastNotStatus = null;
   const run = async ({ customerId, serviceIds, serviceTypes, recurrence = null, heldBy = [], heldVia = 'primary', addonPattern = null }) => {
     const db = require('../models/db');
     const bare = (col) => col.replace(/^scheduled_services\.|^scheduled_service_addons\./, '');
     db.mockImplementation((table) => {
       const q = { table, filters: {} };
+      const grouped = {
+        whereIn(col, vals) { q.filters[bare(col)] = vals; return this; },
+        orWhereIn(col, vals) { q.filters[`or:${bare(col)}`] = vals; return this; },
+        orWhereRaw(sql, bindings) { q.filters[`raw:${sql}`] = bindings; return this; },
+      };
       const b = {
         join() { return this; },
         whereIn(col, vals) { q.filters[bare(col)] = vals; return this; },
-        where(col, val) { q.filters[bare(col)] = [val]; return this; },
+        where(col, val) {
+          if (typeof col === 'function') { col.call(grouped, grouped); return this; }
+          q.filters[bare(col)] = [val];
+          return this;
+        },
         whereRaw(sql) { q.filters[`raw:${sql}`] = true; return this; },
-        whereNotIn(col, vals) { q.filters[`not:${bare(col)}`] = vals; return this; },
+        whereNotIn(col, vals) { q.filters[`not:${bare(col)}`] = vals; if (bare(col) === 'status') lastNotStatus = vals; return this; },
         distinct() { return this; },
         select() {
-          const rows = [{ id: RETIRED_ID, service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care', short_name: 'Quarterly T&S' }]
-            .filter((r) => q.filters.service_key.includes(r.service_key));
-          return Promise.resolve(rows);
-        },
-        pluck() {
+          if (table === 'services') {
+            const rows = [{ id: RETIRED_ID, service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care', short_name: 'Quarterly T&S' }]
+              .filter((r) => q.filters.service_key.includes(r.service_key));
+            return Promise.resolve(rows);
+          }
           const live = q.filters.is_recurring?.[0] === true && (q.filters['not:status'] || []).includes('completed');
-          const via = table === 'scheduled_service_addons' ? 'addon' : 'primary';
           const { ADDON_LINE_IS_PLAN_SQL } = require('../services/service-library');
+          const via = table === 'scheduled_service_addons' ? 'addon' : 'primary';
           const lineIsPlan = via !== 'addon'
             || (q.filters[`raw:${ADDON_LINE_IS_PLAN_SQL}`] === true && addonPattern !== 'one_time');
-          return Promise.resolve(live && lineIsPlan && via === heldVia && heldBy.includes(q.filters.customer_id[0]) ? [RETIRED_ID] : []);
+          // The identity group must ask for id, snapshot and label alike.
+          const identityAsked = Array.isArray(q.filters.service_id) && Array.isArray(q.filters['or:service_key_snapshot'])
+            && Object.keys(q.filters).some((k) => /^raw:lower\(.*\) = ANY\(\?\)$/.test(k));
+          const holder = live && lineIsPlan && identityAsked && heldBy.includes(q.filters.customer_id[0]);
+          if (!holder) return Promise.resolve([]);
+          if (heldVia === 'snapshot') return Promise.resolve(via === 'primary' ? [{ service_id: null, service_key_snapshot: 'tree_shrub_quarterly', label: 'Tree & Shrub Care' }] : []);
+          if (heldVia === 'label') return Promise.resolve(via === 'primary' ? [{ service_id: null, service_key_snapshot: null, label: 'quarterly tree & shrub care' }] : []);
+          return Promise.resolve(via === heldVia ? [{ service_id: RETIRED_ID, service_key_snapshot: null, label: null }] : []);
         },
       };
       return b;
@@ -241,6 +262,15 @@ describe('new-appointment write boundary (codex r12)', () => {
     expect(await ids([{ label: 'Tree & Shrub Care', recurrence: { pattern: 'bimonthly', intervalDays: null } }], { pattern: 'quarterly' })).toEqual([]);
     // A blank or malformed entry is ignored.
     expect(await ids([{ label: '', recurrence: { pattern: 'quarterly' } }, { label: null }, null], { pattern: 'quarterly' })).toEqual([]);
+  });
+
+  test('an ID-less legacy row still grandfathers by key snapshot or label, and an open reschedule counts (codex r24)', async () => {
+    expect(await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'snapshot' })).toEqual([]);
+    expect(await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'label' })).toEqual([]);
+    expect((await run({ customerId: OTHER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'snapshot' })).map((r) => r.id)).toEqual([RETIRED_ID]);
+    // Ownership semantics: 'rescheduled' is an open obligation, not history.
+    expect(lastNotStatus).toEqual(expect.arrayContaining(['cancelled', 'completed', 'no_show', 'skipped']));
+    expect(lastNotStatus).not.toContain('rescheduled');
   });
 
   test('a one_time add-on line is not grandfathering evidence (codex r17)', async () => {
