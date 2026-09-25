@@ -12,6 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
+const { pricedTreeShrubPalmCount } = require('./tree-shrub-palm-priced');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -827,11 +828,19 @@ function mapV1ToLegacyShape(v1Result) {
   });
   // Palm count rides the mapped row so the customer-facing card can render
   // the palm-care inclusion bullet (owner 2026-09-24: palms priced inside
-  // T&S via routine palm-care reserve, no separate line item). Positive
-  // integer only — the engine emits palmCount:0 when there are none.
+  // T&S via routine palm-care reserve, no separate line item) — but ONLY
+  // when the quote actually PRICED those palms. While the reserve is
+  // unarmed, priceTreeShrub folds SERVICE-LINE palms into the legacy
+  // per-tree term (still priced) but PROPERTY-sourced palms price nothing
+  // at all — showing the bullet for those would claim care the quote never
+  // charged for (Codex round 2 P0 on #4789). pricedTreeShrubPalmCount gates
+  // at this SOURCE so every downstream reader of the mapped row (shapeFromV1,
+  // frequencyFromTreatmentRow/frequencyFromRecurringService) can trust a
+  // positive palmCount here without re-checking evidence.
+  const tsPricedPalmCount = pricedTreeShrubPalmCount(tsLI);
   svcAdd('Tree & Shrub', tsLI, {
     service: 'tree_shrub',
-    ...(tsLI && Number.isInteger(tsLI.palmCount) && tsLI.palmCount > 0 ? { palmCount: tsLI.palmCount } : {}),
+    ...(tsPricedPalmCount ? { palmCount: tsPricedPalmCount } : {}),
   });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)

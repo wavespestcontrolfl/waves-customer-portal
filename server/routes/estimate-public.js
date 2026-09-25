@@ -42,6 +42,7 @@ const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntellige
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
+const { pricedTreeShrubPalmCount } = require('../services/pricing-engine/tree-shrub-palm-priced');
 const {
   serviceCountsTowardWaveGuardTier,
   serviceExcludedFromPercentDiscount,
@@ -3759,6 +3760,7 @@ function recurringServicesWithSupplements(estResult = {}) {
         ? { ...(item.discount || {}), discountable: true }
         : item.discount;
       if (key === 'lawn_care' && itemDiscount) delete itemDiscount.policy;
+      const tsPricedPalmCount = key === 'tree_shrub' ? pricedTreeShrubPalmCount(item) : null;
       upsertSupplement(key, {
         service: key,
         // item.name carries the cadence for foam ("Recurring Foam Treatment
@@ -3786,9 +3788,12 @@ function recurringServicesWithSupplements(estResult = {}) {
         visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
         // Palm count rides the T&S row (raw agent/engine draft path) for the
         // palm-care inclusion bullet (owner 2026-09-24: palms priced inside
-        // T&S via routine palm-care reserve). Positive integer only.
-        ...(key === 'tree_shrub' && Number.isInteger(item.palmCount) && item.palmCount > 0
-          ? { palmCount: item.palmCount } : {}),
+        // T&S via routine palm-care reserve) — but ONLY when the quote
+        // actually PRICED those palms (Codex round 2 P0 on #4789:
+        // property-sourced palms price nothing while the reserve is
+        // unarmed). `item` is a raw engine lineItems entry (priceTreeShrub's
+        // return shape), so pricedTreeShrubPalmCount has full evidence here.
+        ...(tsPricedPalmCount ? { palmCount: tsPricedPalmCount } : {}),
         // Carry cadence (foam) so pattern inference / cadence-aware shapers don't
         // fall back to the monthly billing key; null for services without one.
         cadence: item.cadence || null,
@@ -16975,6 +16980,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       // monthly the row can't be split into its own section or displayed.
       const baseMonthly = firstPositiveNumber(li.monthly, li.mo, li.annual ? li.annual / 12 : null);
       const netMonthly = netAnnual ? Math.round((netAnnual / 12) * 100) / 100 : null;
+      const tsPricedPalmCount = li.service === 'tree_shrub' ? pricedTreeShrubPalmCount(li) : null;
       return {
         service: li.service,
         label: li.displayName || li.name || labelForRecurring(li.service),
@@ -16999,10 +17005,12 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         ...(li.scopeNote ? { scopeNote: String(li.scopeNote) } : {}),
         // Palm count rides the T&S row so the client can render the palm-care
         // inclusion bullet (owner 2026-09-24: palms priced inside T&S via
-        // routine palm-care reserve, no separate line item). Positive-integer
-        // only — the engine emits palmCount:0 when there are none.
-        ...(li.service === 'tree_shrub' && Number.isInteger(li.palmCount) && li.palmCount > 0
-          ? { palmCount: li.palmCount } : {}),
+        // routine palm-care reserve, no separate line item) — but ONLY when
+        // the quote actually PRICED those palms (Codex round 2 P0 on #4789:
+        // property-sourced palms price nothing while the reserve is
+        // unarmed). `li` is priceTreeShrub's raw return shape, so
+        // pricedTreeShrubPalmCount has full evidence here.
+        ...(tsPricedPalmCount ? { palmCount: tsPricedPalmCount } : {}),
       };
     });
   const sameDayTreatmentTotal = perServiceTreatments.reduce(
@@ -19904,9 +19912,11 @@ function treeShrubTierKey(row = {}) {
 // treeShrubLegacyTierRows) never carried palmCount, so it's read separately
 // off the stored T&S line item — same lineItems lookup as
 // treeShrubKnobSignalForReplay (estimate-tree-shrub-knob-replay.js): check
-// estData.result.lineItems then estData.engineResult.lineItems. Positive
-// integer only (owner 2026-09-24: palms priced inside T&S via routine
-// palm-care reserve, no separate line item).
+// estData.result.lineItems then estData.engineResult.lineItems. The raw
+// line item is priceTreeShrub's own return shape, so pricedTreeShrubPalmCount
+// gates it on real evidence (owner 2026-09-24: palms priced inside T&S via
+// routine palm-care reserve — but a property-sourced count that reserve
+// never armed for priced NOTHING; Codex round 2 P0 on #4789).
 //
 // A solo T&S estimate saved in the MAPPED v1 shape (admin-estimate-
 // persistence#resolveServerAuthoritativePricing) carries NO raw lineItems at
@@ -19914,10 +19924,24 @@ function treeShrubTierKey(row = {}) {
 // estimates skip it outright; an ENGINE_ERROR fallback keeps whatever
 // client-preview shape was already stored) — engineResult is only stamped
 // on a recompute that actually ran. Fall back to the mapped shape's own
-// palm carriers: the tree_shrub row v1-legacy-mapper's svcAdd('Tree & Shrub',
-// tsLI, …) attaches to result.recurring.services[], then result.tsMeta.palmCount
-// (v1-legacy-mapper ~L607, stamped for every mapped T&S line — the replay
-// knob signal reads the same tsMeta object for its own palm/knob inputs).
+// palm carriers:
+//  - result.recurring.services[] tree_shrub row: v1-legacy-mapper's
+//    svcAdd('Tree & Shrub', tsLI, …) ALREADY gates this with
+//    pricedTreeShrubPalmCount(tsLI) at write time — a positive value here
+//    is priced by construction, so a plain positive-integer check is
+//    correct and sufficient (the row carries no further evidence fields to
+//    re-check, and re-applying the full predicate here would wrongly
+//    reject an armed PROPERTY-sourced count that mapper already verified).
+//  - result.results.tsMeta.palmCount (v1-legacy-mapper ~L607+, mapV1To
+//    LegacyShape's return nests its accumulator R as `results: R` — same
+//    path treeShrubKnobSignalForReplay reads, NOT a bare result.tsMeta —
+//    stamped for EVERY mapped T&S line regardless of pricing, since this is
+//    the RAW count the palm/knob replay needs and is never gated at write
+//    time): tsMeta also carries palmCountSource and pricingKnobs (same
+//    fields the replay signal reads), so pricedTreeShrubPalmCount has full
+//    evidence and gates it here, at read time, instead.
+// Fail closed: a legacy pre-v4.7 estimate whose tsMeta carries neither a
+// service_line source nor an armed knob returns null — never guessed priced.
 function treeShrubPalmCountForEstData(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
   const positiveInt = (value) => {
@@ -19929,13 +19953,13 @@ function treeShrubPalmCountForEstData(estData = {}) {
     ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
   ];
   const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
-  const fromLineItem = positiveInt(tsLine?.palmCount);
+  const fromLineItem = tsLine ? pricedTreeShrubPalmCount(tsLine) : null;
   if (fromLineItem != null) return fromLineItem;
   const mappedServices = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
   const mappedTsRow = mappedServices.find((s) => (s?.service || '') === 'tree_shrub');
   const fromMappedRow = positiveInt(mappedTsRow?.palmCount);
   if (fromMappedRow != null) return fromMappedRow;
-  return positiveInt(result?.tsMeta?.palmCount);
+  return result?.results?.tsMeta ? pricedTreeShrubPalmCount(result.results.tsMeta) : null;
 }
 
 function treeShrubFrequenciesFromResultStats(estData = {}) {
@@ -21653,7 +21677,11 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     // 2026-09-24: palm bullet is additive display only). `row` here IS the
     // same perServiceTreatments entry the T&S builders already stamp with
     // palmCount (treatmentRowForServiceFrequency reads it straight off
-    // baseFrequency.perServiceTreatments).
+    // baseFrequency.perServiceTreatments) — NO re-check here: every source
+    // builder (shapeFrequencyEntry, recurringServicesWithSupplements,
+    // v1-legacy-mapper's svcAdd) already gates with
+    // pricedTreeShrubPalmCount, so row.palmCount is priced-only by the time
+    // it reaches this function (Codex round 2 P0 on #4789).
     ...(key === 'tree_shrub' && Number.isInteger(row.palmCount) && row.palmCount > 0
       ? { palmCount: row.palmCount } : {}),
   };
@@ -21691,8 +21719,10 @@ function frequencyFromRecurringService(recurringService = {}, key, recurringDisc
     quoteRequired: false,
     // Same rowless palm-count carry as frequencyFromTreatmentRow (this is
     // the no-matching-row fallback path) — recurringService is the mapped
-    // v1.services / raw-supplement row, already carrying palmCount for
-    // tree_shrub when positive.
+    // v1.services / raw-supplement row, already gated with
+    // pricedTreeShrubPalmCount at its own source, so a positive
+    // recurringService.palmCount is priced-only (Codex round 2 P0 on #4789;
+    // no re-check needed here).
     ...(key === 'tree_shrub' && Number.isInteger(recurringService.palmCount) && recurringService.palmCount > 0
       ? { palmCount: recurringService.palmCount } : {}),
   };
@@ -23878,6 +23908,11 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(svc),
         // Palm count rides through from v1.services (mapped or raw-supplement
         // row) so the client can render the palm-care inclusion bullet.
+        // NO re-check here: both feeders (v1-legacy-mapper's svcAdd and
+        // recurringServicesWithSupplements' upsertSupplement) already gate
+        // with pricedTreeShrubPalmCount at their own source, so a positive
+        // svc.palmCount reaching this point is already priced-only (Codex
+        // round 2 P0 on #4789).
         ...(recurringServiceKey(svc) === 'tree_shrub' && Number.isInteger(svc?.palmCount) && svc.palmCount > 0
           ? { palmCount: svc.palmCount } : {}),
       });
@@ -24127,10 +24162,13 @@ function pricingBundleHasStaleTermiteRow(bundle = {}) {
 // this is NOT a fast-path bypass (a frozen sent quote must never re-price):
 // it enriches the ALREADY-CHOSEN snapshot at read time with one additive
 // display field, read straight off the same stored evidence
-// treeShrubPalmCountForEstData resolves for the fresh builders. Never
-// touches a price field, never writes back to estData/the DB. Traversal
-// mirrors pricingBundleHasStaleTermiteRow (frequencies[],
-// services[].frequencies[], serviceCadenceCombos[]).
+// treeShrubPalmCountForEstData resolves for the fresh builders — which
+// itself only ever returns a count the quote actually PRICED
+// (pricedTreeShrubPalmCount; Codex round 2 P0 on #4789: a pre-arm quote
+// whose T&S line carries an unpriced property palm count must never gain
+// the bullet here either). Never touches a price field, never writes back
+// to estData/the DB. Traversal mirrors pricingBundleHasStaleTermiteRow
+// (frequencies[], services[].frequencies[], serviceCadenceCombos[]).
 function enrichPricingBundleTreeShrubPalmCount(bundle, estData) {
   if (!bundle || typeof bundle !== 'object') return bundle;
   const palmCount = treeShrubPalmCountForEstData(estData);

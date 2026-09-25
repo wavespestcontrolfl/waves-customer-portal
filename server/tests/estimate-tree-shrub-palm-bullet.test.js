@@ -4,6 +4,17 @@
 // off a T&S perServiceTreatments row, so every server builder that can emit
 // a tree_shrub row must attach it — but ONLY as a positive integer, so a
 // zero/absent/invalid count leaves the row (and the rendered list) unchanged.
+//
+// Codex round 2 P0 on #4789 ("Exclude unpriced property palms from legacy
+// bullets"): a positive palmCount is not enough — priceTreeShrub only
+// actually PRICES a palm count when either palmCountSource === 'service_line'
+// (folded into the legacy per-tree term regardless of arm state) or the
+// v4.7 routine palm-care reserve is armed (perPalmAnnual / minutesPerPalmVisit
+// knob > 0). A PROPERTY-sourced count while unarmed prices NOTHING, so the
+// bullet must never show for it. tsLineItem() below defaults to
+// palmCountSource: 'service_line' (the common "always priced" case most
+// round-1 tests exercise) — tests for the property/unarmed gap override it
+// explicitly with `evidence: 'property_unarmed'` / `'none'`.
 const {
   shapeFrequencyEntry,
   treeShrubFrequenciesFromResultStats,
@@ -14,10 +25,23 @@ const {
   frequencyFromTreatmentRow,
   frequencyFromRecurringService,
 } = require('../routes/estimate-public');
+const { pricedTreeShrubPalmCount } = require('../services/pricing-engine/tree-shrub-palm-priced');
 
 const QUARTERLY = { key: 'quarterly', label: 'Quarterly (4 visits/year)', engineFrequency: 'quarterly' };
 
+// `evidence` selects the priceTreeShrub-shaped fields that make a palmCount
+// PRICED ('service_line' default, or 'property_armed') vs merely present but
+// UNPRICED ('property_unarmed', or 'none' for a legacy pre-knob row with no
+// evidence at all).
+const EVIDENCE_SHAPES = {
+  service_line: { palmCountSource: 'service_line' },
+  property_armed: { palmCountSource: 'property', palmReserveActive: true, palmMaterialArmed: true, palmLaborArmed: true },
+  property_unarmed: { palmCountSource: 'property', palmReserveActive: false, palmMaterialArmed: false, palmLaborArmed: false },
+  none: {},
+};
+
 function tsLineItem(overrides = {}) {
+  const { evidence = 'service_line', ...rest } = overrides;
   return {
     service: 'tree_shrub',
     tier: 'standard',
@@ -26,7 +50,8 @@ function tsLineItem(overrides = {}) {
     monthly: 66.75,
     annual: 801,
     perApp: 133.5,
-    ...overrides,
+    ...EVIDENCE_SHAPES[evidence],
+    ...rest,
   };
 }
 
@@ -201,7 +226,12 @@ describe('shapeFromV1 — bundled T&S + pest row (server/routes/estimate-public.
 describe('treeShrubPalmCountForEstData — mapped-v1-shape fallbacks (Codex #1)', () => {
   // A solo T&S estimate saved in the MAPPED shape (quote-required, or an
   // ENGINE_ERROR fallback) carries no raw lineItems/engineResult at all —
-  // the count lives on result.recurring.services[] and/or result.tsMeta.
+  // the count lives on result.recurring.services[] and/or
+  // result.results.tsMeta (mapV1ToLegacyShape nests its R accumulator as
+  // `results: R` — same path treeShrubKnobSignalForReplay reads). tsMeta
+  // rows below default to palmCountSource: 'service_line' so they read as
+  // PRICED without extra fields (the priced-only gate itself is covered
+  // separately in the round-2 describe blocks further down).
   test('falls back to result.recurring.services[] tree_shrub row when no raw lineItems exist', () => {
     const estData = {
       result: {
@@ -211,8 +241,8 @@ describe('treeShrubPalmCountForEstData — mapped-v1-shape fallbacks (Codex #1)'
     expect(treeShrubPalmCountForEstData(estData)).toBe(6);
   });
 
-  test('falls back to result.tsMeta.palmCount when neither lineItems nor a mapped services row carry it', () => {
-    const estData = { result: { tsMeta: { palmCount: 9, palmCountSource: 'service_line' } } };
+  test('falls back to result.results.tsMeta.palmCount when neither lineItems nor a mapped services row carry it', () => {
+    const estData = { result: { results: { tsMeta: { palmCount: 9, palmCountSource: 'service_line' } } } };
     expect(treeShrubPalmCountForEstData(estData)).toBe(9);
   });
 
@@ -221,7 +251,7 @@ describe('treeShrubPalmCountForEstData — mapped-v1-shape fallbacks (Codex #1)'
       result: {
         lineItems: [tsLineItem({ palmCount: 4 })],
         recurring: { services: [{ service: 'tree_shrub', palmCount: 11 }] },
-        tsMeta: { palmCount: 12 },
+        results: { tsMeta: { palmCount: 12, palmCountSource: 'service_line' } },
       },
     };
     expect(treeShrubPalmCountForEstData(estData)).toBe(4);
@@ -231,16 +261,16 @@ describe('treeShrubPalmCountForEstData — mapped-v1-shape fallbacks (Codex #1)'
     const estData = {
       result: {
         recurring: { services: [{ service: 'tree_shrub', palmCount: 5 }] },
-        tsMeta: { palmCount: 12 },
+        results: { tsMeta: { palmCount: 12, palmCountSource: 'service_line' } },
       },
     };
     expect(treeShrubPalmCountForEstData(estData)).toBe(5);
   });
 
   test.each([
-    ['zero on both fallbacks', { recurring: { services: [{ service: 'tree_shrub', palmCount: 0 }] }, tsMeta: { palmCount: 0 } }],
+    ['zero on both fallbacks', { recurring: { services: [{ service: 'tree_shrub', palmCount: 0 }] }, results: { tsMeta: { palmCount: 0, palmCountSource: 'service_line' } } }],
     ['no tree_shrub row in recurring.services, no tsMeta', { recurring: { services: [{ service: 'pest_control', palmCount: 4 }] } }],
-    ['non-integer tsMeta.palmCount', { tsMeta: { palmCount: 2.5 } }],
+    ['non-integer tsMeta.palmCount', { results: { tsMeta: { palmCount: 2.5, palmCountSource: 'service_line' } } }],
   ])('returns null for %s', (_label, result) => {
     expect(treeShrubPalmCountForEstData({ result })).toBeNull();
   });
@@ -381,5 +411,233 @@ describe('frequencyFromRecurringService — no-matching-row fallback carries pal
     };
     const frequency = frequencyFromRecurringService(recurringService, 'tree_shrub', 0);
     expect(frequency.palmCount).toBeUndefined();
+  });
+});
+
+// ── Codex round 2 fix (2026-09-24): "Exclude unpriced property palms from
+// legacy bullets" — a positive palmCount is not, by itself, evidence the
+// quote priced it. ───────────────────────────────────────────────────────
+
+describe('pricedTreeShrubPalmCount — the shared priced-evidence predicate (Codex round 2 P0)', () => {
+  test('service-line source prices regardless of arm state', () => {
+    expect(pricedTreeShrubPalmCount({ palmCount: 4, palmCountSource: 'service_line' })).toBe(4);
+    expect(pricedTreeShrubPalmCount({
+      palmCount: 4, palmCountSource: 'service_line', palmReserveActive: false, palmMaterialArmed: false, palmLaborArmed: false,
+    })).toBe(4);
+  });
+
+  test('property source prices ONLY when the reserve is armed for at least one leg', () => {
+    expect(pricedTreeShrubPalmCount({ palmCount: 4, palmCountSource: 'property', palmReserveActive: true })).toBe(4);
+    expect(pricedTreeShrubPalmCount({ palmCount: 4, palmCountSource: 'property', palmMaterialArmed: true })).toBe(4);
+    expect(pricedTreeShrubPalmCount({ palmCount: 4, palmCountSource: 'property', palmLaborArmed: true })).toBe(4);
+    // tsMeta shape carries no boolean flags — pricingKnobs alone is enough.
+    expect(pricedTreeShrubPalmCount({
+      palmCount: 4, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 16 },
+    })).toBe(4);
+    expect(pricedTreeShrubPalmCount({
+      palmCount: 4, palmCountSource: 'property', pricingKnobs: { minutesPerPalmVisit: 1.5 },
+    })).toBe(4);
+  });
+
+  test('property source with the reserve fully unarmed never prices — the exact bug Codex found', () => {
+    expect(pricedTreeShrubPalmCount({
+      palmCount: 4, palmCountSource: 'property', palmReserveActive: false, palmMaterialArmed: false, palmLaborArmed: false,
+    })).toBeNull();
+    expect(pricedTreeShrubPalmCount({
+      palmCount: 4, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 },
+    })).toBeNull();
+  });
+
+  test('fails closed with no evidence at all (a legacy pre-v4.7-knob row)', () => {
+    expect(pricedTreeShrubPalmCount({ palmCount: 4 })).toBeNull();
+    expect(pricedTreeShrubPalmCount({ palmCount: 4, palmCountSource: 'none' })).toBeNull();
+  });
+
+  test.each([0, undefined, -1, 2.5])('null for a non-positive-integer palmCount (%s) even with full arm evidence', (palmCount) => {
+    expect(pricedTreeShrubPalmCount({
+      ...(palmCount === undefined ? {} : { palmCount }), palmCountSource: 'property', palmReserveActive: true,
+    })).toBeNull();
+  });
+
+  test('handles null/non-object input without throwing', () => {
+    expect(pricedTreeShrubPalmCount(null)).toBeNull();
+    expect(pricedTreeShrubPalmCount(undefined)).toBeNull();
+  });
+});
+
+describe('End-to-end priced-only gating across every carrier (Codex round 2 P0)', () => {
+  test('property-sourced + unarmed → no palmCount from shapeFrequencyEntry (fresh engine build)', () => {
+    const engineResult = {
+      summary: { recurringMonthlyAfterDiscount: 66.75, recurringAnnualAfterDiscount: 801 },
+      lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_unarmed' })],
+    };
+    const entry = shapeFrequencyEntry(QUARTERLY, engineResult, {});
+    const row = entry.perServiceTreatments.find((r) => r.service === 'tree_shrub');
+    expect(row.palmCount).toBeUndefined();
+  });
+
+  test('service-line + unarmed → palmCount IS shown from shapeFrequencyEntry (always priced)', () => {
+    const engineResult = {
+      summary: { recurringMonthlyAfterDiscount: 66.75, recurringAnnualAfterDiscount: 801 },
+      lineItems: [tsLineItem({ palmCount: 4, evidence: 'service_line' })],
+    };
+    const entry = shapeFrequencyEntry(QUARTERLY, engineResult, {});
+    const row = entry.perServiceTreatments.find((r) => r.service === 'tree_shrub');
+    expect(row.palmCount).toBe(4);
+  });
+
+  test('property-sourced + ARMED → palmCount IS shown from shapeFrequencyEntry', () => {
+    const engineResult = {
+      summary: { recurringMonthlyAfterDiscount: 66.75, recurringAnnualAfterDiscount: 801 },
+      lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_armed' })],
+    };
+    const entry = shapeFrequencyEntry(QUARTERLY, engineResult, {});
+    const row = entry.perServiceTreatments.find((r) => r.service === 'tree_shrub');
+    expect(row.palmCount).toBe(4);
+  });
+
+  test('property-sourced + unarmed → no palmCount from recurringServicesWithSupplements (raw agent draft)', () => {
+    const estResult = { lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_unarmed', annualAfterCredits: 801 })] };
+    const services = recurringServicesWithSupplements(estResult);
+    const row = services.find((s) => s.service === 'tree_shrub');
+    expect(row.palmCount).toBeUndefined();
+  });
+
+  test('property-sourced + unarmed → no palmCount from treeShrubPalmCountForEstData\'s raw-lineItem fallback', () => {
+    const estData = { result: { lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_unarmed' })] } };
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+
+  test('property-sourced + ARMED → priced, from treeShrubPalmCountForEstData\'s raw-lineItem fallback', () => {
+    const estData = { result: { lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_armed' })] } };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(4);
+  });
+
+  test('property-sourced + unarmed tsMeta → no palmCount from treeShrubPalmCountForEstData\'s tsMeta fallback', () => {
+    const estData = {
+      result: {
+        results: { tsMeta: { palmCount: 4, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } } },
+      },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+
+  test('service-line tsMeta with the reserve unarmed → priced, from the tsMeta fallback', () => {
+    const estData = {
+      result: {
+        results: { tsMeta: { palmCount: 4, palmCountSource: 'service_line', pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } } },
+      },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(4);
+  });
+
+  test('property-sourced tsMeta with the reserve ARMED → priced, from the tsMeta fallback', () => {
+    const estData = {
+      result: {
+        results: { tsMeta: { palmCount: 4, palmCountSource: 'property', pricingKnobs: { perPalmAnnual: 16, minutesPerPalmVisit: 1.5 } } },
+      },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(4);
+  });
+
+  test('tsMeta with no source and no knob evidence at all (legacy pre-v4.7 row) fails closed', () => {
+    const estData = { result: { results: { tsMeta: { palmCount: 4 } } } };
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+
+  test('missing evidence anywhere (no lineItems, no mapped row, no tsMeta) → null, never guessed', () => {
+    expect(treeShrubPalmCountForEstData({ result: {} })).toBeNull();
+  });
+
+  test('property-sourced + unarmed → no palmCount from v1-legacy-mapper svcAdd, via mapV1ToLegacyShape', () => {
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const v1Result = {
+      summary: {},
+      lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_unarmed' })],
+      property: {},
+    };
+    const mapped = mapV1ToLegacyShape(v1Result);
+    const row = mapped.recurring.services.find((s) => s.service === 'tree_shrub');
+    expect(row).toBeTruthy();
+    expect(row.palmCount).toBeUndefined();
+    // results.tsMeta still carries the RAW count (unpriced or not) — the
+    // palm/knob replay machinery needs it to reprice the same job; only the
+    // customer-facing bullet carrier (recurring.services[]) is gated.
+    expect(mapped.results.tsMeta.palmCount).toBe(4);
+  });
+
+  test('property-sourced + ARMED → palmCount shown from v1-legacy-mapper svcAdd, via mapV1ToLegacyShape', () => {
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const v1Result = {
+      summary: {},
+      lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_armed' })],
+      property: {},
+    };
+    const mapped = mapV1ToLegacyShape(v1Result);
+    const row = mapped.recurring.services.find((s) => s.service === 'tree_shrub');
+    expect(row.palmCount).toBe(4);
+  });
+
+  test('property-sourced + unarmed → snapshot enrichment adds NOTHING (Codex #2 x round-2 interaction)', () => {
+    const bundle = {
+      frequencies: [{
+        monthly: 66.75,
+        perServiceTreatments: [{ service: 'tree_shrub', perTreatment: 133.5, displayPrice: 133.5 }],
+      }],
+    };
+    const estData = { result: { lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_unarmed' })] } };
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, estData);
+    // No evidence to add → same bundle reference, row still has no palmCount.
+    expect(enriched).toBe(bundle);
+    expect(enriched.frequencies[0].perServiceTreatments[0].palmCount).toBeUndefined();
+  });
+
+  test('property-sourced + ARMED → snapshot enrichment DOES add the count', () => {
+    const bundle = {
+      frequencies: [{
+        monthly: 66.75,
+        perServiceTreatments: [{ service: 'tree_shrub', perTreatment: 133.5, displayPrice: 133.5 }],
+      }],
+    };
+    const estData = { result: { lineItems: [tsLineItem({ palmCount: 4, evidence: 'property_armed' })] } };
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, estData);
+    expect(enriched.frequencies[0].perServiceTreatments[0].palmCount).toBe(4);
+    // Price fields untouched.
+    expect(enriched.frequencies[0].perServiceTreatments[0].perTreatment).toBe(133.5);
+    expect(enriched.frequencies[0].monthly).toBe(66.75);
+  });
+});
+
+describe('pricedTreeShrubPalmCount against the REAL priceTreeShrub engine output (field-name sanity check)', () => {
+  const { priceTreeShrub } = require('../services/pricing-engine/service-pricing');
+
+  test('a property palm count with the reserve at its unarmed constants-file default is NOT priced', () => {
+    const line = priceTreeShrub({ palmCount: 4, bedArea: 500 }, { tier: 'standard' });
+    expect(line.palmCountSource).toBe('property');
+    expect(line.palmReserveActive).toBe(false);
+    expect(pricedTreeShrubPalmCount(line)).toBeNull();
+  });
+
+  test('the same property palm count IS priced once the per-request knobs arm the reserve', () => {
+    const line = priceTreeShrub(
+      { palmCount: 4, bedArea: 500 },
+      { tier: 'standard', knobs: { perPalmAnnual: 16, minutesPerPalmVisit: 1.5 } },
+    );
+    expect(line.palmCountSource).toBe('property');
+    expect(line.palmReserveActive).toBe(true);
+    expect(pricedTreeShrubPalmCount(line)).toBe(4);
+  });
+
+  test('a service-line palm count is priced even at the unarmed constants-file default (folded into the legacy term)', () => {
+    const line = priceTreeShrub({ bedArea: 500 }, { tier: 'standard', palmCount: 4 });
+    expect(line.palmCountSource).toBe('service_line');
+    expect(line.palmReserveActive).toBe(false);
+    expect(pricedTreeShrubPalmCount(line)).toBe(4);
+  });
+
+  test('no palms at all → palmCount 0, never priced', () => {
+    const line = priceTreeShrub({ bedArea: 500 }, { tier: 'standard' });
+    expect(line.palmCount).toBe(0);
+    expect(pricedTreeShrubPalmCount(line)).toBeNull();
   });
 });

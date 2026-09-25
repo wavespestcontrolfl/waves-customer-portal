@@ -1319,23 +1319,34 @@ The iframe exchanges only height/step messages with its parent, which checks
 the sender window and exact origin; no customer details or tokens are posted.
 `pricing.frequencies[].perServiceTreatments[].palmCount` (palm-care bullet
 lane, owner 2026-09-24): a positive integer riding a Tree & Shrub treatment
-row when the estimate's T&S line carries a service-line palm count — sourced
-from the engine's `tree_shrub` line item's own `palmCount` (fresh builds and
+row ONLY when the quote actually PRICED those palms — sourced from the
+engine's `tree_shrub` line item's own `palmCount` (fresh builds and
 raw/agent-draft shapes) or, for a mapped/admin-saved estimate with no raw
 line items, the mapped `result.recurring.services[]` tree_shrub row or
 `result.tsMeta.palmCount` (same evidence `estimateTreeShrubKnobSignal`
-reads for its own palm/knob replay). Validated positive-integer, clamped
-≤200 by the pricing engine; omitted entirely (not `0`, not `null`) whenever
-the estimate has no palms, so existing clients that don't know the field see
-no change. A ROWLESS single-service T&S card (an engine-backed multi-service
+reads for its own palm/knob replay). The v4.7 routine palm-care reserve
+(armed in prod 2026-09-24 ~23:53Z) prices a SERVICE-LINE palm count either
+way (folded into the legacy per-tree term while unarmed), but a
+PROPERTY-sourced count prices NOTHING until the reserve is armed — every
+quote saved before the arm time is unarmed, and the field is omitted for
+any T&S line the engine didn't actually charge for its palms
+(`pricedTreeShrubPalmCount`, `server/services/pricing-engine/tree-shrub-
+palm-priced.js`: priced when `palmCountSource === 'service_line'`, OR the
+reserve's `perPalmAnnual`/`minutesPerPalmVisit` knob is armed). Evidence-less
+legacy rows (no source, no knob) fail closed — no bullet. Validated
+positive-integer, clamped ≤200 by the pricing engine; omitted entirely (not
+`0`, not `null`) whenever the estimate has no palms OR the palms it has
+weren't priced, so existing clients that don't know the field see no
+change. A ROWLESS single-service T&S card (an engine-backed multi-service
 split, no `perServiceTreatments` on that card) instead carries
-`pricing.frequencies[].palmCount` directly on the frequency, same validation
-and omission rule. Display-only: drives one extra customer-facing inclusion
-bullet ("Includes care for your N palms — seasonal palm nutrition and
-root-zone treatment when needed") and has no effect on any price, fee, line
-item, or booking/acceptance math anywhere in the contract. A `sendSnapshot`
-bundle frozen before this field existed is enriched with it at GET time from
-the same stored evidence (never written back to `estimate_data`, never
+`pricing.frequencies[].palmCount` directly on the frequency, same
+priced-only validation and omission rule. Display-only: drives one extra
+customer-facing inclusion bullet ("Includes care for your N palms —
+seasonal palm nutrition and root-zone treatment when needed") and has no
+effect on any price, fee, line item, or booking/acceptance math anywhere in
+the contract. A `sendSnapshot` bundle frozen before this field existed is
+enriched with it at GET time from the same stored evidence, same
+priced-only gate (never written back to `estimate_data`, never
 changes a price field on the frozen snapshot).
 `/accept` fails CLOSED when the accepted plan's money cannot be resolved
 (#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
