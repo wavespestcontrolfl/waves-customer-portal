@@ -74,7 +74,7 @@ const MANUAL_MESSAGE_TYPE = 'manual';
 // there by 3". The visit or estimate is still ahead, so thanks in reply is not
 // a closure. Manual texts only: our en-route template says "on the way" and is
 // a closure by type.
-const MANUAL_PROMISE_RE = /\b(?:give (?:me )?a (?:minute|min|sec|second|moment)|in (?:a|an|\d+(?:-\d+)?) ?(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|moment)|leaving now|on (?:the|my) way|swinging by|heading (?:over|your way)|be there (?:by|at|around|after))\b/i;
+const MANUAL_PROMISE_RE = /\b(?:give (?:me |us )?(?:a |an |\d+ |a few |a couple(?: of)? |several |about \d+ )?(?:minutes?|mins?|sec(?:ond)?s?|moments?)|in (?:about |around |roughly |like |just )?(?:a few |a couple(?: of)? |several |a |an |\d+(?:-\d+)?(?: or \d+)? |(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty|forty-five|sixty) )?(?:minutes?|mins?|hours?|hrs?|sec(?:ond)?s?|moments?)|leaving now|on (?:the|my|our) way|swinging by|heading (?:over|out|your way)|be (?:right )?(?:there|over)(?: (?:by|at|around|after|in) \S+)?|there in \d+)\b/i;
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
   || (row.messageType === MANUAL_MESSAGE_TYPE && MANUAL_PROMISE_RE.test(text));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
