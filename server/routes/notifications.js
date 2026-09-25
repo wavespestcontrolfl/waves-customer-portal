@@ -565,16 +565,30 @@ async function billingAvailabilityError({ req, trx, updates, propertyDbUpdates, 
     const customer = customerById.get(id);
     const emailAvailable = deliverableEmail(customer?.email) || deliverableEmail(prefs.billing_email);
     const channels = billingChannelsPayload(prefs, { emailAvailable });
+    const beforeEmailAvailable = deliverableEmail(customer?.email) || deliverableEmail(before.billing_email);
+    const beforeChannels = billingChannelsPayload(before, { emailAvailable: beforeEmailAvailable });
+    const adds = (channel) => current && [...BILLING_ARRAY_KEYS].some((key) => (
+      Array.isArray(updates[key]) && updates[key].includes(channel) && !beforeChannels[key].includes(channel)
+    ));
     const clearsBillingEmail = current && updates.billingEmail !== undefined && !emailAvailable;
     const keys = billingKeysToValidate({ before, channels, updates, current, clearsBillingEmail, disabledChannels });
-    if (keys.length) candidates.push({ prefs, customer, emailAvailable, channels, keys, clearsBillingEmail });
+    if (keys.length) candidates.push({ prefs, customer, emailAvailable, channels, keys, clearsBillingEmail,
+      addsEmail: adds('email'), addsPush: adds('push') });
   }
 
-  const needsApp = candidates.some(({ channels, keys }) => keys.some((key) => channels[key].includes('push')));
+  if (candidates.some(({ addsEmail, emailAvailable, prefs }) => addsEmail
+    && (!emailAvailable || prefs.email_enabled === false))) {
+    return 'Add a billing email and enable email notifications before choosing Email.';
+  }
+  const needsApp = candidates.some(({ channels, keys, addsPush }) => addsPush
+    || keys.some((key) => channels[key].includes('push')));
   const appStatus = gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && needsApp
     ? await require('../services/push-notifications').customerStatus(req.customerId) : null;
   const appAvailable = appStatus?.fresh === true && primaryPrefs.push_enabled !== false
     && (updates.pushEnabled === true || appStatus.enabled);
+  if (candidates.some(({ addsPush }) => addsPush) && !appAvailable) {
+    return 'Connect the app and enable notifications before choosing App.';
+  }
   for (const candidate of candidates) {
     if (billingCandidateStranded(candidate, appAvailable)) return candidate.clearsBillingEmail
       ? 'Choose Text or App for every billing notification before removing the billing email.'
@@ -798,37 +812,11 @@ router.put('/preferences', async (req, res, next) => {
       : req.customerId;
     const existingPrimary = String(primaryId) === String(req.customerId) ? existing : await ensurePrefs(primaryId);
 
-    const billingArrayUpdates = Object.entries(BILLING_DELIVERY_FIELDS)
-      .filter(([key]) => updates[key] !== undefined);
-    let billingEmailAvailable = true;
     let previousBillingEmailAvailable = true;
-    let addsBillingPush = false;
-    const checksBillingEmail = billingArrayUpdates.length || updates.billingEmail !== undefined || disablesBillingDelivery;
+    const checksBillingEmail = hasBillingArrayUpdates || updates.billingEmail !== undefined || disablesBillingDelivery;
     const currentCustomerHasEmail = checksBillingEmail && await customerEmailAvailable(req.customerId);
     if (checksBillingEmail) {
       previousBillingEmailAvailable = currentCustomerHasEmail || deliverableEmail(existing.billing_email);
-      const effectiveBillingEmail = updates.billingEmail !== undefined ? updates.billingEmail : existing.billing_email;
-      billingEmailAvailable = currentCustomerHasEmail || deliverableEmail(effectiveBillingEmail);
-    }
-    if (billingArrayUpdates.length) {
-      const emailEnabled = updates.emailEnabled !== undefined
-        ? updates.emailEnabled
-        : existing.email_enabled !== false;
-      const beforeBilling = billingChannelsPayload(
-        { ...existing, email_enabled: emailEnabled },
-        { emailAvailable: billingEmailAvailable },
-      );
-      const addsBillingEmail = billingArrayUpdates.some(([key]) => (
-        updates[key].includes('email') && !beforeBilling[key].includes('email')
-      ));
-      if (addsBillingEmail) {
-        if (!billingEmailAvailable || !emailEnabled) {
-          return res.status(409).json({ error: 'Add a billing email and enable email notifications before choosing Email.' });
-        }
-      }
-      addsBillingPush = billingArrayUpdates.some(([key]) => (
-        updates[key].includes('push') && !beforeBilling[key].includes('push')
-      ));
     }
     // Older native builds render an unknown channel as Text and may echo it
     // when saving another setting. Their saves must not erase an App choice.
@@ -845,7 +833,7 @@ router.put('/preferences', async (req, res, next) => {
         }
       }
     }
-    if (addsBillingPush || [...APP_CHANNEL_KEYS].some((key) => updates[key] === 'push'
+    if ([...APP_CHANNEL_KEYS].some((key) => updates[key] === 'push'
       && (CHANNEL_DB_COLUMNS.includes(DB_FIELD_BY_PREF[key]) ? existingPrimary : existing)?.[DB_FIELD_BY_PREF[key]] !== 'push')) {
       const status = await require('../services/push-notifications').customerStatus(req.customerId);
       if (!status.fresh || updates.pushEnabled === false || (updates.pushEnabled !== true && !status.enabled)) {

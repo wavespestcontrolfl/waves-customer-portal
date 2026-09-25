@@ -698,6 +698,51 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect([saved.email_enabled, saved.sms_enabled].filter((enabled) => enabled !== false)).toHaveLength(1);
   });
 
+  test('new Email and App checks compare against the row reread under lock', async () => {
+    async function raceLockedChange(lockedUpdate, body) {
+      const blocker = await mockPg.transaction();
+      let committed = false;
+      try {
+        await blocker('notification_prefs').where({ customer_id: property }).forUpdate().first('customer_id');
+        await blocker('notification_prefs').where({ customer_id: property }).update(lockedUpdate);
+        const pending = put(body);
+        let settled;
+        void pending.then((response) => { settled = response; });
+        let waiting = false;
+        for (let attempt = 0; attempt < 50 && !waiting && !settled; attempt += 1) {
+          const result = await admin.raw(`SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+              AND wait_event_type = 'Lock' AND query ILIKE '%notification_prefs%' AND query ILIKE '%for update%'
+          ) AS waiting`);
+          waiting = result.rows[0].waiting;
+          if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect({ waiting, settled }).toEqual({ waiting: true, settled: undefined });
+        await blocker.commit();
+        committed = true;
+        return pending;
+      } finally {
+        if (!committed) await blocker.rollback();
+      }
+    }
+
+    try {
+      await mockPg('customers').where({ id: property }).update({ email: null });
+      await mockPg('notification_prefs').where({ customer_id: property }).update({
+        billing_email: 'billing@example.com', invoice_channels: ['sms'],
+      });
+      expect(await raceLockedChange({ billing_email: null }, { invoiceChannels: ['email', 'sms'] }))
+        .toMatchObject({ status: 409, body: { error: 'Add a billing email and enable email notifications before choosing Email.' } });
+
+      await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['sms', 'push'] });
+      expect(await raceLockedChange({ invoice_channels: ['sms'] }, { invoiceChannels: ['sms', 'push'] }))
+        .toMatchObject({ status: 409, body: { error: 'Connect the app and enable notifications before choosing App.' } });
+      expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels).toEqual(['sms']);
+    } finally {
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
+    }
+  });
+
   test('billing array audit compares legacy channels with the pre-save email destination', async () => {
     try {
       await mockPg('customers').where({ id: property }).update({ email: null });
