@@ -3975,6 +3975,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 first_name: contactFirstName || null,
                 last_name: contactLastName || null,
               },
+              // Consultation-booking email block (dark behind
+              // GATE_LEAD_INSPECTION_LINK) needs a lead id to render.
+              context: { leadId: lead.id },
             });
             logger.info(`[public-quote] existing subscriber id=${result.subscriber?.id} new_lead ${r.enrolled ? 'queued' : 'skipped'}`);
           } catch (e) {
