@@ -13,6 +13,18 @@ function isDialablePhone(value) {
   return String(value).replace(/\D/g, '').length >= 10;
 }
 
+// Pure predicate: did THIS caller disclaim the ANI as not their own with no
+// spoken callback number backing it up? Single source of truth (schema
+// 1.14.0) — computeDeterministicTriageFlags derives callback_number_needed
+// from it, and every other consumer that needs the same fact (the
+// crm_notes stamp in extraction-compat.js, the CSR-coaching addendum in
+// csr-coach.js) calls this instead of re-deriving the condition, so a
+// future refinement here can't silently desync from the flag.
+function callerIdDisclaimedNeedsCallback(caller) {
+  if (!caller || caller.caller_id_disclaimed !== true) return false;
+  return caller.phone_source !== 'spoken' && caller.phone_source !== 'both';
+}
+
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
 // name — don't treat these as a name↔email mismatch.
 const GENERIC_EMAIL_LOCALPARTS = new Set([
@@ -274,14 +286,16 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // callback_number_needed (schema 1.14.0, live miss 2026-09-25, call
   // 6fee5f34: "this is our office line... I pick up, and then text"). The
   // caller explicitly disclaimed the ANI as NOT their own AND gave us no
-  // spoken number to use instead (phone_source would be 'spoken' or 'both'
-  // if they had) — the only number on file is one we now KNOW is wrong to
-  // text. Distinct from caller_phone_missing above, which fires when there
-  // is no reachable number at all; here the ANI IS dialable, it's just not
-  // this caller's. SMS-only: see SMS_ONLY_FLAGS / ADVISORY_TRIAGE_FLAGS —
-  // the appointment still books, the confirmation/reminder SMS leg holds.
-  if (caller.caller_id_disclaimed === true
-      && caller.phone_source !== 'spoken' && caller.phone_source !== 'both') {
+  // spoken number to use instead — the only number on file is one we now
+  // KNOW is wrong to text. Distinct from caller_phone_missing above, which
+  // fires when there is no reachable number at all; here the ANI IS
+  // dialable, it's just not this caller's. SMS-only: see SMS_ONLY_FLAGS /
+  // ADVISORY_TRIAGE_FLAGS — the appointment still books, the confirmation/
+  // reminder SMS leg holds. The predicate itself lives in
+  // callerIdDisclaimedNeedsCallback (single source of truth — pre-push
+  // review P1: the crm_notes stamp and CSR-coaching addendum call it too,
+  // rather than re-deriving the condition).
+  if (callerIdDisclaimedNeedsCallback(caller)) {
     flags.push('callback_number_needed');
   }
 
@@ -1945,6 +1959,7 @@ module.exports = {
   onFileAddressSatisfaction,
   SMS_ONLY_FLAGS,
   callbackNumberNeededBlocksSms,
+  callerIdDisclaimedNeedsCallback,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,

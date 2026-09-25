@@ -70,12 +70,15 @@ function csrScoringApplies({ direction, callNature, v2Valid, v2Promoted } = {}) 
 // number isn't theirs and the call still ended with no cell number
 // captured, that is a specific, checkable miss worth coaching on every time,
 // so it's appended deterministically rather than left to the model to
-// notice. Pure/testable; scoreCall appends the text it returns.
+// notice. Pure/testable; scoreCall appends the text it returns. The
+// predicate is NOT re-derived here (pre-push review P1) — it calls
+// call-triage-flags.js's callerIdDisclaimedNeedsCallback, the same function
+// computeDeterministicTriageFlags uses for callback_number_needed, so
+// coaching can never silently disagree with the flag.
 const CALLBACK_NUMBER_COACHING_NOTE = "Caller said this number isn't theirs — ask for a cell before ending the call.";
 function callbackNumberCoachingNote(v2Extraction) {
-  const caller = v2Extraction?.caller;
-  if (!caller || caller.caller_id_disclaimed !== true) return null;
-  if (caller.phone_source === 'spoken' || caller.phone_source === 'both') return null;
+  const { callerIdDisclaimedNeedsCallback } = require('../call-triage-flags');
+  if (!callerIdDisclaimedNeedsCallback(v2Extraction?.caller)) return null;
   return CALLBACK_NUMBER_COACHING_NOTE;
 }
 

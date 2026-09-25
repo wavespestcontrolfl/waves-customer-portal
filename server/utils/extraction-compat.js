@@ -627,14 +627,21 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
 // "not this caller's phone"), so the fallback is the same operator-note
 // convention customer-dedupe.js's predictNoteAppends uses: a timestamped
 // stamp appended to crm_notes. Pure/testable; the caller does the DB write
-// (fail-open, after the customer row already exists).
+// (fail-open, after the customer row already exists). The disclaim
+// predicate itself is NOT re-derived here (pre-push review P1) — it calls
+// call-triage-flags.js's callerIdDisclaimedNeedsCallback, the same function
+// computeDeterministicTriageFlags uses for callback_number_needed, so this
+// can never silently disagree with the flag. The date is the server's own
+// ET calendar day (AGENTS.md America/New_York discipline) — Railway runs
+// UTC, so a raw toISOString() date would misdate every call after ~7pm ET.
 function callerIdDisclaimedNoteText(caller, { now = new Date() } = {}) {
-  if (!caller || caller.caller_id_disclaimed !== true) return null;
-  if (caller.phone_source === 'spoken' || caller.phone_source === 'both') return null;
+  const { callerIdDisclaimedNeedsCallback } = require('../services/call-triage-flags');
+  if (!callerIdDisclaimedNeedsCallback(caller)) return null;
   const said = typeof caller.phone_note === 'string' && caller.phone_note.trim()
     ? caller.phone_note.trim()
     : null;
-  const dateStr = now.toISOString().slice(0, 10);
+  const { etDateString } = require('./datetime-et');
+  const dateStr = etDateString(now);
   return `[${dateStr}] Caller ID number is UNVERIFIED — caller said this is a shared/office line, not their own`
     + (said ? ` ("${said}")` : '')
     + `. Confirm a personal callback number before relying on this number for texts.`;
