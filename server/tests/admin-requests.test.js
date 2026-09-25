@@ -74,6 +74,7 @@ async function withServer(fn) {
 }
 
 describe('admin requests routes', () => {
+  const requestId = '11111111-1111-4111-8111-111111111111';
   beforeEach(() => jest.clearAllMocks());
 
   test('rejects unauthenticated callers', async () => {
@@ -83,10 +84,42 @@ describe('admin requests routes', () => {
     });
   });
 
+  test('rejects unauthenticated request photo reads before querying the database', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`);
+      expect(res.status).toBe(401);
+      expect(db).not.toHaveBeenCalled();
+    });
+  });
+
+  test('rejects an invalid request id before querying the database', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/requests/not-a-uuid/photos`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(400);
+      expect(db).not.toHaveBeenCalled();
+    });
+  });
+
+  test('loads request photos on demand for authenticated staff', async () => {
+    const photos = ['data:image/jpeg;base64,YQ==', 'data:image/png;base64,Yg=='];
+    setDb({ service_requests: [makeChain({ first: { id: requestId, photos: [...photos, 'data:text/html;base64,PHNjcmlwdD4='] } })] });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, {
+        headers: { Authorization: 'Bearer tech' },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('private, no-store');
+      expect(await res.json()).toEqual({ photos });
+    });
+  });
+
   test('lists service requests for a technician', async () => {
     setDb({
       service_requests: [
-        makeChain({ rows: [{ id: 'req-1', status: 'new', subject: 'Ants in kitchen' }] }),
+        makeChain({ rows: [{ id: 'req-1', status: 'new', subject: 'Ants in kitchen', photoCount: 2 }] }),
         makeChain({ first: { count: '1' } }),
       ],
     });
@@ -95,7 +128,7 @@ describe('admin requests routes', () => {
       const res = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer tech' } });
       const body = await res.json();
       expect(res.status).toBe(200);
-      expect(body.requests).toEqual([{ id: 'req-1', status: 'new', subject: 'Ants in kitchen' }]);
+      expect(body.requests).toEqual([{ id: 'req-1', status: 'new', subject: 'Ants in kitchen', photoCount: 2 }]);
       expect(body.total).toBe(1);
     });
   });

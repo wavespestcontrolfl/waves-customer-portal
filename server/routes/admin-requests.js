@@ -30,6 +30,7 @@ const STATUS_LABELS = {
   scheduled: 'Scheduled',
   resolved: 'Resolved',
 };
+const REQUEST_PHOTO_RE = /^data:image\/(?:jpeg|jpg|png|webp|heic|heif);base64,/i;
 
 // Strip HTML-ish characters before storage so admin/UI surfaces can never
 // render injected markup (mirrors routes/requests.js).
@@ -44,6 +45,7 @@ const listSchema = Joi.object({
   limit: Joi.number().integer().min(1).max(200).default(50),
   page: Joi.number().integer().min(1).default(1),
 });
+const requestIdSchema = Joi.string().uuid().required();
 
 const updateSchema = Joi.object({
   status: Joi.string().valid(...STATUSES).optional(),
@@ -95,6 +97,7 @@ router.get('/', async (req, res, next) => {
         'customers.phone as customerPhone',
         'technicians.name as assignedTechnician',
         'service_requests.metadata',
+        db.raw('COALESCE(jsonb_array_length(service_requests.photos), 0)::int as "photoCount"'),
       );
     if (status) query = query.where('service_requests.status', status);
     if (openOnly) query = query.whereNotIn('service_requests.status', TERMINAL_STATUSES);
@@ -120,6 +123,30 @@ router.get('/', async (req, res, next) => {
     const total = await countQuery.count('id as count').first();
 
     res.json({ requests, total: parseInt(total?.count || 0, 10), limit, page });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/requests/:id/photos — load request evidence on demand.
+// Keep base64 photo data out of the triage list; staff fetch it only when
+// opening the attachment strip for one request.
+router.get('/:id/photos', async (req, res, next) => {
+  try {
+    const { value: requestId, error } = requestIdSchema.validate(req.params.id);
+    if (error) return res.status(400).json({ error: 'Invalid service request id' });
+    const request = await db('service_requests')
+      .where({ id: requestId })
+      .first('id', 'photos');
+    if (!request) return res.status(404).json({ error: 'Service request not found' });
+
+    let photos = request.photos;
+    if (typeof photos === 'string') {
+      try { photos = JSON.parse(photos); } catch { photos = []; }
+    }
+    const viewable = Array.isArray(photos)
+      ? photos.filter((photo) => typeof photo === 'string' && REQUEST_PHOTO_RE.test(photo)).slice(0, 3)
+      : [];
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ photos: viewable });
   } catch (err) { next(err); }
 });
 
