@@ -32,7 +32,11 @@ postgres('invoice send episode ownership', () => {
   const read = () => trx('invoices').where({ id: invoiceId }).first();
   beforeAll(() => {
     const url = new URL(process.env.DATABASE_URL);
-    if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use an isolated local/CI database');
+    const privateQa = process.env.WAVES_DATABASE_ENVIRONMENT === 'test'
+      && /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname) && !privateQa) {
+      throw new Error('Use an isolated local/CI database or labeled private QA database');
+    }
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
   });
   beforeEach(async () => {
@@ -76,6 +80,32 @@ postgres('invoice send episode ownership', () => {
     expect(original).not.toBe(replacement);
     expect(require('../services/invoice-followups').scheduleForInvoice).not.toHaveBeenCalled();
     expect(require('../services/invoice-issued-closeout').closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
+  });
+
+  test('Email retry marker preserves a payer withdrawal after Text acceptance', async () => {
+    const claimToken = randomUUID();
+    const withdrawal = `payer_billed:${randomUUID()}`;
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: claimToken });
+    const sms = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({ sent: true });
+    require('../services/invoice-email').sendInvoiceEmail.mockImplementationOnce(async () => {
+      await trx('invoices').where({ id: invoiceId }).update({
+        status: 'draft', scheduled_send_at: null, scheduled_send_error: withdrawal,
+      });
+      return { ok: false, code: 'billing_prefs_unavailable', error: 'preferences temporarily unavailable' };
+    });
+    try {
+      await expect(Invoice.sendViaSMSAndEmail(invoiceId, { allowClaimed: true, claimToken }))
+        .resolves.toMatchObject({ ok: false, code: 'INVOICE_ACCEPTED_LEG_UNSTAMPED', deliveryHeld: true });
+      const withdrawn = await read();
+      expect(withdrawn).toMatchObject({
+        status: 'draft', scheduled_send_error: withdrawal, send_claim_token: claimToken,
+        payer_id: null, sent_at: null, sms_sent_at: null,
+      });
+      expect(() => require('../services/invoice-helpers').assertInvoiceCollectible(withdrawn)).toThrow(/payer|third.party/i);
+      await expect(Invoice.restoreSendClaim(invoiceId, 'scheduled', true, [], trx, claimToken)).resolves.toBe(false);
+      expect((await read()).scheduled_send_error).toBe(withdrawal);
+      expect(sms).toHaveBeenCalledTimes(1);
+    } finally { sms.mockRestore(); }
   });
 
   test('cancellation leaves an in-flight claim for review and the terminal-visit boundary blocks dispatch', async () => {

@@ -3018,7 +3018,9 @@ async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
   if (!claimToken) return false;
   try {
     const marked = await whereSendClaimOwned(
-      db("invoices").where({ id: invoiceId }),
+      db("invoices").where({ id: invoiceId, status: "sending" })
+        .whereNull("payer_id")
+        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'"),
       claimToken,
     ).update({
       sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [new Date()]),

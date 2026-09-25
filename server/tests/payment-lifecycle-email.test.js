@@ -368,6 +368,30 @@ describe('payment lifecycle email sender', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test.each(['INVOICE_UNREADABLE', 'INVOICE_PAYER_BILLED'])('a retry notice classifies ownership refusal %s before provider handoff', async (code) => {
+    const ownership = jest.spyOn(require('../services/invoice-helpers'), 'selfPayAtDispatch')
+      .mockReturnValueOnce(async () => ({ ok: false, code }));
+    const provider = jest.fn();
+    setDbQueues({
+      payments: [chain({ first: payment({ invoice_id: 'inv-1' }) })],
+      invoices: [chain({ first: invoice() })],
+      payment_methods: [chain({ first: paymentMethod() })],
+      ...lifecycleQueues(),
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      await withProviderHandoff(provider);
+      return { sent: false, aborted: true };
+    });
+    try {
+      const result = await PaymentLifecycleEmail.sendPaymentRetryNotice({
+        customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23',
+      });
+      expect(result).toMatchObject({ ok: false, deliveryOutcome: 'not_sent' });
+      expect(result.retryable === true).toBe(code === 'INVOICE_UNREADABLE');
+      expect(provider).not.toHaveBeenCalled();
+    } finally { ownership.mockRestore(); }
+  });
+
   test('retry and failure notices name a removed bank method from the payment snapshot (GH codex r6 P2)', async () => {
     // payment_method_id was nulled by the method's removal; the delete
     // trigger left the tender on the payment itself.
@@ -519,6 +543,24 @@ describe('payment lifecycle email sender', () => {
       to_phone: '',
       metadata: expect.stringContaining('"billingDeliveryCategory":"payment_issue"'),
     }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each(['sms', 'push'])('a template lookup failure keeps %s-only payment-failure work retryable', async (channel) => {
+    const prefs = { payment_issue_channels: [channel] };
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
+    });
+    const render = require('../services/sms-template-renderer').renderSmsTemplate;
+    render.mockRejectedValueOnce(new Error('template lookup unavailable'));
+    await expect(PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1', paymentIntentId: 'pi_test', attemptId: 'attempt-1', invoiceId: 'inv-1',
+    })).rejects.toThrow('template lookup unavailable');
+    expect(render).toHaveBeenCalledWith('payment_failed', expect.any(Object), expect.any(Object), { throwOnError: true });
+    expect(db).not.toHaveBeenCalledWith('sms_log');
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 

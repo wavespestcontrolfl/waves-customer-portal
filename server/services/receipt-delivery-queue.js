@@ -134,11 +134,20 @@ function actionableEmailFailure(result) {
   return result && result.ok === false && !expectedEmailSkip(result);
 }
 
+function receiptChannelChoiceChanged(smsResult, emailResult) {
+  return smsResult?.sent === false && smsResult.reason === 'channel_email_only'
+    && emailResult?.ok === false && emailResult.error === 'billing_email_not_selected';
+}
+
 function shouldRetryReceiptDelivery({ smsResult = null, emailResult = null } = {}) {
-  return actionableSmsFailure(smsResult) || actionableEmailFailure(emailResult);
+  return receiptChannelChoiceChanged(smsResult, emailResult)
+    || actionableSmsFailure(smsResult) || actionableEmailFailure(emailResult);
 }
 
 function receiptDeliveryFailureError({ smsResult = null, emailResult = null } = {}) {
+  if (receiptChannelChoiceChanged(smsResult, emailResult)) {
+    return new Error('Receipt delivery preferences changed between channel checks');
+  }
   const smsReason = actionableSmsFailure(smsResult) ? (smsResult.reason || 'unknown') : 'ok';
   const emailReason = actionableEmailFailure(emailResult) ? (emailResult.error || 'unknown') : 'ok';
   return new Error(`receipt channel failed: sms=${smsReason} email=${emailReason}`);

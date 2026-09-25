@@ -39,6 +39,19 @@ describe('admin SMS template renderer', () => {
     expect(body).toBe('Hello Sam! Track: portal.wavespestcontrol.com/l/abc23');
   });
 
+  test('required delivery callers distinguish a lookup error from an inactive template', async () => {
+    const db = require('../models/db');
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const failure = new Error('template database temporarily unavailable');
+    db.schema.hasTable.mockRejectedValueOnce(failure);
+    await expect(renderSmsTemplate('sample_template', {}, {}, { throwOnError: true })).rejects.toBe(failure);
+    db.schema.hasTable.mockRejectedValueOnce(failure);
+    await expect(renderSmsTemplate('sample_template', {})).resolves.toBeUndefined();
+
+    db.mockImplementationOnce(() => ({ where: () => ({ first: async () => ({ ...table, is_active: false }) }) }));
+    await expect(renderSmsTemplate('sample_template', {}, {}, { throwOnError: true })).resolves.toBeUndefined();
+  });
+
   test('removes schemes from external links in both stored base and variant bodies', async () => {
     const vars = { first_name: 'Testname', track_url: 'https://g.page/r/demo/review' };
     expect(await smsTemplates.getTemplate('sample_template', vars))

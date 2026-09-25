@@ -270,7 +270,7 @@ async function sendLifecycleTemplate({
             if (invoiceId) {
               const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoiceId, db)();
               if (ownership.ok !== true) {
-                handoffGuardFailed = ownership.retryable === true;
+                handoffGuardFailed = ownership.retryable === true || ownership.code === 'INVOICE_UNREADABLE';
                 return ownership;
               }
             }
@@ -665,7 +665,7 @@ async function sendPaymentFailed({
     workflow: 'interactive_payment_failed',
     entity_type: 'invoice',
     entity_id: invoice?.id || invoiceId || null,
-  });
+  }, { throwOnError: true });
   if (!body) return emailResult;
   const eventKey = `payment-failed:${paymentIntentId || invoice?.id || effectiveCustomerId}:${attemptId || 'no_attempt'}`;
   const replayMetadata = {
