@@ -210,6 +210,56 @@ never went through a socket at all (a bake-off/synthetic fixture). So a
 single stored metric can always be traced back to its session + socket/leg +
 turn.
 
+## Streaming renderer (PR C)
+
+`VOICE_RELAY_RENDERER=block|stream` selects how agent text reaches Twilio,
+resolved once per session and pinned for its lifetime (same
+resolve-once/allowlist/warn-once pattern as the `VOICE_RELAY_INBOUND_MODEL`
+override). `VOICE_RELAY_SANDBOX_RENDERER` outranks it for sandbox sessions
+only. An unrecognized value falls back to `block` with one logged warning —
+never a silent substitution. Default (`block`, unset) is byte-identical to
+this lane's original behavior: one whole utterance per Twilio text frame,
+sent only after the model round's `finalMessage()` resolves — `renderer:
+'block'` in every turn stat, `renderer_version: 'block-v1'` in the session
+version stamp.
+
+`stream` sends sentence-complete chunks as `stream.on('text', …)` deltas
+arrive (`{type:'text', token, last:false}` frames, `last:true` on the
+close), stamped `renderer: 'stream-v1'` / `renderer_version: 'stream-v1'`.
+Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
+
+1. **Flush at a completed sentence boundary** — `.`/`!`/`?` (+ an optional
+   closing quote/paren) followed by whitespace. An incomplete trailing
+   fragment is held for the next delta; a missed boundary (an abbreviation)
+   just holds a little longer — never a guess.
+2. **Hold a sentence** — never send it progressively — when it contains a
+   dollar amount (reusing `eval/voice-relay-spoken-checks`'s
+   `amountMentions`), a date/time expression, a negation, or a commitment
+   verb (booked/scheduled/sent/charged/refunded/confirmed/…). Once one
+   sentence in a round needs holding, every sentence after it in that same
+   round is held too — never reordered, never partially released.
+3. **Release the held tail only at `finalMessage()`**, under the exact same
+   write-tool suppression check the block renderer already runs
+   (`hasPendingWrite` / `WRITE_TOOLS` in `relay-conversation.js`): if the
+   round ends in a write tool call, the held tail is dropped from both the
+   air and the assistant history (never spoken, never stored) — anything
+   already flushed before the hold point stays spoken and stays in history,
+   so the transcript agrees with what the caller actually heard. If not, the
+   held tail is sent as the closing chunk.
+
+Interruption: a barge-in aborts the round's own `AbortController` (unchanged
+mechanism); every send call in the streaming path checks that controller's
+`signal.aborted` first, so a chunk queued before the abort but delivered
+after it is dropped rather than resurfacing. A round's streaming state is
+local to that round and is never read by a later round, a reconnect, or a
+transfer. A mid-stream timeout/error closes the open utterance with an empty
+`last:true` frame (no replay of anything already sent) before the existing
+failure copy speaks as its own, separate utterance. The
+`played`/`tokens-played` mapping (`_appendPlayed`, `interrupt()`) is
+unchanged — it already matches against an utterance's growing `planned`
+text, which is exactly what the stream renderer's single growing transcript
+entry per turn provides.
+
 ## Roadmap (not in this PR)
 
 - **Phase 1** — add read-only `get_availability` / `find_slots` tools → agent quotes real openings, still writes a lead. Zero mutation risk.
