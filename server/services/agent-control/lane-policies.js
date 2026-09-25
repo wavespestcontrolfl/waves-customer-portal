@@ -61,25 +61,36 @@ const AGENT_SESSION = {
   budget: { max_steps: 200, max_tool_calls: 400, max_retries: 1 },
 };
 
+// Lanes that keep redacted prompt / response bodies in llm_call_traces once
+// GATE_LLM_CALL_TRACES is on (llm-dispatch-metrics recordTrace). Opted in:
+// the text lanes the owner debugs — SMS drafting and intent, the call
+// pipeline, estimates, service-report copy, email, reviews. Left out on
+// purpose: vision lanes (image bodies), content / SEO / social (large
+// prompts, low debugging value), embeddings, canaries and evals, and every
+// Managed Agents session (session rows carry no bodies). Bodies are redacted
+// in full, capped at 8 KB and pruned after 7 days; a low-confidence
+// redaction is never stored on any lane.
+const TRACED = { trace: true };
+
 const LANE_RUNTIME = {
   // ── SMS & messaging ──
   // customer_visible + M3 (Codex r23): classified by the worst-case path — with GATE_SMS_AUTO_SEND on, an intent promoted to auto_send hands
   // the drafted reply to maybeAutoSend() and it reaches the customer with no human step (deliveredAs 'auto_sent', judge-covered). Gate off = shadow rows.
-  sms_draft: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
-  sms_save_sale: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M3' },
+  sms_draft: { side_effect_class: 'customer_visible', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
+  sms_save_sale: { side_effect_class: 'customer_visible', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M3' },
   // M2 (Codex r20): both return text the comms client installs into the editable body; sending is the operator's separate action.
-  sms_tone: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
-  sms_suggest: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
+  sms_tone: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
+  sms_suggest: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity (two switchboard lanes since #3769 b21f45aeb).
-  response_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
-  response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
-  estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
+  response_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
+  response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
+  estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
   'sms-commitment-fulfillment': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'sms-commitment-fulfillment', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
-  sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  sms_intent: { side_effect_class: 'internal_write', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
   // queue retries later — no cross-provider chain, no deterministic answer.
-  contact_correction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M3' },
+  contact_correction: { side_effect_class: 'internal_write', ledger: 'call', ...TRACED, fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M3' },
   sms_pathology: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', ...LONG_BATCH },
   sms_verifier: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check' },
   // offline, not measurement: the nightly judge goes through createDeepMessage,
@@ -100,16 +111,16 @@ const LANE_RUNTIME = {
   sms_canary_save_sale: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: null, expected_cadence: 'daily', expected_duration_ms: 15_000 },
 
   // ── Calls ──
-  call_extraction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0', ...CALL_PIPELINE },
+  call_extraction: { side_effect_class: 'internal_write', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0', ...CALL_PIPELINE },
   // direct_sdk (Codex r15): V1 extraction and transcript relabeling are raw Gemini / OpenAI fetches in call-recording-processor.js.
   // offline (Codex r16): each is one provider with no cross-provider answer, retried by the background call pipeline.
   call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', ...CALL_PIPELINE },
   // workflow_id = the cron job (scheduler.js runExclusive name) whose body IS this lane's run — the module names the lane on its calls — so job_health rows read with the lane's long-batch policy, not the 1-min default (Codex r3). Lanes served by two jobs (sms_pathology: classify + propose; sealed_eval: seal + autorun) or one job serving two lanes (sms-draft-canary) stay unmapped until the S5 cron wrap registers the job per run.
-  call_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', workflow_id: 'call-research-miner', ...LONG_BATCH },
+  call_research: { side_effect_class: 'internal_write', ledger: 'call', ...TRACED, fallback_class: 'offline', eval_family: 'structured_extraction', workflow_id: 'call-research-miner', ...LONG_BATCH },
   transcription: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   transcript_label: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
-  call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'classification' },
   call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', workflow_id: 'call-self-audit', ...LONG_BATCH },
   lead_synopsis: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   // The hourly cron only verifies follow-ups (no model call); the model runs
@@ -123,7 +134,7 @@ const LANE_RUNTIME = {
   contact_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
-  parse_when: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
+  parse_when: { side_effect_class: 'read_only', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'structured_extraction' },
 
   // ── Voice AI agent ──
   // offline: streams from Anthropic only with a canned spoken error — no second provider (Codex r12).
@@ -182,48 +193,48 @@ const LANE_RUNTIME = {
   // customer_visible + M3 (Codex r17): the public estimate ask handler returns the answer straight to the customer and audit-logs it.
   // direct_sdk (Codex r18): answerWithAnthropic builds its own client after an OpenAI miss.
   estimate_assistant: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M3' },
-  estimator_sms_signal: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  estimator_sms_signal: { side_effect_class: 'internal_write', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'classification' },
   sms_solicitation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // draft_for_human + M2 (Codex r22): the composed intent is priced deterministically by draft-builder into an estimate draft nobody sends until an operator reviews it.
-  intent_composer: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M2', expected_duration_ms: 120_000 },
+  intent_composer: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M2', expected_duration_ms: 120_000 },
   // M2 (Codex r20): persists the brief + an unpriced, disabled estimate scaffold; the operator prices, enables and sends.
-  commercial_proposal: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
+  commercial_proposal: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   churn_classify: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   signal_detector: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification', ...LONG_BATCH },
   retention_drafts: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },
 
   // ── Service reports ──
   // draft_for_human + M2 (Codex r19): /generate-report copy lands in the tech's editable notes and reaches the customer only through the later completion action.
-  report_copy: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
+  report_copy: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
   // M3 (Codex r21): buildTreatmentNarrative runs on report read with no staff step and caches the copy in service_report_ai_summaries.
-  treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
-  rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
+  treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
+  rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'service_report' },
   // M2 (Codex r20): both admin-projects AI-write endpoints return copy into the editable Recommendations field; delivery is a separate admin action.
-  project_report: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
+  project_report: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
   // M3: admin-dispatch completion auto-generates the recap when the tech supplies none, persists it in structured_notes and
   // sends it in the customer completion SMS with no approval step (Codex r15).
-  completion_recap: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
-  lawn_visit_narratives: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
+  completion_recap: { side_effect_class: 'customer_visible', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
+  lawn_visit_narratives: { side_effect_class: 'customer_visible', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'service_report' },
   // event: the half-hourly sweep returns cached briefs unchanged, so a stable
   // route (or a day with no eligible visits) makes no model call.
   // M3 (Codex r21): the generator writes body + provenance straight into scheduled_services.pre_service_brief; no approval boundary.
-  previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
+  previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', ...TRACED, fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
   // interactive: runs while the tech opens the drawer — bounded cross-provider
   // fallback, then the deterministic template (Codex r8 on #3885).
   job_card_paragraph: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M1' },
   // M2 (Codex r20): notes / email copy land in the editable invoice fields, never saved or sent directly.
-  invoice_summary: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
+  invoice_summary: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   // M3 (Codex r21): appointment-tagger generates and persists the brief the moment the appointment is tagged.
   wdo_appt_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: null, maturity: 'M3' },
 
   // ── Email ──
   // irreversible_external + M3 (Codex r16): a marketing_newsletter verdict runs executeAutoAction — Gmail archive and a one-click
   // unsubscribe request with no approval, audited on the emails row (email-classifier.js → email-actions.js).
-  email_classify: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M3' },
+  email_classify: { side_effect_class: 'irreversible_external', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'classification', maturity: 'M3' },
   // M2 (Codex r20): creates a Gmail draft (id recorded) and never sends; the operator reviews and sends it.
-  email_reply: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
+  email_reply: { side_effect_class: 'draft_for_human', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   // M2 (Codex r16): the LLM decode leg only ever yields a `suggested` candidate emailed to the owner; applying it is an operator action.
-  bounce_rescue: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M2' },
+  bounce_rescue: { side_effect_class: 'internal_write', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M2' },
   // direct_sdk (Codex r15): email/invoice-processor.js parses through its own new Anthropic() client.
   // offline (Codex r16): background email step, one request, continues without parsed data on a miss.
   invoice_pdf: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 120_000 },
@@ -243,11 +254,11 @@ const LANE_RUNTIME = {
   social_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3' },
   // M2 (Codex r20): captions return to editable textareas; a separate Publish action posts the selected versions.
   tech_caption_copy: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
-  review_ask: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
+  review_ask: { side_effect_class: 'customer_visible', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // M3: GATE_REVIEW_AUTO_REPLY=auto publishes without approval and persists the audit evidence — Codex r9.
-  review_reply: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M3' },
+  review_reply: { side_effect_class: 'irreversible_external', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M3' },
   // M3 (Codex r18): review-gate.js returns the generated copy to the customer and persists generated_review_text — no staff step.
-  review_gate_text: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
+  review_gate_text: { side_effect_class: 'customer_visible', ledger: 'call', ...TRACED, fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // customer_visible + M3 (Codex r18): the autonomous publisher stamps the alt text into blog frontmatter the PR poller can auto-merge.
   hero_alt: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   editorial_review: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
