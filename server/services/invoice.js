@@ -3012,6 +3012,26 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
   }
 }
 
+async function ensureAcceptedSmsStamp(invoiceId, claimToken) {
+  if (!claimToken) return false;
+  try {
+    const current = await whereSendClaimOwned(
+      db("invoices").where({ id: invoiceId }),
+      claimToken,
+    ).first("sms_sent_at");
+    if (!current) return false;
+    if (current.sms_sent_at) return true;
+    const stamped = await whereSendClaimOwned(
+      db("invoices").where({ id: invoiceId }),
+      claimToken,
+    ).whereNull("sms_sent_at").update({ sms_sent_at: new Date(), updated_at: new Date() });
+    return stamped !== 0;
+  } catch (err) {
+    logger.error(`[invoice] Accepted Text/App leg could not be stamped for ${invoiceId}: ${err.message}`);
+    return false;
+  }
+}
+
 // Statuses an invoice can move FROM into 'sent' on its first delivery. A send
 // from any other status (sent/viewed/overdue) is a RESEND — the CASE updates in
 // the send paths leave the status unchanged there.
@@ -5621,6 +5641,7 @@ const InvoiceService = {
         }
         if (smsResult?.sent) {
           sms.ok = true;
+          if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
           if (smsResult?.code) sms.code = smsResult.code;
@@ -5768,6 +5789,19 @@ const InvoiceService = {
     }
 
     const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    if (emailMustRetry && sms.ok
+      && !await ensureAcceptedSmsStamp(invoiceId, claim.invoice.send_claim_token)) {
+      logger.error(`[invoice] Email retry for ${invoiceId} parked because its accepted Text/App leg has no durable timestamp`);
+      return {
+        ok: false,
+        code: "INVOICE_ACCEPTED_LEG_UNSTAMPED",
+        deliveryHeld: true,
+        sms,
+        email,
+        payUrl,
+        creditApplied: 0,
+      };
+    }
     const ok = !emailMustRetry && (sms.ok || email.ok);
     // An adopted queued pay-link text is discharged by the SMS leg's OWN
     // outcome only: provider acceptance or a replacement on the scheduled
@@ -6505,6 +6539,11 @@ const InvoiceService = {
       if (result.code === "INVOICE_DELIVERY_OUTCOME_UNCERTAIN") {
         held += 1;
         logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} has an unverified provider outcome — claim retained for review`);
+        continue;
+      }
+      if (result.code === "INVOICE_ACCEPTED_LEG_UNSTAMPED") {
+        held += 1;
+        logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} delivered Text/App but could not persist its timestamp — claim retained for review`);
         continue;
       }
 

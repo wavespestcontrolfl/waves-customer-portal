@@ -464,6 +464,7 @@ describe('processScheduledSends send-window handling', () => {
       chain({ first: { payer_statement_id: null } }),
       chain({ first: sendingInvoice }),
       adoptionNoOp(),
+      chain({ first: { sms_sent_at: new Date('2026-09-25T02:45:00.000Z') } }),
       chain({ first: { id: 'inv-1' } }),
     ]);
     try {
@@ -477,6 +478,50 @@ describe('processScheduledSends send-window handling', () => {
         sms: { ok: true },
         email: { code: 'billing_prefs_unavailable' },
         creditApplied: 0,
+      });
+      expect(smsSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
+  test('parks an automated Email retry when both accepted-leg stamp attempts failed', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockResolvedValue({
+      sent: true,
+      finalizeError: 'both accepted-leg timestamp writes failed',
+    });
+    sendInvoiceEmail.mockResolvedValueOnce({
+      ok: false,
+      code: 'billing_prefs_unavailable',
+      error: 'Invoice delivery preferences unavailable',
+    });
+    const sendingInvoice = {
+      ...dueRow,
+      status: 'sending',
+      send_claim_token: 'claim-1',
+    };
+    const failedRepair = chain();
+    failedRepair.update.mockRejectedValueOnce(new Error('timestamp database unavailable'));
+    queueMocks(db, [
+      chain({ first: { payer_statement_id: null } }),
+      chain({ first: sendingInvoice }),
+      adoptionNoOp(),
+      chain({ first: { sms_sent_at: null } }),
+      failedRepair,
+    ]);
+    try {
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+        allowClaimed: true,
+        claimToken: 'claim-1',
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        code: 'INVOICE_ACCEPTED_LEG_UNSTAMPED',
+        deliveryHeld: true,
+        sms: { ok: true, finalizeError: 'both accepted-leg timestamp writes failed' },
+        email: { code: 'billing_prefs_unavailable' },
       });
       expect(smsSpy).toHaveBeenCalledTimes(1);
     } finally {
@@ -785,6 +830,24 @@ describe('processScheduledSends send-window handling', () => {
     sendSpy.mockResolvedValue({ ok: false, code: 'INVOICE_DELIVERY_OUTCOME_UNCERTAIN',
       sms: { error: 'provider outcome unknown', deliveryOutcome: 'uncertain' },
       email: { error: 'SMTP rejected', deliveryOutcome: 'not_sent' }, creditApplied: 25 });
+
+    expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect(db).toHaveBeenCalledTimes(3);
+  });
+
+  test('a delivered leg with no durable timestamp is parked instead of automatically retried', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    db.mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [dueRow] }))
+      .mockReturnValueOnce(chain({ returning: [claimedRow()] }));
+    sendSpy.mockResolvedValue({
+      ok: false,
+      code: 'INVOICE_ACCEPTED_LEG_UNSTAMPED',
+      deliveryHeld: true,
+      sms: { ok: true, finalizeError: 'both timestamp writes failed' },
+      email: { ok: false, code: 'billing_prefs_unavailable' },
+      creditApplied: 0,
+    });
 
     expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 0, deferred: 0 });
     expect(db).toHaveBeenCalledTimes(3);
