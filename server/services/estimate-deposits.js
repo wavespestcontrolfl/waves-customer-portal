@@ -682,6 +682,11 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
       logger.warn(`[estimate-deposits] deposit receipt email suppressed for estimate ${estimateId}: ${result.reason || 'suppressed'}`);
       return { sent: false, reason: result.reason || 'suppressed' };
     }
+    if (result?.aborted || result?.sent !== true) {
+      const reason = result?.reason || (result?.aborted ? 'aborted_before_dispatch' : 'email_not_sent');
+      logger.warn(`[estimate-deposits] deposit receipt email not sent for estimate ${estimateId}: ${reason}`);
+      return { sent: false, reason };
+    }
     if (result?.deduped) {
       logger.info(`[estimate-deposits] deposit receipt email deduped for estimate ${estimateId} (pi=${paymentIntentId})`);
       // The receipt already went out under this idempotency key — delivered.
