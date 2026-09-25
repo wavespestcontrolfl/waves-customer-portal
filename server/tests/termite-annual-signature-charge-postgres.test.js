@@ -124,7 +124,9 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     if (fixture) await fixture.destroy();
   });
 
-  function load({ gateOn = true, method = 'default', chargeImpl } = {}) {
+  function load({
+    gateOn = true, method = 'default', chargeImpl, quoteTotal = FROZEN_TOTAL,
+  } = {}) {
     const { db } = fixture;
     const notifyAdmin = jest.fn().mockResolvedValue(true);
     const resolvedMethod = method === 'default'
@@ -140,7 +142,8 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => logger);
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
-    jest.doMock('../services/stripe', () => ({ chargeInvoiceWithSavedCard }));
+    const quoteInvoiceSavedCardCharge = jest.fn(async () => ({ total: quoteTotal }));
+    jest.doMock('../services/stripe', () => ({ chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge }));
     // The frozen-snapshot validator itself is covered by the converter
     // suite; loading the whole converter here would drag its module graph
     // onto this scratch pool.
@@ -245,7 +248,21 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     expect((await chargeState(db)).status).toBe('declined');
   });
 
-  test('a surcharge past the frozen total is refused by the charge service → handled as a decline (pay link), never overcharged', async () => {
+  test('a credit-card surcharge past the frozen total is not authorized by the signature: skipped up front, pay link + bell, never charged', async () => {
+    const {
+      run, chargeInvoiceWithSavedCard, notifyAdmin, db,
+    } = load({ quoteTotal: 462.02 });
+
+    expect(await run()).toEqual({ status: 'skipped', reason: 'surcharge_exceeds_accepted_total', deliverPayLink: true });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(await db('payment_method_consents')).toHaveLength(0);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'billing', expect.stringContaining('surcharge'), expect.any(String),
+      expect.objectContaining({ dedupeKey: `termite-annual-signature-charge:${ids.estimateId}:surcharge_not_authorized` }),
+    );
+  });
+
+  test('if the charge-time total still exceeds the ceiling, the charge service refuses → decline lane (pay link), never overcharged', async () => {
     const { run } = load({
       chargeImpl: async () => { throw new Error('Charge total exceeds the quoted total the customer authorized. Review before charging.'); },
     });

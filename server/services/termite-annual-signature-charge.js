@@ -38,8 +38,8 @@
 // snapshot and evidence_contract_id pointing at the signed contract. The
 // charge is capped at the total frozen when the customer accepted
 // (maxAuthorizedTotalCents) — the agreement's prices are total maximum
-// prices, so a card whose surcharge would push past that total is refused
-// before Stripe and falls back to the pay link.
+// prices, so a card whose surcharge would push past that total is skipped
+// (the charge service's own quote, checked first) and gets the pay link.
 // ============================================================
 
 const crypto = require('crypto');
@@ -68,6 +68,10 @@ const BELL_COPY = {
   charge_deferred: (ctx) => ({
     title: 'Termite annual plan — signing charge not attempted',
     body: `Invoice #${ctx.invoiceId} (estimate #${ctx.estimateId}) was not charged and no pay link was sent: ${ctx.reason}. Resolve it and collect from the invoice.`,
+  }),
+  surcharge_not_authorized: (ctx) => ({
+    title: 'Termite annual plan — card on file not charged (surcharge)',
+    body: `The payment method on file for invoice #${ctx.invoiceId} (estimate #${ctx.estimateId}) is a credit card whose surcharge would exceed the total the customer signed for, so it was not charged. The pay link is being sent instead; the customer sees the exact total before paying.`,
   }),
   no_accepted_amount: (ctx) => ({
     title: 'Termite annual plan — no accepted total to charge against',
@@ -226,6 +230,23 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   });
   if (!method?.paymentMethodRowId) return { status: 'skipped', reason: 'no_enrolled_method' };
 
+  // The agreement's prices are total maximums: a credit-card surcharge
+  // that would carry the charge past the accepted total is not authorized
+  // by the signature, so that customer gets the pay link (which shows the
+  // exact surcharge before paying). Checked up front with the charge
+  // service's own quote so it is a clear skip, not a decline; if the quote
+  // itself fails, the charge's maxAuthorizedTotalCents ceiling still holds.
+  const StripeService = require('./stripe');
+  try {
+    const quote = await StripeService.quoteInvoiceSavedCardCharge(ctx.invoiceId, method.paymentMethodRowId);
+    if (Math.round(Number(quote?.total) * 100) > frozenTotalCents) {
+      await ringBell('surcharge_not_authorized', ctx);
+      return { status: 'skipped', reason: 'surcharge_exceeds_accepted_total' };
+    }
+  } catch (err) {
+    logger.warn(`[termite-annual-charge] pre-charge quote failed for invoice ${ctx.invoiceId} — relying on the charge ceiling: ${err.message}`);
+  }
+
   try {
     const contract = await signedAnnualContractFor(conn, ctx.estimateId, ctx.contractId);
     if (!contract?.contract_text_snapshot) throw new Error('signed annual agreement not found');
@@ -238,7 +259,6 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
     return { release: true };
   }
 
-  const StripeService = require('./stripe');
   let chargeResult;
   try {
     chargeResult = await StripeService.chargeInvoiceWithSavedCard(ctx.invoiceId, method.paymentMethodRowId, {
