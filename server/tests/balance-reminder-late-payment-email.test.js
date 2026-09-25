@@ -538,6 +538,31 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     } finally { balanceRead.mockRestore(); send.mockRestore(); }
   });
 
+  test('an App reminder is counted once: its push proof row carries the episode key and is not legacy history', async () => {
+    const service = customer({ cust_id: 'cust-1', phone: null, scheduled_date: new Date(Date.now() + 3.5 * 86400000) });
+    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const dayAgo = (days) => new Date(Date.now() - days * 86400000);
+    const key = 'balance-reminder:inv-1:gentle:May 25, 2026';
+    const delivered = { id: 'led-push', channel: 'push', occurred_at: dayAgo(4),
+      metadata: { delivered: true, notificationEventKey: key, invoiceId: 'inv-1', scheduledDate: 'May 25, 2026' } };
+    // The proof row push-channel-routing writes for an accepted push.
+    const proof = { id: 'sms-proof', from_phone: 'push', created_at: dayAgo(4),
+      metadata: JSON.stringify({ channel: 'push', providerAccepted: true, notificationEventKey: key }) };
+    const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    const send = jest.spyOn(BalanceReminder, 'sendReminder').mockResolvedValue(true);
+    try {
+      setDbQueues({
+        scheduled_services: [chain({ result: [service] })],
+        notification_prefs: [chain({ first: { billing_channels: ['push'] } })],
+        collections_contact_ledger: [chain({ result: [delivered] })],
+        sms_log: [chain({ result: [proof] })],
+      });
+      await BalanceReminder.dailyCheck();
+      // Exactly one prior reminder → the firm tier is still allowed.
+      expect(send).toHaveBeenCalledWith(service, balance, 'firm', expect.any(Number));
+    } finally { balanceRead.mockRestore(); send.mockRestore(); }
+  });
+
   test('a partially delivered episode for a superseded invoice or date still counts toward the allowance', async () => {
     // Text accepted, Email still pending, then the visit was rescheduled:
     // the episode is incomplete and no longer `pending` for this date, but

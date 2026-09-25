@@ -45,18 +45,26 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
   let delivered = 0;
   let code = null;
   for (const channel of legs) {
-    const result = await sendCustomerMessage({
-      ...sendInput,
-      to: null,
-      channel,
-      metadata: {
-        ...sendInput.metadata,
-        billingDeliveryCategory: 'billing',
-        notificationEventKey: eventKey,
-        billingDeliveryLeg: channel,
-        ...(channel === 'push' ? { appOnly: true } : {}),
-      },
-    });
+    let result;
+    try {
+      result = await sendCustomerMessage({
+        ...sendInput,
+        to: null,
+        channel,
+        metadata: {
+          ...sendInput.metadata,
+          billingDeliveryCategory: 'billing',
+          notificationEventKey: eventKey,
+          billingDeliveryLeg: channel,
+          ...(channel === 'push' ? { appOnly: true } : {}),
+        },
+      });
+    } catch (err) {
+      // One leg's failure never skips its sibling; a throw after the
+      // provider may have accepted carries its own outcome and is not
+      // stamped as progress.
+      result = err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: err.message };
+    }
     if (result.code === 'lane_changed') return { laneChanged: true, reason: result.reason };
     if (result.deliveryOutcome === 'accepted') {
       await logAutopay(customer.id, 'pre_charge_reminder_sent', {
@@ -74,11 +82,16 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
 
 async function sendPreChargeReminders() {
   // Target = ET calendar date, 3 days from now. billing_day is a calendar
-  // day-of-month (1-31), so this match must be done in ET.
+  // day-of-month (1-31), so this match must be done in ET. The two days
+  // after that re-select ONLY a no-phone customer, whose selected App /
+  // Email leg may have been refused on the first pass: the per-leg cooldown
+  // keeps an accepted leg from repeating, so a refused leg is retried each
+  // remaining day before the charge instead of waiting a whole cycle.
   const today = new Date();
-  const target = addETDays(today, 3);
-  const targetParts = etParts(target);
-  const targetDay = targetParts.day;
+  const targets = [3, 2, 1].map((days) => addETDays(today, days));
+  const dayOf = (date) => Number(etParts(date).day);
+  const targetDay = dayOf(targets[0]);
+  const retryDays = targets.slice(1).map(dayOf);
 
   logger.info(`[autopay-notifications] Pre-charge reminders for billing_day=${targetDay}`);
 
@@ -106,9 +119,14 @@ async function sendPreChargeReminders() {
     .where({ active: true, autopay_enabled: true })
     .where('monthly_rate', '>', 0)
     .whereRaw(MONTHLY_LANE_SQL)
-    .where('billing_day', targetDay)
+    .where(function eligibleBillingDay() {
+      this.where('billing_day', targetDay)
+        .orWhere(function noPhoneRetry() {
+          this.whereRaw("COALESCE(phone, '') = ''").whereIn('billing_day', retryDays);
+        });
+    })
     .whereNull('deleted_at')
-    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier', 'billing_mode');
+    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier', 'billing_mode', 'billing_day');
   const customers = await customersQuery;
 
   let sent = 0;
@@ -116,6 +134,9 @@ async function sendPreChargeReminders() {
 
   for (const c of customers) {
     try {
+      // The charge date this row was selected for (T+3 for a phone
+      // customer; a retry day only re-selects a no-phone customer).
+      const target = targets.find((date) => dayOf(date) === Number(c.billing_day)) || targets[0];
       // No phone: only an explicit App / Email choice can carry the
       // reminder, and each selected leg is dispatched on its own below
       // (null = the customer has a phone and gets the single Text).

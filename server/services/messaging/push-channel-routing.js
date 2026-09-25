@@ -505,6 +505,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           providerAccepted: true,
           provider_from_number: fromNumber,
           ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
+          // Same event identity the Text path stamps (twilio.js), so a
+          // history reader can correlate this proof with its keyed ledger
+          // episode instead of counting the same contact twice.
+          ...(notificationEventKey ? { notificationEventKey } : {}),
         }),
       }).returning('id');
       proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;

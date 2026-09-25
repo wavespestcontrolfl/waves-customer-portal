@@ -40,10 +40,14 @@ jest.mock('../services/autopay-eligibility', () => ({ isPaused: jest.fn(() => fa
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { logAutopay } = require('../services/autopay-log');
+const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendPreChargeReminders } = require('../services/autopay-notifications');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 
+const chargeIn = (days) => addETDays(new Date(), days);
 const NO_PHONE = { id: 'cust-1', first_name: 'Pat', phone: null, monthly_rate: '89.00',
-  waveguard_tier: 'Gold', billing_mode: 'monthly_membership', autopay_paused_until: null };
+  waveguard_tier: 'Gold', billing_mode: 'monthly_membership', autopay_paused_until: null,
+  billing_day: Number(etParts(chargeIn(3)).day) };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -101,6 +105,33 @@ test.each([null, { billing_channels: null }, { billing_channels: ['sms'] }])(
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   },
 );
+
+test.each([2, 1])('a no-phone customer re-selected %s day(s) before the charge retries only its pending leg for THAT charge date', async (days) => {
+  mockCustomers = [{ ...NO_PHONE, billing_day: Number(etParts(chargeIn(days)).day) }];
+  mockPrefs = { billing_channels: ['push', 'email'] };
+  mockCooldown.mockImplementation(async (_c, _t, _d, _pm, details) => details?.channel === 'push');
+  const result = await sendPreChargeReminders();
+  expect(result).toMatchObject({ sent: 1 });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(sendCustomerMessage.mock.calls[0][0].channel).toBe('email');
+  expect(sendCustomerMessage.mock.calls[0][0].metadata.notificationEventKey).toBe(`autopay-pre-charge:cust-1:${etDateString(chargeIn(days))}`);
+  expect(renderSmsTemplate).toHaveBeenCalledWith('autopay_pre_charge', expect.objectContaining({
+    charge_date: chargeIn(days).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
+  }), expect.any(Object));
+  expect(logAutopay).toHaveBeenCalledWith('cust-1', 'pre_charge_reminder_sent',
+    expect.objectContaining({ details: { charge_date: etDateString(chargeIn(days)), channel: 'email' } }));
+});
+
+test('a leg whose send throws does not skip its sibling and records no progress for itself', async () => {
+  mockPrefs = { billing_channels: ['push', 'email'] };
+  sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), {
+    providerOutcome: { sent: false, deliveryOutcome: 'uncertain' },
+  }));
+  const result = await sendPreChargeReminders();
+  expect(result).toMatchObject({ sent: 1 });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  expect(logAutopay.mock.calls.map(([, , opts]) => opts.details.channel)).toEqual(['email']);
+});
 
 test('a customer with a phone keeps the single Text reminder and the customer-wide cooldown', async () => {
   mockCustomers = [{ ...NO_PHONE, phone: '+19415550101' }];
