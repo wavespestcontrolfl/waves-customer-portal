@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const PhotoService = require('./photos');
+const logger = require('./logger');
 const { applyPropertyPredicate } = require('./account-properties');
 
 const PHOTO_ID_TABLES = {
@@ -21,7 +22,10 @@ async function customerPhotoViews(type, id) {
     id: photo.id,
     mime_type: photo.mime_type,
     url: photo.s3_key
-      ? await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS).catch(() => null)
+      ? await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS).catch(() => {
+        logger.warn(`[photo-id] preview signing failed for photo ${photo.id}`);
+        return null;
+      })
       : null,
   })));
 }
@@ -46,6 +50,7 @@ async function requestPhotoIdEvidence(req, source, scope) {
     }));
     return { photos };
   } catch {
+    logger.warn(`[photo-id] saved photo read failed for submission ${source.id}`);
     return { status: 503, error: 'We could not load your saved photos. Please try again.' };
   }
 }

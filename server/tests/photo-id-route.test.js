@@ -1387,3 +1387,11 @@ describe('saved Photo ID evidence', () => {
     expect((await requestPhotoIdEvidence(req, source, { enabled: true, scoped: true, property: { id: 'home-b' } })).status).toBe(404);
   });
 });
+
+test('preview signing failure retains the photo ID, emits a safe diagnostic and returns no storage URL', async () => {
+  const { customerPhotoViews } = require('../services/customer-photo-id-evidence');
+  TABLES.pest_identification_photos = [{ id: 'photo-signing-failed', identification_id: 'parent', customer_visible: true, s3_key: 'private-key' }];
+  mockGetViewUrl.mockRejectedValueOnce(new Error('secret signed URL must not be logged'));
+  expect(await customerPhotoViews('pest', 'parent')).toEqual([{ id: 'photo-signing-failed', mime_type: undefined, url: null }]);
+  expect(require('../services/logger').warn).toHaveBeenCalledWith('[photo-id] preview signing failed for photo photo-signing-failed');
+});

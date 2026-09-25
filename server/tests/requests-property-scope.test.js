@@ -183,3 +183,17 @@ test('combined new and saved attachments still obey the shared photo cap', async
   expect(res.status).toBe(400);
   expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
 });
+
+test('Photo ID scope failure refuses the request even with a validated property claim fallback', async () => {
+  const { resolveSessionScope } = require('../services/account-properties');
+  const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+  resolveSessionScope.mockRejectedValueOnce(new Error('scope unavailable'));
+  global.__REQ_PROPERTY__ = { ...SECONDARY.property, customer_id: 'cust-1' };
+  try {
+    const res = await post({ category: 'other', subject: 'Photo follow-up', photoIdSource: { type: 'pest', id: '11111111-1111-4111-8111-111111111111' } });
+    expect(res.status).toBe(500);
+    expect(requestPhotoIdEvidence).not.toHaveBeenCalled();
+    expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  } finally { global.__REQ_PROPERTY__ = null; }
+});
