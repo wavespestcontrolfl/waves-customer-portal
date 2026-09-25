@@ -264,7 +264,7 @@ describe('callAnthropic prompt caching', () => {
   // Anthropic 400s on array cardinality keywords ("For 'array' type, property
   // 'maxItems' is not supported"); the wire copy drops them, nested too, and
   // the caller's schema (still used by its own Ajv validator) is untouched.
-  test('Anthropic wire schema drops minItems/maxItems without mutating the caller schema', async () => {
+  test('Anthropic wire schema drops array and string bounds without mutating the caller schema', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"items":[]}' }] });
     const schema = { type: 'object', additionalProperties: false, required: ['items'], properties: {
       items: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'object', additionalProperties: false, required: ['tags'],
@@ -272,8 +272,10 @@ describe('callAnthropic prompt caching', () => {
     const before = JSON.stringify(schema);
     await callAnthropic({ model: FLAGSHIP, text: 'classify', jsonMode: true, jsonSchema: schema });
     const wire = mockAnthropicCreate.mock.calls.at(-1)[0].output_config.format.schema;
-    expect(JSON.stringify(wire)).not.toMatch(/m(in|ax)Items/);
-    expect(wire.properties.items.items.properties.tags.items).toEqual({ type: 'string', minLength: 1, maxLength: 40 });
+    expect(JSON.stringify(wire)).not.toMatch(/m(in|ax)(Items|Length)/);
+    expect(wire.properties.items.items.properties.tags.items).toEqual({ type: 'string' });
+    expect(wire.properties.items.items).toEqual({ type: 'object', additionalProperties: false, required: ['tags'],
+      properties: { tags: { type: 'array', items: { type: 'string' } } } });
     expect(JSON.stringify(schema)).toBe(before);
   });
 

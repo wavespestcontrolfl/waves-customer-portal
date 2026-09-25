@@ -30,8 +30,9 @@ describe('sms operational-actions schema is accepted by both structured-output p
     }
   });
 
-  test('the Anthropic wire copy carries no array cardinality keywords', () => {
+  test('the Anthropic wire copy carries no array cardinality or string length keywords', () => {
     expect(JSON.stringify(SCHEMA)).toMatch(/maxItems/);
-    expect(JSON.stringify(anthropicSchema(SCHEMA))).not.toMatch(/m(in|ax)Items/);
+    expect(JSON.stringify(SCHEMA)).toMatch(/maxLength/);
+    expect(JSON.stringify(anthropicSchema(SCHEMA))).not.toMatch(/m(in|ax)(Items|Length)/);
   });
 });

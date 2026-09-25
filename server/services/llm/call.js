@@ -519,11 +519,14 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
 // Anthropic's structured-output grammar rejects array cardinality keywords
 // (`For 'array' type, property 'maxItems' is not supported`, a 400 on EVERY
 // call — the SMS operational-actions lane failed 36/36 on 2026-09-24 before
-// its gate was ever on). OpenAI strict mode and Gemini accept them, and the
-// lanes' own Ajv validators still enforce the full schema on the answer, so
-// only the wire copy sent to Anthropic drops them. Deep copy; the caller's
-// schema object is never mutated.
-const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set(['minItems', 'maxItems']);
+// its gate was ever on). String length bounds passed a live probe the same
+// day, but prompts/call-research-v1.js already strips all four bounds for
+// its provider copy, so this leg follows that precedent rather than betting
+// on one model's grammar. OpenAI strict mode accepts every bound (probed),
+// and the lanes' own Ajv validators still enforce the full schema on the
+// answer, so only the wire copy sent to Anthropic drops them. Deep copy; the
+// caller's schema object is never mutated.
+const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set(['minItems', 'maxItems', 'minLength', 'maxLength']);
 function anthropicSchema(schema) {
   return JSON.parse(JSON.stringify(schema, (key, value) => (ANTHROPIC_UNSUPPORTED_KEYWORDS.has(key) ? undefined : value)));
 }
