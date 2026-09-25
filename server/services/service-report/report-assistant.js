@@ -1,6 +1,6 @@
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
-const WAVES_PHONE_DISPLAY = '(941) 297-5749';
+const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
 
 // AW-06: the only cues allowed to route a typed question to the re-entry
 // answer on their own. A bare location word ("outside"/"inside") is NOT a
@@ -530,7 +530,7 @@ function answerServiceReportQuestion({
   // AW-06: exact-word matching missed inflections ("treated", "applying",
   // "products", "used") — this is the branch "What was applied outside
   // today?" and "Why was <product> used?" must reach.
-  if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|application|applications|apply|applies|applied|applying|spray|sprays|sprayed|spraying|bait|baits|baited|chemical|chemicals|use|used|using)\b/.test(q)) {
+  if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|application|applications|apply|applies|applied|applying|spray|sprays|sprayed|spraying|bait|baits|baited|chemical|chemicals|used)\b/.test(q)) {
     return answerAppliedToday({ data });
   }
 
