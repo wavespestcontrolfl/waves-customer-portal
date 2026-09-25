@@ -33,9 +33,8 @@ const PLANNING_MINUTES = Object.freeze({
   rodentTermite: 30,
 });
 
-// The legacy default charge. A stored estimate above it that is not simply
-// the window span is a deliberate long job (e.g. pest + termite bait at 120)
-// and is never planned shorter.
+// The legacy default charge. A stored estimate above it is a real long job
+// (e.g. pest + termite bait at 120) and is never planned shorter.
 const LEGACY_DEFAULT_MINUTES = 60;
 
 const CADENCE = /quarterly|monthly|weekly|annual|every \d+ (weeks?|months?)/;
@@ -60,16 +59,12 @@ function tableMinutes(stop) {
 }
 
 function deliberateEstimate(stop) {
+  // window_end is duration-driven (AGENTS.md), so a stored estimate above the
+  // legacy default is real work whether or not it matches the window span.
+  // A wide window carrying the default estimate still plans at the table:
+  // the span alone is never charged as work.
   const estimate = Number(stop.estimated_duration_minutes) || 0;
-  if (estimate <= LEGACY_DEFAULT_MINUTES) return 0;
-  const start = /^(\d{1,2}):(\d{2})/.exec(String(stop.window_start || ''));
-  const end = /^(\d{1,2}):(\d{2})/.exec(String(stop.window_end || ''));
-  const span = start && end ? (Number(end[1]) * 60 + Number(end[2])) - (Number(start[1]) * 60 + Number(start[2])) : null;
-  // A span-sized estimate on a whole-hour window is a wide arrival band
-  // (13:00-16:00), charged the table. An off-hour end is duration-driven
-  // (AGENTS.md: a 90-min job at 09:00 ends 10:30), so it is real work.
-  const offHourEnd = end && Number(end[2]) !== 0;
-  return estimate === span && !offHourEnd ? 0 : estimate;
+  return estimate > LEGACY_DEFAULT_MINUTES ? estimate : 0;
 }
 
 /** Planned on-site minutes for one scheduled_services row, or null when the

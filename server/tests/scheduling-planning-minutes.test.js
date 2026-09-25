@@ -52,13 +52,17 @@ describe('planning minutes table', () => {
       expect(workDuration(row(name))).toBe(60);
     });
 
-  test('a deliberate long estimate is never planned shorter; a span-sized one is', () => {
+  test('a stored long estimate is never planned shorter; a wide window alone is not work', () => {
     expect(plannedWorkMinutes(row('Quarterly Pest Control Service', { estimated_duration_minutes: 120 }))).toBe(120);
-    expect(plannedWorkMinutes(row('Quarterly Pest Control Service',
-      { window_start: '13:00', window_end: '16:00', estimated_duration_minutes: 180 }))).toBe(25);
-    // A duration-driven window (off-hour end) carries real work.
+    // window_end is duration-driven: a long job keeps its estimate whether
+    // its window ends off the hour or on it (Codex #4829 r3 P1).
     expect(plannedWorkMinutes(row('Quarterly Pest Control Service',
       { window_start: '09:00', window_end: '10:30', estimated_duration_minutes: 90 }))).toBe(90);
+    expect(plannedWorkMinutes(row('Termite Bait Installation',
+      { window_start: '09:00', window_end: '11:00', estimated_duration_minutes: 120 }))).toBe(120);
+    // A wide window with the default estimate charges the table, not the span.
+    expect(plannedWorkMinutes(row('Quarterly Pest Control Service',
+      { window_start: '13:00', window_end: '16:00', estimated_duration_minutes: 60 }))).toBe(25);
   });
 
   test('gate off and the placed visit are not planned; a route group keeps its members\' sum', () => {
