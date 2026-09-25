@@ -1,5 +1,5 @@
 /**
- * 20260924000001 → … → 000006 — prep guide content v3.
+ * 20260924000001 → … → 000007 — prep guide content v3.
  *
  * Each earlier file ran on the PR preview database before the next Codex
  * round and is frozen; each later file supersedes the previous with
@@ -26,6 +26,7 @@ const CHAIN = [
   require('../models/migrations/20260924000004_prep_guide_content_v3_codex_r3'),
   require('../models/migrations/20260924000005_prep_guide_content_v3_codex_r4'),
   require('../models/migrations/20260924000006_prep_guide_content_v3_codex_r5'),
+  require('../models/migrations/20260924000007_prep_guide_content_v3_codex_r6'),
 ];
 // The step-0 sequence swaps ship in 000005 (the latest file carrying them).
 const stepMigration = [...CHAIN].reverse().find((m) => m.STEP_SWAPS);
@@ -191,6 +192,17 @@ describe('prep guide v3 content compliance', () => {
     expect(termite).toMatch(/If your service includes a protection plan or bait monitoring/);
   });
 
+  test('no insulation content anywhere, and the misting upsell is not "set-and-forget" (Codex r6)', () => {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
+      expect(chunk).not.toMatch(/insulation/i);
+      expect(chunk).not.toMatch(/set-and-forget/i);
+    }
+    const rodent = TEMPLATES.find((x) => x.key === 'prep.rodent');
+    const faqRows = rodent.blocks.find((b) => b.type === 'details' && b.variant === 'faq').rows;
+    expect(faqRows.map((r) => r.label)).not.toContain('Should I clean the attic insulation?');
+    expect(faqRows.length).toBeGreaterThanOrEqual(3);
+  });
+
   test('bed bug guide describes chemical/IPM work only — no heat-treatment or steam component', () => {
     const bedBug = TEMPLATES.find((t) => t.key === 'prep.bed_bug');
     for (const chunk of textChunks(bedBug)) {
@@ -306,7 +318,7 @@ describe('each migration supersedes the previous one (each frozen after its prev
     for (const patch of migration.PATCHES) {
       // A patch may extend its `from` (to = from + more); only a true replacement removes it.
       if (!patch.to.includes(patch.from)) expect(effective).not.toContain(patch.from);
-      expect(effective).toContain(patch.to);
+      if (patch.to) expect(effective).toContain(patch.to);
     }
   });
 

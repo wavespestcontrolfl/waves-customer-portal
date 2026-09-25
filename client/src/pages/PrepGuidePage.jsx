@@ -115,7 +115,11 @@ function BlockRenderer({ blocks }) {
           <ul key={i} style={{
             listStyle: 'none', margin: `0 0 ${SP.lg}px`, padding: 0, display: 'grid', gap: SP.sm,
           }}>
-            {(Array.isArray(block.items) ? block.items : []).map((item, j) => (
+            {(Array.isArray(block.items) ? block.items : [])
+              // Blank rows (editor stores split('\n') lines) drop here as they do
+              // in the email renderer and the PDF — no dangling check marks.
+              .filter((item) => String(item ?? '').trim() !== '')
+              .map((item, j) => (
               <li key={j} style={{
                 display: 'flex', alignItems: 'baseline', gap: SP.sm,
                 fontSize: FS.bodyLg, lineHeight: LH.body, color: SURFACE.body,

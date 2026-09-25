@@ -48,6 +48,7 @@ describe('PrepGuidePage block rendering', () => {
           type: 'list',
           items: [
             'Remove pet bowls from the yard',
+            '   ',
             'Clear access to the [garage](https://wavespestcontrol.com/garage)',
           ],
         },
@@ -62,6 +63,9 @@ describe('PrepGuidePage block rendering', () => {
     render(<PrepGuidePage />);
 
     await waitFor(() => expect(screen.getByText(/Flea Control Prep Guide/i)).toBeInTheDocument());
+
+    // Blank items drop (match the email renderer + PDF): two rows, not three.
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
 
     // Paragraph link: safe https href, opens in a new tab, no opener leak.
     const checklistLink = screen.getByRole('link', { name: 'prep checklist' });

@@ -562,8 +562,9 @@ view columns so an opened page never changes guide or 404s behind the
 customer; the `prep_guide_views` log row follows. Response blocks (#4790):
 in addition to `paragraph` / `heading` / `details` / `callout`, the
 anonymous payload may carry `{ type: 'list', items: string[] }` check-list
-blocks, and prose in any block (`content`, `items[]`, details `label` /
-`value`) may contain author-written inline markdown links
+blocks, and prose in paragraph / callout `content`, list `items[]` and
+details `label` / `value` (NOT heading content, which both surfaces print
+verbatim) may contain author-written inline markdown links
 `[label](https://…)` that the page and PDF render with an
 http/https/mailto/tel allowlist. Server-side interpolation now also
 substitutes `items[]` and details `label`, and breaks any `](` inside a
