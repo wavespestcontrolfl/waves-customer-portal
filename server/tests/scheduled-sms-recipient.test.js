@@ -179,9 +179,22 @@ describe('resolveScheduledRecipient', () => {
 });
 
 describe('canReplayBillingWithoutPhone', () => {
+  test.each([
+    [{ recipient_identity_unverified: true }, false],
+    [{ explicit_recipient: true }, false],
+    [{ refresh_customer_phone: true }, true],
+    [{ refresh_customer_phone: true, recipient_identity_unverified: true }, false],
+  ])('never discards an unresolved original recipient: %j', (provenance, expected) => {
+    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '+19415550101' },
+      { billingDeliveryCategory: 'invoice', ...provenance })).toBe(expected);
+  });
+
   test('requires a customer row and a recognized explicit billing category', () => {
     expect(canReplayBillingWithoutPhone(
       { customer_id: 'cust-1' }, { billingDeliveryCategory: 'payment_issue' },
+    )).toBe(true);
+    expect(canReplayBillingWithoutPhone(
+      { customer_id: 'cust-1', to_phone: '' }, { billingDeliveryCategory: 'payment_issue', explicit_recipient: true },
     )).toBe(true);
     expect(canReplayBillingWithoutPhone(
       { customer_id: null }, { billingDeliveryCategory: 'payment_issue' },

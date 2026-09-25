@@ -85,10 +85,14 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
       continue;
     }
     try {
+      const metadata = { ...input.metadata, billingDeliveryLeg: channel,
+        billingDeliveryCategory: category, notificationEventKey };
+      // App acceptance is not proof that a selected Text was sent. Its event
+      // key dedupes a replay if the process stops before the final Text leg.
+      if (channel === 'push' && channels.includes('sms')) delete metadata.scheduled_sms_log_id;
       channelResults[channel] = await sendLeg({
         ...input, channel: channel === 'push' ? 'sms' : channel,
-        metadata: { ...input.metadata, billingDeliveryLeg: channel,
-          billingDeliveryCategory: category, notificationEventKey },
+        metadata,
       });
     } catch (err) {
       const outcome = err.providerOutcome;
@@ -101,8 +105,10 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
   }
   const results = Object.values(channelResults);
   const accepted = [...results].reverse().find((result) => result.sent && result.deliveryOutcome === 'accepted');
+  const retry = results.find((result) => result.retryable || result.deliveryOutcome === 'uncertain');
+  const textAccepted = channelResults.sms?.sent && channelResults.sms.deliveryOutcome === 'accepted';
   const outcome = results.find(isReplayHold)
-    || accepted || results.find((result) => result.retryable || result.deliveryOutcome === 'uncertain')
+    || (!textAccepted && retry) || accepted || retry
     || results[results.length - 1];
   return { ...outcome, channelResults };
 }

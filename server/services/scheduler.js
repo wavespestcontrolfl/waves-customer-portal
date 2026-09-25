@@ -98,6 +98,8 @@ async function resolveScheduledRecipient(msg, claimMeta) {
 
 function canReplayBillingWithoutPhone(msg, claimMeta) {
   return Boolean(msg.customer_id
+    && (!String(msg.to_phone || '').trim() || (claimMeta?.refresh_customer_phone === true
+      && claimMeta.recipient_identity_unverified !== true && claimMeta.explicit_recipient !== true))
     && ['invoice', 'payment_issue', 'billing', 'payment_receipt']
       .includes(claimMeta?.billingDeliveryCategory));
 }

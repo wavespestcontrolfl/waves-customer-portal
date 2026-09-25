@@ -569,6 +569,27 @@ describe('explicit billing channel combinations', () => {
     expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
   });
 
+  test('only the final selected Text carries proof that the whole scheduled row was delivered', async () => {
+    prefs.payment_receipt_channels = ['sms', 'push'];
+    await sendCustomerMessage({ ...input, metadata: { ...input.metadata,
+      scheduled_sms_log_id: 'queue-1', notificationEventKey: 'receipt:queue-1' } });
+    const appOptions = Twilio.sendSMS.mock.calls.find(([, , options]) => options.explicitPushOnly)[2];
+    const textOptions = Twilio.sendSMS.mock.calls.find(([, , options]) => !options.explicitPushOnly)[2];
+    expect(appOptions.scheduledSmsLogId).toBeUndefined();
+    expect(appOptions.notificationEventKey).toBe('receipt:queue-1');
+    expect(textOptions.scheduledSmsLogId).toBe('queue-1');
+  });
+
+  test('App acceptance cannot settle a selected Text that still needs retry', async () => {
+    const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
+    const result = await dispatchBillingChannels(input, { payment_receipt_channels: ['sms', 'push'] }, async (leg) =>
+      leg.metadata.billingDeliveryLeg === 'push'
+        ? { sent: true, deliveryOutcome: 'accepted', channel: 'push' }
+        : { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'TEXT_PROVIDER_RETRY' });
+    expect(result).toMatchObject({ sent: false, retryable: true, code: 'TEXT_PROVIDER_RETRY',
+      channelResults: { push: { sent: true }, sms: { sent: false } } });
+  });
+
   test('separate payments with identical receipt copy have separate event identities', () => {
     const { billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
     expect(billingNotificationEventKey({ ...input, paymentId: 'payment-one' }))
