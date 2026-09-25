@@ -88,12 +88,15 @@ describe('termite annual plan activation on sign', () => {
       }
       if (table === 'estimates') {
         const filters = {};
+        const nullColumns = [];
         const builder = {
           where: jest.fn((f) => { Object.assign(filters, f); return builder; }),
+          whereNull: jest.fn((col) => { nullColumns.push(col); return builder; }),
           forUpdate: jest.fn(() => builder),
           first: jest.fn().mockResolvedValue(estimate),
           update: jest.fn(async (patch) => {
-            const matches = Object.entries(filters).every(([k, v]) => k === 'id' || estimate[k] === v);
+            const matches = Object.entries(filters).every(([k, v]) => k === 'id' || estimate[k] === v)
+              && nullColumns.every((col) => estimate[col] == null);
             if (!matches) return 0;
             return estimateUpdate(patch);
           }),
@@ -114,11 +117,12 @@ describe('termite annual plan activation on sign', () => {
     canAutoSend = true, deliveryImpl,
     chargeImpl,
     overlapImpl,
+    notifyAdminImpl,
   } = {}) {
     const { trx, estimateUpdate, termUpdate } = makeTrx({ contract, estimate });
     const conn = trx;
     conn.transaction = jest.fn(async (cb) => cb(trx));
-    const notifyAdmin = jest.fn().mockResolvedValue(true);
+    const notifyAdmin = jest.fn(notifyAdminImpl || (async () => ({ id: 'notification-1', deduped: false })));
     const sendViaSMSAndEmail = jest.fn(deliveryImpl || (async () => ({ ok: true, sms: { ok: true }, email: { ok: true } })));
     const canAutoSendDraftInvoice = jest.fn(() => canAutoSend);
     // Default: mirrors a successful ordinary prepay_annual conversion —
@@ -308,6 +312,33 @@ describe('termite annual plan activation on sign', () => {
     );
   });
 
+  test('codex round-4 P1: the install handoff is stamped durable only once notifyAdmin records the bell', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(estimateUpdate).toHaveBeenCalledWith({ annual_plan_install_handoff_at: expect.any(Date) });
+  });
+
+  test('codex round-4 P1: a scheduling bell that does not durably land leaves the handoff unstamped for the sweep — activation still completes', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate } = setup({
+      contract,
+      estimate,
+      // notifyAdmin returns null when its dedupe transaction fails; the
+      // other bells fail too, which must not matter here.
+      notifyAdminImpl: async () => null,
+    });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result).toMatchObject({ activated: true });
+    expect(estimateUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ annual_plan_install_handoff_at: expect.anything() }));
+  });
+
   test('owner ruling 2026-09-25: a successful signature charge sends NO pay link', async () => {
     const contract = makeContract();
     const estimate = makeEstimate();
@@ -438,9 +469,11 @@ describe('termite annual plan activation on sign', () => {
     expect(second).toEqual({ skipped: 'activated' });
     expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1); // still just once
     expect(convertEstimate).toHaveBeenCalledTimes(1); // never re-driven
-    // Only the attempt-stamp write from the first run — no second write of
-    // any kind for the already-activated re-run.
-    expect(estimateUpdate).toHaveBeenCalledTimes(1);
+    // Only the first run's two writes (the attempt stamp and the install
+    // handoff stamp) — no write of any kind for the already-activated
+    // re-run.
+    expect(estimateUpdate).toHaveBeenCalledTimes(2);
+    expect(estimateUpdate).toHaveBeenLastCalledWith({ annual_plan_install_handoff_at: expect.any(Date) });
   });
 
   test('an empty/missing accept-context replays no accept opts (the converter decides, failing closed on a missing frozen price)', async () => {

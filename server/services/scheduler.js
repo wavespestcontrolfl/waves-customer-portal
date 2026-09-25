@@ -5891,8 +5891,9 @@ function initScheduledJobs() {
         try {
           const { reconcileTermiteAnnualActivations } = require('./termite-annual-activation');
           const annualRecon = await reconcileTermiteAnnualActivations();
-          if (annualRecon.activated || annualRecon.failed || annualRecon.delivered || annualRecon.deliveryFailed || annualRecon.charged || annualRecon.collectionHeld) {
-            logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed, ${annualRecon.delivered || 0} delivered, ${annualRecon.deliveryFailed || 0} delivery failed, ${annualRecon.charged || 0} charged, ${annualRecon.collectionHeld || 0} held`);
+          if (annualRecon.activated || annualRecon.failed || annualRecon.delivered || annualRecon.deliveryFailed || annualRecon.charged || annualRecon.collectionHeld
+            || annualRecon.anchored || annualRecon.anchorFailed || annualRecon.handedOff || annualRecon.handoffFailed) {
+            logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed, ${annualRecon.delivered || 0} delivered, ${annualRecon.deliveryFailed || 0} delivery failed, ${annualRecon.charged || 0} charged, ${annualRecon.collectionHeld || 0} held, ${annualRecon.anchored || 0} anchored to installation, ${annualRecon.anchorFailed || 0} anchor failed, ${annualRecon.handedOff || 0} install handoffs, ${annualRecon.handoffFailed || 0} handoff failed`);
           }
         } catch (err) {
           logger.error(`Termite annual plan activation reconciliation failed: ${err.message}`);

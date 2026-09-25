@@ -75,6 +75,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     // prior round's fake.
     function plainTableHandler(table) {
       const filters = {};
+      const nullColumns = [];
       let rawAnyBindings = null;
       const builder = {
         where(a, b) {
@@ -82,6 +83,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
           else if (a && typeof a === 'object') Object.assign(filters, a);
           return builder;
         },
+        whereNull(col) { nullColumns.push(col); return builder; },
         whereRaw(_sql, bindings) {
           rawAnyBindings = bindings?.[0] || null;
           return builder;
@@ -101,6 +103,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
       function matched() {
         let rows = rowsFor(table);
         rows = rows.filter((row) => Object.entries(filters).every(([k, v]) => row[k] === v));
+        rows = rows.filter((row) => nullColumns.every((col) => row[col] == null));
         if (rawAnyBindings && baseTableName(table) === 'customer_contracts') {
           rows = rows.filter((row) => rawAnyBindings.includes(String(row.document_variables_snapshot?.estimate?.id)));
         }
@@ -300,9 +303,25 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
       return builder;
     }
 
+    // The installation-anchor and install-handoff passes (codex round 4)
+    // scan conn('annual_prepay_terms as apt') — their real SQL is covered by
+    // termite-annual-install-anchor-postgres.test.js, so this fake serves
+    // them an empty result and these tests stay about the two passes above.
+    function emptyScanBuilder() {
+      const builder = new Proxy({}, {
+        get(_target, prop) {
+          if (prop === 'then') return (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+          if (prop === 'catch') return (reject) => Promise.resolve([]).catch(reject);
+          return () => builder;
+        },
+      });
+      return builder;
+    }
+
     const conn = jest.fn((table) => {
       if (table === 'customer_contracts as cc') return contractsJoinEstimatesBuilder();
       if (table === 'estimates as e') return estimatesJoinTermsJoinInvoicesBuilder();
+      if (table === 'annual_prepay_terms as apt') return emptyScanBuilder();
       return plainTableHandler(table);
     });
     conn.raw = jest.fn((sql) => ({ __rawSql: sql }));

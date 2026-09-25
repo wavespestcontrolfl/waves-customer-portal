@@ -38,6 +38,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
+const { addMonthsSameDay, dateOnlyString } = require('../utils/date-only');
 
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 const DEFAULT_ANNUAL_PLAN_VERSION = 'v3';
@@ -115,6 +116,12 @@ function bellCopyFor(kind, {
       body: `The annual termite agreement (contract #${contractId}${estimateId ? `, estimate #${estimateId}` : ''}) is signed and the plan is active. No visit is on the calendar yet — nothing is booked before signature. ${reason} Book the station installation from the customer's schedule.`,
     };
   }
+  if (kind === 'anchor_overlap') {
+    return {
+      title: 'Termite annual plan — coverage not moved to the installation date',
+      body: `The station installation for the signed annual termite plan${estimateId ? ` (estimate #${estimateId})` : ''} is complete, but its coverage year could not be re-anchored to the installation: ${reason}. The term still runs from the signing date — fix the overlapping term, and the daily sweep will anchor it.`,
+    };
+  }
   if (kind === 'no_source_estimate') {
     return {
       title: 'Termite annual agreement has no linked estimate',
@@ -127,6 +134,9 @@ function bellCopyFor(kind, {
   };
 }
 
+// Returns notifyAdmin's result — the persisted (or already-persisted,
+// deduped) notification row, or null when nothing durable landed — so the
+// install handoff below can stamp only a bell that really exists.
 async function ringActivationBell(NotificationService, {
   estimateId, contractId, reason, kind = 'activation_error', invoiceId = null,
 }) {
@@ -134,7 +144,7 @@ async function ringActivationBell(NotificationService, {
     const { title, body } = bellCopyFor(kind, {
       contractId, estimateId, invoiceId, reason,
     });
-    await NotificationService.notifyAdmin(
+    return await NotificationService.notifyAdmin(
       'estimate',
       title,
       body,
@@ -150,6 +160,35 @@ async function ringActivationBell(NotificationService, {
     );
   } catch (bellErr) {
     logger.error(`[termite-annual-activation] admin bell failed for contract ${contractId}: ${bellErr.message}`);
+    return null;
+  }
+}
+
+// Codex round-4 P1: activation books no visit, so this staff bell is the
+// ONLY handoff that gets the station installation scheduled. It counts as
+// handed off only once notifyAdmin durably records it — then
+// estimates.annual_plan_install_handoff_at is stamped; until then the
+// daily reconciliation re-rings it (the bell's own dedupeKey makes a
+// retry after a lost stamp land on the existing row, never a second bell).
+async function ringInstallHandoff({
+  estimateId, contractId = null, requestedFirstVisit = null, conn = db,
+}) {
+  const delivered = await ringActivationBell(require('./notification-service'), {
+    estimateId, contractId, kind: 'schedule_first_visit', reason: requestedFirstVisitNote(requestedFirstVisit),
+  });
+  if (!delivered) {
+    logger.warn(`[termite-annual-activation] install scheduling handoff not recorded for estimate ${estimateId} — the reconciliation sweep will retry`);
+    return false;
+  }
+  try {
+    await conn('estimates')
+      .where({ id: estimateId })
+      .whereNull('annual_plan_install_handoff_at')
+      .update({ annual_plan_install_handoff_at: new Date() });
+    return true;
+  } catch (stampErr) {
+    logger.warn(`[termite-annual-activation] install handoff stamp failed for estimate ${estimateId}: ${stampErr.message}`);
+    return false;
   }
 }
 
@@ -354,8 +393,8 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
       delete result.requestedFirstVisit;
       delete result.customerId;
       await dispatchDeferredConversionEffects({ estimateId, customerId, conversion });
-      await ringActivationBell(require('./notification-service'), {
-        estimateId, contractId, kind: 'schedule_first_visit', reason: requestedFirstVisitNote(requestedFirstVisit),
+      await ringInstallHandoff({
+        estimateId, contractId, requestedFirstVisit, conn,
       });
       const collection = await collectOrDeliverAnnualInvoice({
         estimateId, contractId, invoiceId: result.invoiceId, termId: result.termId, conn, trigger,
@@ -442,10 +481,35 @@ async function collectOrDeliverAnnualInvoice({
   return { charge, invoiceDelivery: delivery.invoiceDelivery, ok: delivery.ok };
 }
 
+// The daily sweep (6:10am cron), four independent bounded passes — one
+// pass's failure never stops the next:
+//   1. retryAwaitingActivations — re-drives a signed-but-unactivated plan
+//   2. retryUndeliveredInvoices — collects / delivers an activated invoice
+//      that never went out
+//   3. anchorInstalledTerms — re-anchors coverage to the completed
+//      installation (codex round 4)
+//   4. retryInstallHandoffs — re-rings a scheduling handoff that never
+//      durably landed (codex round 4)
+async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}) {
+  const counts = {
+    scanned: 0, activated: 0, skipped: 0, failed: 0,
+    deliveryScanned: 0, delivered: 0, deliveryFailed: 0, charged: 0, collectionHeld: 0,
+    anchorScanned: 0, anchored: 0, anchorFailed: 0,
+    handoffScanned: 0, handedOff: 0, handoffFailed: 0,
+  };
+  await retryAwaitingActivations({ conn, limit, counts });
+  await retryUndeliveredInvoices({ conn, limit, counts });
+  // Anchor BEFORE the handoff retry: a term whose installation already
+  // happened needs no "schedule the installation" bell.
+  await anchorInstalledTerms({ conn, limit, counts });
+  await retryInstallHandoffs({ conn, limit, counts });
+  return counts;
+}
+
 // The minimal retry for a failed activation. Signing burns the contract's
 // share token, so there is no "sign again" path once
 // activateTermiteAnnualPlanForSignedContract bells and leaves an estimate
-// 'awaiting_signature' — this sweep re-drives it for exactly that stuck
+// 'awaiting_signature' — this pass re-drives it for exactly that stuck
 // case. Idempotent by construction, bounded batch, and a single row's
 // failure never stops the rest. Abandoned-signature EXPIRY (an estimate
 // that never gets signed at all) stays out of scope for this slice.
@@ -454,12 +518,7 @@ async function collectOrDeliverAnnualInvoice({
 // signed_at), not from awaiting estimates — an unlucky page of awaiting-but-
 // unsigned estimates can never crowd out a genuinely signed one, and every
 // row this query returns is immediately actionable.
-async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}) {
-  const counts = {
-    scanned: 0, activated: 0, skipped: 0, failed: 0,
-    deliveryScanned: 0, delivered: 0, deliveryFailed: 0, charged: 0, collectionHeld: 0,
-  };
-
+async function retryAwaitingActivations({ conn, limit, counts }) {
   try {
     const actionable = await conn('customer_contracts as cc')
       // Matched the same way activateTermiteAnnualPlanForSignedContract
@@ -514,6 +573,9 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     counts.activationScanError = err.message;
   }
 
+}
+
+async function retryUndeliveredInvoices({ conn, limit, counts }) {
   // The sweep's second job — an already-ACTIVATED estimate whose invoice
   // never got delivered (a prior sendViaSMSAndEmail failure, or the
   // process dying between activation and delivery). Found via the
@@ -603,11 +665,199 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     counts.deliveryScanError = err.message;
   }
 
-  return counts;
+}
+
+
+// ---- installation anchor (codex round-4 P1) --------------------------
+// The signed agreement says coverage starts at installation, but activation
+// books no visit, so createTermForAnnualPrepay mints the term with a
+// PROVISIONAL start on the signature day (kept so the term exists for the
+// invoice). Once the termite installation visit is COMPLETED, the original
+// term is re-anchored to that visit's date + 12 months — exactly once
+// (annual_prepay_terms.installation_anchored_at), and never after a renewal
+// exists or was decided.
+//
+// Driven from this daily sweep over completed visits rather than a hook
+// inside completeScheduledService: visits complete through several writers
+// (the tech/admin closeout, the invoice-issued closeout, backfill), and the
+// repo's existing termite term anchor — lifecycle-email-sweeps.js's
+// termite-bond sync — reads completed visits the same way, so every
+// completion path is covered by one reader. The re-anchor is at most a day
+// behind the installation; renewal notices sit weeks out.
+//
+// The window moves through createTermForAnnualPrepay's own edit path (the
+// same one an admin window edit uses): it detaches out-of-window visits,
+// re-runs coverage, and re-syncs customers.waveguard_renewal_date — so
+// renewal notices (which read term_end / last_scheduled_service_date) see
+// the anchored dates.
+const ANCHORABLE_TERM_STATUSES = ['payment_pending', 'active'];
+
+// The termite program's installation visit, by the same service-type rule
+// termite-program-agreement.js's scheduledStartDate uses to find the
+// program start: a termite service naming the bait or the stations.
+function whereTermiteInstallationServiceType(builder, alias) {
+  return builder
+    .whereRaw(`LOWER(${alias}.service_type) LIKE '%termite%'`)
+    .whereRaw(`(LOWER(${alias}.service_type) LIKE '%bait%' OR LOWER(${alias}.service_type) LIKE '%station%')`);
+}
+
+// An installation can't precede the plan it installs: only visits on or
+// after the earlier of the provisional start and the activation day count
+// (an older bait program on the same account never anchors this term).
+function installationFloorFor(term) {
+  const provisionalStart = dateOnlyString(term.term_start);
+  const activatedOn = term.created_at ? etDateString(new Date(term.created_at)) : provisionalStart;
+  return activatedOn && activatedOn < provisionalStart ? activatedOn : provisionalStart;
+}
+
+async function anchorTermToInstallation({ termId, conn = db }) {
+  return conn.transaction(async (trx) => {
+    const peek = await trx('annual_prepay_terms').where({ id: termId }).first('customer_id');
+    if (!peek) return { skipped: 'term_not_found' };
+    // The per-customer annual-prepay advisory lock every term writer holds
+    // (allowOverlap=true: lock only — the moved window is checked below).
+    const { lockAndAssertNoAnnualPrepayOverlap, annualPrepayOverlapStatusClause } = require('../routes/admin-customers')._private;
+    await lockAndAssertNoAnnualPrepayOverlap(trx, peek.customer_id, null, true, '');
+    const term = await trx('annual_prepay_terms').where({ id: termId }).forUpdate().first();
+    if (!term || term.installation_anchored_at) return { skipped: 'already_anchored' };
+    if (term.renewed_from_term_id || term.renewal_decision || !ANCHORABLE_TERM_STATUSES.includes(term.status)) {
+      return { skipped: 'not_original_term' };
+    }
+    if (await trx('annual_prepay_terms').where({ renewed_from_term_id: term.id }).first('id')) return { skipped: 'renewed' };
+
+    const installation = await whereTermiteInstallationServiceType(
+      trx('scheduled_services as ss')
+        .where({ 'ss.customer_id': term.customer_id, 'ss.status': 'completed' })
+        .where('ss.scheduled_date', '>=', installationFloorFor(term)),
+      'ss',
+    ).orderBy('ss.scheduled_date', 'asc').first('ss.id', 'ss.scheduled_date');
+    if (!installation) return { skipped: 'no_completed_installation' };
+
+    const termStart = dateOnlyString(installation.scheduled_date);
+    const termEnd = addMonthsSameDay(termStart, 12);
+    const clash = await trx('annual_prepay_terms')
+      .where({ customer_id: term.customer_id })
+      .whereNot({ id: term.id })
+      .where(annualPrepayOverlapStatusClause())
+      .where('term_start', '<=', termEnd)
+      .where('term_end', '>=', termStart)
+      .first('id');
+    if (clash) return { skipped: 'overlap', clashTermId: clash.id, termStart };
+
+    const moved = termStart !== dateOnlyString(term.term_start) || termEnd !== dateOnlyString(term.term_end);
+    if (moved) {
+      await require('./annual-prepay-renewals').createTermForAnnualPrepay({
+        customerId: term.customer_id,
+        sourceEstimateId: term.source_estimate_id,
+        prepayInvoiceId: term.prepay_invoice_id,
+        planLabel: term.plan_label,
+        termStart,
+        termEnd,
+        conn: trx,
+      });
+    }
+    await trx('annual_prepay_terms').where({ id: term.id }).update({
+      installation_anchored_at: new Date(),
+      installation_anchor_visit_id: installation.id,
+      updated_at: new Date(),
+    });
+    return {
+      anchored: true, termId: term.id, termStart, termEnd, moved,
+    };
+  });
+}
+
+async function anchorInstalledTerms({ conn, limit, counts }) {
+  try {
+    const candidates = await conn('annual_prepay_terms as apt')
+      .join('estimates as e', 'e.id', 'apt.source_estimate_id')
+      .where('e.annual_plan_activation_status', 'activated')
+      .whereNull('apt.installation_anchored_at')
+      .whereNull('apt.renewed_from_term_id')
+      .whereNull('apt.renewal_decision')
+      .whereIn('apt.status', ANCHORABLE_TERM_STATUSES)
+      .whereExists(function completedInstallation() {
+        whereTermiteInstallationServiceType(
+          this.select(conn.raw('1')).from('scheduled_services as ss')
+            .whereRaw('ss.customer_id = apt.customer_id')
+            .where('ss.status', 'completed')
+            .whereRaw("ss.scheduled_date >= LEAST(apt.term_start, (apt.created_at AT TIME ZONE 'America/New_York')::date)"),
+          'ss',
+        );
+      })
+      .orderBy('apt.created_at', 'asc', 'first')
+      .select('apt.id as term_id', 'e.id as estimate_id')
+      .limit(limit);
+    counts.anchorScanned = candidates.length;
+    for (const row of candidates) {
+      try {
+        const result = await anchorTermToInstallation({ termId: row.term_id, conn });
+        if (result?.anchored) {
+          counts.anchored += 1;
+          logger.info(`[termite-annual-activation] term ${row.term_id} anchored to installation: ${result.termStart} → ${result.termEnd}${result.moved ? '' : ' (unchanged)'}`);
+        } else if (result?.skipped === 'overlap') {
+          counts.anchorFailed += 1;
+          await ringActivationBell(require('./notification-service'), {
+            estimateId: row.estimate_id,
+            contractId: null,
+            kind: 'anchor_overlap',
+            reason: `anchoring coverage to the installation on ${result.termStart} would overlap annual prepay term ${result.clashTermId}`,
+          });
+        }
+      } catch (err) {
+        counts.anchorFailed += 1;
+        logger.error(`[termite-annual-activation] installation anchor failed for term ${row.term_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] installation anchor scan failed: ${err.message}`);
+    counts.anchorScanError = err.message;
+  }
+}
+
+// Re-rings the install-scheduling handoff for activated plans whose bell
+// never durably landed (see ringInstallHandoff). A term already anchored to
+// its completed installation needs no scheduling, and a cancelled term
+// none either. Oldest activation first, never-stamped activation times
+// ahead of all, bounded.
+async function retryInstallHandoffs({ conn, limit, counts }) {
+  try {
+    const pending = await conn('annual_prepay_terms as apt')
+      .join('estimates as e', 'e.id', 'apt.source_estimate_id')
+      .where('e.annual_plan_activation_status', 'activated')
+      .whereNull('e.annual_plan_install_handoff_at')
+      .whereNull('apt.renewed_from_term_id')
+      .whereNull('apt.installation_anchored_at')
+      .whereIn('apt.status', ANCHORABLE_TERM_STATUSES)
+      .orderBy('e.annual_plan_activated_at', 'asc', 'first')
+      .select('e.id as estimate_id', 'e.annual_plan_deferred_invoice')
+      .limit(limit);
+    counts.handoffScanned = pending.length;
+    for (const row of pending) {
+      const contract = await conn('customer_contracts')
+        .where({ document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed' })
+        .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(row.estimate_id)])
+        .orderBy('signed_at', 'desc')
+        .first('id')
+        .catch(() => null);
+      const handedOff = await ringInstallHandoff({
+        estimateId: row.estimate_id,
+        contractId: contract?.id || null,
+        requestedFirstVisit: acceptContextFromEstimate(row).requestedFirstVisit || null,
+        conn,
+      });
+      if (handedOff) counts.handedOff += 1;
+      else counts.handoffFailed += 1;
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] install handoff scan failed: ${err.message}`);
+    counts.handoffScanError = err.message;
+  }
 }
 
 module.exports = {
   activateTermiteAnnualPlanForSignedContract,
+  anchorTermToInstallation,
   reconcileTermiteAnnualActivations,
   ANNUAL_TEMPLATE_KEY,
 };

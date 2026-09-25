@@ -5967,6 +5967,10 @@ router._private = {
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   lockAndAssertNoAnnualPrepayOverlap,
+  // The status set every annual-prepay overlap check shares — the termite
+  // annual plan's installation re-anchor (termite-annual-activation.js)
+  // checks a moved window against the same set.
+  annualPrepayOverlapStatusClause,
   stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,
