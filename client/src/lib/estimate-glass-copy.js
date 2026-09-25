@@ -629,6 +629,30 @@ export function applyCommercialExteriorScope(items, isCommercialPestRow, interio
   return out;
 }
 
+// Palm-care inclusion bullet text for a Tree & Shrub row/card carrying a
+// positive palm count (owner 2026-09-24: palms are priced inside T&S via the
+// routine palm-care reserve — no separate line item, no new fee, just an
+// extra bullet). Pure; null for zero/absent/invalid counts. Shared by both
+// the row-list appender below and PriceCard's ROWLESS single-service T&S
+// card (an engine-backed split section has no perServiceTreatments row to
+// append a list bullet to — see frequency.palmCount).
+export function treeShrubPalmBulletText(palmCount) {
+  const n = Number(palmCount);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return `Includes care for your ${n} palm${n === 1 ? '' : 's'} — seasonal palm nutrition and root-zone treatment when needed`;
+}
+
+// Palm-care inclusion bullet for a Tree & Shrub row carrying a positive
+// service-line palm count. Pure and additive: called by PriceCard AFTER the
+// glass/baseline inclusion list is chosen, so it never mutates the shared
+// GLASS_SERVICE_INCLUSIONS / SERVICE_INCLUSIONS arrays. Zero/absent/invalid
+// count returns items unchanged (byte-identical list).
+export function withTreeShrubPalmBullet(items, palmCount) {
+  const bullet = treeShrubPalmBulletText(palmCount);
+  if (!Array.isArray(items) || !bullet) return items;
+  return [...items, bullet];
+}
+
 // ── Per-day value line ──────────────────────────────────────────────────────
 // Recomputed per billing cadence with a cadence-matched comparison tail
 // (price × periods / 365 — PriceCard's existing dayPrice math already yields

@@ -1317,6 +1317,63 @@ estimate documents retain the strict framing policy. Query markers do not
 grant draft access or change token, payment, consent, or booking eligibility.
 The iframe exchanges only height/step messages with its parent, which checks
 the sender window and exact origin; no customer details or tokens are posted.
+`pricing.frequencies[].perServiceTreatments[].palmCount` (palm-care bullet
+lane, owner 2026-09-24; restructured to a single evidence + stamping
+chokepoint in Codex round 4 on #4789 after three earlier rounds each found
+a different per-builder carry that leaked a raw or stale value — NO
+pricing-bundle builder attaches this field itself any more): a positive
+integer riding a Tree & Shrub treatment row ONLY when the quote actually
+PRICED those palms. The v4.7 routine palm-care reserve (armed in prod
+2026-09-24 ~23:53Z) prices a SERVICE-LINE palm count either way (folded
+into the legacy per-tree term while unarmed), but a PROPERTY-sourced count
+prices NOTHING until the reserve is armed — every quote saved before the
+arm time is unarmed. `pricedTreeShrubPalmCount`
+(`server/services/pricing-engine/tree-shrub-palm-priced.js`) is the one
+evidence predicate: priced when `palmCountSource === 'service_line'`, OR
+the reserve's `perPalmAnnual`/`minutesPerPalmVisit` knob is armed;
+evidence-less legacy rows (no source, no knob) fail closed — no bullet.
+`treeShrubPalmCountForEstData` (estimate-public.js) resolves the one
+authoritative count per request: a FRESH engine result (this request just
+re-ran pricing) is checked first and is final for T&S once present,
+outranking anything stored; otherwise the MAPPED envelope
+(`result.results.tsMeta`, gated through the predicate — then the mapped
+`result.recurring.services[]` tree_shrub row, ALSO gated through the
+predicate rather than trusted, since a raw engine line can land in that
+exact slot too, e.g. one-tap-purchase.js) is authoritative and exclusive
+whenever it exists — a revision can leave an older raw `engineResult`
+behind, so raw line items are read only when no mapped envelope exists at
+all. `stampTreeShrubPalmCount` then applies that ONE resolved count to
+the FINAL pricing bundle, on every `buildPricingBundle` return path
+(a fresh build, the `sendSnapshot` fast path, and the pricing-cache fast
+path all funnel through it) — it sets the field on every tree_shrub
+`perServiceTreatments` row and unconditionally DELETES it otherwise, so a
+stale or raw value from an older cached/snapshotted bundle, or from any
+future producer, can never survive to the client. Validated
+positive-integer, clamped ≤200 by the pricing engine; omitted entirely (not
+`0`, not `null`) whenever the estimate has no palms OR the palms it has
+weren't priced, so existing clients that don't know the field see no
+change. A ROWLESS single-service T&S card (an engine-backed multi-service
+split, no `perServiceTreatments` on that card) instead carries the count
+directly on the frequency. The full set of paths the stamper writes, all
+under the same priced-only validation, omission, and chokepoint rule:
+`pricing.frequencies[].perServiceTreatments[].palmCount`,
+`pricing.frequencies[].palmCount` (rowless solo-T&S ladder),
+`pricing.services[].frequencies[].perServiceTreatments[].palmCount`,
+`pricing.services[].frequencies[].palmCount` (rowless split T&S card), and
+`pricing.serviceCadenceCombos[].perServiceTreatments[].palmCount`. On the
+`sendSnapshot` and pricing-cache fast paths, when stored evidence alone
+cannot resolve a count (an engine-inputs-only estimate, whose build stamped
+from the fresh engine run), the count already stamped in the frozen/cached
+bundle is reused — only the stamper writes this field, so a stamped value
+is trusted. Display-only:
+drives one extra customer-facing inclusion bullet ("Includes care for your
+N palms — seasonal palm nutrition and root-zone treatment when needed", singular
+for 1) and has no effect on any price, fee, line item, or booking/acceptance
+math anywhere in the contract. The legacy server-rendered estimate page
+(`use_v2_view=false` / the GrowthBook control arm) shows the identical
+sentence on its own Tree & Shrub service-price card, resolved through the
+same `treeShrubPalmCountForEstData` evidence function (stored evidence
+only — this render path never re-runs the engine).
 `/accept` fails CLOSED when the accepted plan's money cannot be resolved
 (#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
 — `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application

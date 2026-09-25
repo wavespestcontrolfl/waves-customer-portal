@@ -2995,6 +2995,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             totalBeforeDiscount: item.totalBeforeDiscount ?? item.total ?? null,
             recurringCustomerDiscountRate: item.recurringCustomerDiscountRate ?? null,
             tier: item.tier ?? null,
+            // Palm pricing evidence on the Tree & Shrub row: the customer
+            // card's palm-care bullet shows a count only when this proves the
+            // quote priced the palms (pricedTreeShrubPalmCount, #4789).
+            ...(item.service === 'tree_shrub' && item.palmCount !== undefined
+              ? {
+                palmCount: item.palmCount,
+                palmCountSource: item.palmCountSource ?? null,
+                palmReserveActive: item.palmReserveActive ?? null,
+                pricingKnobs: item.pricingKnobs ?? null,
+              }
+              : {}),
             // Mosquito rows name their program via selectedProgram/tier and
             // carry station/dunk addOns — both feed the audit's COGS
             // overrides (GH codex on #3628).
