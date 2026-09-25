@@ -71,30 +71,29 @@ const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route'
 // receipt); 'ach_payment_processing' (mid-flight acknowledgment — the
 // invoice is still 'processing', not proof money landed); 'invoice' (the
 // bill went out, not that it was paid).
-const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'autopay_charge_success', 'autopay_retry_success'];
-// A payment record is only ever evidence for an `other` ask that is itself
-// about money — never a blanket "any payment closes any open ask".
-// 'check' is deliberately absent: "please check whether the tech is coming"
-// is not a payment question (Codex #4816 r1). A payment by check reads as
-// "pay"/"paid"/"payment" in practice.
-// Includes the terms the supported receipt flows use (deposit_receipt,
-// autopay_charge_success): deposit, charge(s|d), refund (Codex #4816 r4).
-const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay|deposit|charge|charges|charged|refund)\b/i;
-// A request to change HOW the customer pays (the split-billing ask: "separate the
-// charges under two payment methods", "update my card", "set up autopay") is
-// not answered by money landing, so a payment is never a witness for it
-// (Codex #4816 r2). Only a change VERB near a tender/method word counts:
-// "did my card payment go through?" merely names the tender and stays a
-// payment question (Codex r3).
-const METHOD_CHANGE = /\b(?:payment methods?|split|separate|(?:update|change|switch|replace|remove|add|set ?up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:card|method|autopay|auto ?pay|payment|billing))\b/i;
+const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'autopay_charge_success', 'autopay_retry_success',
+  // complete-scheduled-service.js: the combined "service done + paid" receipt.
+  'service_complete_paid_receipt'];
+// Payment evidence and `other` asks (Codex #4816 r1–r5, settled structurally
+// in r5): a payment record is ADMISSIBLE for any `other` ask except one a
+// payment cannot answer (below), and the model judges whether it answers
+// the question. It closes an ask WITHOUT the model only when the ask uses a
+// strong payment term AND the payment is the only charge it could be about
+// (one unpaid invoice at the time of the text). A keyword the list lacks
+// therefore costs one model call, never a false follow-up bell.
+const STRONG_PAYMENT_TERM = /\b(?:pay|pays|paying|payment|payments|paid|zelle|venmo|invoice|invoices|balance|receipt|receipts|autopay|deposit|deposits|charge|charges|charged)\b/i;
+// Asks money landing cannot answer: changing HOW the customer pays (the
+// split-billing ask "separate the charges under two payment methods",
+// "update my card", "set up autopay") — only a change VERB near a
+// tender/method word counts, "did my card payment go through?" merely names
+// the tender — and money going the OTHER way (refund, dispute, chargeback).
+const NOT_ANSWERED_BY_PAYMENT = /\b(?:payment methods?|split|separate|(?:update|change|switch|replace|remove|add|set ?up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:card|method|autopay|auto ?pay|payment|billing)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/i;
 function askText(commitment) {
   const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((item) => item?.quote || '');
   return [commitment.description || '', ...quotes].join(' ');
 }
-function mentionsPayment(commitment) {
-  const text = askText(commitment);
-  return PAYMENT_MENTION.test(text) && !METHOD_CHANGE.test(text);
-}
+function paymentCanAnswer(commitment) { return !NOT_ANSWERED_BY_PAYMENT.test(askText(commitment)); }
+function mentionsPayment(commitment) { return STRONG_PAYMENT_TERM.test(askText(commitment)) && paymentCanAnswer(commitment); }
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
@@ -144,11 +143,15 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         .orderBy('paid_at', 'desc').limit(LIMIT + 1)
         .select('id', 'title', 'invoice_number', 'paid_at'),
       // How many invoices could the question have been about: every invoice
-      // of the customer's that was still unpaid at the moment of the text.
+      // of the customer's that EXISTED and was still unpaid at the moment of
+      // the text (created_at <= request, paid_at null or later). Snapshotted
+      // at request time, so an invoice created afterwards cannot make a
+      // unique payment look ambiguous, and one voided afterwards still
+      // counts (it was open when the customer asked) — an over-count only
+      // sends the payment to the model, never past it (Codex #4816 r2, r5).
       // With exactly one, the payment that followed can only be that one and
-      // may close the ask deterministically; with more, which charge the
-      // customer meant is a semantic question for the model (Codex #4816 r2).
-      conn('invoices').where({ customer_id: customerId }).whereNotIn('status', ['draft', 'void', 'cancelled'])
+      // may close the ask deterministically.
+      conn('invoices').where({ customer_id: customerId }).whereNot('status', 'draft').where('created_at', '<=', after)
         .where((q) => q.whereNull('paid_at').orWhere('paid_at', '>', after)).count({ n: 'id' }).first(),
       conn('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'delivered' })
         .whereIn('message_type', PAYMENT_SMS_TYPES)
@@ -332,7 +335,7 @@ function admissibleWitness(record, commitment, records = []) {
     // R2: the query already scopes both legs (invoice paid_at / sms
     // delivered created_at) to strictly after the request, so only the
     // subject-matter and kind gates are checked here.
-    payment: () => commitment.kind === 'other' && mentionsPayment(commitment),
+    payment: () => commitment.kind === 'other' && paymentCanAnswer(commitment),
   };
   // Invoice sends are context, never evidence that a question was answered.
   return witnesses[record.type]?.() === true;
@@ -439,10 +442,12 @@ const SYSTEM_EVENT_TYPES = ['visit', 'payment'];
 const SYSTEM_EVENT_KINDS = ['other', 'callback'];
 function systemEventFulfillment(evidence, commitment) {
   if (!SYSTEM_EVENT_KINDS.includes(commitment.kind)) return null;
-  // A payment closes without the model only when it is the only charge the
-  // question could have been about (one unpaid invoice at the time of the
-  // text). An ambiguous payment stays an admissible witness for the model.
-  const unambiguous = (record) => record.type !== 'payment' || Number(record.candidate_invoices) <= 1;
+  // A payment closes without the model only when the ask uses a strong
+  // payment term AND the payment is the only charge the question could have
+  // been about (one unpaid invoice at the time of the text). Anything else
+  // stays an admissible witness for the model.
+  const unambiguous = (record) => record.type !== 'payment'
+    || (mentionsPayment(commitment) && Number(record.candidate_invoices) <= 1);
   const witness = evidence.records.find((record) => SYSTEM_EVENT_TYPES.includes(record.type)
     && unambiguous(record) && admissibleWitness(record, commitment, evidence.records));
   if (!witness) return null;
