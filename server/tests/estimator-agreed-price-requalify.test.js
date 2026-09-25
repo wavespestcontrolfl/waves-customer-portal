@@ -35,6 +35,7 @@ jest.mock('../models/db', () => {
       };
     }
     b.whereRaw = (sql, bindings) => { op.whereRaw.push({ sql, bindings }); return b; };
+    b.orWhereRaw = b.whereRaw;
     b.first = async () => (table === 'call_log' ? mockCallRow : null);
     b.update = async (row) => { mockOps.push({ ...op, update: row }); return 1; };
     b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
@@ -72,7 +73,11 @@ const agreedBlock = (extra = {}) => ({ reason: 'price_agreed_on_call', at: '2026
 const engineData = (eng = {}) => ({ estimatorEngine: { callLogId: 'call-1', ...eng } });
 
 const supersedeWrites = () => mockOps.filter((o) => o.table === 'call_log'
-  && typeof o.update?.metadata?.sql === 'string' && o.update.metadata.bindings?.[0]?.includes('superseded_at'));
+  && typeof o.update?.metadata?.sql === 'string' && String(o.update.metadata.bindings?.[0] || '').includes('superseded_at'));
+
+const eagerClears = () => mockOps.filter((o) => o.table === 'call_log'
+  && String(o.update?.metadata?.sql || '').includes("- 'estimator_draft_block'")
+  && o.whereRaw.some((w) => w.sql.includes('NOT IN')));
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -214,6 +219,28 @@ describe('P1 — a re-qualified call can draft again', () => {
     expect(result.lane).toBe('existing');
     expect(supersedeWrites()).toHaveLength(0);
     expect(mockComposeIntent).not.toHaveBeenCalled();
+  });
+
+  test('a clean context EAGERLY retires a stale CALL-WIDE verdict (identity conflict cleared) — but never a row-scoped agreed-price marker', async () => {
+    mockCallRow.metadata = { estimator_draft_block: { reason: 'email_identity_conflict', at: 'x', generation: 4 } };
+    mockExtractionFromCall.mockReturnValue({ source: 'enriched', extraction: { service_request: { quote_requested: true } } });
+    mockBuildCallContext.mockResolvedValue({ call: { id: 'call-1' }, extraction: {} });
+    mockExistingDraftForCall.mockResolvedValue(null);
+    mockComposeIntent.mockImplementation(async () => {
+      // Retired BEFORE the pipeline, so the creators' guard can let the
+      // re-qualified insert through.
+      expect(eagerClears()).toHaveLength(1);
+      return { intent: null, errors: ['test stub'] };
+    });
+
+    await maybeDraftEstimateForCall({ callLogId: 'call-1', quotePromised: false, ownerProcGeneration: 5 });
+
+    expect(mockComposeIntent).toHaveBeenCalled();
+    const [clear] = eagerClears();
+    const where = clear.whereRaw.map((w) => w.sql).join('\n');
+    // The eager clear itself refuses to touch a row-scoped marker, in SQL.
+    expect(where).toContain("COALESCE(metadata->'estimator_draft_block'->>'reason', '') NOT IN ('price_agreed_on_call')");
+    expect(where).toContain("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') NOT IN ('price_agreed_on_call')");
   });
 
   test('a dry run never supersedes', async () => {

@@ -1172,7 +1172,7 @@ async function supersedeRowScopedDraftBlock(callLogId, { notNewerThan, generatio
 // blocks the valid replacement draft just as hard as the verdict itself.
 // A clear that will not land THROWS: the pass fails and retries, which
 // defers the draft rather than losing it to a permanent block.
-async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = null } = {}) {
+async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = null, callWideOnly = false } = {}) {
   // GENERATION FENCE (codex P0, PR #3304 GH r8h; hardened with the real
   // processing_generation, PR #3304): only markers this pass may retire
   // are cleared. A concurrent pass can write a NEWER conflict or
@@ -1186,10 +1186,20 @@ async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = nul
   const fenceAt = notNewerThan || new Date().toISOString();
   const markerClearable = (key) => markerRetirableSql(key, generation);
   const markerBindings = markerRetirableBindings(generation, fenceAt);
+  // callWideOnly (codex #4815 r6 P1): the EAGER clear on a conclusively
+  // clean context retires CALL-WIDE verdicts only (identity conflict,
+  // spam / voicemail / no-attribution) — a clean context disproves those.
+  // It never retires a ROW-SCOPED (agreed-price) marker: a clean context
+  // says nothing about a price agreed on the call, and erasing a queued
+  // price_agreed_on_call retry that way was the r5 regression; that marker
+  // is superseded by an explicit re-qualification instead.
+  const scopedAbsent = (key) => `COALESCE(metadata->'${key}'->>'reason', '') NOT IN (${SCOPED_REASON_SQL_LIST})`;
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      await db('call_log').where({ id: callLogId })
+      const q = db('call_log').where({ id: callLogId });
+      if (callWideOnly) q.whereRaw(scopedAbsent('estimator_draft_block')).whereRaw(scopedAbsent('estimator_quarantine_pending'));
+      await q
         .where(function anyMarker() {
           this.whereRaw("COALESCE(metadata->'estimator_draft_block'->>'reason', '') <> ''")
             .orWhereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''");
@@ -1765,6 +1775,15 @@ async function maybeDraftEstimateForCall({
         if (unitLineOverride) sa.street_line_2 = String(unitLineOverride);
       }
     }
+    // A CONCLUSIVELY clean context retires a CALL-WIDE conflict verdict
+    // (codex #4815 r6 P1 — restores main's eager clear, which r5 removed for
+    // every reason): the creators' in-lock guard refuses every insert while
+    // a call-wide marker stands, so waiting for pipelineResult.created left
+    // a call whose identity conflict cleared unable to ever draft again.
+    // Row-scoped (agreed-price) markers are excluded — see callWideOnly.
+    if (!dryRun && context && !context.error) {
+      await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration, callWideOnly: true });
+    }
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];
@@ -1975,24 +1994,17 @@ async function maybeDraftEstimateForCall({
   const pipelineResult = await runDraftPipeline({
     context, origin: CALL_ORIGIN, result, dryRun, refreshLookup, quotePromised,
   });
-  // codex #4815 r5 P1: the call-side conflict verdict (estimator_draft_block
-  // + estimator_quarantine_pending) is retired ONLY once a NEW draft
-  // actually replaces whatever it was blocking — never merely because this
-  // pass observed a clean context. The former eager clear (fired the moment
-  // buildCallContext came back clean, before existingDraftForCall even ran)
-  // let the price-agreed assessment exception silently erase a queued
-  // price_agreed_on_call retry the instant the composer started: the
-  // existing-draft branch above returns the SAME unpriced-agreement draft
-  // untouched, with nothing new to justify lifting the block. A pass that
-  // reuses an existing draft (the several `return result` above, before this
-  // point) never reaches here and never clears; only pipelineResult.created
-  // does. This also fails closed for a clean context whose pipeline still
-  // lands RED with nothing drafted (e.g. pricing failed) — the prior verdict
-  // stays in place for another pass to resolve, which is the same
-  // conservative direction the block already takes everywhere else.
-  // (A re-qualified pass reaches a successful insert at all only because
-  // the supersede above lifted a row-scoped block for NEW drafts first —
-  // codex #4815 r6 P1; this clear then retires the superseded marker.)
+  // codex #4815 r5 P1 (scoped r6): a ROW-SCOPED (agreed-price) verdict —
+  // estimator_draft_block and a queued estimator_quarantine_pending alike —
+  // is retired ONLY once a NEW draft actually replaces whatever it was
+  // blocking, never merely because this pass observed a clean context (a
+  // clean context says nothing about a price agreed on the call; the eager
+  // clear above skips these). A pass that reuses an existing draft (the
+  // several `return result` above) never reaches here and never clears; a
+  // pipeline that lands RED with nothing drafted leaves the verdict for
+  // another pass. The supersede above is what lets a re-qualified pass's
+  // insert through the creators' guard at all (codex #4815 r6 P1); this
+  // clear then retires the superseded marker.
   if (!dryRun && pipelineResult.created === true) {
     await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration })
       .catch((clearErr) => {
