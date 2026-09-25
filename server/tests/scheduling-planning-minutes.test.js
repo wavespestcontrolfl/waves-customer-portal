@@ -56,6 +56,9 @@ describe('planning minutes table', () => {
     expect(plannedWorkMinutes(row('Quarterly Pest Control Service', { estimated_duration_minutes: 120 }))).toBe(120);
     expect(plannedWorkMinutes(row('Quarterly Pest Control Service',
       { window_start: '13:00', window_end: '16:00', estimated_duration_minutes: 180 }))).toBe(25);
+    // A duration-driven window (off-hour end) carries real work.
+    expect(plannedWorkMinutes(row('Quarterly Pest Control Service',
+      { window_start: '09:00', window_end: '10:30', estimated_duration_minutes: 90 }))).toBe(90);
   });
 
   test('gate off and the placed visit are not planned; a route group keeps its members\' sum', () => {

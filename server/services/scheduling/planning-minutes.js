@@ -65,7 +65,11 @@ function deliberateEstimate(stop) {
   const start = /^(\d{1,2}):(\d{2})/.exec(String(stop.window_start || ''));
   const end = /^(\d{1,2}):(\d{2})/.exec(String(stop.window_end || ''));
   const span = start && end ? (Number(end[1]) * 60 + Number(end[2])) - (Number(start[1]) * 60 + Number(start[2])) : null;
-  return estimate === span ? 0 : estimate;
+  // A span-sized estimate on a whole-hour window is a wide arrival band
+  // (13:00-16:00), charged the table. An off-hour end is duration-driven
+  // (AGENTS.md: a 90-min job at 09:00 ends 10:30), so it is real work.
+  const offHourEnd = end && Number(end[2]) !== 0;
+  return estimate === span && !offHourEnd ? 0 : estimate;
 }
 
 /** Planned on-site minutes for one scheduled_services row, or null when the
