@@ -231,7 +231,7 @@ async function estimateLinks(row, data) {
   let blocked = false;
   try {
     const { estimateOffCustomerSurface, callSideBlockForEstimateData } = lazy.claimSql();
-    blocked = estimateOffCustomerSurface(row) || !!(await callSideBlockForEstimateData(db, data));
+    blocked = estimateOffCustomerSurface(row) || !!(await callSideBlockForEstimateData(db, data, { estimateStatus: row?.status }));
   } catch {
     blocked = true; // fail closed: an unverifiable block is not a link
   }

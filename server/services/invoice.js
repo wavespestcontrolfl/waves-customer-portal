@@ -16,6 +16,7 @@ const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
 const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
+const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
@@ -128,6 +129,12 @@ function parseInvoiceLineItems(raw) {
     }
   }
   return [];
+}
+
+async function explicitBillingAppSelected(customerId, category) {
+  if (!customerId) return false;
+  const prefs = await db("notification_prefs").where({ customer_id: customerId }).first();
+  return explicitBillingChannels(prefs || {}, category)?.includes("push") === true;
 }
 
 // Fail-closed: does the invoice carry ANY positive charge beyond the covered base
@@ -3005,6 +3012,28 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
   }
 }
 
+const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
+
+async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
+  if (!claimToken) return false;
+  try {
+    const marked = await whereSendClaimOwned(
+      db("invoices").where({ id: invoiceId, status: "sending" })
+        .whereNull("payer_id")
+        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'"),
+      claimToken,
+    ).update({
+      sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [new Date()]),
+      scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+      updated_at: new Date(),
+    });
+    return marked !== 0;
+  } catch (err) {
+    logger.error(`[invoice] Accepted Text/App leg could not be marked for Email retry for ${invoiceId}: ${err.message}`);
+    return false;
+  }
+}
+
 // Statuses an invoice can move FROM into 'sent' on its first delivery. A send
 // from any other status (sent/viewed/overdue) is a RESEND — the CASE updates in
 // the send paths leave the status unchanged there.
@@ -4747,7 +4776,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true,
+  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true, hasEmailLeg = false,
     // Internal-only: sends this same call once more after a not_zero_due
     // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
     // this itself, so a real race can retry at most once, never loop.
@@ -4803,7 +4832,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, _zeroDueRetried: true,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, _zeroDueRetried: true,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -4863,7 +4892,16 @@ const InvoiceService = {
     const customer = await db("customers")
       .where({ id: invoice.customer_id })
       .first();
-    if (!customer?.phone) {
+    let canRouteWithoutPhone = false;
+    try {
+      canRouteWithoutPhone = !customer?.phone
+        && await explicitBillingAppSelected(customer?.id, "invoice");
+    } catch (prefsErr) {
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
+      throw prefsErr;
+    }
+    if (!customer?.phone && !canRouteWithoutPhone) {
       const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
       if (restored) await reverseSmsCreditOnFailure();
       throw new Error("Customer has no phone number");
@@ -5026,7 +5064,13 @@ const InvoiceService = {
     const finalizeInvoiceAfterSms = () => whereSendClaimOwned(
       db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
       invoice.send_claim_token,
-    ).update({
+    ).update(allowClaimed && hasEmailLeg ? {
+      // The combined owner finalizes only after every selected sidecar has
+      // either started durably or completed. Keep its claim retryable while
+      // recording this accepted Text/App leg so an Email retry skips it.
+      sms_sent_at: new Date(),
+      updated_at: new Date(),
+    } : {
         status: db.raw(
           "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
         ),
@@ -5094,7 +5138,12 @@ const InvoiceService = {
         // 'invoice' template kill switch (invoice → invoice_sent) still
         // applies. If ops disables the invoice template to halt broken
         // billing texts, this flow needs to stop too.
-        metadata: { original_message_type: "invoice" },
+        metadata: {
+          original_message_type: "invoice",
+          billingDeliveryCategory: "invoice",
+          notificationEventKey: `invoice:${invoiceId}:sent`,
+        },
+        ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
         // The canonical sender owns push-first / push+SMS / Twilio routing.
         // Wrap that ONE provider dispatcher so the invoice row and estimate
         // deposit ledger stay stable through whichever delivery leg it picks.
@@ -5475,6 +5524,15 @@ const InvoiceService = {
     if (claim.invoice?.payer_id) {
       sms.error = "Suppressed — invoice billed to a third-party payer";
       sms.code = "payer_billed";
+    } else if (!operatorInitiated
+      && claim.invoice.sms_sent_at
+      && String(claim.invoice.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)) {
+      // A prior automated attempt delivered Text/App but could not start its
+      // selected Email leg. The dedicated marker ties sms_sent_at to this
+      // schedule episode; a historical stamp alone must not suppress a new
+      // delivery after unvoid + explicit reschedule.
+      sms.ok = true;
+      sms.deduped = true;
     } else {
       try {
         // The nested call does not adopt (adoptsQueuedInvoiceSend: false
@@ -5487,6 +5545,7 @@ const InvoiceService = {
           claimToken: claim.invoice.send_claim_token,
           payUrlParams,
           operatorInitiated,
+          hasEmailLeg: true,
           // This wrapper's own claim above already adopted (and will
           // restore/resolve) any queued pay-link SMS this send supersedes —
           // the nested claim must not adopt it a second time.
@@ -5587,6 +5646,7 @@ const InvoiceService = {
         }
         if (smsResult?.sent) {
           sms.ok = true;
+          if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
           if (smsResult?.code) sms.code = smsResult.code;
@@ -5654,6 +5714,9 @@ const InvoiceService = {
             metadata: JSON.stringify({
               entry_point: "invoice_send_deferred",
               invoice_id: invoiceId,
+              billingDeliveryCategory: "invoice",
+              notificationEventKey: `invoice:${invoiceId}:sent`,
+              hasEmailLeg: true,
               original_block_code: sms.code,
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
@@ -5716,6 +5779,7 @@ const InvoiceService = {
           recipientOverride: emailRecipientOverride,
           payUrlParams,
           claimToken: claim.invoice.send_claim_token,
+          ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
         });
         if (r?.ok) email.ok = true;
         else if (r?.error) email.error = r.error;
@@ -5729,7 +5793,77 @@ const InvoiceService = {
       }
     }
 
-    const ok = sms.ok || email.ok;
+    const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    if (emailMustRetry && sms.ok && claimed && !allowClaimed
+      && ["draft", "scheduled"].includes(previousStatus)) {
+      // A direct caller owns this claim, so it must put the accepted Text/App
+      // and owed Email onto the scheduled retry rail itself. The scheduled
+      // worker's separate restore path only runs for allowClaimed callers.
+      let queued = false;
+      try {
+        queued = await db.transaction(async (trx) => {
+          const owned = await trx("invoices")
+            .where({ id: invoiceId, status: "sending", send_claim_token: claim.invoice.send_claim_token })
+            .whereNull("payer_id")
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+            .forUpdate()
+            .first("id", "scheduled_send_error", "scheduled_send_attempts");
+          if (!owned) return false;
+          // A queued pay-link text adopted by this claim is discharged by its
+          // accepted replacement. Resolve it before clearing the claim token;
+          // any failure rolls back the whole transition and holds the claim.
+          if (!await resolveConsumedQueuedSend(invoiceId, claim.invoice.send_claim_token, consumedQueuedSendRows, trx)) {
+            throw new Error("adopted queued text could not be resolved");
+          }
+          const alreadyPending = String(owned.scheduled_send_error || "")
+            .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+          const now = new Date();
+          const updated = await trx("invoices")
+            .where({ id: invoiceId, status: "sending", send_claim_token: claim.invoice.send_claim_token })
+            .whereNull("payer_id")
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+            .update({
+              status: "scheduled",
+              sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [now]),
+              scheduled_send_at: new Date(now.getTime() + 5 * 60 * 1000),
+              scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+              scheduled_send_attempts: alreadyPending ? owned.scheduled_send_attempts : 0,
+              scheduled_request_review: Boolean(effectiveRequestReview),
+              scheduled_review_delay_minutes: effectiveRequestReview ? effectiveReviewDelayMinutes : null,
+              send_claim_token: null,
+              updated_at: now,
+            });
+          if (updated !== 1) throw new Error("send claim changed before Email retry was queued");
+          return true;
+        });
+      } catch (err) {
+        logger.error(`[invoice] Accepted Text/App for ${invoiceId} held under its claim: Email retry could not be queued (${err.message})`);
+      }
+      return {
+        ok: false,
+        code: queued ? "INVOICE_EMAIL_RETRY_QUEUED" : "INVOICE_ACCEPTED_LEG_UNSTAMPED",
+        deliveryQueued: queued,
+        deliveryHeld: !queued,
+        sms,
+        email,
+        payUrl,
+        creditApplied: 0,
+      };
+    }
+    if (emailMustRetry && sms.ok
+      && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token)) {
+      logger.error(`[invoice] Email retry for ${invoiceId} parked because its accepted Text/App leg has no durable retry marker`);
+      return {
+        ok: false,
+        code: "INVOICE_ACCEPTED_LEG_UNSTAMPED",
+        deliveryHeld: true,
+        sms,
+        email,
+        payUrl,
+        creditApplied: 0,
+      };
+    }
+    const ok = !emailMustRetry && (sms.ok || email.ok);
     // An adopted queued pay-link text is discharged by the SMS leg's OWN
     // outcome only: provider acceptance or a replacement on the scheduled
     // rail. Email success says nothing about it — a definite SMS failure
@@ -5873,7 +6007,7 @@ const InvoiceService = {
       // no-op and the row is still 'sending', so reverseAppliedCredit would refuse
       // — the caller (processScheduledSends) restores 'scheduled' then reverses
       // creditApplied from the result.
-      if (restored && !allowClaimed && sendCreditResult?.applied > 0) {
+      if (restored && !allowClaimed && !sms.ok && sendCreditResult?.applied > 0) {
         try {
           const { reverseAppliedCredit } = require("./customer-credit");
           await reverseAppliedCredit({ invoiceId, amount: sendCreditResult.applied, createdBy: "system:send_failed" });
@@ -5945,7 +6079,7 @@ const InvoiceService = {
         );
       }
     }
-    return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0,
+    return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
       ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
       ...(terminalVisitRefused
@@ -6189,6 +6323,8 @@ const InvoiceService = {
         "customer_id",
         "scheduled_service_id",
         "service_record_id",
+        "sms_sent_at",
+        "scheduled_send_error",
         // A combined-visit invoice re-resolves live Bill-To under held rows
         // before its queue claim.
         "visit_completion_packet_id",
@@ -6307,7 +6443,9 @@ const InvoiceService = {
         // and send at their requested time. Fail toward deferral on a
         // lookup error: worst case an email waits for 8:00 AM, never a
         // night text.
-        let hasSmsLeg = !inv.payer_id;
+        const acceptedChannelPendingEmail = Boolean(inv.sms_sent_at)
+          && String(inv.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+        let hasSmsLeg = !inv.payer_id && !acceptedChannelPendingEmail;
         if (hasSmsLeg) {
           try {
             const cust = await db("customers")
@@ -6468,6 +6606,11 @@ const InvoiceService = {
         logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} has an unverified provider outcome — claim retained for review`);
         continue;
       }
+      if (result.code === "INVOICE_ACCEPTED_LEG_UNSTAMPED") {
+        held += 1;
+        logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} delivered Text/App but could not persist its timestamp — claim retained for review`);
+        continue;
+      }
 
       const error =
         [
@@ -6482,13 +6625,16 @@ const InvoiceService = {
       // overnight cron passes must not permanently fail the send.
       const smsHeld =
         ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
+      const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
+        ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
+        : error;
       let restored = 0;
       if (smsHeld) {
         deferred += 1;
         restored = await restoreClaimedInvoice({
           status: "scheduled",
           scheduled_send_at: new Date(result.sms.nextAllowedAt),
-          scheduled_send_error: error,
+          scheduled_send_error: durableSendError,
           updated_at: new Date(),
         });
       } else {
@@ -6504,7 +6650,7 @@ const InvoiceService = {
           status: "scheduled",
           scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
           ...(nativeRetryMs ? { scheduled_send_at: new Date(Date.now() + nativeRetryMs) } : {}),
-          scheduled_send_error: error,
+          scheduled_send_error: durableSendError,
           updated_at: new Date(),
         });
       }
@@ -6621,7 +6767,9 @@ const InvoiceService = {
     const customer = await db("customers")
       .where({ id: invoice.customer_id })
       .first();
-    if (!customer?.phone) return { sent: false, reason: "no-phone" };
+    const canRouteWithoutPhone = !customer?.phone
+      && await explicitBillingAppSelected(customer?.id, "payment_receipt");
+    if (!customer?.phone && !canRouteWithoutPhone) return { sent: false, reason: "no-phone" };
 
     // Template body has a {card_line} placeholder that renders as e.g.
     // " (Visa ending 4242)" when card metadata is present, or empty otherwise.
@@ -6673,7 +6821,11 @@ const InvoiceService = {
       // open. Callers assert it only from verified provenance (the
       // receipt queue's persisted flag; Pay-route enqueues).
       ...(customerInitiated ? { customerInitiated: true } : {}),
-      metadata: { original_message_type: "receipt" },
+      metadata: {
+        original_message_type: "receipt",
+        billingDeliveryCategory: "payment_receipt",
+        notificationEventKey: `invoice:${invoiceId}:receipt`,
+      },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
       hasEmailLeg,

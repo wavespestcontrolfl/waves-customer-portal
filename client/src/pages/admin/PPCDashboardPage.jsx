@@ -436,7 +436,7 @@ export default function WavesPPCDashboard() {
         </div>{" "}
       </div>
       {/* Tab Switcher */}
-      <div className="ppc-tab-bar flex max-sm:w-full [&_button]:shrink-0 [gap:4px] [margin-bottom:24px] bg-zinc-100 rounded-md [padding:4px] [width:fit-content] overflow-x-auto">
+      <div className="ppc-tab-bar mx-auto flex max-w-full max-sm:w-full [justify-content:safe_center] [&_button]:shrink-0 [gap:4px] [margin-bottom:24px] bg-zinc-100 rounded-md [padding:4px] [width:fit-content] overflow-x-auto">
         {[
           {
             id: "overview",

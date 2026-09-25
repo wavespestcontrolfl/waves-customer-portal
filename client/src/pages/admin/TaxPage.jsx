@@ -6148,42 +6148,16 @@ export default function TaxPage() {
           if (g) setActiveTab(g.tabs[0]);
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+        secondarySections={
+          activeGroup.tabs.length > 1
+            ? activeGroup.tabs.map((key) => TAX_LEAF_BY_KEY[key])
+            : []
+        }
+        secondaryActiveKey={activeTab}
+        onSecondaryChange={setActiveTab}
+        secondaryAriaLabel="Tax sub-section"
         variant="workspace"
       />
-      {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            marginBottom: 16,
-          }}
-        >
-          {activeGroup.tabs.map((key) => {
-            const leaf = TAX_LEAF_BY_KEY[key];
-            const active = activeTab === key;
-            const LeafIcon = leaf.Icon;
-            return (
-              <Button
-                key={key}
-                type="button"
-                onClick={() => setActiveTab(key)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                }}
-                variant={active ? "primary" : "secondary"}
-                aria-pressed={active}
-                className="min-w-11"
-              >
-                <LeafIcon size={14} strokeWidth={1.9} />
-                {leaf.label}
-              </Button>
-            );
-          })}
-        </div>
-      )}
       {!d && activeTab === "overview" && (
         <div
           style={{

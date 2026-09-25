@@ -19,6 +19,24 @@ function dateOnlyString(value) {
   return null;
 }
 
+// Calendar-exact "+ N months" on a date-only value, clamped to the target
+// month's last day (Jan 31 + 1 → Feb 28/29). Returns the YYYY-MM-DD string or
+// null for an unparseable input. Shared by the prepay renewal schedule and the
+// termite annual agreement's coverage end date so the clamping rule can't
+// drift between them.
+function addMonthsSameDay(value, months) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateOnlyString(value) || '');
+  if (!match) return null;
+  const year = Number(match[1]);
+  const day = Number(match[3]);
+  const monthIndex = Number(match[2]) - 1 + Number(months || 0);
+  const targetYear = year + Math.floor(monthIndex / 12);
+  const targetMonth = (((monthIndex % 12) + 12) % 12) + 1;
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth, 0, 12, 0, 0)).getUTCDate();
+  const targetDay = Math.min(day, lastDay);
+  return `${targetYear}-${String(targetMonth).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`;
+}
+
 function dateOnlyAtNoonUtc(value) {
   const ymd = dateOnlyString(value);
   return ymd ? new Date(`${ymd}T12:00:00Z`) : null;
@@ -87,6 +105,7 @@ function validDateOnly(value) {
 }
 
 module.exports = {
+  addMonthsSameDay,
   dateOnlyString,
   dateOnlyAtNoonUtc,
   formatDateOnly,

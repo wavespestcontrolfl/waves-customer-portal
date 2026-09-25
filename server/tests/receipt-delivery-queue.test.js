@@ -204,6 +204,23 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(invoicesTable.update).not.toHaveBeenCalled();
   });
 
+  test('a preference switch between Text and Email checks leaves the receipt job retryable', async () => {
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, receipt_sent_at: null },
+      prefs: { payment_receipt: true, payment_receipt_channels: ['sms'] },
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'channel_email_only' });
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(false);
+    expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'retry_scheduled', last_error: 'Receipt delivery preferences changed between channel checks',
+    }));
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(invoicesTable.update).not.toHaveBeenCalled();
+  });
+
   test('the text-only toggle still emails — payment_confirmation_sms=false is not the kill switch', async () => {
     primeDb({
       invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
@@ -215,7 +232,10 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(true);
-    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     // The delivered email IS the receipt — stamped so the needs_receipt
     // filter/batch resend can't double-send.
     expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
@@ -291,7 +311,10 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(true);
-    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     // The queue is a paired-legs caller — it must declare the email sidecar
     // so email-only customers get the channel_email_only SMS skip (the flag
     // is caller-declared now; codex round 5). customerInitiated rides along

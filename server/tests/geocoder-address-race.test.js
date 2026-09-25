@@ -3,8 +3,10 @@ process.env.GOOGLE_API_KEY = 'synthetic-geocoder-key';
 const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/scheduling/quality-after-change', () => ({ refreshScheduleQualityAfterChange: jest.fn(async () => {}) }));
 
 const { regeocodeCustomerAddressGuarded } = require('../services/geocoder');
+const { refreshScheduleQualityAfterChange } = require('../services/scheduling/quality-after-change');
 
 function deferred() {
   let resolve;
@@ -65,6 +67,8 @@ describe('customer address geocode completion order', () => {
 
     expect(customer).toMatchObject({ address_line1: '200 Synthetic Race Lane', latitude: 27.5, longitude: -82.4 });
     expect(property).toMatchObject({ latitude: 27.5, longitude: -82.4 });
+    expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
+    expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: [customer.id] });
   });
 
   it('leaves coordinates empty when the address changes while its geocode is pending', async () => {
@@ -83,5 +87,6 @@ describe('customer address geocode completion order', () => {
     expect(await pending).toBeNull();
     expect(customer.latitude).toBeNull();
     expect(property.latitude).toBeNull();
+    expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
   });
 });

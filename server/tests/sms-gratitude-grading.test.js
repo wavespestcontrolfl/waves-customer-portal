@@ -55,7 +55,8 @@ describe('pure gratitude qualification grading', () => {
     expect(fixtureSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(exam.fixtures.map(fixture => fixture.id)).toEqual([
       'positive_report', 'positive_receipt', 'positive_completed_service', 'positive_bank_ack',
-      'negative_mixed_thanks', 'negative_question', 'negative_promise', 'negative_complaint',
+      'positive_manual_answer', 'positive_manual_after_question',
+      'negative_mixed_thanks', 'negative_question', 'negative_promise', 'negative_manual_payment_request', 'negative_complaint',
       'negative_booking_acceptance', 'negative_media', 'negative_prior_operational',
       'negative_new_inbound', 'negative_new_outbound', 'negative_loop',
       'negative_missing_context', 'negative_pending_work',
@@ -82,7 +83,7 @@ describe('pure gratitude qualification grading', () => {
     const { exam } = loadGratitudeExam();
     const complete = passingResults(exam);
     expect(gradeGratitudeResults({ exam, results: complete, pins: PINS, legs: LEGS }))
-      .toEqual({ qualified: true, reason: 'qualified', positives: 8, negatives: 24 });
+      .toEqual({ qualified: true, reason: 'qualified', positives: 12, negatives: 26 });
 
     expect(gradeGratitudeResults({ exam, results: complete.slice(1), pins: PINS, legs: LEGS }))
       .toMatchObject({ qualified: false, reason: 'result_set_incomplete' });

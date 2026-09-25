@@ -706,6 +706,42 @@ describe('reviseAdminEstimate', () => {
     expect(data.sendSnapshot).toBeUndefined();
   });
 
+  test('carries the assessment-exception provenance across an ordinary revision; a client payload cannot invent or repoint it (codex #4815 r9 P2)', async () => {
+    const exception = { call_log_id: 'call-9', generation: 3, reason: 'booked_visit_terminal' };
+    const withException = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        assessment_exception: exception,
+      }),
+    };
+    const kept = makeReviseDatabase({ estimate: withException });
+    await reviseAdminEstimate({
+      database: kept.database,
+      estimateId: 'est-1',
+      body: {
+        ...reviseBody,
+        estimateData: { ...reviseBody.estimateData, assessment_exception: { call_log_id: 'call-other' } },
+      },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(JSON.parse(kept.updates[0].estimate_data).assessment_exception).toEqual(exception);
+
+    const invented = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database: invented.database,
+      estimateId: 'est-1',
+      body: {
+        ...reviseBody,
+        estimateData: { ...reviseBody.estimateData, assessment_exception: { call_log_id: 'call-9' } },
+      },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(JSON.parse(invented.updates[0].estimate_data).assessment_exception).toBeUndefined();
+  });
+
   test('preserves the locked publication window and anchor routing across wholesale revisions', async () => {
     const originalData = JSON.parse(sentEstimate.estimate_data);
     const prior = { ...sentEstimate, estimate_group_id: '11111111-1111-4111-8111-111111111111', estimate_data: JSON.stringify({ ...originalData,

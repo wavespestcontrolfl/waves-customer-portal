@@ -48,10 +48,8 @@ function catalogEntry(id) {
 // thinking blocks + refusals — catalog entries with requires:'deep'). `lock`
 // removes the picker entirely.
 const SELECTORS = [
-  // cap 'vision', not 'text': satellite-analyzer.js and routes/property-lookup-v2.js
-  // send image payloads through MODELS.FLAGSHIP, so a text-only pick would
-  // break those lanes after restart. Every catalogued Claude model has vision.
-  { key: 'FLAGSHIP', env: 'MODEL_FLAGSHIP', description: 'Best general reasoning (also the Claude leg of two photo lanes)', accepts: { providers: ['anthropic'], cap: 'vision' } },
+  // General reasoning callers may include images; keep a vision-capable tier.
+  { key: 'FLAGSHIP', env: 'MODEL_FLAGSHIP', description: 'Best general reasoning', accepts: { providers: ['anthropic'], cap: 'vision' } },
   { key: 'DEEP', env: 'MODEL_DEEP', description: 'Verifiers, judges, gates (via llm/deep.js)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'EXTREME', env: 'MODEL_EXTREME', description: 'Explicit deep-audit opt-in; never automatic', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'WORKHORSE', env: 'MODEL_WORKHORSE', description: 'Drafting and content', accepts: { providers: ['anthropic'], cap: 'text' } },
@@ -66,6 +64,8 @@ const SELECTORS = [
   { key: 'OPENAI_REPORT_WRITER', env: 'MODEL_OPENAI_REPORT_WRITER', description: 'Reports + high-stakes backup (Sol)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_BALANCED', env: 'MODEL_OPENAI_BALANCED', description: 'Q&A + customer-copy backup; OpenAI leg of the vision route (Terra)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FRONTIER', env: 'MODEL_OPENAI_FRONTIER', description: 'Frontier OpenAI vision — lawn visit assessment backup leg (Astra)', accepts: { providers: ['openai'], cap: 'vision' } },
+  { key: 'OPENAI_ESTIMATE_VISION', env: 'MODEL_OPENAI_ESTIMATE_VISION', description: 'Estimate satellite/property image fallback (Sol)', accepts: { providers: ['openai'], cap: 'vision' } },
+  { key: 'OPENAI_IMAGE_SCREEN', env: 'MODEL_OPENAI_IMAGE_SCREEN', description: 'Generated-image screen (Sol) — blog image text/logo/uniform/van check', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FAST', env: 'MODEL_OPENAI_FAST', description: 'Cheap structured classification (Luna)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_SMS_DRAFT', env: 'MODEL_OPENAI_SMS_DRAFT', description: 'Sealed-eval Luna leg (follows OPENAI_FAST unless set)', derivesFrom: 'OPENAI_FAST', accepts: { providers: ['openai'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'GEMINI_VISION_BEST', env: 'MODEL_GEMINI_VISION', description: 'Gemini leg of the photo lanes', accepts: { providers: ['gemini'], cap: 'vision' } },
@@ -105,11 +105,13 @@ const POLICY_SELECTOR = {
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   visionAnalysis: { primary: 'VISION', fallback: 'OPENAI_BALANCED' },
+  estimateVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_ESTIMATE_VISION' },
   photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
+  imageScreen: { primary: 'OPENAI_IMAGE_SCREEN', fallback: 'VISION' },
   voiceJudge: { primary: 'VOICE_JUDGE', fallback: 'OPENAI_REPORT_WRITER' },
 };
 
@@ -120,12 +122,21 @@ const POLICY_SELECTOR = {
 //   P(policy, leg)     MODELS.TEXT_POLICIES[policy][leg].model
 //   E(env, ref)        process.env[env] || resolve(ref)      (pin over a selector)
 //   D(env, literal)    process.env[env] || literal           (out-of-registry lane)
+// `opts.parse` on E works like D's: for the rare env whose call site validates
+// the raw value (an allowlist, not a bare pass-through) before running it.
+// Called with the raw string; returns the id to report, or null to report the
+// same fallback the call site itself would use for a rejected value.
+// `opts.catalogOnly` marks a leg whose call site allowlist-checks the raw env
+// against config/models.js MODEL_CATALOG (never a live-discovered id) — the
+// picker consults `accepts.catalogOnly` to stop offering a search result the
+// runtime would reject after restart. Only meaningful with `opts.parse`,
+// which is what actually enforces it at read time; this just advertises it.
 const T = (tier) => ({ kind: 'tier', key: tier });
 const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
-const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live });
+const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null, catalogOnly: !!opts.catalogOnly, allowed: opts.allowed || null });
 // D(env | [env, ...aliases], literal): the call site reads the first set var
-// in order (satellite: OPENAI_VISION_MODEL || OPENAI_MODEL || 'gpt-5-mini').
+// in order (property records: OPENAI_PROPERTY_MODEL || OPENAI_MODEL || 'gpt-5-mini').
 // The composer writes the FIRST (specific) name; aliases only report.
 //   opts.parse(value)  when the env value is not a bare model id (the image
 //                      chain "gpt-image-2,gemini-image-best"): returns the
@@ -191,6 +202,27 @@ function nthImageChainModel(n) {
 const firstImageChainModel = nthImageChainModel(0);
 const secondImageChainModel = nthImageChainModel(1);
 
+// Social keeps its OWN default chain (SOCIAL_DEFAULT_CHAIN, social-media.js's
+// engine — not moved to the blog chain, no gpt-image-2.5-sunburst leg
+// yet). image-generator's parseChain/MODEL_MAP do the parsing (same slugs,
+// same pixel-watermark filter) but its OWN no-env default is the BLOG chain,
+// so a bare `parseChain(value)` call here would silently report the blog
+// lane's default whenever SOCIAL_IMAGE_PROVIDER is unset. Falling back to the
+// social engine's own default (watermark-allowed variant included, mirroring
+// CREATIVE_FLAGS.chain's own env-override logic) keeps the no-env case honest.
+function nthSocialImageChainModel(n) {
+  return (value) => {
+    const { parseChain, MODEL_MAP } = require('./content/image-generator')._internals;
+    const { SOCIAL_DEFAULT_CHAIN, SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN } = require('./social-creative-engine');
+    const allowWatermark = process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS === 'true';
+    const noEnvChain = allowWatermark ? SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN : SOCIAL_DEFAULT_CHAIN;
+    const slug = parseChain(value || noEnvChain)[n];
+    return slug ? MODEL_MAP[slug].model : null;
+  };
+}
+const firstSocialImageChainModel = nthSocialImageChainModel(0);
+const secondSocialImageChainModel = nthSocialImageChainModel(1);
+
 // Lane extras: `retry` = the leg tried after the fallback leg (the fan-out
 // photo lanes re-run Gemini on GEMINI_VISION_FALLBACK; the sequential caption
 // ladder reaches Claude only after both Gemini rungs); `also` = further legs
@@ -208,6 +240,23 @@ const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by eight photo lane
 // an inbound lane onto Gemini widens the prompt-injection surface — the tab
 // warns on that specific move.
 const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ id, name, file, policy, primary, fallback, ...extra });
+
+// voice_relay's E() parse + allowed hooks (below): VOICE_RELAY_INBOUND_MODEL is
+// the one pin here the call site itself allowlist-checks. Lazy require — this
+// file loads at server boot, well before any inbound call; relay-conversation.js
+// pulls in the Anthropic SDK, db and other heavier deps this module has no
+// other reason to load. Both hooks ask the runtime's OWN allowlist verdict
+// (isAllowedOverrideModel, the check resolveSessionModel applies) — never
+// compare resolved model ids, which cannot tell a rejected override from a
+// fallback that happens to carry the same id.
+function inboundOverrideParse(raw) {
+  const { isAllowedOverrideModel } = require('./voice-agent/relay-conversation');
+  return isAllowedOverrideModel(raw) ? raw : null;
+}
+function inboundOverrideAllowed() {
+  const { ALLOWED_OVERRIDE_MODEL_IDS } = require('./voice-agent/relay-conversation');
+  return [...ALLOWED_OVERRIDE_MODEL_IDS];
+}
 
 // The audited call-site map (server/, 2026-09-02). Grouped by the kind of
 // work the lane does — NOT by the model it happens to run — so a routine lane
@@ -259,14 +308,12 @@ const LANES = [
   // Sequential ladder, not a fan-out: analyzePhoto tries Gemini, then the
   // prior Gemini, and reaches Claude VISION only when both miss.
   L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
-  // Ladder, not a fan-out (owner ruling 2026-09-24): Gemini first, then
-  // Claude (FLAGSHIP — the trio's heavier reasoning leg), then OpenAI as the
-  // true last resort — stopping at the first schema-valid result. No more
-  // three-way parallel fan-out / agreement-based confidence; a single-source
-  // result always reads 'single_model', never 'high'.
-  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('FLAGSHIP'), { retry: D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } }), note: 'Gemini → Claude → OpenAI ladder (owner 2026-09-24), stopping at the first schema-valid result' }),
+  // Estimate imagery uses Gemini, then Sol only on a failed/invalid read.
+  // Satellite confidence stays 'single_model'; V2 retains one source's
+  // measurement provenance rather than claiming multi-provider agreement.
+  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('estimateVision', 'fallback'), { note: 'Gemini → Sol fallback, stopping at the first schema-valid result' }),
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), E('GEMINI_PROPERTY_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
-  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: SHARED_GEMINI_PIN }),
+  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('estimateVision', 'fallback'), { note: 'Gemini → Sol fallback, stopping at the first schema-valid result' }),
   L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', E('GEMINI_TURF_OCR_MODEL', T('GEMINI_VISION_BEST')), null, { fanout: true, inbound: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
   L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('photoCaptions', 'fallback'), { inbound: true, note: `drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24) · ${SHARED_GEMINI_PIN}` }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
@@ -274,6 +321,10 @@ const LANES = [
   L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
   L('lawn_challenge', 'Lawn diagnostic · adversarial challenge', 'lawn-diagnostic-prompt.js', 'multimodal', T('LAWN_CHALLENGE')),
   L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
+  // Generated-image screen (owner ruling 2026-09-25: Sol first, Claude
+  // backup) — the blog image text/logo/uniform/van check, a separate call
+  // from the hero_alt alt-text pass above (which stays on visionAnalysis).
+  L('image_screen', 'Generated image screen', 'content/hero-alt-vision.js', 'multimodal', P('imageScreen', 'primary'), P('imageScreen', 'fallback'), { note: 'blog image text/logo/uniform/van check; Sol first, Claude VISION backs it up' }),
   L('wdo_project_brief', 'WDO project brief + treatment-photo read', 'routes/admin-projects.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'text-only briefs ride contentDraft' }),
   L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('FLAGSHIP'), null, { inbound: true }),
   L('contact_dictation', 'Contact dictation decoder', 'contact-dictation.js', 'multimodal', D('GEMINI_CONTACT_DECODER_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
@@ -308,7 +359,23 @@ const LANES = [
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
   L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD, dark' }),
-  L('voice_relay', 'Voice relay + collections calls', 'voice-agent/relay-conversation.js, collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'one env for both call flows' }),
+  // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
+  // (pinned once per session at conversation construction), else the shared
+  // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
+  // directly (row below) and never sees the inbound-only override.
+  // Unlike every other E() pin here, VOICE_RELAY_INBOUND_MODEL is allowlist
+  // -checked by the call site itself (relay-conversation.js
+  // resolveSessionModel) — a raw value outside config/models.js MODEL_CATALOG
+  // never runs. inboundOverrideParse() reuses that same live resolver instead
+  // of re-deriving the allowlist here, so this row can never show a model the
+  // runtime would actually refuse. `catalogOnly: true` carries that same fact
+  // to the Models tab's picker (PickModelDialog.jsx): a live provider search
+  // result that is not in MODEL_CATALOG must not be offered for this lane —
+  // it would draft an env value inboundOverrideParse() (and the runtime's own
+  // resolveSessionModel) reject outright, falling back after the restart the
+  // owner thought would apply it.
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE')), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
   // ── Report writer ──
@@ -389,7 +456,16 @@ const LANES = [
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
-  L('image_gen', 'Blog / social image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-1.5', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2 → gpt-image-1.5 → gpt-image-1 (owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs and this lane then reports that Gemini backup.' }),
+  // Blog image generation (content/image-generator.js, env BLOG_IMAGE_PROVIDER).
+  // Literals are the REAL no-env defaults — computed through the same
+  // firstImageChainModel/secondImageChainModel parse helpers the env-override
+  // path uses, not a hand-typed slug, so a chain reorder (Images 2.5 leading
+  // since 2026-09-25) can't drift the card out of sync with image-generator.js.
+  L('image_gen', 'Blog image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', firstImageChainModel(undefined) || 'gpt-image-2.5-sunburst', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-2', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2.5-sunburst → gpt-image-2 → gpt-image-1.5 → gpt-image-1 (Images 2.5 leads since 2026-09-25; owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs further down the chain (out of this card\'s first two legs) during a deliberate run.' }),
+  // Social image generation (social-creative-engine.js, env SOCIAL_IMAGE_PROVIDER)
+  // keeps the OLDER chain — no gpt-image-2.5-sunburst leg (the 2026-09-25
+  // Images 2.5 switch covered the blog generator only; social was not moved).
+  L('social_image_gen', 'Social image generation', 'social-creative-engine.js', 'locked', D('SOCIAL_IMAGE_PROVIDER', firstSocialImageChainModel(undefined) || 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstSocialImageChainModel }), D('SOCIAL_IMAGE_PROVIDER', secondSocialImageChainModel(undefined) || 'gpt-image-1.5', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondSocialImageChainModel }), { lock: LOCK.provider('image chain, env SOCIAL_IMAGE_PROVIDER'), note: 'social keeps the older chain (no Images 2.5 leg): gpt-image-2 → gpt-image-1.5 → gpt-image-1. ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs further down the chain during a deliberate run.' }),
   L('video_gen', 'Reels video generation', 'content/video-generator.js', 'locked', T('GEMINI_VIDEO_FAST'), T('GEMINI_VIDEO_QUALITY'), { lock: LOCK.provider('video chain') }),
   L('mentions_prober', 'LLM mentions prober (Claude, OpenAI, Gemini, Perplexity arms)', 'seo/llm-mention-prober.js', 'locked', E('MODEL_MENTIONS', T('WORKHORSE'), { live: true }), null, { lock: LOCK.measurement('each engine is probed directly; a fallback would falsify the measurement'), note: 'OPENAI_MENTIONS_MODEL gpt-4o-search-preview · GEMINI_MENTIONS_MODEL gemini-2.5-flash · PERPLEXITY_MENTIONS_MODEL sonar' }),
   L('sealed_eval', 'SMS sealed-eval exam legs', 'sms-sealed-eval.js', 'locked', T('SMS_SONNET'), T('OPENAI_REPORT_WRITER'), { lock: LOCK.measurement('frozen exam; Gemini / Luna / Opus / Fable measurement legs too') }),
@@ -448,6 +524,7 @@ const LANE_AREA = {
   tech_dictation: 'calls',
   parse_when: 'calls',
   voice_relay: 'voice',
+  voice_relay_collections: 'voice',
   voice_relay_judge: 'voice',
   pest_id: 'photos',
   lawn_assess: 'photos',
@@ -501,6 +578,7 @@ const LANE_AREA = {
   review_reply: 'content',
   review_gate_text: 'content',
   hero_alt: 'content',
+  image_screen: 'content',
   editorial_review: 'content',
   editorial_repair: 'content',
   editorial_plan_review: 'content',
@@ -519,6 +597,7 @@ const LANE_AREA = {
   mentions_prober: 'content',
   mentions_sentiment: 'content',
   image_gen: 'content',
+  social_image_gen: 'content',
   video_gen: 'content',
   events: 'content',
   events_editorial: 'content',
@@ -582,7 +661,8 @@ const LANE_DESCRIBE = {
   address_recovery: 'Recovers a street address that did not validate',
   tech_dictation: 'Transcribes field notes from the tech',
   parse_when: 'Reads "next Tuesday morning" into a date',
-  voice_relay: 'Speaks with callers on the phone line and collections calls',
+  voice_relay: 'Speaks with callers on the phone line (Sandy)',
+  voice_relay_collections: 'Speaks with customers on collections calls',
   voice_relay_judge: 'Grades Sandy\'s eval calls against each scenario\'s spec',
   pest_id: 'Identifies the pest in a customer photo',
   lawn_assess: 'Assesses lawn health from a customer photo',
@@ -636,6 +716,7 @@ const LANE_DESCRIBE = {
   review_reply: 'Replies to Google reviews',
   review_gate_text: 'Drafts the review text for a customer',
   hero_alt: 'Writes alt text for hero images',
+  image_screen: 'Screens a generated blog image for a wrong text mark, logo, uniform badge or van wrap',
   editorial_review: 'Audits complete article evidence and editorial quality',
   editorial_repair: 'Repairs editorial findings while preserving document structure',
   editorial_plan_review: 'Checks answer-first section plans before drafting',
@@ -653,7 +734,8 @@ const LANE_DESCRIBE = {
   link_investigator: 'Investigates internal link paths',
   mentions_prober: 'Asks each AI engine whether it mentions Waves',
   mentions_sentiment: 'Scores those mentions',
-  image_gen: 'Generates blog and social images',
+  image_gen: 'Generates blog images',
+  social_image_gen: 'Generates social post images',
   video_gen: 'Generates Reels clips',
   events: 'Finds community events',
   events_editorial: 'Scores community events and cleans up their venue details',
@@ -691,7 +773,7 @@ const LANE_DESCRIBE = {
 const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "response_drafter_high_stakes", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {
@@ -740,6 +822,75 @@ function resolveSelectors() {
 
 const SELECTOR_BY_KEY = Object.fromEntries(SELECTORS.map((s) => [s.key, s]));
 
+// A ROUTES / TEXT_POLICIES leg is attributed to its registry selector only
+// while the selector still supplies that exact model.
+function resolveAttributed(model, selKey, path) {
+  const attributed = selKey && MODELS[selKey] === model ? selKey : null;
+  return { model, selector: attributed, via: `${path}${attributed ? ` → ${attributed}` : ''}`, pinEnv: null, pinned: false, live: false, accepts: attributed ? SELECTOR_BY_KEY[attributed].accepts : null };
+}
+
+// One env pin's own state, before any fallback: which alias is set (`setEnv`
+// is the name to DELETE, not the canonical first name the composer writes),
+// the model it yields (through ref.parse when the call site validates or
+// decodes the value), and `afterUnpin` — the next lower-priority alias still
+// set, which is what the leg runs on once `setEnv` is deleted.
+function envLink(ref) {
+  const names = Array.isArray(ref.env) ? ref.env : [ref.env];
+  const setName = names.find((n) => process.env[n]) || null;
+  const raw = setName ? process.env[setName] : null;
+  const model = raw ? (ref.parse ? ref.parse(raw) : raw) || null : null;
+  const afterUnpin = setName ? names.slice(names.indexOf(setName) + 1).map((n) => process.env[n]).find(Boolean) || null : null;
+  return { env: names[0], setEnv: setName, model, accepted: !!model, afterUnpin };
+}
+
+// D(env, literal): `process.env.PIN || 'literal'`.
+function resolveEnvLiteral(ref) {
+  const link = envLink(ref);
+  const model = link.model || ref.literal;
+  const via = link.setEnv ? `${link.setEnv}${link.setEnv !== link.env ? ' (alias)' : ''}` : `${link.env} (code default)`;
+  return { model, selector: null, via, pinEnv: link.env, setEnv: link.setEnv, pinned: !!link.setEnv, unpinnedModel: link.afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
+}
+
+// E(env, base): `process.env.PIN || <base>`, where base may itself be an E()
+// (voice_relay: VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → VOICE tier).
+//
+// `chain` is the whole env chain, highest precedence first, each link with its
+// own accepted/rejected verdict; `chainBase` is the selector / model at the
+// bottom. The composer (client/src/pages/admin/agents/modelDraft.js walkChain)
+// resolves every draft question — where a leg lands, which env moves it,
+// whether it still follows a selector — by walking this one list with the
+// draft applied, instead of re-deriving the chain from summary flags.
+//
+// `pinned` = the model comes from an env rather than the selector (the tab's
+// selector-follower lists key on `!pinned`). An override ref.parse REJECTED
+// is set but not in effect, so the leg is pinned exactly when its base is.
+// `dependsOnEnvs` lists lower envs the CURRENT resolution rides (non-empty
+// only when this leg's own pin is not in effect).
+function resolveEnvChain(ref) {
+  const link = envLink(ref);
+  const base = resolveRef(ref.ref);
+  const own = link.accepted;
+  const dependsOnEnvs = own ? [] : [...(base.pinEnv ? [base.pinEnv] : []), ...(base.dependsOnEnvs || [])];
+  const chain = [link, ...(base.chain || [])];
+  const chainBase = base.chainBase || { selector: base.selector || null, model: base.model };
+  const accepts = ref.catalogOnly ? { ...base.accepts, catalogOnly: true, allowedIds: ref.allowed ? ref.allowed() : null } : base.accepts;
+  const via = own ? `${link.setEnv} (pinned)` : link.setEnv ? `${link.setEnv} rejected → ${base.via}` : `${link.env} → ${base.via}`;
+  return {
+    model: own ? link.model : base.model,
+    selector: base.selector,
+    via,
+    pinEnv: link.env,
+    setEnv: link.setEnv,
+    pinned: own || !!base.pinned,
+    unpinnedModel: link.afterUnpin || base.model,
+    live: ref.live,
+    accepts,
+    dependsOnEnvs,
+    chain,
+    chainBase,
+  };
+}
+
 // Resolve a ref to { model, selector, via, pinEnv, pinned, live, accepts }.
 // `selector` is the registry selector the value ultimately comes from (null
 // for out-of-registry literals); `via` is the human-readable path.
@@ -750,41 +901,14 @@ function resolveRef(ref) {
       const sel = SELECTOR_BY_KEY[ref.key];
       return { model: MODELS[ref.key], selector: ref.key, via: ref.key, pinEnv: null, pinned: false, live: false, accepts: sel ? sel.accepts : null };
     }
-    case 'route': {
-      const route = MODELS.ROUTES[ref.key];
-      const selKey = ROUTE_SELECTOR[ref.key];
-      const attributed = selKey && MODELS[selKey] === route?.model ? selKey : null;
-      return { model: route?.model, selector: attributed, via: `ROUTES.${ref.key}${attributed ? ` → ${attributed}` : ''}`, pinEnv: null, pinned: false, live: false, accepts: attributed ? SELECTOR_BY_KEY[attributed].accepts : null };
-    }
-    case 'policy': {
-      const leg = MODELS.TEXT_POLICIES[ref.key]?.[ref.leg];
-      const selKey = POLICY_SELECTOR[ref.key]?.[ref.leg];
-      const attributed = selKey && MODELS[selKey] === leg?.model ? selKey : null;
-      return { model: leg?.model, selector: attributed, via: `TEXT_POLICIES.${ref.key}.${ref.leg}${attributed ? ` → ${attributed}` : ''}`, pinEnv: null, pinned: false, live: false, accepts: attributed ? SELECTOR_BY_KEY[attributed].accepts : null };
-    }
+    case 'route':
+      return resolveAttributed(MODELS.ROUTES[ref.key]?.model, ROUTE_SELECTOR[ref.key], `ROUTES.${ref.key}`);
+    case 'policy':
+      return resolveAttributed(MODELS.TEXT_POLICIES[ref.key]?.[ref.leg]?.model, POLICY_SELECTOR[ref.key]?.[ref.leg], `TEXT_POLICIES.${ref.key}.${ref.leg}`);
     case 'literal':
       return { model: ref.model, selector: null, via: 'code constant', pinEnv: null, pinned: false, unpinnedModel: ref.model, live: false, accepts: ref.accepts || { providers: [providerOf(ref.model)], cap: 'text' } };
-    case 'env': {
-      const names = Array.isArray(ref.env) ? ref.env : [ref.env];
-      const setName = names.find((n) => process.env[n]) || null;
-      const pinned = !!setName;
-      const primaryName = names[0];
-      // unpinnedModel = what the leg runs on once the env var is deleted, so
-      // the composer can offer "unpin" with an honest before/after. With an
-      // alias chain that is the next set alias, then the literal / base.
-      // `setEnv` is the name to DELETE (the active alias, not the canonical
-      // first name); `afterUnpin` is the next lower-priority alias still set.
-      const afterUnpin = setName ? names.slice(names.indexOf(setName) + 1).map((n) => process.env[n]).find(Boolean) || null : null;
-      if (ref.literal !== undefined) {
-        const raw = (setName && process.env[setName]) || null;
-        const model = (raw && (ref.parse ? ref.parse(raw) : raw)) || ref.literal;
-        const via = setName ? `${setName}${setName !== primaryName ? ' (alias)' : ''}` : `${primaryName} (code default)`;
-        return { model, selector: null, via, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || ref.literal, live: ref.live, accepts: ref.accepts || { providers: [providerOf(model)], cap: 'text' } };
-      }
-      const base = resolveRef(ref.ref);
-      const model = (setName && process.env[setName]) || base.model;
-      return { model, selector: base.selector, via: setName ? `${setName} (pinned)` : `${primaryName} → ${base.via}`, pinEnv: primaryName, setEnv: setName, pinned, unpinnedModel: afterUnpin || base.model, live: ref.live, accepts: base.accepts };
-    }
+    case 'env':
+      return ref.literal !== undefined ? resolveEnvLiteral(ref) : resolveEnvChain(ref);
     default:
       return null;
   }

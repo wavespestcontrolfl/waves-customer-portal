@@ -605,6 +605,8 @@ async function dispatch(route, payload = {}) {
  *
  * validate(result, route) may return null/false for success or a short reason
  * string for rejection. Rejected output is never returned as a success.
+ * reserveFallbackBudget splits even an explicit timeoutMs across remaining
+ * legs; maxAttemptMs optionally caps each leg without extending the deadline.
  */
 async function dispatchWithFallback(policy, payload = {}, options = {}) {
   // Every leg of the chain shares one agent-control chain id (the ledger's
@@ -625,7 +627,7 @@ function legFailure(route, reason, result, extra = {}) {
   return { provider: route.provider, model: route.model, reason, ...extra, ...(result?.usage ? { usage: result.usage } : {}) };
 }
 
-async function runFallbackChain(policy, payload, { validate } = {}) {
+async function runFallbackChain(policy, payload, { validate, reserveFallbackBudget = false, maxAttemptMs } = {}) {
   const routes = [policy?.primary, policy?.fallback].filter(Boolean);
   if (!routes.length) return { ok: false, reason: 'no_route', failures: [] };
   if (routes.length > 1 && routes[0].provider === routes[1].provider) {
@@ -638,14 +640,16 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
   // as the chain row (labels resolve in one place: policyLabel).
   const chainLabel = metrics.recordedPolicyLabel(policy);
   // Every chain runs under a shared wall-clock deadline. Callers with an
-  // explicit timeoutMs keep their original semantics (each leg gets the full
-  // remainder — fact-check's hard 60s ceiling). Callers WITHOUT one get
+  // explicit timeoutMs keep their original semantics unless they opt into
+  // reserving fallback time (each leg otherwise gets the full remainder —
+  // fact-check's hard 60s ceiling). Callers WITHOUT one get
   // DEFAULT_FALLBACK_BUDGET_MS, split evenly across the remaining legs so a
   // stalled primary aborts at its share and cannot starve the fallback —
   // without this, a hung leg sat on the adapter's 10-minute default before
   // failover ever started, far beyond user-facing request windows.
   const explicitBudget = Number.isFinite(payload.timeoutMs) && payload.timeoutMs > 0;
   const timeoutBudgetMs = explicitBudget ? payload.timeoutMs : DEFAULT_FALLBACK_BUDGET_MS;
+  const attemptCapMs = Number.isFinite(maxAttemptMs) && maxAttemptMs > 0 ? maxAttemptMs : Infinity;
   const deadline = Date.now() + timeoutBudgetMs;
   for (let index = 0; index < routes.length; index += 1) {
     const route = routes[index];
@@ -654,7 +658,9 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
       failures.push(legFailure(route, 'timeout_budget_exhausted'));
       break;
     }
-    const legMs = explicitBudget ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
+    const shareMs = explicitBudget && !reserveFallbackBudget
+      ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
+    const legMs = Math.min(shareMs, attemptCapMs);
     const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
     let result;
     try {

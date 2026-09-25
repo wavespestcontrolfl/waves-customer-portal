@@ -58,6 +58,16 @@ jest.mock('../services/estimate-annual-guard', () => ({
   // scheduled-retry test.
   withheldLinkPolicyForSmsPurpose: jest.fn(() => 'refuse'),
 }));
+// callback_number_needed hold (PR #4807, round 6 — number-keyed) — the
+// canonical chokepoint checks every SMS `to` against
+// disclaimed_number_holds, right beside the MOVE_HOLD check this file's own
+// describe block exercises. Mocked out (default: never held) so this
+// file's plain `db` doubles — built for MOVE_HOLD's own where/first query
+// shape — are never asked to also answer the hold read; the chokepoint
+// itself is covered by send-customer-message-callback-number-hold.test.js.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberBlocksSend: jest.fn(async () => false),
+}));
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { persistAudit } = require('../services/messaging/audit');

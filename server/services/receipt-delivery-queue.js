@@ -1,6 +1,7 @@
 const os = require('os');
 const db = require('../models/db');
 const logger = require('./logger');
+const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 const QUEUED_STATUSES = ['queued', 'retry_scheduled'];
 const STALE_LOCK_MINUTES = 10;
@@ -111,7 +112,8 @@ function expectedEmailSkip(result) {
   // already do; the SMS leg carries the receipt for these customers).
   return result?.error === 'No receipt recipient email'
     || result?.error === 'receipt_opted_out'
-    || result?.error === 'email_opted_out';
+    || result?.error === 'email_opted_out'
+    || result?.error === 'billing_email_not_selected';
 }
 
 function actionableSmsFailure(result) {
@@ -132,11 +134,20 @@ function actionableEmailFailure(result) {
   return result && result.ok === false && !expectedEmailSkip(result);
 }
 
+function receiptChannelChoiceChanged(smsResult, emailResult) {
+  return smsResult?.sent === false && smsResult.reason === 'channel_email_only'
+    && emailResult?.ok === false && emailResult.error === 'billing_email_not_selected';
+}
+
 function shouldRetryReceiptDelivery({ smsResult = null, emailResult = null } = {}) {
-  return actionableSmsFailure(smsResult) || actionableEmailFailure(emailResult);
+  return receiptChannelChoiceChanged(smsResult, emailResult)
+    || actionableSmsFailure(smsResult) || actionableEmailFailure(emailResult);
 }
 
 function receiptDeliveryFailureError({ smsResult = null, emailResult = null } = {}) {
+  if (receiptChannelChoiceChanged(smsResult, emailResult)) {
+    return new Error('Receipt delivery preferences changed between channel checks');
+  }
   const smsReason = actionableSmsFailure(smsResult) ? (smsResult.reason || 'unknown') : 'ok';
   const emailReason = actionableEmailFailure(emailResult) ? (emailResult.error || 'unknown') : 'ok';
   return new Error(`receipt channel failed: sms=${smsReason} email=${emailReason}`);
@@ -245,6 +256,7 @@ async function processReceiptDeliveryJob(job) {
     // delivered email) — nothing was sent.
     let receiptKillSwitch = false;
     let emailOptedOut = false;
+    let emailSelected = true;
     let prefsLookupFailed = false;
     if (!invoice.payer_id) {
       const prefs = await db('notification_prefs')
@@ -260,6 +272,7 @@ async function processReceiptDeliveryJob(job) {
         });
       receiptKillSwitch = prefs?.payment_receipt === false;
       emailOptedOut = prefs?.email_enabled === false;
+      emailSelected = billingChannelAllowed(prefs || {}, 'payment_receipt', 'email') !== false;
     }
     // The email leg is deliberately NOT gated on payment_receipt_channel:
     // migration 104 seeded 'sms' as the column DEFAULT on every existing row,
@@ -275,8 +288,11 @@ async function processReceiptDeliveryJob(job) {
         ? { ok: false, error: 'receipt_opted_out' }
         : emailOptedOut
           ? { ok: false, error: 'email_opted_out' }
-          : await sendReceiptEmail(invoice.id, {
+          : !emailSelected
+            ? { ok: false, skipped: true, error: 'billing_email_not_selected' }
+            : await sendReceiptEmail(invoice.id, {
             idempotencyKey: `receipt_email_auto:${invoice.id}`,
+            billingDeliveryCategory: 'payment_receipt',
           }).catch((err) => ({ ok: false, error: err.message }));
     if (actionableEmailFailure(emailResult)) {
       logger.warn(`[receipt-delivery-queue] Receipt email not sent for invoice ${invoice.invoice_number}: ${emailResult.error || 'unknown'}`);

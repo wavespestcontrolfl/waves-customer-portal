@@ -155,14 +155,40 @@ async function classifyServiceIntent(body) {
 
 // Words that pick the LAWN assessment. Everything else that triggers
 // photo_diagnosis runs the pest identifier.
-const PHOTO_LAWN_WORDS = ['lawn', 'grass', 'yard', 'turf', 'weed', 'weeds'];
+// Lawn-soil pests (grubs, sod webworms, armyworms, chinch) are LAWN
+// diagnostics, not pest identification — they count for the lawn
+// assessment (pre-push audit r7: "grubs in my lawn" must stay lawn). A bare
+// "worm" is NOT lawn-specific ("worm in my kitchen") — it is no subject
+// word at all, so the caption takes the default pest path (codex #4810 r8).
+const PHOTO_LAWN_WORDS = [
+  'lawn', 'grass', 'yard', 'turf', 'weed', 'weeds', 'sod',
+  'grub', 'grubs', 'webworm', 'webworms', 'armyworm', 'armyworms', 'chinch',
+];
+// Every pest class the classifier prompt names (bug, insect, spider,
+// rodent, termite) plus the common sightings customers actually type — a
+// mixed "spider on my plant" caption must reach the pest identifier, not
+// fast-path to a plant-health assessment (codex #4810 r1).
 const PHOTO_PEST_WORDS = [
   'bug', 'bugs', 'insect', 'insects', 'pest', 'pests', 'ant', 'ants',
-  'termite', 'termites',
+  'termite', 'termites', 'spider', 'spiders', 'roach', 'roaches',
+  'cockroach', 'cockroaches', 'rat', 'rats', 'mouse', 'mice', 'rodent',
+  'rodents', 'beetle', 'beetles', 'wasp', 'wasps', 'bee', 'bees', 'hornet',
+  'hornets', 'mosquito', 'mosquitoes', 'mosquitos', 'flea', 'fleas', 'tick',
+  'ticks', 'scorpion', 'scorpions', 'silverfish', 'caterpillar',
+  'caterpillars', 'aphid', 'aphids', 'mealybug', 'mealybugs', 'whitefly',
+  'whiteflies', 'mite', 'mites', 'moth',
+  'moths', 'gnat', 'gnats', 'fly', 'flies', 'earwig', 'earwigs', 'millipede',
+  'millipedes', 'centipede', 'centipedes', 'snail', 'snails', 'slug', 'slugs',
+  'lizard', 'lizards', 'gecko', 'geckos', 'frog', 'frogs',
 ];
 const PHOTO_TREE_SHRUB_WORDS = [
   'tree', 'trees', 'shrub', 'shrubs', 'bush', 'bushes', 'plant', 'plants',
   'palm', 'palms', 'leaf', 'leaves',
+  // codex #4810 r4: hedges/ornamentals are the commonest tree & shrub
+  // subjects customers actually type.
+  'hedge', 'hedges', 'hedgerow', 'ornamental', 'ornamentals', 'hibiscus',
+  'vine', 'vines', 'flower', 'flowers', 'foliage', 'branch', 'branches',
+  'trunk', 'bark', 'frond', 'fronds',
 ];
 // Subject words that say "diagnose this" without leaning lawn or pest.
 const PHOTO_NEUTRAL_WORDS = ['fungus', 'fungi', 'mold', 'mushroom', 'mushrooms'];
@@ -176,35 +202,71 @@ const PHOTO_PROBLEM_RE = /\b(wrong|problem|dead|dying|brown|yellow(?:ing)?|patch
 // the model even when it also reads like a question about a photo.
 const PHOTO_NON_DIAGNOSTIC_RE = /\b(invoice|receipt|bill(?:ed|ing)?|charge[ds]?|pay(?:ment)?|paid|price|quote|estimate|schedul\w*|reschedul\w*|appointment|visit|come (?:out|by)|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|gate|code|address|screenshot)\b/i;
 
-// TODO(tree_shrub): tree/shrub photos run the pest identifier until the
-// tree_shrub assessment type lands in its own PR; flip this constant then.
-const TREE_SHRUB_TRIAGE_TYPE = 'pest';
+// Tree/shrub photos run their own assessment type (photo-assessment-create.js
+// TYPES.tree_shrub).
+const TREE_SHRUB_TRIAGE_TYPE = 'tree_shrub';
 
 function countTokens(lower, tokens) {
   return tokens.filter((t) => tokenMatches(lower, [t])).length;
 }
 
 // Lawn only when lawn words strictly outnumber the pest-side words (pest +
-// tree/shrub, which currently route to TREE_SHRUB_TRIAGE_TYPE); a tie or a
-// question with no subject word runs the pest identifier.
+// tree/shrub combined, same "lawn must clearly win" rule as before the
+// tree_shrub split). Tree/shrub only when plant words appear with NO pest
+// word at all: a photographed pest ON a plant ("spider on my plant", "beetle
+// eating my shrub") is a pest identification, however many plant words
+// surround it — the identifier already reads the plant context (codex #4810
+// r1). Everything else, including 0-0 (a question with no subject word),
+// runs the pest identifier, same default as always.
+// Lawn-soil pest names customers spell as two words collapse to the one
+// lawn token before counting: "chinch bug" must not let its "bug" tie the
+// lawn word (codex #4810 r11), and "army worm" / "sod web worm" must match
+// the armyworm/webworm lawn words at all (r14).
+const LAWN_PEST_PHRASES = [
+  [/\bchinch bugs?\b/g, 'chinch'],
+  [/\barmy worms?\b/g, 'armyworm'],
+  [/\b(?:sod )?web worms?\b/g, 'webworm'],
+];
+
+function normalizeLawnPests(lower) {
+  return LAWN_PEST_PHRASES.reduce((text, [re, token]) => text.replace(re, token), lower);
+}
+
+// "in my yard" / "on the lawn" is WHERE a named tree or shrub stands, not a
+// second subject — "what's wrong with this tree in my yard?" is a tree
+// question (codex #4810 r16). Stripped only when a tree/shrub word is
+// present; "the grass under my tree" keeps its real lawn subject.
+const LAWN_LOCATION_RE = /\b(?:in|around|on|by) (?:my|the|our) (?:front |back )?(?:yard|lawn)\b/g;
+
 function photoAssessmentType(lower) {
-  const scores = { lawn: 0, pest: 0 };
-  scores.lawn += countTokens(lower, PHOTO_LAWN_WORDS);
-  scores.pest += countTokens(lower, PHOTO_PEST_WORDS);
-  scores[TREE_SHRUB_TRIAGE_TYPE] += countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
-  return scores.lawn > scores.pest ? 'lawn' : 'pest';
+  const treeShrubScore = countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
+  const lawnText = treeShrubScore > 0 ? lower.replace(LAWN_LOCATION_RE, ' ') : lower;
+  const lawnScore = countTokens(lawnText, PHOTO_LAWN_WORDS);
+  const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
+  if (lawnScore > pestScore + treeShrubScore) return 'lawn';
+  if (treeShrubScore > 0 && pestScore === 0) {
+    // Lawn and tree/shrub words with no pest word and no clear winner
+    // ("the grass under my tree") is the structured classifier's call, not
+    // a default to the tree pipeline (codex #4810 r2).
+    return lawnScore > 0 && lawnScore >= treeShrubScore ? null : TREE_SHRUB_TRIAGE_TYPE;
+  }
+  return 'pest';
 }
 
 function regexClassifyPhoto(body) {
   const text = typeof body === 'string' ? body.trim() : '';
   if (!text) return { intent: 'photo_diagnosis', assessmentType: 'pest', method: 'regex' };
-  const lower = text.toLowerCase();
+  // Normalized BEFORE the subject gate too — "army worms everywhere" must
+  // count as a lawn subject here, not only in the type pick (codex #4810 r15).
+  const lower = normalizeLawnPests(text.toLowerCase());
   const subject = tokenMatches(lower, [
     ...PHOTO_LAWN_WORDS, ...PHOTO_PEST_WORDS, ...PHOTO_TREE_SHRUB_WORDS, ...PHOTO_NEUTRAL_WORDS,
   ]);
   const diagnostic = PHOTO_QUESTION_RE.test(text) || (subject && PHOTO_PROBLEM_RE.test(text));
   if (!diagnostic || PHOTO_NON_DIAGNOSTIC_RE.test(text)) return null;
-  return { intent: 'photo_diagnosis', assessmentType: photoAssessmentType(lower), method: 'regex' };
+  const assessmentType = photoAssessmentType(lower);
+  if (!assessmentType) return null;
+  return { intent: 'photo_diagnosis', assessmentType, method: 'regex' };
 }
 
 const PHOTO_INTENT_SCHEMA = {

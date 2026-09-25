@@ -8,6 +8,7 @@ const {
   buildPricingBundle,
 } = require('../routes/estimate-public');
 const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
+const { setEstimatePricingCache } = require('../services/estimate-pricing-cache');
 
 // A pest + lawn + mosquito bundle (Gold tier = 3 qualifying services → 15% off).
 function pestLawnMosquitoV1() {
@@ -590,6 +591,142 @@ describe('bundle split survives 1-cent per-service rounding drift (buildPricingB
       (c) => c.key === 'lawn_care:enhanced|pest_control:quarterly',
     );
     expect(defaultCombo.monthly).toBe(84.08);
+  });
+});
+
+describe('palm-care bullet survives the fast-path split (Codex round 5 P0 on #4789)', () => {
+  // attachPublicPricingContract (inside finalizePricingBundle) REBUILDS
+  // services[] via buildPricingServices → frequencyFromTreatmentRow for a
+  // split single-service T&S card — a stamp applied to the RAW snapshot/
+  // cache bundle BEFORE finalize is thrown away the moment that rebuild
+  // runs. The fix stamps the bundle finalizePricingBundle returns instead.
+  // These fixtures were hand-verified against the real buildPricingBundle
+  // (not mocked) before being written as permanent tests.
+  function pestTreeShrubEstimate({ palmCount, evidence } = {}, { id } = {}) {
+    const evidenceFields = evidence === 'service_line'
+      ? { palmCountSource: 'service_line', pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } }
+      : evidence === 'property_armed'
+        ? { palmCountSource: 'property', palmReserveActive: true, pricingKnobs: { perPalmAnnual: 16, minutesPerPalmVisit: 1.5 } }
+        : evidence === 'property_unarmed'
+          ? { palmCountSource: 'property', palmReserveActive: false, pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } }
+          : {};
+    const tsRow = {
+      name: 'Tree & Shrub', service: 'tree_shrub', mo: 66.75, monthly: 66.75, annual: 801,
+      perTreatment: 133.5, visitsPerYear: 6,
+      ...(palmCount !== undefined ? { palmCount, ...evidenceFields } : {}),
+    };
+    const pestRow = { name: 'Pest Control', service: 'pest_control', mo: 60, monthly: 60, perTreatment: 180, visitsPerYear: 4 };
+    return {
+      id: id || `estimate-${Math.random().toString(36).slice(2)}`,
+      status: 'sent',
+      monthly_total: 126.75,
+      annual_total: 1521,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        result: {
+          hasRecurring: true,
+          recurring: { discount: 0, monthlyTotal: 126.75, services: [pestRow, tsRow] },
+          results: {
+            pestTiers: [{ label: 'Quarterly', mo: 60, pa: 180, ann: 720, apps: 4, recommended: true }],
+            ts: [{ name: 'Standard', v: 6, mo: 66.75, ann: 801, pa: 133.5 }],
+          },
+          oneTime: { items: [], total: 0 },
+        },
+      },
+    };
+  }
+  const topLevelFrequency = () => ({
+    key: 'quarterly',
+    label: 'Quarterly',
+    monthly: 126.75,
+    annual: 1521,
+    perServiceTreatments: [
+      { service: 'pest_control', label: 'Pest Control', perTreatment: 180, displayPrice: 180, visitsPerYear: 4 },
+      { service: 'tree_shrub', label: 'Tree & Shrub', perTreatment: 133.5, displayPrice: 133.5, visitsPerYear: 6 },
+    ],
+  });
+
+  describe('sendSnapshot fast path', () => {
+    function snapshotEstimate(palmArgs, idSuffix) {
+      const estimate = pestTreeShrubEstimate(palmArgs, { id: `estimate-snap-${idSuffix}-${Math.random().toString(36).slice(2)}` });
+      estimate.estimate_data.sendSnapshot = {
+        pricingBundle: {
+          frequencies: [topLevelFrequency()],
+          source: 'send_snapshot',
+          oneTimeBreakdown: { items: [], total: 0 },
+        },
+      };
+      return estimate;
+    }
+
+    test('priced evidence: split T&S card is a rowless services[] frequency carrying palmCount', async () => {
+      const bundle = await buildPricingBundle(snapshotEstimate({ palmCount: 4, evidence: 'service_line' }, 'priced'));
+      expect(bundle.snapshotHit).toBe(true); // prove the fast path served this
+      expect(bundle.services.map((s) => s.key)).toEqual(['pest_control', 'tree_shrub']);
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      // Rowless by construction — the split card carries no perServiceTreatments.
+      expect(ts.frequencies[0].perServiceTreatments).toBeUndefined();
+      expect(ts.frequencies[0].palmCount).toBe(4);
+    });
+
+    test('unpriced evidence: palmCount is absent from the split T&S card', async () => {
+      const bundle = await buildPricingBundle(snapshotEstimate({ palmCount: 4, evidence: 'property_unarmed' }, 'unpriced'));
+      expect(bundle.snapshotHit).toBe(true);
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      expect(ts.frequencies[0].palmCount).toBeUndefined();
+    });
+
+    test('armed property evidence also shows the count', async () => {
+      const bundle = await buildPricingBundle(snapshotEstimate({ palmCount: 6, evidence: 'property_armed' }, 'armed'));
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      expect(ts.frequencies[0].palmCount).toBe(6);
+    });
+
+    // Codex round 7 on #4789: an estimate whose stored data carries no
+    // palm evidence (engine-inputs-only — its build stamped from the fresh
+    // engine run) keeps the count already stamped into its frozen snapshot
+    // instead of deleting it on every fast-path read.
+    test('no stored evidence: the count already stamped in the snapshot survives', async () => {
+      const estimate = snapshotEstimate({}, 'stamped-only');
+      estimate.estimate_data.sendSnapshot.pricingBundle.frequencies[0].perServiceTreatments[1].palmCount = 4;
+      const bundle = await buildPricingBundle(estimate);
+      expect(bundle.snapshotHit).toBe(true);
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      expect(ts.frequencies[0].palmCount).toBe(4);
+    });
+
+    test('no stored evidence and nothing stamped: no palmCount', async () => {
+      const bundle = await buildPricingBundle(snapshotEstimate({}, 'none'));
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      expect(ts.frequencies[0].palmCount).toBeUndefined();
+    });
+  });
+
+  describe('pricing-cache fast path', () => {
+    // Seeds the REAL module-level cache (services/estimate-pricing-cache.js)
+    // directly — the same singleton buildPricingBundleInner reads/writes —
+    // so this exercises the actual cache-hit branch, not a mock.
+    test('a cache entry with a STALE palmCount from an older build is corrected on read', async () => {
+      const estimate = pestTreeShrubEstimate({ palmCount: 4, evidence: 'service_line' }, { id: 'estimate-cache-stale' });
+      setEstimatePricingCache(estimate, { frequencies: [{ ...topLevelFrequency(), perServiceTreatments: [
+        topLevelFrequency().perServiceTreatments[0],
+        { ...topLevelFrequency().perServiceTreatments[1], palmCount: 99 },
+      ] }] });
+      const bundle = await buildPricingBundle(estimate);
+      expect(bundle.cacheHit).toBe(true);
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      expect(ts.frequencies[0].palmCount).toBe(4);
+    });
+
+    test('a cache entry stamps NOTHING when the stored evidence is unpriced', async () => {
+      const estimate = pestTreeShrubEstimate({ palmCount: 4, evidence: 'property_unarmed' }, { id: 'estimate-cache-unpriced' });
+      setEstimatePricingCache(estimate, { frequencies: [topLevelFrequency()] });
+      const bundle = await buildPricingBundle(estimate);
+      expect(bundle.cacheHit).toBe(true);
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      expect(ts.frequencies[0].palmCount).toBeUndefined();
+    });
   });
 });
 

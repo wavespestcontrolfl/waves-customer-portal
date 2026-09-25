@@ -29,11 +29,41 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { formatDisplayDate } = require('../utils/date-only');
+const { formatDisplayDate, dateOnlyString, addMonthsSameDay } = require('../utils/date-only');
+const { selectedTermiteAnnualPlanRows, authoritativeMappedTermiteEnvelope } = require('./estimate-termite-program-rows');
 
 const PURCHASE_TEMPLATE_KEY = 'service_agreement.termite_bait_program_purchase';
 const RENTAL_TEMPLATE_KEY = 'service_agreement.termite_bait_program_rental';
-const PROGRAM_TEMPLATE_KEYS = [PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY];
+// Annual Protection plan (v3, owner rulings 2026-09-24 — plan doc §A2-A4).
+// Seeded as a DRAFT by 20260924030002 — no active version until the owner's
+// own review activates it. Included in PROGRAM_TEMPLATE_KEYS because every
+// use of that list below is a customer-scoped LOOKUP ("does this customer
+// already have an open/active program agreement, of either shape") — never
+// the thing that DECIDES which template a given estimate renders. Template
+// SELECTION stays entirely inside buildTermiteProgramAgreementValues, which
+// picks purchase/rental/annual off the estimate's OWN termite line, so
+// adding the annual key here cannot change what the quarterly prep picks.
+const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
+// customer_contracts.service_name / bell wording per program shape — the
+// annual plan keeps the stations Waves-owned, so it must never read as the
+// outright-purchase program in generated records.
+const QUARTERLY_SERVICE_NAME = 'Termite Bait Station Program';
+const ANNUAL_SERVICE_NAME = 'Waves Subterranean Termite Protection — Annual';
+// maybeCreateTermiteProgramAgreement outcomes that END in a manual-prep bell
+// — reconciliation treats them as handled, never as failures to retry.
+// annual_prepay_terms statuses that end coverage — never durable evidence
+// that the account is on the plan's prepay track.
+const TERMINAL_PREPAY_TERM_STATUSES = ['cancelled', 'canceled', 'refunded', 'expired', 'lapsed', 'void', 'voided'];
+const PARKED_HANDOFF_OUTCOMES = new Set([
+  'commercial', 'annual_prepay', 'figures_unresolved',
+  'annual_template_not_active', 'annual_plan_billing_mismatch', 'annual_plan_billing_unverified',
+]);
+const OWNERSHIP_BELL_LABELS = {
+  rent: 'rented-stations',
+  own: 'purchased-stations',
+  annual_protection: 'annual protection (Waves-owned stations)',
+};
+const PROGRAM_TEMPLATE_KEYS = [PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY, ANNUAL_TEMPLATE_KEY];
 
 // The delivery workflow's real status vocabulary: signed/cancelled/voided
 // are terminal (its TERMINAL_STATUSES), and expireDocumentRequests writes
@@ -272,12 +302,146 @@ function estimateMayDiscount(estimate = {}, estData = null) {
   return !!(data.manualDiscount || data.manual_discount || data.result?.manualDiscount);
 }
 
+// The Annual Protection plan's sold figures, read from whichever persisted
+// shape the estimate carries. The mapped results.tmBait envelope wins when
+// present (same precedence as estimate-termite-program-rows); a published
+// website quote may persist only the raw engine lineItems (+ the one-time
+// setup item), so those are read directly when no envelope exists.
+function annualPlanFigures(data) {
+  const mapped = authoritativeMappedTermiteEnvelope(data);
+  if (mapped) {
+    return {
+      setupFee: mapped.setupFee,
+      annualFee: mapped.annualFee,
+      system: mapped.selectedSystem || mapped.system,
+    };
+  }
+  const rows = selectedTermiteAnnualPlanRows(data);
+  const line = rows.find((row) => String(row?.service || '').toLowerCase() === 'termite_bait') || null;
+  const setupItem = rows.find((row) => String(row?.kind || '').toLowerCase() === 'setup') || null;
+  if (!line && !setupItem) return null;
+  return {
+    setupFee: line?.setup?.price ?? line?.installation?.price ?? setupItem?.price ?? null,
+    annualFee: line?.annualFee ?? line?.annual ?? null,
+    system: line?.selectedSystem || line?.system || setupItem?.system || null,
+  };
+}
+
+// The accepted NET annual fee, read ONLY from the authoritative container.
+// When the mapped result exists it is the source of truth (same precedence
+// as annualPlanFigures / estimate-termite-program-rows): the v1-legacy-mapper
+// writes results.tmBait and recurring.services[] side by side, and the
+// termite row there carries annualAfterDiscount / manualFinalAnnual with
+// visitsPerYear = 1 on this plan. A stale engineResult.lineItems or raw
+// lineItems row from an earlier QUARTERLY quote must never supply the
+// figure (Codex #4811 r3: $288 / 4 = $72 would otherwise become the "annual"
+// fee), so raw containers are skipped whenever the mapped result exists,
+// and any row that is not annual-shaped (plan !== annual_protection or an
+// explicit visitsPerYear !== 1) is ignored. Returns null when no net figure
+// is stored — the caller then decides gross-vs-fail-closed.
+function annualPlanNetFee(estimateData) {
+  const container = estimateData?.result && typeof estimateData.result === 'object'
+    ? estimateData.result : estimateData;
+  if (!container || typeof container !== 'object') return null;
+  const mapped = authoritativeMappedTermiteEnvelope(estimateData);
+  const netOf = (node) => {
+    const n = Number(node?.manualFinalAnnual ?? node?.annualAfterDiscount);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const annualShaped = (node) => {
+    const plan = String(node?.plan || '').toLowerCase();
+    if (plan && plan !== 'annual_protection') return false;
+    const visits = node?.visitsPerYear ?? node?.visits;
+    if (visits != null && Number(visits) !== 1) return false;
+    return true;
+  };
+  const isTermiteRow = (node) => {
+    const key = String(node?.service || node?.key || '').toLowerCase();
+    const name = String(node?.name || '').toLowerCase();
+    return key === 'termite_bait' || (!key && /termite bait/.test(name));
+  };
+  if (mapped) {
+    // Mapped result: the mapper's own rows only — never engineResult or the
+    // raw lineItems retained beside it.
+    const rows = Array.isArray(container?.recurring?.services) ? container.recurring.services : [];
+    const row = rows.find((r) => isTermiteRow(r) && annualShaped(r));
+    return row ? netOf(row) : netOf(mapped);
+  }
+  const raw = selectedTermiteAnnualPlanRows(estimateData).find((r) => isTermiteRow(r) && annualShaped(r));
+  return raw ? netOf(raw) : null;
+}
+
+// Build the Annual Protection plan's template values (setup fee, annual fee,
+// 12-month coverage window), or null when the figures can't be resolved.
+// Same fail-closed posture as the quarterly builder below: an unresolvable
+// price parks for manual prep rather than signing a wrong number.
+//
+// Annual fee = what the customer ACCEPTED. The mapped/raw `annualFee` is the
+// gross list figure (v1-legacy-mapper copies the pre-discount value); a
+// WaveGuard or manual discount lands on the line as annualAfterDiscount /
+// manualFinalAnnual on the authoritative container's termite row
+// (annualPlanNetFee). When no net figure is stored and the estimate may
+// carry a discount, fail closed exactly like the quarterly builder.
+//
+// A missing RAW start date (no visit booked yet at accept time — the common
+// case) does NOT fail closed — like the quarterly agreement's start_date,
+// both dates fall back to the honest "confirmed at installation" text.
+function buildAnnualProgramAgreementValues(estimate = {}, data = null, { startDateLabel = null, startDateRaw = null } = {}) {
+  const figures = annualPlanFigures(data);
+  if (!figures) return null;
+
+  const netAnnual = annualPlanNetFee(data);
+  let annualFeeValue = null;
+  if (netAnnual != null) {
+    annualFeeValue = netAnnual;
+  } else if (estimateMayDiscount(estimate, data)) {
+    return null;
+  } else {
+    annualFeeValue = figures.annualFee;
+  }
+
+  const setupPrice = money(figures.setupFee);
+  const annualPrice = money(annualFeeValue);
+  if (!setupPrice || !annualPrice) return null;
+
+  const rawStart = dateOnlyString(startDateRaw);
+  const endDateLabel = rawStart
+    ? (formatDisplayDate(addMonthsSameDay(rawStart, 12), { fallback: '' }) || null)
+    : null;
+
+  return {
+    templateKey: ANNUAL_TEMPLATE_KEY,
+    ownership: 'annual_protection',
+    values: {
+      program: {
+        system: systemLabelFor(figures.system),
+        setup_price: setupPrice,
+        annual_price: annualPrice,
+      },
+      service: { name: ANNUAL_SERVICE_NAME },
+      agreement: {
+        start_date: startDateLabel || START_DATE_FALLBACK,
+        end_date: endDateLabel || START_DATE_FALLBACK,
+      },
+      estimate: { id: estimate.id || null, address: estimate.address || null },
+    },
+  };
+}
+
 // Build the template values for the matching ownership variant, or null when
 // the required figures can't be resolved (fail-closed — see header).
 // startDateLabel comes from the accepted/booked first visit when one exists;
 // otherwise the merge field says the start is confirmed at installation.
-function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { startDateLabel = null } = {}) {
+function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { startDateLabel = null, startDateRaw = null } = {}) {
   const data = estData || parseEstimateData(estimate.estimate_data);
+
+  // Annual Protection plan (ruling A-1/A-2): a distinct product from the
+  // quarterly purchase/rental program — checked FIRST and returned early,
+  // never falling through to the quarterly ownership logic below.
+  if (selectedTermiteAnnualPlanRows(data).length > 0) {
+    return buildAnnualProgramAgreementValues(estimate, data, { startDateLabel, startDateRaw });
+  }
+
   const facts = collectTermiteFacts(data);
   if (!facts.hasProgram) return null;
 
@@ -299,7 +463,7 @@ function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { sta
       system: systemLabelFor(facts.system),
       per_application: perApplication,
     },
-    service: { name: 'Termite Bait Station Program' },
+    service: { name: QUARTERLY_SERVICE_NAME },
     agreement: { start_date: startDateLabel || START_DATE_FALLBACK },
     estimate: { id: estimate.id || null, address: estimate.address || null },
   };
@@ -446,26 +610,41 @@ async function existingBlockingProgramAgreement(customerId, estimate, conn = db,
 }
 
 // First upcoming non-cancelled visit booked from this estimate — the honest
-// program start date when acceptance also booked the installation.
-async function scheduledStartDateLabel(estimateId, conn = db) {
+// program start date when acceptance also booked the installation. Returns
+// the raw scheduled_date alongside the display label so the annual plan's
+// end_date (start + 12 months) can be computed off the actual calendar day,
+// never off parsed display text.
+async function scheduledStartDate(estimateId, conn = db) {
   try {
     const row = await conn('scheduled_services')
       .where({ source_estimate_id: estimateId })
-      .whereNotIn('status', ['cancelled', 'skipped'])
+      // 'rescheduled' rows are pending-rebook phantoms in this repo's
+      // scheduling queries (annual-prepay-renewals COVERAGE_EXCLUDED_STATUSES)
+      // — an obsolete appointment must not anchor the coverage window.
+      .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       // Multi-service accepts book pest/lawn visits from the same estimate —
-      // only the termite installation/service anchors the PROGRAM start.
+      // only the BAIT program's installation/service anchors the PROGRAM
+      // start. Other termite work sold alongside (trenching, spot treatment,
+      // an inspection) is not the coverage start (Codex #4811 r5). The
+      // converter labels the program rows 'Termite Bait' / 'Termite Bait
+      // Installation' (service-type map + one-time item names).
       .whereRaw("LOWER(service_type) LIKE '%termite%'")
+      .whereRaw("(LOWER(service_type) LIKE '%bait%' OR LOWER(service_type) LIKE '%station%')")
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
-    if (!row?.scheduled_date) return null;
+    if (!row?.scheduled_date) return { raw: null, label: null };
     // scheduled_date is a pg DATE (hydrates as UTC midnight) — the repo's
     // date-only formatter renders the stored calendar day, never the prior
     // ET day.
-    return formatDisplayDate(row.scheduled_date, { fallback: '' }) || null;
+    return {
+      raw: dateOnlyString(row.scheduled_date),
+      label: formatDisplayDate(row.scheduled_date, { fallback: '' }) || null,
+    };
   } catch {
-    return null;
+    return { raw: null, label: null };
   }
 }
+
 
 // Annual-prepay accepts are billed as one annual invoice, but the seeded
 // templates state per-application billing — a signable contract must not
@@ -484,6 +663,46 @@ async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
     return !!term;
   } catch (err) {
     logger.warn(`[termite-agreement] annual-prepay lookup failed for estimate ${estimate.id}: ${err.message}`);
+    return 'error';
+  }
+}
+
+// The quarterly annual-prepay park does not apply to the Annual Protection
+// plan: that plan IS a prepaid annual product and its v3 template states
+// prepaid annual billing, so the "seeded wording says per-application"
+// contradiction the park guards against cannot arise. Without this exemption
+// every legitimate annual-plan accept (billingTerm 'prepay_annual' by
+// construction) would park before ever reaching the v3 branch (Codex #4811
+// r2 P1). Quarterly termite estimates on annual prepay still park.
+function isAnnualPlanEstimate(estData) {
+  return selectedTermiteAnnualPlanRows(estData).length > 0;
+}
+
+// Durable proof that an annual-plan estimate is on the prepay track when the
+// caller cannot tell us the billing term: the annual_prepay_terms row (exists
+// after activation), or the sign-before-pay deferral stamp on the estimate
+// (exists from the accept transaction on; column-guarded because it ships in
+// a later slice). true / false / 'error' like isAnnualPrepayAccept.
+async function annualPlanDurableEvidence(estimate, conn = db) {
+  if (!estimate?.id) return false;
+  try {
+    // A term counts only while it is LIVE for this estimate: the state
+    // machine moves a voided/refunded first invoice's term to
+    // cancelled/refunded (annual-prepay-renewals), and a retained terminal
+    // row must not license prepaid auto-renewal wording (Codex #4811 r6).
+    const term = await conn('annual_prepay_terms')
+      .where({ source_estimate_id: estimate.id })
+      .whereNotIn('status', TERMINAL_PREPAY_TERM_STATUSES)
+      .first('id');
+    if (term) return true;
+    if (estimate.annual_plan_activation_status) return true;
+    if (await conn.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
+      const row = await conn('estimates').where({ id: estimate.id }).first('annual_plan_activation_status');
+      return !!row?.annual_plan_activation_status;
+    }
+    return false;
+  } catch (err) {
+    logger.warn(`[termite-agreement] annual-plan evidence lookup failed for estimate ${estimate.id}: ${err.message}`);
     return 'error';
   }
 }
@@ -697,7 +916,7 @@ async function ringAdminBellDeduped(NotificationService, { lockKey, titleLike, m
   return true;
 }
 
-async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null, signedBlockScope = 'estimate', reissueSourceContractId = null, signedAfter = null }) {
+async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null, startDateRaw: startDateRawOverride = null, signedBlockScope = 'estimate', reissueSourceContractId = null, signedAfter = null }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
     // One-time acceptances keep their termite snapshots but did NOT accept
@@ -754,7 +973,87 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
     }
 
-    const prepay = await isAnnualPrepayAccept(estimate, billingTerm);
+    const annualPlan = isAnnualPlanEstimate(estData);
+    const explicitBillingTerm = String(billingTerm || '').toLowerCase();
+    if (annualPlan && explicitBillingTerm && explicitBillingTerm !== 'prepay_annual') {
+      // The v3 agreement states a prepaid setup + annual fee due before
+      // installation and an annual renewal. An annual-plan accept under any
+      // OTHER explicit billing term (the public route passes 'standard' for
+      // "pay per application") converts without the annual invoice or its
+      // renewal term, so a signed v3 would not match the account — park for
+      // manual prep instead of drafting mismatched terms (Codex #4811 r3).
+      // Callers that pass no billingTerm (reissue/reconcile paths) are not
+      // judged here.
+      logger.warn(`[termite-agreement] annual plan accepted under billing term '${explicitBillingTerm}' for estimate ${estimate.id} — parking for manual prep.`);
+      let mismatchReplacementKept = false;
+      let mismatchRetireFailed = false;
+      try {
+        ({ keptReplacement: mismatchReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+      } catch (err) {
+        mismatchRetireFailed = true;
+        logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+      }
+      if (mismatchReplacementKept) return { ok: false, skipped: 'annual_plan_billing_mismatch', belled: true };
+      const mismatchBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${customerId}`,
+        titleLike: 'Termite agreement needs manual prep%',
+        ...(reissueSourceContractId
+          ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+          : { metaKey: 'estimateId', metaValue: estimate.id }),
+      }, [
+        'estimate',
+        'Termite agreement needs manual prep (annual plan billing)',
+        `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan under '${explicitBillingTerm}' billing instead of annual prepay — the v3 agreement states prepaid terms, so prepare the agreement manually.${propertyClause}`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+      ], `manual-prep (annual plan billing mismatch) for estimate ${estimate.id}`);
+      return { ok: false, skipped: 'annual_plan_billing_mismatch', belled: mismatchBelled, retireFailed: mismatchRetireFailed };
+    }
+
+    if (annualPlan && !explicitBillingTerm) {
+      // Reconciliation / reissue callers pass no billingTerm. The prepaid
+      // v3 wording is only right when the account really is on the annual
+      // plan's prepay track, so require DURABLE evidence before drafting:
+      // an annual_prepay_terms row for this estimate, or the sign-before-pay
+      // deferral stamp (estimates.annual_plan_activation_status, written in
+      // the accept transaction before any agreement work — slice 3a; read
+      // column-guarded so this file works before that migration lands).
+      // No evidence → park with the billing-mismatch bell; lookup error →
+      // fail closed and let the sweep retry (Codex #4811 r4).
+      const evidence = await annualPlanDurableEvidence(estimate);
+      if (evidence === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
+      if (!evidence) {
+        logger.warn(`[termite-agreement] annual plan for estimate ${estimate.id} has no durable prepay evidence (no term, no deferral stamp) — parking for manual prep.`);
+        // Retire the open same-property rows first, exactly like the other
+        // parks: on the rollout-audit path the row being judged IS the
+        // misissued prepaid agreement, and a park that leaves it open and
+        // signable while the caller marks it handled would strand it
+        // (Codex #4811 r6).
+        let unverifiedReplacementKept = false;
+        let unverifiedRetireFailed = false;
+        try {
+          ({ keptReplacement: unverifiedReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+        } catch (err) {
+          unverifiedRetireFailed = true;
+          logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+        }
+        if (unverifiedReplacementKept) return { ok: false, skipped: 'annual_plan_billing_unverified', belled: true };
+        const unverifiedBelled = await ringAdminBellDeduped(NotificationService, {
+          lockKey: `termite-agreement:${customerId}`,
+          titleLike: 'Termite agreement needs manual prep%',
+          ...(reissueSourceContractId
+            ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+            : { metaKey: 'estimateId', metaValue: estimate.id }),
+        }, [
+          'estimate',
+          'Termite agreement needs manual prep (annual plan billing)',
+          `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but no annual prepay record exists for the estimate — confirm billing before preparing the agreement manually.${propertyClause}`,
+          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        ], `manual-prep (annual plan billing unverified) for estimate ${estimate.id}`);
+        return { ok: false, skipped: 'annual_plan_billing_unverified', belled: unverifiedBelled, retireFailed: unverifiedRetireFailed };
+      }
+    }
+
+    const prepay = annualPlan ? false : await isAnnualPrepayAccept(estimate, billingTerm);
     if (prepay === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
     if (prepay) {
       // Fail closed: the seeded wording states per-application billing,
@@ -788,9 +1087,20 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     // to the estimate (linkCreatedRowsToEstimate runs after acceptance), so
     // it passes the booked termite date explicitly — the DB lookup would
     // race the linking and permanently snapshot the fallback label.
-    const startDateLabel = startDateLabelOverride
-      || (estimate.id ? await scheduledStartDateLabel(estimate.id) : null);
-    const prepared = buildTermiteProgramAgreementValues(estimate, estData, { startDateLabel });
+    // The raw scheduled date feeds the annual plan's end_date (start + 12
+    // months). Manual acceptance passes both the display label and the raw
+    // booked date (startDateRaw); the public accept route leaves both to the
+    // DB lookup. An override label WITHOUT a raw date keeps end_date on the
+    // honest "confirmed at installation" text rather than parsing display
+    // text back into a calendar day.
+    const resolvedStartDate = startDateLabelOverride
+      ? { raw: dateOnlyString(startDateRawOverride), label: startDateLabelOverride }
+      : (estimate.id ? await scheduledStartDate(estimate.id) : { raw: null, label: null });
+    const startDateLabel = resolvedStartDate.label;
+    const prepared = buildTermiteProgramAgreementValues(estimate, estData, {
+      startDateLabel,
+      startDateRaw: resolvedStartDate.raw,
+    });
 
     if (!prepared) {
       // Termite program present but figures unresolvable — park the
@@ -819,6 +1129,46 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
+    }
+
+    if (prepared.templateKey === ANNUAL_TEMPLATE_KEY) {
+      // The annual template is seeded as a DRAFT (20260924030002) with no
+      // active version until the owner's own review activates it (plan
+      // §A-11). Fail closed exactly like a missing template — and NEVER
+      // fall back to the quarterly purchase/rental wording, which would
+      // misstate the sold plan. Checked explicitly (rather than relying on
+      // the generic template_missing branch below, which today is
+      // unreachable defensive code for the always-active quarterly
+      // templates) so this EXPECTED park gets its own log line and bell.
+      const annualTemplateActive = await db('document_templates')
+        .where({ template_key: ANNUAL_TEMPLATE_KEY, status: 'active' })
+        .whereNotNull('active_version_id')
+        .first('id');
+      if (!annualTemplateActive) {
+        logger.warn(`[termite-agreement] annual plan accepted for estimate ${estimate.id}, but the v3 agreement template has no active version yet — parking for manual prep.`);
+        let annualReplacementKept = false;
+        let annualRetireFailed = false;
+        try {
+          ({ keptReplacement: annualReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+        } catch (err) {
+          annualRetireFailed = true;
+          logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+        }
+        if (annualReplacementKept) return { ok: false, skipped: 'annual_template_not_active', belled: true };
+        const annualBelled = await ringAdminBellDeduped(NotificationService, {
+          lockKey: `termite-agreement:${customerId}`,
+          titleLike: 'Termite agreement needs manual prep%',
+          ...(reissueSourceContractId
+            ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+            : { metaKey: 'estimateId', metaValue: estimate.id }),
+        }, [
+          'estimate',
+          'Termite agreement needs manual prep (annual plan)',
+          `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but the v3 agreement template is not active yet — prepare and send the agreement manually.${propertyClause}`,
+          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        ], `manual-prep (annual template not active) for estimate ${estimate.id}`);
+        return { ok: false, skipped: 'annual_template_not_active', belled: annualBelled, retireFailed: annualRetireFailed };
+      }
     }
 
     // Deliberately NO pre-transaction "already exists" fast path: a blocker
@@ -973,7 +1323,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         recipient_name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || estimate.customer_name || null,
         recipient_email: customer.email || null,
         recipient_phone: customer.phone || null,
-        service_name: 'Termite Bait Station Program',
+        service_name: prepared.values?.service?.name || QUARTERLY_SERVICE_NAME,
         esign_disclosure_snapshot: version.signer_disclosure || ESIGN_DISCLOSURE,
         contract_text_snapshot: rendered.body,
         document_template_id: template.id,
@@ -1028,7 +1378,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     const bellArgs = [
       'estimate',
       autosent ? 'Termite agreement sent for signature' : 'Termite agreement drafted',
-      `${estimate.customer_name || 'Customer'} accepted the ${prepared.ownership === 'rent' ? 'rented-stations' : 'purchased-stations'} termite program — the agreement is ${autosent ? 'on its way for e-signature' : 'prefilled and ready to send from the document library'}.`,
+      `${estimate.customer_name || 'Customer'} accepted the ${OWNERSHIP_BELL_LABELS[prepared.ownership] || OWNERSHIP_BELL_LABELS.own} termite program — the agreement is ${autosent ? 'on its way for e-signature' : 'prefilled and ready to send from the document library'}.`,
       { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, contractId: contract.id } },
     ];
     await ringAdminBell(NotificationService, bellArgs, `drafted bell for contract ${contract.id} (estimate ${estimate.id}) — draft remains in the open document-requests queue`);
@@ -1238,9 +1588,16 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     if (isCommercialEstimate(linkedEstimate, linkedEstData)) {
       misissue = 'park_expected';
     } else {
-      const prepayState = await isAnnualPrepayAccept(linkedEstimate, null);
+      // Annual plan: the row is only rightly issued when durable prepay
+      // evidence exists (the same predicate maybeCreate applies on the
+      // no-billingTerm path) — an older dyno may have issued the prepaid v3
+      // wording for a standard-billing accept (Codex #4811 r5).
+      const annualRow = isAnnualPlanEstimate(linkedEstData);
+      const prepayState = annualRow ? false : await isAnnualPrepayAccept(linkedEstimate, null);
       if (prepayState === 'error') { results.failed += 1; continue; } // retry tomorrow
-      if (prepayState) {
+      const annualEvidence = annualRow ? await annualPlanDurableEvidence(linkedEstimate) : true;
+      if (annualEvidence === 'error') { results.failed += 1; continue; } // retry tomorrow
+      if (prepayState || !annualEvidence) {
         misissue = 'park_expected';
       } else {
         const preparedNow = buildTermiteProgramAgreementValues(linkedEstimate, linkedEstData, { startDateLabel: null });
@@ -1514,7 +1871,10 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       signedAfter: row.created_at || null,
       reissueSourceContractId: row.id,
     });
-    const parked = ['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped);
+    // Every manual-prep park is a completed handoff (the bell is the
+    // deliverable) — including the annual-plan parks, or the cancelled source
+    // would be re-selected every cron run (Codex #4811 r5).
+    const parked = PARKED_HANDOFF_OUTCOMES.has(result.skipped);
     if (result.ok && result.contractId && !result.skipped) {
       await markSupersededHandled(row, 'replaced');
       results.created += 1;
@@ -1645,12 +2005,19 @@ module.exports = {
   reconcileSupersededProgramAgreements,
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
+  ANNUAL_TEMPLATE_KEY,
+  ANNUAL_SERVICE_NAME,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,
   classifyExistingAgreement,
   collectTermiteFacts,
   estimateMayDiscount,
+  isAnnualPlanEstimate,
+  annualPlanNetFee,
+  annualPlanDurableEvidence,
+  PARKED_HANDOFF_OUTCOMES,
+  TERMINAL_PREPAY_TERM_STATUSES,
   maybeCreateTermiteProgramAgreement,
   normalizeAddress,
   reconcileTermiteProgramAgreements,

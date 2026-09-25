@@ -48,9 +48,17 @@
  * Draft copy is built ONLY from the customer-safe teaser allowlists the
  * public funnels already publish pre-capture — lawn: buildTeaser's gated
  * first finding (routes/public-lawn-assessment.js); pest: buildPestTeaser's
- * library-generic label (services/pest-identification.js). Never raw model
+ * library-generic label (services/pest-identification.js); tree_shrub: its
+ * own worst_signal (photo-triage-opportunity.js). Never raw model
  * observations, never product names, never a link (the report link exists
  * only after an admin clicks Send report / Get link).
+ *
+ * What the draft SAYS beyond the finding — advise / offer a compute-only
+ * quote / ask for an in-person visit — is decided by the opportunity gauge
+ * (photo-triage-opportunity.js#gaugeOpportunity, owner ruling 2026-09-25):
+ * it reads the finding, the caption, and the customer's own record to pick
+ * one of three modes, minimizing on-site visits in favor of advice or a
+ * quote wherever the numbers support one.
  */
 
 const db = require('../models/db');
@@ -66,7 +74,7 @@ const {
 const { isSignableStoredMediaKey } = require('./sms-media');
 const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 const { countSegments } = require('./messaging/segment-counter');
-const { buildPestTeaser, PEST_LIBRARY } = require('./pest-identification');
+const { gaugeOpportunity, teaserOutcome, outcomeFor, priceContextSentence, GAUGE_VERSION } = require('./photo-triage-opportunity');
 const { safePublicFirstName } = require('../utils/public-report-egress');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
@@ -191,51 +199,100 @@ async function releaseVisionSlot(messageId) {
     .catch((err) => logger.error(`[photo-triage] vision slot release failed for message ${messageId}: ${err.message}`));
 }
 
-const LIBRARY_BY_SLUG = new Map(PEST_LIBRARY.map((entry) => [entry.slug, entry]));
-const HEALTHY_LAWN_LABEL = 'no major visible stress';
-
-// What the draft may say, from the pre-capture teaser allowlists only:
-//   { kind: 'actionable', label } — a finding worth a treatment offer;
-//   { kind: 'harmless', label }   — a clean lawn, or a not-a-pest ID
-//                                   (the category, or its library entry's);
-//   { kind: 'none' }              — nothing we can name.
-function teaserOutcome(type, analysis) {
-  if (type === 'lawn') {
-    const { buildTeaser } = require('../routes/public-lawn-assessment');
-    const teaser = buildTeaser(analysis);
-    const label = teaser.first_finding?.name || null;
-    if (label === HEALTHY_LAWN_LABEL || (!label && teaser.overall_status === 'Healthy')) {
-      return { kind: 'harmless', label: 'a healthy lawn' };
-    }
-    return label ? { kind: 'actionable', label } : { kind: 'none' };
-  }
-  const contract = JSON.parse(analysis.report_contract || '{}');
-  const teaser = buildPestTeaser(contract);
-  const match = /^We identified (.+)\.$/.exec(teaser.identified_teaser || '');
-  if (!match) return { kind: 'none' };
-  const item = LIBRARY_BY_SLUG.get(contract.identification?.slug);
-  const harmless = teaser.category === 'not_a_pest' || item?.category === 'not_a_pest';
-  return { kind: harmless ? 'harmless' : 'actionable', label: match[1] };
+// "it's {label}." — the SAME resolved label the opportunity gauge itself
+// reasons over (photo-triage-opportunity.js#outcomeFor: lawn/pest via the
+// allowlisted teaser, tree_shrub via its own worst_signal phrase map). One
+// source for the label, never a second copy here. A pest outcome of kind
+// 'none' (nothing nameable) resolves label null — the caller falls back to
+// the old bare "want us to take a look?" copy for that case only.
+function messageLabel(type, analysis) {
+  return outcomeFor(type, analysis).label;
 }
 
-// The sentences after the greeting, per outcome. Fixed copy + an allowlisted
-// label only, and nothing Approve does not deliver: approving sends only
-// this text (no report, no link — staff mint the report link from the
-// draft's View assessment link). A harmless finding never gets a treatment
-// pitch.
-const DRAFT_BODIES = {
-  actionable: (label) => ` From what we can see, it's consistent with ${label}. Want us to come take a closer look and quote treatment?`,
-  harmless: (label) => ` From what we can see, it's ${label}, so no treatment is needed. Reply if you'd like us to take a look anyway.`,
-  none: () => ' Want us to take a look?',
-};
+function joinSentences(parts) {
+  return parts.filter(Boolean).join(' ');
+}
+
+const QUOTE_SERVICE_LABEL = { tree_shrub: 'tree & shrub', lawn_care: 'lawn', pest_control: 'pest control' };
+
+// The sentences after the greeting, keyed by the opportunity gauge's mode
+// (owner ruling 2026-09-25 — see photo-triage-opportunity.js). Fixed copy +
+// an allowlisted label/quote only, and nothing Approve does not
+// deliver: approving sends only this text (no report, no link — staff mint
+// the report link from the draft's View assessment link). Pure — takes the
+// already-resolved label rather than re-deriving them, so it (and the
+// "every real label fits in two segments" regression tests) never need a
+// real photo-analysis fixture.
+// No separate advice sentence: the tree/shrub label already names the
+// cause ("water, heat, or pruning stress"), and a fixed tip would either
+// repeat it or prescribe one fix for three causes (codex #4810 r14).
+function composeBody({ label, opportunity }) {
+  // No safe label → no finding sentence, but an on-site verdict still gets
+  // its explanation and scheduling ask (codex #4810 r9); every other mode
+  // falls back to the plain look-offer below.
+  const lead = label === null ? '' : `From what we can see, it's ${label}.`;
+
+  if (opportunity.mode === 'onsite') {
+    // The explanation names the reason that actually fired (codex #4810
+    // r4): scope when the caption described one, otherwise the failed
+    // prior treatment — never "that much to cover" for one shrub.
+    // "before quoting" only for a LEAD: an existing customer reaching
+    // onsite (scope + failed treatment) may already own this family — the
+    // gauge short-circuits before the ownership check there, so the copy
+    // must not pitch a quote (pre-push audit r4).
+    const quoting = opportunity.reasons.includes('lead') ? ' before quoting' : '';
+    const why = opportunity.reasons.includes('large_scope')
+      ? `With that much to cover we'd rather see it in person${quoting}.`
+      : `Since what's been tried hasn't held, we'd rather see it in person${quoting}.`;
+    return joinSentences([lead, why, 'What day this week works for a quick visit?']);
+  }
+
+  if (label === null) return 'Want us to take a look?';
+
+  if (opportunity.mode === 'quote' && opportunity.quote) {
+    // NO dollar amount in the customer text (codex #4810 r1–r3): AGENTS.md
+    // "estimator engine authority" blocks existing customers from engine
+    // drafting, and this lane is not one of the two owner-approved mint
+    // exceptions. The draft offers the quote; the offer core's
+    // per-application figure rides flags.quote + context_summary for the
+    // OWNER, who adds it (or sends the estimate) when approving.
+    const serviceLabel = QUOTE_SERVICE_LABEL[opportunity.quote.service] || 'service';
+    const quoteLine = `Want a quote for our ${serviceLabel} program? Just reply yes.`;
+    return joinSentences([lead, quoteLine]);
+  }
+
+  // advise
+  const harmless = opportunity.reasons.includes('harmless');
+  // Already on the customer's plan (codex #4810 r2 P1): never pitch the
+  // service they have — no quote CTA, no promise of a visit, and no claim
+  // that the program covers this finding either (r3 P2: owning the family
+  // says nothing about whether this condition is in the program — T&S
+  // injections and premium add-ons are quoted separately).
+  // offer_unavailable (r4): the offer core failed closed — the customer
+  // MAY already pay for this family, so no pitch either.
+  const noPitch = opportunity.reasons.includes('already_owned') || opportunity.reasons.includes('offer_unavailable');
+  const close = harmless
+    ? 'No treatment is needed.'
+    : noPitch ? 'Reply if you have questions.' : "Reply if you'd like a quote.";
+  return joinSentences([lead, close]);
+}
+
+function draftBodyText({ type, analysis, opportunity }) {
+  return composeBody({ label: messageLabel(type, analysis), opportunity });
+}
 
 // ≤ MAX_DRAFT_SEGMENTS SMS segments, no link. The first name is dropped
-// before anything else when the copy would run long.
-function buildDraftText({ firstName, outcome }) {
-  const bodyText = DRAFT_BODIES[outcome.kind](outcome.label);
-  const compose = (name) => `Thanks for the photo${name ? `, ${name}` : ''}.${bodyText}`;
+// before anything else when the copy would run long. Takes an
+// already-composed body (see composeBody/draftBodyText) so the name +
+// segment-cap logic has exactly one implementation.
+function composeDraft({ firstName, bodyText }) {
+  const compose = (name) => `Thanks for the photo${name ? `, ${name}` : ''}. ${bodyText}`;
   const named = compose(safePublicFirstName(firstName));
   return countSegments(named).segmentCount <= MAX_DRAFT_SEGMENTS ? named : compose(null);
+}
+
+function buildDraftText({ firstName, type, analysis, opportunity }) {
+  return composeDraft({ firstName, bodyText: draftBodyText({ type, analysis, opportunity }) });
 }
 
 // The final pending-draft check and the insert commit together under a
@@ -259,7 +316,7 @@ async function insertDraftUnlessPending({ from, customer }, row) {
   });
 }
 
-async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method }) {
+async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method, opportunity }) {
   return insertDraftUnlessPending({ from, customer }, {
     sms_log_id: smsLogId,
     customer_id: customer?.id || null,
@@ -267,13 +324,29 @@ async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, cr
     draft_response: text,
     intent: DRAFT_INTENT,
     status: 'pending',
-    context_summary: `Photo triage ran a ${created.type} assessment on this text's photo. Review the assessment before approving.`,
+    context_summary: `Photo triage ran a ${created.type} assessment on this text's photo and gauged it as ${opportunity.mode}`
+      + ` (${opportunity.reasons.join(', ') || 'no signals'}).`
+      + (opportunity.quote?.per_visit ? ` ${priceContextSentence(opportunity.quote.service, opportunity.quote.per_visit)}` : '')
+      + ' Review the assessment before approving.',
     flags: JSON.stringify({
       origin: DRAFT_INTENT,
       assessment_type: created.type,
       assessment_id: created.id,
       message_id: messageId,
       classifier_method: method,
+      // Marks a gauge-written draft: approve-as-written + the dispatch
+      // recheck apply only to these (codex #4810 r14).
+      gauge_version: GAUGE_VERSION,
+      opportunity_mode: opportunity.mode,
+      opportunity_reasons: opportunity.reasons,
+      // The family the gauge checked — the dispatch-time recheck
+      // (photo-triage-opportunity.js#recheckDraftOffer) checks exactly this.
+      offer_family: opportunity.family,
+      // Who the verdict was computed for — a recipient linked after
+      // creation makes the whole verdict stale (codex #4810 r12).
+      gauged_customer_id: customer?.id || null,
+      gauged_lead: opportunity.reasons.includes('lead'),
+      quote: opportunity.quote,
     }),
   });
 }
@@ -338,15 +411,18 @@ function legacyAiDraftsAllowed(candidacy) {
 }
 
 // Draft for a finished assessment (the paid vision already ran).
-async function parkForAssessment({ intent, messageId, smsLogId, body, from, customer }, created) {
+async function parkForAssessment({ intent, messageId, smsLogId, body, from, customer, images }, created) {
+  const opportunity = await gaugeOpportunity({ type: created.type, analysis: created.analysis, customer, body, images });
   const text = buildDraftText({
     firstName: customer?.first_name,
-    outcome: teaserOutcome(created.type, created.analysis),
+    type: created.type,
+    analysis: created.analysis,
+    opportunity,
   });
   // A second photo text from the same contact may have drafted while this
   // one's vision call ran — the assessment is kept (its slot stays spent),
   // the draft is not.
-  const draftId = await parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method: intent.method });
+  const draftId = await parkDraftUnlessPending({ from, smsLogId, customer, body, text, created, messageId, method: intent.method, opportunity });
   if (!draftId) {
     logger.info(`[photo-triage] ${created.type} assessment ${created.id} kept; draft skipped (pending draft appeared)`);
     return { status: 'skipped', reason: 'pending_draft' };
@@ -428,5 +504,9 @@ module.exports = {
     insertDraftUnlessPending,
     teaserOutcome,
     buildDraftText,
+    messageLabel,
+    draftBodyText,
+    composeBody,
+    composeDraft,
   },
 };

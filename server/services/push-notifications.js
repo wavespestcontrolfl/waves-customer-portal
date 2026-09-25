@@ -9,17 +9,17 @@ const { qualifyNotificationLink } = require('./notification-links');
 
 const PUSH_HEARTBEAT_HOURS = 72;
 
-async function customerPushContext(customerId) {
-  const customer = await db('customers').where({ id: customerId }).first('id', 'account_id', 'active', 'deleted_at');
+async function customerPushContext(customerId, database = db) {
+  const customer = await database('customers').where({ id: customerId }).first('id', 'account_id', 'active', 'deleted_at');
   if (!customer || customer.active !== true || customer.deleted_at) return null;
   const req = { customerId, accountId: customer.account_id || customerId };
-  const primaryId = await resolvePrimaryProfileId(req, db, { onError: 'throw' });
+  const primaryId = await resolvePrimaryProfileId(req, database, { onError: 'throw' });
   // SELECT * keeps an older, pre-migration database readable. Absence of
   // push_enabled retains the existing device opt-in; a stored false stays
   // effective even when the preference UI gate is turned off.
-  const prefs = await db('notification_prefs').where({ customer_id: primaryId }).first();
+  const prefs = await database('notification_prefs').where({ customer_id: primaryId }).first();
   const ids = gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')
-    ? await accountPropertyIds(req)
+    ? await accountPropertyIds(req, database)
     : [customerId];
   return { enabled: prefs?.push_enabled !== false, ids };
 }
@@ -114,10 +114,10 @@ async function sendSubscription(sub, notification, options) {
 }
 
 class PushNotificationService {
-  async customerStatus(customerId) {
-    const context = await customerPushContext(customerId);
+  async customerStatus(customerId, database = db) {
+    const context = await customerPushContext(customerId, database);
     if (!context) return { enabled: false, registered: false, fresh: false };
-    const rows = await db('push_subscriptions')
+    const rows = await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at');
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;

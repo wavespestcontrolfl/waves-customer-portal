@@ -675,6 +675,46 @@ describe('dispatchWithFallback', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: 700, maxRetries: 0 });
   });
 
+  test.each([
+    [1000, 500, 500, 500],
+    [1000, 0, 500, 700],
+    [4000, 0, 700, 700],
+  ])('reserves fallback time within a %i ms deadline and caps both attempts', async (budget, elapsed, primaryMs, fallbackMs) => {
+    let now = 1000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout');
+    jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      now += elapsed;
+      throw new DOMException('Timed out', 'TimeoutError');
+    });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+    }, { text: 'write', jsonMode: false, timeoutMs: budget }, { reserveFallbackBudget: true, maxAttemptMs: 700 });
+    expect(result).toMatchObject({ ok: true, fallbackUsed: true });
+    expect(timeoutSpy).toHaveBeenCalledWith(primaryMs);
+    expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: fallbackMs, maxRetries: 0 });
+  });
+
+  test('a reserved fallback is not called after the shared deadline expires', async () => {
+    let now = 1000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      now += 1000;
+      return { ok: false, status: 503 };
+    });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+    }, { text: 'write', timeoutMs: 1000 }, { reserveFallbackBudget: true, maxAttemptMs: 700 });
+    expect(result).toMatchObject({ ok: false, failures: [
+      expect.objectContaining({ reason: 'openai_503' }),
+      expect.objectContaining({ reason: 'timeout_budget_exhausted' }),
+    ] });
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
   test('rejects a same-provider fallback policy', async () => {
     const result = await dispatchWithFallback({
       primary: { provider: PROVIDER.OPENAI, model: 'a' },
