@@ -483,13 +483,16 @@ function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requir
  * feasibility simulation and the distance model would treat its travel as
  * zero, so a fallback built on it is not trustworthy; fail closed before
  * attempting the repair, codex GitHub round P1), or 'NO_FEASIBLE_IMPROVEMENT'
- * (gates on, coordinates present, the search ran, no legal order exists) —
- * the actionable "why didn't this get fixed". `conflict` — always present,
+ * (gates on, coordinates present, the bounded search ran, but returned no
+ * certifiable order) — the external refusal contract for "no fallback was
+ * found"; it does not prove that every possible order is impossible.
+ * `conflict` — always present,
  * null when Google's order was legal — is 'WINDOW_ORDER_CONFLICT' or
  * 'WINDOW_FIT_CONFLICT': which guard Google's order actually failed, for the
- * UI detail line (admin) and the skip reason (nightly, which additionally
+ * UI detail line (admin) and nightly ledger evidence (nightly additionally
  * applies its own min-savings floor on top of this decision — see
- * runRouteReorder).
+ * runRouteReorder, where a feasible repair below that floor is skipped as
+ * BELOW_MIN_SAVINGS while retaining this conflict).
  */
 function chooseWindowSafeOrder({
   RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null,
@@ -606,7 +609,11 @@ const ROUTE_WRITE_GUARD_COLUMNS = ['window_start', 'window_end', 'time_window',
   // them must find them on BOTH sides of the lock, or every write aborts as
   // stale (codex round 5 P1).
   'customer_id', 'service_address_line1', 'service_address_line2',
-  'service_address_city', 'service_address_zip'];
+  'service_address_city', 'service_address_zip',
+  // Planning-minute inputs (scheduling/planning-minutes.js): with
+  // GATE_SCHEDULING_CAPACITY on, workDuration reads them, so both sides of
+  // the lock must carry them or every signature differs.
+  'service_type', 'is_recurring', 'is_callback'];
 
 /** The customer's primary premise, aliased the way effectiveServiceAddress
  *  (and stampedAddressDiverges) expect. An UNSTAMPED row resolves its premise
@@ -895,6 +902,22 @@ function windowGuardSignature(stop, { repairDurationFallback = false } = {}) {
   return `${range ? `${range.startMin}-${range.endMin}` : 'open'}|${dur}|${raw}|${locked}|${stop.visit_id || ''}|${stop.customer_id ?? ''}|${premise}`;
 }
 
+/**
+ * A stored order that is not a whole order: some stop carries no
+ * route_order, or two stops share one. Numbers linger from earlier writers
+ * while newer bookings stay null, so the board's sequence is partly an
+ * accident of sort fallbacks rather than a plan anyone chose. The savings
+ * floor exists to avoid reshuffling a deliberate order for noise; with
+ * GATE_ROUTE_REORDER_COMPLETE_ORDER on, it is waived here (owner 2026-09-25:
+ * a promise-safe order beats a stale one) and any strictly shorter legal
+ * order is written. A complete order keeps the floor, so a day is completed
+ * once and not reshuffled nightly.
+ */
+function hasIncompleteStoredOrder(stops) {
+  const positions = stops.map((s) => s.route_order);
+  return positions.some((p) => p == null) || new Set(positions.map(Number)).size !== positions.length;
+}
+
 async function runRouteReorder(opts = {}, conn = db) {
   const config = getRouteReorderConfig(opts);
   const now = opts.now || new Date();
@@ -905,6 +928,7 @@ async function runRouteReorder(opts = {}, conn = db) {
   if (opts.repairOnly) repairGates.push('GATE_ROUTE_REORDER');
   const repairEnabled = repairGates.every(gateEnvValue);
   if (opts.repairOnly && !repairEnabled) return { status: 'gate_off' };
+  const completeOrderEnabled = gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER');
   const lastDate = etDateString(addETDays(now, 30));
   const dates = opts.repairOnly
     ? [...new Set((opts.dates || []).map(toDateStr))].filter(date => validCalendarDate(date) && date > today && date <= lastDate).sort()
@@ -961,6 +985,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             'scheduled_services.estimated_duration_minutes',
             'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
             'scheduled_services.service_type',
+            'scheduled_services.is_recurring', 'scheduled_services.is_callback',
             'scheduled_services.zone', 'scheduled_services.created_at',
             ...guardedCoordSelects(conn),
           ],
@@ -1141,7 +1166,10 @@ async function runRouteReorder(opts = {}, conn = db) {
           // through to the skip below so the ledger still records the
           // conflict plus `fallback: 'CALIBRATION_OFF'`.
           const gateStoodDown = guardOutcome.reason === 'WINDOW_FIT_GATE_OFF';
-          if (!repair && savedMeters < config.minSavingsMeters
+          // Waived floor still demands a strictly shorter order (1 m).
+          const floorWaived = completeOrderEnabled && hasIncompleteStoredOrder(techStops);
+          const floorMeters = floorWaived ? 1 : config.minSavingsMeters;
+          if (!repair && savedMeters < floorMeters
               && (guardOutcome.conflict === null || guardOutcome.gateOff === 'WINDOW_FIT')) {
             summary.skipped.push({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
             continue;
@@ -1167,15 +1195,18 @@ async function runRouteReorder(opts = {}, conn = db) {
             // before accepting it (nightly-only bookkeeping, not a duplicate
             // safety decision).
             const fallbackSaved = Math.max(0, guardOutcome.beforeMeters - guardOutcome.afterMeters);
-            if (fallbackSaved < config.minSavingsMeters) {
-              // The day stays skipped under its ORIGINAL reason — the
-              // fallback tag records that the legal-order search ran and
-              // found nothing worth writing (same 805 m floor, owner-ruled).
+            if (fallbackSaved < floorMeters) {
+              // The constrained search DID find and certify a legal order;
+              // the nightly pass declines it only because it saves less than
+              // this day's savings floor. Keep the original Google-order
+              // conflict as evidence, but do not mislabel this as an
+              // impossible schedule / missing feasible improvement.
               summary.skipped.push({
                 ...entryBase,
-                reason: guardOutcome.conflict,
+                reason: 'BELOW_MIN_SAVINGS',
                 ...metrics,
-                fallback: 'NO_FEASIBLE_IMPROVEMENT',
+                conflict: guardOutcome.conflict,
+                constrained_order_feasible: true,
                 fallback_saved_meters: fallbackSaved,
               });
               continue;
@@ -1282,6 +1313,9 @@ async function runRouteReorder(opts = {}, conn = db) {
                     customer_city: 'customers.city',
                     customer_state: 'customers.state',
                     customer_zip: 'customers.zip' },
+                  // Planning-minute inputs, as selected at day-load.
+                  'scheduled_services.service_type', 'scheduled_services.is_recurring',
+                  'scheduled_services.is_callback',
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
               // Full guard-input signature (shared with the admin optimize
@@ -1365,7 +1399,12 @@ async function runRouteReorder(opts = {}, conn = db) {
             }
             throw writeErr;
           }
-          summary.applied.push({ ...entryBase, ...appliedMetrics });
+          summary.applied.push({
+            ...entryBase,
+            ...appliedMetrics,
+            ...(!repair && appliedMetrics.saved_meters < config.minSavingsMeters
+              ? { floor_waived: 'INCOMPLETE_STORED_ORDER' } : {}),
+          });
           if (qualityEnabled) {
             // Record the order that actually committed as well as the loaded
             // baseline, so later performance does not compare against the
@@ -1474,6 +1513,7 @@ async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, conf
           waypoint_cap: GOOGLE_WAYPOINT_CAP,
           freeze_hours: FREEZE_HOURS,
           repair_enabled: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
+          complete_order: gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER'),
           ...(includeMeasurements ? { day_quality_version: 2, code_revision: process.env.RAILWAY_GIT_COMMIT_SHA || null } : {}),
         }),
         result: JSON.stringify({

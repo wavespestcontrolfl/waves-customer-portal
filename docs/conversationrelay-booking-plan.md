@@ -146,6 +146,70 @@ the staff ring when a backstop is reachable. It was dormant only because
 To pause it instantly without a deploy: clear `agentEndpoint` (or turn off the
 `voiceAiAgent` gate) → every call returns to the normal voicemail flow.
 
+## Latency fields (`call_log.transcription_metadata.latency`)
+
+Every relay call's close writes a per-call latency summary
+(`relay-transcript.summarizeTurnStats`) into `transcription_metadata.latency`.
+Two kinds of field live there:
+
+- **Application clocks** — `prompt_to_first_send_*`, `first_token_p50`,
+  `model_ms_total`, `tool_ms_*` — timestamped entirely on our own server
+  clock (prompt frame received → first text frame sent / first model token).
+  These are never null for lack of a Twilio subscription.
+- **Provider-derived spans** — `endpoint_delay_*`, `stop_to_first_send_*`,
+  `send_to_first_audio_*`, `stop_to_first_audio_*` — built from Twilio's
+  `caller_speaking_end` / `agent_speaking_start` speaker events, which only
+  arrive when the rendered `<ConversationRelay>` carries
+  `events="speaker-events tokens-played"` (a relay profile —
+  `relay-profiles.js`'s `EVENTS_ALL`). An **untuned** call (no
+  `VOICE_RELAY_PROFILE`) renders no `events` attribute at all, so every one
+  of these four fields is null on every untuned call — that is expected, not
+  a bug, and `audio_metric_turns` will read `0`.
+
+**Every null in the four provider-derived fields is now explainable.** The
+summary carries either a single `audio_metrics_reason` (when all four share
+one cause — the common case) or a per-field `missing: { field: reason }` map
+(a partial outage, e.g. caller events arrived but agent ones never did).
+Reasons:
+
+| Reason | Meaning |
+| --- | --- |
+| `events_not_subscribed` | The session's relay profile never rendered the needed `events` attribute. |
+| `no_events_received` | Subscribed (or unknown), but not one relevant event arrived this call. |
+| `insufficient_turns` | EVERY boundary kind the span needs arrived this session, but no turn ever carried both stamps together. |
+| `partial_events_received` | One boundary stream arrived and the other never did (e.g. `caller_speaking_end` events but no `agent_speaking_start`) — a partial provider-event outage, not a pairing problem. |
+| `instrumentation_unknown` | At least one relay leg was persisted before this instrumentation existed (no `observability` block), so its silence cannot be read as zero events. `observability.instrumentation_unknown: true` marks the row. |
+
+`latency.observability` carries the session-level evidence behind those
+reasons, so a single stored row is enough to diagnose it without pulling
+logs: `events_subscribed: { speaker, tokens_played }` (derived from the
+active relay profile's `events` attribute, or `null` when the profile id
+can't be resolved — e.g. a sandbox raw-attribute cell), `events_received`
+(a count per Twilio event kind actually seen this call), and `event_shapes`
+(the first redacted key-name shape seen per kind — names only, never
+values, for spotting an undocumented ConversationRelay payload change).
+
+`latency.boundaries_version` (currently `1`) pins the meaning of each span's
+two clock ends — the actual boundary text lives in code
+(`relay-transcript.LATENCY_BOUNDARIES`) rather than bloating every row, and
+distinguishes an **application-observed** clock (our own timestamp) from a
+**provider-reported** one (a Twilio event's arrival is a proxy for the real
+instant, not an exact measurement — "first text sent" is not "first audio
+heard").
+
+Each turn stat also carries `turn` (index), `rounds` (model round count),
+`renderer`, and `segmentGeneration` — the PER-SOCKET generation the turn ran
+under, stamped by `relay-server.js` from the upgrade token's nonce on every
+authenticated relay socket, including the first leg of a call that never
+reconnects. It is **not** a reconnect-only or "resumed leg" marker: an
+ordinary, never-reconnected call still carries a (single, non-null)
+generation on every turn. What it correlates is a turn to the socket/leg it
+ran on — a call with N legs (N-1 reconnects) shows N distinct values across
+its turns, in mint order. `null` only when a caller passes turn stats that
+never went through a socket at all (a bake-off/synthetic fixture). So a
+single stored metric can always be traced back to its session + socket/leg +
+turn.
+
 ## Roadmap (not in this PR)
 
 - **Phase 1** — add read-only `get_availability` / `find_slots` tools → agent quotes real openings, still writes a lead. Zero mutation risk.

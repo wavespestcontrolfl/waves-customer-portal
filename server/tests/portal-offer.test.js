@@ -9,7 +9,7 @@ jest.mock('../services/property-lookup/lookup-cache', () => ({
   hasVerifiedOverrides: jest.fn(async () => false),
 }));
 
-const { buildPortalOffer } = require('../services/service-report/cross-sell');
+const { buildPortalOffer, buildOfferForFamily } = require('../services/service-report/cross-sell');
 const { hasVerifiedOverrides } = require('../services/property-lookup/lookup-cache');
 
 const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
@@ -160,5 +160,127 @@ describe('buildPortalOffer', () => {
       planRates: [{ family_key: 'tree_shrub', monthly_rate: 40 }],
     });
     expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+  });
+});
+
+// buildOfferForFamily — the photo-triage lane's targeted variant (2026-09-25):
+// the family is fixed by what the photo shows, every other gate is the
+// portal card's.
+describe('buildOfferForFamily', () => {
+  test('lawn-only customer asked about tree & shrub → a tree & shrub offer (the ladder would have picked pest)', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    expect((await buildPortalOffer('cust-1', db, { propertyLookup: missLookup }))?.serviceKey).toBe('pest_control');
+    const offer = await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup });
+    expect(offer).not.toBeNull();
+    expect(offer.serviceKey).toBe('tree_shrub');
+    expect(['priced', 'quote_cta']).toContain(offer.mode);
+    if (offer.mode === 'priced') {
+      expect(offer.option.perVisit).toBeGreaterThan(0);
+      expect(offer.option.monthly).toBeUndefined();
+      expect(offer.option.annual).toBeUndefined();
+    }
+  });
+
+  test('a family the customer already owns is never re-priced → mode owned, no option, no price', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    const offer = await buildOfferForFamily('cust-1', db, 'lawn_care', { propertyLookup: missLookup });
+    expect(offer).toMatchObject({ serviceKey: 'lawn_care', mode: 'owned', option: null });
+    expect(typeof offer.fingerprint).toBe('string');
+    // The ladder entry points never see the owned shape.
+    expect((await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).mode).not.toBe('owned');
+  });
+
+  test('owns NOTHING recurring → null (no engine quote for a customer with no plan)', async () => {
+    const db = dbFor({ serviceTypes: [] });
+    expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('a live plan-rate on the requested family fails closed → mode unavailable, no option (the ladder still returns null)', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'], planRates: [{ family_key: 'tree_shrub', monthly_rate: 40 }] });
+    expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
+    const ladderDb = dbFor({ serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'], planRates: [{ family_key: 'tree_shrub', monthly_rate: 40 }] });
+    expect(await buildPortalOffer('cust-1', ladderDb, { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('a live plan-rate on the requested family with NO seeded visit row still fails closed (codex #4810 r5)', async () => {
+    const db = dbFor({ serviceTypes: [], planRates: [{ family_key: 'lawn_care', monthly_rate: 55 }] });
+    expect(await buildOfferForFamily('cust-1', db, 'lawn_care', { propertyLookup: missLookup })).toMatchObject({ serviceKey: 'lawn_care', mode: 'unavailable', option: null });
+    // Other families on an owns-nothing account are still simply not offered.
+    expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toBeNull();
+    // The ladder path is unchanged: owns nothing → null.
+    expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('an ownership lookup failure fails closed → mode unavailable, never null', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    const broken = Object.assign((table) => {
+      if (table === 'scheduled_services as s') throw new Error('catalog join down');
+      return db(table);
+    }, { schema: db.schema });
+    const offer = await buildOfferForFamily('cust-1', broken, 'tree_shrub', { propertyLookup: missLookup });
+    expect(offer).toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
+    // Dispatch-time callers ask for the error instead (codex #4810 r7).
+    await expect(buildOfferForFamily('cust-1', broken, 'tree_shrub', { propertyLookup: missLookup, throwOnError: true })).rejects.toThrow();
+  });
+
+  test('throwOnError also surfaces the best-effort inner failures (verified-override probe) instead of demoting (codex #4810 r8)', async () => {
+    hasVerifiedOverrides.mockImplementation(async () => { throw new Error('probe down'); });
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    // Creation-time: demoted to the CTA, as the card does.
+    expect((await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).mode).toBe('quote_cta');
+    // Dispatch-time: the error reaches the caller.
+    await expect(buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup, throwOnError: true })).rejects.toThrow('probe down');
+  });
+
+  test('throwOnError surfaces a property-lookup throw the pricer would swallow into a profile-only price (codex #4810 r9)', async () => {
+    const downLookup = jest.fn(async () => { throw new Error('lookup down'); });
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    // Creation-time: best effort, no throw.
+    await expect(buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: downLookup })).resolves.not.toBeUndefined();
+    expect(downLookup).toHaveBeenCalled();
+    // Dispatch-time: the lookup outage reaches the caller.
+    await expect(buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: downLookup, throwOnError: true })).rejects.toThrow('lookup down');
+  });
+
+  test('a verified correction on file demotes to the quote CTA, same as the card', async () => {
+    hasVerifiedOverrides.mockImplementation(async () => true);
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    const offer = await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup });
+    expect(offer).not.toBeNull();
+    expect(offer.mode).toBe('quote_cta');
+    expect(offer.option).toBeNull();
+  });
+
+  test('no provable single premises → a requested family fails closed (unavailable); the ladder still returns null (codex #4810 r12)', async () => {
+    for (const customer of [CUSTOMER({ has_multi_home: true }), CUSTOMER({ address_line1: null, city: null, zip: null })]) {
+      const db = dbFor({ customer, serviceTypes: ['Quarterly Pest Control'] });
+      expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup }))
+        .toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
+      expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+    }
+  });
+
+  test('the pricer\'s own refusals keep their meaning for a requested family: alreadyIncluded → owned, PRICING_UNAVAILABLE → unavailable (codex #4810 r12)', async () => {
+    const pricingAi = require('../services/customer-pricing-ai');
+    const spy = jest.spyOn(pricingAi, 'buildCustomerPricingResponse');
+    try {
+      const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+      spy.mockResolvedValueOnce({ ok: true, options: [], alreadyIncluded: ['tree_shrub'], currentServiceKeys: ['lawn_care'] });
+      expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup }))
+        .toMatchObject({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
+      spy.mockResolvedValueOnce({ ok: false, code: 'PRICING_UNAVAILABLE' });
+      expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup }))
+        .toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
+      // The ladder entry point keeps its plain null for both.
+      spy.mockResolvedValueOnce({ ok: true, options: [], alreadyIncluded: ['pest_control'], currentServiceKeys: ['lawn_care'] });
+      expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an unknown family → null', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    expect(await buildOfferForFamily('cust-1', db, 'mosquito', { propertyLookup: missLookup })).toBeNull();
   });
 });

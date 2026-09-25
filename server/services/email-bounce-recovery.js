@@ -398,8 +398,11 @@ async function gmailMailboxOwnedByOther(email, ownCustomerId, database = db) {
   const own = String(ownCustomerId || '');
   const isOther = (rowCustomerId) => !own || String(rowCustomerId || '') !== own;
   // Column names come from the hardcoded field lists below — never user input.
-  const CANON = (f) => `REPLACE(SPLIT_PART(SPLIT_PART(LOWER(${f}), '@', 1), '+', 1), '.', '')`;
-  const GOOGLE = (f) => `SPLIT_PART(LOWER(${f}), '@', 2) IN ('gmail.com', 'googlemail.com')`;
+  // The SQL identity is shared with the operator email conflict check
+  // (utils/customer-comms-lock.js GOOGLE_MAILBOX_SQL).
+  const { GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
+  const CANON = GOOGLE_MAILBOX_SQL.mailbox;
+  const GOOGLE = GOOGLE_MAILBOX_SQL.isGoogle;
   try {
     const customerRows = await database('customers')
       .where((q) => {

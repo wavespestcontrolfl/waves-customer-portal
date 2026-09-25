@@ -40,13 +40,60 @@ describe('regex fast path', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  test('tree/shrub words route to the TODO constant (pest until the tree_shrub type lands)', async () => {
-    expect(TREE_SHRUB_TRIAGE_TYPE).toBe('pest');
+  test('tree/shrub words route to their own assessment type', async () => {
+    expect(TREE_SHRUB_TRIAGE_TYPE).toBe('tree_shrub');
     const result = await classifyPhotoDiagnosisIntent('what is wrong with my palm tree leaves');
     expect(result).toEqual({ intent: 'photo_diagnosis', assessmentType: TREE_SHRUB_TRIAGE_TYPE, method: 'regex' });
-    // Tree words count on the pest side, so they outvote a single lawn word.
+    // Hedges/ornamentals are tree & shrub subjects too (codex #4810 r4).
+    await expect(classifyPhotoDiagnosisIntent('what is wrong with my hedges?'))
+      .resolves.toMatchObject({ assessmentType: TREE_SHRUB_TRIAGE_TYPE, method: 'regex' });
+    // Tree words outvote a single lawn word (lawn must strictly outnumber
+    // the combined pest + tree/shrub words to win).
     await expect(classifyPhotoDiagnosisIntent('shrubs and bushes next to the lawn are dying'))
       .resolves.toMatchObject({ assessmentType: TREE_SHRUB_TRIAGE_TYPE });
+    // Any pest word alongside plant words runs the pest identifier.
+    await expect(classifyPhotoDiagnosisIntent('found a bug on my plant'))
+      .resolves.toMatchObject({ assessmentType: 'pest' });
+  });
+
+  // Lawn-soil pests are lawn diagnostics: they route to the lawn assessment,
+  // never the pest identifier (pre-push audit r7).
+  test.each([
+    'grubs are eating my lawn',
+    'what are these webworms in the grass',
+    'chinch bug damage in the yard?',
+    // "bug" in "chinch bug" is part of the lawn pest's name, not a second
+    // pest subject that ties the lawn word (codex #4810 r11).
+    'what is this chinch bug?',
+    'what are these chinch bugs?',
+    // Two-word spellings of the lawn-pest names (codex #4810 r14).
+    'what is this army worm?',
+    'what are these army worms in my grass',
+    'what are these sod web worms?',
+    // No raw subject token until the phrase is normalized (codex #4810 r15).
+    'army worms everywhere, help',
+    'web worms everywhere and brown patches',
+  ])('lawn-pest caption %p runs the lawn assessment', async (body) => {
+    await expect(classifyPhotoDiagnosisIntent(body)).resolves.toMatchObject({ assessmentType: 'lawn', method: 'regex' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a bare "worm" is not a lawn word: "what is this worm in my kitchen?" runs the pest identifier', async () => {
+    await expect(classifyPhotoDiagnosisIntent('what is this worm in my kitchen?')).resolves.toMatchObject({ assessmentType: 'pest', method: 'regex' });
+  });
+
+  // codex #4810 r1: every pest class the classifier prompt names (spider,
+  // rodent...) and the common sightings must count as pest words, or a
+  // mixed caption fast-paths to a plant-health assessment.
+  test.each([
+    'what is this spider on my plant?',
+    'found a beetle eating my shrub leaves',
+    'what are these mealybugs on the hibiscus bush',
+    'what kind of caterpillar is this on my tree',
+    'rat droppings under the palm',
+  ])('mixed plant-and-pest caption %p runs the pest identifier', async (body) => {
+    await expect(classifyPhotoDiagnosisIntent(body)).resolves.toMatchObject({ assessmentType: 'pest', method: 'regex' });
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -61,6 +108,9 @@ describe('regex fast path', () => {
     'What is this charge on my invoice?',
     'Brown spots in the lawn, can you come out tomorrow',
     'are these termites',
+    // Lawn and tree/shrub words tied with no pest word: the subject is
+    // ambiguous, so the structured classifier decides (codex #4810 r2).
+    'what is wrong with the grass under my tree?',
   ])('not fast-pathed: %p goes to the model', async (body) => {
     mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'none' } });
     await expect(classifyPhotoDiagnosisIntent(body)).resolves.toEqual({ intent: null, assessmentType: null, method: 'ai' });
@@ -75,6 +125,18 @@ describe('regex fast path', () => {
   });
 });
 
+describe('a named tree beats incidental yard/lawn location words (codex #4810 r16)', () => {
+  test("\"what's wrong with this tree in my yard?\" runs the tree & shrub assessment on the regex path", async () => {
+    await expect(classifyPhotoDiagnosisIntent("what's wrong with this tree in my yard?")).resolves.toMatchObject({ assessmentType: 'tree_shrub', method: 'regex' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('"the grass under my tree" stays the classifier\'s call (real lawn subject)', async () => {
+    await classifyPhotoDiagnosisIntent('what is wrong with the grass under my tree?').catch(() => null);
+    expect(mockDispatch).toHaveBeenCalled();
+  });
+});
+
 describe('Claude FAST fallback', () => {
   test('an unplaced caption asks the sms_intent lane with the structured schema', async () => {
     mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'lawn' } });
@@ -85,7 +147,7 @@ describe('Claude FAST fallback', () => {
     expect(request.jsonSchema.properties.subject.enum).toEqual(['lawn', 'pest', 'tree_shrub', 'none']);
   });
 
-  test('tree_shrub from the model maps to the TODO constant', async () => {
+  test('tree_shrub from the model maps to its own assessment type', async () => {
     mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'tree_shrub' } });
     await expect(classifyPhotoDiagnosisIntent('Look at this by the driveway'))
       .resolves.toMatchObject({ intent: 'photo_diagnosis', assessmentType: TREE_SHRUB_TRIAGE_TYPE });

@@ -17,7 +17,7 @@ jest.mock('../services/call-bridge', () => ({
 jest.mock('../services/lead-estimate-link', () => ({ stampFirstResponseByContact: jest.fn(async () => 1) }));
 const mockAcceptedSid = `SM${'a'.repeat(32)}`;
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: mockAcceptedSid })) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvTimestamp: jest.fn(() => null) }));
 jest.mock('../services/sms-suggest-mode', () => ({
   reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: ['dec-1'], reservationId: '22222222-2222-4222-8222-222222222222', autoSendInFlight: false })),
   settleHumanReply: jest.fn(async () => undefined),

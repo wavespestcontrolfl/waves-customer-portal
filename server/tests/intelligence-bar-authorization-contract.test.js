@@ -124,7 +124,7 @@ test('nested structures are described in full, never dropped (estimate draft ser
 
 test('update_customer email/name/phone changes carry the mandatory fan-out disclosures as effects', () => {
   const { EMAIL_FANOUT_DISCLOSURE } = require('../services/customer-email-fanout');
-  const { CONTACT_FANOUT_DISCLOSURE } = require('../services/customer-contact-fanout');
+  const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../services/customer-contact-fanout');
   const c = buildContract({
     toolName: 'update_customer',
     params: { customer_id: 'c9', updates: { email: 'x@example.test', phone: '9415550000' } },
@@ -132,9 +132,22 @@ test('update_customer email/name/phone changes carry the mandatory fan-out discl
   });
   const labels = c.effects.map((e) => e.label);
   expect(labels).toContainEqual(EMAIL_FANOUT_DISCLOSURE);
-  expect(labels).toContainEqual(CONTACT_FANOUT_DISCLOSURE);
+  // A phone change appends the hold-clear clause (codex round-5 P2).
+  expect(labels).toContainEqual(`${CONTACT_FANOUT_DISCLOSURE} ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`);
   const only = buildContract({ toolName: 'update_customer', params: { updates: { notes: 'gate code 1234' } }, displayParams: { updates: { notes: 'gate code 1234' } } });
   expect(only.effects.map((e) => e.label)).not.toContainEqual(EMAIL_FANOUT_DISCLOSURE);
+});
+
+test('codex round-5 P2: a name-only update_customer edit discloses the fan-out WITHOUT promising a hold lift it never does', () => {
+  const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../services/customer-contact-fanout');
+  const c = buildContract({
+    toolName: 'update_customer',
+    params: { customer_id: 'c9', updates: { first_name: 'Ada' } },
+    displayParams: { customer_id: 'c9', updates: { first_name: 'Ada' } },
+  });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContainEqual(CONTACT_FANOUT_DISCLOSURE);
+  expect(labels.some((l) => l.includes(CONTACT_FANOUT_PHONE_HOLD_CLAUSE))).toBe(false);
 });
 
 test('bulk_update_customers with an email change discloses the per-customer email fan-out (email only)', () => {

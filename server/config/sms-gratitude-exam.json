@@ -87,6 +87,33 @@
       }
     },
     {
+      "id": "positive_manual_answer",
+      "expectedEligible": true,
+      "source": {
+        "inbound": { "id": "in-manual-answer", "body": "Thanks!", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-manual-answer", "body": "Yes, you can download the Waves app and move appointments there.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "manual", "humanAuthored": true }
+        ],
+        "firstName": "Casey",
+        "contextComplete": true,
+        "pendingWork": false
+      }
+    },
+    {
+      "id": "positive_manual_after_question",
+      "expectedEligible": true,
+      "source": {
+        "inbound": { "id": "in-manual-after-q", "body": "Thank you", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "in-manual-q", "body": "Is the app the best way to move an appointment?", "direction": "inbound", "createdAt": "2030-01-10T14:57:00.000Z", "mediaCount": 0, "messageType": "inbound" },
+          { "id": "out-manual-after-q", "body": "Yes, the Waves app is the easiest way to move an appointment.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "manual", "humanAuthored": true }
+        ],
+        "firstName": "Casey",
+        "contextComplete": true,
+        "pendingWork": false
+      }
+    },
+    {
       "id": "negative_mixed_thanks",
       "expectedEligible": false,
       "source": {
@@ -114,9 +141,22 @@
       "source": {
         "inbound": { "id": "in-promise", "body": "Thank you", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
         "history": [
-          { "id": "out-promise", "body": "We'll send your report shortly.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "manual" }
+          { "id": "out-promise", "body": "We'll send your report shortly.", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "manual", "humanAuthored": true }
         ],
         "firstName": "Casey", "contextComplete": true, "pendingWork": false
+      }
+    },
+    {
+      "id": "negative_manual_payment_request",
+      "expectedEligible": false,
+      "source": {
+        "inbound": { "id": "in-manual-pay", "body": "Thanks", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
+        "history": [
+          { "id": "out-manual-pay", "body": "Here is your payment link: https://example.invalid/pay/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "manual", "humanAuthored": true }
+        ],
+        "firstName": "Casey",
+        "contextComplete": true,
+        "pendingWork": false
       }
     },
     {
@@ -183,7 +223,7 @@
         "inbound": { "id": "in-newer-out", "body": "Thanks", "direction": "inbound", "createdAt": "2030-01-10T15:00:00.000Z", "mediaCount": 0 },
         "history": [
           { "id": "out-newer-out", "body": "Your service report: https://example.invalid/report/synthetic", "direction": "outbound", "createdAt": "2030-01-10T14:59:00.000Z", "mediaCount": 0, "messageType": "service_report" },
-          { "id": "out-after", "body": "A teammate is reviewing your note.", "direction": "outbound", "createdAt": "2030-01-10T15:01:00.000Z", "mediaCount": 0, "messageType": "manual" }
+          { "id": "out-after", "body": "A teammate is reviewing your note.", "direction": "outbound", "createdAt": "2030-01-10T15:01:00.000Z", "mediaCount": 0, "messageType": "manual", "humanAuthored": true }
         ],
         "firstName": "Casey", "contextComplete": true, "pendingWork": false
       }

@@ -153,12 +153,15 @@ async function dispatchReserved(input, {
 
 /**
  * Gratitude-lane prerequisite for the three operator send paths that do not
- * already own the composer/tech reply lifecycle. The gate-off branch is an
- * exact pass-through. When enabled, reserveHumanReply serializes against the
- * shared autonomous claim and persists recovery linkage before provider entry.
+ * already own the composer/tech reply lifecycle. Never activated and gate-off,
+ * this is an exact pass-through. Otherwise — including gate-off after
+ * activation, where a retained or rolling-deploy claim may exist —
+ * reserveHumanReply serializes against the shared autonomous claim under the
+ * thread lock and persists recovery linkage before provider entry.
  */
 async function sendManualCustomerSms(input) {
-  if (!isEnabled('smsGratitudeReplies')) return sendCustomerMessage(input);
+  if (!isEnabled('smsGratitudeReplies')
+    && !require('../sms-gratitude-context').gratitudeClaimsPossible()) return sendCustomerMessage(input);
 
   const reviewedBy = input.metadata?.adminUserId || null;
   // Canonical send metadata historically also carries symbolic provenance

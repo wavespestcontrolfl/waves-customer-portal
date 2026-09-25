@@ -130,13 +130,17 @@ const LANE_RUNTIME = {
   // direct_sdk: both relay implementations stream through the Anthropic SDK, not llm/call.js (Codex r14).
   // M3 (Codex r19): replies go straight to the caller mid-call; the ordered transcript is written back to call_log on close.
   voice_relay: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
+  // Same runtime shape as voice_relay (same offline direct-SDK stream, same
+  // customer-visible risk, same M3 maturity) — collections-conversation.js
+  // is the other relay implementation the comment above already covers.
+  voice_relay_collections: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
   // Optional manual replay judge: no business writes; ordinary call ledger
   // and traces remain available. Event cadence avoids expected silence alarms.
   voice_relay_judge: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
 
   // ── Photos & property ──
   // direct_sdk: the photo lanes call Anthropic directly and Gemini over raw HTTP, not llm/call.js (Codex r13);
-  // satellite, both property-lookup lanes and turf OCR do the same for every provider arm (Codex r14);
+  // property_trio and turf OCR do the same for every provider arm (Codex r14);
   // treatment_zone (raw Gemini fetch + anthropic.messages.create), lawn_quality_gate (new Anthropic()), the three
   // lawn-diagnostic stages (raw Gemini / OpenAI fetches + the SDK) are direct_sdk too (Codex r15).
   // offline (Codex r15): the pest / lawn / tree-shrub fetches and treatment_zone's Gemini attempts carry no AbortSignal,
@@ -151,11 +155,11 @@ const LANE_RUNTIME = {
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },
-  // offline (Codex r17): satellite's Promise.allSettled fetches and turf OCR's Gemini leg carry no AbortSignal, and the OCR reading
+  // offline (Codex r17): satellite's parallel image fetches and turf OCR's Gemini leg carry no AbortSignal, and the OCR reading
   // is a background enrichment left pending for a later retry — neither can honour an interactive hard timeout.
-  satellite: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
+  satellite: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
   property_trio: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
-  property_v2_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
+  property_v2_vision: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'property_measurement', expected_duration_ms: 120_000 },
   turf_ocr: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   // draft_for_human + M2 (Codex r20): /photo-analysis/draft installs summary + captions into the tech's editable completion state; the later completion submits them.
   photo_scoring: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
@@ -250,6 +254,15 @@ const LANE_RUNTIME = {
   review_gate_text: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
   // customer_visible + M3 (Codex r18): the autonomous publisher stamps the alt text into blog frontmatter the PR poller can auto-merge.
   hero_alt: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  // read_only: a gate, not a write — screenGeneratedImage returns a pass/fail
+  // verdict the blog publisher acts on (retry / accept), the same shape as
+  // lawn_quality_gate. Unlike hero_alt's alt-text pass, this call site DOES
+  // ride the shared adapter (dispatchWithFallback → TEXT_POLICIES.imageScreen,
+  // owner ruling 2026-09-25: Sol first, Claude backup), so it is ledger: 'call'
+  // (laneId 'image_screen' at the call site), and
+  // offline (part of the same background blog-publish pipeline as hero_alt /
+  // image_gen, not a synchronous user request).
+  image_screen: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   editorial_review: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
   editorial_repair: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
   editorial_plan_review: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', expected_duration_ms: 120_000 },
@@ -281,6 +294,12 @@ const LANE_RUNTIME = {
   mentions_sentiment: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification' },
   // customer_visible + M3 (Codex r19): hero/body images are committed into the auto-mergeable post PR — same boundary as hero_alt.
   image_gen: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, maturity: 'M3', expected_duration_ms: 180_000 },
+  // customer_visible + M3: a live (non-draft) autonomous run generates exactly
+  // one image and posts it with no approval step (social-content-studio.js
+  // creativeVariantsForRun: count is 1 outside 'draft' mode) — same worst-case
+  // boundary as image_gen. Draft/preview runs generate several variants into
+  // the approval queue, but the lane is classified by its live path.
+  social_image_gen: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'image', fallback_class: 'offline', eval_family: null, maturity: 'M3', expected_duration_ms: 180_000 },
   // draft_for_human + M2 (Codex r18): a Veo clip is only made for a draft campaign run and lands in the approval queue.
   video_gen: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, maturity: 'M2', ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },

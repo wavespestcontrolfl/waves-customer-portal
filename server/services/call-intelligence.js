@@ -235,6 +235,10 @@ function buildCallIntelligence({ call, commitments = [], outcomes = null }) {
       preferred_contact_method: caller.preferred_contact_method || null,
       customer_status: v2?.customer_history?.status || null,
       email_captured: !!caller.email,
+      // caller_id_disclaimed / phone_note (schema 1.14.0) — the caller said
+      // the ANI isn't theirs; see callback_number_needed (triage_flags).
+      caller_id_disclaimed: caller.caller_id_disclaimed ?? null,
+      phone_note: caller.phone_note || null,
     },
     property: {
       address: addressText(property.service_address) || null,

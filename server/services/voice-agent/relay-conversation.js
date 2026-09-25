@@ -8,7 +8,30 @@
  *
  * Model: MODELS.VOICE — the repo's warm customer-facing tier (CLAUDE.md: never
  * hardcode model IDs; concrete IDs live only in server/config/models.js).
- * Overridable via VOICE_RELAY_MODEL.
+ * Overridable via VOICE_RELAY_MODEL (shared with the collections outbound
+ * flow — do not read that env expecting it to move only this lane).
+ *
+ * Inbound-only override: VOICE_RELAY_INBOUND_MODEL takes precedence over
+ * VOICE_RELAY_MODEL for THIS file only (collections-conversation.js never
+ * reads it). VOICE_RELAY_SANDBOX_MODEL applies only to sandbox test calls
+ * (this.sandbox === true) and takes precedence over the inbound override, so
+ * the owner can A/B a candidate model on the sandbox line without touching
+ * production inbound calls. Precedence, highest first:
+ *   sandbox session:      VOICE_RELAY_SANDBOX_MODEL → VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
+ *   production inbound:                                VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
+ * Every override is checked against an allowlist derived from
+ * MODELS.MODEL_CATALOG (Anthropic, text-capable, not `requires: 'deep'` —
+ * this lane always runs `thinking: 'disabled'`, which Fable/Mythos ids
+ * reject). An unknown override id is never silently substituted: it is
+ * rejected with one logged warning and the session falls back down the
+ * chain, stamping `model_fallback_reason` in `_versionStamps()` so the
+ * record shows what actually ran. The model is resolved ONCE per session at
+ * construction and pinned on `this.model` — every request in that call uses
+ * the pinned value, so a mid-call env change or two concurrent calls under
+ * different env values can never leak into each other. The module-level
+ * MODEL export stays the plain VOICE_RELAY_MODEL/MODELS.VOICE resolution for
+ * any other importer (e.g. collections-conversation.js's own independent
+ * read of the same env).
  * Thinking is DISABLED: this is a live phone call where a "thinking" pause reads
  * as dead air; tool-use + a tight system prompt carry the structure instead.
  * Streaming (.stream + .finalMessage) per the claude-api skill — avoids HTTP
@@ -53,7 +76,112 @@ function slotStartMinutes(slot) {
   return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
 }
 
+/**
+ * Was `<ConversationRelay events="…">` actually rendered for this session's
+ * TwiML, and did it include speaker-events / tokens-played? `relayProfileId`
+ * is the label the rendering TwiML put on a `<Parameter>` (relay-server.js
+ * reads it back off the setup frame) — the SAME untrusted-but-attributable
+ * label `_versionStamps` already stamps as `relay_profile_id`. Looked up
+ * against `RELAY_PROFILES` (relay-profiles.js is the only chooser of the
+ * `events` attribute), never re-derived from a guess, so a null result here
+ * means exactly what it says: no attribute was rendered, not "we forgot to
+ * check". A profile id this lookup does not recognize (a sandbox raw-JSON
+ * cell's synthesized `sandbox_raw_<hash>` id, or a future profile added after
+ * a deploy skew) is reported UNKNOWN — never guessed true or false — so an
+ * actually-received event (proof positive) is what later resolves it, not
+ * this lookup.
+ */
+function deriveRelayEventsSubscribed(relayProfileId) {
+  if (!relayProfileId) return { speaker: false, tokensPlayed: false };
+  let events = null;
+  try {
+    const { RELAY_PROFILES } = require('./relay-profiles');
+    const profile = RELAY_PROFILES[relayProfileId];
+    if (profile && profile.attrs) events = profile.attrs.events;
+  } catch { /* relay-profiles unavailable — fall through to unknown */ }
+  if (typeof events !== 'string') return { speaker: null, tokensPlayed: null };
+  const parts = events.trim().split(/\s+/).filter(Boolean);
+  return { speaker: parts.includes('speaker-events'), tokensPlayed: parts.includes('tokens-played') };
+}
+
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+
+// Env names for the two inbound-only override levers (see the file header),
+// used in log/stamp text. The reads below name process.env.VOICE_RELAY_* directly
+// so the switchboard drift guard (model-switchboard-callsites.test.js) sees them.
+// Never read by collections-conversation.js — it keeps reading VOICE_RELAY_MODEL
+// directly, so these two vars have no effect on that flow.
+const INBOUND_MODEL_ENV = 'VOICE_RELAY_INBOUND_MODEL';
+const SANDBOX_MODEL_ENV = 'VOICE_RELAY_SANDBOX_MODEL';
+
+// Allowlist for the override envs above — derived from the shared catalog
+// (config/models.js MODEL_CATALOG) rather than a locally hand-typed list, so
+// a new/retired Anthropic id needs no change here. Anthropic + text-capable
+// only (this lane never sends images); `requires: 'deep'` ids (Fable/Mythos)
+// are excluded because only services/llm/deep.js knows how to run them — this
+// lane sends `thinking: { type: 'disabled' }`, which those models reject.
+const ALLOWED_OVERRIDE_MODEL_IDS = new Set(
+  Object.entries(MODELS.MODEL_CATALOG)
+    .filter(([, meta]) => meta
+      && meta.provider === 'anthropic'
+      && Array.isArray(meta.caps) && meta.caps.includes('text')
+      && meta.status !== 'unavailable'
+      && !meta.requires)
+    .map(([id]) => id)
+);
+
+function isAllowedOverrideModel(id) {
+  return typeof id === 'string' && id.length > 0 && ALLOWED_OVERRIDE_MODEL_IDS.has(id);
+}
+
+// A misconfigured override is re-read by every new call; the per-session
+// fallback stamp records each one, but the operational warning (which lists
+// the whole allowlist) is logged once per process per source/value — the
+// relay-profiles.js warnOnce pattern — so a busy line cannot flood the logs.
+const warnedOverrides = new Set();
+function warnRejectedOverrideOnce(source, value) {
+  const key = `${source}=${value}`;
+  if (warnedOverrides.has(key)) return;
+  warnedOverrides.add(key);
+  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')})`);
+}
+
+/**
+ * Resolve the ONE model this session pins for its whole lifetime. Called once
+ * at RelayConversation construction; the caller stores the result on
+ * `this.model` (and `this._modelFallbackReason`) so every later model
+ * request and version stamp in this call reads the same value, immune to a
+ * mid-call env change or a concurrent call under a different env.
+ *
+ * Walks the override chain highest-precedence first (sandbox model, then the
+ * inbound override), returning the first value that passes the allowlist.
+ * The FIRST rejected value along the way is logged once and recorded as
+ * `fallbackReason` even if a lower-precedence override or the shared default
+ * ends up running instead — the version stamp must show a rejection happened
+ * even when the call still ran on a legitimate (if less-preferred) model.
+ */
+function resolveSessionModel({ sandbox } = {}) {
+  const candidates = [];
+  if (sandbox === true) {
+    const sandboxRaw = process.env.VOICE_RELAY_SANDBOX_MODEL;
+    if (sandboxRaw) candidates.push({ source: SANDBOX_MODEL_ENV, value: sandboxRaw });
+  }
+  const inboundRaw = process.env.VOICE_RELAY_INBOUND_MODEL;
+  if (inboundRaw) candidates.push({ source: INBOUND_MODEL_ENV, value: inboundRaw });
+
+  let fallbackReason = null;
+  for (const { source, value } of candidates) {
+    if (isAllowedOverrideModel(value)) {
+      return { model: value, fallbackReason };
+    }
+    if (!fallbackReason) {
+      fallbackReason = `unknown_model_override:${source}=${value}`;
+      warnRejectedOverrideOnce(source, value);
+    }
+  }
+  return { model: MODEL, fallbackReason };
+}
+
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
@@ -164,6 +292,11 @@ const SYSTEM_PROMPT = [
   '- Keep every reply to one or two short sentences. This is a phone call, not an essay.',
   '- Calm, plain-spoken, and efficient — a steady front-desk voice, not a cheerleader. No',
   '  exclamation-point energy, no hype, no gushing; one friendly beat is plenty. No corporate filler.',
+  '- Learn what they need with OPEN-ENDED questions. Never offer a menu of services or make',
+  '  them pick from a list ("pest control or lawn care?", "pest, lawn, mosquito, or something',
+  '  else?"). Ask what is going on at their home, let them describe it in their own words, then',
+  '  follow up on what they said. This is about identifying their need only: appointment times a',
+  '  tool returned are still read out as two or three choices for the caller to pick from.',
   '- Gather, conversationally: their FIRST and LAST name, the full service street address (not',
   '  just the city/ZIP), an email address, and what is going on (the pest or lawn problem).',
   '  These four — full name, service address, and email — are what let the office work the',
@@ -496,6 +629,14 @@ class RelayConversation {
     // the hangup capture floor stays down. A profile test or a stranger
     // dialling the test number can never create dispatch work.
     this.sandbox = sandbox === true;
+    // Resolved ONCE, here, and pinned for the rest of this session — see the
+    // file header + resolveSessionModel(). Every model request and version
+    // stamp below reads this.model, never the module-level MODEL, so a
+    // mid-call env change or a concurrent call under a different env can
+    // never leak into an in-flight session.
+    const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
+    this.model = modelResolution.model;
+    this._modelFallbackReason = modelResolution.fallbackReason;
     // The upgrade token's nonce — the per-session key the CallSid claim is
     // owned by, so a fresh-token reconnect can reclaim the live call — and
     // its expiry, the monotonic generation a takeover must beat.
@@ -546,7 +687,15 @@ class RelayConversation {
     this._clearedFailures = { model: false, tool: false };
     this._handoffForFailure = false; // the provider-failure handoff ran (once per call)
     this._failureCallbackPromised = false;
-    this._eventShapesSeen = new Set();
+    // Redacted-shape fixture (task: key names only, never values), keyed by
+    // classifyRelayEvent's `kind` so a call row alone can tell "we never saw
+    // an agent_speaking_end frame" from "we saw one and it had these keys".
+    this._eventShapesByKind = new Map();
+    // Every classified relay-event kind, counted — the RECEIVED half of the
+    // trustworthy-measurement pair below (SUBSCRIBED is the other half). A
+    // received event is proof of subscription no lookup can override.
+    this._eventCounts = Object.create(null);
+    this._relayEventsSubscribed = deriveRelayEventsSubscribed(relayProfileId);
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
     // version record, never acted on.
@@ -887,10 +1036,16 @@ class RelayConversation {
   /** Relay notifications the `events` attribute adds (speaker / tokens-played). */
   handleRelayEvent(frame) {
     const ev = classifyRelayEvent(frame);
-    if (ev.shape && !this._eventShapesSeen.has(ev.shape)) {
+    // RECEIVED, per kind — proof of subscription no profile lookup can
+    // override, and the raw count a call row needs to tell "nothing arrived"
+    // from "one arrived and it was unusable" (see relay-transcript's reasons).
+    this._eventCounts[ev.kind] = (this._eventCounts[ev.kind] || 0) + 1;
+    if (ev.shape && !this._eventShapesByKind.has(ev.kind)) {
       // Key names only — never values — so the first sandbox call can pin the
       // undocumented payload shape without the log carrying spoken text.
-      this._eventShapesSeen.add(ev.shape);
+      // Deduped per KIND (not per shape): two kinds sharing an identical key
+      // set are still two distinct things a payload drift could break.
+      this._eventShapesByKind.set(ev.kind, ev.shape);
       logger.info(`[voice-relay] relay event shape seen callSid=${maskSid(this.callSid)} kind=${ev.kind} shape=${ev.shape}`);
     }
     const t = now();
@@ -941,12 +1096,31 @@ class RelayConversation {
     }
     stat.logged = true;
     const ms = (a, b) => (Number.isFinite(a) && Number.isFinite(b) && b >= a ? `${Math.round(b - a)}ms` : 'n/a');
+    // Every null above is explainable from these two: `subscribed` says
+    // whether the relay was EVER going to send speaker/tokens-played events
+    // this call, `eventCounts` says how many of each actually arrived — so a
+    // reviewer never has to guess why endpoint/firstAudio read "n/a".
+    const counts = this._eventCounts;
+    const eventCounts = ['caller_speaking_end', 'agent_speaking_start', 'agent_speaking_end', 'tokens_played']
+      .map((kind) => `${kind}=${counts[kind] || 0}`).join(',');
+    // Three states, never a truthiness coin-flip on a null: `speaker` is
+    // true/false when the profile lookup resolved it, or null for an
+    // UNKNOWN profile (deriveRelayEventsSubscribed) — a null is not "none".
+    // When it's null but a speaker-kind event actually arrived this call,
+    // that arrival is proof positive (see reasonForMissingAudioMetric's same
+    // priority in relay-transcript), so the log says so instead of lying.
+    const speakerReceived = ['caller_speaking_end', 'agent_speaking_start', 'agent_speaking_end']
+      .some((kind) => (counts[kind] || 0) > 0);
+    const eventsState = this._relayEventsSubscribed.speaker === true ? 'subscribed'
+      : this._relayEventsSubscribed.speaker === false ? 'none'
+        : speakerReceived ? 'subscribed(observed)' : 'unknown';
     logger.info(
       `[voice-relay] turn=${stat.turn} callSid=${maskSid(this.callSid)} endpoint=${ms(stat.callerSpeechStoppedAt, stat.promptAt)} `
       + `firstToken=${ms(stat.promptAt, stat.firstTokenAt)} firstSend=${ms(stat.promptAt, stat.firstSendAt)} `
       + `firstAudio=${ms(stat.callerSpeechStoppedAt, stat.agentSpeakingStartAt)} model=${Math.round(stat.modelMs)}ms rounds=${stat.rounds} `
       + `tools=${stat.toolCount}/${Math.round(stat.toolMs)}ms effort=${stat.effort} renderer=${stat.renderer} `
-      + `interrupted=${stat.interrupted} timedOut=${stat.timedOut}`
+      + `interrupted=${stat.interrupted} timedOut=${stat.timedOut} `
+      + `events=${eventsState} eventCounts=${eventCounts}`
     );
   }
 
@@ -966,7 +1140,8 @@ class RelayConversation {
     const language = !/[-_]/.test(raw) && isSpanish(raw) ? require('./relay-protocol').SPANISH_LANGUAGE : raw;
     return {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
-      model: MODEL,
+      model: this.model,
+      model_fallback_reason: this._modelFallbackReason || null,
       effort: VOICE_EFFORT,
       prompt_sha: this._promptSha,
       context_snapshot_sha: this._contextSnapshotSha,
@@ -981,6 +1156,22 @@ class RelayConversation {
       tts_settings: tts.ttsSettings,
       renderer_version: RENDERER_VERSION,
       speech_format_version: null,
+    };
+  }
+
+  /**
+   * The session-level half of "trustworthy measurement" (relay-transcript's
+   * summarizeTurnStats needs it to turn a null audio metric into a reason
+   * instead of a shrug): whether speaker-events / tokens-played were
+   * SUBSCRIBED for this session, how many of each kind actually arrived, and
+   * the first redacted shape seen per kind. Read at close, so it reflects the
+   * whole call, not a snapshot.
+   */
+  _eventsTelemetry() {
+    return {
+      subscribed: { ...this._relayEventsSubscribed },
+      counts: { ...this._eventCounts },
+      shapes: Object.fromEntries(this._eventShapesByKind),
     };
   }
 
@@ -1135,6 +1326,13 @@ class RelayConversation {
     this._drainPlaying();
     const stat = {
       turn: this._userTurns.length,
+      // The PER-SOCKET generation this turn ran under (relay-server stamps
+      // it from the upgrade token's nonce on every authenticated socket,
+      // including the first leg of a call that never reconnects — this is
+      // NOT a reconnect-only field), so a metric survives being pulled out
+      // of the session and still ties back to its socket/leg: a call with N
+      // legs shows N distinct values here, one per leg.
+      segmentGeneration: this.sessionGeneration != null ? this.sessionGeneration : null,
       promptAt,
       callerSpeechStoppedAt: stoppedAt != null && promptAt - stoppedAt <= CALLER_STOP_STALE_MS ? stoppedAt : null,
       loopStartAt: null,
@@ -2010,7 +2208,7 @@ class RelayConversation {
       try {
         const stream = anthropic.messages.stream(
           {
-            model: MODEL,
+            model: this.model,
             max_tokens: MAX_TOKENS,
             system: this._systemBlocks,
             thinking: { type: 'disabled' },
@@ -2229,12 +2427,12 @@ class RelayConversation {
           reason,
           text: buildTranscriptText(this._transcript),
           turns: this._transcript.length,
-          latency: summarizeTurnStats(this._turnStats),
+          latency: summarizeTurnStats(this._turnStats, this._eventsTelemetry()),
           turnCounts: Object.fromEntries([['caller_turns', 'caller'], ['agent_turns', 'agent'], ['tool_calls', 'tool']]
             .map(([key, role]) => [key, this._transcript.filter((turn) => turn.role === role).length])),
           turnStats: storedTurnStats(this._turnStats),
           versions: this._versionStamps(),
-          model: MODEL,
+          model: this.model,
           leadId: this._leadId,
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
@@ -2322,9 +2520,9 @@ class RelayConversation {
           leadCaptured: capturedLead,
           reserviceFiled: this._reserviceFiled,
           callSid: this.callSid,
-          model: MODEL,
+          model: this.model,
           startedAt: this._startedAt,
-          latency: summarizeTurnStats(this._turnStats),
+          latency: summarizeTurnStats(this._turnStats, this._eventsTelemetry()),
           versions: this._versionStamps(),
         });
         // PR 2B (codex r3 P2): on a reconnected call the summary covers the
@@ -2854,4 +3052,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

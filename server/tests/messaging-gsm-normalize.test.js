@@ -45,6 +45,13 @@ jest.mock('../services/messaging/providers/twilio-sms', () => ({
   },
 }));
 
+// callback_number_needed (PR #4807): every SMS is checked against
+// disclaimed_number_holds (sendCustomerMessage + sendSMS's dispatch). Not
+// under test here — stubbed to "never held" so no hold read reaches the db.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberBlocksSend: jest.fn(async () => false),
+}));
+
 const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');

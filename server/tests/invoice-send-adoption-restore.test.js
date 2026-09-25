@@ -349,6 +349,7 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
       if (table === 'invoices') return invoices.query();
       if (table === 'sms_log') return smsLog.query();
       if (table === 'customers') return customerQuery(customer);
+      if (table === 'notification_prefs') return customerQuery({});
       if (table === 'activity_log') return passthroughQuery();
       throw new Error(`Unexpected table: ${table}`);
     });
@@ -740,6 +741,7 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
         if (table === 'invoices') return invoices.query();
         if (table === 'sms_log') return smsLog.query();
         if (table === 'customers') return customerQuery(customer);
+        if (table === 'notification_prefs') return customerQuery({});
         if (table === 'activity_log') return passthroughQuery();
         throw new Error(`Unexpected table: ${table}`);
       });

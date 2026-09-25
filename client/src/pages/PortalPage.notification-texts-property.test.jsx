@@ -84,7 +84,7 @@ describe('Appointment texts per saved property', () => {
     expect(screen.queryByText(/Primary residence · 77 Pine Ct/)).not.toBeInTheDocument();
     // The profile card keeps the delivery choice but not the on/off switch.
     expect(await screen.findByTestId('per-property-techEnRoute')).toBeInTheDocument();
-    expect(screen.queryByRole('switch', { name: 'Tech En Route Alert' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'On the way' })).not.toBeInTheDocument();
   });
   it('keeps the delivery choice selectable when the HOUSE enables an alert the profile row has off', async () => {
     api.getNotificationPrefs.mockResolvedValue({ preferences: { ...prefsOf(true), techEnRoute: false, appPreferencesAvailable: false } });

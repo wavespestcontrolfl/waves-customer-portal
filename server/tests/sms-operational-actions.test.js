@@ -788,6 +788,34 @@ describe('fulfillment proof', () => {
     },
   );
 
+  test.each([['other', 'en_route'], ['callback', 'on_site']])(
+    'owner ruling 2026-09-24: a %s ask is nullified by visible field progress after the request, not before it, and not by a mere booking',
+    (kind, status) => {
+      const before = '2040-03-09T15:00:00Z';
+      const after = '2040-03-11T15:00:00Z';
+      const commitment = { kind, sms_context: { property_id: PROPERTY_ID, source_at: '2040-03-10T15:00:00Z' } };
+      const progressedAfter = { type: 'visit', property_id: PROPERTY_ID, status, created_at: before, progressed_at: after };
+      // The same transition, but it happened before the request was ever made.
+      const progressedBefore = { ...progressedAfter, progressed_at: before };
+      // A visit that was merely (re)booked after the request, with no progress
+      // recorded, does not answer "are you still coming" / "will you call".
+      const bookedOnly = { type: 'visit', property_id: PROPERTY_ID, status: 'confirmed', created_at: after, booked_at: after };
+      expect(admissibleWitness(progressedAfter, commitment)).toBe(true);
+      expect(admissibleWitness(progressedBefore, commitment)).toBe(false);
+      expect(admissibleWitness(bookedOnly, commitment)).toBe(false);
+      expect(admissibleWitness({ ...progressedAfter, status: 'confirmed' }, commitment)).toBe(false);
+    },
+  );
+
+  test('owner ruling 2026-09-24: an "other" ask with no stated property accepts any of the customer\'s own visits', () => {
+    const after = '2040-03-11T15:00:00Z';
+    const commitment = { kind: 'other', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    const progressed = { type: 'visit', property_id: 'some-other-property', status: 'completed', created_at: '2040-03-09T15:00:00Z', progressed_at: after };
+    expect(admissibleWitness(progressed, commitment)).toBe(true);
+    // technician_follow_up still requires an exact, stated property match.
+    expect(admissibleWitness(progressed, { ...commitment, kind: 'technician_follow_up' })).toBe(false);
+  });
+
   test('a staff claim of sending or completing work is not the deliverable itself', () => {
     const reply = { type: 'sms', status: 'delivered', message_type: 'manual', text: 'I sent the estimate' };
     expect(admissibleWitness(reply, { kind: 'send_estimate' })).toBe(false);

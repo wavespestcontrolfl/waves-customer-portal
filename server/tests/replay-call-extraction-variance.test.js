@@ -774,4 +774,50 @@ describe('call extraction replay variance reporting', () => {
       expect(signatureVariance.severity).toBe('medium');
     });
   });
+
+  // caller.caller_id_disclaimed / caller.phone_note (schema 1.14.0, live
+  // miss 2026-09-25, call 6fee5f34): without these in FIELD_GROUPS, a model
+  // that stops catching (or starts hallucinating) the disclaim would go
+  // unnoticed by the weekly replay/model bake-off.
+  describe('caller.caller_id_disclaimed variance coverage', () => {
+    test('caller_id_disclaimed and phone_note are registered in FIELD_GROUPS', () => {
+      const allFields = new Set(Object.values(FIELD_GROUPS).flat());
+      expect(allFields.has('caller_id_disclaimed')).toBe(true);
+      expect(allFields.has('phone_note')).toBe(true);
+    });
+
+    test('compareFlatFields reports a variance when caller_id_disclaimed flips', () => {
+      const variances = compareFlatFields(
+        { caller_id_disclaimed: null },
+        { caller_id_disclaimed: true },
+        true
+      );
+      const variance = variances.find((v) => v.field === 'caller_id_disclaimed');
+      expect(variance).toBeDefined();
+      expect(variance.severity).toBe('medium');
+    });
+
+    test('normalizeField keeps caller_id_disclaimed a genuine tri-state (null distinct from false)', () => {
+      expect(normalizeField('caller_id_disclaimed', null)).toBeNull();
+      expect(normalizeField('caller_id_disclaimed', false)).toBe(false);
+      expect(normalizeField('caller_id_disclaimed', true)).toBe(true);
+      expect(normalizeField('caller_id_disclaimed', null)).not.toBe(normalizeField('caller_id_disclaimed', false));
+    });
+
+    test('compareFlatFields reports a variance when phone_note changes', () => {
+      const variances = compareFlatFields(
+        { caller_id_disclaimed: true, phone_note: 'office line' },
+        { caller_id_disclaimed: true, phone_note: 'shop phone' },
+        true
+      );
+      expect(variances.find((v) => v.field === 'phone_note')).toBeDefined();
+    });
+
+    test('compareFlatFields reports no variance when nothing changed', () => {
+      const flat = { caller_id_disclaimed: true, phone_note: 'office line' };
+      const variances = compareFlatFields(flat, { ...flat }, true)
+        .filter((v) => v.field === 'caller_id_disclaimed' || v.field === 'phone_note');
+      expect(variances).toEqual([]);
+    });
+  });
 });

@@ -23,8 +23,13 @@ const {
   convertCallLeadOnPhoneBooking,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
+  bookingPreDraftAssessmentDrafted,
+  rerunAssessmentPreDraftAfterQuarantineClear,
   normalizeCallExtraction,
 } = _test;
+// ONE shared resolver + formatter for the processor gate and the engine
+// backstop (codex #4815 r6 P2).
+const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');
 const { flatView, mapAdditionalPropertiesToLegacy } = require('../utils/extraction-compat');
 const { validateModelOutput } = require('../schemas/validate-extraction');
 const { canAutoRoute, ADVISORY_TRIAGE_FLAGS } = require('../services/call-triage-flags');
@@ -138,6 +143,140 @@ describe('resolveCallAdditionalProperties / resolveCallQuoteSignals', () => {
       .toEqual({ quoteRequested: true, quotePromised: false });
     expect(resolveCallQuoteSignals({ quote_promised: 'yes' }, { service_request: { quote_promised: null } }))
       .toEqual({ quoteRequested: false, quotePromised: false });
+  });
+});
+
+// ─── owner ruling 2026-09-24: the spoken word beats the estimator ──────────
+// The $300 flea call — "just to confirm one more time, it's $300, that's
+// two treatments" / "Yep" — still spawned a $387 estimator-engine draft two
+// minutes later. resolveCallAgreedPrice must return the accepted amount so
+// the engine can be skipped for exactly that call, and null for every call
+// where the caller has not actually accepted a price yet.
+//
+// codex #4815 r1 P1s: (1) service_request.quoted_price_usd — the schema's
+// OWN narrower "agent quoted AND caller accepted" total — counts as agreed
+// on its own, independent of the broader price/prices[] object; (2) V2
+// ONLY — downstream composer decisions read the validated V2 extraction
+// plus the raw transcript, never the unvalidated V1 blob, so with no valid
+// V2 extraction this always returns null and the engine runs as before.
+//
+// codex #4815 r3 P2: returns { amount, amountMax? } (not a bare number) so
+// a genuinely accepted RANGE ("$90 to $100") is never collapsed to its low
+// end — amount_usd is defined as the range's LOW end and amount_max_usd
+// the HIGH end (schema description + the prompt's own "$90 to 100"
+// example), so reporting amount alone as an exact figure ("$90 agreed")
+// misrepresents what the caller actually accepted.
+describe('resolveCallAgreedPrice', () => {
+  test('V2 price.accepted: an accepted EXACT price with a finite positive amount is returned, no amountMax', () => {
+    const v2 = { service_request: { price: { amount_usd: 300, accepted: true, caller_response: 'accepted', stated_by: 'agent' } } };
+    expect(resolveCallAgreedPrice(v2)).toEqual({ amount: 300 });
+  });
+
+  test('V2 price.accepted: a genuine accepted RANGE carries amountMax through', () => {
+    const v2 = { service_request: { price: { amount_usd: 90, amount_max_usd: 100, accepted: true, caller_response: 'accepted' } } };
+    expect(resolveCallAgreedPrice(v2)).toEqual({ amount: 90, amountMax: 100 });
+  });
+
+  test('a NON-range price.amount_max_usd (absent, equal, or lower than amount_usd) never adds amountMax', () => {
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 300, amount_max_usd: null, accepted: true } } })).toEqual({ amount: 300 });
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 300, amount_max_usd: 300, accepted: true } } })).toEqual({ amount: 300 });
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 300, amount_max_usd: 250, accepted: true } } })).toEqual({ amount: 300 });
+  });
+
+  test('V2 quoted_price_usd: a finite positive value is agreed on its own, with no price object at all — always EXACT, never a range', () => {
+    // codex #4815 r3 P2: quoted_price_usd is defined by the extraction
+    // prompt as null whenever the amount is "uncertain OR A RANGE" — it
+    // never itself carries a paired max, so this path stays exact.
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300 } })).toEqual({ amount: 300 });
+  });
+
+  test('V2 quoted_price_usd wins even when the broader price object is absent/null/unaccepted', () => {
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300, price: null } })).toEqual({ amount: 300 });
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 300, price: { amount_usd: 387, accepted: false } } })).toEqual({ amount: 300 });
+  });
+
+  test('a stated price the caller declined or is still considering returns null', () => {
+    const declined = { service_request: { price: { amount_usd: 387, accepted: false, caller_response: 'declined' } } };
+    expect(resolveCallAgreedPrice(declined)).toBeNull();
+    const considering = { service_request: { price: { amount_usd: 387, accepted: null, caller_response: 'not_at_issue' } } };
+    expect(resolveCallAgreedPrice(considering)).toBeNull();
+  });
+
+  test('accepted but non-finite/zero/negative amount returns null (never a fabricated price), for both fields', () => {
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: null, accepted: true } } })).toBeNull();
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 0, accepted: true } } })).toBeNull();
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: -50, accepted: true } } })).toBeNull();
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: NaN, accepted: true } } })).toBeNull();
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: 0 } })).toBeNull();
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: -50 } })).toBeNull();
+    expect(resolveCallAgreedPrice({ service_request: { quoted_price_usd: null } })).toBeNull();
+  });
+
+  test('no price at all (quote requested only, nothing agreed) returns null', () => {
+    expect(resolveCallAgreedPrice({ service_request: { quote_requested: true } })).toBeNull();
+    expect(resolveCallAgreedPrice(null)).toBeNull();
+    expect(resolveCallAgreedPrice({})).toBeNull();
+    expect(resolveCallAgreedPrice({ service_request: {} })).toBeNull();
+  });
+
+  // codex #4815 r6 P2: the accepted billing unit and every accepted
+  // component (upfront + recurring) ride along — "$90 per quarter" agreed
+  // is never reported as a bare "$90.00".
+  test('the accepted billing UNIT rides along (and "unknown" is dropped, not rendered)', () => {
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 90, unit: 'per_quarter', accepted: true } } }))
+      .toEqual({ amount: 90, unit: 'per_quarter' });
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 90, amount_max_usd: 100, unit: 'per_month', accepted: true } } }))
+      .toEqual({ amount: 90, amountMax: 100, unit: 'per_month' });
+    expect(resolveCallAgreedPrice({ service_request: { price: { amount_usd: 300, unit: 'unknown', accepted: true } } }))
+      .toEqual({ amount: 300 });
+  });
+
+  test('quoted_price_usd borrows the unit of the accepted price entry with the SAME amount', () => {
+    const v2 = { service_request: { quoted_price_usd: 150, price: { amount_usd: 150, unit: 'per_application', accepted: true } } };
+    expect(resolveCallAgreedPrice(v2)).toEqual({ amount: 150, unit: 'per_application' });
+  });
+
+  test('an upfront + recurring agreement keeps EVERY accepted component, primary first', () => {
+    const upfront = { amount_usd: 150, unit: 'one_time', accepted: true, caller_response: 'accepted' };
+    const recurring = { amount_usd: 50, unit: 'per_month', accepted: true, caller_response: 'accepted' };
+    const declinedAlt = { amount_usd: 400, unit: 'per_year', accepted: false, caller_response: 'declined' };
+    const v2 = { service_request: { price: upfront, prices: [upfront, recurring, declinedAlt] } };
+    expect(resolveCallAgreedPrice(v2)).toEqual({
+      amount: 150, unit: 'one_time', additionalTerms: [{ amount: 50, unit: 'per_month' }],
+    });
+  });
+
+  test('with no valid V2 extraction, V1-shaped fields (quoted_price/appointment_confirmed) are NEVER honored — always null', () => {
+    // codex #4815 r1 P1: downstream composer decisions never read V1.
+    // resolveCallAgreedPrice takes the V2 extraction alone; passing a
+    // V1-shaped object in that slot must not be mistaken for V2 and must
+    // not gate the engine.
+    expect(resolveCallAgreedPrice({ quoted_price: 300, appointment_confirmed: true })).toBeNull();
+    expect(resolveCallAgreedPrice(undefined)).toBeNull();
+  });
+});
+
+describe('formatAgreedPriceLabel', () => {
+  test('an exact amount formats as a single figure', () => {
+    expect(formatAgreedPriceLabel({ amount: 90 })).toBe('$90.00');
+  });
+
+  test('a genuine range formats as low–high, never collapsed to the low end', () => {
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 100 })).toBe('$90.00–$100.00');
+  });
+
+  test('an amountMax that is not actually higher is ignored (defense in depth)', () => {
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 90 })).toBe('$90.00');
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 50 })).toBe('$90.00');
+  });
+
+  test('renders the full agreed terms — billing unit and every accepted component (codex #4815 r6 P2)', () => {
+    expect(formatAgreedPriceLabel({ amount: 90, unit: 'per_quarter' })).toBe('$90.00/quarter');
+    expect(formatAgreedPriceLabel({ amount: 90, amountMax: 100, unit: 'per_month' })).toBe('$90.00–$100.00/month');
+    expect(formatAgreedPriceLabel({ amount: 150, unit: 'per_application' })).toBe('$150.00 per application');
+    expect(formatAgreedPriceLabel({ amount: 300, unit: 'per_year' })).toBe('$300.00/year');
+    expect(formatAgreedPriceLabel({ amount: 150, unit: 'one_time', additionalTerms: [{ amount: 50, unit: 'per_month' }] }))
+      .toBe('$150.00 one-time + $50.00/month');
   });
 });
 
@@ -255,5 +394,132 @@ describe('convertCallLeadOnPhoneBooking — keepOpenForQuote', () => {
     expect(converted).toBe(true);
     const wonWrite = inner._writes.updates.find((w) => w.table === 'leads' && w.payload.status === 'won');
     expect(wonWrite).toBeTruthy();
+  });
+});
+
+// ─── codex #4815 r2 P2 (refined r3 P2): sweep/pre-draft ordering ───────────
+// The booking pre-draft hook (quotePromised:true, the documented assessment
+// exception) can clear this call's same-generation estimator_draft_block
+// while composing an assessment draft; the post-finalization price-agreed
+// sweep must wait for that SAME promise to settle before deciding whether
+// to re-stamp the block, rather than racing it. bookingPreDraftAssessmentDrafted
+// is the isolated, unit-testable decision the sweep chains onto.
+//
+// codex #4815 r3 P2: keyed on estimateId, NOT the outcome's own `drafted`
+// flag — maybeDraftEstimateForCall/maybePreDraftForBooking report
+// `drafted: false` for an ALREADY-VALID exception estimate just as often as
+// for a genuine skip (an existing/reconciled draft, a duplicate-guard hit,
+// or the call-delegated path's own "existing draft recovery" branch all
+// carry a real estimateId while `drafted` reads false). Every shape that
+// can come back from those two functions is tested here.
+// codex #4815 r9 P2: when the pre-finalization invalidation failed, the
+// QUEUED agreed-price verdict refused the assessment pre-draft that ran
+// first; once the fallback sweep lands and clears that entry, the pre-draft
+// is re-run ONCE — and only when the agreed-price verdict was the reason.
+describe('rerunAssessmentPreDraftAfterQuarantineClear', () => {
+  test('a pre-draft the queued agreed-price verdict refused is re-run once', async () => {
+    const rerun = jest.fn(async () => ({ drafted: true, delegated: 'call_engine', estimateId: 'est-assess-2' }));
+    const outcome = await rerunAssessmentPreDraftAfterQuarantineClear({
+      bookingPreDraftPromise: Promise.resolve({ drafted: false, delegated: 'call_engine', estimateId: null, blockedBy: 'price_agreed_on_call' }),
+      rerun,
+      callSid: 'CA-r9',
+    });
+    expect(rerun).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ estimateId: 'est-assess-2' });
+  });
+
+  test.each([
+    ['a pre-draft that already drafted', { drafted: true, estimateId: 'est-1' }],
+    ['a genuine skip (not an assessment)', { drafted: false, skipped: 'not_assessment' }],
+    ['a refusal by ANOTHER verdict', { drafted: false, delegated: 'call_engine', estimateId: null, blockedBy: 'email_identity_conflict' }],
+    ['a failed hook (null)', null],
+  ])('%s is never re-run', async (_label, first) => {
+    const rerun = jest.fn();
+    await expect(rerunAssessmentPreDraftAfterQuarantineClear({
+      bookingPreDraftPromise: Promise.resolve(first), rerun, callSid: 'CA-r9',
+    })).resolves.toBeNull();
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  test('no tracked pre-draft (gate off / no booking) re-runs nothing; a re-run failure never throws', async () => {
+    await expect(rerunAssessmentPreDraftAfterQuarantineClear({ bookingPreDraftPromise: null, rerun: jest.fn(), callSid: 'CA-r9' })).resolves.toBeNull();
+    await expect(rerunAssessmentPreDraftAfterQuarantineClear({
+      bookingPreDraftPromise: Promise.resolve({ estimateId: null, blockedBy: 'price_agreed_on_call' }),
+      rerun: jest.fn(async () => { throw new Error('composer down'); }),
+      callSid: 'CA-r9',
+    })).resolves.toBeNull();
+  });
+});
+
+describe('bookingPreDraftAssessmentDrafted', () => {
+  test('no tracked promise (gate off / no booking) never blocks the sweep', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(null)).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(undefined)).toBe(false);
+  });
+
+  test('a genuinely SLOW pre-draft promise is awaited to completion — the ordering, not just the value, is real', async () => {
+    // A fake promise ordering: resolves on a later microtask/macrotask tick
+    // with a fresh draft, proving the helper actually AWAITS the
+    // settlement rather than reading a value that happened to be ready
+    // synchronously.
+    let resolved = false;
+    const slowPromise = new Promise((resolve) => {
+      setTimeout(() => {
+        resolved = true;
+        resolve({ drafted: true, estimateId: 'est-assess-1' });
+      }, 20);
+    });
+
+    const resultPromise = bookingPreDraftAssessmentDrafted(slowPromise);
+    // The helper must not have decided yet — the tracked promise has not
+    // settled (this assertion would fail if the helper raced ahead).
+    expect(resolved).toBe(false);
+
+    const result = await resultPromise;
+    expect(resolved).toBe(true);
+    expect(result).toBe(true);
+  });
+
+  test('a FRESH draft (drafted:true, estimateId set) stands the sweep down', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: true, estimateId: 'est-1' }))).toBe(true);
+  });
+
+  test('an EXISTING/reconciled draft (drafted:false, skipped:"already_drafted", estimateId set) ALSO stands the sweep down', async () => {
+    // codex #4815 r3 P2: the exact regression — booking-predraft.js returns
+    // this shape for a draft the tagger hook already created, and reading
+    // `drafted` alone let the sweep archive that live, valid estimate.
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'already_drafted', estimateId: 'est-existing' }))).toBe(true);
+  });
+
+  test('a DUPLICATE-guard hit (drafted:false, skipped:"duplicate_open_estimate", estimateId set) ALSO stands the sweep down', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'duplicate_open_estimate', estimateId: 'est-dup' }))).toBe(true);
+  });
+
+  test('the call-delegated path\'s own "existing draft recovery" (created:false, estimateId set, mapped to drafted:false) ALSO stands the sweep down', async () => {
+    // maybeDraftEstimateForCall's re-entry recovery path sets lane:
+    // 'existing' + estimateId with created staying false — booking-predraft.js
+    // maps that straight through as { drafted: outcome.created === true,
+    // estimateId: outcome.estimateId }.
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, delegated: 'call_engine', lane: 'existing', estimateId: 'est-recovered' }))).toBe(true);
+  });
+
+  test('a genuine skip with NO estimateId (gate off, not an assessment, booking dead, no customer) lets the sweep proceed', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'gate_off' }))).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'not_assessment' }))).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'booking_terminal' }))).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'no_customer' }))).toBe(false);
+  });
+
+  test('a genuine composer failure (drafted:false, skipped:"error", no estimateId) lets the sweep proceed', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'error' }))).toBe(false);
+  });
+
+  test('a null/undefined settled outcome lets the sweep proceed', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve(null))).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve(undefined))).toBe(false);
+  });
+
+  test('a rejected promise (belt-and-braces — the tracked promise never actually rejects) never blocks the sweep', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.reject(new Error('unexpected')))).toBe(false);
   });
 });

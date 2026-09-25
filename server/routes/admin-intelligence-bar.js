@@ -400,7 +400,13 @@ function summarizeProposal(toolName, params, displayParams = params) {
   }
   if (toolName === 'update_customer'
     && (params?.updates?.first_name !== undefined || params?.updates?.last_name !== undefined || params?.updates?.phone !== undefined)) {
-    rippleParts.push(require('../services/customer-contact-fanout').CONTACT_FANOUT_DISCLOSURE);
+    const ContactFanout = require('../services/customer-contact-fanout');
+    // codex round-5 P2: the hold-clear clause only describes what a PHONE
+    // edit does — appending it for a name-only update promised a hold lift
+    // that never happens.
+    rippleParts.push(params?.updates?.phone !== undefined
+      ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
+      : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
   }
   const ripple = rippleParts.length ? ` — ${rippleParts.join('; ')}` : '';
   // The ripple is long by design (it names every synced surface) and sits

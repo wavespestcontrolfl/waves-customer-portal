@@ -1956,7 +1956,7 @@ export default function ReviewsPage() {
         navGridClassName="grid-cols-1 md:grid-cols-3"
       />
       {activeGroup.tabs.length > 1 && (
-        <div className="flex flex-wrap gap-[8px] mb-[16px]">
+        <div className="flex flex-wrap justify-center gap-[8px] mb-[16px]">
           {activeGroup.tabs.map((key) => {
             const leaf = REVIEWS_LEAF_BY_KEY[key];
             const active = activeTab === key;

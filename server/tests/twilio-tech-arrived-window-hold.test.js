@@ -46,11 +46,13 @@ jest.mock("../services/appointment-email", () => ({
 jest.mock("../services/appointment-reminders", () => ({
   alertNoReachableChannel: jest.fn(async () => ({})),
   resolveChannelPrefsRow: jest.fn(async (customerId, prefs) => prefs),
+  buildServiceLabel: jest.fn(async (scheduledServiceId, parentName) => parentName || "service"),
   apptChannel: (value) => (value === "email" || value === "both" ? value : "sms"),
 }));
 
 const db = require("../models/db");
 const smsTemplates = require("../routes/admin-sms-templates");
+const { buildServiceLabel } = require("../services/appointment-reminders");
 const { getAppointmentContacts } = require("../services/customer-contact");
 const { sendCustomerMessage } = require("../services/messaging/send-customer-message");
 const TwilioService = require("../services/twilio");
@@ -130,4 +132,46 @@ test("the scheduled service id is forwarded as appointmentId on every arrival se
   sendCustomerMessage.mockClear();
   await TwilioService.sendTechArrived("cust-1", "Adam");
   expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty("appointmentId");
+});
+
+// The arrival text names the visit (owner 2026-09-24): the label comes from
+// the reminder path's resolver (buildServiceLabel: admin suffixes stripped,
+// add-ons joined) fed with the visit row's service_type, and degrades to
+// "service" when there is no visit or the resolver fails.
+test("the visit's service label is passed to the tech_arrived template, 'service' without a visit", async () => {
+  getAppointmentContacts.mockReturnValue([{ phone: customer.phone, name: "Pat Q", role: "primary" }]);
+  sendCustomerMessage.mockResolvedValue({ sent: true, success: true });
+  db.mockImplementation((table) => {
+    if (table === "customers") return firstQuery(customer);
+    if (table === "notification_prefs") return firstQuery(prefs);
+    if (table === "scheduled_services") return firstQuery({ service_type: "Pest Control Re-Service (Bi-Monthly)" });
+    return firstQuery(null);
+  });
+  buildServiceLabel.mockResolvedValueOnce("Pest Control Re-Service & Mosquito Control");
+
+  await TwilioService.sendTechArrived("cust-1", "Adam", { scheduledServiceId: "svc-9" });
+  expect(buildServiceLabel).toHaveBeenCalledWith("svc-9", "Pest Control Re-Service (Bi-Monthly)");
+  expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+    "tech_arrived",
+    expect.objectContaining({ first_name: "Pat", tech_name: "Adam", service_type: "Pest Control Re-Service & Mosquito Control" }),
+    expect.anything(),
+  );
+
+  smsTemplates.getTemplate.mockClear();
+  await TwilioService.sendTechArrived("cust-1", "Adam");
+  expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+    "tech_arrived",
+    expect.objectContaining({ service_type: "service" }),
+    expect.anything(),
+  );
+
+  smsTemplates.getTemplate.mockClear();
+  buildServiceLabel.mockRejectedValueOnce(new Error("pool exhausted"));
+  const res = await TwilioService.sendTechArrived("cust-1", "Adam", { scheduledServiceId: "svc-9" });
+  expect(res.success).toBe(true);
+  expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+    "tech_arrived",
+    expect.objectContaining({ service_type: "service" }),
+    expect.anything(),
+  );
 });

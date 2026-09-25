@@ -163,6 +163,38 @@ describe('sendInvoiceEmail service summary', () => {
     expect(visitGuard).not.toHaveBeenCalled();
   });
 
+  test.each([false, true])('retains a retryable preference failure through an aborted template handoff (transaction failure: %s)', async (transactionFailure) => {
+    mockDb(invoiceRow());
+    const previousDb = db.getMockImplementation();
+    let atBoundary = false;
+    db.mockImplementation((table) => {
+      if (table !== 'notification_prefs') return previousDb(table);
+      const query = chain({ first: { invoice_channels: ['email', 'sms'] } });
+      if (atBoundary) query.first.mockRejectedValue(new Error('preferences temporarily unavailable'));
+      return query;
+    });
+    if (transactionFailure) {
+      require('../services/estimate-deposits').withInvoiceDepositSettlement.mockImplementationOnce(async (_id, callback) => {
+        await callback(db, invoiceRow());
+        throw new Error('transaction aborted');
+      });
+    }
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      atBoundary = true;
+      const verdict = await withProviderHandoff(dispatch);
+      expect(verdict).toMatchObject({ ok: false, code: 'billing_prefs_unavailable' });
+      return { sent: false, aborted: true };
+    });
+
+    await expect(sendInvoiceEmail('inv-1', {
+      billingDeliveryCategory: 'invoice', recipientOverride: { email: 'office@example.com' },
+    })).resolves.toMatchObject({
+      ok: false, code: 'billing_prefs_unavailable', deliveryOutcome: 'not_sent', retryable: true,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   test.each(['draft', 'scheduled', 'sent', 'viewed', 'overdue', 'sending'])(
     'allows %s at the locked provider boundary',
     async (status) => {

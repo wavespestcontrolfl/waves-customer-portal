@@ -521,6 +521,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     return stripSmsUrlScheme(body).replace(/\n{3,}/g, '\n\n').trim();
   } catch (err) {
     audit(templateKey, 'render_error', err.message || 'template render failed', context);
+    if (opts.throwOnError) throw err;
     return null;
   }
 };

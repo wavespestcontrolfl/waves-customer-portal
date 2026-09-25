@@ -63,6 +63,31 @@ function csrScoringApplies({ direction, callNature, v2Valid, v2Promoted } = {}) 
   return callNature === SALES_RUBRIC_CALL_NATURE;
 }
 
+// Deterministic coaching addendum (schema 1.14.0, live miss 2026-09-25, call
+// 6fee5f34): the LLM rubric above scores what it can infer from a transcript
+// alone — it has no reliable way to know the extracted caller_id_disclaimed
+// signal was ever raised. When the caller explicitly said the incoming
+// number isn't theirs and the call still ended with no cell number
+// captured, that is a specific, checkable miss worth coaching on every time,
+// so it's appended deterministically rather than left to the model to
+// notice. Pure/testable; scoreCall appends the text it returns. The
+// predicate is NOT re-derived here (pre-push review P1) — it calls
+// call-triage-flags.js's callerIdDisclaimedNeedsCallback, the same function
+// computeDeterministicTriageFlags uses for callback_number_needed, so
+// coaching can never silently disagree with the flag.
+const CALLBACK_NUMBER_COACHING_NOTE = "Caller said this number isn't theirs — ask for a cell before ending the call.";
+// contactPhone (the call's ANI) is optional and forwarded to
+// callerIdDisclaimedNeedsCallback unchanged — see that function's own P1
+// fix (call-triage-flags.js) for why a bare phone_e164 presence check isn't
+// enough. Omitting it here never widens the coaching note beyond what the
+// flag itself would raise; it only means the "provably different from the
+// ANI" clearance path can't apply, same fail-closed default as the flag.
+function callbackNumberCoachingNote(v2Extraction, contactPhone) {
+  const { callerIdDisclaimedNeedsCallback } = require('../call-triage-flags');
+  if (!callerIdDisclaimedNeedsCallback(v2Extraction?.caller, { ani: contactPhone })) return null;
+  return CALLBACK_NUMBER_COACHING_NOTE;
+}
+
 class CSRCoach {
 
   /**
@@ -85,7 +110,7 @@ class CSRCoach {
    */
   async scoreCallIfApplicable({
     direction, v2Extraction, v2Status, v2Promoted, maskedCallSid,
-    stillOwnsClaim, csrName, customerId, callSource, transcript, metadata,
+    stillOwnsClaim, csrName, customerId, callSource, transcript, metadata, contactPhone = null,
   }) {
     const v2Valid = v2Status === 'valid' && !!v2Extraction && isV2Extraction(v2Extraction);
     const callNature = v2Valid ? (v2Extraction?.call_nature || null) : null;
@@ -96,6 +121,20 @@ class CSRCoach {
     try {
       const scoreResult = await this.scoreCall({
         stillOwnsClaim, csrName, customerId, callDirection: 'inbound', callSource, transcript, metadata,
+        // Codex round-5 P2: v2Extraction is used inside scoreCall for
+        // exactly one thing — callbackNumberCoachingNote, the deterministic
+        // "ask for a cell" coaching addendum. v2Valid alone (shadow mode
+        // included) let a shadow-only extraction's signal reach
+        // csr_call_scores.coaching_notes even while V2 has no operational
+        // authority anywhere else (the same v2Promoted gate this function's
+        // own rubric-applicability check already honors above). Gate the
+        // extraction on v2Promoted too, so the coaching note stays shadow-
+        // mode-inert like everything else V2 hasn't been promoted to drive
+        // — the SMS safety hold itself (callbackNumberHoldActiveForVisit /
+        // call-recording-processor.js) is untouched by this and still arms
+        // in shadow mode, as it must.
+        v2Extraction: (v2Valid && v2Promoted) ? v2Extraction : null,
+        contactPhone,
       });
       // The scorer's own post-await check found the claim gone. That is not
       // "no score" — it is this pass being superseded, and the caller's
@@ -128,7 +167,7 @@ class CSRCoach {
    * that await must not persist a second score (codex #3677 P1). Checked
    * immediately before the insert, which is the only moment that matters.
    */
-  async scoreCall({ csrName, customerId, callDirection, callSource, transcript, metadata, stillOwnsClaim }) {
+  async scoreCall({ csrName, customerId, callDirection, callSource, transcript, metadata, stillOwnsClaim, v2Extraction = null, contactPhone = null }) {
     // FLAGSHIP first, Sol on a miss. The explicit timeoutMs is the shared
     // wall-clock ceiling across BOTH legs (llm/call.js), so the bound
     // reasoned about below covers the whole scoring pass, not one provider.
@@ -238,6 +277,16 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
       return { error: `Failed to score call (${res.reason})` };
     }
     const score = res.json;
+
+    // Deterministic coaching addendum (see callbackNumberCoachingNote) — the
+    // model's own coaching_notes never sees the extracted caller_id_disclaimed
+    // signal, so append it rather than hope the transcript alone surfaced it.
+    const callbackNote = callbackNumberCoachingNote(v2Extraction, contactPhone);
+    if (callbackNote) {
+      score.coaching_notes = score.coaching_notes
+        ? `${score.coaching_notes}\n\n${callbackNote}`
+        : callbackNote;
+    }
 
     // Check if this is the first call from this lead
     let isFirstCall = false;
@@ -554,3 +603,5 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
 module.exports = new CSRCoach();
 module.exports.csrScoringApplies = csrScoringApplies;
 module.exports.SALES_RUBRIC_CALL_NATURE = SALES_RUBRIC_CALL_NATURE;
+module.exports.callbackNumberCoachingNote = callbackNumberCoachingNote;
+module.exports.CALLBACK_NUMBER_COACHING_NOTE = CALLBACK_NUMBER_COACHING_NOTE;

@@ -299,7 +299,29 @@ const NOTIFICATION_PREFS = {
   techArrivedChannel: 'sms',
   billingReminderChannel: 'sms',
   paymentConfirmationChannel: 'sms',
+  billingChannelsAvailable: true,
+  invoiceChannels: ['email'],
+  paymentIssueChannels: ['sms'],
+  billingReminderChannels: ['email', 'sms'],
+  paymentConfirmationChannels: ['email', 'sms', 'push'],
 };
+// ?billingCombo=1..7 puts the same one of the seven valid Email/Text/App
+// combinations on every row for focused interaction and screenshot checks.
+const BILLING_CHANNEL_COMBINATIONS = [
+  ['email'], ['sms'], ['push'],
+  ['email', 'sms'], ['email', 'push'], ['sms', 'push'],
+  ['email', 'sms', 'push'],
+];
+const BILLING_COMBO_INDEX = Number(new URLSearchParams(window.location.search).get('billingCombo')) - 1;
+if (BILLING_CHANNEL_COMBINATIONS[BILLING_COMBO_INDEX]) {
+  const combination = BILLING_CHANNEL_COMBINATIONS[BILLING_COMBO_INDEX];
+  Object.assign(NOTIFICATION_PREFS, {
+    invoiceChannels: [...combination],
+    paymentIssueChannels: [...combination],
+    billingReminderChannels: [...combination],
+    paymentConfirmationChannels: [...combination],
+  });
+}
 const APP_NOTIFICATIONS = new URLSearchParams(window.location.search).get('appNotifications');
 if (APP_NOTIFICATIONS) Object.assign(NOTIFICATION_PREFS, {
   appPreferencesAvailable: true, pushEnabled: APP_NOTIFICATIONS !== 'off',

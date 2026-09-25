@@ -47,7 +47,8 @@ const CREATIVE_FLAGS = {
   // Same literal-'true' override image-generator's parseChain honors
   // (PIXEL_WATERMARK_OVERRIDE_ENV); read here directly so the flag has no
   // module dependency (tests mock image-generator down to its class).
-  get chain() { return process.env.SOCIAL_IMAGE_PROVIDER || (process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS === 'true' ? SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN : SOCIAL_DEFAULT_CHAIN); },
+  get defaultChain() { return process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS === 'true' ? SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN : SOCIAL_DEFAULT_CHAIN; },
+  get chain() { return process.env.SOCIAL_IMAGE_PROVIDER || this.defaultChain; },
 };
 
 // Video (Veo Reels) — separate opt-in on top of the creative engine. A video
@@ -340,7 +341,7 @@ async function generateVariants({
   });
   if (!concepts.length) return [];
 
-  const generator = new ImageGenerator({ envChain: CREATIVE_FLAGS.chain });
+  const generator = new ImageGenerator({ envChain: CREATIVE_FLAGS.chain, defaultChain: CREATIVE_FLAGS.defaultChain });
   const overlayVariant = OVERLAY_VARIANTS[variant] || 'photo';
   const seedBase = SocialCardRenderer.filenameSlug(`${variant}-${city || 'waves'}-${topic || 'creative'}`);
 
