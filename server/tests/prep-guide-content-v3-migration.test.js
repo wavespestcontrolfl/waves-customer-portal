@@ -1,5 +1,10 @@
 /**
- * 20260924000001 — prep guide content v3.
+ * 20260924000001 + 20260924000002 — prep guide content v3.
+ *
+ * 000001 ran on the PR preview database before Codex round 1 and is frozen;
+ * 000002 supersedes it with exact-match text patches and publishes the
+ * effective content. This suite reads 000002's TEMPLATES as the content
+ * customers receive, and checks the supersession itself.
  *
  * Guards the compliance rules the 2026-07-15 refresh established (they
  * must never regress in prep copy) plus the v3 additions: links are plain
@@ -13,7 +18,8 @@ jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => fals
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({}));
 
-const migration = require('../models/migrations/20260924000001_prep_guide_content_v3');
+const baseMigration = require('../models/migrations/20260924000001_prep_guide_content_v3');
+const migration = require('../models/migrations/20260924000002_prep_guide_content_v3_codex_r1');
 const { normalizeBlocks, renderTemplate } = require('../services/email-template-library');
 
 const { TEMPLATES, MIGRATION_MARKER } = migration;
@@ -93,6 +99,17 @@ describe('prep guide v3 content compliance', () => {
     }
   });
 
+  test('flea and German roach copy never promise a single-visit outcome (both are sold as multi-visit programs)', () => {
+    for (const key of ['prep.flea', 'prep.cockroach']) {
+      const t = TEMPLATES.find((x) => x.key === key);
+      for (const chunk of textChunks(t)) {
+        expect(chunk).not.toMatch(/one[- ]visit job|one treatment usually|single (visit|treatment) (does|is enough|will do)/i);
+      }
+    }
+    const flea = textChunks(TEMPLATES.find((x) => x.key === 'prep.flea')).join(' ');
+    expect(flea).toMatch(/two-visit/i);
+  });
+
   test('bed bug guide describes chemical/IPM work only — no heat-treatment or steam component', () => {
     const bedBug = TEMPLATES.find((t) => t.key === 'prep.bed_bug');
     for (const chunk of textChunks(bedBug)) {
@@ -116,7 +133,11 @@ describe('prep guide v3 content compliance', () => {
       expect(t.blocks.filter((b) => b.type === 'details' && b.variant === 'faq').length).toBe(1);
       const cta = t.blocks.find((b) => b.type === 'cta');
       expect(cta).toEqual({ type: 'cta', label: 'Open prep guide', url_variable: 'prep_url' });
-      expect(t.blocks.filter((b) => b.type === 'signature').length).toBe(1);
+      const signatures = t.blocks.filter((b) => b.type === 'signature');
+      expect(signatures.length).toBe(1);
+      // Owner call 2026-07-21 (20260721100020): service emails sign as
+      // "— The Waves Team", never as the company name.
+      expect(signatures[0].content).toBe('— The Waves Team');
       expect(typeof t.subject).toBe('string');
       expect(t.subject.length).toBeGreaterThan(10);
       expect(typeof t.preview).toBe('string');
@@ -189,6 +210,34 @@ describe('prep guide v3 content compliance', () => {
       expect(anchors.length).toBe(linkCount); // every authored link becomes exactly one anchor
       if (linkCount > 0) expect(text).toMatch(/\(https:\/\/[^)]+\)/); // text arm shows destinations
       expect(html).not.toContain('{{');
+    }
+  });
+});
+
+describe('000002 supersedes 000001 (frozen after its preview run)', () => {
+  test('publishes the same eight keys, records what it supersedes, and every patch landed', () => {
+    expect(migration.TEMPLATES.map((t) => t.key)).toEqual(baseMigration.TEMPLATES.map((t) => t.key));
+    expect(migration.SUPERSEDES).toBe(baseMigration.MIGRATION_MARKER);
+    expect(migration.MIGRATION_MARKER).not.toBe(baseMigration.MIGRATION_MARKER);
+    const effective = allNewCopy().join('\n');
+    for (const patch of migration.PATCHES) {
+      expect(effective).not.toContain(patch.from);
+      expect(effective).toContain(patch.to);
+    }
+  });
+
+  test('only the patched templates and the signature differ from 000001', () => {
+    for (const t of migration.TEMPLATES) {
+      const before = baseMigration.TEMPLATES.find((x) => x.key === t.key);
+      const strip = (blocks) => blocks.filter((b) => b.type !== 'signature');
+      const patchedKeys = new Set(migration.PATCHES.map((p) => p.key));
+      if (patchedKeys.has(t.key)) {
+        expect(strip(t.blocks)).not.toEqual(strip(before.blocks));
+      } else {
+        expect(strip(t.blocks)).toEqual(strip(before.blocks));
+      }
+      expect(t.subject).toBe(before.subject);
+      expect(t.preview).toBe(before.preview);
     }
   });
 });
