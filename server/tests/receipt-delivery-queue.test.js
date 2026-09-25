@@ -215,7 +215,10 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(true);
-    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     // The delivered email IS the receipt — stamped so the needs_receipt
     // filter/batch resend can't double-send.
     expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
@@ -291,7 +294,10 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(true);
-    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     // The queue is a paired-legs caller — it must declare the email sidecar
     // so email-only customers get the channel_email_only SMS skip (the flag
     // is caller-declared now; codex round 5). customerInitiated rides along

@@ -7,9 +7,11 @@ const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { currency } = require('./email-template');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { invoiceAmountDue } = require('./invoice-helpers');
+const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
+const PREFS_UNAVAILABLE = Symbol('prefs_unavailable');
 
 function clean(value) {
   return String(value || '').trim();
@@ -138,7 +140,7 @@ async function loadPrefs(customerId) {
     .first()
     .catch((err) => {
       logger.warn(`[payment-lifecycle-email] notification_prefs lookup failed for ${customerId}: ${err.message}`);
-      return null;
+      return PREFS_UNAVAILABLE;
     });
 }
 
@@ -197,13 +199,22 @@ async function sendLifecycleTemplate({
   refundId = null,
   paymentPlanId = null,
   categories = [],
+  billingDeliveryCategory = null,
 }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
   const prefs = await loadPrefs(customer.id);
+  if (billingDeliveryCategory) {
+    if (prefs === PREFS_UNAVAILABLE) {
+      return { ok: false, skipped: true, reason: 'billing_prefs_unavailable', retryable: true };
+    }
+    if (billingChannelAllowed(prefs || {}, billingDeliveryCategory, 'email') === false) {
+      return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
+    }
+  }
 
-  const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
+  const [recipient] = getInvoiceEmailRecipients(customer, prefs === PREFS_UNAVAILABLE ? {} : (prefs || {}))
     .filter((entry) => isEmailLike(entry.email));
   if (!recipient?.email) {
     await logPaymentLifecycleEmailAttempt({
@@ -245,6 +256,27 @@ async function sendLifecycleTemplate({
       idempotencyKey,
       categories: ['payment', eventType.replace(/[^a-zA-Z0-9_-]/g, '_'), ...categories],
       suppressionGroupKey: TRANSACTIONAL_GROUP,
+      ...(billingDeliveryCategory ? {
+        withProviderHandoff: async (dispatch) => {
+          if (invoiceId) {
+            const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoiceId, db)();
+            if (ownership.ok !== true) return ownership;
+          }
+          const [freshCustomer, freshPrefs] = await Promise.all([
+            loadCustomer(customer.id),
+            loadPrefs(customer.id),
+          ]);
+          if (!freshCustomer || freshPrefs === PREFS_UNAVAILABLE
+            || billingChannelAllowed(freshPrefs || {}, billingDeliveryCategory, 'email') === false) {
+            return { ok: false };
+          }
+          const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
+            .filter((entry) => isEmailLike(entry.email));
+          if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
+          await dispatch();
+          return { ok: true };
+        },
+      } : {}),
     });
 
     if (result.deduped) {
@@ -449,6 +481,7 @@ async function sendPaymentMethodExpiring({
     paymentMethodId: method.id,
     idempotencyKey: idempotencyKey || `payment.method_expiring:${method.customer_id}:${method.id}:${payload.expiration_month}:${payload.expiration_year}:${stage}`,
     categories: [`payment_method_expiring_${stage}`],
+    billingDeliveryCategory: 'billing',
   });
 }
 
@@ -498,6 +531,7 @@ async function sendPaymentRetryNotice({
     paymentId: payment.id,
     paymentMethodId: payment.payment_method_id || null,
     idempotencyKey: idempotencyKey || `payment.retry_notice:${invoice?.id || invoiceId || 'no_invoice'}:${payment.id}:${stableDateKey(effectiveRetryDate)}`,
+    billingDeliveryCategory: 'payment_issue',
   });
 }
 
@@ -512,6 +546,7 @@ async function sendPaymentFailed({
   // attempted, never one arbitrary share's remainder.
   amountDueOverride = null,
   idempotencyKey,
+  customerInitiated = false,
 } = {}) {
   let invoice = invoiceId ? await db('invoices').where({ id: invoiceId }).first().catch(() => null) : null;
   let payment = paymentId ? await db('payments').where({ id: paymentId }).first().catch(() => null) : null;
@@ -549,7 +584,7 @@ async function sendPaymentFailed({
   if (!effectiveCustomerId) return { ok: false, skipped: true, reason: 'customer_not_resolved' };
   const dedupeKey = idempotencyKey
     || `payment.failed:${paymentIntentId || invoice?.id || effectiveCustomerId}:${attemptId || 'no_attempt'}`;
-  return sendLifecycleTemplate({
+  const emailResult = await sendLifecycleTemplate({
     customerId: effectiveCustomerId,
     templateKey: 'payment.failed',
     eventType: 'payment.failed',
@@ -558,7 +593,101 @@ async function sendPaymentFailed({
     paymentId: payment?.id || paymentId || null,
     paymentMethodId: payment?.payment_method_id || null,
     idempotencyKey: dedupeKey,
+    billingDeliveryCategory: 'payment_issue',
   });
+
+  // Legacy rows stay email-only. Explicit Text/App work is first persisted on
+  // the scheduled-message rail; Stripe can redeliver the same event after a
+  // crash, so the customer communications lock plus event key must establish
+  // one durable owner before the webhook is acknowledged. The replay runs the
+  // canonical channel router and declares the branded email sidecar.
+  const prefs = await loadPrefs(effectiveCustomerId);
+  if (prefs === PREFS_UNAVAILABLE) {
+    const err = new Error('Payment-issue delivery preferences are unavailable');
+    err.code = 'BILLING_PREFS_UNAVAILABLE';
+    err.retryable = true;
+    throw err;
+  }
+  const explicit = explicitBillingChannels(prefs || {}, 'payment_issue');
+  if (!explicit || !explicit.some((channel) => channel === 'sms' || channel === 'push')) return emailResult;
+  const customer = await loadCustomer(effectiveCustomerId);
+  if (!customer?.phone) return emailResult;
+  const body = await require('./sms-template-renderer').renderSmsTemplate('payment_failed', {
+    first_name: customer.first_name || 'there',
+    service_type: invoice?.title || invoice?.service_type || 'your Waves invoice',
+    service_date: displayDate(invoice?.service_date || payment?.payment_date || payment?.created_at),
+  }, {
+    workflow: 'interactive_payment_failed',
+    entity_type: 'invoice',
+    entity_id: invoice?.id || invoiceId || null,
+  });
+  if (!body) return emailResult;
+  const eventKey = `payment-failed:${paymentIntentId || invoice?.id || effectiveCustomerId}:${attemptId || 'no_attempt'}`;
+  const replayMetadata = {
+    original_message_type: 'payment_failed',
+    billingDeliveryCategory: 'payment_issue',
+    notificationEventKey: eventKey,
+    hasEmailLeg: true,
+    customer_initiated: customerInitiated === true,
+    entry_point: 'stripe_webhook_billing_deferred',
+    replay_purpose: 'payment_failure',
+    refresh_customer_phone: true,
+    resolve_from_by_customer: true,
+    customer_id: effectiveCustomerId,
+    ...(invoice?.id || invoiceId ? { invoice_id: invoice?.id || invoiceId } : {}),
+    ...(payment?.id || paymentId ? { payment_id: payment?.id || paymentId } : {}),
+    ...(paymentIntentId ? { stripe_payment_intent_id: paymentIntentId } : {}),
+  };
+  let channelResult;
+  try {
+    channelResult = await require('../utils/customer-comms-lock').withCustomerCommsLock(
+      db,
+      effectiveCustomerId,
+      async (trx) => {
+        const existing = await trx('sms_log')
+          .where({ customer_id: effectiveCustomerId })
+          .whereRaw("metadata->>'entry_point' = ?", ['stripe_webhook_billing_deferred'])
+          .whereRaw("metadata->>'notificationEventKey' = ?", [eventKey])
+          .first('id', 'status');
+        if (existing) {
+          return {
+            sent: false,
+            scheduled: true,
+            deduped: true,
+            queueId: existing.id,
+            deliveryOutcome: 'not_sent',
+          };
+        }
+        const inserted = await trx('sms_log').insert({
+          customer_id: effectiveCustomerId,
+          direction: 'outbound',
+          from_phone: require('../config/twilio-numbers').getOutboundNumber(),
+          to_phone: customer.phone,
+          message_body: body,
+          message_type: 'payment_failed',
+          status: 'scheduled',
+          scheduled_for: new Date(),
+          metadata: JSON.stringify(replayMetadata),
+        }).returning('id');
+        return {
+          sent: false,
+          scheduled: true,
+          queueId: inserted?.[0]?.id || inserted?.[0] || null,
+          deliveryOutcome: 'not_sent',
+        };
+      },
+    );
+  } catch (queueErr) {
+    const err = new Error(`Payment-failure delivery could not be queued: ${queueErr.message}`);
+    err.code = 'BILLING_NOTICE_ENQUEUE_FAILED';
+    throw err;
+  }
+  return {
+    ok: emailResult?.ok === true || channelResult?.scheduled === true,
+    email: emailResult,
+    channels: channelResult,
+    ...(channelResult?.queueId ? { queueId: channelResult.queueId } : {}),
+  };
 }
 
 async function sendAchProcessing({

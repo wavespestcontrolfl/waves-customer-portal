@@ -13,6 +13,23 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor Morgan', role: 'primary' }]),
 }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async () => ({
+    sent: true,
+    provider: 'twilio',
+    providerMessageId: 'SM-payment-failed',
+    deliveryOutcome: 'accepted',
+  })),
+}));
+jest.mock('../services/sms-template-renderer', () => ({
+  renderSmsTemplate: jest.fn(async () => 'Taylor, we could not process your payment.'),
+}));
+jest.mock('../config/twilio-numbers', () => ({
+  getOutboundNumber: jest.fn(() => '+19415550199'),
+}));
+jest.mock('../utils/customer-comms-lock', () => ({
+  withCustomerCommsLock: jest.fn(async (database, _customerId, fn) => fn(database)),
+}));
 let mockChangeEmailsGate = true;
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (name) => (name === 'paymentMethodChangeEmails' ? mockChangeEmailsGate : false),
@@ -21,6 +38,7 @@ jest.mock('../config/feature-gates', () => ({
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
 function chain({ result = [], first, returning } = {}) {
@@ -31,6 +49,7 @@ function chain({ result = [], first, returning } = {}) {
     'whereNotNull',
     'whereNotIn',
     'whereNull',
+    'whereRaw',
     'select',
     'orderBy',
   ].forEach((method) => {
@@ -118,6 +137,12 @@ function lifecycleQueues(extra = {}) {
 describe('payment lifecycle email sender', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    sendCustomerMessage.mockResolvedValue({
+      sent: true,
+      provider: 'twilio',
+      providerMessageId: 'SM-payment-failed',
+      deliveryOutcome: 'accepted',
+    });
   });
 
   test('sends autopay setup confirmation with a stable idempotency key', async () => {
@@ -318,6 +343,10 @@ describe('payment lifecycle email sender', () => {
       invoices: [chain({ first: invoice() })],
       payments: [chain({ first: removed })],
       ...lifecycleQueues(),
+      notification_prefs: [
+        chain({ first: { email_enabled: true } }),
+        chain({ first: { email_enabled: true } }),
+      ],
     });
     await PaymentLifecycleEmail.sendPaymentFailed({ customerId: 'cust-1', paymentIntentId: 'pi_test', attemptId: 'ch_attempt2', invoiceId: 'inv-1' });
     expect(EmailTemplates.sendTemplate).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -331,6 +360,10 @@ describe('payment lifecycle email sender', () => {
       invoices: [chain({ first: invoice() })],
       payments: [chain({ first: payment() })],
       ...lifecycleQueues(),
+      notification_prefs: [
+        chain({ first: { email_enabled: true } }),
+        chain({ first: { email_enabled: true } }),
+      ],
     });
 
     await PaymentLifecycleEmail.sendPaymentFailed({
@@ -348,6 +381,179 @@ describe('payment lifecycle email sender', () => {
         payment_url: expect.stringContaining('/pay/pay-token'),
       }),
     }));
+  });
+
+  test('keeps an explicit Email-only payment failure on the branded email sidecar', async () => {
+    const explicitPrefs = { email_enabled: true, payment_issue_channels: ['email'] };
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      customers: [chain({ first: customer() })],
+      notification_prefs: [chain({ first: explicitPrefs }), chain({ first: explicitPrefs })],
+      customer_interactions: [chain()],
+    });
+
+    const result = await PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1',
+      paymentIntentId: 'pi_test',
+      attemptId: 'ch_attempt1',
+      invoiceId: 'inv-1',
+      customerInitiated: true,
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.failed',
+    }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('queues an explicit Text payment failure without duplicating the email sidecar', async () => {
+    const explicitPrefs = { email_enabled: true, payment_issue_channels: ['sms'] };
+    const queueLookup = chain({ first: null });
+    const queueInsert = chain({ returning: [{ id: 'sms-1' }] });
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      notification_prefs: [chain({ first: explicitPrefs }), chain({ first: explicitPrefs })],
+      sms_log: [queueLookup, queueInsert],
+    });
+
+    const result = await PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1',
+      paymentIntentId: 'pi_test',
+      attemptId: 'ch_attempt1',
+      invoiceId: 'inv-1',
+      customerInitiated: true,
+    });
+
+    expect(result).toMatchObject({ ok: true, queueId: 'sms-1', channels: { scheduled: true } });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(queueInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'scheduled',
+      message_type: 'payment_failed',
+      scheduled_for: expect.any(Date),
+      metadata: expect.stringContaining('"hasEmailLeg":true'),
+    }));
+    expect(JSON.parse(queueInsert.insert.mock.calls[0][0].metadata)).toMatchObject({
+        original_message_type: 'payment_failed',
+        billingDeliveryCategory: 'payment_issue',
+        notificationEventKey: 'payment-failed:pi_test:ch_attempt1',
+        customer_initiated: true,
+    });
+  });
+
+  test.each([
+    ['off-session', false],
+    ['verified customer-initiated', true],
+  ])('persists %s provenance on queued Text/App payment failure work', async (_label, customerInitiated) => {
+    const explicitPrefs = { email_enabled: true, payment_issue_channels: ['sms'] };
+    const queueLookup = chain({ first: null });
+    const queueInsert = chain({ returning: [{ id: 'sms-provenance' }] });
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      notification_prefs: [chain({ first: explicitPrefs }), chain({ first: explicitPrefs })],
+      sms_log: [queueLookup, queueInsert],
+    });
+
+    const result = await PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1',
+      paymentIntentId: 'pi_off_session',
+      attemptId: 'ch_machine',
+      invoiceId: 'inv-1',
+      customerInitiated,
+    });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(queueInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'scheduled',
+      message_type: 'payment_failed',
+      scheduled_for: expect.any(Date),
+      metadata: expect.stringContaining('"hasEmailLeg":true'),
+    }));
+    expect(JSON.parse(queueInsert.insert.mock.calls[0][0].metadata)).toMatchObject({
+      customer_initiated: customerInitiated,
+      billingDeliveryCategory: 'payment_issue',
+    });
+    expect(result).toMatchObject({ channels: { scheduled: true } });
+  });
+
+  test('dedupes a repeated payment-failure event against any existing queue status', async () => {
+    const explicitPrefs = { email_enabled: true, payment_issue_channels: ['sms'] };
+    const firstLookup = chain({ first: null });
+    const firstInsert = chain({ returning: [{ id: 'sms-first' }] });
+    const repeatedLookup = chain({ first: { id: 'sms-first', status: 'sent' } });
+    setDbQueues({
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() })],
+      payments: [chain({ first: payment() }), chain({ first: payment() })],
+      customers: [
+        chain({ first: customer() }), chain({ first: customer() }),
+        chain({ first: customer() }), chain({ first: customer() }),
+      ],
+      notification_prefs: [
+        chain({ first: explicitPrefs }), chain({ first: explicitPrefs }),
+        chain({ first: explicitPrefs }), chain({ first: explicitPrefs }),
+      ],
+      sms_log: [firstLookup, firstInsert, repeatedLookup],
+    });
+    const args = {
+      customerId: 'cust-1', paymentIntentId: 'pi_same', attemptId: 'ch_same',
+      invoiceId: 'inv-1', customerInitiated: true,
+    };
+
+    const first = await PaymentLifecycleEmail.sendPaymentFailed(args);
+    const repeated = await PaymentLifecycleEmail.sendPaymentFailed(args);
+
+    expect(first).toMatchObject({ channels: { scheduled: true, queueId: 'sms-first' } });
+    expect(repeated).toMatchObject({ channels: { scheduled: true, deduped: true, queueId: 'sms-first' } });
+    expect(firstInsert.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('propagates a payment-failure enqueue error to the webhook retry owner', async () => {
+    const explicitPrefs = { email_enabled: true, payment_issue_channels: ['sms'] };
+    const queueLookup = chain({ first: null });
+    const queueInsert = chain();
+    queueInsert.returning.mockRejectedValueOnce(new Error('database unavailable'));
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      notification_prefs: [chain({ first: explicitPrefs }), chain({ first: explicitPrefs })],
+      sms_log: [queueLookup, queueInsert],
+    });
+
+    await expect(PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1',
+      paymentIntentId: 'pi_off_session',
+      attemptId: 'ch_machine',
+      invoiceId: 'inv-1',
+      customerInitiated: false,
+    })).rejects.toMatchObject({ code: 'BILLING_NOTICE_ENQUEUE_FAILED' });
+  });
+
+  test('propagates an unavailable preference read instead of acknowledging it as legacy', async () => {
+    const firstPrefs = chain();
+    const routingPrefs = chain();
+    firstPrefs.first.mockRejectedValueOnce(new Error('database unavailable'));
+    routingPrefs.first.mockRejectedValueOnce(new Error('database unavailable'));
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      customers: [chain({ first: customer() })],
+      notification_prefs: [firstPrefs, routingPrefs],
+    });
+
+    await expect(PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1',
+      paymentIntentId: 'pi_retry_prefs',
+      attemptId: 'ch_retry_prefs',
+      invoiceId: 'inv-1',
+      customerInitiated: true,
+    })).rejects.toMatchObject({ code: 'BILLING_PREFS_UNAVAILABLE', retryable: true });
   });
 
   test('sends payment plan confirmation through the shared lifecycle sender', async () => {

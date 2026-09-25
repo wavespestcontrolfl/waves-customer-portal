@@ -4747,7 +4747,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true,
+  async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true, hasEmailLeg = false,
     // Internal-only: sends this same call once more after a not_zero_due
     // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
     // this itself, so a real race can retry at most once, never loop.
@@ -4803,7 +4803,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, _zeroDueRetried: true,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, _zeroDueRetried: true,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -5094,7 +5094,12 @@ const InvoiceService = {
         // 'invoice' template kill switch (invoice → invoice_sent) still
         // applies. If ops disables the invoice template to halt broken
         // billing texts, this flow needs to stop too.
-        metadata: { original_message_type: "invoice" },
+        metadata: {
+          original_message_type: "invoice",
+          billingDeliveryCategory: "invoice",
+          notificationEventKey: `invoice:${invoiceId}:sent`,
+        },
+        ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
         // The canonical sender owns push-first / push+SMS / Twilio routing.
         // Wrap that ONE provider dispatcher so the invoice row and estimate
         // deposit ledger stay stable through whichever delivery leg it picks.
@@ -5487,6 +5492,7 @@ const InvoiceService = {
           claimToken: claim.invoice.send_claim_token,
           payUrlParams,
           operatorInitiated,
+          hasEmailLeg: true,
           // This wrapper's own claim above already adopted (and will
           // restore/resolve) any queued pay-link SMS this send supersedes —
           // the nested claim must not adopt it a second time.
@@ -5654,6 +5660,9 @@ const InvoiceService = {
             metadata: JSON.stringify({
               entry_point: "invoice_send_deferred",
               invoice_id: invoiceId,
+              billingDeliveryCategory: "invoice",
+              notificationEventKey: `invoice:${invoiceId}:sent`,
+              hasEmailLeg: true,
               original_block_code: sms.code,
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
@@ -5716,6 +5725,7 @@ const InvoiceService = {
           recipientOverride: emailRecipientOverride,
           payUrlParams,
           claimToken: claim.invoice.send_claim_token,
+          ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
         });
         if (r?.ok) email.ok = true;
         else if (r?.error) email.error = r.error;
@@ -6673,7 +6683,11 @@ const InvoiceService = {
       // open. Callers assert it only from verified provenance (the
       // receipt queue's persisted flag; Pay-route enqueues).
       ...(customerInitiated ? { customerInitiated: true } : {}),
-      metadata: { original_message_type: "receipt" },
+      metadata: {
+        original_message_type: "receipt",
+        billingDeliveryCategory: "payment_receipt",
+        notificationEventKey: `invoice:${invoiceId}:receipt`,
+      },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
       hasEmailLeg,

@@ -16,6 +16,7 @@ const logger = require('./logger');
 const StripeService = require('./stripe');
 const { invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const { DEPOSIT } = require('./pricing-engine/constants');
+const { explicitBillingChannels, billingChannelAllowed } = require('./billing-delivery-channels');
 // Surcharge revert (owner ruling 2026-07-13): a deposit PI can now capture
 // face value + card surcharge (credit funding, quoted at confirm). The
 // LEDGER stays face-value denominated — amount/credited_amount/
@@ -394,8 +395,11 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
     ? (require('./customer-contact').getReceiptEmailRecipients(customer, prefs || {})[0]?.email || '')
     : leadEmail;
   const emailUsable = !emailOptOut && !!emailRecipient;
+  const explicitChannels = estimate.customer_id ? explicitBillingChannels(prefs || {}, 'payment_receipt') : null;
   const wantSms = estimate.customer_id
-    ? (['sms', 'both', 'push'].includes(channel) || (channel === 'email' && !emailUsable))
+    ? (explicitChannels
+      ? (explicitChannels.includes('sms') || explicitChannels.includes('push'))
+      : (['sms', 'both', 'push'].includes(channel) || (channel === 'email' && !emailUsable)))
     : true;
   // The receipt-texts opt-outs (the portal "Payment confirmation texts"
   // toggle, and the STOP/sms_enabled master switch) block the SMS leg at the
@@ -405,7 +409,9 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
   // every-channel kill switch.
   const smsOptedOut = prefs?.payment_confirmation_sms === false || prefs?.sms_enabled === false;
   const wantEmail = estimate.customer_id
-    ? (!receiptOptOut && emailUsable && (channel === 'email' || channel === 'both' || (!phone || smsOptedOut)))
+    ? (!receiptOptOut && emailUsable && (explicitChannels
+      ? explicitChannels.includes('email')
+      : (channel === 'email' || channel === 'both' || (!phone || smsOptedOut))))
     : (!phone && !!leadEmail);
 
   if (wantSms && phone) {
@@ -480,7 +486,14 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
     // (scheduler.js's replayInput, forwarding sms_log.message_type)
     // carries too — so a retry inherits the policy structurally instead of
     // needing its own explicit override.
-    metadata: { original_message_type: 'deposit_receipt' },
+    metadata: {
+      original_message_type: 'deposit_receipt',
+      ...(estimate.customer_id ? {
+        billingDeliveryCategory: 'payment_receipt',
+        notificationEventKey: `estimate-deposit:${estimateId}:${paymentIntentId || 'receipt'}`,
+      } : {}),
+    },
+    ...(estimate.customer_id ? { hasEmailLeg: true } : {}),
   });
   if (!result.sent) {
     // estimate_deposit_receipt is a customer-action entry point (owner
@@ -531,6 +544,11 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
             // fallback must target THIS ledger row on multi-deposit
             // estimates, not the newest one.
             payment_intent_id: paymentIntentId || null,
+            ...(estimate.customer_id ? {
+              billingDeliveryCategory: 'payment_receipt',
+              notificationEventKey: `estimate-deposit:${estimateId}:${paymentIntentId || 'receipt'}`,
+              hasEmailLeg: true,
+            } : {}),
             // The customer can change their phone between the hold and
             // nextAllowedAt — the cron re-reads customers.phone at send time
             // so the phone_matches_customer trust it asserts stays true.
@@ -648,6 +666,17 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
       // SendGrid rejection bodies can echo the recipient address — keep them
       // out of the provider log (redaction below covers this catch).
       suppressProviderErrorLog: true,
+      ...(customer ? {
+        withProviderHandoff: async (dispatch) => {
+          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (billingChannelAllowed(freshPrefs || {}, 'payment_receipt', 'email') === false) return { ok: false };
+          const freshCustomer = await db('customers').where({ id: customer.id }).first();
+          const [freshRecipient] = require('./customer-contact').getReceiptEmailRecipients(freshCustomer, freshPrefs || {});
+          if (String(freshRecipient?.email || '').trim().toLowerCase() !== String(recipient.email).trim().toLowerCase()) return { ok: false };
+          await dispatch();
+          return { ok: true };
+        },
+      } : {}),
     });
     if (result?.blocked) {
       logger.warn(`[estimate-deposits] deposit receipt email suppressed for estimate ${estimateId}: ${result.reason || 'suppressed'}`);
