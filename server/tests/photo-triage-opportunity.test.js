@@ -2,57 +2,32 @@
 // Pure metric/rule tests plus the two anonymized reference shapes (never a
 // real customer name/record, per repo policy): a new lead with a
 // whole-property finding and a prior failed treatment → onsite; an existing
-// customer with a modest finding → advice, quoted when the numbers support
-// it. DB reads (property facts, active-service check) are mocked; real
-// pricing-engine/pest-identification/estimator-engine modules run unmocked
-// so the numbers and the review gate are the real engine's.
+// customer with a modest finding → advice, quoted when the shared offer
+// core prices the family. Pricing goes through service-report/cross-sell's
+// buildOfferForFamily (the ONE existing-customer offer mechanism — its own
+// suites pin ownership, demotion and per-application rules), mocked here so
+// this suite tests the gauge's use of it, not the offer core itself.
 
-const mockState = { customersRow: undefined, estimates: [] };
-function resetState() {
-  mockState.customersRow = undefined; // undefined = "assert not queried"; null/object = the row
-  mockState.estimates = [];
-}
-resetState();
-
-function mockQuery(table) {
-  const q = {};
-  for (const method of ['whereRaw', 'orWhereRaw', 'orWhere', 'whereNull', 'whereIn', 'orderBy', 'limit']) q[method] = () => q;
-  q.where = () => q;
-  q.first = async (...cols) => {
-    if (table !== 'customers') throw new Error(`unexpected first() on ${table}`);
-    if (mockState.customersRow === undefined) throw new Error('unexpected customers read');
-    if (mockState.customersRow === null) return null;
-    const row = {};
-    for (const col of cols) row[col] = mockState.customersRow[col] ?? null;
-    return row;
-  };
-  q.select = async () => {
-    if (table !== 'estimates') throw new Error(`unexpected select() on ${table}`);
-    return mockState.estimates;
-  };
-  return q;
-}
-const mockDb = jest.fn((table) => mockQuery(table));
+const mockBuildOffer = jest.fn(async () => null);
+jest.mock('../services/service-report/cross-sell', () => ({
+  buildOfferForFamily: (...args) => mockBuildOffer(...args),
+}));
+const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-// The gauge refreshes DB-authoritative pricing constants before pricing
-// (same needsSync/syncConstantsFromDB pattern as customer-pricing-ai). The
-// real engine runs unmocked; only the DB refresh is stubbed here (mockDb
-// has no pricing_config table) and asserted to have been consulted.
-const mockNeedsSync = jest.fn(() => true);
-const mockSyncConstants = jest.fn(async () => {});
-jest.mock('../services/pricing-engine', () => ({
-  ...jest.requireActual('../services/pricing-engine'),
-  needsSync: (...args) => mockNeedsSync(...args),
-  syncConstantsFromDB: (...args) => mockSyncConstants(...args),
-}));
 
 const { gaugeOpportunity, _test } = require('../services/photo-triage-opportunity');
-const { largeScope, priorTreatmentFailed, outcomeFor, loadPropertyFacts, customerHasActiveService } = _test;
+const { largeScope, priorTreatmentFailed, outcomeFor } = _test;
+
+const PRICED_OFFER = (serviceKey, overrides = {}) => ({
+  serviceKey, label: 'x', mode: 'priced', relationship: 'add',
+  option: { id: `${serviceKey}-opt`, label: 'Standard program', cadence: '6 visits/year', perVisit: 83, ...overrides },
+});
+const CTA_OFFER = (serviceKey) => ({ serviceKey, label: 'x', mode: 'quote_cta', relationship: 'add', option: null });
+
 
 beforeEach(() => {
   jest.clearAllMocks();
-  resetState();
 });
 
 // ── Caption metrics ──────────────────────────────────────────────────────
@@ -72,11 +47,17 @@ describe('large_scope / prior_treatment_failed regexes', () => {
   // codex review 2026-09-25: hedge(s)/border(s) ALONE (no quantifier or
   // location phrase) must not set large_scope — one hedge or one border bed
   // is one spot, same as "just this one spot".
+  // codex #4810 r1: bare entire/whole/every (time, or a single object) are
+  // not scope evidence either — the quantifier has to land on a property
+  // subject (yard, beds, hedges, shrubs, plants, sides...).
   test.each([
     'just this one spot',
     'a small patch by the door',
     'the hedges are covered in webs',
     'along the borders of the property',
+    'this one patch keeps coming back every year',
+    'the whole thing started last week',
+    'every time it rains the spots get worse',
     '',
   ])('%p is not large scope', (body) => expect(largeScope(body)).toBe(false));
 
@@ -145,70 +126,10 @@ describe('outcomeFor pest', () => {
 
 // ── property facts + active-service checks ──────────────────────────────
 
-describe('loadPropertyFacts', () => {
-  test('reads straight off a customer object that already carries the columns (no DB call)', async () => {
-    const facts = await loadPropertyFacts({ id: 'c1', lot_sqft: 8500, property_sqft: 4500, bed_sqft: null });
-    expect(facts).toEqual({ lotSqFt: 8500, turfSf: 4500, bedArea: null });
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-
-  test('falls back to a DB read when the passed customer lacks those columns', async () => {
-    mockState.customersRow = { lot_sqft: 9000, property_sqft: null, bed_sqft: 1200 };
-    const facts = await loadPropertyFacts({ id: 'c1' });
-    expect(facts).toEqual({ lotSqFt: 9000, turfSf: null, bedArea: 1200 });
-    expect(mockDb).toHaveBeenCalledWith('customers');
-  });
-
-  test('no customer, no id, or a fully-empty row → null (never fabricates a guess)', async () => {
-    expect(await loadPropertyFacts(null)).toBeNull();
-    expect(await loadPropertyFacts({})).toBeNull();
-    mockState.customersRow = null;
-    expect(await loadPropertyFacts({ id: 'c1' })).toBeNull();
-    mockState.customersRow = { lot_sqft: null, property_sqft: null, bed_sqft: null };
-    expect(await loadPropertyFacts({ id: 'c2' })).toBeNull();
-  });
-});
-
-describe('customerHasActiveService', () => {
-  // The real persisted shape (admin-estimate-persistence.js): the priced
-  // engine result rides under estimate_data.result.lineItems, which is
-  // exactly what recurringServicesFromEstimateData/recurringLinesFromEngineResult
-  // (estimate-converter.js) read — NOT a bare top-level lineItems array.
-  test('true only when an accepted estimate prices this exact service', async () => {
-    // recurringServicesFromEstimateData only counts a line with a positive
-    // annual and no review/quote-required flag — a bare { service } with no
-    // annual is filtered out as not-actually-priced.
-    mockState.estimates = [{ estimate_data: { result: { lineItems: [{ service: 'pest_control', annual: 300 }] } } }];
-    expect(await customerHasActiveService('c1', 'lawn_care')).toBe(false);
-    expect(await customerHasActiveService('c1', 'pest_control')).toBe(true);
-  });
-
-  test('a line that priced $0 or still needs review does not count as active', async () => {
-    mockState.estimates = [{
-      estimate_data: {
-        result: {
-          lineItems: [
-            { service: 'tree_shrub', annual: 0 },
-            { service: 'lawn_care', annual: 600, requiresManualReview: true },
-          ],
-        },
-      },
-    }];
-    expect(await customerHasActiveService('c1', 'tree_shrub')).toBe(false);
-    expect(await customerHasActiveService('c1', 'lawn_care')).toBe(false);
-  });
-
-  test('no customer id → false without a query', async () => {
-    expect(await customerHasActiveService(null, 'lawn_care')).toBe(false);
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-});
-
-// ── gaugeOpportunity end to end ──────────────────────────────────────────
-
 const TREE_ANALYSIS = (worstSignal, score) => ({ worst_signal: worstSignal, overall_score: score });
 
 describe('gaugeOpportunity', () => {
+  beforeEach(() => { mockBuildOffer.mockReset(); mockBuildOffer.mockResolvedValue(null); mockDb.mockClear(); });
   test('harmless always advises, even with scope/prior-treatment language in the caption', async () => {
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
@@ -222,19 +143,9 @@ describe('gaugeOpportunity', () => {
     expect(result.quote).toBeNull();
   });
 
-  test('existing customer, one tree with water/establishment stress, no tree-count fact on file → advise, needs review (never a silent quote)', async () => {
-    // codex review 2026-09-25: routing through generateEstimate means
-    // tree_shrub pricing honors the SAME zero-tree-underquote review gate a
-    // real drafted estimate does (lineRequiresReview, draft-builder.js). This
-    // lane's property facts (customers.lot_sqft/property_sqft/bed_sqft) never
-    // carry a tree count or density, so a tree_shrub finding on file here
-    // always needs review rather than a guessed quote — the same honest
-    // "no facts, no price" outcome as pest's missing home-square-footage.
-    mockState.estimates = [];
-    const customer = {
-      id: 'existing-lawn-1', pipeline_stage: 'active_customer',
-      lot_sqft: 8500, property_sqft: 4500, bed_sqft: null,
-    };
+  test('existing customer, one tree under cultural stress, offer core prices tree & shrub → quote (the quoted-T&S reference shape)', async () => {
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub'));
+    const customer = { id: 'existing-lawn-1', pipeline_stage: 'active_customer' };
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('water_heat_mechanical_stress', 62),
@@ -242,39 +153,101 @@ describe('gaugeOpportunity', () => {
       body: 'my tree looks stressed, can you take a look',
       images: [],
     });
-    expect(result.mode).toBe('advise');
-    expect(result.reasons).toEqual(expect.arrayContaining(['cultural', 'quote_needs_review']));
+    expect(mockBuildOffer).toHaveBeenCalledWith('existing-lawn-1', mockDb, 'tree_shrub');
+    expect(result.mode).toBe('quote');
+    expect(result.reasons).toEqual(expect.arrayContaining(['cultural', 'quoted']));
     expect(result.reasons).not.toContain('lead');
+    // Per-application is the ONLY price the quote carries — no monthly/
+    // annual/plan totals ever reach the draft (AGENTS.md P1).
+    expect(result.quote).toEqual({
+      service: 'tree_shrub', label: 'Standard program', option_id: 'tree_shrub-opt', applications_per_year: 6, per_visit: 83,
+    });
+    expect(result.quote).not.toHaveProperty('monthly');
+    expect(result.quote).not.toHaveProperty('annual');
+  });
+
+  test('offer core demotes to the unpriced CTA (review-worthy facts, correction on file...) → advise, quote_needs_review', async () => {
+    mockBuildOffer.mockResolvedValueOnce(CTA_OFFER('tree_shrub'));
+    const result = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('pest_activity', 45),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      body: 'bugs on one of my shrubs',
+      images: [],
+    });
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toEqual(expect.arrayContaining(['actionable', 'quote_needs_review']));
     expect(result.quote).toBeNull();
   });
 
-  test('existing customer, a real turf area on file, lawn actionable → quote with a per-visit price (lawn has no tree-count gate)', async () => {
-    mockState.estimates = [];
-    const customer = {
-      id: 'existing-lawn-2', pipeline_stage: 'active_customer',
-      lot_sqft: 8500, property_sqft: 4500, bed_sqft: null, lawn_type: 'St. Augustine',
-    };
+  test('offer core declines (family owned, ownership unknown, no plan, commercial...) → advise, never a second pitch', async () => {
+    mockBuildOffer.mockResolvedValueOnce(null);
     const lawnRow = (findings, score) => ({
       report_contract: JSON.stringify({ diagnosis: { findings } }), overall_score: score, created_at: new Date(),
     });
     const result = await gaugeOpportunity({
       type: 'lawn',
       analysis: lawnRow([{ name: 'Chinch bug pressure', confidence: 'moderate' }], 55),
-      customer,
-      body: 'weeds are spreading, can you take a look',
+      customer: { id: 'existing-lawn-3', pipeline_stage: 'active_customer' },
+      body: 'weeds are spreading in the yard',
       images: [],
     });
-    expect(result.mode).toBe('quote');
-    expect(result.reasons).toEqual(expect.arrayContaining(['actionable', 'quoted']));
-    expect(result.quote).toMatchObject({ service: 'lawn_care' });
-    // DB-authoritative pricing: constants were refreshed before the engine ran.
-    expect(mockSyncConstants).toHaveBeenCalled();
-    expect(result.quote.monthly).toBeGreaterThan(0);
-    expect(result.quote.annual).toBeCloseTo(result.quote.monthly * 12, 0);
-    // AGENTS.md P1 "per application price copy": the customer-facing quote
-    // line reads per_visit (the per-application amount), never the monthly/annual total.
-    expect(result.quote.per_visit).toBeGreaterThan(0);
-    expect(result.quote.per_visit).toBeCloseTo(result.quote.annual / result.quote.frequency, 0);
+    expect(mockBuildOffer).toHaveBeenCalledWith('existing-lawn-3', mockDb, 'lawn_care');
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toContain('no_offer');
+    expect(result.quote).toBeNull();
+  });
+
+  test('a priced offer for a DIFFERENT family than the photo never becomes this quote', async () => {
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('pest_control'));
+    const result = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('pest_activity', 45),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      body: 'bugs on one of my shrubs',
+      images: [],
+    });
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toContain('no_offer');
+  });
+
+  test('a priced offer with a $0 per-application amount is not a quote', async () => {
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub', { perVisit: 0 }));
+    const result = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('pest_activity', 45),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      body: 'bugs on one of my shrubs',
+      images: [],
+    });
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toContain('quote_needs_review');
+  });
+
+  test('offer core throws → advise (fail closed), never onsite, never a quote', async () => {
+    mockBuildOffer.mockRejectedValueOnce(new Error('boom'));
+    const result = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('pest_activity', 45),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      body: 'bugs on one of my shrubs',
+      images: [],
+    });
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toContain('no_offer');
+  });
+
+  test('pest photos are never engine-quoted through this lane (no offer call at all)', async () => {
+    const result = await gaugeOpportunity({
+      type: 'pest',
+      analysis: { report_contract: JSON.stringify({ identification: { category: 'insect' } }) },
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer' },
+      body: 'found this on the patio',
+      images: [],
+    });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toContain('no_offer');
   });
 
   test('new lead, whole-property finding, already tried and failed → onsite', async () => {
@@ -290,37 +263,17 @@ describe('gaugeOpportunity', () => {
     expect(result.quote).toBeNull();
   });
 
-  test('lead (or unknown customer) with no property facts on file → advise, never a guessed quote', async () => {
-    mockState.customersRow = null;
+  test('lead with a customer row but no plan → the offer core declines → advise, never a guessed quote', async () => {
+    mockBuildOffer.mockResolvedValueOnce(null);
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('pest_activity', 55),
-      customer: { id: 'newlead-1' }, // pipeline_stage absent → lead; no lot/bed/turf columns present
+      customer: { id: 'newlead-1' }, // pipeline_stage absent → lead
       body: 'small bug spot on one shrub',
       images: [],
     });
     expect(result.mode).toBe('advise');
-    expect(result.reasons).toContain('no_property_facts');
-    expect(result.quote).toBeNull();
-  });
-
-  test('customer already has this service (accepted estimate on file) → advise, not a second pitch', async () => {
-    // tree_shrub always needs review through this lane (see the test above),
-    // so the already_active branch is only reachable for lawn here.
-    mockState.estimates = [{ estimate_data: { result: { lineItems: [{ service: 'lawn_care', annual: 576 }] } } }];
-    const customer = { id: 'existing-lawn-3', pipeline_stage: 'active_customer', lot_sqft: 8000, property_sqft: 4500, bed_sqft: null };
-    const lawnRow = (findings, score) => ({
-      report_contract: JSON.stringify({ diagnosis: { findings } }), overall_score: score, created_at: new Date(),
-    });
-    const result = await gaugeOpportunity({
-      type: 'lawn',
-      analysis: lawnRow([{ name: 'Chinch bug pressure', confidence: 'moderate' }], 55),
-      customer,
-      body: 'weeds are spreading in the yard',
-      images: [],
-    });
-    expect(result.mode).toBe('advise');
-    expect(result.reasons).toContain('already_active');
+    expect(result.reasons).toEqual(expect.arrayContaining(['lead', 'no_offer']));
     expect(result.quote).toBeNull();
   });
 
@@ -337,7 +290,7 @@ describe('gaugeOpportunity', () => {
     expect(result.reasons).not.toContain('lead');
   });
 
-  test('actionable + no scope/prior-failure language on a lead with no property facts → advise (not onsite, not quote)', async () => {
+  test('actionable + no scope/prior-failure language on a lead with no customer row → advise (not onsite, not quote; leads never get engine quotes)', async () => {
     const result = await gaugeOpportunity({
       type: 'tree_shrub',
       analysis: TREE_ANALYSIS('pest_activity', 45),

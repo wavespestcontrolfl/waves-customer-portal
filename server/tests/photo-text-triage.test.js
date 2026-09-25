@@ -363,7 +363,7 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
       // CUSTOMER carries no pipeline_stage / property facts in this fixture,
       // so the opportunity gauge lands on advise (lead + no facts to quote).
       opportunity_mode: 'advise',
-      opportunity_reasons: ['lead', 'actionable', 'no_property_facts'],
+      opportunity_reasons: ['lead', 'actionable', 'no_offer'],
       quote: null,
     });
     expect(draft.draft_response).toBe(
@@ -498,7 +498,7 @@ describe('draft text builder', () => {
   const QUOTE = (overrides = {}) => ({
     mode: 'quote',
     reasons: ['actionable', 'quoted'],
-    quote: { service: 'tree_shrub', tier: 'standard', monthly: 41.31, annual: 495.72, frequency: 6, per_visit: 83, ...overrides },
+    quote: { service: 'tree_shrub', label: 'Standard tree & shrub care', option_id: 'tree-standard', applications_per_year: 6, per_visit: 83, ...overrides },
   });
   const draft = (firstName, label, opportunity, advice = '') => composeDraft({
     firstName, bodyText: composeBody({ label, advice, opportunity }),
@@ -524,6 +524,9 @@ describe('draft text builder', () => {
       + 'Our tree & shrub program is about $83 per application, 6 applications a year. Want me to add it?',
     );
     expect(text).not.toMatch(/\/mo\b|\/yr\b|per month|per year|per visit|visits a year/i);
+    // No cadence on the option → the price still reads per application, no
+    // invented "N applications a year".
+    expect(draft('Morgan', 'thin foliage', QUOTE({ applications_per_year: null }))).toContain('about $83 per application. Want me to add it?');
   });
 
   test('tree_shrub healthy (no worst_signal): a customer-friendly label, not the internal "no major visible stress" sentinel', () => {

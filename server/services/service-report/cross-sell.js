@@ -1017,9 +1017,18 @@ async function buildReportCrossSell(service, database, {
 // context (full picked option, pricing result, customer row) the purchase
 // path needs to re-synthesize the same price. Sharing the core is what makes
 // the two surfaces unable to disagree about what a customer may be offered.
-async function composePortalOffer(customerId, database, { propertyLookup = cacheOnlyPropertyLookup } = {}) {
+// targetKey (opt-in, photo-triage lane 2026-09-25): price ONE named family
+// instead of the ladder's pick. Every other gate is unchanged — ownership
+// authority (fail closed), owned-family refusal, plan-rate suppression,
+// alreadyIncluded, the seed/correction/baseline demotions — so a caller
+// that already knows which family the customer asked about (a tree photo
+// → tree & shrub) gets the same offer discipline as the portal card, never
+// a parallel pricer. Ownership of the target itself → null: an owned
+// family is never re-priced, ladder or not.
+async function composePortalOffer(customerId, database, { propertyLookup = cacheOnlyPropertyLookup, targetKey: requestedTargetKey = null } = {}) {
   {
     if (!customerId || !database) return null;
+    if (requestedTargetKey && !OFFER_PROMPTS[requestedTargetKey]) return null;
 
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer || customer.active === false || customer.deleted_at) return null;
@@ -1064,7 +1073,10 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
       .map((row) => String(row.family_key || ''))
       .filter((key) => key && key !== 'unattributed');
 
-    const targetKey = pickOfferTarget(ownedKeys);
+    // A requested family the customer already owns is never re-priced —
+    // same never-re-price rule the ladder enforces by construction.
+    if (requestedTargetKey && offerVocabulary(ownedKeys).has(requestedTargetKey)) return null;
+    const targetKey = requestedTargetKey || pickOfferTarget(ownedKeys);
     // Owns everything → nothing to offer (owner matrix: the referral card
     // fills the slot, which needs no offer payload).
     if (!targetKey) return null;
@@ -1168,6 +1180,23 @@ async function buildPortalOffer(customerId, database, opts = {}) {
   }
 }
 
+// buildOfferForFamily(customerId, database, targetKey) → offer payload | null.
+// The photo-triage lane's entry point (owner ruling 2026-09-25): the
+// customer texted a photo of a specific thing, so the family is known and
+// the ladder does not pick. Same composePortalOffer core, same suppression
+// and demotion rules, same per-application-only payload; a family the
+// customer owns, an unprovable premises, or an ownership failure all
+// return null — the caller advises instead of quoting.
+async function buildOfferForFamily(customerId, database, targetKey, opts = {}) {
+  try {
+    const basis = await composePortalOffer(customerId, database, { ...opts, targetKey });
+    return basis ? basis.payload : null;
+  } catch (err) {
+    logger.warn(`[family-offer] suppressed (code=${err?.code || 'none'})`);
+    return null;
+  }
+}
+
 // buildPortalPurchaseBasis(customerId, database) → basis | null.
 // The one-tap purchase entry point: same offer machinery as buildPortalOffer
 // (shared composePortalOffer core — the suppression ladder can never fork),
@@ -1189,6 +1218,7 @@ async function buildPortalPurchaseBasis(customerId, database, opts = {}) {
 module.exports = {
   buildReportCrossSell,
   buildPortalOffer,
+  buildOfferForFamily,
   buildPortalPurchaseBasis,
   // The cache-only lookup discipline both offer surfaces price under — the
   // one-tap purchase re-resolves the same property context through it (one

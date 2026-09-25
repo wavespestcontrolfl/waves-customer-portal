@@ -156,9 +156,22 @@ async function classifyServiceIntent(body) {
 // Words that pick the LAWN assessment. Everything else that triggers
 // photo_diagnosis runs the pest identifier.
 const PHOTO_LAWN_WORDS = ['lawn', 'grass', 'yard', 'turf', 'weed', 'weeds'];
+// Every pest class the classifier prompt names (bug, insect, spider,
+// rodent, termite) plus the common sightings customers actually type — a
+// mixed "spider on my plant" caption must reach the pest identifier, not
+// fast-path to a plant-health assessment (codex #4810 r1).
 const PHOTO_PEST_WORDS = [
   'bug', 'bugs', 'insect', 'insects', 'pest', 'pests', 'ant', 'ants',
-  'termite', 'termites',
+  'termite', 'termites', 'spider', 'spiders', 'roach', 'roaches',
+  'cockroach', 'cockroaches', 'rat', 'rats', 'mouse', 'mice', 'rodent',
+  'rodents', 'beetle', 'beetles', 'wasp', 'wasps', 'bee', 'bees', 'hornet',
+  'hornets', 'mosquito', 'mosquitoes', 'mosquitos', 'flea', 'fleas', 'tick',
+  'ticks', 'scorpion', 'scorpions', 'silverfish', 'caterpillar',
+  'caterpillars', 'aphid', 'aphids', 'mealybug', 'mealybugs', 'whitefly',
+  'whiteflies', 'mite', 'mites', 'grub', 'grubs', 'worm', 'worms', 'moth',
+  'moths', 'gnat', 'gnats', 'fly', 'flies', 'earwig', 'earwigs', 'millipede',
+  'millipedes', 'centipede', 'centipedes', 'snail', 'snails', 'slug', 'slugs',
+  'lizard', 'lizards', 'gecko', 'geckos', 'frog', 'frogs',
 ];
 const PHOTO_TREE_SHRUB_WORDS = [
   'tree', 'trees', 'shrub', 'shrubs', 'bush', 'bushes', 'plant', 'plants',
@@ -186,15 +199,18 @@ function countTokens(lower, tokens) {
 
 // Lawn only when lawn words strictly outnumber the pest-side words (pest +
 // tree/shrub combined, same "lawn must clearly win" rule as before the
-// tree_shrub split); otherwise tree/shrub words winning outright over pest
-// words route to TREE_SHRUB_TRIAGE_TYPE — a tie (including 0-0, a question
-// with no subject word) runs the pest identifier, same default as always.
+// tree_shrub split). Tree/shrub only when plant words appear with NO pest
+// word at all: a photographed pest ON a plant ("spider on my plant", "beetle
+// eating my shrub") is a pest identification, however many plant words
+// surround it — the identifier already reads the plant context (codex #4810
+// r1). Everything else, including 0-0 (a question with no subject word),
+// runs the pest identifier, same default as always.
 function photoAssessmentType(lower) {
   const lawnScore = countTokens(lower, PHOTO_LAWN_WORDS);
   const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
   const treeShrubScore = countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
   if (lawnScore > pestScore + treeShrubScore) return 'lawn';
-  return treeShrubScore > pestScore ? TREE_SHRUB_TRIAGE_TYPE : 'pest';
+  return treeShrubScore > 0 && pestScore === 0 ? TREE_SHRUB_TRIAGE_TYPE : 'pest';
 }
 
 function regexClassifyPhoto(body) {

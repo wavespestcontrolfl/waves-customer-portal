@@ -11,14 +11,13 @@
  * already failed).
  *
  * gaugeOpportunity({ type, analysis, customer, body, images }) is the one
- * export the triage draft-builder calls. It is pure except for the property-
- * facts read (customers.lot_sqft / property_sqft / bed_sqft — skipped
- * entirely when the caller's `customer` already carries those columns, as
- * the inbound-SMS lookup in twilio-webhook.js does) and, only on the quote
- * path, a read of the customer's own accepted estimates to avoid re-pitching
- * a service they already bought (see customerHasActiveService below — there
- * is no cheaper canonical "is this customer already on service X" helper
- * near this lane).
+ * export the triage draft-builder calls. It is pure except for the quote
+ * path, which asks the shared existing-customer offer core
+ * (service-report/cross-sell.js#buildOfferForFamily) whether this family
+ * may be offered to this customer and at what per-application price — the
+ * same ownership authority, never-re-price rule, plan baseline and
+ * demotions the report/portal cards use, so this lane can never quote what
+ * those surfaces would refuse.
  *
  * Reference cases (owner ruling, 2026-09-25 — anonymized shapes, never real
  * customer names/records in code, tests, or commits):
@@ -38,24 +37,15 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { buildPestTeaser, PEST_LIBRARY } = require('./pest-identification');
-// generateEstimate (not priceTreeShrub/priceLawnCare directly): it runs the
-// pricer through calculatePropertyProfile, which is what actually resolves
-// bedArea/turfSf/track into the shape the pricer expects (a raw
-// { lotSqFt, bedArea } object bypasses the profile and its review-worthy-
-// default detection — codex review on this lane, 2026-09-25).
-const { generateEstimate } = require('./pricing-engine/estimate-engine');
-// Pricing is DB-authoritative (pricing_config rows overlay constants.js via
-// db-bridge.syncConstantsFromDB, 60s cache). Every other in-process
-// generateEstimate caller (customer-pricing-ai, one-tap-purchase,
-// relay-context) refreshes before pricing so the number matches what the
-// estimator would show — same here, or a stale constant set could quote a
-// price the customer's later estimate contradicts (pre-push audit).
-const pricingEngine = require('./pricing-engine');
-// The SAME review gate the admin/agent estimator draft path enforces before
-// ever showing a customer a price (a zero-tree/zero-count line prices only
-// fixed costs — an invisible underquote without this check).
-const { lineRequiresReview } = require('./estimator-engine/draft-builder');
-const { recurringServicesFromEstimateData, recurringServiceKey } = require('./estimate-converter');
+// The ONE existing-customer offer mechanism (service-report/cross-sell.js,
+// shared by the report card, the portal-home card, and the one-tap
+// purchase): ownership authority with fail-closed catalog joins, the
+// never-re-price-an-owned-family rule, the member/WaveGuard baseline, and
+// every seed/correction/baseline demotion — priced per application only.
+// AGENTS.md "estimator engine authority": existing customers are blocked
+// from raw engine drafting, so this lane never calls generateEstimate
+// itself (codex #4810 r1 P1 ×2).
+const { buildOfferForFamily } = require('./service-report/cross-sell');
 
 const LIBRARY_BY_SLUG = new Map(PEST_LIBRARY.map((entry) => [entry.slug, entry]));
 const HEALTHY_LAWN_LABEL = 'no major visible stress';
@@ -91,12 +81,16 @@ function teaserOutcome(type, analysis) {
 
 // ── Caption metrics ─────────────────────────────────────────────────────
 
-// "both sides", "all my"/"all of my", "entire", "whole", "every",
-// "around the house/property", "front and back" — the customer describing a
+// "both sides", "all my"/"all of my", "around the house/property", "front
+// and back", or entire/whole/every modifying a property noun (yard, beds,
+// hedges, shrubs, trees, plants, sides...) — the customer describing a
 // whole-property (or whole-side-of-property) scope rather than one spot.
 // "hedge(s)"/"border(s)" alone are NOT scope words (a single hedge or one
-// border bed is one spot, same as "one shrub") — codex review 2026-09-25.
-const LARGE_SCOPE_RE = /\b(both sides|all my|all of my|entire|whole|every|around the (house|property)|front and back)\b/i;
+// border bed is one spot), and bare entire/whole/every are NOT either —
+// "this one patch keeps coming back every year" is one spot (codex #4810
+// r1). The quantifier has to land on a property subject.
+const SCOPE_SUBJECT = '(?:yard|lawn|property|house|home|landscape|landscaping|bed|beds|hedge|hedges|hedgerow|shrub|shrubs|bush|bushes|tree|trees|palm|palms|plant|plants|border|borders|side|sides|perimeter|fence ?line)';
+const LARGE_SCOPE_RE = new RegExp(`\\b(both sides|all (?:of )?my|around the (?:house|property)|front and back|(?:entire|whole|every) (?:\\w+ )?${SCOPE_SUBJECT})\\b`, 'i');
 
 // Failure/recurrence language: the customer (or their lawn company) already
 // attempted treatment AND it did not hold. "tried"/"treated" ALONE are not
@@ -177,162 +171,54 @@ function outcomeFor(type, analysis) {
   };
 }
 
-// ── Property facts + compute-only pricing ───────────────────────────────
+// ── Compute-only pricing ────────────────────────────────────────────────
 
-function positiveNum(value) {
-  const n = Number(value);
+// Offer family per assessment type. No pest entry: the only sanctioned
+// existing-customer pricer is the offer machinery, and pest control is its
+// anchor family — a pest-photo customer with no plan is a lead-shaped
+// conversation ("Reply if you'd like a quote"), not an engine quote.
+const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care' };
+
+function applicationsPerYearFrom(option) {
+  const m = /(\d+)/.exec(String(option?.cadence || ''));
+  const n = m ? Number(m[1]) : NaN;
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// customers.property_sqft/lot_sqft/bed_sqft are the same primary-property
-// columns the estimator context-builder reads (server/services/estimator-
-// engine/context-builder.js). There is no home/building-footprint column on
-// `customers` today, so pest pricing (which needs one) has no property-facts
-// path at all — see priceForCustomer's pest guard below.
-async function loadPropertyFacts(customer) {
-  if (!customer) return null;
-  const hasColumns = ['lot_sqft', 'property_sqft', 'bed_sqft']
-    .some((key) => Object.prototype.hasOwnProperty.call(customer, key));
-  let row = customer;
-  if (!hasColumns) {
-    if (!customer.id) return null;
-    try {
-      row = await db('customers').where({ id: customer.id }).first('lot_sqft', 'property_sqft', 'bed_sqft');
-    } catch (err) {
-      logger.error(`[photo-triage-opportunity] property-facts read failed for customer ${customer.id}: ${err.message}`);
-      return null;
-    }
-  }
-  if (!row) return null;
-  const lotSqFt = positiveNum(row.lot_sqft);
-  const turfSf = positiveNum(row.property_sqft);
-  const bedArea = positiveNum(row.bed_sqft);
-  if (!lotSqFt && !turfSf && !bedArea) return null;
-  return { lotSqFt, turfSf, bedArea };
-}
-
-// tree_shrub/lawn only — pest has no property-facts path (see loadPropertyFacts).
-const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care' };
-
-// Best available "does this customer already have this service" signal.
-// There is no cheap canonical helper for it near this lane — the closest,
-// irrigation-weekly-email.js's lawn-cadence check, walks scheduled_services
-// visit history and is scoped to lawn only. Reuses the SAME accepted-
-// estimate line-item extractor the estimate converter/admin persistence use
-// (recurringServicesFromEstimateData — reads recurring.services plus the
-// engineResult/result lineItems containers a persisted estimate_data blob
-// actually uses; a bare root lineItems array is NOT a persisted shape) +
-// recurringServiceKey to normalize the raw service field against our
-// canonical key. Can undercount a plan sold outside the
-// estimator (phone/manual), never overcount — and this lane only ever
-// drafts for owner review, so an occasional redundant offer is a minor
-// annoyance, never a customer-facing mistake.
-async function customerHasActiveService(customerId, serviceKey) {
-  if (!customerId) return false;
-  try {
-    const rows = await db('estimates')
-      .where({ customer_id: customerId, status: 'accepted' })
-      .select('estimate_data');
-    return rows.some((row) => recurringServicesFromEstimateData(row.estimate_data)
-      .some((svc) => recurringServiceKey(svc) === serviceKey));
-  } catch (err) {
-    logger.error(`[photo-triage-opportunity] active-service check failed for customer ${customerId}: ${err.message}`);
-    return false;
-  }
-}
-
-// AGENTS.md P1 "per application price copy": customer-facing estimate copy
-// must never state a combined plan total ($X/mo, $X/yr) — only the
-// per-application amount. `perApp` is the customer-facing per-application
-// figure every estimate surface reads (priceTreeShrub sets perApp to the
-// same value as its internalPerVisitRevenue; priceLawnCare sets perApp
-// directly) — read that one field, never an "internal" alias, and fall back
-// to annual/frequency only if a pricer result is ever missing it.
-function perApplicationFrom(result, frequency) {
-  const perApp = Number(result.perApp);
-  if (Number.isFinite(perApp) && perApp > 0) return Math.round(perApp);
-  const freq = Number(frequency) || 1;
-  return Math.round((Number(result.annual) || 0) / freq);
-}
-
-async function ensurePricingConstantsSynced() {
-  if (typeof pricingEngine.needsSync === 'function' && pricingEngine.needsSync()) {
-    await pricingEngine.syncConstantsFromDB(db);
-  }
-}
-
 // Compute-only pricing for one service — NEVER inserts an estimates row,
-// NEVER sends anything. Routes through generateEstimate (not priceTreeShrub/
-// priceLawnCare directly) so the SAME property-profile resolution AND the
-// SAME review gate (lineRequiresReview) a real drafted estimate goes through
-// also gates this quote — a zero-tree/zero-count line that would silently
-// underquote a real customer must not silently quote here either. Returns
-// { quote } on success or { reason } naming why not ('no_property_facts' |
-// 'quote_needs_review' | 'already_active'). quote.monthly/.annual are
-// admin-audit context only (flags.quote, context_summary) — the customer-
-// facing draft copy (photo-text-triage.js) uses quote.per_visit (the
-// per-application amount) only, never a combined total.
-async function priceForCustomer(type, customer, facts) {
+// NEVER sends anything. Existing customers go through buildOfferForFamily
+// (the portal-offer core with the family fixed to what the photo shows):
+// the customer's ownership, plan baseline and every demotion rule apply,
+// and only a PRICED offer becomes a quote. Returns { quote } on success or
+// { reason } naming why not:
+//   'no_customer_record'  — a lead with no customer row has nothing to
+//                           price against (and leads never get engine
+//                           quotes anyway)
+//   'no_offer'            — the offer core declined: family already owned,
+//                           ownership unknown (fail closed), no recurring
+//                           plan, unprovable premises, commercial, or a
+//                           live plan rate on the family
+//   'quote_needs_review'  — offer composed but demoted to the unpriced CTA
+//                           (review-worthy facts, verified correction on
+//                           file, baseline mismatch, ambiguous tree count)
+// quote.per_visit is the per-application amount — the only price field
+// the offer payload carries, and the only one the draft copy may state.
+async function priceForCustomer(type, customer) {
   const serviceKey = SERVICE_KEY[type];
-  // pest: no home-square-footage source exists anywhere in the schema
-  // (customers/customer_properties carry treated-lawn/lot/bed area only) —
-  // there is no property-facts path to reach this branch at all.
-  if (!serviceKey) return { reason: 'no_property_facts' };
-
-  if (type === 'tree_shrub') {
-    if (!facts.lotSqFt && !facts.bedArea) return { reason: 'no_property_facts' };
-    let line;
-    try {
-      await ensurePricingConstantsSynced();
-      const estimate = generateEstimate({
-        lotSqFt: facts.lotSqFt,
-        bedArea: facts.bedArea,
-        services: { treeShrub: { tier: 'standard' } },
-      });
-      line = estimate.lineItems.find((item) => item.service === 'tree_shrub');
-    } catch (err) {
-      logger.error(`[photo-triage-opportunity] tree_shrub pricing failed: ${err.message}`);
-      return { reason: 'no_property_facts' };
-    }
-    // No real lot/bed measurement at all — the pricer's own fallback (a bare
-    // 2,000 sqft guess) is exactly what "no facts" means here.
-    if (!line || line.bedAreaSource === 'fallback') return { reason: 'no_property_facts' };
-    if (lineRequiresReview(line)) return { reason: 'quote_needs_review' };
-    if (await customerHasActiveService(customer?.id, serviceKey)) return { reason: 'already_active' };
-    return {
-      quote: {
-        service: serviceKey, tier: line.tier, monthly: line.monthly, annual: line.annual,
-        frequency: line.frequency, per_visit: perApplicationFrom(line, line.frequency),
-      },
-    };
-  }
-
-  // lawn
-  if (!facts.turfSf) return { reason: 'no_property_facts' };
-  if (await customerHasActiveService(customer?.id, serviceKey)) return { reason: 'already_active' };
-  let line;
-  try {
-    // No explicit tier: priceLawnCare's own default (currently 'enhanced',
-    // 9x/yr — the 6x 'standard' tier is retired-hidden, owner directive
-    // 2026-09-24) is "the standard lawn program the engine prices today".
-    // track rides in services.lawn (the pricer's OPTIONS arg) — a saved
-    // lawn_type on the property object itself is never read.
-    await ensurePricingConstantsSynced();
-    const estimate = generateEstimate({
-      measuredTurfSf: facts.turfSf,
-      services: { lawn: { track: customer?.lawn_type || undefined } },
-    });
-    line = estimate.lineItems.find((item) => item.service === 'lawn_care');
-  } catch (err) {
-    logger.error(`[photo-triage-opportunity] lawn pricing failed: ${err.message}`);
-    return { reason: 'no_property_facts' };
-  }
-  if (!line) return { reason: 'no_property_facts' };
-  if (lineRequiresReview(line)) return { reason: 'quote_needs_review' };
+  if (!serviceKey) return { reason: 'no_offer' };
+  if (!customer?.id) return { reason: 'no_customer_record' };
+  const offer = await buildOfferForFamily(customer.id, db, serviceKey);
+  if (!offer || offer.serviceKey !== serviceKey) return { reason: 'no_offer' };
+  if (offer.mode !== 'priced' || !offer.option) return { reason: 'quote_needs_review' };
+  const perApplication = Math.round(Number(offer.option.perVisit) || 0);
+  if (!(perApplication > 0)) return { reason: 'quote_needs_review' };
   return {
     quote: {
-      service: serviceKey, tier: line.tier, monthly: line.monthly, annual: line.annual,
-      frequency: line.frequency, per_visit: perApplicationFrom(line, line.frequency),
+      service: serviceKey,
+      label: offer.option.label || null,
+      option_id: offer.option.id || null,
+      applications_per_year: applicationsPerYearFrom(offer.option),
+      per_visit: perApplication,
     },
   };
 }
@@ -348,7 +234,7 @@ function needsOnsite({ lead, actionable, scopeIsLarge, treatmentFailed }) {
 // ── The gauge ────────────────────────────────────────────────────────────
 
 /**
- * @returns {Promise<{ mode: 'advise'|'quote'|'onsite', reasons: string[], quote: null | { service, tier, monthly, annual, frequency, per_visit } }>}
+ * @returns {Promise<{ mode: 'advise'|'quote'|'onsite', reasons: string[], quote: null | { service, label, option_id, applications_per_year, per_visit } }>}
  */
 async function gaugeOpportunity({ type, analysis, customer, body, /* images reserved for a future visual-scope signal */ images: _images }) {
   const reasons = [];
@@ -379,17 +265,18 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
   }
 
   if (actionable || outcome.cultural) {
-    const facts = await loadPropertyFacts(customer);
-    if (facts) {
-      const priced = await priceForCustomer(type, customer, facts);
-      if (priced.quote) {
-        reasons.push('quoted');
-        return { mode: 'quote', reasons, quote: priced.quote };
-      }
-      reasons.push(priced.reason || 'no_property_facts');
-    } else {
-      reasons.push('no_property_facts');
+    let priced;
+    try {
+      priced = await priceForCustomer(type, customer);
+    } catch (err) {
+      logger.error(`[photo-triage-opportunity] pricing failed for customer ${customer?.id || 'none'}: ${err.message}`);
+      priced = { reason: 'no_offer' };
     }
+    if (priced.quote) {
+      reasons.push('quoted');
+      return { mode: 'quote', reasons, quote: priced.quote };
+    }
+    reasons.push(priced.reason || 'no_offer');
   }
 
   return { mode: 'advise', reasons, quote: null };
@@ -406,8 +293,6 @@ module.exports = {
     outcomeFor,
     largeScope,
     priorTreatmentFailed,
-    loadPropertyFacts,
-    customerHasActiveService,
     priceForCustomer,
   },
 };

@@ -259,7 +259,9 @@ function composeBody({ label, advice, opportunity }) {
     // amount (photo-triage-opportunity.js#perApplicationFrom).
     const serviceLabel = QUOTE_SERVICE_LABEL[opportunity.quote.service] || 'service';
     const perApplication = Math.round(Number(opportunity.quote.per_visit) || 0);
-    const quoteLine = `Our ${serviceLabel} program is about $${perApplication} per application, ${opportunity.quote.frequency} applications a year. Want me to add it?`;
+    const perYear = Number(opportunity.quote.applications_per_year);
+    const cadence = Number.isFinite(perYear) && perYear > 0 ? `, ${perYear} applications a year` : '';
+    const quoteLine = `Our ${serviceLabel} program is about $${perApplication} per application${cadence}. Want me to add it?`;
     return joinSentences([lead, advice, quoteLine]);
   }
 

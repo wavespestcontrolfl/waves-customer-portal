@@ -9,7 +9,7 @@ jest.mock('../services/property-lookup/lookup-cache', () => ({
   hasVerifiedOverrides: jest.fn(async () => false),
 }));
 
-const { buildPortalOffer } = require('../services/service-report/cross-sell');
+const { buildPortalOffer, buildOfferForFamily } = require('../services/service-report/cross-sell');
 const { hasVerifiedOverrides } = require('../services/property-lookup/lookup-cache');
 
 const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
@@ -160,5 +160,53 @@ describe('buildPortalOffer', () => {
       planRates: [{ family_key: 'tree_shrub', monthly_rate: 40 }],
     });
     expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+  });
+});
+
+// buildOfferForFamily — the photo-triage lane's targeted variant (2026-09-25):
+// the family is fixed by what the photo shows, every other gate is the
+// portal card's.
+describe('buildOfferForFamily', () => {
+  test('lawn-only customer asked about tree & shrub → a tree & shrub offer (the ladder would have picked pest)', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    expect((await buildPortalOffer('cust-1', db, { propertyLookup: missLookup }))?.serviceKey).toBe('pest_control');
+    const offer = await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup });
+    expect(offer).not.toBeNull();
+    expect(offer.serviceKey).toBe('tree_shrub');
+    expect(['priced', 'quote_cta']).toContain(offer.mode);
+    if (offer.mode === 'priced') {
+      expect(offer.option.perVisit).toBeGreaterThan(0);
+      expect(offer.option.monthly).toBeUndefined();
+      expect(offer.option.annual).toBeUndefined();
+    }
+  });
+
+  test('a family the customer already owns is never re-priced → null', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    expect(await buildOfferForFamily('cust-1', db, 'lawn_care', { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('owns NOTHING recurring → null (no engine quote for a customer with no plan)', async () => {
+    const db = dbFor({ serviceTypes: [] });
+    expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('a live plan-rate on the requested family suppresses it', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'], planRates: [{ family_key: 'tree_shrub', monthly_rate: 40 }] });
+    expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).toBeNull();
+  });
+
+  test('a verified correction on file demotes to the quote CTA, same as the card', async () => {
+    hasVerifiedOverrides.mockImplementation(async () => true);
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    const offer = await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup });
+    expect(offer).not.toBeNull();
+    expect(offer.mode).toBe('quote_cta');
+    expect(offer.option).toBeNull();
+  });
+
+  test('an unknown family → null', async () => {
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    expect(await buildOfferForFamily('cust-1', db, 'mosquito', { propertyLookup: missLookup })).toBeNull();
   });
 });

@@ -48,9 +48,23 @@ describe('regex fast path', () => {
     // the combined pest + tree/shrub words to win).
     await expect(classifyPhotoDiagnosisIntent('shrubs and bushes next to the lawn are dying'))
       .resolves.toMatchObject({ assessmentType: TREE_SHRUB_TRIAGE_TYPE });
-    // A tie between pest and tree/shrub words still runs the pest identifier.
+    // Any pest word alongside plant words runs the pest identifier.
     await expect(classifyPhotoDiagnosisIntent('found a bug on my plant'))
       .resolves.toMatchObject({ assessmentType: 'pest' });
+  });
+
+  // codex #4810 r1: every pest class the classifier prompt names (spider,
+  // rodent...) and the common sightings must count as pest words, or a
+  // mixed caption fast-paths to a plant-health assessment.
+  test.each([
+    'what is this spider on my plant?',
+    'found a beetle eating my shrub leaves',
+    'what are these mealybugs on the hibiscus bush',
+    'what kind of caterpillar is this on my tree',
+    'rat droppings under the palm',
+  ])('mixed plant-and-pest caption %p runs the pest identifier', async (body) => {
+    await expect(classifyPhotoDiagnosisIntent(body)).resolves.toMatchObject({ assessmentType: 'pest', method: 'regex' });
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   test.each([
