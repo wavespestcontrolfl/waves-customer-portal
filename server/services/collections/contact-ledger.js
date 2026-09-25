@@ -95,6 +95,25 @@ async function markDelivered(target) {
   }
 }
 
+// A keyed reservation permits one provider attempt. Only a confirmed failed
+// attempt may be retried; an unstamped reused reservation is ambiguous. Clear
+// the old failure before retrying so a later acceptance-stamp failure cannot
+// make that accepted attempt look safe to send again.
+async function claimAttempt(entry) {
+  if (!entry?.id) return { allowed: false, held: true };
+  if (entry.metadata?.delivered === true) return { allowed: false, delivered: true };
+  if (!entry.reused) return { allowed: true };
+  if (entry.metadata?.send_failed !== true) return { allowed: false, held: true };
+  const changed = await db('collections_contact_ledger').where({ id: entry.id })
+    .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb)", [
+      JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }),
+    ])
+    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
+      JSON.stringify({ send_failed: false }),
+    ]) });
+  return changed === 1 ? { allowed: true } : { allowed: false, held: true };
+}
+
 /**
  * Stamp a pre-recorded contact as undelivered. Best-effort and never throws —
  * the row standing un-stamped only ever over-suppresses, which is safe.
@@ -124,4 +143,4 @@ async function markSendFailed(entry, extra = {}) {
   }
 }
 
-module.exports = { recordContact, markSendFailed, markDelivered };
+module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt };

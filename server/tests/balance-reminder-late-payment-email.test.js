@@ -27,6 +27,7 @@ jest.mock('../services/customer-contact', () => ({
 // send — so the ledger is mocked healthy for these delivery-path tests.
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
+  claimAttempt: jest.fn(async () => ({ allowed: true })),
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
 }));
@@ -51,6 +52,7 @@ function chain({ result = [], first, returning } = {}) {
     'whereNotNull',
     'whereNotIn',
     'whereNull',
+    'leftJoin',
     'orderBy',
     'orderByRaw',
     'select',
@@ -346,6 +348,7 @@ describe('late-payment email sidecar', () => {
 // and the record-then-send ledger discipline.
 describe('collections policy + ledger on latePaymentCheck', () => {
   function armHappyPath(prefs = { email_enabled: true }, customerOverrides = {}) {
+    const interactions = [chain(), chain(), chain()];
     setDbQueues({
       customers: [chain({ result: [customer(customerOverrides)] })],
       payments: [chain({ result: [overduePayment(8)] })],
@@ -360,8 +363,10 @@ describe('collections policy + ledger on latePaymentCheck', () => {
         chain({ first: null }),
       ],
       notification_prefs: [chain({ first: prefs })],
-      customer_interactions: [chain(), chain()],
+      collections_contact_ledger: [chain({ result: [] }), chain({ result: [] })],
+      customer_interactions: [...interactions],
     });
+    return { interactions };
   }
 
   beforeEach(() => {
@@ -398,7 +403,7 @@ describe('collections policy + ledger on latePaymentCheck', () => {
   });
 
   test('selected Email and Text share a reminder without the first delivery blocking its sibling', async () => {
-    armHappyPath({ email_enabled: true, billing_channels: ['email', 'sms'] });
+    const { interactions } = armHappyPath({ email_enabled: true, billing_channels: ['email', 'sms'] });
     ContactPolicy.evaluate.mockImplementation(async () => ({
       allowed: ContactLedger.recordContact.mock.calls.length === 0,
       eligibleInvoiceIds: ['inv-1'],
@@ -408,6 +413,12 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['email', 'sms']);
+    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.metadata.notificationEventKey))
+      .toEqual(['balance-late-payment:inv-1:late_payment_7d', 'balance-late-payment:inv-1:late_payment_7d']);
+    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.metadata.template_key))
+      .toEqual(['late_payment_7d', 'late_payment_7d']);
+    expect(interactions.flatMap((query) => query.insert.mock.calls.map(([row]) => row.interaction_type)))
+      .toEqual(['email_outbound', 'sms_outbound']);
   });
 
   test('a selected App reaches the canonical sender even without a phone', async () => {
@@ -417,6 +428,78 @@ describe('collections policy + ledger on latePaymentCheck', () => {
       customerId: 'cust-1', to: null, metadata: expect.objectContaining({ billingDeliveryCategory: 'billing' }),
     }));
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each(['direct', 'daily', 'late payment'])('%s reminder holds when channel preferences cannot be read', async (entry) => {
+    const failedPrefs = chain();
+    failedPrefs.first.mockRejectedValue(new Error('preferences temporarily unavailable'));
+    const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 5 * 86400000) });
+    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    try {
+      setDbQueues({
+        notification_prefs: [failedPrefs],
+        scheduled_services: [chain({ result: [service] })],
+        customers: [chain({ result: [customer()] })],
+      });
+      if (entry === 'direct') await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(false);
+      else if (entry === 'daily') await BalanceReminder.dailyCheck();
+      else await BalanceReminder.latePaymentCheck();
+      expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
+      expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    } finally { balanceRead.mockRestore(); }
+  });
+
+  test('completed reminders from the prior visit cycle do not consume the current 14-day allowance', async () => {
+    const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 6 * 86400000) });
+    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const oldProgress = [1, 2, 3].map((tier) => ({
+      id: `old-${tier}`, channel: 'email', occurred_at: new Date(Date.now() - 20 * 86400000),
+      metadata: { delivered: true, notificationEventKey: `prior-cycle:${tier}` },
+    }));
+    const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    const send = jest.spyOn(BalanceReminder, 'sendReminder').mockResolvedValue(true);
+    try {
+      setDbQueues({
+        scheduled_services: [chain({ result: [service] })],
+        notification_prefs: [chain({ first: { billing_channels: ['email'] } })],
+        collections_contact_ledger: [chain({ result: oldProgress })],
+      });
+      await BalanceReminder.dailyCheck();
+      expect(send).toHaveBeenCalledWith(service, balance, 'gentle', expect.any(Number));
+    } finally { balanceRead.mockRestore(); send.mockRestore(); }
+  });
+
+  test('a no-phone Email delivery is durable progress and the next run emits no duplicate audit or ledger row', async () => {
+    const delivered = {
+      id: 'led-email', customer_id: 'cust-1', channel: 'email', source: 'balance_reminder_workflow',
+      occurred_at: new Date(), metadata: {
+        delivered: true, notificationEventKey: 'balance-reminder:inv-1:gentle:May 25, 2026',
+        selectedChannels: ['email'],
+      },
+    };
+    const interaction = chain();
+    setDbQueues({
+      notification_prefs: [
+        chain({ first: { billing_channels: ['email'] } }),
+        chain({ first: { billing_channels: ['email'] } }),
+      ],
+      collections_contact_ledger: [chain({ result: [] }), chain({ result: [delivered] })],
+      customer_interactions: [interaction],
+    });
+    const service = customer({ cust_id: 'cust-1', phone: null, scheduled_date: '2026-05-25', service_type: 'Pest Control' });
+    const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
+
+    await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(true);
+    await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(true);
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email', to: null }));
+    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(1);
+    expect(interaction.insert).toHaveBeenCalledTimes(1);
+    expect(interaction.insert).toHaveBeenCalledWith(expect.objectContaining({ interaction_type: 'email_outbound' }));
   });
 
   test('allowed path records BEFORE each send and both channels get their own ledger rows', async () => {

@@ -33,7 +33,7 @@ const LatePaymentChecker = require('../services/late-payment-checker');
 function chain({ result = [], first } = {}) {
   const q = {};
   q.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; });
-  for (const m of ['whereIn', 'whereNull', 'whereRaw', 'whereNot', 'orWhereNot', 'orWhereNull', 'andWhere', 'limit']) q[m] = jest.fn(() => q);
+  for (const m of ['whereIn', 'whereNull', 'whereRaw', 'whereNot', 'orWhereNot', 'orWhereNull', 'andWhere', 'limit', 'orderBy']) q[m] = jest.fn(() => q);
   q.orWhere = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; });
   q.first = jest.fn(async () => first);
   q.insert = jest.fn(async () => undefined);
@@ -48,6 +48,7 @@ function setDbQueues(queues) {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) {
       if (table === 'payment_plans') return chain({ first: undefined });
+      if (table === 'collections_contact_ledger') return chain({ result: [] });
       throw new Error(`Unexpected db table ${table}`);
     }
     return queue.shift();

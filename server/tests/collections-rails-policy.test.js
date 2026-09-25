@@ -91,6 +91,7 @@ function setDbQueues(queues) {
       // The checker's active-plan gate (fail-closed) probes payment_plans
       // per invoice — default to "no active plan" unless a test scripts one.
       if (table === 'payment_plans') return chain({ first: undefined });
+      if (table === 'collections_contact_ledger') return chain({ result: [] });
       throw new Error(`Unexpected db table ${table}`);
     }
     return queue.shift();
@@ -284,6 +285,7 @@ describe('late-payment-checker rail', () => {
       invoiceIds: ['inv-1'],
       source: 'late_payment_checker',
       metadata: { tier_days: 14, days_overdue: 16 },
+      idempotencyKey: 'late_payment_checker:inv-1:14:sms',
     });
     expect(ContactLedger.recordContact.mock.calls[1][0]).toEqual(expect.objectContaining({
       channel: 'email', purpose: 'late_payment', invoiceIds: ['inv-1'],

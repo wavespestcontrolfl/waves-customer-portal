@@ -65,6 +65,15 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn(() => 'msg') }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => Promise.resolve('Hi there')) }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn(), sendPaymentRetryNotice: jest.fn(() => Promise.resolve({ ok: true })) }));
+jest.mock('../services/billing-retry-email-obligation', () => ({
+  pendingDescriptor: jest.fn(({ customerId, paymentId, retryDate }) => ({
+    key: `payment.retry_notice:${paymentId}:${new Date(retryDate).toISOString().slice(0, 10)}`,
+    customer_id: customerId, payment_id: paymentId, state: 'pending_decision',
+  })),
+  mergePendingDescriptor: jest.fn((_db, descriptor) => ({ descriptor })),
+  reconcilePendingNotices: jest.fn(() => Promise.resolve({ checked: 1, queued: 1 })),
+  sendPaymentRetryNotice: jest.fn(() => Promise.resolve({ ok: true })),
+}));
 jest.mock('../services/account-membership-email', () => ({}));
 jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
 jest.mock('../services/stripe', () => ({

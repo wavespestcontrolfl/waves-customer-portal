@@ -1,6 +1,10 @@
 // late-payment-checker: a micro-deposit-blocked invoice gets a verification
 // re-nudge instead of the misleading "X days overdue" dunning.
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  return fn;
+});
 // Collections contact ledger (record-then-send, codex 2026-08-14): the rails
 // now insert a ledger row BEFORE each delivery attempt and SKIP the send if
 // the insert fails. Mock it as always-succeeding so this suite keeps testing
@@ -10,6 +14,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
   markDelivered: jest.fn(async () => true),
   markSendFailed: jest.fn(async () => true),
+  claimAttempt: jest.fn(async () => ({ allowed: true })),
 }));
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -43,6 +48,7 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const BalanceReminder = require('../services/workflows/balance-reminder');
 const StripeService = require('../services/stripe');
 const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
+const ContactLedger = require('../services/collections/contact-ledger');
 const LatePaymentChecker = require('../services/late-payment-checker');
 
 function chain({ result = [], first } = {}) {
@@ -54,11 +60,13 @@ function chain({ result = [], first } = {}) {
   q.orWhereNot = jest.fn(() => q);
   q.orWhereNull = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
+  q.orderBy = jest.fn(() => q);
   q.andWhere = jest.fn(() => q);
   q.orWhere = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; });
   q.limit = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.insert = jest.fn(async () => undefined);
+  q.update = jest.fn(async () => 1);
   q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   q.catch = (reject) => Promise.resolve(result).catch(reject);
   return q;
@@ -73,6 +81,7 @@ function setDbQueues(queues) {
       // per invoice — default to "no active plan" unless a test scripts one.
       if (table === 'payment_plans') return chain({ first: undefined });
       if (table === 'notification_prefs') return chain({ first: undefined });
+      if (table === 'collections_contact_ledger') return chain({ result: [] });
       throw new Error(`Unexpected db table ${table}`);
     }
     return queue.shift();
@@ -99,6 +108,8 @@ describe('late-payment micro-deposit diversion', () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
     jest.clearAllMocks();
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(false);
+    ContactLedger.recordContact.mockReset().mockResolvedValue({ id: 'led-1', metadata: {} });
+    ContactLedger.claimAttempt.mockReset().mockResolvedValue({ allowed: true });
   });
   afterEach(() => jest.useRealTimers());
 
@@ -183,5 +194,94 @@ describe('late-payment micro-deposit diversion', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(sendMicrodepositVerificationEmail).not.toHaveBeenCalled();
     expect(result.skipped).toBe(1);
+  });
+
+  test('retries only the pending verification Email after accepted Text', async () => {
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    sendMicrodepositVerificationEmail
+      .mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable' })
+      .mockResolvedValueOnce({ ok: true });
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: null }), activityInsert],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    const pending = JSON.parse(activityInsert.insert.mock.calls[0][0].metadata);
+    expect(pending).toMatchObject({ pendingEmail: true, channel: 'sms', tierDays: 14 });
+
+    jest.setSystemTime(new Date('2026-06-15T14:00:00.000Z'));
+    const completion = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: { id: 'activity-1', metadata: pending } }), completion],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+    expect(sendMicrodepositVerificationEmail).toHaveBeenLastCalledWith(
+      expect.objectContaining({ touchKey: '14d' }),
+    );
+    expect(completion.update).toHaveBeenCalled();
+  });
+
+  test('a failed verification ledger read holds the reminder instead of opening a new tier', async () => {
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    const failedRecovery = chain();
+    failedRecovery.then = (_resolve, reject) => Promise.reject(new Error('ledger temporarily unavailable')).catch(reject);
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+      collections_contact_ledger: [failedRecovery],
+    });
+    await LatePaymentChecker.checkAndNotify();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(sendMicrodepositVerificationEmail).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+  });
+
+  test('recovers a failed 14-day verification Email from ledger at 30 days without repeating Text', async () => {
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    sendMicrodepositVerificationEmail
+      .mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable' })
+      .mockResolvedValueOnce({ ok: true });
+    const failedInsert = chain();
+    failedInsert.insert.mockRejectedValueOnce(new Error('activity write unavailable'));
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: null }), failedInsert],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+    });
+    await LatePaymentChecker.checkAndNotify();
+
+    jest.setSystemTime(new Date('2026-06-15T14:00:00.000Z'));
+    ContactLedger.recordContact.mockResolvedValueOnce({
+      id: 'email-14', reused: true, metadata: { send_failed: true },
+    });
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: null })],
+      collections_contact_ledger: [chain({ result: [
+        { id: 'sms-14', channel: 'sms', idempotency_key: 'late_payment_checker:microdeposit:inv-1:14:sms', metadata: { delivered: true } },
+        { id: 'email-14', channel: 'email', idempotency_key: 'late_payment_checker:microdeposit:inv-1:14:email', metadata: { send_failed: true } },
+      ] })],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+    expect(sendMicrodepositVerificationEmail).toHaveBeenLastCalledWith(
+      expect.objectContaining({ touchKey: '14d' }),
+    );
+    expect(ContactLedger.recordContact).toHaveBeenLastCalledWith(expect.objectContaining({
+      channel: 'email', idempotencyKey: 'late_payment_checker:microdeposit:inv-1:14:email',
+    }));
   });
 });

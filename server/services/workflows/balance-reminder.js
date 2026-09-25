@@ -13,7 +13,8 @@ const { formatDateOnly } = require("../../utils/date-only");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../../constants/business");
 const { collectionsChannelPermitted } = require("../collections/rail-guard");
 const ContactLedger = require("../collections/contact-ledger");
-const { billingChannelAllowed } = require('../billing-delivery-channels');
+const { billingChannelAllowed, explicitBillingChannels } = require('../billing-delivery-channels');
+const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
 
 const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
   late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
@@ -134,7 +135,24 @@ class BalanceReminder {
           (new Date(service.scheduled_date) - new Date()) / 86400000,
         );
 
-        const prevReminders = await db("sms_log")
+        let channels = null;
+        try {
+          channels = explicitBillingChannels(await db('notification_prefs').where({ customer_id: service.cust_id }).first() || {}, 'billing');
+        } catch {
+          logger.warn('Balance reminder skipped: delivery preferences unavailable');
+          continue;
+        }
+        const progress = channels ? await reminderProgress(service.cust_id, 'balance_reminder_workflow', channels) : [];
+        const pending = progress.find((event) => !event.complete
+          && event.metadata.invoiceId === balance.oldestInvoiceId
+          && event.metadata.scheduledDate === formatDateOnly(service.scheduled_date));
+        if (pending) {
+          if (await this.sendReminder(service, balance, pending.metadata.tier, daysUntil)) sent++;
+          continue;
+        }
+        const prevReminders = channels ? progress.filter((event) => event.complete
+          && new Date(event.deliveredAt) > new Date(Date.now() - 14 * 86400000))
+          .map((event) => ({ created_at: event.deliveredAt })) : await db("sms_log")
           .where({
             customer_id: service.cust_id,
             message_type: "balance_reminder",
@@ -256,7 +274,14 @@ class BalanceReminder {
     // Collections policy (gate off ⇒ permitted without consulting — this
     // rail stays byte-identical, pinned). A denial is a quiet skip, not a
     // thrown error: policy holds are expected states, not failures.
-    if (!(await collectionsChannelPermitted({
+    let selectedChannels = null;
+    try {
+      selectedChannels = explicitBillingChannels(await db('notification_prefs').where({ customer_id: service.cust_id }).first() || {}, 'billing');
+    } catch {
+      logger.warn('Balance reminder skipped: delivery preferences unavailable');
+      return false;
+    }
+    if (!selectedChannels && !(await collectionsChannelPermitted({
       customerId: service.cust_id,
       invoiceId: balance.oldestInvoiceId,
       channel: "sms",
@@ -294,6 +319,35 @@ class BalanceReminder {
     });
     if (!message) {
       throw new Error(`balance_reminder_${tier} template missing/disabled`);
+    }
+
+    if (selectedChannels) {
+      const eventKey = `balance-reminder:${balance.oldestInvoiceId}:${tier}:${formatDateOnly(service.scheduled_date)}`;
+      const result = await sendReminderChannels({
+        customerId: service.cust_id, invoiceId: balance.oldestInvoiceId,
+        source: 'balance_reminder_workflow', purpose: 'balance_reminder', eventKey,
+        channels: selectedChannels, metadata: { tier, days_until: daysUntil,
+          invoiceId: balance.oldestInvoiceId, scheduledDate: formatDateOnly(service.scheduled_date) },
+        send: (channel) => sendCustomerMessage({
+          to: service.phone, body: message, channel: channel === 'push' ? 'sms' : channel,
+          audience: 'customer', purpose: 'payment_link', customerId: service.cust_id,
+          invoiceId: balance.oldestInvoiceId, entryPoint: 'balance_reminder_workflow',
+          metadata: { original_message_type: 'balance_reminder', billingDeliveryCategory: 'billing',
+            notificationEventKey: eventKey, billingDeliveryLeg: channel },
+          preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(balance.oldestInvoiceId, db),
+        }),
+      });
+      for (const channel of result.deliveredNow) await db('customer_interactions').insert({
+        customer_id: service.cust_id, interaction_type: `${channel}_outbound`,
+        subject: `Balance reminder (${tier})`, body: `Sent ${tier} reminder via ${channel}.`,
+        metadata: JSON.stringify({ tier, channel, notificationEventKey: eventKey }),
+      });
+      if (result.complete && result.deliveredNow.length && balance.daysOverdue >= 30 && tier === 'urgent') {
+        await TwilioService.sendSMS(process.env.ADAM_PHONE || '+19415993489',
+          `💰 Overdue: ${service.first_name} ${service.last_name} — $${balance.totalBalance.toFixed(2)} (${balance.daysOverdue} days). Service ${daysUntil === 0 ? 'today' : 'tomorrow'}.`,
+          { messageType: 'internal_alert' });
+      }
+      return result.complete;
     }
 
     // RECORD-THEN-SEND (collections ledger discipline): the row precedes the
@@ -518,6 +572,58 @@ class BalanceReminder {
     }
   }
 
+  async sendExplicitLatePaymentReminder(customer, balance, prefs, channels) {
+    const invoice = await db('invoices').where({ customer_id: customer.id })
+      .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid']).whereNull('payer_id')
+      .where(function notWithdrawn() {
+        this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+      }).orderByRaw('COALESCE(due_date::timestamp, created_at) asc').first();
+    if (!invoice?.id || !invoice.token) return false;
+    const source = 'balance_reminder_late_payment_check';
+    const progress = await reminderProgress(customer.id, source, channels);
+    const pending = progress.find((event) => !event.complete && event.metadata.invoiceId === invoice.id);
+    if (!pending && progress.some((event) => event.complete && new Date(event.deliveredAt) > new Date(Date.now() - 7 * 86400000))) return false;
+    const stage = balance.daysOverdue >= 90 ? 90 : balance.daysOverdue >= 60 ? 60 : balance.daysOverdue >= 30 ? 30 : balance.daysOverdue >= 14 ? 14 : 7;
+    const templateKey = pending?.metadata.templateKey || `late_payment_${stage}d`;
+    const eventKey = pending?.metadata.notificationEventKey || `balance-late-payment:${invoice.id}:${templateKey}`;
+    if (progress.some((event) => event.complete && event.metadata.notificationEventKey === eventKey)) return false;
+    const link = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+      kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id,
+    });
+    const invoiceTitle = invoice.title || invoice.service_type || 'your service';
+    const completedOn = formatDateOnly(invoice.service_date);
+    const dateClause = completedOn ? ` completed on ${completedOn}` : '';
+    const message = await renderSmsTemplate(templateKey, {
+      first_name: customer.first_name || 'there', invoice_title: invoiceTitle,
+      service_date: completedOn || 'your service date', service_date_clause: dateClause, pay_url: link,
+    }, { workflow: 'balance_late_payment_check', entity_type: 'invoice', entity_id: invoice.id });
+    if (!message) return false;
+    const result = await sendReminderChannels({
+      customerId: customer.id, invoiceId: invoice.id, source, purpose: 'late_payment', eventKey, channels,
+      metadata: { invoiceId: invoice.id, templateKey, template_key: templateKey, days_overdue: balance.daysOverdue },
+      send: (channel) => channel === 'email'
+        ? this.sendLatePaymentEmail({ customer, invoice, balance, smsTemplateKey: templateKey,
+          invoiceTitle, serviceDateClause: dateClause, payUrl: link, initialPrefs: prefs })
+        : sendCustomerMessage({
+          to: customer.phone, body: message, channel: 'sms', audience: 'customer', purpose: 'payment_link',
+          customerId: customer.id, invoiceId: invoice.id, entryPoint: 'balance_reminder_late_payment_check',
+          metadata: { original_message_type: 'late_payment', billingDeliveryCategory: 'billing',
+            notificationEventKey: eventKey, billingDeliveryLeg: channel },
+          hasEmailLeg: true, preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(invoice.id, db),
+        }),
+    });
+    for (const channel of result.deliveredNow.filter((method) => method !== 'email')) await db('customer_interactions').insert({
+      customer_id: customer.id, interaction_type: `${channel}_outbound`,
+      subject: `Late payment ${templateKey} via ${channel}`,
+      body: `$${balance.totalBalance.toFixed(2)} overdue ${balance.daysOverdue} days.`,
+      metadata: JSON.stringify({ channel, notificationEventKey: eventKey }),
+    });
+    if (stage >= 60 && result.deliveredNow.length) await db('customers').where({ id: customer.id }).update({
+      pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date(),
+    });
+    return result.complete;
+  }
+
   async latePaymentCheck() {
     const customers = await db("customers")
       .where({ active: true })
@@ -532,6 +638,19 @@ class BalanceReminder {
       const balance = await this.getCustomerBalance(customer.id);
       if (!balance || balance.totalBalance <= 0 || balance.daysOverdue < 7)
         continue;
+
+      let prefs = null;
+      try {
+        prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+      } catch {
+        logger.warn('Late payment reminder skipped: delivery preferences unavailable');
+        continue;
+      }
+      const channels = explicitBillingChannels(prefs || {}, 'billing');
+      if (channels) {
+        if (await this.sendExplicitLatePaymentReminder(customer, balance, prefs, channels)) sent++;
+        continue;
+      }
 
       const prevCount = await db("sms_log")
         .where({ customer_id: customer.id, message_type: "late_payment" })
@@ -641,10 +760,6 @@ class BalanceReminder {
         continue;
       }
 
-      let prefs = null;
-      try {
-        prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-      } catch { /* preserve legacy routing when preferences cannot be read */ }
       const explicitEmailSelected = billingChannelAllowed(prefs || {}, 'billing', 'email') === true;
       const emailPolicyPermitted = await collectionsChannelPermitted({
         customerId: customer.id,

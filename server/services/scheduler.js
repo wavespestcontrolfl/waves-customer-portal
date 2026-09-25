@@ -6356,6 +6356,19 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Payment retry timing stays on the billing cron. This bounded sweep only
+  // materializes Email decisions that were committed with that retry state
+  // but could not be queued during the originating process.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('billing-retry-email-reconcile', async () => {
+        await require('./billing-retry-email-obligation').reconcilePendingNotices({ limit: 50 });
+      });
+    } catch (err) {
+      logger.error(`Billing retry Email reconciliation failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Stranded prepay auto-charge recovery every 15 min (Codex #3492 r12):
   // an accept can crash between commit and its in-flow charge, and
   // same-day slots book with a two-hour lead — a job stranded just after
