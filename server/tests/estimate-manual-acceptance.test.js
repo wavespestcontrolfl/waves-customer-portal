@@ -433,6 +433,56 @@ describe('estimate manual acceptance', () => {
     expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
   });
 
+  test('codex P1: a termite annual-plan manual accept with a DEFERRED invoice (sign-before-pay) does not throw — annualPlanActivationStatus stands in for draftInvoiceId', async () => {
+    const estimate = {
+      id: 'estimate-annual-plan-deferred',
+      status: 'viewed',
+      customer_id: 'customer-annual-plan',
+      sent_at: '2026-05-10T12:00:00.000Z',
+      accepted_at: null,
+      declined_at: null,
+      decline_reason: null,
+      monthly_total: '0.00',
+      annual_total: '300.00',
+      onetime_total: '0.00',
+      waveguard_tier: 'none',
+      estimate_data: {
+        recurring: {
+          services: [{ service: 'termite_bait', name: 'Termite Bait', frequency: 'annual', visitsPerYear: 1 }],
+        },
+        oneTime: { total: 0, items: [] },
+      },
+    };
+    const { database, updates } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = {
+      // Sign-before-pay (slice 3a): the converter defers — no invoice yet,
+      // annualPlanActivationStatus is the valid substitute signal.
+      convertEstimate: jest.fn().mockResolvedValue({
+        customerId: 'customer-annual-plan',
+        billingTerm: 'prepay_annual',
+        draftInvoiceId: null,
+        annualPlanActivationStatus: 'awaiting_signature',
+      }),
+    };
+
+    const result = await markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-annual-plan',
+      source: 'verbal_annual_prepay',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService,
+      estimateConverter,
+    });
+
+    expect(updates[0].patch).toMatchObject({ status: 'accepted' });
+    expect(result.conversion).toEqual(expect.objectContaining({
+      draftInvoiceId: null,
+      annualPlanActivationStatus: 'awaiting_signature',
+    }));
+  });
+
   test('manual annual prepay rejects estimates without recurring value before marking accepted', async () => {
     const estimate = {
       id: 'estimate-no-recurring-prepay',

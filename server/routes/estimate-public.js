@@ -11623,15 +11623,33 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ? existingAppointmentRow.id
             : null,
         });
-        if (!annualPrepayConversionResult?.draftInvoiceId) {
-          throw new Error('Annual prepay invoice was not created');
+        if (annualPrepayConversionResult?.annualPlanActivationStatus === 'awaiting_signature') {
+          // Sign-before-pay (slice 3a, codex P1): a termite annual-plan
+          // accept intentionally defers its invoice + prepay term until the
+          // customer e-signs the annual agreement — no draftInvoiceId here
+          // is the EXPECTED outcome, not a failure. Report a no-invoice
+          // result rather than throwing (which would roll back an accept
+          // that in fact succeeded). invoiceKindResult deliberately does
+          // NOT reuse 'annual_prepay' — every money-touching branch further
+          // down (e.g. the prepay auto-charge fence) keys on that exact
+          // string, and there is no invoice yet for any of them to act on.
+          invoiceModeResult = false;
+          invoiceIdResult = null;
+          invoiceAmountResult = annualPrepayDisplayAmount || null;
+          invoicePayUrlResult = null;
+          invoiceServiceLabelResult = 'Annual prepay — awaiting signature';
+          invoiceKindResult = 'annual_prepay_deferred';
+        } else {
+          if (!annualPrepayConversionResult?.draftInvoiceId) {
+            throw new Error('Annual prepay invoice was not created');
+          }
+          invoiceModeResult = true;
+          invoiceIdResult = annualPrepayConversionResult.draftInvoiceId;
+          invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayDisplayAmount || null;
+          invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
+          invoiceServiceLabelResult = 'Annual prepay';
+          invoiceKindResult = 'annual_prepay';
         }
-        invoiceModeResult = true;
-        invoiceIdResult = annualPrepayConversionResult.draftInvoiceId;
-        invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayDisplayAmount || null;
-        invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
-        invoiceServiceLabelResult = 'Annual prepay';
-        invoiceKindResult = 'annual_prepay';
         // FENCE the projected credits atomically with the acceptance
         // (Codex r16/r17): the revalidation above only READ them.
         if (prepayChargePlan && invoiceIdResult

@@ -335,7 +335,10 @@ router.post('/:token/sign', async (req, res, next) => {
     // document_template_key before doing anything.
     if (response.body.contract?.id && response.body.contract.documentTemplateKey === ANNUAL_TERMITE_TEMPLATE_KEY) {
       const { activateTermiteAnnualPlanForSignedContract } = require('../services/termite-annual-activation');
-      activateTermiteAnnualPlanForSignedContract({ contractId: response.body.contract.id }).catch((err) => {
+      // Deliberately detached (AGENTS.md's fire-and-forget rule) — `void`
+      // marks that on purpose rather than letting it look like an
+      // accidentally unawaited call.
+      void activateTermiteAnnualPlanForSignedContract({ contractId: response.body.contract.id }).catch((err) => {
         logger.error(`[contracts-public] termite annual plan activation errored for contract ${response.body.contract.id}: ${err.message}`);
       });
     }

@@ -257,6 +257,98 @@ describe('termite annual plan activation on sign', () => {
     expect(estimateUpdate).toHaveBeenCalledTimes(1); // no second write
   });
 
+  test('codex P1: passes the snapshot termStartDate as termStart, so an already-scheduled visit stays inside coverage', async () => {
+    const contract = makeContract();
+    const snapshot = makeSnapshot({ termStartDate: '2026-08-15' });
+    const estimate = makeEstimate({ annual_plan_deferred_invoice: snapshot });
+    const { activateTermiteAnnualPlanForSignedContract, conn, createTermForAnnualPrepay } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({ termStart: '2026-08-15' }));
+  });
+
+  test('codex P1: no termStartDate in the snapshot passes termStart: null (falls back to today, same as the ordinary accept path would)', async () => {
+    const contract = makeContract();
+    const snapshot = makeSnapshot(); // no termStartDate
+    const estimate = makeEstimate({ annual_plan_deferred_invoice: snapshot });
+    const { activateTermiteAnnualPlanForSignedContract, conn, createTermForAnnualPrepay } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({ termStart: null }));
+  });
+
+  test('codex P1: taxRate is always passed to InvoiceService.create, defaulting to 0 (never omitted) when the snapshot has null', async () => {
+    const contract = makeContract();
+    const snapshot = makeSnapshot({ taxRate: null });
+    const estimate = makeEstimate({ annual_plan_deferred_invoice: snapshot });
+    const { activateTermiteAnnualPlanForSignedContract, conn, invoiceCreate } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(invoiceCreate).toHaveBeenCalledWith(expect.objectContaining({ taxRate: 0 }));
+  });
+
+  test('codex P1: an explicit non-zero snapshot taxRate is passed through verbatim', async () => {
+    const contract = makeContract();
+    const snapshot = makeSnapshot({ taxRate: 0.07 });
+    const estimate = makeEstimate({ annual_plan_deferred_invoice: snapshot });
+    const { activateTermiteAnnualPlanForSignedContract, conn, invoiceCreate } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(invoiceCreate).toHaveBeenCalledWith(expect.objectContaining({ taxRate: 0.07 }));
+  });
+
+  test('codex P1 (fallback round, item a): a signed contract with no resolvable source estimate id bells (deduped) instead of vanishing silently', async () => {
+    const contract = makeContract({ document_variables_snapshot: { estimate: {} } }); // no id
+    const { activateTermiteAnnualPlanForSignedContract, conn, notifyAdmin } = setup({ contract, estimate: makeEstimate() });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result).toEqual({ skipped: 'no_source_estimate' });
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate',
+      expect.stringContaining('no linked estimate'),
+      expect.any(String),
+      expect.objectContaining({ bell: true, dedupeKey: `termite-annual-activation:contract-${CONTRACT_ID}:no_source_estimate` }),
+    );
+  });
+
+  test('codex P1 (item on ~96): delivery-failure bell copy says activation SUCCEEDED and names the invoice — never "activate by hand"', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, notifyAdmin } = setup({
+      contract, estimate, deliveryImpl: async () => { throw new Error('sms provider down'); },
+    });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    const [, title, body] = notifyAdmin.mock.calls[0];
+    expect(title).toMatch(/not delivered/i);
+    expect(body).toMatch(/ACTIVATED/);
+    expect(body).toMatch(/invoice #invoice-1/);
+    // Never the generic activation-failure phrasing that would tell an
+    // operator to (re-)activate something that already exists.
+    expect(body).not.toMatch(/recheck after fixing, or activate it by hand/i);
+    expect(body).not.toMatch(/awaiting signature/i);
+  });
+
+  test('codex P1 (item on ~96): the ordinary activation-failure bell copy is unchanged — still names "awaiting signature"', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, notifyAdmin } = setup({
+      contract, estimate, term: null, // forces "Annual prepay term was not created"
+    });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    const [, title, body] = notifyAdmin.mock.calls[0];
+    expect(title).toMatch(/needs manual follow-up/i);
+    expect(body).toMatch(/awaiting signature/i);
+  });
+
   test('codex P1-2: setup fee + annual line both ride the one deferred invoice, billed verbatim', async () => {
     const contract = makeContract();
     const snapshot = makeSnapshot({

@@ -938,7 +938,12 @@ async function markEstimateManuallyAccepted({
           );
         }
         conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
-        if (annualPrepaySelected && !conversion?.draftInvoiceId) {
+        // Sign-before-pay (slice 3a, codex P1): a termite annual-plan
+        // manual accept intentionally defers its invoice + prepay term
+        // until the customer e-signs — a missing draftInvoiceId is the
+        // EXPECTED outcome then, not a failure to roll back.
+        if (annualPrepaySelected && !conversion?.draftInvoiceId
+          && conversion?.annualPlanActivationStatus !== 'awaiting_signature') {
           throw new Error('Annual prepay invoice was not created');
         }
       } catch (err) {

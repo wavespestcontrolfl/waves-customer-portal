@@ -86,20 +86,51 @@ function bellDedupeKey(estimateId, contractId, kind) {
   return subject ? `termite-annual-activation:${subject}:${kind}` : undefined;
 }
 
+// Codex P1 (this round, item on ~96): a delivery failure happens AFTER the
+// activation transaction already committed the invoice, term, and
+// 'activated' status — the money is real. Reusing the activation-failure
+// copy ("stays awaiting signature — activate by hand") told an operator to
+// activate something that was already activated, risking a SECOND
+// invoice/term. Delivery failures get their own copy: activation succeeded,
+// only the customer-facing send needs a retry, naming the invoice.
+function bellCopyFor(kind, { contractId, estimateId, invoiceId, reason }) {
+  if (kind === 'delivery_failed') {
+    return {
+      title: 'Termite annual plan invoice not delivered',
+      body: `The signed annual termite agreement (contract #${contractId}${estimateId ? `, estimate #${estimateId}` : ''}) is fully ACTIVATED — invoice #${invoiceId || '?'} and its annual prepay term already exist. Only delivering the invoice to the customer failed: ${reason}. Do NOT create a new invoice or term — resend this exact invoice (the reconciliation sweep will also retry automatically), or send it by hand from the estimate.`,
+    };
+  }
+  if (kind === 'no_source_estimate') {
+    return {
+      title: 'Termite annual agreement has no linked estimate',
+      body: `Signed annual termite agreement (contract #${contractId}) could not be matched back to its source estimate: ${reason}. Nothing was billed — find and activate the correct estimate by hand.`,
+    };
+  }
+  return {
+    title: 'Termite annual plan activation needs manual follow-up',
+    body: `Signed annual termite agreement (contract #${contractId}${estimateId ? `, estimate #${estimateId}` : ''}) could not activate automatically: ${reason}. The estimate stays "awaiting signature" — recheck after fixing, or activate by hand.`,
+  };
+}
+
 async function ringActivationBell(NotificationService, {
-  estimateId, contractId, reason, kind = 'activation_error',
+  estimateId, contractId, reason, kind = 'activation_error', invoiceId = null,
 }) {
   try {
+    const { title, body } = bellCopyFor(kind, {
+      contractId, estimateId, invoiceId, reason,
+    });
     await NotificationService.notifyAdmin(
       'estimate',
-      'Termite annual plan activation needs manual follow-up',
-      `Signed annual termite agreement (contract #${contractId}${estimateId ? `, estimate #${estimateId}` : ''}) could not activate automatically: ${reason}. The estimate stays "awaiting signature" — recheck after fixing, or activate by hand.`,
+      title,
+      body,
       {
         icon: '⚠️',
         link: estimateId ? `/admin/estimates?estimateId=${estimateId}` : undefined,
         bell: true,
         dedupeKey: bellDedupeKey(estimateId, contractId, kind),
-        metadata: { estimateId, contractId, reason },
+        metadata: {
+          estimateId, contractId, invoiceId, reason,
+        },
       },
     );
   } catch (bellErr) {
@@ -115,7 +146,7 @@ async function ringActivationBell(NotificationService, {
 // immediate post-activation attempt and the reconciliation sweep's retry
 // pass, so both paths bell and report identically.
 async function deliverAnnualInvoiceOrBell({
-  estimateId, contractId = null, invoiceId, termId,
+  estimateId, contractId = null, invoiceId, termId, conn = db,
 }) {
   try {
     const InvoiceService = require('./invoice');
@@ -125,6 +156,18 @@ async function deliverAnnualInvoiceOrBell({
       // prepay_annual is just !!annualPrepayTermId) — fail-soft rather than
       // silently pretending success.
       return { ok: false, invoiceDelivery: { ok: false, error: 'delivery gate refused (no term)' } };
+    }
+    // Codex P2: stamp the ATTEMPT before sending, success or failure — the
+    // reconciliation sweep's undelivered-invoice scan (below) skips a row
+    // already attempted today, so a permanently-failing invoice (no
+    // deliverable channel on file, say) gets exactly one attempt per ET
+    // calendar day instead of occupying every batch ahead of genuinely
+    // retryable rows. Best-effort: a stamp failure must not block the
+    // actual delivery attempt.
+    try {
+      await conn('invoices').where({ id: invoiceId }).update({ annual_delivery_attempted_at: new Date() });
+    } catch (stampErr) {
+      logger.warn(`[termite-annual-activation] delivery-attempt stamp failed for invoice ${invoiceId}: ${stampErr.message}`);
     }
     const invoiceDelivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
       payUrlParams: {
@@ -141,7 +184,7 @@ async function deliverAnnualInvoiceOrBell({
     if (!invoiceDelivery || invoiceDelivery.ok === false) {
       const NotificationService = require('./notification-service');
       await ringActivationBell(NotificationService, {
-        estimateId, contractId, kind: 'delivery_failed', reason: invoiceDelivery?.error || 'delivery reported not ok',
+        estimateId, contractId, invoiceId, kind: 'delivery_failed', reason: invoiceDelivery?.error || 'delivery reported not ok',
       });
       return { ok: false, invoiceDelivery };
     }
@@ -154,7 +197,7 @@ async function deliverAnnualInvoiceOrBell({
     try {
       const NotificationService = require('./notification-service');
       await ringActivationBell(NotificationService, {
-        estimateId, contractId, kind: 'delivery_failed', reason: deliveryErr.message,
+        estimateId, contractId, invoiceId, kind: 'delivery_failed', reason: deliveryErr.message,
       });
     } catch (bellErr) {
       logger.error(`[termite-annual-activation] delivery-failure bell failed for estimate ${estimateId}: ${bellErr.message}`);
@@ -183,7 +226,23 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
       if (contract.status !== 'signed') return { skipped: 'not_signed' };
 
       estimateId = sourceEstimateIdFromContract(contract);
-      if (!estimateId) return { skipped: 'no_source_estimate' };
+      if (!estimateId) {
+        // Fallback-round P1 (a): this used to skip silently. A signed v3
+        // agreement with no resolvable source estimate is an anomaly
+        // (slice 2's context builder should always stamp
+        // document_variables_snapshot.estimate.id) — a human needs to find
+        // and activate the right estimate by hand, so bell rather than
+        // vanish.
+        try {
+          const NotificationService = require('./notification-service');
+          await ringActivationBell(NotificationService, {
+            estimateId: null, contractId, kind: 'no_source_estimate', reason: 'the signed agreement has no resolvable source estimate id in its snapshot',
+          });
+        } catch (bellErr) {
+          logger.error(`[termite-annual-activation] bell setup failed for contract ${contractId}: ${bellErr.message}`);
+        }
+        return { skipped: 'no_source_estimate' };
+      }
 
       const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
       if (!estimate) return { skipped: 'estimate_not_found' };
@@ -239,7 +298,14 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         lineItems: deferredInvoiceSnapshot.lines,
         notes: deferredInvoiceSnapshot.notes
           || `Auto-generated on signature of the termite annual agreement (contract #${contractId}, estimate #${estimateId}). Charge was deferred at acceptance until this signature (sign-before-pay).`,
-        ...(deferredInvoiceSnapshot.taxRate != null ? { taxRate: deferredInvoiceSnapshot.taxRate } : {}),
+        // Codex P1: ALWAYS pass the accepted rate explicitly (the converter
+        // now freezes 0, never null, when it computed no tax) — never let
+        // InvoiceService.create fall back to recomputing tax from the
+        // customer's CURRENT property type, which could add tax nobody
+        // agreed to if the property was reclassified between acceptance and
+        // signature. `!= null` still covers a pre-fix snapshot from before
+        // this column existed.
+        taxRate: deferredInvoiceSnapshot.taxRate != null ? deferredInvoiceSnapshot.taxRate : 0,
         ...(requestedDepositCredit > 0
           ? { depositCredit: { amount: requestedDepositCredit, estimateId } }
           : {}),
@@ -268,6 +334,15 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
           ? Number(deferredInvoiceSnapshot.monthlyRate)
           : Math.round((annualAmount / 12) * 100) / 100,
         prepayAmount,
+        // Codex P1: the accepted first-service date, snapshotted by the
+        // converter at accept time (deferredInvoiceSnapshot.termStartDate)
+        // — the SAME value the ordinary (non-deferred) branch passes as
+        // termStart. Omitting it here would default the term to the
+        // SIGNATURE day; coverage queries only include visits between
+        // term_start/term_end, so an already-scheduled visit dated before
+        // signature would fall outside paid coverage and complete-bill
+        // again.
+        termStart: deferredInvoiceSnapshot.termStartDate || null,
         coverageServiceType: COVERAGE_SERVICE_TYPE,
         coverageVisitCount: COVERAGE_VISIT_COUNT,
         coverageCadence: COVERAGE_CADENCE,
@@ -314,7 +389,7 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
       // anywhere (estimates.annual_plan_* is frozen; invoices.sent_at IS
       // NULL already IS that flag).
       const { invoiceDelivery } = await deliverAnnualInvoiceOrBell({
-        estimateId, contractId, invoiceId: result.invoiceId, termId: result.termId,
+        estimateId, contractId, invoiceId: result.invoiceId, termId: result.termId, conn,
       });
       result.invoiceDelivery = invoiceDelivery;
     }
@@ -381,6 +456,13 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
         // truly unexpected failure can't take the rest of the batch down.
         const result = await activateTermiteAnnualPlanForSignedContract({ contractId: row.contract_id, conn });
         if (result?.activated) counts.activated += 1;
+        // Codex P2: an explicit { skipped: 'error' } result means
+        // activateTermiteAnnualPlanForSignedContract caught a real failure
+        // (it already bells) — count it as failed, not a routine skip, so
+        // a tick where every signed activation fails still reports
+        // failures (and the scheduler's summary log line, gated on
+        // `activated || failed`, actually fires).
+        else if (result?.skipped === 'error') counts.failed += 1;
         else counts.skipped += 1;
       } catch (err) {
         counts.failed += 1;
@@ -418,6 +500,18 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
       .whereNull('inv.sent_at')
       .whereNull('inv.sms_sent_at')
       .whereNull('inv.email_sent_at')
+      // Codex P2: a permanently-failing row (e.g. no deliverable channel on
+      // file) retains all three NULL delivery stamps forever — without
+      // this, it would keep sorting to the front and monopolizing the
+      // LIMIT batch, starving genuinely retryable invoices behind it.
+      // Skip anything already attempted TODAY (ET calendar day; the sweep
+      // runs once daily), and order oldest-invoice-first so the longest-
+      // waiting customers are attempted first among what's left.
+      .where((builder) => {
+        builder.whereNull('inv.annual_delivery_attempted_at')
+          .orWhereRaw("(inv.annual_delivery_attempted_at AT TIME ZONE 'America/New_York')::date < (now() AT TIME ZONE 'America/New_York')::date");
+      })
+      .orderBy('inv.created_at', 'asc')
       .select('e.id as estimate_id', 'apt.id as term_id', 'inv.id as invoice_id')
       .limit(limit);
     counts.deliveryScanned = undelivered.length;
@@ -425,7 +519,7 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     for (const row of undelivered) {
       try {
         const outcome = await deliverAnnualInvoiceOrBell({
-          estimateId: row.estimate_id, invoiceId: row.invoice_id, termId: row.term_id,
+          estimateId: row.estimate_id, invoiceId: row.invoice_id, termId: row.term_id, conn,
         });
         if (outcome.ok) counts.delivered += 1;
         else counts.deliveryFailed += 1;

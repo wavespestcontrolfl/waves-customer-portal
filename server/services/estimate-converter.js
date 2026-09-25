@@ -45,6 +45,15 @@ const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-serv
 // import is inert everywhere the plan is not live.
 const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
 const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
+// Codex P0: the LIVE gate alone is wrong for an already-DELIVERED annual
+// offer — estimate-offer-version.js's own annualPlanPublicReplayBlocked
+// treats a delivered offer as acceptable even after the gate flips off, so
+// the converter must honor that same persisted evidence rather than
+// re-deciding from the live gate alone (which would let a stale offer skip
+// straight to money+term with no signature the moment the gate is
+// disabled). annualPlanHasDeliveredOffer reads a stamp already written at
+// send time (estimate_data.deliveryState + its fingerprint) — no new state.
+const { annualPlanHasDeliveredOffer } = require('./estimate-offer-version');
 
 // Find the first grassType/grass_type string anywhere in the estimate data
 // (confirmed primary path is inputs.grassType, but estimate shapes vary).
@@ -6798,9 +6807,24 @@ const EstimateConverter = {
       // TODO(3b): abandoned-signature expiry + a reconciliation sweep that
       // retries a stuck 'awaiting_signature' estimate is NOT built here —
       // left for the next slice.
+      // Codex P0: computed once here (not just a .length check) so the
+      // setup-fee resolution below can reuse the same rows array rather
+      // than re-deriving it from estimateData a second time.
+      const annualPlanRowsForDeferral = billingTerm === 'prepay_annual'
+        ? selectedTermiteAnnualPlanRows(estimateData)
+        : [];
+      // The live gate alone governs a FRESH selection, but an offer already
+      // delivered to the customer before the gate flipped off must still
+      // honor sign-before-pay — annualPlanHasDeliveredOffer reads the
+      // persisted delivery/fingerprint stamp estimate-offer-version.js
+      // already writes at send time, the same evidence
+      // annualPlanPublicReplayBlocked uses to keep such an offer viewable
+      // and acceptable. Without this, disabling the gate mid-flight would
+      // make an in-flight tokenized annual offer fall through to the
+      // ordinary branch and mint its invoice+term before signature.
       const isTermiteAnnualPlanAccept = billingTerm === 'prepay_annual'
-        && termiteAnnualPlanSelectionEnabled()
-        && selectedTermiteAnnualPlanRows(estimateData).length > 0;
+        && annualPlanRowsForDeferral.length > 0
+        && (termiteAnnualPlanSelectionEnabled() || annualPlanHasDeliveredOffer(estimate));
       if (hasDraftAmount && !skipSetupInvoice && shouldCreateDraftInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
@@ -6925,9 +6949,23 @@ const EstimateConverter = {
               // guarded on annual_plan_deferred_invoice IS NULL.
               annualPlanActivationStatus = 'awaiting_signature';
             } else {
+              // Codex P1: the annual plan's own one-time setup fee rides as
+              // its own row in selectedTermiteAnnualPlanRows (service
+              // 'termite_bait_installation', name 'Station Setup', kind
+              // 'setup' — v1-legacy-mapper.js ~1173) — it is NOT the rodent
+              // bait-station setup frozenRodentBaitSetupAmount resolves.
+              // Using that (rodent) resolver here always read 0 for a real
+              // annual-plan estimate, silently dropping the accepted setup
+              // fee from every deferred snapshot.
+              const annualPlanSetupRow = annualPlanRowsForDeferral.find(
+                (row) => row && (row.kind === 'setup' || row.service === 'termite_bait_installation'),
+              );
+              const annualPlanSetupFeeAmount = Number(annualPlanSetupRow?.price) > 0
+                ? Math.round(Number(annualPlanSetupRow.price) * 100) / 100
+                : 0;
               const deferredInvoiceSnapshot = {
                 amountCents: Math.round(annualAmount * 100),
-                setupFeeCents: Math.round(prepayRodentSetupAmount * 100),
+                setupFeeCents: Math.round(annualPlanSetupFeeAmount * 100),
                 lines: [
                   {
                     description: prepayManualLabel
@@ -6936,16 +6974,32 @@ const EstimateConverter = {
                     quantity: 1,
                     unit_price: annualAmount,
                   },
-                  ...(prepayRodentSetupAmount > 0 ? [{
-                    description: 'Bait Station Setup — one-time setup fee',
+                  ...(annualPlanSetupFeeAmount > 0 ? [{
+                    description: annualPlanSetupRow?.name || 'Station Setup',
                     quantity: 1,
-                    unit_price: prepayRodentSetupAmount,
+                    unit_price: annualPlanSetupFeeAmount,
                   }] : []),
                 ],
                 title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
                 notes: prepayNotes,
-                taxRate: prepayTaxRate !== undefined ? prepayTaxRate : null,
+                // Codex P1: freeze the accepted rate explicitly — 0 (never
+                // null) when the converter computed no tax — so activation
+                // never falls back to InvoiceService.create's own
+                // recompute-from-current-property-type default days or
+                // weeks later (a property reclassified residential→
+                // commercial between acceptance and signature must not add
+                // tax nobody agreed to).
+                taxRate: prepayTaxRate !== undefined ? prepayTaxRate : 0,
                 monthlyRate: termMonthlyRate,
+                // Codex P1: the accepted first-service date, exactly as the
+                // ordinary (non-deferred) branch passes it to
+                // createTermForAnnualPrepay below (termStart: termStartDate).
+                // Omitting it lets the deferred term default to the
+                // SIGNATURE day instead — coverage queries only include
+                // visits between term_start/term_end, so an already-
+                // scheduled visit dated before signature would fall outside
+                // paid coverage and bill again at completion.
+                termStartDate: termStartDate || null,
                 resolvedBy: 'estimate-converter:prepay_annual',
                 at: new Date().toISOString(),
               };
@@ -6954,7 +7008,7 @@ const EstimateConverter = {
                 // in-memory check above): never overwrite a row that
                 // reached 'activated' between the read at the top of this
                 // function and this write.
-                await database('estimates')
+                const stampedCount = await database('estimates')
                   .where({ id: estimateId })
                   .where(function guardFirstDeferralOnly() {
                     this.whereNull('annual_plan_activation_status')
@@ -6967,7 +7021,18 @@ const EstimateConverter = {
                     annual_plan_activation_status: 'awaiting_signature',
                     annual_plan_deferred_invoice: JSON.stringify(deferredInvoiceSnapshot),
                   });
-                annualPlanActivationStatus = 'awaiting_signature';
+                if (stampedCount > 0) {
+                  annualPlanActivationStatus = 'awaiting_signature';
+                } else {
+                  // Codex P1 (fallback round): the guard matched ZERO rows —
+                  // a concurrent write (activation, or another accept
+                  // attempt) landed between the read at the top of this
+                  // function and this UPDATE. Report what the row ACTUALLY
+                  // holds now rather than blindly claiming
+                  // 'awaiting_signature' for a write that never happened.
+                  const freshRow = await database('estimates').where({ id: estimateId }).first('annual_plan_activation_status');
+                  annualPlanActivationStatus = freshRow?.annual_plan_activation_status || null;
+                }
               } catch (stampErr) {
                 logger.error(`[estimate-converter] annual-plan awaiting-signature stamp failed for estimate ${estimateId}: ${stampErr.message}`);
                 throw stampErr;

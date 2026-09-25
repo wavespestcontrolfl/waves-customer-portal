@@ -159,24 +159,58 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     // apt.source_estimate_id === e.id, inv.id === apt.prepay_invoice_id.
     function estimatesJoinTermsJoinInvoicesBuilder() {
       const filters = {};
-      let nullChecks = [];
+      const nullChecks = [];
+      const notIn = [];
+      let notAttemptedTodayGuard = false;
+      let order = null;
       let lim = null;
       const builder = {
         join() { return builder; },
-        where(a, b) {
-          if (b !== undefined) filters[a] = b;
-          else if (a && typeof a === 'object') Object.assign(filters, a);
+        where(a) {
+          // Only usage in production: a single callback building the
+          // "not attempted today" OR-condition. Every other .where() call
+          // in this query uses the (col, value) two-arg form, handled
+          // below.
+          if (typeof a === 'function') {
+            notAttemptedTodayGuard = true;
+            return builder;
+          }
           return builder;
         },
+        whereRaw() { return builder; },
         whereNull(col) { nullChecks.push(col); return builder; },
         whereNotIn(col, values) { notIn.push([col, values]); return builder; },
+        orderBy(col, dir = 'asc') { order = { col, dir }; return builder; },
         select() { return builder; },
         limit(n) { lim = n; return builder; },
         then: (resolve, reject) => Promise.resolve(rows()).then(resolve, reject),
         catch: (reject) => Promise.resolve(rows()).catch(reject),
       };
-      const notIn = [];
+      // Overload: (col, value) two-arg where, kept separate from the
+      // callback form above so both call shapes this module actually uses
+      // are supported without a generic knex WHERE-clause emulator.
+      const originalWhere = builder.where;
+      builder.where = (a, b) => {
+        if (typeof a === 'function') return originalWhere(a);
+        if (b !== undefined) filters[a] = b;
+        else if (a && typeof a === 'object') Object.assign(filters, a);
+        return builder;
+      };
       function fieldFor(prefix, key) { return key.startsWith(prefix) ? key.slice(prefix.length) : null; }
+      // UTC-calendar-day comparison — good enough for the fake (the real
+      // query compares ET calendar days in Postgres); tests set
+      // annual_delivery_attempted_at to either null, "now", or several
+      // days in the past, never within hours of a real day boundary.
+      function attemptedBeforeToday(attemptedAt) {
+        if (!attemptedAt) return true;
+        const attempted = new Date(attemptedAt);
+        const now = new Date();
+        return attempted.getUTCFullYear() !== now.getUTCFullYear()
+          || attempted.getUTCMonth() !== now.getUTCMonth()
+          || attempted.getUTCDate() !== now.getUTCDate()
+          ? attempted < now
+          : false;
+      }
       function rows() {
         let joined = [...estimates.values()].flatMap((e) => {
           const matchingTerms = [...terms.values()].filter((t) => t.source_estimate_id === e.id);
@@ -201,6 +235,19 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
           const invField = fieldFor('inv.', col) || col;
           return inv[invField] == null;
         }));
+        if (notAttemptedTodayGuard) {
+          joined = joined.filter(({ inv }) => inv.annual_delivery_attempted_at == null
+            || attemptedBeforeToday(inv.annual_delivery_attempted_at));
+        }
+        if (order) {
+          const field = fieldFor('inv.', order.col) || order.col;
+          joined.sort((a, b) => {
+            const av = a.inv[field];
+            const bv = b.inv[field];
+            const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+            return order.dir === 'desc' ? -cmp : cmp;
+          });
+        }
         let result = joined.map(({ e, apt, inv }) => ({ estimate_id: e.id, term_id: apt.id, invoice_id: inv.id }));
         if (lim != null) result = result.slice(0, lim);
         return result;
@@ -369,8 +416,12 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
 
     expect(counts.scanned).toBe(2);
     expect(counts.activated).toBe(1);
-    expect(counts.skipped).toBe(1); // the failed row reports skipped:'error', not a thrown batch failure
-    expect(counts.failed).toBe(0);
+    // Codex P2: an explicit { skipped: 'error' } result from
+    // activateTermiteAnnualPlanForSignedContract counts as FAILED, not a
+    // routine skip — otherwise a tick where every activation fails would
+    // report zero failures.
+    expect(counts.failed).toBe(1);
+    expect(counts.skipped).toBe(0);
     const statuses = [estimates.get('est-1').annual_plan_activation_status, estimates.get('est-2').annual_plan_activation_status].sort();
     expect(statuses).toEqual(['activated', 'awaiting_signature']);
   });
@@ -521,7 +572,13 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
       deliveryImpl: async () => { throw new Error('sms provider still down'); },
     });
 
-    await reconcileTermiteAnnualActivations({ conn }); // tick 1
+    await reconcileTermiteAnnualActivations({ conn }); // tick 1 (today)
+    // Codex P2's attempted-today throttle means a SAME-day re-run correctly
+    // skips this row (proven by the dedicated throttle test above) — back-
+    // date the attempt stamp to simulate "this also failed yesterday's
+    // tick" so tick 2 is eligible again, isolating what THIS test actually
+    // checks: dedupeKey stability across retries, not the throttle itself.
+    invoices.get('invoice-1').annual_delivery_attempted_at = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     await reconcileTermiteAnnualActivations({ conn }); // tick 2 — same estimate, still undelivered
 
     expect(notifyAdmin).toHaveBeenCalledTimes(2);
@@ -559,5 +616,110 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
 
     expect(counts.deliveryScanned).toBe(0);
     expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('codex P2: a delivery attempt stamps annual_delivery_attempted_at, success or failure', async () => {
+    const estimates = new Map([
+      ['est-1', {
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+      }],
+    ]);
+    const terms = new Map([
+      ['term-1', { id: 'term-1', source_estimate_id: 'est-1', prepay_invoice_id: 'invoice-1' }],
+    ]);
+    const invoices = new Map([
+      ['invoice-1', { id: 'invoice-1', total: 300, sent_at: null }],
+    ]);
+    const { reconcileTermiteAnnualActivations, conn } = setup({
+      estimates, contracts: new Map(), terms, invoices,
+    });
+
+    expect(invoices.get('invoice-1').annual_delivery_attempted_at).toBeUndefined();
+    await reconcileTermiteAnnualActivations({ conn });
+    expect(invoices.get('invoice-1').annual_delivery_attempted_at).toBeInstanceOf(Date);
+  });
+
+  test('codex P2: a row attempted TODAY is skipped this tick (throttle), so it never monopolizes the batch', async () => {
+    const estimates = new Map([
+      ['est-1', {
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+      }],
+    ]);
+    const terms = new Map([
+      ['term-1', { id: 'term-1', source_estimate_id: 'est-1', prepay_invoice_id: 'invoice-1' }],
+    ]);
+    const invoices = new Map([
+      // Already attempted a few minutes ago (still today) — a permanently
+      // failing row (no deliverable channel) would otherwise retain all
+      // three NULL delivery stamps forever and re-win the LIMIT every tick.
+      ['invoice-1', { id: 'invoice-1', total: 300, sent_at: null, annual_delivery_attempted_at: new Date(Date.now() - 5 * 60 * 1000) }],
+    ]);
+    const { reconcileTermiteAnnualActivations, conn, sendViaSMSAndEmail } = setup({
+      estimates, contracts: new Map(), terms, invoices,
+    });
+
+    const counts = await reconcileTermiteAnnualActivations({ conn });
+
+    expect(counts.deliveryScanned).toBe(0);
+    expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('codex P2: an invoice attempted on an EARLIER day is eligible again (the throttle is per-day, not permanent)', async () => {
+    const estimates = new Map([
+      ['est-1', {
+        id: 'est-1', customer_id: 'cust-1', annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot(),
+      }],
+    ]);
+    const terms = new Map([
+      ['term-1', { id: 'term-1', source_estimate_id: 'est-1', prepay_invoice_id: 'invoice-1' }],
+    ]);
+    const invoices = new Map([
+      ['invoice-1', { id: 'invoice-1', total: 300, sent_at: null, annual_delivery_attempted_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) }],
+    ]);
+    const { reconcileTermiteAnnualActivations, conn, sendViaSMSAndEmail } = setup({
+      estimates, contracts: new Map(), terms, invoices,
+    });
+
+    const counts = await reconcileTermiteAnnualActivations({ conn });
+
+    expect(counts.deliveryScanned).toBe(1);
+    expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('codex P2: undelivered invoices are attempted oldest-created-first', async () => {
+    const estimates = new Map();
+    const terms = new Map();
+    const invoices = new Map();
+    // Newest invoice inserted first in the Map, oldest last — proves the
+    // order comes from created_at, not insertion order.
+    const rows = [
+      { id: 'newer', createdAt: new Date('2026-09-24T00:00:00Z') },
+      { id: 'oldest', createdAt: new Date('2026-09-01T00:00:00Z') },
+      { id: 'middle', createdAt: new Date('2026-09-15T00:00:00Z') },
+    ];
+    rows.forEach(({ id, createdAt }) => {
+      estimates.set(`est-${id}`, { id: `est-${id}`, customer_id: `cust-${id}`, annual_plan_activation_status: 'activated', annual_plan_deferred_invoice: baseSnapshot() });
+      invoices.set(`inv-${id}`, {
+        id: `inv-${id}`, total: 300, sent_at: null, created_at: createdAt,
+      });
+      terms.set(`term-${id}`, { id: `term-${id}`, source_estimate_id: `est-${id}`, prepay_invoice_id: `inv-${id}` });
+    });
+    const deliveredOrder = [];
+    const { reconcileTermiteAnnualActivations, conn } = setup({
+      estimates,
+      contracts: new Map(),
+      terms,
+      invoices,
+      deliveryImpl: async (invoiceId) => {
+        deliveredOrder.push(invoiceId);
+        const inv = [...invoices.values()].find((i) => i.id === invoiceId);
+        if (inv) inv.sent_at = new Date();
+        return { ok: true, sms: { ok: true }, email: { ok: true } };
+      },
+    });
+
+    await reconcileTermiteAnnualActivations({ conn });
+
+    expect(deliveredOrder).toEqual(['inv-oldest', 'inv-middle', 'inv-newer']);
   });
 });
