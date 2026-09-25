@@ -547,6 +547,13 @@ async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id
   let verdict;
   const { recheckDraftOffer, stripQuotePitch, priceContextSentence, replacePriceContext } = require('../services/photo-triage-opportunity');
   try {
+    // The SMS row's CURRENT linkage wins: resolveDraftRecipient prefers the
+    // draft's own customer_id, which a later re-link of the SMS row never
+    // updates (codex #4810 r15).
+    if (draft.sms_log_id) {
+      const smsRow = await db('sms_log').where({ id: draft.sms_log_id }).first();
+      customerId = smsRow?.customer_id || customerId;
+    }
     verdict = await recheckDraftOffer({ customerId: customerId || draft.customer_id, flags });
   } catch (err) {
     logger.warn(`[admin-drafts] photo-triage offer recheck failed for draft ${draft.id} (code=${err?.code || 'none'})`);

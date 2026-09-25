@@ -70,6 +70,9 @@ describe('regex fast path', () => {
     'what is this army worm?',
     'what are these army worms in my grass',
     'what are these sod web worms?',
+    // No raw subject token until the phrase is normalized (codex #4810 r15).
+    'army worms everywhere, help',
+    'web worms everywhere and brown patches',
   ])('lawn-pest caption %p runs the lawn assessment', async (body) => {
     await expect(classifyPhotoDiagnosisIntent(body)).resolves.toMatchObject({ assessmentType: 'lawn', method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();

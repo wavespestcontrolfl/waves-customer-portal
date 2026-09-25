@@ -312,6 +312,23 @@ describe('approve — the late recheck also guards the provider handoff and keep
   });
 });
 
+describe('approve — the SMS row\'s current linkage wins over the draft\'s own customer_id (codex #4810 r15)', () => {
+  test('a draft stamped for customer A whose SMS row now points at B rechecks against B', async () => {
+    enqueue('message_drafts', { returning: [photoDraft({ sms_log_id: 'sms-9', customer_id: 'cust-A' })] });
+    enqueue('sms_log', { first: { id: 'sms-9', from_phone: '+19415550142', to_phone: '+19415550000', customer_id: 'cust-B' } }); // recipient resolve
+    enqueue('sms_log', { first: { id: 'sms-9', customer_id: 'cust-B' } });                                                          // guard re-read
+    enqueue('message_drafts', { update: 1 });
+    mockRecheck.mockResolvedValue({ blocked: 'recipient_changed', family: 'tree_shrub' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
+      expect(res.status).toBe(409);
+    });
+    expect(mockRecheck).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-B' }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe('approve — recipient changed since the draft was gauged', () => {
   test('→ 409 PHOTO_TRIAGE_RECIPIENT_CHANGED, claim released, flags and text untouched, nothing sent', async () => {
     enqueue('message_drafts', { returning: [photoDraft()] });

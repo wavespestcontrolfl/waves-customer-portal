@@ -61,6 +61,9 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     'I used all my spray on this one shrub',
     'both sides of this one leaf have spots',
     'front and back of the same shrub',
+    // entire/whole on ONE specimen is one spot (codex #4810 r15).
+    'what is wrong with my whole tree?',
+    'the entire shrub is yellow',
     '',
   ])('%p is not large scope', (body) => expect(largeScope(body)).toBe(false));
 
@@ -96,6 +99,8 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     // Bare "tried"/"used" name no treatment (codex #4810 r13).
     "I tried uploading the photo but it didn't work; what are these spots?",
     "I used the app but it didn't work, what is this?",
+    // "couldn't fix" needs the pest problem as its object (codex #4810 r15).
+    "I couldn't fix the sprinkler; what are these lawn spots?",
   ])('%p is not a prior failure', (body) => expect(priorTreatmentFailed(body)).toBe(false));
 });
 
@@ -554,6 +559,13 @@ describe('recheckDraftOffer', () => {
     // A hand-set verdict without the version marker is still pre-gauge.
     expect(await recheckDraftOffer({ customerId: 'c1', flags: { ...legacy, opportunity_mode: 'quote', quote: { service: 'tree_shrub', per_visit: 84 } } }))
       .toEqual({ blocked: 'pre_gauge', family: null });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
+  });
+
+  test('an unchanged lead keeps its lead verdict — the customer offer core is never asked (codex #4810 r15)', async () => {
+    const lead = FLAGS({ gauged_customer_id: 'c1', gauged_lead: true, opportunity_mode: 'advise', opportunity_reasons: ['lead', 'actionable', 'lead_not_priced'], quote: null });
+    mockDb.mockReturnValueOnce({ where: () => ({ first: async () => ({ id: 'c1', active: true, pipeline_stage: 'new_lead' }) }) });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: lead })).toEqual({ ok: true });
     expect(mockBuildOffer).not.toHaveBeenCalled();
   });
 

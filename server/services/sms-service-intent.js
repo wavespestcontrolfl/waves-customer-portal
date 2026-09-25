@@ -228,8 +228,11 @@ const LAWN_PEST_PHRASES = [
   [/\b(?:sod )?web worms?\b/g, 'webworm'],
 ];
 
-function photoAssessmentType(rawLower) {
-  const lower = LAWN_PEST_PHRASES.reduce((text, [re, token]) => text.replace(re, token), rawLower);
+function normalizeLawnPests(lower) {
+  return LAWN_PEST_PHRASES.reduce((text, [re, token]) => text.replace(re, token), lower);
+}
+
+function photoAssessmentType(lower) {
   const lawnScore = countTokens(lower, PHOTO_LAWN_WORDS);
   const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
   const treeShrubScore = countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
@@ -246,7 +249,9 @@ function photoAssessmentType(rawLower) {
 function regexClassifyPhoto(body) {
   const text = typeof body === 'string' ? body.trim() : '';
   if (!text) return { intent: 'photo_diagnosis', assessmentType: 'pest', method: 'regex' };
-  const lower = text.toLowerCase();
+  // Normalized BEFORE the subject gate too — "army worms everywhere" must
+  // count as a lawn subject here, not only in the type pick (codex #4810 r15).
+  const lower = normalizeLawnPests(text.toLowerCase());
   const subject = tokenMatches(lower, [
     ...PHOTO_LAWN_WORDS, ...PHOTO_PEST_WORDS, ...PHOTO_TREE_SHRUB_WORDS, ...PHOTO_NEUTRAL_WORDS,
   ]);

@@ -95,7 +95,11 @@ const SCOPE_SUBJECT = '(?:yard|lawn|property|house|home|landscape|landscaping|be
 // "both sides" / "front and back" bind to a property-sized subject too —
 // "both sides of this one leaf" is one leaf (codex #4810 r6).
 const PROPERTY_SIZED = '(?:house|home|property|yard|lot|driveway|street|building|lawn)';
-const LARGE_SCOPE_RE = new RegExp(`\\b(both sides of (?:the |my |our )?${PROPERTY_SIZED}|around the (?:house|property)|front and back (?:of (?:the |my |our )?${PROPERTY_SIZED}|yards?)|(?:all (?:of )?my|entire|whole|every) (?:\\w+ )?${SCOPE_SUBJECT})\\b`, 'i');
+// entire/whole quantify ONE thing, so they need a property-wide or plural
+// subject — "my whole tree" is one tree (codex #4810 r15); all-my/every
+// already quantify many. A hedge is itself a row of shrubs, so it counts.
+const PROPERTY_WIDE = '(?:yard|lawn|property|house|home|landscape|landscaping|perimeter|fence ?line|beds|hedge|hedges|hedgerow|shrubs|bushes|trees|palms|plants|borders|sides)';
+const LARGE_SCOPE_RE = new RegExp(`\\b(both sides of (?:the |my |our )?${PROPERTY_SIZED}|around the (?:house|property)|front and back (?:of (?:the |my |our )?${PROPERTY_SIZED}|yards?)|(?:entire|whole) (?:\\w+ )?${PROPERTY_WIDE}|(?:all (?:of )?my|every) (?:\\w+ )?${SCOPE_SUBJECT})\\b`, 'i');
 
 // Failure/recurrence language: the customer (or their lawn company) already
 // attempted treatment AND it did not hold. "tried"/"treated" ALONE are not
@@ -116,8 +120,11 @@ const TREATMENT_SUBJECT = '(?:spray\\w*|treat\\w*|product|remedy|application|pes
 // subject in the same sentence, on either side (codex #4810 r9).
 // Plain "still there" counts once bound to a treatment subject ("we treated
 // it and it's still there", codex #4810 r14); alone it still reads nothing.
+// "couldn't fix" needs the pest problem as its object — "I couldn't fix the
+// sprinkler" failed at something else (codex #4810 r15).
+const FAILED_OBJECT = '(?:it|them|this|these|those|the (?:problem|issue|bugs?|pests?|infestation|fungus|disease|spots?|weeds?|damage))';
 const RECURRENCE = '(?:won.?t go away|(?:can.?t|couldn.?t) get rid|keeps coming back|still (?:there|here))';
-const PRIOR_TREATMENT_RE = new RegExp(`\\b(?:${TREATMENT_SUBJECT}\\b[^.!?]{0,40}\\b(?:(?:didn.?t|did not) work|${RECURRENCE})|${RECURRENCE}\\b[^.!?]{0,40}\\b${TREATMENT_SUBJECT}|couldn.?t (?:fix|kill|stop|control|treat|clear))\\b`, 'i');
+const PRIOR_TREATMENT_RE = new RegExp(`\\b(?:${TREATMENT_SUBJECT}\\b[^.!?]{0,40}\\b(?:(?:didn.?t|did not) work|${RECURRENCE})|${RECURRENCE}\\b[^.!?]{0,40}\\b${TREATMENT_SUBJECT}|couldn.?t (?:fix|kill|stop|control|treat|clear) ${FAILED_OBJECT})\\b`, 'i');
 // "our lawn guy/company ... failed [to fix it]" — a wider gap between the
 // subject and the verdict, and the one failure word (failed) the plain list
 // above doesn't already cover on its own.
@@ -452,6 +459,11 @@ async function recheckDraftOffer({ customerId, flags }) {
   // of it stale — onsite and uncheckable-family drafts included — so the
   // draft is held rather than re-judged piecemeal (codex #4810 r12).
   if (await audienceChanged(customerId, flags)) return { blocked: 'recipient_changed', family };
+  // Still the lead it was gauged as: leads are never offer-core priced, so
+  // the creation-time lead verdict (manual quote ask) stands (codex #4810
+  // r15 — the customer offer core can answer 'unavailable' for a lead's
+  // incomplete address and wrongly strip the ask).
+  if (flags.gauged_lead === true) return { ok: true };
   if (!family || !customerId || !draftPitches(flags)) return { ok: true };
   // throwOnError: an outage here must surface as a 503 (draft left pending
   // for retry), never as confirmed staleness.
