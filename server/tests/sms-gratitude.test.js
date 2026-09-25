@@ -200,6 +200,9 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Your old invoice was paid, please pay your new invoice here',
     'Last month went through and the new invoice is due Friday',
     'Old balance cleared - please pay the new one here',
+    'Invoice: https://example.invalid/i/abc',
+    'Here is your invoice: https://example.invalid/i/abc',
+    'Here you go https://portal.example.invalid/pay/abc',
   ])('a hand-typed payment request is not a closure: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(false);
   });
@@ -208,6 +211,14 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Payment received and applied, you are all set',
   ])('a hand-typed settlement is still a closure: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
+  });
+  test.each([
+    ['media-only', '', 1],
+    ['text with media', 'Here you go', 1],
+    ['unknown media count', 'Here you go', undefined],
+    ['empty body', '   ', 0],
+  ])('a hand-typed send is judged on its text alone, so %s abstains', (_label, body, mediaCount) => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...manual(body), mediaCount }] }).eligible).toBe(false);
   });
   test('a hand-typed receipt link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Your receipt: https://example.invalid/receipt/abc')] }).eligible).toBe(true);
