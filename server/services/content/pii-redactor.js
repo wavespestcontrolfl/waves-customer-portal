@@ -368,23 +368,31 @@ function suspiciousUnstructured(text) {
 // not. Not part of redact() itself: public review quoting and the other
 // callers keep their exact contract; the LLM call-trace path runs this
 // FIRST and then redact().
+// Keys match by SUBSTRING, not an exact list (pre-push auditor: an exact
+// list missed `customer_phone` / `contact_email`): any key containing a
+// phone / email / address / name-ish stem is a contact field. Order
+// matters — `email_address` is an email, not an address; `phone_number`
+// is a phone before it is anything else.
 const STRUCTURED_FIELDS = [
-  { token: '[name]', keys: ['name', 'first_name', 'last_name', 'full_name', 'customer_name', 'contact_name', 'display_name', 'firstname', 'lastname', 'fullname', 'customername', 'contactname', 'displayname', 'customer', 'contact', 'first name', 'last name', 'full name', 'customer name', 'contact name', 'caller', 'caller name', 'callername'] },
-  { token: '[phone]', keys: ['phone', 'phone_number', 'phonenumber', 'phone number', 'mobile', 'mobile_number', 'cell', 'telephone', 'tel', 'from', 'to'] },
-  { token: '[email]', keys: ['email', 'email_address', 'emailaddress', 'email address', 'e-mail'] },
-  { token: '[address]', keys: ['address', 'street', 'street_address', 'streetaddress', 'street address', 'address_line1', 'address_line_1', 'address1', 'addressline1', 'address line 1', 'service_address', 'service address', 'property_address', 'property address', 'billing_address', 'billing address'] },
+  { token: '[email]', stem: 'e-?mail' },
+  { token: '[phone]', stem: 'phone|mobile|cell|tel(?:ephone)?|fax' },
+  { token: '[address]', stem: 'address|street|addr(?:ess)?_?line' },
+  { token: '[name]', stem: 'name|customer|contact|caller|recipient|owner|tenant|resident|payer' },
 ];
-const escapeRe = (k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const STRUCTURED_RES = STRUCTURED_FIELDS.map(({ token, keys }) => {
-  const alt = keys.map(escapeRe).join('|');
+const KEY_CHARS = "[a-z0-9_ .'-]";
+const STRUCTURED_RES = STRUCTURED_FIELDS.map(({ token, stem }) => {
+  const key = `${KEY_CHARS}*?(?:${stem})${KEY_CHARS}*?`;
   return {
     token,
     // "key": "value"  — the value is a JSON string (escapes allowed), never
     // null / number / object, so `"last_name":null` stays as-is.
-    json: new RegExp(`("(?:${alt})"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"`, 'gi'),
+    // A value that is already a token is left alone, so a later pass
+    // (`customer_phone` also matches the name stem) cannot re-label it,
+    // and the scrub is idempotent.
+    json: new RegExp(`("(?:${key})"\\s*:\\s*)"(?!\\[)(?:[^"\\\\]|\\\\.)*"`, 'gi'),
     // Key: value — a label at the start of a line or after a bullet /
     // separator, value runs to end of line (or a `|` / `;` field break).
-    label: new RegExp(`((?:^|[\\n\\r]|[-*•|;,(]\\s*)\\s*(?:${alt})\\s*[:=](?!\\s*[\\[\\n\\r])\\s*)[^\\n\\r|;]+`, 'gi'),
+    label: new RegExp(`((?:^|[\\n\\r]|[-*•|;,(]\\s*)\\s*(?:${key})\\s*[:=](?!\\s*[\\[\\n\\r])\\s*)[^\\n\\r|;]+`, 'gi'),
   };
 });
 
