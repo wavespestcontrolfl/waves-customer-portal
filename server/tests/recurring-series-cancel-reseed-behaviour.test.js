@@ -118,6 +118,10 @@ function scenario(over = {}) {
       if (op === 'columnInfo') return COLS;
       if (op === 'first') {
         const where = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object');
+        // the rung-6 owner re-lock reads first('customer_id'); a scenario can script a moving owner
+        if (calls.some((c) => c[0] === 'first' && c[1] === 'customer_id') && s.relockOwners?.length) {
+          return { customer_id: s.relockOwners.shift() };
+        }
         // ids reach the writer as strings from the batch (String(id)) and as numbers from the direct callers
         if (String(where?.[1]?.id) === String(CANCELLED.id)) return s.cancelled;
         if (String(where?.[1]?.id) === String(PARENT.id)) return s.parent;
@@ -128,7 +132,6 @@ function scenario(over = {}) {
       return [];
     }
     if (table === 'job_status_history') {
-      if (op === 'first') return s.transition;
       if (op === 'await') return s.transitions || (s.transition ? [{ job_id: CANCELLED.id, from_status: s.transition.from_status }] : []);
     }
     if (table === 'recurring_plan_alerts') return op === 'await' ? s.decisions : null;
@@ -157,11 +160,13 @@ describe('readReseedCandidate — the audited transition decides', () => {
     expect(out.skipped).toBe(skipped);
   });
 
-  test('a counting transition (and a legacy NULL source status, and a null-flagged legacy child) passes', async () => {
+  test('a counting transition (and a legacy NULL source status, a null-flagged legacy child, and a replay row on top of the real cancel) passes', async () => {
     for (const over of [
       {},
       { transition: { from_status: null } },
       { cancelled: { ...CANCELLED, is_recurring: null } },
+      // dispatch same-status retry: cancelled→cancelled replay row is newest, the real pending→cancelled sits under it
+      { transitions: [{ job_id: 22, from_status: 'cancelled' }, { job_id: 22, from_status: 'pending' }] },
     ]) {
       const { handler } = scenario(over);
       const out = await readReseedCandidate(makeConn(handler), CANCELLED.id);
@@ -282,10 +287,25 @@ describe('probeReseedOverlaps + stampReseed', () => {
 });
 
 describe('the writing wrapper and the batch', () => {
+  beforeEach(() => jest.clearAllMocks());
+
   test('refuses a caller-open transaction', async () => {
     const trx = makeConn(scenario().handler);
     trx.isTransaction = true;
     await expect(reseedRecurringSeriesAfterCancel(trx, CANCELLED.id)).rejects.toThrow(/must not be called with an already-open transaction/);
+  });
+
+  test('an owner that moves under the comms lock is re-locked; one that moves again defers (owner_changed_under_fence) and the wrapper retries', async () => {
+    // relock reads: first says customer 6 (moved), second says 7 (moved again) → defer; retried thrice, then given up
+    const owners = [];
+    for (let i = 0; i < RESEED_STALE_READ_ATTEMPTS; i += 1) owners.push(6, 7);
+    const { handler } = scenario({ relockOwners: owners, decisions: [{ recurring_parent_id: 10, resolved_action: 'cancel_series' }] });
+    const out = await reseedRecurringSeriesAfterCancel(makeConn(handler), CANCELLED.id, { source: 'test' });
+    expect(out.skipped).toBe('owner_changed_under_fence');
+    expect(logger.warn).toHaveBeenCalledTimes(RESEED_STALE_READ_ATTEMPTS);
+    // moved once and stable under the second lock → evaluated under the fresh owner (then refused: stopped)
+    const { handler: settled } = scenario({ relockOwners: [6, 6], parent: { ...PARENT, customer_id: 6 }, decisions: [{ recurring_parent_id: 10, resolved_action: 'cancel_series' }] });
+    expect((await reseedRecurringSeriesAfterCancel(makeConn(settled), CANCELLED.id, { source: 'test' })).skipped).toBe('series_stopped');
   });
 
   test('a refusal path runs end-to-end through the locks and returns the reason', async () => {

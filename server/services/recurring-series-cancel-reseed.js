@@ -112,7 +112,10 @@ function plannedVisitsPerYearForSeries(parent, seeder = require('./recurring-app
   if (pattern === 'monthly_nth_weekday') return 12;
   if (pattern === 'custom') {
     const interval = Number(parent.recurring_interval_days);
-    return Number.isFinite(interval) && interval > 0 ? Math.max(1, Math.round(365 / interval)) : null;
+    // Cadence positions before the next anniversary — a CEILING (Codex r4
+    // P1): a 150-day cadence has visits at days 0, 150 and 300, three, where
+    // nearest-integer rounding said two and let a cancel go unreplaced.
+    return Number.isFinite(interval) && interval > 0 ? Math.max(1, Math.ceil(365 / interval)) : null;
   }
   const count = seeder.plannedVisitCountForPattern(pattern);
   return Number.isInteger(count) && count > 0 ? count : null;
@@ -171,9 +174,12 @@ function countTermVisits(rows, window, termOverrides = null) {
 // series rows themselves (plan rows incl. legacy null-flagged children —
 // Codex #4814 r2 P1: liveUpcomingSeriesVisits filters is_recurring = true
 // and refused every legacy series as 'no_live_visits').
+// "Live" = every counting active state (pending/confirmed/en_route/on_site
+// and a legacy NULL status — Codex r4 P1), the same set the source-status
+// rule and the term count treat as counting; terminal rows never qualify.
 function hasUpcomingPlanRow(rows, todayStr) {
   return (rows || []).some((row) => isPlanSeriesRow(row)
-    && UPCOMING_STATUSES.includes(String(row.status))
+    && isCountingSourceStatus(row.status)
     && dateOnly(row.scheduled_date) >= todayStr);
 }
 

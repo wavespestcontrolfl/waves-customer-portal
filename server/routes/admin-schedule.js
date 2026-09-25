@@ -17907,14 +17907,18 @@ async function readReseedCandidate(trx, cancelledServiceId) {
   if (!cancelled) return { skipped: 'not_found' };
   if (cancelled.status !== 'cancelled') return { skipped: 'not_cancelled' };
   if (!isPlanSeriesRow(cancelled)) return { skipped: 'not_plan_visit' };
-  const transition = await trx('job_status_history')
+  const transitions = await trx('job_status_history')
     .where({ job_id: cancelledServiceId, to_status: 'cancelled' })
     .orderBy('transitioned_at', 'desc')
-    .first('from_status');
-  if (!transition) return { skipped: 'no_transition_record' };
-  if (!isCountingSourceStatus(transition.from_status)) {
-    return { skipped: 'non_counting_transition', fromStatus: transition.from_status };
-  }
+    .select('from_status');
+  if (!transitions.length) return { skipped: 'no_transition_record' };
+  // The latest COUNTING transition, not merely the latest (Codex r4 P1): a
+  // same-status retry on the dispatch route appends a cancelled→cancelled
+  // replay row on top of the real pending→cancelled one — and that retry is
+  // exactly how a first reseed that failed without its stamp gets another
+  // chance. A row whose cancel rows were ALL non-counting stays refused.
+  const transition = transitions.find((t) => isCountingSourceStatus(t.from_status));
+  if (!transition) return { skipped: 'non_counting_transition', fromStatus: transitions[0].from_status };
   return { cancelled };
 }
 
@@ -17979,9 +17983,13 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
     if (!Number.isInteger(meta.term_index)) continue;
     for (const id of meta.added_service_ids || []) termOverrides.set(String(id), meta.term_index);
   }
+  // Terms anchor on the root's PLAN position too (Codex r4 P1): a root moved
+  // as a single occurrence keeps its cadence date, and the term must not
+  // shift with the appointment.
+  const anchor = planPositionDate(parent);
   const window = termOverrides.has(String(cancelled.id))
-    ? termWindowAtIndex(parent.scheduled_date, termOverrides.get(String(cancelled.id)))
-    : termWindowContaining(parent.scheduled_date, planPositionDate(cancelled));
+    ? termWindowAtIndex(anchor, termOverrides.get(String(cancelled.id)))
+    : termWindowContaining(anchor, planPositionDate(cancelled));
   if (!window) return { skipped: 'no_term_window' };
   const seriesRows = await trx('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
@@ -18035,14 +18043,73 @@ function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, add
   });
 }
 
+// Rung-6 comms lock on the cancelled row's owner, then the re-lock (mirrors
+// topUpRecurringSeriesWithLocks; Codex r4 P1): a merge undo can repoint the
+// cancelled row (and its root) to a different customer while this call
+// waited on the comms lock. Re-read and lock the FRESH owner too; a row
+// that moved AGAIN under the second lock defers to the wrapper's retry
+// rather than evaluating under a stale owner's fence and returning a
+// terminal owner_mismatch. Returns the (possibly re-owned) row or a skip.
+async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
+  await lockCustomerComms(trx, cancelled.customer_id);
+  const relocked = await trx('scheduled_services').where({ id: cancelledServiceId }).first('customer_id');
+  if (!relocked) return { skipped: 'not_found' };
+  if (String(relocked.customer_id) === String(cancelled.customer_id)) return { cancelled };
+  await lockCustomerComms(trx, relocked.customer_id);
+  const relockedAgain = await trx('scheduled_services').where({ id: cancelledServiceId }).first('customer_id');
+  if (!relockedAgain || String(relockedAgain.customer_id) !== String(relocked.customer_id)) {
+    return { skipped: 'owner_changed_under_fence' };
+  }
+  return { cancelled: { ...cancelled, customer_id: relocked.customer_id } };
+}
+
+// Step 4 — the add itself. Legacy off-hour template (Codex #4814 P1): the
+// reconciler copies the root's window verbatim, so a "09:15" root would mint
+// an invalid appointment from this unattended path — same floor + validator
+// the nightly top-up applies; an unplaceable window refuses, never inserts.
+// Exactly ONE visit, even under a concurrent cancel (Codex r2 P1):
+// cancellation status writes do not hold the maintenance lock, so the live
+// count read here can go stale before the reconciler re-reads it and an
+// absolute target would then add two. baselineCount is the reconciler's own
+// staleness fence — a mismatch refuses (409 → series_changed_retry, the
+// wrapper retries) instead of over-adding.
+async function addOneReseedVisit(trx, { parent, parentId, cols }) {
+  const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
+  if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
+  const reconcileParent = normalizedWindow
+    ? { ...parent, window_start: normalizedWindow.start, window_end: normalizedWindow.end }
+    : parent;
+  const live = await liveUpcomingSeriesVisits(trx, parentId);
+  if (live.length >= MAX_SERIES_VISIT_COUNT) return { skipped: 'at_max_visit_count' };
+  try {
+    const result = await reconcileRecurringSeriesVisitCount(trx, {
+      parentId, parent: reconcileParent, cols,
+      targetCount: live.length + 1,
+      baselineCount: live.length,
+      actorId: null,
+      // Extend-only by construction (target = live + 1): the trim branch,
+      // the only consumer of the claim token, is unreachable.
+      claimToken: null,
+      ongoingSeries: cols.recurring_ongoing ? !!parent.recurring_ongoing : false,
+    });
+    return { added: result.added, reconcileParent };
+  } catch (e) {
+    // The staleness fence fires before any write, so the trx is intact.
+    if (e?.statusCode === 409) return { skipped: 'series_changed_retry' };
+    throw e;
+  }
+}
+
 async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const candidate = await readReseedCandidate(trx, cancelledServiceId);
   if (candidate.skipped) return { added: [], skipped: candidate.skipped, fromStatus: candidate.fromStatus };
-  const { cancelled } = candidate;
+  let { cancelled } = candidate;
   const cols = await trx('scheduled_services').columnInfo();
   const parentId = cancelled.recurring_parent_id || cancelled.id;
   await acquireRecurringSeriesMaintenanceLock(trx, parentId);
-  await lockCustomerComms(trx, cancelled.customer_id);
+  const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);
+  if (fenced.skipped) return { added: [], skipped: fenced.skipped, parentId };
+  cancelled = fenced.cancelled;
   let parent = await trx('scheduled_services').where({ id: parentId }).first();
   if (!parent) return { added: [], skipped: 'no_series_root' };
   if (parent.recurring_parent_id) return { added: [], skipped: 'not_series_root' };
@@ -18057,47 +18124,15 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const term = await reseedTermShortfall(trx, { parent, parentId, cancelled });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
-  // Legacy off-hour template (Codex #4814 P1): the reconciler copies the
-  // root's window verbatim, so a "09:15" root would mint an invalid
-  // appointment from this unattended path. Same floor + validator the
-  // nightly top-up applies; an unplaceable window refuses, never inserts.
-  const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
-  if (normalizedWindow?.unplaceable) return { added: [], skipped: 'window_unplaceable', counting: term.counting, expected: term.expected };
-  const reconcileParent = normalizedWindow
-    ? { ...parent, window_start: normalizedWindow.start, window_end: normalizedWindow.end }
-    : parent;
-  // Exactly ONE visit, even under a concurrent cancel (Codex #4814 r2 P1):
-  // cancellation status writes do not hold the maintenance lock, so the
-  // live count read here can go stale before the reconciler re-reads it and
-  // an absolute target would then add two. baselineCount is the
-  // reconciler's own staleness fence — a mismatch refuses (409) instead of
-  // over-adding; that other cancel's own reseed handles its own visit.
-  const live = await liveUpcomingSeriesVisits(trx, parentId);
-  if (live.length >= MAX_SERIES_VISIT_COUNT) return { added: [], skipped: 'at_max_visit_count', counting: term.counting, expected: term.expected };
-  let result;
-  try {
-    result = await reconcileRecurringSeriesVisitCount(trx, {
-      parentId, parent: reconcileParent, cols,
-      targetCount: live.length + 1,
-      baselineCount: live.length,
-      actorId: null,
-      // Extend-only by construction (target = live + 1): the trim branch,
-      // the only consumer of the claim token, is unreachable.
-      claimToken: null,
-      ongoingSeries: cols.recurring_ongoing ? !!parent.recurring_ongoing : false,
-    });
-  } catch (e) {
-    // The staleness fence fires before any write, so the trx is intact.
-    if (e?.statusCode === 409) return { added: [], skipped: 'series_changed_retry', counting: term.counting, expected: term.expected, parentId };
-    throw e;
-  }
-  const overlapDates = await probeReseedOverlaps(trx, { parent: reconcileParent, parentId, added: result.added });
-  if (result.added.length) {
-    await stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added: result.added, term, overlapDates });
+  const add = await addOneReseedVisit(trx, { parent, parentId, cols });
+  if (add.skipped) return { added: [], skipped: add.skipped, counting: term.counting, expected: term.expected, parentId };
+  const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
+  if (add.added.length) {
+    await stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates });
   }
   return {
-    added: result.added,
-    skipped: result.added.length ? null : 'not_placed',
+    added: add.added,
+    skipped: add.added.length ? null : 'not_placed',
     counting: term.counting, expected: term.expected, parentId, customerId: parent.customer_id, overlapWarnings: overlapDates,
   };
 }
@@ -18105,6 +18140,9 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
 // How many times the writer re-opens its transaction after the baselineCount
 // fence refused a stale live read (see reseedRecurringSeriesAfterCancel).
 const RESEED_STALE_READ_ATTEMPTS = 3;
+// The transient refusals that retry re-reads resolve: a live count that went
+// stale under the fence, or an owner that moved under the comms lock.
+const RESEED_TRANSIENT_SKIPS = ['series_changed_retry', 'owner_changed_under_fence'];
 
 // The writing wrapper — same shape as topUpRecurringSeries: ALWAYS opens and
 // commits its OWN transaction, then registers a reminder for every added
@@ -18126,8 +18164,8 @@ async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { sour
   let result;
   for (let attempt = 1; attempt <= RESEED_STALE_READ_ATTEMPTS; attempt += 1) {
     result = await conn.transaction((trx) => reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId));
-    if (result.skipped !== 'series_changed_retry') break;
-    logger.warn(`[recurring-cancel-reseed] parent=${result.parentId || '?'} changed under the live read (attempt ${attempt}/${RESEED_STALE_READ_ATTEMPTS}) — ${attempt < RESEED_STALE_READ_ATTEMPTS ? 'retrying' : 'giving up'}`);
+    if (!RESEED_TRANSIENT_SKIPS.includes(result.skipped)) break;
+    logger.warn(`[recurring-cancel-reseed] parent=${result.parentId || '?'} ${result.skipped} (attempt ${attempt}/${RESEED_STALE_READ_ATTEMPTS}) — ${attempt < RESEED_STALE_READ_ATTEMPTS ? 'retrying' : 'giving up'}`);
   }
   for (const child of result.added) {
     await registerSpawnedVisitReminder({
@@ -18165,14 +18203,16 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
     .whereIn('job_id', ids).where('to_status', 'cancelled')
     .orderBy('transitioned_at', 'desc')
     .select('job_id', 'from_status');
-  const sourceStatus = new Map();
-  for (const t of transitions) if (!sourceStatus.has(String(t.job_id))) sourceStatus.set(String(t.job_id), t.from_status);
+  // A job qualifies when ANY of its cancel rows left a counting status —
+  // the newest may be a cancelled→cancelled replay (Codex r4 P1).
+  const countingCancel = new Set();
+  for (const t of transitions) if (isCountingSourceStatus(t.from_status)) countingCancel.add(String(t.job_id));
   const byRoot = new Map();
   for (const row of rows) {
     // Plan rows only: explicit recurring, or a legacy null-flagged child of
     // a series; explicit boosters never reach the writer (Codex #4814 P1).
     if (!isPlanSeriesRow(row)) continue;
-    if (!sourceStatus.has(String(row.id)) || !isCountingSourceStatus(sourceStatus.get(String(row.id)))) continue;
+    if (!countingCancel.has(String(row.id))) continue;
     const rootId = String(row.recurring_parent_id || row.id);
     if (!byRoot.has(rootId)) byRoot.set(rootId, []);
     byRoot.get(rootId).push(String(row.id));
@@ -23822,6 +23862,8 @@ router._test = {
   reseedTermShortfall,
   probeReseedOverlaps,
   stampReseed,
+  lockReseedOwner,
+  addOneReseedVisit,
   RESEED_STALE_READ_ATTEMPTS,
   negativePricePosted,
   discountChangeWithoutPricePosted,
