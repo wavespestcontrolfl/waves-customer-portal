@@ -379,11 +379,23 @@ describe('rewriteTreeShrubRecurringServices — palm rows are never tier-rewritt
     expect(gate({ name: 'Every 6 Weeks Tree & Shrub Care Service', serviceKey: 'tree_shrub_6week', frequency: 'every_6_weeks', visitsPerYear: 9 })).toBe(false);
   });
 
+  test('an explicit retired tier field is retired even with no cadence wording (codex P0 r10)', () => {
+    const gate = (svc) => recurringTreeShrubRowAtRetiredCadence({ recurring: { services: [svc] } });
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', tier: 'light' })).toBe(true);
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', tierKey: 'Light' })).toBe(true);
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', serviceTier: '4x' })).toBe(true);
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', selected_tier: 'premium' })).toBe(true);
+    // Current tiers, and a valid 6x count, pass.
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', tier: 'standard', visitsPerYear: 6 })).toBe(false);
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', selectedTier: 'enhanced' })).toBe(false);
+  });
+
   test.each(['standard', 'enhanced'])('restamping a fully-stale Light row onto %s clears every retired signal (codex P0 r5)', (key) => {
     const staleLight = {
       name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', service_key: 'tree_shrub_quarterly',
       frequency: 'quarterly', frequency_key: 'quarterly', recurringPattern: 'quarterly', recurring_pattern: 'quarterly',
       planFrequency: 'quarterly', visitsPerYear: 4, visits: 4, v: 4, mo: 30,
+      tier: 'light', tier_key: 'light', selectedTier: 'light', service_tier: 'light',
     };
     expect(recurringTreeShrubRowAtRetiredCadence({ recurring: { services: [staleLight] } })).toBe(true);
     // No visitsPerYear on the selection: the tier's own count must win over the stale 4.

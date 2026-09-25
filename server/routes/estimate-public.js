@@ -17912,6 +17912,16 @@ const TREE_SHRUB_CADENCE_FIELD_KEYS = Object.freeze([
   'cadence', 'cadenceKey', 'cadence_key',
   'planFrequency', 'plan_frequency',
 ]);
+// Every tier-field spelling a recurring T&S row can carry. The gate reads
+// all of them (codex P0 r10: { name: 'Tree & Shrub Care', tier: 'light' }
+// carried no cadence signal at all) and selectedTreeShrubServiceRow
+// overwrites all of them on restamp, so a re-selected row never keeps a
+// stale 'light'.
+const TREE_SHRUB_TIER_FIELD_KEYS = Object.freeze([
+  'tier', 'tierKey', 'tier_key',
+  'serviceTier', 'service_tier',
+  'selectedTier', 'selected_tier',
+]);
 
 // Retired T&S tiers = the 12x Premium AND, as of 2026-09-24 (owner
 // directive: stop offering quarterly tree & shrub care), the 4x Light. The
@@ -17950,6 +17960,12 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
       .map((key) => Number(svc?.[key]))
       .filter((value) => Number.isFinite(value) && value > 0);
     if (rawVisitAliases.some((value) => value !== 6 && value !== 9)) return true;
+    // An explicit retired tier (light / premium, any spelling) is retired
+    // regardless of cadence wording: the cadence-less converter would
+    // schedule the current 6x program at the stored Light price.
+    if (TREE_SHRUB_TIER_FIELD_KEYS.some((key) => (
+      svc?.[key] != null && isRetiredTreeShrubTierKey(treeShrubTierKey({ tier: svc[key] }))
+    ))) return true;
     // A valid 6/9 count is NOT proof the row is current (codex P0 round 5):
     // { serviceKey: 'tree_shrub_quarterly', visitsPerYear: 6 } or
     // { frequency: 'quarterly', visitsPerYear: 6 } still carry a retired
@@ -21104,9 +21120,6 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
     frequency: meta.frequencyKey,
     cadence: meta.frequencyKey,
     cadenceLabel: label,
-    tier: meta.tierKey,
-    tierKey: meta.tierKey,
-    serviceTier: meta.tierKey,
     tierLabel: label,
     billingFrequencyKey: frequency.billingFrequencyKey || 'monthly',
     selected: true,
@@ -21142,6 +21155,7 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
   // 'quarterly' surviving the restamp would conflict with the new tier's
   // cadence and trip the retired-cadence gate (codex P0 round 5).
   for (const key of TREE_SHRUB_CADENCE_FIELD_KEYS) row[key] = meta.frequencyKey;
+  for (const key of TREE_SHRUB_TIER_FIELD_KEYS) row[key] = meta.tierKey;
   return row;
 }
 

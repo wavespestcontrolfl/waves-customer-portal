@@ -280,21 +280,35 @@ The same accept path answers 409 `{ error, reason:
 still resolves to a retired T&S cadence — 4x/Light/quarterly (hidden via
 `TREE_SHRUB.tiers.light.hidden` since 2026-09-24, catalog key
 `tree_shrub_quarterly`) or the already-retired 12x/Premium — by explicit
-cadence, visit count, or cadence wording. 9x/Enhanced and 6x/Standard stay
-current. One existing customer's already-scheduled quarterly program is
+cadence, visit count, cadence wording, catalog key, or an explicit tier field
+(`tier` / `tierKey` / `serviceTier` / `selectedTier`, any spelling).
+9x/Enhanced and 6x/Standard stay current. One existing customer's already-scheduled quarterly program is
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
-estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light entry
-(only Standard 6x / Enhanced 9x cards render). When the stored recurring T&S
-row itself still resolves to a retired cadence, the response's quote
-requirement is `{ quoteRequired: true, reason:
-'retired_tree_shrub_cadence_requote' }` with the friendly "call Waves to
-refresh your tree & shrub plan" copy, so the page shows the requote state
-instead of an acceptable card. The same gate applies to staff-side manual
-acceptance (Mark Won / phone accept) of a not-yet-accepted estimate; estimates
-accepted before the retirement are unaffected.
+estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
+12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
+response does next depends on what is left:
+- **Mixed ladder** (the saved ladder still has a 6x or 9x entry): self-service
+  stays on and no quote requirement is added, even when the stored recurring
+  T&S row is itself 4x. The customer must pick a current card: the selection
+  restamps the row to that tier (cadence, visit count, catalog key and tier
+  fields) before accept. A PUT `/accept` that still carries the retired row
+  (no current T&S selection) gets the 409 `retired_tree_shrub_cadence_selection`
+  above.
+- **All-retired ladder** (only Light and/or Premium entries), or no tier ladder
+  at all with a stored recurring T&S row at a retired cadence: the response's
+  quote requirement is `{ quoteRequired: true, reason:
+  'retired_tree_shrub_cadence_requote' }` with the friendly "call Waves to
+  refresh your tree & shrub plan" copy, so the page shows the requote state
+  instead of an acceptable card.
+
+The same retired-cadence gate applies to staff-side manual acceptance (Mark
+Won / phone accept) and to booking from a linked not-yet-accepted estimate
+(409 before any appointment is written). Estimates accepted before the
+retirement are unaffected.
+
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
