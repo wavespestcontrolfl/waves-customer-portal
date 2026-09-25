@@ -38,6 +38,14 @@ const NON_COUNTING_STATUSES = Object.freeze(['cancelled', 'rescheduled', 'skippe
 // that still counted (Codex #4814 P1): a 'rescheduled' placeholder flipped
 // to 'cancelled' removed nothing, so it earns no replacement.
 const COUNTING_SOURCE_STATUSES = Object.freeze(['pending', 'confirmed', 'en_route', 'on_site']);
+// A legacy row can carry status NULL (transitionJobStatus documents the null
+// fromStatus); countTermVisits counts it (null is not non-counting), so the
+// audit row it leaves must count too (Codex #4814 r2 P1).
+function isCountingSourceStatus(status) {
+  return status == null || COUNTING_SOURCE_STATUSES.includes(String(status));
+}
+// Upcoming plan rows: the statuses the visit-count reconciler treats as live.
+const UPCOMING_STATUSES = Object.freeze(['pending', 'confirmed']);
 
 // Booster months are deliberately non-recurring rows hanging off a
 // recurring root (is_recurring === false + recurring_parent_id): paid
@@ -97,6 +105,11 @@ function plannedVisitsPerYearForSeries(parent, seeder = require('./recurring-app
   if (!parent) return null;
   const pattern = seeder.normalizeRecurringPattern(parent.recurring_pattern) || parent.recurring_pattern;
   if (!pattern) return null;
+  // Scheduler-only spellings the normalizer does not know: an nth-weekday
+  // monthly series is a monthly cadence, twelve a year (Codex #4814 r2 P1 —
+  // the count helper's default of 4 let eleven remaining visits read as
+  // whole).
+  if (pattern === 'monthly_nth_weekday') return 12;
   if (pattern === 'custom') {
     const interval = Number(parent.recurring_interval_days);
     return Number.isFinite(interval) && interval > 0 ? Math.max(1, Math.round(365 / interval)) : null;
@@ -116,16 +129,36 @@ function termWindowContaining(rootDateStr, dateStr) {
   return { index, start: addYears(root, index), end: addYears(root, index + 1) }; // end exclusive
 }
 
+// The date a row occupies in its PLAN — a one-occurrence exception keeps
+// its cadence position (date_exception_cadence_date) even when the actual
+// appointment moved across the root anniversary (Codex #4814 r2 P1; the
+// same rule recurring-schedule-audit.js's spacing check applies).
+function planPositionDate(row) {
+  if (!row) return null;
+  if (row.date_exception === true && row.date_exception_cadence_date) return dateOnly(row.date_exception_cadence_date);
+  return dateOnly(row.scheduled_date);
+}
+
 // Rows (root + children) that still count toward the term: plan rows only
-// (no boosters), not cancelled/rescheduled/skipped/no_show, dated inside
-// [start, end).
+// (no boosters), not cancelled/rescheduled/skipped/no_show, whose PLAN
+// position falls inside [start, end).
 function countTermVisits(rows, window) {
   if (!window) return 0;
   return (rows || []).filter((row) => {
     if (isBoosterRow(row)) return false;
-    const d = dateOnly(row.scheduled_date);
+    const d = planPositionDate(row);
     return d && d >= window.start && d < window.end && !NON_COUNTING_STATUSES.includes(String(row.status));
   }).length;
+}
+
+// Does the plan still have an upcoming row after the cancel? Read from the
+// series rows themselves (plan rows incl. legacy null-flagged children —
+// Codex #4814 r2 P1: liveUpcomingSeriesVisits filters is_recurring = true
+// and refused every legacy series as 'no_live_visits').
+function hasUpcomingPlanRow(rows, todayStr) {
+  return (rows || []).some((row) => isPlanSeriesRow(row)
+    && UPCOMING_STATUSES.includes(String(row.status))
+    && dateOnly(row.scheduled_date) >= todayStr);
 }
 
 // `serviceId` for the single-visit surfaces; `serviceIds` for the bulk
@@ -160,6 +193,10 @@ module.exports = {
   countTermVisits,
   isBoosterRow,
   isPlanSeriesRow,
+  isCountingSourceStatus,
+  planPositionDate,
+  hasUpcomingPlanRow,
   NON_COUNTING_STATUSES,
   COUNTING_SOURCE_STATUSES,
+  UPCOMING_STATUSES,
 };
