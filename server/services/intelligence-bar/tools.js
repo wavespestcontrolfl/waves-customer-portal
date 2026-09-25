@@ -566,8 +566,20 @@ async function findOverdueCustomers(input) {
   // scheduled_services statuses.
   const PLAN_TERMINAL_STATUSES = require('../service-library').terminalHistoryStatuses();
   const terminalSql = PLAN_TERMINAL_STATUSES.map(() => '?').join(', ');
-  const treeShrubIntervalDays = (serviceType, serviceKey) => {
-    if (TREE_SHRUB_KEY_INTERVAL[serviceKey]) return TREE_SHRUB_KEY_INTERVAL[serviceKey];
+  // The live plan line's OWN recurrence outranks its catalog default (codex
+  // r28 on #4786): a tree_shrub_program row customized to every 42 days is
+  // due at 42, not the row's 60. A custom / bare interval wins, else the
+  // stored pattern, else the catalog key, else the label.
+  const PLAN_PATTERN_DAYS = { quarterly: 90, bimonthly: 60, every_6_weeks: 42, monthly: 30 };
+  const planIntervalDays = (plan) => {
+    if (!plan) return null;
+    const interval = Number.parseInt(plan.recurring_interval_days, 10);
+    if ((!plan.recurring_pattern || plan.recurring_pattern === 'custom') && Number.isInteger(interval) && interval > 0) return interval;
+    return PLAN_PATTERN_DAYS[plan.recurring_pattern] || TREE_SHRUB_KEY_INTERVAL[plan.service_key] || null;
+  };
+  const treeShrubIntervalDays = (serviceType, plan) => {
+    const fromPlan = planIntervalDays(plan);
+    if (fromPlan) return fromPlan;
     const t = String(serviceType || '').toLowerCase();
     if (/quarterly/.test(t)) return 90;
     if (/6\s*weeks?|six\s*weeks?/.test(t)) return 42;
@@ -609,22 +621,32 @@ async function findOverdueCustomers(input) {
         // The plan row is matched to its catalog row by id, key snapshot or
         // label (service-library's holder identity predicates — an ID-less
         // legacy row still resolves its cadence, codex r25 on #4786).
-        db.raw(`(SELECT plan.service_key FROM (
-          SELECT services.service_key, scheduled_services.scheduled_date FROM scheduled_services
+        // The plan row's catalog key AND its own recurrence, as one JSON
+        // value (the line's cadence outranks the catalog default — codex r28).
+        db.raw(`(SELECT row_to_json(plan) FROM (
+          SELECT services.service_key, scheduled_services.scheduled_date,
+              scheduled_services.recurring_pattern, scheduled_services.recurring_interval_days
+            FROM scheduled_services
             JOIN services ON ${require('../service-library').HOLDER_VISIT_IS_SERVICE_SQL}
             WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
           UNION ALL
           -- Plan carried as an add-on line of a combined recurring visit (a
           -- one_time add-on line is not a plan — service-library's
-          -- ADDON_LINE_IS_PLAN_SQL, codex r18 on #4786).
-          SELECT services.service_key, scheduled_services.scheduled_date FROM scheduled_service_addons
+          -- ADDON_LINE_IS_PLAN_SQL, codex r18 on #4786). A line with no
+          -- cadence of its own rides the parent's.
+          SELECT services.service_key, scheduled_services.scheduled_date,
+              CASE WHEN scheduled_service_addons.recurring_pattern IS NULL AND scheduled_service_addons.recurring_interval_days IS NULL
+                THEN scheduled_services.recurring_pattern ELSE scheduled_service_addons.recurring_pattern END AS recurring_pattern,
+              CASE WHEN scheduled_service_addons.recurring_pattern IS NULL AND scheduled_service_addons.recurring_interval_days IS NULL
+                THEN scheduled_services.recurring_interval_days ELSE scheduled_service_addons.recurring_interval_days END AS recurring_interval_days
+            FROM scheduled_service_addons
             JOIN scheduled_services ON scheduled_services.id = scheduled_service_addons.scheduled_service_id
             JOIN services ON ${require('../service-library').HOLDER_ADDON_IS_SERVICE_SQL}
             WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
               AND ${require('../service-library').ADDON_LINE_IS_PLAN_SQL}
-        ) plan ORDER BY plan.scheduled_date ASC LIMIT 1) as active_plan_service_key`, [
+        ) plan ORDER BY plan.scheduled_date ASC LIMIT 1) as active_plan`, [
           ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...PLAN_TERMINAL_STATUSES,
           ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...PLAN_TERMINAL_STATUSES,
         ]),
@@ -666,7 +688,8 @@ async function findOverdueCustomers(input) {
     for (const c of customers) {
       const daysSince = c.last_service_date ? calendarDaysSince(c.last_service_date) : null;
       if (daysSince != null && Number.isNaN(daysSince)) continue;
-      const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type, c.active_plan_service_key) : baseFreq;
+      const activePlan = typeof c.active_plan === 'string' ? JSON.parse(c.active_plan) : c.active_plan;
+      const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type, activePlan) : baseFreq;
       if (daysSince != null && daysSince < freq + overdue_days) continue;
 
       results.push({

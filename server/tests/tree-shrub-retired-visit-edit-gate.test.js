@@ -99,12 +99,13 @@ describe('retiredGateInputsForVisitEdit', () => {
         { serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: null },
       ],
     })).toEqual(expected);
-    // Posted in the opposite order WITH row ids: each line pairs with its own row.
+    // Posted in the opposite order WITH row ids (the normalized rows carry the
+    // stored id as submittedAddonId — codex r28): each line pairs with its own row.
     expect(retiredGateInputsForVisitEdit({
       current: recurring, currentAddons: stored, postedServiceId: null, serviceType: 'Lawn Care', plansRetainedLines: true,
       postedAddons: [
-        { id: 'a2', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: null },
-        { id: 'a1', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'one_time' },
+        { submittedAddonId: 'a2', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: null },
+        { submittedAddonId: 'a1', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'one_time' },
       ],
     })).toEqual(expected);
     // Without a parent cadence change, repatterning only the riding copy to
@@ -113,8 +114,8 @@ describe('retiredGateInputsForVisitEdit', () => {
     expect(retiredGateInputsForVisitEdit({
       current: recurring, currentAddons: stored, postedServiceId: LIVE_ID, serviceType: 'Lawn Care',
       postedAddons: [
-        { id: 'a1', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'one_time' },
-        { id: 'a2', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'quarterly' },
+        { submittedAddonId: 'a1', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'one_time' },
+        { submittedAddonId: 'a2', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'quarterly' },
       ],
     })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: [{ label: 'Bi-Monthly Tree & Shrub Care', recurrence: { pattern: 'quarterly', intervalDays: null } }] });
     // A posted line whose row id names a stored row of a DIFFERENT service is
@@ -122,7 +123,7 @@ describe('retiredGateInputsForVisitEdit', () => {
     expect(retiredGateInputsForVisitEdit({
       current, currentAddons: [{ id: 'a1', service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: null }],
       postedServiceId: LIVE_ID, serviceType: 'Quarterly Pest Control',
-      postedAddons: [{ id: 'a1', serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null }],
+      postedAddons: [{ submittedAddonId: 'a1', serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null }],
     })).toEqual({ serviceIds: [RETIRED_ID], serviceTypes: [] });
   });
 
@@ -291,6 +292,9 @@ describe('retiredGateInputsForVisitEdit', () => {
     expect(source).toMatch(/\.first\('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_interval_days'\)/);
     // Stored row ids ride along so a posted line pairs with its own stored row (codex r27).
     expect(source).toMatch(/\.select\('id', 'service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days'\)/);
+    // normalizeUpdateDetailsAddons hands the gate the stored row id as submittedAddonId (codex r28).
+    expect(source).toMatch(/submittedAddonId: a\.id \|\| null,/);
+    expect(source).toMatch(/const rowIdOf = \(l\) => \(l\.submittedAddonId != null \? l\.submittedAddonId : l\.id\);/);
     // A changed interval is a cadence change too (codex r23).
     expect(source).toMatch(/const plansRetainedLines = recurrencePosted\s*&& \(!current\.is_recurring \|\| \(!!recurringPattern && recurringPattern !== current\.recurring_pattern\) \|\| intervalChanged\);/);
     expect(source).toMatch(/&& postedInterval !== Number\.parseInt\(current\.recurring_interval_days, 10\);/);

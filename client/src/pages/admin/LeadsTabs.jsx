@@ -1207,8 +1207,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   }, []);
   const loadServices = useCallback(async () => {
     try {
+      // A lead booking is always a new sale, so retired-for-sale rows
+      // (quarterly T&S) are not offered; the write gate refuses them anyway.
       const data = await adminFetch(
-        "/admin/services?is_active=true&limit=200",
+        "/admin/services?is_active=true&sellable=true&limit=200",
       ).catch(() => ({
         services: [],
       }));

@@ -11825,7 +11825,10 @@ function retiredGateInputsForVisitEdit({
   const pairedLine = new Map(); // stored row index -> posted line
   const pairedStored = new Map(); // posted line -> stored row
   const pairUp = (l, idx) => { pairedLine.set(idx, l); pairedStored.set(l, currentAddons[idx]); };
-  const sameRow = (l, a) => l.id != null && a?.id != null && String(l.id) === String(a.id);
+  // The PUT path hands the gate normalizeUpdateDetailsAddons' rows, which
+  // carry the stored row id as `submittedAddonId` (codex r28 on #4786).
+  const rowIdOf = (l) => (l.submittedAddonId != null ? l.submittedAddonId : l.id);
+  const sameRow = (l, a) => rowIdOf(l) != null && a?.id != null && String(rowIdOf(l)) === String(a.id);
   for (const l of lines) {
     const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && sameRow(l, a) && pairs(l, a));
     if (idx >= 0) pairUp(l, idx);

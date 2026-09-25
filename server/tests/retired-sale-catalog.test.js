@@ -86,3 +86,20 @@ describe('inherited object keys are never tiers (codex P0 r8)', () => {
     expect(isRetiredTreeShrubTier(tier)).toBe(false);
   });
 });
+
+describe('retiredSaleKeyForLabel — free-text labels', () => {
+  const { retiredSaleKeyForLabel, labelMayNameRetiredSale } = require('../services/pricing-engine/retired-sale-catalog');
+
+  test('the family reads in the singular and the plural (codex r28)', () => {
+    for (const label of ['Quarterly Tree & Shrub', 'Quarterly Trees & Shrubs', 'Trees and Shrubs 4x', 'trees/shrubs every 3 months', 'T&S quarterly', 'Ornamentals (Light)']) {
+      expect(retiredSaleKeyForLabel(label)).toBe('tree_shrub_quarterly');
+      expect(labelMayNameRetiredSale(label)).toBe(true);
+    }
+  });
+
+  test('a current-cadence label or another family is not the retired row', () => {
+    for (const label of ['Bi-Monthly Trees & Shrubs', 'Every 6 Weeks Tree & Shrub Care', 'Quarterly Pest Control', 'Trees & Shrubs']) {
+      expect(retiredSaleKeyForLabel(label)).toBeNull();
+    }
+  });
+});

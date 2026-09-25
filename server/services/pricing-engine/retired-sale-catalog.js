@@ -114,8 +114,9 @@ function isSellableTreeShrubTier(tier) {
 // id-less writes.
 // "Ornamental" is the Tree & Shrub family everywhere else the portal maps
 // free text to a catalog row (admin-customers serviceCatalogMatch) — codex
-// r21 on #4786.
-const TREE_SHRUB_LABEL_RE = /\btree\s*(?:&|and|\+|\/)?\s*shrubs?\b|\bt\s*&\s*s\b|\bornamentals?\b/i;
+// r21 on #4786. "Trees & Shrubs" is the same family in the plural, the
+// portal's own wording in places (property-score.js) — codex r28.
+const TREE_SHRUB_LABEL_RE = /\btrees?\s*(?:&|and|\+|\/)?\s*shrubs?\b|\bt\s*&\s*s\b|\bornamentals?\b/i;
 const QUARTERLY_CADENCE_RE = /\bquarterly\b|\b(?:4|four)[\s-]*(?:x|visits?|applications?)\b|\bevery\s+(?:3|three)\s+months?\b|\bevery\s+(?:8[4-9]|9[0-7])\s+days?\b/i;
 // The retired tier's own name: the catalog row is short-named
 // "Tree & Shrub (Light)" (20260718300000_tree_shrub_quarterly_catalog.js).

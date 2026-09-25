@@ -87,8 +87,8 @@ test('the active recurring plan beats completed history (plan switch)', async ()
 
 test('the plan\'s catalog key beats a generic "Tree & Shrub" label (codex r15)', async () => {
   db.__state.rows = [
-    { ...row('engine-9x', 'Tree & Shrub', 45), active_plan_service_type: 'Tree & Shrub', active_plan_service_key: 'tree_shrub_6week' },
-    { ...row('engine-6x', 'Tree & Shrub', 45), active_plan_service_type: 'Tree & Shrub', active_plan_service_key: 'tree_shrub_program' },
+    { ...row('engine-9x', 'Tree & Shrub', 45), active_plan_service_type: 'Tree & Shrub', active_plan: { service_key: 'tree_shrub_6week' } },
+    { ...row('engine-6x', 'Tree & Shrub', 45), active_plan_service_type: 'Tree & Shrub', active_plan: { service_key: 'tree_shrub_program' } },
   ];
   const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
   expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['engine-9x', 42]]);
@@ -98,10 +98,26 @@ test('an add-on-line plan key drives the cadence the same way (codex r16)', asyn
   // The SQL resolves active_plan_service_key across primary AND add-on lines;
   // here the combined visit's generic label would otherwise default to 60.
   db.__state.rows = [
-    { ...row('addon-quarterly', 'Pest + Tree & Shrub', 70), active_plan_service_type: 'Pest + Tree & Shrub', active_plan_service_key: 'tree_shrub_quarterly' },
+    { ...row('addon-quarterly', 'Pest + Tree & Shrub', 70), active_plan_service_type: 'Pest + Tree & Shrub', active_plan: { service_key: 'tree_shrub_quarterly' } },
   ];
   const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
   expect(result.overdue_customers).toEqual([]);
+});
+
+test('the plan line\'s own recurrence outranks its catalog default (codex r28)', async () => {
+  db.__state.rows = [
+    // tree_shrub_program customized to every 42 days: due at 42, not the row's 60.
+    { ...row('custom-42', 'Tree & Shrub', 45), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'custom', recurring_interval_days: 42 } },
+    // A bare interval with no pattern reads the same way.
+    { ...row('bare-42', 'Tree & Shrub', 45), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: null, recurring_interval_days: 42 } },
+    // A stored pattern wins over a stale interval and over the catalog key.
+    { ...row('pattern-quarterly', 'Tree & Shrub', 70), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'quarterly', recurring_interval_days: 42 } },
+    // No recurrence on the line: the catalog default stands (a JSON string
+    // from the driver parses the same way).
+    { ...row('catalog-60', 'Tree & Shrub', 45), active_plan: JSON.stringify({ service_key: 'tree_shrub_program', recurring_pattern: null, recurring_interval_days: null }) },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['bare-42', 42], ['custom-42', 42]]);
 });
 
 test('other categories keep their fixed interval', async () => {
@@ -124,7 +140,7 @@ test('a one_time T&S add-on line is not the customer\'s active plan (codex r18)'
     db.raw = original;
   }
   const { ADDON_LINE_IS_PLAN_SQL, HOLDER_VISIT_IS_SERVICE_SQL, HOLDER_ADDON_IS_SERVICE_SQL } = require('../services/service-library');
-  const planSql = seen.find((sql) => /as active_plan_service_key/.test(sql));
+  const planSql = seen.find((sql) => /as active_plan$/.test(sql.trim()));
   expect(planSql).toBeDefined();
   expect(planSql).toContain('FROM scheduled_service_addons');
   expect(planSql).toContain(ADDON_LINE_IS_PLAN_SQL);
@@ -132,6 +148,10 @@ test('a one_time T&S add-on line is not the customer\'s active plan (codex r18)'
   // same identity the holder gate reads (codex r25).
   expect(planSql).toContain(`JOIN services ON ${HOLDER_VISIT_IS_SERVICE_SQL}`);
   expect(planSql).toContain(`JOIN services ON ${HOLDER_ADDON_IS_SERVICE_SQL}`);
+  // The plan row carries its own recurrence; an add-on line without one rides the parent's (codex r28).
+  expect(planSql).toContain('row_to_json(plan)');
+  expect(planSql).toContain('scheduled_services.recurring_pattern, scheduled_services.recurring_interval_days');
+  expect(planSql).toMatch(/CASE WHEN scheduled_service_addons\.recurring_pattern IS NULL AND scheduled_service_addons\.recurring_interval_days IS NULL\s+THEN scheduled_services\.recurring_pattern ELSE scheduled_service_addons\.recurring_pattern END AS recurring_pattern/);
   expect(planSql).not.toMatch(/JOIN services ON services\.id = scheduled_service/);
 });
 
@@ -148,7 +168,7 @@ test('the active-plan subqueries read ownership statuses: an open rescheduled ro
   const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
   const { terminalHistoryStatuses } = require('../services/service-library');
   expect(TERMINAL_STATUSES).toContain('rescheduled');
-  const planReads = seen.filter(([sql]) => /as active_plan_service_(key|type)/.test(sql));
+  const planReads = seen.filter(([sql]) => /as active_plan(_service_type)?$/.test(sql.trim()));
   expect(planReads).toHaveLength(2);
   for (const [sql, bindings] of planReads) {
     expect(sql).toMatch(/status NOT IN \(/);
