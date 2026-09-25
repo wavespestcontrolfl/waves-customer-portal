@@ -599,14 +599,44 @@ async function lockConfirmEmailScope(trx, callLogId) {
 // actually reads, so confirmation never depends on there ALSO being a
 // customer/lead diff to write. Pending/releasing only — a row that already
 // sent under an earlier cycle's address is a historical fact this must not
-// rewrite. Returns whether a hold row now carries the confirmed address.
-async function confirmEmailHold(trx, holdsTable, callLogId, customerId, typedEmail) {
-  if (!holdsTable) return false;
-  const holdUpdated = await trx('first_touch_holds')
+// rewrite. Also repoints the row at the CURRENTLY locked call's customer
+// (Codex round-7 P1): a staff relink moves call_log.customer_id, not this
+// ledger row, and leaving the stale customer_id makes
+// resumeHeldFirstTouch's hold_customer_mismatch check reject the hold
+// forever. And clears a prior denial stamp (Codex round-7 P1): an explicit
+// operator confirmation IS the "await correction" that stamp is waiting
+// for — mirrors customer-email-fanout's own deny-lift exactly, including
+// only ever flipping status on an OWNERLESS 'releasing' row (deny-stamped —
+// its own updated_at bump already invalidated every outstanding lease, so
+// no in-flight worker owns it) back to 'pending'; a live (non-denied)
+// 'releasing' claim keeps its status and only has its target superseded.
+// call_log_id is unique on this table, so at most one pending/releasing row
+// can ever match — read it under the row lock the caller already holds
+// (first_touch_holds FOR UPDATE, above) and write it with plain literal
+// values instead of a bulk CASE WHEN.
+async function retargetConfirmedHold(trx, callLogId, customerId, typedEmail) {
+  const row = await trx('first_touch_holds')
     .where({ call_log_id: callLogId })
     .whereIn('status', ['pending', 'releasing'])
-    .update({ held_email: typedEmail, corrected_at: new Date(), updated_at: new Date() });
-  if (holdUpdated > 0) return true;
+    .first('id', 'status', 'last_error');
+  if (!row) return false;
+  const wasDenied = row.last_error === 'email_denied_await_correction';
+  await trx('first_touch_holds')
+    .where({ id: row.id })
+    .update({
+      held_email: typedEmail,
+      customer_id: customerId || null,
+      corrected_at: new Date(),
+      updated_at: new Date(),
+      status: (wasDenied && row.status === 'releasing') ? 'pending' : row.status,
+      last_error: wasDenied ? null : row.last_error,
+    });
+  return true;
+}
+
+async function confirmEmailHold(trx, holdsTable, callLogId, customerId, typedEmail) {
+  if (!holdsTable) return;
+  if (await retargetConfirmedHold(trx, callLogId, customerId, typedEmail)) return;
   // Pre-Step-6 window (Codex round-6 P1): no hold row exists for this call
   // yet — the disagreement card committed, but the processor's own
   // hold-ledger write for THIS run has not landed (mintEmailReviewCardsFenced
@@ -620,7 +650,7 @@ async function confirmEmailHold(trx, holdsTable, callLogId, customerId, typedEma
   // extraction. Status 'released'/zero held flags: nothing was ever
   // actually queued to send from this marker row; the real hold-ledger
   // write flips it back to 'pending' on merge.
-  const inserted = await trx('first_touch_holds')
+  await trx('first_touch_holds')
     .insert({
       call_log_id: callLogId,
       customer_id: customerId || null,
@@ -634,20 +664,15 @@ async function confirmEmailHold(trx, holdsTable, callLogId, customerId, typedEma
       updated_at: new Date(),
     })
     .onConflict('call_log_id')
-    .ignore()
-    .returning('call_log_id');
-  // A real row can race in between the update above and this insert
+    .ignore();
+  // A real row can race in between the read above and this insert
   // (recordFirstTouchHoldOwned committing concurrently) — retarget it the
   // same way, so a genuine pending/releasing row is never left uncorrected
-  // just because the marker insert lost that race.
-  const retargeted = await trx('first_touch_holds')
-    .where({ call_log_id: callLogId })
-    .whereIn('status', ['pending', 'releasing'])
-    .update({ held_email: typedEmail, corrected_at: new Date(), updated_at: new Date() });
-  // An existing terminal row (already sent) is left untouched above — the
-  // insert is then ignored and nothing carries the confirmed address, so
-  // this must report false rather than claim a durable confirmation.
-  return (Array.isArray(inserted) ? inserted.length > 0 : Number(inserted) > 0) || retargeted > 0;
+  // just because the marker insert lost that race. An existing terminal row
+  // (already sent) is left untouched either way — the insert above is then
+  // ignored and nothing carries the confirmed address, which is correct: a
+  // historical send is never rewritten.
+  await retargetConfirmedHold(trx, callLogId, customerId, typedEmail);
 }
 
 // (b) The customer record, through the normal channel — diff-gated (a
@@ -792,6 +817,13 @@ async function resumeFirstTouchAfterConfirmEmail(id, item, resumeHeldFirstTouch,
 
 router.post('/:id/confirm-email', async (req, res) => {
   try {
+    // Customer email writes are admin-territory, same rule as
+    // apply-property-roles below: this overwrites a customer's email of
+    // record and triggers token fanout + first-touch comms, so the shared
+    // tech-or-admin router isn't enough here (Codex round-7 P1).
+    if (req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
     const { id } = req.params;
     const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
     const typedEmail = cleanValidEmailOrNull(req.body?.email);
@@ -848,31 +880,37 @@ router.post('/:id/confirm-email', async (req, res) => {
       );
       confirmedSource = isListedCandidate ? 'candidate' : 'operator_typed';
 
-      const holdConfirmed = await confirmEmailHold(trx, holdsTable, item.call_log_id, lockScope?.customer_id, typedEmail);
-
       // (b)/(c) The customer or lead record, through the normal channels.
+      // Fetched and (for the customer-less branch) gated BEFORE any write
+      // below — same discipline as every other guard in this route: a
+      // refusal must precede the first mutation, not follow it, since an
+      // early `return` here commits whatever the transaction already did
+      // rather than rolling it back.
       const call = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'twilio_call_sid', 'metadata');
+      if (!call?.customer_id) {
+        // Codex round-7 P1: a customer-less call requires an authoritative
+        // lead regardless of whether the hold marker would confirm
+        // anything — the hold ledger is a first-touch send record, not
+        // proof a lead exists to carry the confirmed address. No metadata
+        // stamp and either zero or more than one live SID match means
+        // nothing durable would back this confirmation; refuse BEFORE the
+        // hold write below (card stays open, nothing written) rather than
+        // resolve the card and leave the lead email-less with no work item
+        // left to fix it.
+        const leadId = await resolveAndStampLeadEmail(trx, call, typedEmail);
+        if (!leadId) {
+          outcome = 'lead_not_resolved';
+          return;
+        }
+      }
+
+      await confirmEmailHold(trx, holdsTable, item.call_log_id, lockScope?.customer_id, typedEmail);
+
       if (call?.customer_id) {
         // Same-value case: applyCustomerEmailConfirm no-ops and returns
         // null — the hold write above is what confirmation reads either
         // way.
         emailSync = await applyCustomerEmailConfirm(trx, call.customer_id, typedEmail);
-      } else {
-        const leadId = await resolveAndStampLeadEmail(trx, call, typedEmail);
-        if (!leadId && !holdConfirmed) {
-          // Codex round-6 P1: no authoritative lead resolved (no metadata
-          // stamp, and either zero or more than one live SID match) AND no
-          // hold channel confirmed anything either — nothing durable would
-          // back this confirmation. Refuse instead of resolving the card
-          // and leaving the lead email-less with no work item left to fix
-          // it (holdConfirmed is normally always true here once a
-          // first_touch_holds table exists — the (a) marker above already
-          // covers the ordinary "no lead, but the hold still confirms"
-          // case; this only fires when even that channel is unavailable).
-          outcome = 'lead_not_resolved';
-          return;
-        }
-        // No resolvable lead but the hold confirmed: nothing else to stamp.
       }
 
       await stampAndResolveConfirmedCard(trx, { id, item, livePayload, typedEmail, confirmedSource, technicianId: req.technicianId });

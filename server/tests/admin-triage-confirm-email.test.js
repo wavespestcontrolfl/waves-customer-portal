@@ -24,9 +24,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../utils/triage-locks', () => ({ lockTriageCall: jest.fn(async () => {}) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
-    req.technician = { id: 'tech-1', role: 'admin' };
+    // Defaults to admin; a test overrides via the `x-test-role` header
+    // (Codex round-7 P1: confirm-email is now admin-only, mirroring
+    // apply-property-roles).
+    const role = req.headers['x-test-role'] || 'admin';
+    req.technician = { id: 'tech-1', role };
     req.technicianId = 'tech-1';
-    req.techRole = 'admin';
+    req.techRole = role;
     next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -161,9 +165,9 @@ async function withServer(fn) {
   }
 }
 
-function post(baseUrl, path, body = {}) {
+function post(baseUrl, path, body = {}, headers = {}) {
   return fetch(`${baseUrl}/admin/triage${path}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
   });
 }
 
@@ -495,7 +499,14 @@ describe('POST /admin/triage/:id/confirm-email', () => {
       expect(tables.triage_items[0].status).toBe('open');
     });
 
-    test('still succeeds via the hold marker when no lead resolves but a hold channel exists (the ordinary case)', async () => {
+    // Codex round-7 P1 (finding at admin-triage.js:862): a customer-less
+    // confirmation now requires an authoritative lead REGARDLESS of
+    // whether a hold marker would confirm anything — the hold ledger is a
+    // first-touch send record, not proof a lead exists to carry the
+    // confirmed address. This used to succeed via the hold marker alone;
+    // it now refuses, and the hold table is untouched because the lead
+    // gate runs before any write.
+    test('refuses with 409 LEAD_NOT_RESOLVED even though a hold channel exists, when no lead resolves', async () => {
       const { conn, tables } = fixture({
         call_log: [{ id: CALL_ID, review_status: 'open', customer_id: null, twilio_call_sid: 'CA000' }],
         customers: [],
@@ -507,11 +518,11 @@ describe('POST /admin/triage/:id/confirm-email', () => {
         const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
           email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
         });
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('LEAD_NOT_RESOLVED');
       });
-      expect(tables.first_touch_holds).toHaveLength(1);
-      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
-      expect(tables.triage_items[0].status).toBe('resolved');
+      expect(tables.first_touch_holds).toHaveLength(0);
+      expect(tables.triage_items[0].status).toBe('open');
     });
   });
 
@@ -585,6 +596,137 @@ describe('POST /admin/triage/:id/confirm-email', () => {
       } finally {
         lockTriageCall.mockImplementation(async () => {});
       }
+    });
+  });
+
+  // Codex round-7 P1 (finding at admin-triage.js:793): the router is only
+  // requireTechOrAdmin, but this endpoint overwrites a customer's email of
+  // record and triggers token fanout + first-touch comms — admin-only, same
+  // rule as apply-property-roles.
+  describe('admin-only', () => {
+    test('a tech token refuses with 403 and writes nothing', async () => {
+      const { conn, tables } = fixture();
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        }, { 'x-test-role': 'technician' });
+        expect(res.status).toBe(403);
+        expect((await res.json()).error).toBe('Admin access required');
+      });
+      expect(tables.triage_items[0].status).toBe('open');
+      expect(tables.first_touch_holds[0].held_email).toBe('');
+      expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
+    });
+
+    test('an admin token still succeeds (existing contract preserved)', async () => {
+      const { conn, tables } = fixture();
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        }, { 'x-test-role': 'admin' });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.triage_items[0].status).toBe('resolved');
+    });
+  });
+
+  // Codex round-7 P1 (finding at admin-triage.js:608): a staff relink moves
+  // call_log.customer_id, not the first_touch_holds row, so the hold must be
+  // repointed at the CURRENTLY locked call's customer — otherwise
+  // resumeHeldFirstTouch's hold_customer_mismatch check
+  // (lead-first-touch-resume.js:833-840) rejects the hold forever.
+  describe('relinked call: the hold repoints to the currently locked customer', () => {
+    test('confirming a relinked call updates the hold row\'s customer_id to the NEW customer, not the stale one', async () => {
+      const OLD_CUSTOMER_ID = 'cust-old';
+      const { conn, tables } = fixture({
+        customers: [{ id: CUSTOMER_ID, email: null }, { id: OLD_CUSTOMER_ID, email: null }],
+        // The call was relinked from OLD_CUSTOMER_ID to CUSTOMER_ID
+        // (call_log.customer_id already reflects the relink), but the
+        // ledger row a prior run wrote still carries the stale customer.
+        first_touch_holds: [
+          { id: 'hold-1', call_log_id: CALL_ID, customer_id: OLD_CUSTOMER_ID, status: 'pending', held_email: '' },
+        ],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.first_touch_holds[0].customer_id).toBe(CUSTOMER_ID);
+      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+      expect(tables.first_touch_holds[0].corrected_at).toBeInstanceOf(Date);
+    });
+  });
+
+  // Codex round-7 P1 (finding at admin-triage.js:608): an explicit
+  // confirmation is exactly the correction a prior denial ('deny, await
+  // correction') was waiting for — the retarget must clear that stamp
+  // (mirroring customer-email-fanout's own deny-lift) or
+  // resumeHeldFirstTouch rejects the stamped hold forever
+  // (lead-first-touch-resume.js:787-795). An ownerless 'releasing' row (its
+  // own deny bump already invalidated any outstanding lease) returns to
+  // 'pending' so it is claimable again; a LIVE 'releasing' claim (no deny
+  // stamp) keeps its status — its target is superseded, not stolen.
+  describe('denial stamp clears on explicit confirmation', () => {
+    test('a pending, deny-stamped hold has last_error cleared and is retargeted', async () => {
+      const { conn, tables } = fixture({
+        first_touch_holds: [{
+          id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'pending',
+          held_email: 'stale@example.com', last_error: 'email_denied_await_correction',
+        }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.first_touch_holds[0].status).toBe('pending');
+      expect(tables.first_touch_holds[0].last_error).toBeNull();
+      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+    });
+
+    test('an ownerless releasing+deny-stamped hold returns to pending, ready to be claimed again', async () => {
+      const { conn, tables } = fixture({
+        first_touch_holds: [{
+          id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'releasing',
+          held_email: 'stale@example.com', last_error: 'email_denied_await_correction',
+        }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.first_touch_holds[0].status).toBe('pending');
+      expect(tables.first_touch_holds[0].last_error).toBeNull();
+      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
+    });
+
+    test('a LIVE releasing claim (no deny stamp) keeps its status — the target is superseded, not stolen', async () => {
+      const { conn, tables } = fixture({
+        first_touch_holds: [{
+          id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'releasing',
+          held_email: 'stale@example.com', last_error: null,
+        }],
+      });
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
+          email: 'janedoe@example.com', expected_updated_at: CARD_UPDATED_AT,
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(tables.first_touch_holds[0].status).toBe('releasing');
+      expect(tables.first_touch_holds[0].last_error).toBeNull();
+      expect(tables.first_touch_holds[0].held_email).toBe('janedoe@example.com');
     });
   });
 });
