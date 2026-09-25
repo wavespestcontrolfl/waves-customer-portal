@@ -252,9 +252,14 @@ function composeBody({ label, advice, opportunity }) {
     // The explanation names the reason that actually fired (codex #4810
     // r4): scope when the caption described one, otherwise the failed
     // prior treatment — never "that much to cover" for one shrub.
+    // "before quoting" only for a LEAD: an existing customer reaching
+    // onsite (scope + failed treatment) may already own this family — the
+    // gauge short-circuits before the ownership check there, so the copy
+    // must not pitch a quote (pre-push audit r4).
+    const quoting = opportunity.reasons.includes('lead') ? ' before quoting' : '';
     const why = opportunity.reasons.includes('large_scope')
-      ? "With that much to cover we'd rather see it in person before quoting."
-      : "Since what's been tried hasn't held, we'd rather see it in person before quoting.";
+      ? `With that much to cover we'd rather see it in person${quoting}.`
+      : `Since what's been tried hasn't held, we'd rather see it in person${quoting}.`;
     return joinSentences([lead, why, 'What day this week works for a quick visit?']);
   }
 

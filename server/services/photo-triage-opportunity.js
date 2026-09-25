@@ -151,7 +151,7 @@ function treeShrubAttention(analysis, worstSignal) {
   let contract = null;
   try {
     contract = typeof analysis?.report_contract === 'string' ? JSON.parse(analysis.report_contract) : (analysis?.report_contract || null);
-  } catch (_err) { contract = null; }
+  } catch { contract = null; }
   const worst = contract?.worst_signal;
   if (worst && typeof worst === 'object' && worst.key === worstSignal) {
     if (worst.status === 'needs_attention') return true;

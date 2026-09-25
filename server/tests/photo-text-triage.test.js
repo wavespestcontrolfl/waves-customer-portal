@@ -564,6 +564,14 @@ describe('draft text builder', () => {
       + "Since what's been tried hasn't held, we'd rather see it in person before quoting. What day this week works for a quick visit?",
     );
     expect(failed).not.toMatch(/that much to cover/i);
+    // An existing customer sent onsite (scope + failed treatment) may own
+    // the family: no "before quoting" pitch.
+    const existing = draft('Riley', 'pest-pressure signals', { mode: 'onsite', reasons: ['actionable', 'large_scope', 'prior_treatment_failed'], quote: null });
+    expect(existing).toBe(
+      "Thanks for the photo, Riley. From what we can see, it's pest-pressure signals. "
+      + "With that much to cover we'd rather see it in person. What day this week works for a quick visit?",
+    );
+    expect(existing).not.toMatch(/quot/i);
   });
 
   test('advise when the offer core failed closed: no quote pitch (the customer may already pay for it)', () => {
