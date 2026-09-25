@@ -27,10 +27,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
-const { leadLinkRefusal } = require('./lead-consultation-link');
+const { leadLinkRefusal, consultationUrlForLead } = require('./lead-consultation-link');
 const { leadWantsRecurringPlan } = require('./lead-recurring-intent');
-const { mintLeadConsultationToken, TTL_SECONDS } = require('../utils/lead-consultation-token');
-const { publicPortalUrl } = require('../utils/portal-url');
+const { TTL_SECONDS } = require('../utils/lead-consultation-token');
 const { createShortCode } = require('./short-url');
 const { ctaButton, blockPalette } = require('./email-template');
 
@@ -139,9 +138,10 @@ async function buildConsultationEmailBlock({ leadId, recipientEmail } = {}) {
     if (!result.ok) return EMPTY_BLOCK;
     if (!result.needsAddress && result.slots.length === 0) return EMPTY_BLOCK;
 
-    const token = mintLeadConsultationToken(lead.id, undefined, 'email');
-    if (!token) return EMPTY_BLOCK;
-    const longBase = `${publicPortalUrl()}/inspection/${token}`;
+    // The ONE long-URL builder every consultation link shares (Codex #4813
+    // r2 P1) — channel 'email', never the phone-bound sms claim.
+    const longBase = consultationUrlForLead(lead.id, 'email');
+    if (!longBase) return EMPTY_BLOCK;
     const links = await shortLinksFor(longBase, lead.id, result.needsAddress ? [] : result.slots);
 
     return {
