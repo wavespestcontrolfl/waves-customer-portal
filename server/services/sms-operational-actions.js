@@ -595,8 +595,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     // is only a snapshot; never let its former owner strand the obligation.
     const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
     const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
-    const hasDueDate = row.due_at != null;
-    const deadlinePassed = hasDueDate && new Date(row.due_at) <= now;
+    const deadlinePassed = row.due_at != null && new Date(row.due_at) <= now;
     // No deadline to enforce yet (none stated, or the window is still open)
     // and nothing on file even looks like an answer: skip the model call
     // entirely rather than spend it on an obligation with no chance of a
@@ -616,9 +615,11 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     // payment record reaches `verify` at once (Codex #4816 r2); a message
     // witness (a staff text, a call) waits for the deadline before it costs
     // a model call, exactly as a stated-deadline row always has.
+    // (A system verdict always rests on such a record. A NULL due_at reads
+    // as the epoch, never an open window.)
     const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
       && admissibleWitness(record, current, evidence.records));
-    if (!systemVerdict && !eventWitness && hasDueDate && !deadlinePassed) {
+    if (!eventWitness && new Date(row.due_at) > now) {
       skippedNotDue += 1;
       continue;
     }

@@ -901,6 +901,8 @@ describe('fulfillment proof', () => {
     // Estimate-acceptance bookings stamp this one (routes/estimate-public.js → send-customer-message).
     expect(admissibleWitness(delivered('appointment_confirmation'), { kind: 'send_appointment_confirmation' })).toBe(true);
     expect(admissibleWitness(delivered('reschedule_series_confirmation'), { kind: 'send_appointment_confirmation' })).toBe(true);
+    // Codex #4816 r9: admin-dispatch.js recurring-placement notice.
+    expect(admissibleWitness(delivered('appointment_recurring_placement_confirmed'), { kind: 'send_appointment_confirmation' })).toBe(true);
     expect(admissibleWitness(delivered('reschedule_link_promise'), { kind: 'send_reschedule_link' })).toBe(true);
     expect(admissibleWitness(delivered('reschedule_link_promise'), { kind: 'send_appointment_confirmation' })).toBe(false);
     expect(admissibleWitness(delivered('receipt'), { kind: 'send_reschedule_link' })).toBe(false);

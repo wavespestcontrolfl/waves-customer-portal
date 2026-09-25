@@ -9,6 +9,7 @@ const { hashExtractionSource } = require('./data-hygiene/source-extraction-store
 const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeysShareLocality, scopeKeyLacksLocality } = require('./estimate-property-linkage');
 const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt, whereEstimateCustomerOwnership } = require('./call-commitments');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { dateOnlyString } = require('../utils/date-only');
 
 const LIMIT = 50;
 // A logged move: both dates present and either the date or the window
@@ -52,7 +53,9 @@ const HUMAN_SMS_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 // Codex #4816 r1: a kind that now times out (R5) must admit the production
 // send that answers it, or the deadline bells on finished work.
 const SMS_TYPES = {
-  send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirmation', 'appointment_confirmation', 'appointment_rescheduled', 'reschedule_series_confirmation'],
+  // admin-dispatch.js series notices: a recurring placement confirms, a series move reschedules.
+  send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirmation', 'appointment_confirmation', 'appointment_rescheduled',
+    'reschedule_series_confirmation', 'appointment_recurring_placement_confirmed'],
   send_reschedule_link: [...HUMAN_SMS_TYPES, 'reschedule_link_promise'],
 };
 // Owner ruling 2026-09-24: an "are you still coming" (other) or "call me
@@ -149,10 +152,15 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // paid_at with no payments row, and are not money landing (Codex
       // #4816 r7) — the same witness rule as the call matcher
       // (call-commitments.js paidByItsOwnPayment): a paid payments row linked
-      // to THIS invoice through metadata or a shared PaymentIntent.
+      // to THIS invoice through metadata or a shared PaymentIntent, posted
+      // after the request — an older partial payment cannot vouch for a
+      // remainder covered by credit later (Codex #4816 r9). payment_date is
+      // an Eastern business DATE, so it gets the request's day as a floor.
       conn('invoices').where({ customer_id: customerId }).where('paid_at', '>', after).where('paid_at', '<=', now)
         .whereExists(function paymentForThisInvoice() {
           this.select(conn.raw('1')).from('payments as p').where('p.status', 'paid')
+            .where('p.created_at', '>', after).where('p.created_at', '<=', now)
+            .whereRaw("p.payment_date >= (?::timestamptz AT TIME ZONE 'America/New_York')::date", [after])
             .whereRaw("(p.metadata::jsonb ->> 'invoice_id' = invoices.id::text OR p.metadata::jsonb ->> 'waves_invoice_id' = invoices.id::text"
               + ' OR (p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = invoices.stripe_payment_intent_id))');
         })
@@ -177,9 +185,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // own overflow always trips the shared LIMIT check the generic loop
       // already runs on `payment` — a mixed-source customer can over-flag as
       // truncated (fails closed to review) but never under-flags.
+      // Invoice and ledger rows have no message body; each leg composes the
+      // text the quote/fingerprint ground on (an sms row keeps message_body).
     ]).then(([invoicesPaid, ledger, paymentSms]) => [
-      ...invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice' })),
-      ...ledger.map((row) => ({ ...row, payment_source: 'ledger' })),
+      ...invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice',
+        text: `Invoice ${row.title || row.invoice_number || row.id} paid ${new Date(row.paid_at).toISOString().slice(0, 10)}` })),
+      ...ledger.map((row) => ({ ...row, payment_source: 'ledger',
+        text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${row.description ? `: ${row.description}` : ''}` })),
       ...paymentSms.map((row) => ({ ...row, payment_source: 'sms' })),
     ]),
     visit: conn('scheduled_services').where({ customer_id: customerId })
@@ -250,14 +262,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     if (result.value.length > LIMIT) failures.push(`${type}_truncated`);
     for (const row of result.value.slice(0, LIMIT)) {
       const visitText = type === 'visit' ? `${row.service_type} on ${row.scheduled_date} at ${row.window_start}; status ${row.status}${row.moved_at ? '; moved after the request' : ''}${row.progressed_at ? '; en route/on site/completed after the request' : ''}${row.cancelled_at ? '; cancelled after the request' : ''}` : '';
-      // An invoice-sourced payment row has no message body; compose one so
-      // the quote/fingerprint have something concrete to ground on. An
-      // sms-sourced payment row already has message_body (falls through above).
-      const paymentText = type === 'payment' && row.payment_source === 'invoice'
-        ? `Invoice ${row.title || row.invoice_number || row.id} paid ${new Date(row.paid_at).toISOString().slice(0, 10)}`
-        : type === 'payment' && row.payment_source === 'ledger'
-          ? `Payment of $${Number(row.amount).toFixed(2)} recorded ${row.payment_date instanceof Date ? row.payment_date.toISOString().slice(0, 10) : row.payment_date}${row.description ? `: ${row.description}` : ''}` : '';
-      const text = row.message_body || row.transcription || row.body_text || row.text_snapshot || paymentText || row.service_interest || row.title || visitText;
+      const text = row.message_body || row.transcription || row.body_text || row.text_snapshot || row.text || row.service_interest || row.title || visitText;
       if (text.length > 16000) failures.push(`${type}_body_truncated`);
       records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, 16000) });
     }
@@ -424,12 +429,11 @@ function groundFulfillment(parsed, evidence, commitment) {
   const quote = normalized(parsed.quote);
   if (quote.length < 3 || !normalized(witness.text).includes(quote)) return { verdict: 'uncertain', reason: 'ungrounded_witness' };
   const matchedAt = witness.type === 'estimate' ? witnessAt(witness, new Date(commitment.sms_context?.source_at))
+    // An invoice-sourced payment row selects paid_at and no send time (the
+    // invoice's own sent_at is not when it was paid); no other row selects
+    // paid_at, so it leads the chain.
     : witness.type === 'visit' ? visitWitnessAt(witness, commitment)
-      // Invoice-sourced payment rows carry no delivered_at/sent_at (that
-      // would be the INVOICE's own send time, not when it was paid); an
-      // sms-sourced row has no paid_at. Never mix the two up.
-      : witness.type === 'payment' ? (witness.paid_at || witness.created_at)
-        : witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at;
+      : witness.paid_at || witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at;
   const matched = new Date(matchedAt);
   const failures = fatalFailures(evidence, commitment, { type: witness.type, matched_at: matched });
   if (failures.length) return { verdict: 'uncertain', reason: 'incomplete_sources', failures };
@@ -438,8 +442,8 @@ function groundFulfillment(parsed, evidence, commitment) {
   return { verdict: 'fulfilled', record_type: witness.type, record_id: witness.id,
     ...(linked ? { linked_record_type: 'estimate', linked_record_id: linked.id } : {}),
     // Revalidation (below) needs to know which table a 'payment' record_id
-    // actually lives in.
-    ...(witness.type === 'payment' ? { payment_source: witness.payment_source } : {}),
+    // actually lives in (undefined, so dropped from JSON, for other types).
+    payment_source: witness.payment_source,
     matched_at: matchedAt, quote: parsed.quote,
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
 }

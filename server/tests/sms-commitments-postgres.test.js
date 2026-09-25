@@ -1336,6 +1336,19 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
   });
 
+  test('Codex #4816 r9: a partial payment from before the text cannot vouch for a remainder covered by credit after it', async () => {
+    const before = new Date(message.created_at.getTime() - 86400000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
+      invoice_number: 'WPC-2026-0701', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: after }).returning('id');
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(before),
+      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: before });
+    const commitment = { kind: 'other', description: 'Did you receive my payment?',
+      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
+    expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
+  });
+
   test('R2: an invoice paid before the request is not payment evidence', async () => {
     const before = new Date(message.created_at.getTime() - 1000);
     await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(),
