@@ -104,7 +104,9 @@ describe('prep-guide-pdf list blocks + inline links', () => {
         { type: 'list', items: ['Remove pet bowls', '   ', 'Clear the [garage](https://wavespestcontrol.com/garage)'] },
       ],
     });
-    const checkmarks = calls.filter((c) => c === '✓');
+    // ZapfDingbats '4' = heavy check mark; U+2713 has no glyph in Helvetica.
+    const checkmarks = calls.filter((c) => c === '4');
+    expect(calls).not.toContain('✓');
     expect(checkmarks).toHaveLength(2);
     expect(calls).toContain('Remove pet bowls');
     expect(calls).toContain('Clear the garage (https://wavespestcontrol.com/garage)');

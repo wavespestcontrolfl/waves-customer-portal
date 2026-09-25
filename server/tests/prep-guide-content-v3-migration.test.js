@@ -1,5 +1,5 @@
 /**
- * 20260924000001 → 000002 → 000003 → 000004 — prep guide content v3.
+ * 20260924000001 → 000002 → 000003 → 000004 → 000005 — prep guide content v3.
  *
  * Each earlier file ran on the PR preview database before the next Codex
  * round and is frozen; each later file supersedes the previous with
@@ -24,7 +24,9 @@ const CHAIN = [
   require('../models/migrations/20260924000002_prep_guide_content_v3_codex_r1'),
   require('../models/migrations/20260924000003_prep_guide_content_v3_codex_r2'),
   require('../models/migrations/20260924000004_prep_guide_content_v3_codex_r3'),
+  require('../models/migrations/20260924000005_prep_guide_content_v3_codex_r4'),
 ];
+const refreshMigration = require('../models/migrations/20260715000001_prep_guide_content_refresh');
 const baseMigration = CHAIN[CHAIN.length - 2];
 const migration = CHAIN[CHAIN.length - 1];
 const { normalizeBlocks, renderTemplate } = require('../services/email-template-library');
@@ -67,6 +69,11 @@ function allNewCopy() {
   return TEMPLATES.flatMap(textChunks);
 }
 
+// Sequence step-0 bodies (automation_steps) the latest migration ships.
+function stepBodies() {
+  return (migration.STEP_SWAPS || []).map((s) => `${s.templateKey} step0: ${s.toHtml}`);
+}
+
 function allLinks() {
   const links = [];
   for (const chunk of allNewCopy()) {
@@ -82,26 +89,26 @@ describe('prep guide v3 content compliance', () => {
   });
 
   test('re-entry copy never says safe/safely', () => {
-    for (const chunk of allNewCopy()) {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
       expect(chunk).not.toMatch(/\bsafe(ly)?\b/i);
     }
   });
 
   test('no fixed re-entry windows (hours/minutes tied to leaving or re-entering)', () => {
-    for (const chunk of allNewCopy()) {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
       expect(chunk).not.toMatch(/(out of the (home|house|kitchen|room)|stay (out|away|off)|re-?enter|be out)[^.]{0,50}\d+\s*(–|-|to)?\s*\d*\s*(hour|hr|minute|min)/i);
     }
   });
 
   test('brand and pricing wording rules', () => {
-    for (const chunk of allNewCopy()) {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
       expect(chunk).not.toMatch(/Waves Lawn (&|and) Pest/i);
       expect(chunk).not.toMatch(/per visit/i);
     }
   });
 
   test('no fumigation or tenting content (owner prohibition)', () => {
-    for (const chunk of allNewCopy()) {
+    for (const chunk of [...allNewCopy(), ...stepBodies()]) {
       expect(chunk).not.toMatch(/fumigat|tent(ing|ed)?\b/i);
     }
   });
@@ -139,6 +146,36 @@ describe('prep guide v3 content compliance', () => {
     const lawn = textChunks(TEMPLATES.find((x) => x.key === 'prep.lawn')).join('\n');
     expect(lawn).not.toMatch(/\d+ to \d+ times a week/);
     expect(lawn).toMatch(/county restriction currently allows/);
+  });
+
+  test('bed bug guide names the method it covers and routes heat/hybrid customers to method-specific prep (Codex r4)', () => {
+    const bedBug = textChunks(TEMPLATES.find((x) => x.key === 'prep.bed_bug')).join('\n');
+    expect(bedBug).toMatch(/covers our standard chemical treatment/);
+    expect(bedBug).toMatch(/heat or hybrid treatment instead, your technician will send separate prep/);
+  });
+
+  test('sequence step-0 bodies match v3: exact-match on the shipped copy, package-accurate, approved sign-off, EPA-registered (Codex r4)', () => {
+    const swaps = migration.STEP_SWAPS;
+    expect(swaps.map((s) => s.templateKey).sort()).toEqual(['bed_bug', 'cockroach', 'flea']);
+    for (const s of swaps) {
+      const shipped = refreshMigration.STEP_SWAPS.find((r) => r.templateKey === s.templateKey);
+      expect(s.fromHtml).toBe(shipped.toHtml); // admin-edit-preserving swap keys off the current shipped body
+      expect(s.toHtml).not.toBe(s.fromHtml);
+      expect(s.toHtml).toContain('— The Waves Team');
+      expect(s.toHtml).not.toMatch(/Waves Pest Control team/i);
+      expect(s.toHtml).toMatch(/EPA-registered/);
+      expect(s.toHtml).not.toMatch(/one treatment and a repeat visit|one[- ]visit job|A second treatment/);
+      expect(s.toHtml).not.toMatch(/\]\(https?:/); // HTML bodies carry no markdown
+    }
+    const flea = swaps.find((s) => s.templateKey === 'flea').toHtml;
+    expect(flea).toMatch(/two-visit elimination package/);
+    expect(flea).toMatch(/Yard treatment is an add-on/);
+    const roach = swaps.find((s) => s.templateKey === 'cockroach').toHtml;
+    expect(roach).toMatch(/follow-up visits your infestation calls for/);
+    const bedBug = swaps.find((s) => s.templateKey === 'bed_bug').toHtml;
+    expect(bedBug).toMatch(/follow-up visits/);
+    expect(bedBug).toMatch(/Electronics never go in a dryer or freezer/);
+    expect(bedBug).not.toMatch(/hot (garage|car)|\b3 days\b/i);
   });
 
   test('bed bug guide describes chemical/IPM work only — no heat-treatment or steam component', () => {
@@ -254,7 +291,8 @@ describe('each migration supersedes the previous one (each frozen after its prev
     expect(new Set(CHAIN.map((m) => m.MIGRATION_MARKER)).size).toBe(CHAIN.length);
     const effective = allNewCopy().join('\n');
     for (const patch of migration.PATCHES) {
-      expect(effective).not.toContain(patch.from);
+      // A patch may extend its `from` (to = from + more); only a true replacement removes it.
+      if (!patch.to.includes(patch.from)) expect(effective).not.toContain(patch.from);
       expect(effective).toContain(patch.to);
     }
   });
@@ -311,6 +349,16 @@ describe('publish mechanics', () => {
             }),
           })),
           update: jest.fn(async (patch) => { state.versionUpdates.push({ filters: { ...filters }, patch }); return 1; }),
+        };
+        return q;
+      }
+      if (table === 'automation_steps') {
+        // No step row → the exact-match swap is a no-op (admin-edit-preserving path).
+        const q = {
+          where: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          first: jest.fn(async () => null),
+          update: jest.fn(async () => { throw new Error('automation_steps.update must not run without a matching row'); }),
         };
         return q;
       }

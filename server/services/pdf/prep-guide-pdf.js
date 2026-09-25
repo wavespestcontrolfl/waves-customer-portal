@@ -173,6 +173,8 @@ function calloutBlock(doc, text) {
 // item wraps under a hanging indent; a blank item (after link/whitespace
 // resolution) is skipped so a payload-driven empty string leaves no
 // dangling check mark.
+const LIST_CHECK_GLYPH = '4'; // ZapfDingbats: heavy check mark
+
 function listBlock(doc, items) {
   const rows = (items || []).map((item) => renderLinksAsText(String(item || '')).trim()).filter(Boolean);
   if (!rows.length) return;
@@ -184,7 +186,9 @@ function listBlock(doc, items) {
     const rowH = doc.heightOfString(row, { width: W - indent, lineGap: 2 });
     ensureRoom(doc, rowH + 8);
     const startY = doc.y;
-    doc.font('Helvetica-Bold').fillColor(NAVY).text('✓', L, startY, { width: indent, lineGap: 2 });
+    // U+2713 is not in the standard-14 WinAnsi set (Helvetica renders a
+    // missing-glyph box); ZapfDingbats '4' is the heavy check mark (✔).
+    doc.font('ZapfDingbats').fillColor(NAVY).text(LIST_CHECK_GLYPH, L, startY, { width: indent, lineGap: 2 });
     doc.font('Helvetica').fillColor(BODY).text(row, L + indent, startY, { width: W - indent, lineGap: 2 });
     doc.moveDown(0.35);
   }
