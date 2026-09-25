@@ -406,6 +406,44 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.allowed).toBe(true);
   });
 
+  // Codex regression (finding 2, this PR's round-2 audit): the "N o'clock"
+  // matcher always inferred a period from business hours, even when an
+  // EXPLICIT am/pm follows — "10 o'clock PM" recorded 10 AM (the inferred
+  // period) instead of the stated 10 PM, and "1 o'clock AM" could ground a
+  // 13:00 (1 PM) slot instead of refusing it. An explicit trailing period
+  // must now be consumed and used verbatim, ahead of any inference.
+  test('"10 o\'clock PM" binds a 22:00 slot, not the business-hours-inferred 10 AM one', () => {
+    const pm = "So we'll see you Sunday at 10 o'clock PM, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, pm);
+    const mk = (startAt) => {
+      const ex = agentCommitted(['caller_not_authorized'], { quote: pm });
+      ex.scheduling.confirmed_start_at = startAt;
+      return ex;
+    };
+    const evening = canAutoRoute(mk('2026-08-02T22:00:00-04:00'), opts({ transcript }));
+    expect(evening.allowed).toBe(true);
+    expect(evening.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    const morning = canAutoRoute(mk('2026-08-02T10:00:00-04:00'), opts({ transcript }));
+    expect(morning.allowed).toBe(false);
+    expect(morning.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('"1 o\'clock AM" binds a 01:00 slot, not a 13:00 (1 PM) one', () => {
+    const am = "So we'll see you Sunday at 1 o'clock AM, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, am);
+    const mk = (startAt) => {
+      const ex = agentCommitted(['caller_not_authorized'], { quote: am });
+      ex.scheduling.confirmed_start_at = startAt;
+      return ex;
+    };
+    const overnight = canAutoRoute(mk('2026-08-02T01:00:00-04:00'), opts({ transcript }));
+    expect(overnight.allowed).toBe(true);
+    expect(overnight.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    const afternoon = canAutoRoute(mk('2026-08-02T13:00:00-04:00'), opts({ transcript }));
+    expect(afternoon.allowed).toBe(false);
+    expect(afternoon.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   test('a multi-slot turn never binds — rejected 10 AM + committed 11 AM fails for BOTH slots (round-5 P1)', () => {
     const multi = "Sunday at 10 AM won't work, but we'll see you at 11 AM, and just let us know if anything changes.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, multi);
@@ -820,12 +858,52 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  // The clause-scoped conditional check (sentenceHasNonBenignConditional)
-  // only applies to a genuine CONDITIONAL sentence — a plain declarative
-  // that merely MENTIONS a weekday or unrelated topic in passing, naming no
+  // Codex regression, round 2 of this PR's audit (finding 1): the OLD
+  // extractor pulled out only the FIRST conditional clause in a sentence —
+  // "If the email goes to you, let me know," (benign) — and never looked
+  // past it to the SECOND clause, "and if the technician is available,"
+  // (non-benign), so the whole sentence read as clean. Every clause must be
+  // inspected; one bad clause among several benign ones still poisons.
+  test('Codex regression: a sentence with TWO conditional clauses poisons on the second even though the first is benign', () => {
+    const turn = "If the email goes to you, let me know, and if the technician is available, I'll call you. "
+      + "We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex regression, round 2 of this PR's audit (finding 3): a DECLARATIVE
+  // unavailability statement carries no "if"/"unless"/"subject to" trigger
+  // word, so it must poison unconditionally, the same way an unmet-
+  // authorization declarative already does — the old NEGATION_HEDGE_TOKENS
+  // screen only recognized the narrow " unable " token, which "unavailable"
+  // never contains.
+  test('Codex regression: a DECLARATIVE unavailability statement ("The technician is unavailable.") still poisons', () => {
+    const turn = "The technician is unavailable. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // The clause-scoped conditional check (sentenceHasUnmetCondition) only
+  // applies to a genuine CONDITIONAL sentence — a plain declarative that
+  // merely MENTIONS a weekday or unrelated topic in passing, naming no
   // authorization party, must not poison just for naming one.
   test('an adjacent sentence merely mentioning an unrelated topic (invoice email) does not poison the pinned commitment', () => {
     const turn = "I'll email you the invoice. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  // A genuinely benign CONDITIONAL clause — "if the confirmation text goes
+  // to the wrong number" is about text-delivery routing, not scheduling,
+  // staffing, availability, or authorization — must still ground.
+  test('a benign conditional clause about confirmation-text delivery does not poison the pinned commitment', () => {
+    const turn = "If the confirmation text goes to the wrong number, let me know. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
     expect(r.allowed).toBe(true);

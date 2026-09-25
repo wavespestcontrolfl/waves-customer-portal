@@ -618,6 +618,7 @@ function turnHasNegationOrHedge(normalizedTurn) {
 const CONDITIONAL_TOKENS = [
   ' unless ', ' assuming ', ' provided ', ' as long as ', ' pending ',
   ' depends ', ' depending ', ' when ', ' once ', ' should the ',
+  ' subject to ',
 ];
 // "if" is exempt ONLY inside the exact recognized closing construction —
 // "(just) let us know if <benign follower>" (codex P0, round 7g: "we will
@@ -786,28 +787,38 @@ function normalizeCommitmentText(s) {
 //       round 7o, the tag-question case: "You're booked Sunday at noon.
 //       Right?"),
 //   (b) contains a negation/retraction/hedge (turnHasNegationOrHedge),
-//   (c) names an authorization PARTY or ACT — homeowner/owner/landlord/
-//       tenant, approve/approval, sign-off, authorize/authorization,
-//       permission, "check with", "confirm with", "run it by", "needs to
-//       okay", decision(-maker) — REGARDLESS of conditional structure
-//       (sentenceReferencesAuthorizationPartyOrAct, below): a DECLARATIVE
-//       naming an unmet authorization requirement, "That still needs the
-//       homeowner's sign-off. We'll see you Sunday at noon.", carries no
-//       "if"/"unless"/"subject to" trigger word and is just as disqualifying
-//       as a conditional one (codex P1, round 2 of this PR's local audit —
-//       an earlier draft gated this check on isConditional and missed
-//       exactly this declarative shape), or
-//   (d) is a conditional whose topic is NOT one of a small, curated set of
-//       known-benign non-booking topics (sentenceHasNonBenignConditional,
+//   (c) names an authorization PARTY or ACT, or a declarative UNAVAILABILITY
+//       statement — homeowner/owner/landlord/tenant, approve/approval,
+//       sign-off, authorize/authorization, permission, "check with",
+//       "confirm with", "run it by", "needs to okay", decision(-maker),
+//       "still required"/"still needs"/"needs approval"/"waiting on"/"get
+//       back to you", "unavailable"/"not available"/"booked up"/"cannot" —
+//       REGARDLESS of conditional structure
+//       (sentenceHasDeclarativePoisonVocabulary, below): a DECLARATIVE
+//       naming an unmet authorization requirement or unavailability, "That
+//       still needs the homeowner's sign-off. We'll see you Sunday at
+//       noon." or "The technician is unavailable. We'll see you Sunday at
+//       noon.", carries no "if"/"unless"/"subject to" trigger word and is
+//       just as disqualifying as a conditional one (codex P1, round 2 of
+//       this PR's local audit — an earlier draft gated this check on
+//       isConditional and missed exactly this declarative shape), or
+//   (d) is a conditional with ANY clause (extractConditionalClauses splits
+//       EVERY clause in the sentence, not just the first — codex P1: "If
+//       the email goes to you, let me know, and if the technician is
+//       available, I'll call you." has two clauses, and the first being
+//       benign never excuses the second) whose topic is NOT one of a small,
+//       curated set of known-benign non-booking topics (clauseIsBenign,
 //       below) — DEFAULT-POISON, not an allowlist of bad topics: "if we
 //       have space", "if the technician has time", "weather permitting" all
 //       still poison with NO term enumerated for each one, exactly like the
-//       pre-existing fail-closed design (round 7l/7m). The ONLY conditionals
+//       pre-existing fail-closed design (round 7l/7m). The ONLY clauses
 //       that don't poison are ones IDENTIFIABLY about a benign topic (who a
 //       notification/email/text/invoice/report goes to) and that don't ALSO
-//       touch the scheduling itself (weekday/month/time, "see you"/"book"/
-//       "schedule"/"appointment") — a conditional that merely MENTIONS a
-//       weekday or time in passing without being conditional ON it ("Adam
+//       touch scheduling/staffing/availability/authorization anywhere in
+//       THAT CLAUSE (codex P1, round 2: a benign word in the sentence's
+//       CONSEQUENT, e.g. "email", never excuses a poisoned condition, e.g.
+//       "if the technician is available") — a sentence that merely MENTIONS
+//       a weekday or time in passing without being conditional ON it ("Adam
 //       works Sundays. We will see you Sunday at noon.") isn't even a
 //       conditional to begin with, so it never reaches this check at all.
 // This is what still fails closed the two Codex regressions "If the
@@ -820,6 +831,19 @@ function normalizeCommitmentText(s) {
 // poisons — multi-sentence turns that discuss that alongside a clean
 // commitment sentence are the supported shape now, not just the
 // single-sentence turn.
+// Splits one speaker turn into its sentences. Sentence chunks KEEP their
+// terminator (codex P0, round 7n): splitting on [.!?;]+ discarded the "?"
+// that makes "So we will confirm it for noon on Sunday?" a QUESTION — an
+// interrogative sentence can never be the commitment sentence. "a.m."/
+// "p.m." abbreviation dots are collapsed first so they don't split a
+// sentence in two.
+function splitSentences(turn) {
+  const chunks = (String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
+  return chunks
+    .map((c) => ({ raw: c, ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
+    .filter((s) => s.ns);
+}
+
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);
   if (!q || q.length < 12) return false;
@@ -835,21 +859,14 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
   if (!agentTurns.length || !sawCaller) return false;
   const containing = [];
   for (const turn of agentTurns) {
-    // Sentence chunks KEEP their terminator (codex P0, round 7n): splitting
-    // on [.!?;]+ discarded the "?" that makes "So we will confirm it for
-    // noon on Sunday?" a QUESTION — an interrogative sentence can never be
-    // the commitment sentence.
-    const chunks = (String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
-    const sentences = chunks
-      .map((c) => ({ raw: c, ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
-      .filter((s) => s.ns);
+    const sentences = splitSentences(turn);
     for (let i = 0; i < sentences.length; i += 1) {
       const s = sentences[i];
       if (!s.ns.includes(q)) continue;
       const otherSentencesClean = sentences.every((other, j) => j === i
         || (!other.interrogative
           && !turnHasNegationOrHedge(other.ns)
-          && !sentenceHasNonBenignConditional(other.ns, other.raw, sentences[j - 1]?.ns)));
+          && !sentenceHasUnmetCondition(other.ns, other.raw, sentences[j - 1]?.ns)));
       containing.push({ ...s, otherSentencesClean });
     }
   }
@@ -895,65 +912,96 @@ const BENIGN_NON_BOOKING_TOPICS = [
   ' text ', ' texts ', ' invoice ', ' invoices ', ' report ', ' reports ',
   ' inbox ', ' confirmation text ',
 ];
-// Authorization PARTY or ACT (codex P1, round 2 of this PR's local audit):
-// a sentence naming who has to sign off, or the act of approving/
-// authorizing, poisons the pinned commitment REGARDLESS of conditional
-// structure — "That still needs the homeowner's sign-off. We'll see you
-// Sunday at noon." carries no "if"/"unless"/"subject to" trigger word, so
-// the conditional-gated screen below never saw it and the sentence
-// grounded. Checked unconditionally, before any conditional-structure test.
-// This is what still fails closed the two Codex regressions "If the
-// homeowner approves. We will see you Sunday at noon." and "Subject to
-// homeowner approval. We will see you Sunday at noon." too (both name the
-// homeowner's approval) — those also happen to be conditionals, but this
-// list no longer needs the conditional wrapper to catch them.
+// Declarative poison vocabulary (codex P1, rounds 1-2 of this PR's local+
+// Codex audit): a sentence naming who has to sign off, the act of
+// approving/authorizing, an unmet-approval DECLARATIVE ("Homeowner approval
+// is still required."), or a plain statement that someone/something is
+// unavailable poisons the pinned commitment REGARDLESS of conditional
+// structure — none of "That still needs the homeowner's sign-off.",
+// "Homeowner approval is still required.", or "The technician is
+// unavailable." carries an "if"/"unless"/"subject to" trigger word, so a
+// conditional-gated screen alone never sees them. Checked unconditionally,
+// before any conditional-structure test. Built as two proper phrase lists
+// (not a single narrow token like the old ` unable `) so a future round
+// adds a phrase here without touching the flow below.
 const AUTHORIZATION_PARTY_OR_ACT_TERMS = [
   ' homeowner ', ' owner ', ' landlord ', ' tenant ',
   ' approve ', ' approves ', ' approved ', ' approval ',
   ' sign off ', ' authorize ', ' authorizes ', ' authorized ', ' authorization ',
   ' permission ', ' confirm with ', ' check with ', ' run it by ',
   ' needs to okay ', ' decision maker ', ' decision ', ' okay with ', ' ok with ',
+  ' still required ', ' still needs ', ' still need ',
+  ' needs approval ', ' need approval ', ' pending approval ',
+  ' waiting on ', ' waiting to hear ', ' need to confirm ', ' needs to confirm ',
+  ' have to confirm ', ' has to confirm ', ' get back to you ', ' getting back to you ',
+  ' need the go ahead ', ' needs the go ahead ', ' need the ok ', ' needs the ok ',
 ];
-function sentenceReferencesAuthorizationPartyOrAct(ns) {
+const UNAVAILABILITY_TERMS = [
+  ' unavailable ', ' not available ', ' no availability ', ' booked up ',
+  ' fully booked ', ' no openings ', ' no opening ', ' cant make ', ' can t make ',
+  ' cannot make ', ' cannot ', ' unable ', ' not free ', ' has no time ',
+  ' doesn t have time ', ' does not have time ',
+];
+// Unconditional declarative-poison check (finding 3/4 above): either list,
+// anywhere in the sentence, poisons regardless of whether the sentence is
+// structured as a conditional at all.
+function sentenceHasDeclarativePoisonVocabulary(ns) {
   const padded = ` ${ns} `;
-  return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t));
+  return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
+    || UNAVAILABILITY_TERMS.some((t) => padded.includes(t));
 }
-// "Subject to homeowner approval." (codex round 7m regression) is a
-// conditional with no "if"/"unless"/etc. trigger word — turnHasUnresolvedConditional
-// alone would call it clean. "subject to" is added here as an additional
-// conditional trigger, scoped to this other-sentence screen only (it stays
-// out of CONDITIONAL_TOKENS/turnHasUnresolvedConditional so quoteBindsConfirmedSlot's
-// own "subject to" is never touched) — the sentence still poisons via the
-// unconditional authorization check above regardless ("homeowner"/
-// "approval" are both in that list), so this trigger now only matters for
-// a hypothetical "subject to" conditional that names no authorization party.
-//
-// The benign/poison call is decided by the CONDITION CLAUSE alone (codex
-// P1, round 2 of this PR's local+Codex audit: "If the technician is
-// available, I will email you. We will see you Sunday at noon." was wrongly
-// read as benign because "email" sits in the CONSEQUENT, not the
-// condition — a whole-sentence-or-context scan let the consequent launder
-// an unrelated condition). The clause is everything between the trigger
-// word and the next comma, or the end of the sentence if there is none.
-// DEFAULT IS POISON for that clause, same shape as the outer screen:
-// availability, space, weather, approval, the tech, or the schedule itself
-// all still poison with no term enumerated for any of them; only a clause
-// IDENTIFIABLY about who a notification/email/text/invoice/report goes to
-// is benign. A BARE-PRONOUN clause ("if it does", "if it goes to you") names
-// no topic of its own, so ONLY then does the referent resolve against the
-// PREVIOUS sentence's benign nouns ("Yep, it should go to him, the
-// NOTIFICATION. ... so if it goes to you, I'll make sure that's rectified."
-// — "it" is the notification named one sentence earlier); a clause with any
-// actual content word never falls back to the previous sentence.
-const CONDITION_TRIGGER_RE = /\b(if|unless|provided|as long as|assuming|subject to|depending|pending|when|once|should the)\b/i;
-function extractConditionClause(rawSentence) {
+// Scheduling/availability/staffing vocabulary for CONDITION CLAUSES (codex
+// P1, round 2 of this PR's local+Codex audit): a conditional clause is
+// non-benign the instant it touches scheduling/staffing/availability, no
+// matter what the sentence's CONSEQUENT says — "If the technician is
+// available, I'll email you." must poison on "technician"/"available" in
+// the CLAUSE, not read as benign because "email" sits in the consequent.
+const CONDITION_CLAUSE_POISON_TERMS = [
+  ' technician ', ' tech ', ' available ', ' availability ', ' unavailable ',
+  ' schedule ', ' scheduled ', ' scheduling ', ' reschedule ', ' rescheduled ',
+  ' appointment ', ' appointments ', ' visit ', ' staff ', ' staffing ',
+  ' crew ', ' route ', ' slot ', ' calendar ', ' book ', ' booked ', ' booking ',
+];
+// Every conditional trigger word this PR's local+Codex audit has raised,
+// used BOTH to split a sentence into its individual condition clauses (see
+// extractConditionalClauses) and to decide whether a sentence is a
+// conditional at all (turnHasUnresolvedConditional, above, folds these into
+// CONDITIONAL_TOKENS as whole-token phrases). "if" is deliberately absent
+// from CONDITIONAL_TOKENS (it gets the benign-closer exemption there) but
+// IS a trigger here, so a clause that starts with an "if" nested inside an
+// already-conditional sentence still gets split out and evaluated on its
+// own. Bare "should" is deliberately EXCLUDED — "it should go to him" is
+// ordinary modal usage, not a conditional; only the inverted "should the
+// technician be unavailable…" construction is.
+const CONDITION_TRIGGER_RE = /\b(if|unless|as long as|provided|once|when|assuming|subject to|depending|depends|pending|should the)\b/i;
+// Splits a raw sentence into EVERY condition clause it contains — not just
+// the first (codex P1, finding 1: "If the email goes to you, let me know,
+// AND IF the technician is available, I'll call you." has TWO clauses; a
+// single-match extractor read only the benign first one and missed the
+// technician-availability clause entirely). Each clause runs from just
+// after its trigger word to the next comma, the next trigger word, or the
+// end of the sentence — whichever comes first, so one clause never eats
+// into the next.
+function extractConditionalClauses(rawSentence) {
   const s = String(rawSentence || '');
-  const m = CONDITION_TRIGGER_RE.exec(s);
-  if (!m) return null;
-  const after = s.slice(m.index + m[0].length);
-  const commaIdx = after.indexOf(',');
-  const clauseRaw = commaIdx === -1 ? after : after.slice(0, commaIdx);
-  return normalizeCommitmentText(clauseRaw);
+  const re = new RegExp(CONDITION_TRIGGER_RE.source, 'gi');
+  const triggers = [];
+  let m = re.exec(s);
+  while (m !== null) {
+    triggers.push({ start: m.index, end: m.index + m[0].length });
+    m = re.exec(s);
+  }
+  const clauses = [];
+  for (let i = 0; i < triggers.length; i += 1) {
+    const segStart = triggers[i].end;
+    const segEnd = i + 1 < triggers.length ? triggers[i + 1].start : s.length;
+    const segment = s.slice(segStart, segEnd);
+    const commaIdx = segment.indexOf(',');
+    const clauseRaw = commaIdx === -1 ? segment : segment.slice(0, commaIdx);
+    const ns = normalizeCommitmentText(clauseRaw);
+    if (ns) clauses.push(ns);
+  }
+  return clauses;
 }
 const CONDITION_CLAUSE_GLUE_WORDS = new Set([
   'it', 'that', 'this', 'they', 'he', 'she', 'is', 'are', 'was', 'were',
@@ -965,22 +1013,46 @@ function isBarePronounClause(clauseNs) {
   const toks = clauseNs.split(' ').filter(Boolean);
   return toks.length > 0 && toks.every((t) => CONDITION_CLAUSE_GLUE_WORDS.has(t));
 }
-function sentenceHasNonBenignConditional(ns, rawSentence, prevNs) {
-  if (sentenceReferencesAuthorizationPartyOrAct(ns)) return true;
-  const padded = ` ${ns} `;
-  const isConditional = turnHasUnresolvedConditional(ns) || padded.includes(' subject to ');
-  if (!isConditional) return false;
-  const clause = extractConditionClause(rawSentence);
-  // A conditional was detected but the trigger couldn't be isolated in the
-  // raw text (shouldn't normally happen — fail closed rather than guess).
-  if (clause == null) return true;
-  const clausePadded = ` ${clause} `;
-  if (BENIGN_NON_BOOKING_TOPICS.some((t) => clausePadded.includes(t))) return false;
-  if (prevNs && isBarePronounClause(clause)) {
+// Decides whether ONE already-extracted, already-normalized condition
+// clause is safe. DEFAULT IS POISON, same shape as the rest of this file:
+// any authorization/unavailability/scheduling-staffing term ANYWHERE in the
+// clause poisons it outright (codex P1, finding 5: the benign/poison call
+// must be about the clause's own subject, never rescued by a benign word
+// living in the sentence's consequent), and a clause is only benign when it
+// is IDENTIFIABLY about one of the small, curated, non-booking topics (who
+// a notification/email/text/invoice/report goes to). A BARE-PRONOUN clause
+// ("if it does", "if it goes to you") names no topic of its own, so ONLY
+// then does the referent resolve against the PREVIOUS sentence's benign
+// nouns; a clause with any actual content word never falls back.
+function clauseIsBenign(clauseNs, prevNs) {
+  if (!clauseNs) return false;
+  const padded = ` ${clauseNs} `;
+  if (AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))) return false;
+  if (UNAVAILABILITY_TERMS.some((t) => padded.includes(t))) return false;
+  if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
+  if (BENIGN_NON_BOOKING_TOPICS.some((t) => padded.includes(t))) return true;
+  if (prevNs && isBarePronounClause(clauseNs)) {
     const prevPadded = ` ${prevNs} `;
-    if (BENIGN_NON_BOOKING_TOPICS.some((t) => prevPadded.includes(t))) return false;
+    if (BENIGN_NON_BOOKING_TOPICS.some((t) => prevPadded.includes(t))) return true;
   }
-  return true;
+  return false;
+}
+// Top-level poison test for ONE sentence OTHER than the pinned commitment
+// sentence (agentCommitmentSentenceVerified calls this for every sentence
+// in the turn). DEFAULT IS POISON: a declarative authorization/
+// unavailability statement poisons unconditionally; otherwise a sentence
+// with no conditional trigger at all is clean, and a conditional sentence
+// poisons unless EVERY one of its clauses (extractConditionalClauses) is
+// benign (clauseIsBenign) — one bad clause among several benign ones still
+// poisons the whole sentence (codex P1, finding 1).
+function sentenceHasUnmetCondition(ns, rawSentence, prevNs) {
+  if (sentenceHasDeclarativePoisonVocabulary(ns)) return true;
+  if (!turnHasUnresolvedConditional(ns)) return false;
+  const clauses = extractConditionalClauses(rawSentence);
+  // A conditional was detected but no clause could be isolated in the raw
+  // text (shouldn't normally happen — fail closed rather than guess).
+  if (!clauses.length) return true;
+  return !clauses.every((clause) => clauseIsBenign(clause, prevNs));
 }
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves
@@ -1113,13 +1185,22 @@ function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStart
   // "oclock" as one, so the same regex covers both. A bare "at N" is
   // accepted ONLY when it is immediately followed by the end of the
   // sentence or "on <weekday>" — anywhere else "at 10" is too likely to be
-  // an address or an unrelated number. Neither form states a period, so it
-  // is INFERRED from the Waves business day (7am–6pm): 7–11 reads as
-  // morning, 12 as noon, 1–6 as afternoon. That inferred period must still
-  // equal the confirmed slot's period and N must still equal the slot's
-  // 12-hour number through the same `mentions` check below — "10 o'clock"
-  // (inferred am) binds a 10:00 slot and does NOT bind a 22:00 one, whose
-  // 12-hour form is also "10" but whose period is pm.
+  // an address or an unrelated number. Neither form states its OWN period by
+  // construction, but "N o'clock" can still be followed by an EXPLICIT
+  // am/pm ("10 o'clock PM") — codex P1: inferring the period unconditionally
+  // ignored that marker and both recorded the wrong slot (an explicit PM
+  // read as the inferred AM) and refused to bind the slot the caller
+  // actually said. The o'clock regex below consumes a following am/pm FIRST
+  // and uses it verbatim when present; only an "N o'clock" with NO trailing
+  // period falls back to inferring one from the Waves business day
+  // (7am–6pm: 7–11 reads as morning, 12 as noon, 1–6 as afternoon). A bare
+  // "at N" carries no slot for a trailing period to attach to (its lookahead
+  // requires end-of-sentence or "on <weekday>" right after the number), so
+  // it keeps inferring unconditionally. Either way the resulting period AND
+  // hour must still equal the confirmed slot's through the same `mentions`
+  // check below — "10 o'clock" (inferred am) binds a 10:00 slot and does NOT
+  // bind a 22:00 one; "10 o'clock PM" (explicit pm) binds a 22:00 slot and
+  // does NOT bind a 10:00 one.
   const mentions = new Set();
   for (const m of q.matchAll(/(?:^| )(\d{1,2})(?: 00)? (am|pm)(?= |$)/g)) {
     const h = String(Number(m[1]));
@@ -1134,10 +1215,15 @@ function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStart
     if (n >= 1 && n <= 6) return 'pm';
     return null;
   };
-  for (const m of q.matchAll(/(?:^| )(\d{1,2}) o ?clock(?= |$)/g)) {
+  for (const m of q.matchAll(/(?:^| )(\d{1,2}) o ?clock(?: (am|pm))?(?= |$)/g)) {
     const n = Number(m[1]);
-    const period = inferPeriodFromBusinessHours(n);
-    mentions.add(period ? `${n} ${period}` : `invalid ${m[1]} oclock`);
+    const explicitPeriod = m[2] || null;
+    if (explicitPeriod) {
+      mentions.add((n >= 1 && n <= 12) ? `${n} ${explicitPeriod}` : `invalid ${m[1]} oclock ${explicitPeriod}`);
+    } else {
+      const period = inferPeriodFromBusinessHours(n);
+      mentions.add(period ? `${n} ${period}` : `invalid ${m[1]} oclock`);
+    }
   }
   const AT_WEEKDAY_RE = new RegExp(`(?:^| )at (\\d{1,2})(?= $| on (?:${WEEKDAY_NAMES.join('|')})(?= |$))`, 'g');
   for (const m of q.matchAll(AT_WEEKDAY_RE)) {

@@ -97,8 +97,21 @@ function checkTcpaConsent(extraction, opts = {}) {
 // dictating the booking on the recording), so a commercial call that used to
 // land in review can auto-route; a force-reprocess must write a fresh
 // decision row rather than onConflict-ignore into the stale needs_review one.
-const V2_DECISION_VERSION = 'v2-1.8.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0'];
+// v2-1.9.0: the grounded-agent-commitment sentence scan
+// (hasAgentCommittedEvidence / agentCommitmentSentenceVerified in
+// call-triage-flags.js) closed three false-positive gaps a local+Codex
+// audit found — a sentence's SECOND (and later) conditional clause is now
+// inspected instead of only the first, a declarative unavailability
+// statement ("The technician is unavailable.") now poisons like an unmet-
+// authorization one already did, and the "N o'clock" time matcher now
+// honors an explicit trailing am/pm instead of always inferring one from
+// business hours. A call whose old pass demoted caller_not_authorized or
+// commercial_requires_quote on one of these shapes now stays blocked
+// instead — strictly MORE conservative, never less — so a force-reprocess
+// must write a fresh decision row rather than onConflict-ignore into the
+// stale auto-routed one.
+const V2_DECISION_VERSION = 'v2-1.9.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0'];
 
 function buildRouteDecision({
   callLogId,
