@@ -1472,7 +1472,7 @@ function annualPrepayOverlapStatusClause() {
 // concurrent submissions (double-click, or two admins) can both pass that check
 // and create duplicate invoices/terms/payments. Throws a tagged error the route
 // translates to a 409. Statuses mirror the pre-flight overlap query.
-async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, allowOverlap, errorPrefix) {
+async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, allowOverlap, errorPrefix, excludeEstimateId = null) {
   await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [ANNUAL_PREPAY_LOCK_NS, String(customerId)]);
   if (allowOverlap === true) return;
   const activeTerm = await trx('annual_prepay_terms')
@@ -1485,6 +1485,26 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
     const message = `${errorPrefix} ${activeTermEnd}. Use a start date after ${activeTermEnd}.`;
     const err = new Error(message);
     err.annualPrepayOverlap = { error: message, activeTermId: activeTerm.id, activeTermEnd };
+    throw err;
+  }
+  // Sign-before-pay overlap (termite annual-plan restructure): a termite
+  // annual-plan estimate parked awaiting the customer's signature is a
+  // binding commitment too, even though it has no annual_prepay_terms row
+  // yet (estimate-converter.js's parkTermiteAnnualPlanAccept defers that
+  // row until signature) — without this check, under the SAME per-customer
+  // lock this function already holds, a second annual estimate for the
+  // same customer could park while the first is still awaiting signature,
+  // and signing BOTH would double-bill the year. excludeEstimateId lets a
+  // retry of the SAME estimate (already awaiting_signature) pass through
+  // rather than self-block.
+  let awaitingSignatureQuery = trx('estimates')
+    .where({ customer_id: customerId, annual_plan_activation_status: 'awaiting_signature' });
+  if (excludeEstimateId) awaitingSignatureQuery = awaitingSignatureQuery.whereNot({ id: excludeEstimateId });
+  const awaitingSignatureEstimate = await awaitingSignatureQuery.first('id');
+  if (awaitingSignatureEstimate) {
+    const message = `This account already has a termite annual agreement (estimate #${awaitingSignatureEstimate.id}) awaiting the customer's signature. Sign or cancel it before accepting another annual plan.`;
+    const err = new Error(message);
+    err.annualPrepayOverlap = { error: message, awaitingSignatureEstimateId: awaitingSignatureEstimate.id };
     throw err;
   }
 }

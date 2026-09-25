@@ -1383,7 +1383,7 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
     // anchored to the booked date) before conversion.
     const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
     expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
-      database, 'customer-onbook', '2026-07-30', false, expect.any(String),
+      database, 'customer-onbook', '2026-07-30', false, expect.any(String), 'estimate-prepay-onbook',
     );
   });
 

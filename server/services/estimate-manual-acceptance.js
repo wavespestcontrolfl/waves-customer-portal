@@ -935,15 +935,20 @@ async function markEstimateManuallyAccepted({
             annualPrepayTermStart || etDateString(),
             false,
             'Customer already has an annual prepay term through',
+            updatedEstimate.id,
           );
         }
         conversion = await estimateConverter.convertEstimate(updatedEstimate.id, convertOptions);
-        // Sign-before-pay (slice 3a, codex P1): a termite annual-plan
+        // Sign-before-pay (slice 3a restructure): a termite annual-plan
         // manual accept intentionally defers its invoice + prepay term
         // until the customer e-signs — a missing draftInvoiceId is the
-        // EXPECTED outcome then, not a failure to roll back.
+        // EXPECTED outcome then, not a failure to roll back. Fallback P1:
+        // ANY truthy annualPlanActivationStatus is a park outcome
+        // ('awaiting_signature' the common case, 'activated' on an
+        // idempotent replay, or a concurrent-write re-read) — never
+        // narrowed to one exact string.
         if (annualPrepaySelected && !conversion?.draftInvoiceId
-          && conversion?.annualPlanActivationStatus !== 'awaiting_signature') {
+          && !conversion?.annualPlanActivationStatus) {
           throw new Error('Annual prepay invoice was not created');
         }
       } catch (err) {
