@@ -915,6 +915,14 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('Codex #4816 r10: an uncertain-duration fact is not known-temporary — it still rings the review bell', async () => {
+    await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration: 'uncertain' }] }, context);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS instructions need review');
+  });
+
   test('R4 owner ruling 2026-09-24: an existing-value conflict still rings the review bell', async () => {
     await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_controller_location: 'Behind the shed' });
     context = await loadMessageContext(mockPg, message);

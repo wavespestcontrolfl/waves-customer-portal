@@ -829,7 +829,6 @@ describe('fulfillment proof', () => {
   });
 
   test('R2 owner ruling 2026-09-24 (settled r7): a payment is evidence for any "other" ask the model may weigh, and never closes without the model', () => {
-    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
     const invoicePaid = { type: 'payment', payment_source: 'invoice', id: 'invoice-1', ref: 'payment:invoice-1', paid_at: '2040-03-11T15:00:00Z',
       text: 'Invoice Quarterly paid 2040-03-11' };
     const smsReceipt = { type: 'payment', payment_source: 'sms', id: 'sms-1', status: 'delivered', message_type: 'receipt' };
@@ -839,12 +838,6 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(invoicePaid, paymentOther)).toBe(true);
     expect(admissibleWitness(smsReceipt, paymentOther)).toBe(true);
     expect(admissibleWitness(invoicePaid, nonPaymentOther)).toBe(true);
-    // Codex #4816 r7: whether money landing answers THIS question is semantic
-    // ("why is my balance wrong?", "send the receipt"), so no payment ask —
-    // however strongly worded — closes without the model.
-    for (const description of ['What is the Zelle number?', 'Did my payment go through?', 'Why is my balance wrong?', 'Can you send the receipt?']) {
-      expect(systemEventFulfillment({ records: [invoicePaid], failures: [] }, { kind: 'other', description, sms_context: ctx })).toBeNull();
-    }
     // Payment evidence is `other`-only — even a payment-worded ask of another kind does not admit it.
     expect(admissibleWitness(invoicePaid, { kind: 'callback', description: 'Call me about my payment' })).toBe(false);
     // Money going the other way is never answered by money landing (Codex r5).
@@ -854,14 +847,12 @@ describe('fulfillment proof', () => {
   });
 
   test('Codex #4816 r1: a visit never system-closes a schedule_visit or technician_follow_up (service match stays with the model)', () => {
-    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
     const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed', property_id: PROPERTY_ID,
       created_at: '2040-03-11T15:00:00Z', booked_at: '2040-03-11T15:00:00Z', completed_at: '2040-03-12T15:00:00Z', transitioned_at: '2040-03-12T15:00:00Z',
       text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status completed' };
     for (const kind of ['schedule_visit', 'technician_follow_up']) {
       const commitment = { kind, sms_context: { property_id: PROPERTY_ID, source_at: '2040-03-10T15:00:00Z' } };
       expect(admissibleWitness(visitWitness, commitment)).toBe(true);
-      expect(systemEventFulfillment({ records: [visitWitness], failures: [] }, commitment)).toBeNull();
     }
   });
 
@@ -882,13 +873,11 @@ describe('fulfillment proof', () => {
   });
 
   test('Codex #4816 r7: a cancellation after the text answers a cancel ask for the model only; it never closes "still coming?"', () => {
-    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
     const cancelled = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'cancelled', created_at: '2040-03-01T15:00:00Z',
       cancelled_at: '2040-03-11T15:00:00Z', text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status cancelled; cancelled after the request' };
     const cancelAsk = { kind: 'other', description: 'Please cancel my appointment on Thursday', sms_context: ctx };
     expect(admissibleWitness(cancelled, cancelAsk)).toBe(true);
-    expect(systemEventFulfillment({ records: [cancelled], failures: [] }, cancelAsk)).toBeNull();
     // Cancelled before the text: no witness.
     expect(admissibleWitness({ ...cancelled, cancelled_at: '2040-03-09T15:00:00Z' }, cancelAsk)).toBe(false);
     // A callback is answered by a call or field progress, never a cancellation.
@@ -908,25 +897,17 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(delivered('receipt'), { kind: 'send_reschedule_link' })).toBe(false);
   });
 
-  test('R1 owner ruling 2026-09-24: visit progress is fulfilled deterministically, with no model call', () => {
-    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
+  test('R1 owner ruling 2026-09-24 (settled r10): visit progress is admissible for other/callback asks; the model decides', () => {
     const other = { kind: 'other', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
     const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed',
       created_at: '2040-03-09T15:00:00Z', progressed_at: '2040-03-11T15:00:00Z',
       text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status completed' };
-    const fulfilled = systemEventFulfillment({ records: [visitWitness], failures: [] }, other);
-    expect(fulfilled).toMatchObject({ verdict: 'fulfilled', reason: 'system_event', record_type: 'visit', record_id: 'visit-1' });
-    expect(typeof fulfilled.evidence_hash).toBe('string');
-    // No admissible visit/payment witness: no system-event verdict, and the
-    // caller falls through to its own `verify`.
-    expect(systemEventFulfillment({ records: [{ ...visitWitness, progressed_at: null }], failures: [] }, other)).toBeNull();
-    expect(systemEventFulfillment({ records: [], failures: [] }, other)).toBeNull();
-    // A non-visit/payment witness (e.g. a delivered staff sms) is never a
-    // system event, even if it happens to be otherwise admissible for some
-    // other kind.
-    const smsWitness = { id: 'sms-1', ref: 'sms:sms-1', type: 'sms', status: 'delivered', message_type: 'confirmation',
-      text: 'Your appointment is confirmed' };
-    expect(systemEventFulfillment({ records: [smsWitness], failures: [] }, { kind: 'send_appointment_confirmation' })).toBeNull();
+    expect(admissibleWitness(visitWitness, other)).toBe(true);
+    expect(admissibleWitness(visitWitness, { ...other, kind: 'callback' })).toBe(true);
+    expect(admissibleWitness({ ...visitWitness, progressed_at: null }, other)).toBe(false);
+    // Codex #4816 r10: the no-model close is gone — "please cancel Thursday"
+    // is also `other`, and a tech going en route does not answer it.
+    expect(require('../services/sms-commitment-fulfillment').systemEventFulfillment).toBeUndefined();
   });
 
   test('a visit needs post-request scheduling or completion activity', () => {

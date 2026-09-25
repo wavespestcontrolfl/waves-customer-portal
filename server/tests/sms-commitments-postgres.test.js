@@ -1031,7 +1031,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('R1 owner ruling 2026-09-24: a visit system event closes a NULL-due "other" commitment deterministically, with no model call and no bell', async () => {
+  test('R1 owner ruling 2026-09-24 (settled r10): field progress sends a NULL-due "other" ask to the model at once; a grounded verdict closes it, no bell', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
       quote: 'You still coming this morning?', description: 'You still coming this morning?' };
@@ -1048,18 +1048,18 @@ postgres('SMS commitments on PostgreSQL', () => {
       created_at: new Date(message.created_at.getTime() - 1000),
     }).returning('id');
     await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
-    const verify = jest.fn(() => { throw new Error('verify must never be called for a system-event closure'); });
-    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
-    expect(verify).not.toHaveBeenCalled();
-    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`,
+      quote: 'en route/on site/completed after the request' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
     const commitment = await mockPg('call_commitments').first();
     expect(commitment.status).toBe('fulfilled');
-    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', reason: 'system_event', record_type: 'visit', record_id: visit.id });
+    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', basis: 'grounded_sms_request_outcome', record_type: 'visit', record_id: visit.id });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('R1 owner ruling 2026-09-24: a visit system event closes an "other" ask INSIDE its default 24h window, the moment it happens', async () => {
+  test('R1 owner ruling 2026-09-24 (settled r10): field progress reaches the model INSIDE the default 24h window, the moment it happens', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
       quote: 'You still coming this morning?', description: 'You still coming this morning?' };
@@ -1076,13 +1076,14 @@ postgres('SMS commitments on PostgreSQL', () => {
       created_at: new Date(message.created_at.getTime() - 1000),
     }).returning('id');
     await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
-    const verify = jest.fn(() => { throw new Error('verify must never be called for a system-event closure'); });
-    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
-    expect(verify).not.toHaveBeenCalled();
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`,
+      quote: 'en route/on site/completed after the request' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1, skipped_not_due: 0 });
     const commitment = await mockPg('call_commitments').first();
     expect(commitment.status).toBe('fulfilled');
-    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', reason: 'system_event', record_type: 'visit', record_id: visit.id });
+    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', basis: 'grounded_sms_request_outcome', record_type: 'visit', record_id: visit.id });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -1158,7 +1159,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('R1 owner ruling 2026-09-24: on-site field progress closes a NULL-due "callback" commitment deterministically', async () => {
+  test('R1 owner ruling 2026-09-24 (settled r10): on-site field progress sends a NULL-due "callback" to the model, which may close it', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'callback', due_at: null,
       quote: 'Can you call me back?', description: 'Can you call me back?' };
@@ -1172,13 +1173,14 @@ postgres('SMS commitments on PostgreSQL', () => {
       created_at: new Date(message.created_at.getTime() - 1000),
     }).returning('id');
     await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site', transitioned_at: after });
-    const verify = jest.fn(() => { throw new Error('verify must never be called for a system-event closure'); });
-    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
-    expect(verify).not.toHaveBeenCalled();
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`,
+      quote: 'en route/on site/completed after the request' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
     const commitment = await mockPg('call_commitments').first();
     expect(commitment.status).toBe('fulfilled');
-    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', reason: 'system_event', record_type: 'visit', record_id: visit.id });
+    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', basis: 'grounded_sms_request_outcome', record_type: 'visit', record_id: visit.id });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -1343,6 +1345,16 @@ postgres('SMS commitments on PostgreSQL', () => {
       invoice_number: 'WPC-2026-0701', title: 'Quarterly Pest Control', total: 125, status: 'paid', paid_at: after }).returning('id');
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(before),
       metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: before });
+    const commitment = { kind: 'other', description: 'Did you receive my payment?',
+      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
+    expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
+  });
+
+  test('Codex #4816 r10: money a third-party payer settles is not the customer\'s own payment', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 300, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ payer_id: randomUUID() }), created_at: after });
     const commitment = { kind: 'other', description: 'Did you receive my payment?',
       sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));

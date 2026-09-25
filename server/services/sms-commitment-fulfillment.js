@@ -24,7 +24,8 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 // keyed on unchanged evidence would otherwise never be rechecked.
 // 4: R1–R3 witness rules (#4816) — bumped so cached invalid_witness checks re-ground.
 // 5: payments are model-only evidence; cancellations answer cancel asks (#4816 r7).
-const FULFILLMENT_POLICY = 5;
+// 6: no no-model close at all; payer-billed money is not the customer's (#4816 r10).
+const FULFILLMENT_POLICY = 6;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -156,7 +157,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // after the request — an older partial payment cannot vouch for a
       // remainder covered by credit later (Codex #4816 r9). payment_date is
       // an Eastern business DATE, so it gets the request's day as a floor.
-      conn('invoices').where({ customer_id: customerId }).where('paid_at', '>', after).where('paid_at', '<=', now)
+      // Payer-billed invoices keep the homeowner's customer_id but are settled
+      // by a third party (invoices.payer_id, payments.metadata.payer_id):
+      // that money is not the customer's own payment (Codex #4816 r10).
+      conn('invoices').where({ customer_id: customerId }).whereNull('payer_id').where('paid_at', '>', after).where('paid_at', '<=', now)
         .whereExists(function paymentForThisInvoice() {
           this.select(conn.raw('1')).from('payments as p').where('p.status', 'paid')
             .where('p.created_at', '>', after).where('p.created_at', '<=', now)
@@ -172,6 +176,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // model may weigh (Codex #4816 r6); with nothing tying it to a charge
       // it never takes the no-model shortcut.
       conn('payments').where({ customer_id: customerId, status: 'paid' })
+        .whereRaw("COALESCE(metadata::jsonb ->> 'payer_id', '') = ''")
         .where('created_at', '>', after).where('created_at', '<=', now)
         .orderBy('created_at', 'desc').limit(LIMIT + 1)
         .select('id', 'amount', 'description', 'payment_date', 'created_at'),
@@ -449,40 +454,15 @@ function groundFulfillment(parsed, evidence, commitment) {
 }
 
 // R1 (owner ruling 2026-09-24, "you still coming this morning?" / "still saw
-// ants" — a real-world event that already happened does not need a model's
-// opinion): visible field progress on a visit that is admissible for this
-// commitment closes it deterministically, with no LLM call. Payments and
-// cancellations are admissible too, but only the model may close on them:
-// whether money landing (or a cancellation) answers THIS question is
-// semantic (Codex #4816 r2–r7). Reuses
-// groundFulfillment's own witness/quote/property grounding by handing it the
-// witness's own text back as the "quote" — trivially self-grounded — so a
-// system-event closure gets exactly the same property-scope, truncation and
-// revalidation guarantees as a model-grounded one.
-// Events (not messages): an admissible one reaches the model at once, even
-// inside an open window. Only visit progress closes without the model.
+// ants"): an event record — a visit's field progress, move or cancellation,
+// or money landing — reaches the model the moment it happens, even inside an
+// open window, instead of waiting for the deadline like a message witness.
+// There is no no-model close: the other kind also carries cancellations,
+// payment support and missing materials, and whether a given event answers
+// THIS ask is semantic (Codex #4816 r2–r10). The dry-run misses that R1 set
+// out to fix were the model citing a context record; the prompt now names
+// witness_refs, so it cites the admissible event.
 const SYSTEM_EVENT_TYPES = ['visit', 'payment'];
-// Only the asks the owner ruled on: a nagging "still coming?" / "call me
-// back" (other, callback) is answered by ANY field progress at the property.
-// A schedule_visit or
-// technician_follow_up names a particular service, and a visit record alone
-// cannot prove it is that service (Codex #4816 r1: a lawn visit must not
-// close a termite-inspection request), so those keep the model's
-// service/scope comparison.
-const SYSTEM_EVENT_KINDS = ['other', 'callback'];
-function systemEventFulfillment(evidence, commitment) {
-  if (!SYSTEM_EVENT_KINDS.includes(commitment.kind)) return null;
-  const witness = evidence.records.find((record) => record.type === 'visit'
-    && PROGRESS_STATUSES.includes(record.status) && admissibleWitness(record, commitment, evidence.records));
-  if (!witness) return null;
-  const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
-  if (grounded.verdict !== 'fulfilled') return null;
-  // Same shape verifySmsFulfillment produces (evidence_hash for the cache/
-  // revalidation check, no retry_after) so revalidateSmsFulfillment's
-  // under-transaction re-check and the persisted sms_context.fulfillment_check
-  // work identically whether the verdict came from the model or from here.
-  return { ...grounded, reason: 'system_event', evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash, retry_after: null };
-}
 
 function fulfillmentFingerprint(commitment, evidence) {
   const { fulfillment_check: _previous, ...sms_context } = commitment.sms_context || {};
@@ -595,4 +575,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, witness_refs: witnessR
   return groundFulfillment(result.json, evidence, commitment);
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, systemEventFulfillment, FULFILLMENT_POLICY, PAYMENT_SMS_TYPES, SYSTEM_EVENT_TYPES };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, PAYMENT_SMS_TYPES, SYSTEM_EVENT_TYPES };

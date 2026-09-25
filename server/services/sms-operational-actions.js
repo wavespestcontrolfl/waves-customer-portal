@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, systemEventFulfillment, SYSTEM_EVENT_TYPES } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -374,8 +374,12 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // its own. It still rides in `analysis.facts` with that outcome, and
     // still counts toward `unverified_count` on a bell that fires for some
     // OTHER real exception in the same message.
-    const temporaryFacts = facts.filter((f) => f.outcome === 'temporary_instruction');
-    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied', 'temporary_instruction'].includes(f.outcome));
+    // Only a KNOWN-temporary fact is silent: the extractor marks ambiguous
+    // timing duration 'uncertain' precisely for staff review, so that one
+    // still rings (Codex #4816 r10).
+    const temporaryFacts = facts.filter((f) => f.outcome === 'temporary_instruction' && f.duration !== 'uncertain');
+    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome)
+      && !temporaryFacts.includes(f));
     let notification = null;
     // Owner ruling 2026-09-24: dropped model proposals (rejected by the
     // grounding filter) are not, on their own, a real exception — only a
@@ -604,26 +608,19 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       skippedNoWitness += 1;
       continue;
     }
-    // R1 (owner ruling 2026-09-24): visible field progress that already
-    // answers this ask closes it deterministically — no model call, and
-    // `verify` is never invoked for it (payments always go to the model,
-    // Codex #4816 r7).
-    const systemVerdict = systemEventFulfillment(evidence, current);
-    // Inside an open window only a system event may act. For a kind whose
-    // event needs the model's service/scope check (schedule_visit,
-    // technician_follow_up, any payment, a cancellation) an admissible visit or
-    // payment record reaches `verify` at once (Codex #4816 r2); a message
+    // R1 (owner ruling 2026-09-24): inside an open window only an event may
+    // act. An admissible visit or payment record (field progress, a move, a
+    // cancellation, money landing) reaches `verify` at once; a message
     // witness (a staff text, a call) waits for the deadline before it costs
-    // a model call, exactly as a stated-deadline row always has.
-    // (A system verdict always rests on such a record. A NULL due_at reads
-    // as the epoch, never an open window.)
+    // a model call, exactly as a stated-deadline row always has. A NULL
+    // due_at reads as the epoch, never an open window.
     const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
       && admissibleWitness(record, current, evidence.records));
     if (!eventWitness && new Date(row.due_at) > now) {
       skippedNotDue += 1;
       continue;
     }
-    const verdict = systemVerdict || await verify(current, evidence, { now });
+    const verdict = await verify(current, evidence, { now });
     if (verdict.verdict === 'uncertain') unverified += 1;
     await conn.transaction(async (trx) => {
       // Match merge and intake: customer, source, then commitment. A relink
