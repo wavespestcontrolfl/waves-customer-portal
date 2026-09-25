@@ -61,6 +61,7 @@ jest.mock('../services/estimate-clarify-asks', () => ({
 }));
 const mockRecheck = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/photo-triage-opportunity', () => ({
+  ...jest.requireActual('../services/photo-triage-opportunity'),
   recheckDraftOffer: (...args) => mockRecheck(...args),
 }));
 
@@ -136,6 +137,7 @@ function photoDraft(overrides = {}) {
     revised_response: null,
     final_response: null,
     created_at: new Date(Date.now() - 60000).toISOString(),
+    context_summary: 'Photo triage ran a tree_shrub assessment and gauged it as quote (actionable, quoted). Offer core priced tree_shrub at $83.33 per application — owner-only; the draft text carries no price. Review the assessment before approving.',
     flags: JSON.stringify(PHOTO_FLAGS),
     ...overrides,
   };
@@ -198,6 +200,9 @@ describe('approve — photo-triage offer recheck wiring', () => {
     // The pitch sentence is gone from the text a second Approve would send.
     expect(release.payload.draft_response).toBe('Thanks for the photo. Reply if you have questions.');
     expect(release.payload.draft_response).not.toMatch(/quote/i);
+    // The stale owner-only price sentence is gone from the context too.
+    expect(release.payload.context_summary).not.toMatch(/\$83\.33/);
+    expect(release.payload.context_summary).toMatch(/Held at approve: the customer now has tree_shrub on their plan/);
   });
 
   test('figure drifted → 409 PHOTO_TRIAGE_REPRICED and the released row carries the refreshed owner-only figure', async () => {
@@ -219,6 +224,9 @@ describe('approve — photo-triage offer recheck wiring', () => {
     expect(flags.quote_repriced_at).toBeTruthy();
     // The customer text is untouched — it never carried a price.
     expect(release.payload.draft_response).toBeUndefined();
+    // The owner-only context carries the NEW figure only.
+    expect(release.payload.context_summary).toMatch(/\$91\.50 per application/);
+    expect(release.payload.context_summary).not.toMatch(/\$83\.33/);
   });
 
   test('recheck lookup failure → 503, claim released', async () => {

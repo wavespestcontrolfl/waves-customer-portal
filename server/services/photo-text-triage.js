@@ -74,7 +74,7 @@ const {
 const { isSignableStoredMediaKey } = require('./sms-media');
 const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 const { countSegments } = require('./messaging/segment-counter');
-const { gaugeOpportunity, teaserOutcome, outcomeFor } = require('./photo-triage-opportunity');
+const { gaugeOpportunity, teaserOutcome, outcomeFor, priceContextSentence } = require('./photo-triage-opportunity');
 const { safePublicFirstName } = require('../utils/public-report-egress');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
@@ -340,9 +340,7 @@ async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, cr
     status: 'pending',
     context_summary: `Photo triage ran a ${created.type} assessment on this text's photo and gauged it as ${opportunity.mode}`
       + ` (${opportunity.reasons.join(', ') || 'no signals'}).`
-      + (opportunity.quote?.per_visit
-        ? ` Offer core priced ${opportunity.quote.service} at $${Number(opportunity.quote.per_visit).toFixed(2)} per application — owner-only; the draft text carries no price.`
-        : '')
+      + (opportunity.quote?.per_visit ? ` ${priceContextSentence(opportunity.quote.service, opportunity.quote.per_visit)}` : '')
       + ' Review the assessment before approving.',
     flags: JSON.stringify({
       origin: DRAFT_INTENT,

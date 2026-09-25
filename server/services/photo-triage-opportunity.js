@@ -384,10 +384,24 @@ function stripQuotePitch(text) {
   return base.endsWith(NO_PITCH_CLOSE) ? base : `${base} ${NO_PITCH_CLOSE}`;
 }
 
+// context_summary companion: the owner-only price sentence photo-text-
+// triage writes at creation, removed on a dispatch-time hold/reprice so the
+// owner never reads a stale figure (pre-push audit r6).
+const PRICE_CONTEXT_RE = /\s*Offer core priced \S+ at \$[\d.]+ per application — owner-only; the draft text carries no price\./g;
+function priceContextSentence(service, perApplication) {
+  return `Offer core priced ${service} at $${Number(perApplication).toFixed(2)} per application — owner-only; the draft text carries no price.`;
+}
+function replacePriceContext(contextSummary, sentence) {
+  const base = String(contextSummary || '').replace(PRICE_CONTEXT_RE, '').trim();
+  return sentence ? `${base} ${sentence}`.trim() : base;
+}
+
 module.exports = {
   gaugeOpportunity,
   recheckDraftOffer,
   stripQuotePitch,
+  priceContextSentence,
+  replacePriceContext,
   teaserOutcome,
   // The resolved { kind, label, cultural, uncertain } for any type — the
   // single source photo-text-triage.js reads its draft-copy label from

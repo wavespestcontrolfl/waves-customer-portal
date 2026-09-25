@@ -535,7 +535,7 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
   const flags = parseFlags(draft.flags);
   if (flags.origin !== 'photo_triage') return { blocked: false };
   let verdict;
-  const { recheckDraftOffer, stripQuotePitch } = require('../services/photo-triage-opportunity');
+  const { recheckDraftOffer, stripQuotePitch, priceContextSentence, replacePriceContext } = require('../services/photo-triage-opportunity');
   try {
     verdict = await recheckDraftOffer({ customerId: draft.customer_id, flags });
   } catch (err) {
@@ -547,7 +547,12 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
   if (verdict.ok) return { blocked: false };
   if (verdict.repriced !== undefined) {
     const nextFlags = { ...flags, quote: { ...(flags.quote || {}), per_visit: verdict.repriced }, quote_repriced_at: new Date().toISOString() };
-    await releaseDraftClaim(draft.id, { ...releaseFields, flags: JSON.stringify(nextFlags) });
+    await releaseDraftClaim(draft.id, {
+      ...releaseFields,
+      flags: JSON.stringify(nextFlags),
+      // The owner-only price sentence is replaced, never left stale.
+      context_summary: replacePriceContext(draft.context_summary, priceContextSentence(verdict.family, verdict.repriced)),
+    });
     res.status(409).json({
       error: `The offer core now prices ${verdict.family} at $${verdict.repriced.toFixed(2)} per application — the draft's owner-only figure was refreshed; review and approve again.`,
       code: 'PHOTO_TRIAGE_REPRICED',
@@ -569,16 +574,17 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
     quote: null,
     offer_recheck_held_at: new Date().toISOString(),
   };
-  await releaseDraftClaim(draft.id, {
-    ...releaseFields,
-    flags: JSON.stringify(heldFlags),
-    draft_response: stripQuotePitch(draft.draft_response),
-  });
   const why = verdict.blocked === 'owned'
     ? `the customer now has ${verdict.family} on their plan`
     : verdict.blocked === 'unavailable'
       ? `ownership of ${verdict.family} could not be confirmed (live plan rate or lookup failure)`
       : `${verdict.family} can no longer be priced for this customer`;
+  await releaseDraftClaim(draft.id, {
+    ...releaseFields,
+    flags: JSON.stringify(heldFlags),
+    draft_response: stripQuotePitch(draft.draft_response),
+    context_summary: replacePriceContext(draft.context_summary, `Held at approve: ${why}; the quote ask was removed.`),
+  });
   res.status(409).json({
     error: `Photo-triage draft held: ${why} — the quote ask was removed from the draft; review the new copy, then approve.`,
     code: 'PHOTO_TRIAGE_OFFER_STALE',
