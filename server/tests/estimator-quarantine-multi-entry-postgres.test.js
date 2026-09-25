@@ -79,7 +79,8 @@ jest.setTimeout(60000);
       id text PRIMARY KEY, estimate_id text, twilio_call_sid text, deleted_at timestamptz,
       created_at timestamptz DEFAULT now())`, [schema]);
     await mockDatabase.raw(`CREATE TABLE ??.notifications (
-      id text PRIMARY KEY, metadata jsonb, created_at timestamptz DEFAULT now())`, [schema]);
+      id text PRIMARY KEY, metadata jsonb, created_at timestamptz DEFAULT now(),
+      title text, body text, link text, read_at timestamptz)`, [schema]);
     engine = require('../services/estimator-engine');
     persistence = require('../services/admin-estimate-persistence');
     claimSql = require('../utils/estimate-claim-sql');
@@ -384,6 +385,53 @@ jest.setTimeout(60000);
       });
       await bell('CA-bell-4', { estimator_engine: true, quote_promised: false, estimateId: identity.id });
       await expect(engine.staleDraftBellForCall('CA-bell-4', { reason: 'price_agreed_on_call' })).resolves.toBeNull();
+    });
+
+    // codex #4815 r9 P2: a request-only earlier engine run, then a pass whose
+    // extraction has quote_promised + an agreed price — the processor mints
+    // a NEWER generic promised-quote bell before the invalidation. The
+    // retirement must rewrite the engine bell that advertises the retired
+    // draft, not the newest (generic) bell.
+    test('retirement rewrites the bell that references the retired draft, not the newer generic bell (codex #4815 r9 P2)', async () => {
+      const callId = await callRow({});
+      const retired = await estimate(callId, {
+        status: 'draft',
+        extra: { estimatorEngine: { callLogId: callId, linkage_invalidated_at: '2026-09-25T08:00:00.000Z', invalidation_reason: 'price_agreed_on_call' } },
+      });
+      await mockDatabase('notifications').insert({
+        id: 'n-engine-r9', title: 'Estimate draft ready', link: '/admin/estimates', created_at: '2026-09-25T07:00:00.000Z',
+        read_at: '2026-09-25T07:30:00.000Z',
+        metadata: JSON.stringify({ callSid: 'CA-bell-r9', estimator_engine: true, quote_promised: false, estimateId: retired.id }),
+      });
+      await mockDatabase('notifications').insert({
+        id: 'n-generic-r9', title: 'Quote promised on call — send it', link: '/admin/leads', created_at: '2026-09-25T09:00:00.000Z',
+        metadata: JSON.stringify({ callSid: 'CA-bell-r9', quote_promised: true }),
+      });
+      // The retry lookup sees past the newer generic bell too.
+      await expect(engine.staleDraftBellForCall('CA-bell-r9', { reason: 'price_agreed_on_call' })).resolves.toBe(retired.id);
+
+      await expect(engine.notify({
+        call: { twilio_call_sid: 'CA-bell-r9' },
+        title: 'Price agreed on call — send the promised quote',
+        body: 'retired',
+        estimateId: null,
+        quotePromised: true,
+        link: '/admin/customers/cust-1',
+        forceUpdate: true,
+        updateOnly: true,
+        retiredByReason: 'price_agreed_on_call',
+      })).resolves.toBe(true);
+
+      const engineBell = await mockDatabase('notifications').where({ id: 'n-engine-r9' }).first();
+      expect(engineBell.title).toBe('Price agreed on call — send the promised quote');
+      expect(engineBell.link).toBe('/admin/customers/cust-1');
+      expect(engineBell.read_at).toBeNull();
+      expect(engineBell.metadata.estimateId).toBeNull();
+      const generic = await mockDatabase('notifications').where({ id: 'n-generic-r9' }).first();
+      expect(generic.title).toBe('Quote promised on call — send it');
+      expect(generic.link).toBe('/admin/leads');
+      // Idempotent: nothing still advertises the retired draft.
+      await expect(engine.staleDraftBellForCall('CA-bell-r9', { reason: 'price_agreed_on_call' })).resolves.toBeNull();
     });
   });
 });

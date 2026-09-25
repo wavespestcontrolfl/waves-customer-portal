@@ -1782,6 +1782,31 @@ async function bookingPreDraftAssessmentDrafted(bookingPreDraftPromise) {
   }
 }
 
+// codex #4815 r9 P2: when the pre-finalization agreed-price invalidation
+// fails, finalization QUEUES the verdict; the assessment pre-draft (which
+// runs first, by design) is then refused by that queued entry and returns
+// no estimateId. If the post-finalization sweep then lands and clears the
+// entry, nothing re-ran the composer — the owner-approved Waves Assessment
+// pre-draft was lost for good. Re-run it ONCE, only when the first run
+// returned no estimate BECAUSE the agreed-price verdict refused it (not a
+// gate-off / not-assessment / dead-visit skip). The re-run carries the same
+// pass identity, so a newer claim still fences its insert. Never throws.
+async function rerunAssessmentPreDraftAfterQuarantineClear({ bookingPreDraftPromise, rerun, callSid }) {
+  if (!bookingPreDraftPromise || typeof rerun !== 'function') return null;
+  try {
+    const first = await bookingPreDraftPromise;
+    if (first?.estimateId != null || first?.blockedBy !== 'price_agreed_on_call') return null;
+    const outcome = await rerun();
+    if (outcome?.estimateId != null) {
+      logger.info(`[call-proc] assessment pre-draft re-run after the agreed-price queue cleared for ${maskSid(callSid)} (estimate ${outcome.estimateId})`);
+    }
+    return outcome || null;
+  } catch (err) {
+    logger.warn(`[call-proc] assessment pre-draft re-run failed for ${maskSid(callSid)}: ${err.message}`);
+    return null;
+  }
+}
+
 // codex #4815 r3 P1 (r5 P1: live-owner mode retired — the pre-finalization
 // price-agreed call site now defers its durable-queue write into the
 // finalization transaction itself, so it never reaches this fallback at
@@ -1898,6 +1923,9 @@ async function retirePriceAgreedEstimatorBell({
       link,
       forceUpdate: true,
       updateOnly: true,
+      // Rewrite the bell(s) that advertise the retired draft, not merely
+      // the newest bell for the call (codex #4815 r9 P2).
+      retiredByReason: 'price_agreed_on_call',
     });
   } catch (notifyErr) {
     logger.warn(`[call-proc] ${logPrefix} bell retirement failed for ${maskSid(callSid)}: ${notifyErr.message}`);
@@ -13885,6 +13913,10 @@ const CallRecordingProcessor = {
     // made the exception's outcome timing-dependent instead of
     // deterministic.
     let bookingPreDraftPromise = null;
+    // The same pre-draft, re-runnable once by the price-agreed sweep when a
+    // QUEUED agreed-price verdict blocked it and that sweep then landed and
+    // cleared the entry (codex #4815 r9 P2). Same pass identity.
+    let rerunBookingPreDraft = null;
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)
       && callAgreedPrice == null) {
@@ -17321,6 +17353,10 @@ const CallRecordingProcessor = {
         const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
         if (bookingPreDraftsEnabled()) {
           const preDraftBookingId = appointmentResult.scheduledServiceId;
+          rerunBookingPreDraft = () => maybePreDraftForBooking(preDraftBookingId, {
+            ownerProcToken: procToken,
+            ownerProcGeneration: procGeneration,
+          });
           // Tracked (not void-discarded) so the price-agreed sweep below
           // can chain onto this SAME settled promise (codex #4815 r2 P2)
           // instead of racing it — this hook can supersede the same-generation
@@ -17336,10 +17372,7 @@ const CallRecordingProcessor = {
             // token — and without the generation the delegated pass-start
             // clear could not retire this pass's own (or an older)
             // generation-stamped draft block.
-            .then(() => maybePreDraftForBooking(preDraftBookingId, {
-              ownerProcToken: procToken,
-              ownerProcGeneration: procGeneration,
-            }))
+            .then(() => rerunBookingPreDraft())
             .then((outcome) => {
               if (outcome?.drafted) {
                 logger.info(`[call-proc] assessment pre-draft created for ${maskSid(callSid)} (estimate ${outcome.estimateId})`);
@@ -18530,9 +18563,10 @@ const CallRecordingProcessor = {
             // different verdict's), instead of leaving it to block new
             // drafts until the scheduler drains it. An ownership loss
             // landed nothing, so its entry stays for the drainer.
+            let clearedOwnEntry = 0;
             if (!sweepInvalidation.ownershipLost) {
               const { clearOwnQuarantinePending } = require('./estimator-engine');
-              await clearOwnQuarantinePending(call.id, { reason: 'price_agreed_on_call', generation: procGeneration });
+              clearedOwnEntry = await clearOwnQuarantinePending(call.id, { reason: 'price_agreed_on_call', generation: procGeneration });
             }
             // Same bell retirement as the pre-write pass (codex #4815 r2
             // P2, refined r3 P1) — covers the case where THAT attempt
@@ -18546,6 +18580,16 @@ const CallRecordingProcessor = {
               invalidated: sweepInvalidation.invalidated === true,
               customerId, logPrefix: 'post-finalization price-agreed',
             });
+            // The queued entry this sweep just cleared is what refused the
+            // assessment pre-draft that ran first (codex #4815 r9 P2) —
+            // re-run it once, same pass identity, so the owner-approved
+            // Waves Assessment quote is not lost. AFTER the bell retirement:
+            // the re-run's own bell must not be the one retired.
+            if (clearedOwnEntry > 0) {
+              await rerunAssessmentPreDraftAfterQuarantineClear({
+                bookingPreDraftPromise, rerun: rerunBookingPreDraft, callSid,
+              });
+            }
           }
         } catch (sweepErr) {
           logger.warn(`[call-proc] post-finalization price-agreed draft sweep failed (non-blocking): ${sweepErr.message}`);
@@ -19374,6 +19418,7 @@ CallRecordingProcessor._test = {
   bookingPreDraftAssessmentDrafted,
   pushCallToRetryLaneAfterQuarantineFailure,
   retirePriceAgreedEstimatorBell,
+  rerunAssessmentPreDraftAfterQuarantineClear,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
   resolveCallBillingPayer,

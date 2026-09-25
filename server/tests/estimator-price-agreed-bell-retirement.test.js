@@ -76,6 +76,9 @@ describe('retirePriceAgreedEstimatorBell', () => {
     expect(call.body).not.toMatch(/no quote is owed/i);
     expect(call.forceUpdate).toBe(true);
     expect(call.updateOnly).toBe(true);
+    // codex #4815 r9 P2: the rewrite targets the bell(s) advertising the
+    // draft the agreed price retired, not merely the newest bell.
+    expect(call.retiredByReason).toBe('price_agreed_on_call');
   });
 
   test('promised + NO draft invalidated: never calls notify — nothing was actually retired', async () => {

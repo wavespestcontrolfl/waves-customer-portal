@@ -200,6 +200,38 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(block.slice(0, successAt)).not.toContain('clearOwnQuarantinePending');
   });
 
+  // codex #4815 r9 P2: the queued entry the sweep cleared is what refused
+  // the assessment pre-draft that ran first — re-run it, only when THIS
+  // sweep actually cleared its own entry, and after the bell retirement (the
+  // re-run's own bell must not be the one retired).
+  test('a sweep that clears its own queued entry re-runs the blocked assessment pre-draft after retiring the bell (codex #4815 r9 P2)', () => {
+    const block = priceAgreedSweepBlock();
+    const successAt = block.indexOf('} else {', block.indexOf('if (!sweepInvalidation.ok) {'));
+    const success = block.slice(successAt);
+    const clearAt = success.indexOf('clearedOwnEntry = await clearOwnQuarantinePending(');
+    const retireAt = success.indexOf('await retirePriceAgreedEstimatorBell({');
+    const rerunGuardAt = success.indexOf('if (clearedOwnEntry > 0) {');
+    const rerunAt = success.indexOf('await rerunAssessmentPreDraftAfterQuarantineClear({');
+    expect(clearAt).toBeGreaterThan(-1);
+    expect(retireAt).toBeGreaterThan(clearAt);
+    expect(rerunGuardAt).toBeGreaterThan(retireAt);
+    expect(rerunAt).toBeGreaterThan(rerunGuardAt);
+    expect(success.slice(rerunAt, rerunAt + 200)).toContain('bookingPreDraftPromise, rerun: rerunBookingPreDraft, callSid');
+    // The re-run carries the SAME pass identity as the first run.
+    const hookAt = source.indexOf('rerunBookingPreDraft = () => maybePreDraftForBooking(preDraftBookingId, {');
+    expect(hookAt).toBeGreaterThan(-1);
+    expect(source.slice(hookAt, hookAt + 200)).toContain('ownerProcGeneration: procGeneration');
+    expect(source).toContain('.then(() => rerunBookingPreDraft())');
+    // The refusing verdict travels creator → engine result → pre-draft
+    // outcome (the pre-draft passthrough is exercised in
+    // estimator-booking-predraft.test.js).
+    const builder = fs.readFileSync(require.resolve('../services/estimator-engine/draft-builder'), 'utf8');
+    const rejectedAt = builder.indexOf("reason: 'call_rejected',");
+    expect(builder.slice(rejectedAt, rejectedAt + 500)).toContain('rejectedBy: rejected,');
+    const engine = fs.readFileSync(require.resolve('../services/estimator-engine/index'), 'utf8');
+    expect(engine).toContain('result.blockedBy = draft.duplicateBlock?.rejectedBy || null;');
+  });
+
   test('the sweep delegates bell retirement to the shared helper on success, same contract as the pre-write pass (codex #4815 r2 P2, refined r3 P1)', () => {
     const block = priceAgreedSweepBlock();
     expect(block).toContain('await retirePriceAgreedEstimatorBell({');

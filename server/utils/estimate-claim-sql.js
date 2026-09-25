@@ -66,6 +66,22 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
   return false;
 }
 
+// The call's SETTLED processing generation — the pass identity a detached
+// entry point (the booking pre-draft's admin re-draft / appointment tagger,
+// the clarify re-price) adopts so the engine's pass-start clears and the
+// row-scoped supersession can retire generation-stamped markers. Valid
+// exactly while the call is settled: an in-flight claim owns the pass
+// identity, so this returns null then (the live pass performs its own
+// clears). null too for a missing row or an unstamped generation. Throws
+// on a read failure; callers own the fail-safe (adopt nothing).
+async function settledCallGeneration(dbc, callLogId) {
+  if (!callLogId) return null;
+  const row = await dbc('call_log').where({ id: callLogId })
+    .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
+  if (!row || callReprocessInFlight(row) || row.processing_generation == null) return null;
+  return Number(row.processing_generation);
+}
+
 // Pass-identity fence for CALL-ORIGIN inserts (codex P1, PR #3304 —
 // generation-rework GH round). Fence doctrine: token match = in-flight me;
 // SAME generation = no newer claim since mine (survives this pass's own
@@ -504,6 +520,7 @@ module.exports = {
   REPRICE_PENDING_ABSENT_SQL,
   ADDRESS_UNVERIFIED_ABSENT_SQL,
   callReprocessInFlight,
+  settledCallGeneration,
   callPassStillOwned,
   callSideBlockForEstimateData,
   callDraftVerdict,

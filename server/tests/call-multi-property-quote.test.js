@@ -24,6 +24,7 @@ const {
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   bookingPreDraftAssessmentDrafted,
+  rerunAssessmentPreDraftAfterQuarantineClear,
   normalizeCallExtraction,
 } = _test;
 // ONE shared resolver + formatter for the processor gate and the engine
@@ -411,6 +412,45 @@ describe('convertCallLeadOnPhoneBooking — keepOpenForQuote', () => {
 // or the call-delegated path's own "existing draft recovery" branch all
 // carry a real estimateId while `drafted` reads false). Every shape that
 // can come back from those two functions is tested here.
+// codex #4815 r9 P2: when the pre-finalization invalidation failed, the
+// QUEUED agreed-price verdict refused the assessment pre-draft that ran
+// first; once the fallback sweep lands and clears that entry, the pre-draft
+// is re-run ONCE — and only when the agreed-price verdict was the reason.
+describe('rerunAssessmentPreDraftAfterQuarantineClear', () => {
+  test('a pre-draft the queued agreed-price verdict refused is re-run once', async () => {
+    const rerun = jest.fn(async () => ({ drafted: true, delegated: 'call_engine', estimateId: 'est-assess-2' }));
+    const outcome = await rerunAssessmentPreDraftAfterQuarantineClear({
+      bookingPreDraftPromise: Promise.resolve({ drafted: false, delegated: 'call_engine', estimateId: null, blockedBy: 'price_agreed_on_call' }),
+      rerun,
+      callSid: 'CA-r9',
+    });
+    expect(rerun).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ estimateId: 'est-assess-2' });
+  });
+
+  test.each([
+    ['a pre-draft that already drafted', { drafted: true, estimateId: 'est-1' }],
+    ['a genuine skip (not an assessment)', { drafted: false, skipped: 'not_assessment' }],
+    ['a refusal by ANOTHER verdict', { drafted: false, delegated: 'call_engine', estimateId: null, blockedBy: 'email_identity_conflict' }],
+    ['a failed hook (null)', null],
+  ])('%s is never re-run', async (_label, first) => {
+    const rerun = jest.fn();
+    await expect(rerunAssessmentPreDraftAfterQuarantineClear({
+      bookingPreDraftPromise: Promise.resolve(first), rerun, callSid: 'CA-r9',
+    })).resolves.toBeNull();
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  test('no tracked pre-draft (gate off / no booking) re-runs nothing; a re-run failure never throws', async () => {
+    await expect(rerunAssessmentPreDraftAfterQuarantineClear({ bookingPreDraftPromise: null, rerun: jest.fn(), callSid: 'CA-r9' })).resolves.toBeNull();
+    await expect(rerunAssessmentPreDraftAfterQuarantineClear({
+      bookingPreDraftPromise: Promise.resolve({ estimateId: null, blockedBy: 'price_agreed_on_call' }),
+      rerun: jest.fn(async () => { throw new Error('composer down'); }),
+      callSid: 'CA-r9',
+    })).resolves.toBeNull();
+  });
+});
+
 describe('bookingPreDraftAssessmentDrafted', () => {
   test('no tracked promise (gate off / no booking) never blocks the sweep', async () => {
     expect(await bookingPreDraftAssessmentDrafted(null)).toBe(false);

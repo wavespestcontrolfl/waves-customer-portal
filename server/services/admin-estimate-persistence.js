@@ -2640,7 +2640,15 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // handoff-link recheck — an ordinary staff revision must not silently drop
 // it and revive a stale booking link for a still-unconfirmed address
 // (codex #4667 r5 P1); a clean wizard run clears it explicitly (false).
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState'];
+// assessment_exception: the Waves Assessment pre-draft's provenance
+// ({ call_log_id, generation, ... }, booking-predraft.js). When the booked
+// visit went terminal before it could be linked it is the ONLY durable
+// reason a later agreed-price cleanup spares the draft, so an ordinary
+// staff revision must carry it (codex #4815 r9 P2). It is server-owned:
+// the locked pass mirrors the locked row exactly, so a client payload can
+// neither drop it nor invent one.
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'assessment_exception'];
+const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception'];
 // The wizard's county-roll verdict (addressUnverified + addressUnverifiedFlag)
 // is carried across an ORDINARY revision (the public link and the send
 // guard both refuse while it stands), and cleared by the two staff actions
@@ -2980,6 +2988,16 @@ async function reviseAdminEstimate({
           preserved = true;
         }
       }
+      for (const key of REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS) {
+        if (existingData[key] === undefined && nextData[key] !== undefined) {
+          delete nextData[key];
+          preserved = true;
+        } else if (existingData[key] !== undefined
+          && JSON.stringify(nextData[key]) !== JSON.stringify(existingData[key])) {
+          nextData[key] = existingData[key];
+          preserved = true;
+        }
+      }
       if (carryAddressBlockAcrossRevise(nextData, existingData, {
         addressChanged: premiseChanged(estimate.address, writeFields.address),
         explicitConfirm: body?.confirmAddress === true,
@@ -3282,6 +3300,9 @@ async function reviseAdminEstimate({
         if (pendingData && typeof pendingData === 'object' && lockedData && typeof lockedData === 'object') {
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
+          }
+          for (const key of REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS) {
+            if (lockedData[key] === undefined) delete pendingData[key];
           }
           carryAddressBlockAcrossRevise(pendingData, lockedData, {
             addressChanged: premiseChanged(lockedPrior.address, revisedFields.address),

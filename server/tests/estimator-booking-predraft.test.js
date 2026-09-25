@@ -235,6 +235,21 @@ describe('maybePreDraftForBooking — call delegation', () => {
     expect(mockState.forUpdates).toContain('scheduled_services');
   });
 
+  // codex #4815 r9 P2: a delegated insert the call's QUEUED agreed-price
+  // verdict refused reports WHICH verdict, so the processor can re-run the
+  // pre-draft once its own sweep clears that entry.
+  test('a delegated insert refused by a call verdict reports blockedBy; nothing is linked', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7' }),
+      SETTLED_CALL(3),
+    ];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, blocked: true, blockedBy: 'price_agreed_on_call', lane: 'yellow' });
+    const result = await maybePreDraftForBooking('svc-1');
+    expect(result).toEqual({ drafted: false, delegated: 'call_engine', lane: 'yellow', estimateId: null, blockedBy: 'price_agreed_on_call' });
+    expect(mockState.updates).toHaveLength(0);
+  });
+
   // codex #4815 r5 P1: a RECOVERED existing draft (created:false, an
   // estimateId set by existingDraftForCall re-finding what an earlier pass
   // drafted) is only the SAME exception when it is already linked to THIS

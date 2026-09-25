@@ -193,12 +193,8 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
       let passGeneration = ownerProcGeneration;
       if (!passToken && passGeneration == null) {
         try {
-          const liveCall = await db('call_log').where({ id: delegatedCallLogId })
-            .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
-          const { callReprocessInFlight } = require('../../utils/estimate-claim-sql');
-          if (liveCall && !callReprocessInFlight(liveCall) && liveCall.processing_generation != null) {
-            passGeneration = Number(liveCall.processing_generation);
-          }
+          const { settledCallGeneration } = require('../../utils/estimate-claim-sql');
+          passGeneration = await settledCallGeneration(db, delegatedCallLogId);
         } catch (genErr) {
           logger.warn(`[booking-predraft] pass-identity resolve skipped for call ${delegatedCallLogId}: ${genErr.message}`);
         }
@@ -256,6 +252,11 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
         delegated: 'call_engine',
         lane: outcome?.lane,
         estimateId: exceptionEstimateId,
+        // The call verdict that refused the delegated insert, if any (codex
+        // #4815 r9 P2): the processor re-runs this pre-draft once when a
+        // QUEUED agreed-price verdict blocked it and its own sweep then
+        // cleared that entry.
+        ...(outcome?.blockedBy ? { blockedBy: outcome.blockedBy } : {}),
       };
     }
 

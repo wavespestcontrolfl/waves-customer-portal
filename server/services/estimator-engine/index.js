@@ -580,7 +580,7 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   // Callers may pass a specific link (the proposal builder deep-link);
   // otherwise derive the historical default from what the bell references.
@@ -614,6 +614,34 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   // insert, in-place upgrade, or a standing prior bell) — callers that
   // treat the bell as their restart-loss artifact must know it landed.
   try {
+    // Retirement targets the bell(s) that ADVERTISE the retired draft
+    // (codex #4815 r9 P2), not merely the newest bell for the call: when
+    // the quote-promised signal flips between passes, the processor mints
+    // a newer generic promised-quote bell before the invalidation runs, and
+    // the newest-row update below would rewrite THAT bell while the
+    // original "draft ready" bell kept its obsolete estimate link forever.
+    // Every engine bell for this call still pointing at a draft this
+    // verdict retired is rewritten in place (estimateId cleared, so a
+    // replay is idempotent). None found falls through to the historical
+    // newest-bell behavior.
+    if (updateOnly && retiredByReason && callSid) {
+      const stale = await retiredDraftBellsForCall(callSid, { reason: retiredByReason });
+      if (stale.length) {
+        for (const bell of stale) {
+          await db('notifications')
+            .where({ id: bell.id })
+            .whereRaw("metadata->>'estimateId' = ?", [bell.estimateId])
+            .update({
+              title,
+              body,
+              link,
+              metadata: JSON.stringify({ ...bell.meta, ...metadata }),
+              read_at: null,
+            });
+        }
+        return true;
+      }
+    }
     if (dedupe) {
       // Any prior bell for this call counts: the generic promised bell OR a
       // prior estimator bell (request-only bells carry quote_promised=false
@@ -700,35 +728,56 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
 // retirement whose notification update failed transiently was never retried:
 // every later reprocess saw the draft already stamped (invalidated:false)
 // and left the stale "draft ready" bell, amount and link standing forever.
-// This reads the bell's OWN state instead: the SAME bell notify() would
-// upgrade (same selection and order), referencing an estimate whose own
+// This reads the bell's OWN state instead: any engine bell for the call
+// (not only the newest — codex #4815 r9 P2), the same set
+// notify({ retiredByReason }) rewrites, referencing an estimate whose own
 // stamps say this verdict retired it. A bell already retired (estimateId
 // cleared) or pointing at a live draft returns null, so the retirement is
 // idempotent and never tells staff a live draft was retired. Never throws.
 async function staleDraftBellForCall(callSid, { reason }) {
   if (!callSid || !reason) return null;
   try {
-    const bell = await db('notifications')
-      .whereRaw("metadata->>'callSid' = ?", [String(callSid)])
-      .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
-      .orderBy('created_at', 'desc')
-      .first('id', 'metadata');
-    if (!bell) return null;
-    let meta = {};
-    try { meta = typeof bell.metadata === 'string' ? JSON.parse(bell.metadata) : (bell.metadata || {}); } catch { meta = {}; }
-    if (meta?.estimator_engine !== true || !meta.estimateId) return null;
-    const est = await db('estimates').where({ id: String(meta.estimateId) }).first('estimate_data');
-    if (!est) return null;
-    let data = est.estimate_data;
-    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
-    const eng = data?.estimatorEngine || {};
-    const retiredByVerdict = (!!eng.linkage_invalidated_at && eng.invalidation_reason === reason)
-      || (!!eng.invalidation_pending_at && eng.invalidation_pending_reason === reason);
-    return retiredByVerdict ? String(meta.estimateId) : null;
+    const stale = await retiredDraftBellsForCall(callSid, { reason });
+    return stale.length ? stale[0].estimateId : null;
   } catch (err) {
     logger.warn(`[estimator-engine] stale-bell lookup failed for ${callSid}: ${err.message}`);
     return null;
   }
+}
+
+// Every engine bell for the call (newest first) whose estimateId names a
+// draft `reason` retired — by that estimate's OWN stamps (landed or
+// pending). Not just the newest bell (codex #4815 r9 P2): a newer generic
+// promised-quote bell can sit in front of the stale engine bell. Throws on
+// a query failure; callers own the fail-safe.
+async function retiredDraftBellsForCall(callSid, { reason }) {
+  if (!callSid || !reason) return [];
+  const bells = await db('notifications')
+    .whereRaw("metadata->>'callSid' = ?", [String(callSid)])
+    .whereRaw("metadata->>'estimator_engine' = 'true'")
+    .whereRaw("coalesce(metadata->>'estimateId', '') <> ''")
+    .orderBy('created_at', 'desc')
+    .select('id', 'metadata');
+  const parsed = (bells || []).map((bell) => {
+    let meta = {};
+    try { meta = typeof bell.metadata === 'string' ? JSON.parse(bell.metadata) : (bell.metadata || {}); } catch { meta = {}; }
+    return { id: bell.id, meta, estimateId: meta?.estimateId ? String(meta.estimateId) : null };
+  }).filter((bell) => bell.meta?.estimator_engine === true && bell.estimateId);
+  if (!parsed.length) return [];
+  const rows = await db('estimates')
+    .whereIn('id', [...new Set(parsed.map((bell) => bell.estimateId))])
+    .select('id', 'estimate_data');
+  const retired = new Set();
+  for (const row of rows || []) {
+    let data = row.estimate_data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+    const eng = data?.estimatorEngine || {};
+    if ((!!eng.linkage_invalidated_at && eng.invalidation_reason === reason)
+      || (!!eng.invalidation_pending_at && eng.invalidation_pending_reason === reason)) {
+      retired.add(String(row.id));
+    }
+  }
+  return parsed.filter((bell) => retired.has(bell.estimateId));
 }
 
 function callerLabel(intent, context) {
@@ -3026,6 +3075,9 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
 
     if (draft.blocked) {
       result.blocked = true;
+      // Which call verdict refused the insert, when one did (codex #4815 r9
+      // P2) — see draft-builder's call_rejected block.
+      result.blockedBy = draft.duplicateBlock?.rejectedBy || null;
       // Request-only + already-open estimate = nothing is owed and nothing
       // new exists — a "quote promised" bell here would mint a false task.
       if (quotePromised) {
