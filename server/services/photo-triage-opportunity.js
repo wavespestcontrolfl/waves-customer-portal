@@ -96,7 +96,9 @@ const LARGE_SCOPE_RE = new RegExp(`\\b(both sides|all (?:of )?my|around the (?:h
 // attempted treatment AND it did not hold. "tried"/"treated" ALONE are not
 // enough — a bare "we tried a home remedy" doesn't say it failed (codex
 // review 2026-09-25); only these outcome phrases count.
-const PRIOR_TREATMENT_RE = /\b(didn.?t work|did not work|won.?t go away|can.?t get rid|keeps coming back|still there|couldn.?t)\b/i;
+// "couldn't"/"still there" need their object too — "couldn't get a better
+// photo" and "the nest is still there" describe no treatment (pre-push audit).
+const PRIOR_TREATMENT_RE = /\b(didn.?t work|did not work|won.?t go away|can.?t get rid|keeps coming back|still (?:there|here) after|couldn.?t (?:get rid|fix|kill|stop|control|treat|clear))\b/i;
 // "our lawn guy/company ... failed [to fix it]" — a wider gap between the
 // subject and the verdict, and the one failure word (failed) the plain list
 // above doesn't already cover on its own.

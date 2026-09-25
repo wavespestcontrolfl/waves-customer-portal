@@ -77,6 +77,8 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     'bugs on the hibiscus by the front door',
     'we tried treating it ourselves',
     'our lawn company already treated it',
+    "I couldn't get a better photo, sorry",
+    'the nest is still there, should I knock it down?',
   ])('%p is not a prior failure', (body) => expect(priorTreatmentFailed(body)).toBe(false));
 });
 
