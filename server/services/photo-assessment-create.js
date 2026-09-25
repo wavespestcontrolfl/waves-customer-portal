@@ -431,6 +431,12 @@ const TREE_SHRUB_NEXT_STEPS = {
   disease_leaf_spot: 'Recommend an on-site look to confirm the leaf-spot signals and quote treatment.',
   water_heat_mechanical_stress: 'Recommend an on-site look at watering and pruning before quoting treatment.',
 };
+// Inbound photo-text triage (source 'auto_triage') decides the next step
+// itself — the opportunity gauge picks advice, a quote ask, or an on-site
+// visit and writes it into the pending draft. The stored guidance must not
+// contradict that draft with a blanket "recommend an on-site look"
+// (codex #4810 r10), so it points at the draft instead.
+const TREE_SHRUB_TRIAGE_NEXT_STEP = 'Next step is set by the photo-text draft (advice, quote ask, or on-site visit) — see Pending Drafts.';
 
 // The five categories as the admin lane stores them: key/label/score/status
 // only. The report builder's customerExplanation copy is written for a
@@ -504,7 +510,7 @@ async function runTreeShrubAnalysis(photos, prospectNote, source) {
     })),
     findings,
     ai_summary: aiSummary,
-    suggested_customer_action: TREE_SHRUB_NEXT_STEPS[worstKey ?? 'none'],
+    suggested_customer_action: source === 'auto_triage' ? TREE_SHRUB_TRIAGE_NEXT_STEP : TREE_SHRUB_NEXT_STEPS[worstKey ?? 'none'],
     scored_count: scored.length,
     photo_count: analyzable.length,
   };
@@ -728,6 +734,7 @@ module.exports = {
     worstTreeShrubSignal,
     headlineTreeShrubPhoto,
     TREE_SHRUB_NEXT_STEPS,
+    TREE_SHRUB_TRIAGE_NEXT_STEP,
     resolveRequestPhotos,
     resolveAssociations,
     lookupAssociation,

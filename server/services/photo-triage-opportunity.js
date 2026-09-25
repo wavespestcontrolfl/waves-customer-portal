@@ -358,6 +358,7 @@ const NO_PITCH_REASONS = new Set(['harmless', 'already_owned', 'offer_unavailabl
 //   { ok: true }                                  — send as-is
 //   { blocked: 'owned'|'unavailable'|'no_longer_priced', family }
 //   { repriced: <per_visit>, family }             — owner-only figure drifted
+//   { blocked: 'price_in_text', family: null }   — the outgoing text states a dollar amount
 // Throws on a lookup failure — the caller fails closed (draft left pending).
 // outgoingText (codex #4810 r7): the body that will actually be sent — an
 // owner revision can ADD a quote ask to a draft whose stored verdict says
@@ -374,7 +375,10 @@ const PITCH_LANGUAGE_RE = /\b(?:quot(?:e|es|ed|ing)|pric(?:e|es|ed|ing)|estimate
 // rechecked against the family it names, not the stored one. Families the
 // offer core cannot check (mosquito, rodent, palm) fail closed.
 const NAMED_FAMILY = [
-  ['pest_control', /\bpest control\b|\bpest (?:program|plan|service|treatments?)\b/i],
+  // Any standalone "pest"/"pests" in a pitch sentence ("Want a pest
+  // quote?", codex #4810 r10); the hyphenated finding label "pest-pressure
+  // signals" is not a service name.
+  ['pest_control', /\bpests?\b(?!-)/i],
   ['lawn_care', /\blawns?\b/i],
   ['tree_shrub', /\btrees?\b|\bshrubs?\b/i],
   ['termite', /\btermites?\b/i],
@@ -393,8 +397,15 @@ function familiesNamedInPitch(text) {
   }
   return { named, unchecked };
 }
+// Owner ruling 2026-09-25 ("no price as of right now"): a photo-triage
+// text never states a dollar amount. A revision that adds one cannot be
+// validated against the engine (the owner-only figure is per application
+// and may drift), so it is held outright rather than parsed and compared
+// (codex #4810 r10 P1, AGENTS.md estimator engine authority).
+const DOLLAR_AMOUNT_RE = /\$\s?\d/;
 async function recheckDraftOffer({ customerId, flags, outgoingText = null }) {
   if (!flags || flags.origin !== 'photo_triage') return { ok: true };
+  if (typeof outgoingText === 'string' && DOLLAR_AMOUNT_RE.test(outgoingText)) return { blocked: 'price_in_text', family: null };
   const mode = flags.opportunity_mode;
   const reasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
   const textPitches = typeof outgoingText === 'string' && PITCH_LANGUAGE_RE.test(outgoingText);

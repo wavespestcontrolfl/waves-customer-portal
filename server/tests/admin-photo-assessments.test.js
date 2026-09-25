@@ -1333,6 +1333,16 @@ describe('tree & shrub — third assessment type', () => {
     for (const key of categoryKeys) expect(TREE_SHRUB_NEXT_STEPS[key]).toMatch(/^Recommend an on-site look/);
   });
 
+  test('an auto_triage (inbound photo text) assessment points at the draft instead of recommending an on-site look (codex #4810 r10)', async () => {
+    const analysis = await assessmentCreate._test.runTreeShrubAnalysis([{ data: 'aGVsbG8=' }], null, 'auto_triage');
+    const contract = JSON.parse(analysis.insert.report_contract);
+    expect(contract.suggested_customer_action).toBe(assessmentCreate._test.TREE_SHRUB_TRIAGE_NEXT_STEP);
+    expect(contract.suggested_customer_action).not.toMatch(/on-site look/i);
+    // The admin lane keeps its per-signal next step.
+    const admin = JSON.parse((await assessmentCreate._test.runTreeShrubAnalysis([{ data: 'aGVsbG8=' }], null, 'admin')).insert.report_contract);
+    expect(admin.suggested_customer_action).toBe(assessmentCreate._test.TREE_SHRUB_NEXT_STEPS.disease_leaf_spot);
+  });
+
   test('a clean assessment gets the no-signals next step and no worst signal', async () => {
     mockAnalyzeTreeShrub.mockResolvedValue(visionResult(CLEAN_OVERVIEW));
     await withServer(async (base) => {

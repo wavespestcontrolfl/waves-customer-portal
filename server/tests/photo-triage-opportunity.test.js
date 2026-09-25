@@ -468,7 +468,7 @@ describe('recheckDraftOffer', () => {
   test.each([
     'Would you like pricing for this program?',
     'We can prepare an estimate for you.',
-    'It would cost about $80 to add.',
+    'It would cost about eighty dollars to add.',
     'Want me to add it to your plan?',
   ])('alternate pitch wording %p in the outgoing text forces the check (codex #4810 r8)', async (text) => {
     mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
@@ -476,12 +476,25 @@ describe('recheckDraftOffer', () => {
     expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: text })).toEqual({ blocked: 'owned', family: 'tree_shrub' });
   });
 
-  test('a bare dollar amount at the start of a sentence or after a space still counts as a pitch (codex #4810 r9)', async () => {
-    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
-    for (const text of ['We can do this for $80 per application.', '$80 per application.']) {
-      mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
-      expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: text })).toEqual({ blocked: 'owned', family: 'tree_shrub' });
+  test('any dollar amount in the outgoing text is held outright — never parsed or compared (owner ruling: no price in the text; codex #4810 r9/r10)', async () => {
+    const quote = FLAGS();
+    mockBuildOffer.mockResolvedValue(PRICED_OFFER('tree_shrub', { perVisit: 83.33 }));
+    for (const text of ['We can do this for $80 per application.', '$80 per application.', 'Want a quote? It is $83.33 per application.']) {
+      expect(await recheckDraftOffer({ customerId: 'c1', flags: quote, outgoingText: text })).toEqual({ blocked: 'price_in_text', family: null });
     }
+    expect(mockBuildOffer).not.toHaveBeenCalled();
+  });
+
+  test('"pest quote" names pest control; the "pest-pressure" finding label does not (codex #4810 r10)', async () => {
+    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
+    mockBuildOffer.mockImplementation(async (_c, _db, key) => (key === 'pest_control'
+      ? { serviceKey: key, mode: 'owned', option: null }
+      : CTA_OFFER(key)));
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Want a pest quote?' })).toEqual({ blocked: 'owned', family: 'pest_control' });
+    mockBuildOffer.mockClear();
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Those are pest-pressure signals; want a quote for our tree & shrub program?' }))
+      .toEqual({ ok: true });
+    expect(mockBuildOffer.mock.calls.map((c) => c[2])).toEqual(['tree_shrub']);
   });
 
   test('a revised pitch naming a DIFFERENT service is rechecked against that service (codex #4810 r9)', async () => {

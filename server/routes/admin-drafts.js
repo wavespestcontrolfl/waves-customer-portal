@@ -549,6 +549,17 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}, { customerId
     return { blocked: true };
   }
   if (verdict.ok) return { blocked: false };
+  // A revision stating a price: nothing stored is stale, so the flags and
+  // draft text stay as they are — only the send is refused (owner ruling
+  // 2026-09-25: no price in a photo-triage text; codex #4810 r10 P1).
+  if (verdict.blocked === 'price_in_text') {
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(409).json({
+      error: 'Photo-triage texts never state a price — remove the dollar amount (send an estimate for pricing), then approve.',
+      code: 'PHOTO_TRIAGE_PRICE_IN_TEXT',
+    });
+    return { blocked: true };
+  }
   if (verdict.repriced !== undefined) {
     const nextFlags = { ...flags, quote: { ...(flags.quote || {}), per_visit: verdict.repriced }, quote_repriced_at: new Date().toISOString() };
     await releaseDraftClaim(draft.id, {

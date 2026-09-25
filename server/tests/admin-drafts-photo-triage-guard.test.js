@@ -321,6 +321,27 @@ describe('revise — photo-triage offer recheck wiring', () => {
 });
 
 describe('revise — a revision that ADDS a quote ask is rechecked against the outgoing body', () => {
+  test('a revision stating a price → 409 PHOTO_TRIAGE_PRICE_IN_TEXT, flags and draft text untouched, nothing sent (codex #4810 r10)', async () => {
+    enqueue('message_drafts', { returning: [photoDraft()] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
+    enqueue('message_drafts', { update: 1 });
+    mockRecheck.mockResolvedValue({ blocked: 'price_in_text', family: null });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/revise`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Thanks! We can do it for $80 per application.' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('PHOTO_TRIAGE_PRICE_IN_TEXT');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const release = updates[updates.length - 1].payload;
+    expect(release.status).toBe('pending');
+    expect(release).not.toHaveProperty('flags');
+    expect(release).not.toHaveProperty('draft_response');
+  });
+
   test('held flags + revised text with a quote ask → the guard receives the revised body and holds', async () => {
     const heldFlags = { ...PHOTO_FLAGS, opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null };
     enqueue('message_drafts', { returning: [photoDraft({ flags: JSON.stringify(heldFlags) })] });
