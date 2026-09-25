@@ -10,6 +10,10 @@ const { logAutopay } = require('../services/autopay-log');
 const { documentRequiresSignature, hashContractToken, serializeContract } = require('../services/contracts');
 const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+// Termite annual plan sign-before-pay (slice 3a) — see the /sign handler
+// below. Reading the template key from the activation module (rather than
+// a second literal here) keeps the two in lockstep.
+const { ANNUAL_TEMPLATE_KEY: ANNUAL_TERMITE_TEMPLATE_KEY } = require('../services/termite-annual-activation');
 
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -316,6 +320,23 @@ router.post('/:token/sign', async (req, res, next) => {
       // the error body, which could echo the recipient email.
       sendSignedContractCopy(response.body.contract.id).catch(() => {
         logger.warn(`[contracts-public] signed-copy email errored for contract ${response.body.contract.id}`);
+      });
+    }
+
+    // Termite annual plan sign-before-pay (slice 3a, owner ruling
+    // 2026-09-24): signing the v3 annual agreement completes the deferred
+    // prepay term + annual-fee invoice the accept-time converter parked.
+    // AFTER the sign transaction above has committed — activation opens its
+    // own transaction and locks the source estimate. Never throws out of
+    // this route: activateTermiteAnnualPlanForSignedContract fails closed
+    // (admin bell + estimate stays 'awaiting_signature' for a retry) on any
+    // error, and this call is additionally backstopped here. Inert for
+    // every other contract — the activation module itself checks
+    // document_template_key before doing anything.
+    if (response.body.contract?.id && response.body.contract.documentTemplateKey === ANNUAL_TERMITE_TEMPLATE_KEY) {
+      const { activateTermiteAnnualPlanForSignedContract } = require('../services/termite-annual-activation');
+      activateTermiteAnnualPlanForSignedContract({ contractId: response.body.contract.id }).catch((err) => {
+        logger.error(`[contracts-public] termite annual plan activation errored for contract ${response.body.contract.id}: ${err.message}`);
       });
     }
 

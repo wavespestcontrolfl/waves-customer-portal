@@ -36,6 +36,15 @@ const { visitsPerYearForCadence } = require('./prepay-cadence');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeGrassType } = require('./lawn-grass-context');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+// Termite annual-plan sign-before-pay (slice 3a, owner ruling 2026-09-24):
+// termiteAnnualPlanSelectionEnabled combines GATE_TERMITE_ANNUAL_PLAN with
+// GATE_CANCEL_FLOW_V2 (the same single reader pricing-engine/estimate-engine
+// and estimate-offer-version use to decide whether a FRESH quote can even
+// price the plan), and selectedTermiteAnnualPlanRows reads the accepted
+// program off the estimate's own stored data. Both dark by default, so this
+// import is inert everywhere the plan is not live.
+const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
+const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
 
 // Find the first grassType/grass_type string anywhere in the estimate data
 // (confirmed primary path is inputs.grassType, but estimate shapes vary).
@@ -6714,6 +6723,11 @@ const EstimateConverter = {
     let draftInvoicePayUrl = null;
     let invoiceDelivery = null;
     let annualPrepayTermId = null;
+    // Set below when this accept is a termite-annual-plan sign-before-pay
+    // deferral — surfaced on the return value so callers (and the estimate
+    // detail API) can tell the accept succeeded but money is on hold for a
+    // signature, distinct from a normal prepay accept.
+    let annualPlanActivationStatus = null;
     try {
       // Base recurring annual (undiscounted): resolveAnnualPrepayInvoiceAmount never
       // applies the prepay discount, so this is always the pre-discount figure.
@@ -6765,7 +6779,35 @@ const EstimateConverter = {
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
         : setupFeeApplies || standardFirstApplicationAmount > 0;
-      if (hasDraftAmount && !skipSetupInvoice && shouldCreateDraftInvoice) {
+      // Sign-before-pay (slice 3a, owner ruling 2026-09-24, dark behind
+      // GATE_TERMITE_ANNUAL_PLAN): an accepted Subterranean Termite
+      // Protection annual plan does NOT get its prepay term or its annual-fee
+      // invoice here — both are deferred until the customer e-signs the
+      // annual agreement (server/services/termite-annual-activation.js runs
+      // them, idempotently, right after that signature). scheduled_services
+      // were already created above like any other accept; this only skips
+      // the money side of the prepay_annual branch below. Every other
+      // program (lawn/rodent/pest/mosquito/quarterly-termite prepay) is
+      // unaffected — selectedTermiteAnnualPlanRows only matches an accepted
+      // plan==='annual_protection' termite line, and the gate stays off in
+      // prod today.
+      // TODO(3b): abandoned-signature expiry + a reconciliation sweep that
+      // retries a stuck 'awaiting_signature' estimate is NOT built here —
+      // left for the next slice.
+      const isTermiteAnnualPlanAccept = billingTerm === 'prepay_annual'
+        && termiteAnnualPlanSelectionEnabled()
+        && selectedTermiteAnnualPlanRows(estimateData).length > 0;
+      if (isTermiteAnnualPlanAccept) {
+        try {
+          await database('estimates').where({ id: estimateId }).update({
+            annual_plan_activation_status: 'awaiting_signature',
+          });
+          annualPlanActivationStatus = 'awaiting_signature';
+        } catch (stampErr) {
+          logger.error(`[estimate-converter] annual-plan awaiting-signature stamp failed for estimate ${estimateId}: ${stampErr.message}`);
+          throw stampErr;
+        }
+      } else if (hasDraftAmount && !skipSetupInvoice && shouldCreateDraftInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
           const annualAmount = annualPrepayAmount;
@@ -7734,6 +7776,10 @@ const EstimateConverter = {
       draftInvoiceAmount,
       draftInvoicePayUrl,
       invoiceDelivery,
+      // 'awaiting_signature' when this accept deferred the termite annual
+      // plan's prepay term + invoice pending e-signature (slice 3a); null
+      // for every other accept. Mirrors estimates.annual_plan_activation_status.
+      annualPlanActivationStatus,
       // A flat commercial-only plan is NOT a WaveGuard membership — don't hand
       // back a membership-started payload (callers like manual Mark Won fire the
       // returned email post-commit, which would send WaveGuard copy with a
