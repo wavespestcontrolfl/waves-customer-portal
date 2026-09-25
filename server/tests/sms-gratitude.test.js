@@ -201,6 +201,8 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Your old invoice was paid, please pay your new invoice here',
     'Last month went through and the new invoice is due Friday',
     'Old balance cleared - please pay the new one here',
+    'Your old invoice was paid: please pay the new invoice here',
+    'Your old invoice was paid so please pay the new invoice here',
     'Invoice: https://example.invalid/i/abc',
     'Here is your invoice: https://example.invalid/i/abc',
     'Here you go https://portal.example.invalid/pay/abc',
@@ -210,6 +212,7 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
   test.each([
     'Your invoice has been paid, no balance due. Thanks!',
     'Payment received and applied, you are all set',
+    'Payment received: you are all set',
   ])('a hand-typed settlement is still a closure: %s', body => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
   });

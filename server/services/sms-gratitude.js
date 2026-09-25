@@ -101,14 +101,16 @@ const isManualCourtesy = text => {
 // billing exclusion in AUTOMATED_CLOSURE_TYPES: thanks after "here is your
 // payment link" acknowledges nothing paid.
 const MANUAL_PAYMENT_REQUEST_RE = /\b(?:pay(?:ment)? (?:link|here|online|now|portal|page|request|reminder|is due|due)|please pay|pay (?:your|the|this|it|online|here|now)|(?:can|could|would) you pay|invoice (?:is )?(?:due|ready|attached|link|here|below|for)|(?:your|the|an|this) invoice(?: is)? (?:due|ready|attached|open|outstanding|unpaid)|(?:balance|amount) (?:due|owed|outstanding|remaining)|(?:outstanding|remaining|open|unpaid) (?:balance|invoice|amount)|due today|past due|card on file|update your card|autopay|auto-pay|checkout|zelle|venmo|cash ?app|payment method)\b/i;
-const PAYMENT_SETTLED_RE = /\b(?:(?:payment|invoice|balance|it|that|this)(?: has| was| is)? (?:been )?(?:received|paid|processed|cleared|settled|applied|refunded|waived|credited|zeroed)|already (?:paid|processed|received|refunded)|went through|nothing (?:is )?(?:due|owed)|no (?:balance|charge)|paid in full|all paid|zero balance|thank you for (?:your |the )?payment|we received your payment)\b/i;
+const PAYMENT_SETTLED_RE = /\b(?:(?:payment|invoice|balance|it|that|this)(?: has| was| is)? (?:been )?(?:received|paid|processed|cleared|settled|applied|refunded|waived|credited|zeroed)|already (?:paid|processed|received|refunded)|went through|nothing (?:is )?(?:due|owed)|no (?:balance|charge)|paid in full|all paid|zero balance|thank you for (?:your |the )?payment|we received your payment)\b/gi;
 // A hand-typed text closes the exchange unless it asks for money.
 const manualCourtesy = (text, manualReply) => manualReply
   && (isManualCourtesy(text) || isCourtesyOnly(text, { awaitingAnswer: false }));
 // A hand-typed text closes the exchange unless it asks for money; a typed
 // "your payment has been received" is a settlement, not a request.
-// Judged clause by clause: "your old invoice was paid, please pay the new
-// one here" still asks for money. Splitting finer only refuses more. Links
+// Judged clause by clause, and settlement wording only cancels its own
+// words: it is replaced by a neutral token before the request test, so
+// "your old invoice was paid: please pay the new one here" still asks for
+// money however the two halves are joined. Splitting finer only refuses more. Links
 // are masked first so their dots do not split a clause, and a colon never
 // splits, so "Here is your invoice: <link>" keeps its label. A /pay/ link, or
 // an invoice/bill/payment clause carrying any link, is a request.
@@ -117,7 +119,8 @@ const manualCourtesy = (text, manualReply) => manualReply
 const maskLinks = text => text.replace(/(?:https?:\/\/|www\.|(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]+(?=[:/?#]))[^\s<>"']*/giu, url => (/\/pay(?:[/?#]|$)/i.test(url) ? ' paylinktoken ' : ' linktoken '));
 const PAYMENT_LINK_RE = /\bpaylinktoken\b|\b(?:invoices?|bills?|billing|payments?|pay|balance|statement)\b.*\blinktoken\b/i;
 const asksForMoney = text => maskLinks(String(text || '')).split(/[.,!?;\n]+|\s[-–—]\s|\b(?:but|however|although|though|and|also|plus|then)\b/i)
-  .some(clause => (MANUAL_PAYMENT_REQUEST_RE.test(clause) || PAYMENT_LINK_RE.test(clause)) && !PAYMENT_SETTLED_RE.test(clause));
+  .map(clause => clause.replace(PAYMENT_SETTLED_RE, ' settledtoken '))
+  .some(clause => MANUAL_PAYMENT_REQUEST_RE.test(clause) || PAYMENT_LINK_RE.test(clause));
 // Text is the only evidence: an attachment (or an unknown media count) could
 // be an invoice or a form, so a typed send with media or no text abstains.
 const manualClosure = (text, manualReply, row) => manualReply && row.mediaCount === 0
