@@ -17886,30 +17886,49 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
   const converter = require('../services/estimate-converter');
   return (recurringSvcList || []).some((svc) => {
     if (recurringServiceKey(svc) !== 'tree_shrub') return false;
-    // The CONVERTER'S OWN cadence reader first — same reader the lawn
-    // backstop above uses (explicitServiceCadence: cadence FIELDS, then
-    // visit-count aliases, then label/name/displayName/service_type TEXT
-    // via normalizeRecurringPattern) — so this can never drift from what
-    // scheduling actually does. This is what catches a legacy abbreviated
-    // label like '4x applications/yr' (codex P0 round 2): the prior manual
-    // regex here required whitespace directly before "applications", which
+    // Exact-count guard BEFORE trusting the normalized cadence (codex P1
+    // round 3 — a regression from the round-2 change below, which called
+    // the CONVERTER'S OWN cadence reader — explicitServiceCadence: cadence
+    // FIELDS, then visit-count aliases, then label/name/displayName/
+    // service_type TEXT via normalizeRecurringPattern — first, so this can
+    // never drift from what scheduling actually does):
+    // explicitServiceCadence's own generic visits-based fallback
+    // (RecurringAppointmentSeeder.patternFromVisitsPerYear) buckets ANY
+    // visit count in [6,11] as 'bimonthly' (and [4,5] as 'quarterly'), not
+    // just exactly 6 (or 4) — so a stale/malformed row carrying a raw
+    // visit-count alias of 7, 8, 10 or 11 would read as the live
+    // 'bimonthly' pattern below and wrongly pass as "not retired". Only 6x
+    // and 9x are current T&S programs: when ANY raw visit-count alias
+    // (visitCountAliasValues' own vocabulary — visitsPerYear/visits_per_year/
+    // appsPerYear/apps_per_year/visits/apps/treatmentsPerYear/
+    // treatments_per_year — plus the bare tier-row `v` shorthand, which is
+    // not in that vocabulary) is present and finite, it must be exactly 6
+    // or 9 or the row is retired, checked before the normalized pattern is
+    // ever consulted.
+    const rawVisitAliases = [...converter.visitCountAliasValues(svc), svc?.v]
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    if (rawVisitAliases.length > 0) {
+      return rawVisitAliases.some((value) => value !== 6 && value !== 9);
+    }
+    // No raw visit-count alias is present — safe to trust the converter's
+    // own cadence reader, which is what catches a legacy abbreviated label
+    // like '4x applications/yr' (codex P0 round 2): the prior manual regex
+    // here required whitespace directly before "applications", which
     // "4x applications/yr" never has (the "x" sits in the way), but
     // normalizeRecurringPattern matches the bare "4x" substring anywhere in
     // the text and maps it to 'quarterly' — exactly how the converter
     // itself would read it.
     const pattern = converter.explicitServiceCadence(svc);
     if (pattern) return !['bimonthly', 'every_6_weeks'].includes(pattern);
-    // Aliases/wording the converter's reader doesn't cover: bare `v`
-    // visit-count shorthand (tier-row style — visitCountAliasValues has no
-    // `.v`), "N visits/apps/applications" WORDY phrasing
-    // (normalizeRecurringPattern only recognizes the abbreviated "Nx" form
-    // or exact words like "quarterly"/"monthly", never "12 visits"), and
-    // the catalog-identity fields (service/serviceKey/service_key — codex
-    // P0 round 1: a row whose ONLY retired signal is its catalog key, e.g.
-    // { serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub Care' },
-    // which explicitServiceCadence's own text fallback never reads).
-    const vAlias = Number(svc?.v);
-    if (Number.isFinite(vAlias) && vAlias > 0) return vAlias !== 6 && vAlias !== 9;
+    // Wording the converter's reader doesn't cover: "N visits/apps/
+    // applications" WORDY phrasing (normalizeRecurringPattern only
+    // recognizes the abbreviated "Nx" form or exact words like "quarterly"/
+    // "monthly", never "12 visits"), and the catalog-identity fields
+    // (service/serviceKey/service_key — codex P0 round 1: a row whose ONLY
+    // retired signal is its catalog key, e.g. { serviceKey:
+    // 'tree_shrub_quarterly', name: 'Tree & Shrub Care' }, which
+    // explicitServiceCadence's own text fallback never reads).
     const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
     const keyText = [svc?.service, svc?.serviceKey, svc?.service_key]
       .filter(Boolean).join(' ').toLowerCase();

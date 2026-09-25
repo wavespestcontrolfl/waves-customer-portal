@@ -948,8 +948,9 @@ handoff. Ordinary website lead forms do not opt into this route.
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
 route answers 400 before pricing — `light` (4x/quarterly, retired for new
 sales) and any unrecognized value are refused rather than silently priced
-or forwarded unchanged. Absent stays absent (the engine's own `enhanced`
-default runs). A narrowing of the existing payload contract, not a new
+or forwarded unchanged. Absent stays absent (the engine's own `standard`
+default runs, via `TREE_SHRUB.defaultTier` — the mandated 6x program, not
+`enhanced`). A narrowing of the existing payload contract, not a new
 field.
 Address-verification guard (2026-09-23): when the SERVER-trusted property
 profile (the cache-only `performPropertyLookup` re-read, or the lookup
@@ -2444,8 +2445,13 @@ columns excluded AND `description` excluded — tighter than /api/mcp
 get_service, because catalog descriptions are admin-editable free text
 that is neither compliance-curated nor price-synced and must not reach an
 anonymous surface). `list_services`/`get_service` additionally exclude
-`services/public-services-menu.js`'s `FORMERLY_PUBLIC_KEYS` denylist even
-when a row's own `customer_visible=true` — `tree_shrub_quarterly` is the
+`services/pricing-engine/retired-sale-catalog.js`'s `RETIRED_SALE_SERVICE_KEYS`
+denylist (currently only `tree_shrub_quarterly`) even when a row's own
+`customer_visible=true` — this is deliberately narrower than
+`public-services-menu.js`'s `FORMERLY_PUBLIC_KEYS` (which also carries
+still-active services, e.g. foam/termite/rodent keys, that are merely off
+the public quote MENU); MCP's catalog would otherwise promise a narrower
+service list than it actually serves. `tree_shrub_quarterly` is the
 first key excluded this way rather than by `customer_visible=false`
 (2026-09-24; see the services/menu entry above for why its customer_visible
 stays true), so a retired catalog row never becomes agent-discoverable

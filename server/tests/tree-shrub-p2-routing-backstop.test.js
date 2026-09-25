@@ -116,6 +116,38 @@ describe('recurringTreeShrubRowAtRetiredCadence — premium + light backstop (9x
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 6 }))).toBe(false);
   });
 
+  test('off-count visit-count aliases (7/8/10/11) are retired even though the converter\'s generic bucketing would call them "bimonthly" (codex P1 r3 regression)', () => {
+    // explicitServiceCadence's own visits fallback
+    // (RecurringAppointmentSeeder.patternFromVisitsPerYear) buckets ANY
+    // count in [6,11] as 'bimonthly' — only 6 and 9 are real T&S programs,
+    // so 7/8/10/11 must stay retired across every alias spelling, not just
+    // `visitsPerYear`.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 7 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 8 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 10 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 11 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 8 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 10 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', treatmentsPerYear: 11 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', v: 7 }))).toBe(true);
+    // The exact live counts (6, 9) still pass through every alias spelling.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 6 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 9 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', v: 9 }))).toBe(false);
+  });
+
+  test('a legacy abbreviated label with NO numeric alias still resolves through the converter\'s text reader (codex P0 r2, reconfirmed r3)', () => {
+    // "4x applications/yr" has no whitespace directly before "applications"
+    // (the "x" sits in the way), so the manual regex here used to miss it;
+    // normalizeRecurringPattern matches the bare "4x" substring anywhere in
+    // the text and maps it to 'quarterly'. No visit-count alias is present
+    // on this row, so the r3 exact-count guard must not intercept it —
+    // it has to fall through to the converter's cadence reader.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care — 4x applications/yr' }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care — 6x applications/yr' }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care — 9x applications/yr' }))).toBe(false);
+  });
+
   test('the retired catalog key alone proves the retired cadence, even with a generic name and no cadence/count fields (codex P0 pre-push)', () => {
     // A row shaped { serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub
     // Care' } used to pass this backstop: the final check only searched
