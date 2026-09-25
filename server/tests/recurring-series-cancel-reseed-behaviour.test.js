@@ -207,19 +207,24 @@ describe('reseedTermShortfall — term by plan position, stamps pin earlier re-a
   const TERM0 = { index: 0, start: ROOT, end: addYear(ROOT, 1) };
   const parent = { ...PARENT, scheduled_date: ROOT };
   const cancelled = { ...CANCELLED, scheduled_date: daysOut(7) };
+  // the cancelled row itself is part of the series (it keeps its slot)
   const rows = (n, extra = []) => [
     { id: 10, status: 'completed', scheduled_date: ROOT, is_recurring: true, recurring_parent_id: null },
+    { ...CANCELLED, scheduled_date: daysOut(7) },
     ...Array.from({ length: n }, (_, i) => ({ id: 100 + i, status: 'pending', scheduled_date: daysOut(30 + 40 * i), is_recurring: true, recurring_parent_id: 10 })),
     ...extra,
   ];
   const run = (over, c = cancelled) => reseedTermShortfall(makeConn(scenario(over).handler), { parent, parentId: 10, cancelled: c });
 
-  test('a whole term refuses; a short one with an upcoming row reports the shortfall', async () => {
-    expect((await run({ seriesRows: rows(3) })).skipped).toBe('term_still_whole'); // 4 counting = quarterly's 4
-    const out = await run({ seriesRows: rows(2) }); // 3 counting < 4
+  test('a cancelled slot leaves its term short (root + 2 of 4 slots counting); the window rides along for the stamp', async () => {
+    const out = await run({ seriesRows: rows(2) }); // slots: root, cancelled, c0, c1 → 3 counting < 4
     expect(out.skipped).toBeUndefined();
     expect(out).toMatchObject({ counting: 3, expected: 4 });
     expect(out.window).toEqual(TERM0);
+    // a 5th occurrence opens term 1 and never masks term 0
+    const out2 = await run({ seriesRows: rows(3) });
+    expect(out2).toMatchObject({ counting: 3, expected: 4 });
+    expect(out2.window).toEqual(TERM0);
   });
 
   test('a cancelled last visit = the plan ended, no lone visit', async () => {
@@ -227,7 +232,7 @@ describe('reseedTermShortfall — term by plan position, stamps pin earlier re-a
   });
 
   test("an earlier reseed's stamp pins its added row to the term it served", async () => {
-    // 3 counting by date in term 0, plus a re-added row dated in term 1 that the stamp says served term 0 → 4 → whole
+    // 3 counting in term 0 (root + 2; the cancelled slot is empty), plus a re-added row the stamp pins to term 0 → 4 → whole
     const out = await run({
       seriesRows: rows(2, [{ id: 777, status: 'pending', scheduled_date: daysOut(400), is_recurring: true, recurring_parent_id: 10 }]),
       stamps: [{ metadata: JSON.stringify({ added_service_ids: ['777'], term_index: 0 }) }],
@@ -239,7 +244,7 @@ describe('reseedTermShortfall — term by plan position, stamps pin earlier re-a
     // 777 was re-added for term 0 but dated in term 1; cancelling it must re-open term 0 (3 counting < 4), not term 1
     const readded = { ...CANCELLED, id: 777, scheduled_date: daysOut(400) };
     const out = await run({
-      seriesRows: rows(2, [{ ...readded, status: 'cancelled' }]),
+      seriesRows: rows(2, [{ ...readded, status: 'cancelled' }]), // the slot 777 replaced is still empty
       stamps: [{ metadata: JSON.stringify({ added_service_ids: ['777'], term_index: 0 }) }],
     }, readded);
     expect(out.skipped).toBeUndefined();
@@ -249,8 +254,27 @@ describe('reseedTermShortfall — term by plan position, stamps pin earlier re-a
 
   test('a moved exception is placed by its cadence date', async () => {
     const moved = { ...cancelled, scheduled_date: daysOut(400), date_exception: true, date_exception_cadence_date: daysOut(200) };
-    const out = await run({ seriesRows: rows(2) }, moved);
+    const out = await run({ seriesRows: [...rows(2).filter((r) => r.id !== CANCELLED.id), { ...moved, status: 'cancelled' }] }, moved);
     expect(out.window).toEqual(TERM0);
+    expect(out.counting).toBe(3);
+  });
+
+  test('a cancelled row that is not part of the plan sequence refuses', async () => {
+    expect((await run({ seriesRows: rows(2) }, { ...cancelled, id: 'stranger' })).skipped).toBe('not_in_plan_sequence');
+  });
+
+  test('ordinal-weekday monthly: the 13th occurrence a day before the anniversary is term 1 (Codex r6)', async () => {
+    const monthly = { ...parent, recurring_pattern: 'monthly_nth_weekday' };
+    // 12 slots in term 0 (root + 11), a 13th just before the anniversary, the cancelled one among the first 12
+    const series = [
+      { id: 10, status: 'completed', scheduled_date: ROOT, is_recurring: true, recurring_parent_id: null },
+      ...Array.from({ length: 11 }, (_, i) => ({ id: 100 + i, status: i === 3 ? 'cancelled' : 'pending', scheduled_date: daysOut(-80 + 30 * (i + 1)), is_recurring: true, recurring_parent_id: 10 })),
+      { id: 200, status: 'pending', scheduled_date: daysOut(-80 + 364), is_recurring: true, recurring_parent_id: 10 },
+    ];
+    const out = await reseedTermShortfall(makeConn(scenario({ seriesRows: series }).handler), { parent: monthly, parentId: 10, cancelled: { ...cancelled, id: 103 } });
+    expect(out.skipped).toBeUndefined();
+    expect(out).toMatchObject({ counting: 11, expected: 12 });
+    expect(out.window.index).toBe(0);
   });
 });
 

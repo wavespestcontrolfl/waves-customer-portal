@@ -24,7 +24,7 @@ jest.mock('../routes/admin-schedule', () => ({
 const adminSchedule = require('../routes/admin-schedule');
 const gates = require('../config/feature-gates');
 const {
-  runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, countTermVisits,
+  runPostCancelSeriesReseed, plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, assignPlanTerms, countTermVisits,
   isBoosterRow, isPlanSeriesRow, isCountingSourceStatus, planPositionDate, hasUpcomingPlanRow,
   COUNTING_SOURCE_STATUSES,
 } = require('../services/recurring-series-cancel-reseed');
@@ -129,43 +129,86 @@ describe('term / count math (pure)', () => {
     expect(termWindowContaining('2026-07-10', 'not-a-date')).toBeNull();
   });
 
-  test('countTermVisits counts only rows inside the term that can still happen', () => {
-    const window = { index: 0, start: '2026-07-10', end: '2027-07-10' };
-    // customer e887e3c6 after the Oct 5 cancel: 9 rows, one cancelled → 8 count
+  const child = (r) => ({ is_recurring: true, recurring_parent_id: 'root', ...r });
+
+  test('assignPlanTerms: the k-th plan occurrence (cadence order) is in term floor(k / expected); non-counting rows keep their slot', () => {
+    // customer e887e3c6 after the Oct 5 cancel: 9 slots, one cancelled → 8 count in term 0
     const rows = [
-      { scheduled_date: '2026-07-10', status: 'completed' },
-      { scheduled_date: '2026-09-28', status: 'pending' },
-      { scheduled_date: '2026-10-05', status: 'cancelled' },
-      { scheduled_date: '2026-11-13', status: 'pending' },
-      { scheduled_date: '2026-12-25', status: 'pending' },
-      { scheduled_date: '2027-02-05', status: 'pending' },
-      { scheduled_date: '2027-03-19', status: 'pending' },
-      { scheduled_date: '2027-04-30', status: 'confirmed' },
-      { scheduled_date: '2027-06-11', status: 'pending' },
-    ].map((r) => ({ is_recurring: true, recurring_parent_id: 'root', ...r })); // plan children
-    expect(countTermVisits(rows, window)).toBe(8);
-    // a re-added visit at the end of the term restores 9
-    const child = (r) => ({ is_recurring: true, recurring_parent_id: 'root', ...r });
-    expect(countTermVisits([...rows, child({ scheduled_date: '2027-07-09', status: 'pending' })], window)).toBe(9);
-    // next-term rows and no-show/skipped/rescheduled rows never count
-    expect(countTermVisits([
-      ...rows,
-      child({ scheduled_date: '2027-07-23', status: 'pending' }),
-      child({ scheduled_date: '2026-08-19', status: 'no_show' }),
-      child({ scheduled_date: '2026-08-20', status: 'skipped' }),
-      child({ scheduled_date: '2026-08-21', status: 'rescheduled' }),
-    ], window)).toBe(8);
-    expect(countTermVisits(rows, null)).toBe(0);
-    expect(countTermVisits([], window)).toBe(0);
+      child({ id: 'root', scheduled_date: '2026-07-10', status: 'completed', recurring_parent_id: null }),
+      child({ id: 'a', scheduled_date: '2026-09-28', status: 'pending' }),
+      child({ id: 'b', scheduled_date: '2026-10-05', status: 'cancelled' }),
+      child({ id: 'c', scheduled_date: '2026-11-13', status: 'pending' }),
+      child({ id: 'd', scheduled_date: '2026-12-25', status: 'pending' }),
+      child({ id: 'e', scheduled_date: '2027-02-05', status: 'pending' }),
+      child({ id: 'f', scheduled_date: '2027-03-19', status: 'pending' }),
+      child({ id: 'g', scheduled_date: '2027-04-30', status: 'confirmed' }),
+      child({ id: 'h', scheduled_date: '2027-06-11', status: 'pending' }),
+    ];
+    const terms = assignPlanTerms(rows, 9);
+    expect([...terms.values()]).toEqual(Array(9).fill(0));
+    expect(countTermVisits(rows, 0, terms)).toBe(8);
+    // a 10th occurrence opens term 1; it never counts toward term 0
+    const more = [...rows, child({ id: 'i', scheduled_date: '2027-07-23', status: 'pending' })];
+    const terms2 = assignPlanTerms(more, 9);
+    expect(terms2.get('i')).toBe(1);
+    expect(countTermVisits(more, 0, terms2)).toBe(8);
+    expect(countTermVisits(more, 1, terms2)).toBe(1);
+    // no-show/skipped/rescheduled occupy a slot and never count
+    const gaps = [...rows, child({ id: 'x', scheduled_date: '2026-08-19', status: 'no_show' })];
+    const terms3 = assignPlanTerms(gaps, 9);
+    expect(terms3.get('x')).toBe(2 /* slot 2 by date */ === 2 ? 0 : 0);
+    expect(terms3.get('h')).toBe(1); // pushed into term 1 by the extra slot
+    expect(countTermVisits(gaps, 0, terms3)).toBe(7);
+    expect(countTermVisits(rows, 0, null)).toBe(0);
+    expect(countTermVisits(rows, 1.5, terms)).toBe(0);
+    expect(assignPlanTerms(rows, 0).size).toBe(0);
+    expect(assignPlanTerms([], 9).size).toBe(0);
+  });
+
+  test('ordinal-weekday monthly: the 13th occurrence a day before the anniversary is term 1, not term 0 (Codex r6)', () => {
+    // first Saturday, rooted 2023-01-07; next January's first Saturday is 2024-01-06
+    const dates = ['2023-01-07', '2023-02-04', '2023-03-04', '2023-04-01', '2023-05-06', '2023-06-03', '2023-07-01', '2023-08-05', '2023-09-02', '2023-10-07', '2023-11-04', '2023-12-02', '2024-01-06'];
+    const rows = dates.map((d, i) => child({ id: `m${i}`, scheduled_date: d, status: i === 0 ? 'completed' : 'pending', recurring_parent_id: i === 0 ? null : 'root' }));
+    const terms = assignPlanTerms(rows, 12);
+    expect(terms.get('m12')).toBe(1);
+    expect(countTermVisits(rows, 0, terms)).toBe(12);
+    // cancelling one of the first twelve leaves term 0 short — the 13th cannot mask it
+    const cancelled = rows.map((r) => (r.id === 'm5' ? { ...r, status: 'cancelled' } : r));
+    expect(countTermVisits(cancelled, 0, assignPlanTerms(cancelled, 12))).toBe(11);
+  });
+
+  test('a visit an earlier reseed added counts in the term it served (stamp override), takes no slot, and a cancelled one never counts', () => {
+    const rows = [
+      child({ id: 'root', scheduled_date: '2026-07-10', status: 'completed', recurring_parent_id: null }),
+      child({ id: 'a', scheduled_date: '2026-10-10', status: 'cancelled' }),
+      child({ id: 'b', scheduled_date: '2027-01-10', status: 'pending' }),
+      child({ id: 'c', scheduled_date: '2027-04-10', status: 'pending' }),
+      child({ id: 'readded', scheduled_date: '2027-07-23', status: 'pending' }),
+      child({ id: 't1', scheduled_date: '2027-09-03', status: 'pending' }),
+    ];
+    const overrides = new Map([['readded', 0]]);
+    const plain = assignPlanTerms(rows, 4);
+    expect(plain.get('readded')).toBe(1); // by slot it would open term 1 …
+    const pinned = assignPlanTerms(rows, 4, overrides);
+    expect(pinned.get('readded')).toBe(0); // … the stamp pins it to term 0
+    expect(pinned.get('t1')).toBe(1);      // and it takes no slot: t1 is the 5th occurrence → term 1
+    expect(countTermVisits(rows, 0, pinned)).toBe(4);
+    expect(countTermVisits(rows, 1, pinned)).toBe(1);
+    expect(countTermVisits(rows.map((r) => (r.id === 'readded' ? { ...r, status: 'cancelled' } : r)), 0, pinned)).toBe(3);
+    // ids compare as strings
+    expect(assignPlanTerms([child({ id: 42, scheduled_date: '2026-07-10', status: 'pending' })], 4, new Map([['42', 3]])).get('42')).toBe(3);
   });
 
   test('boosters never count toward the plan; legacy null-flagged children do (Codex #4814)', () => {
     const window = { index: 0, start: '2026-07-10', end: '2027-07-10' };
-    const base = Array.from({ length: 8 }, (_, i) => ({ scheduled_date: `2026-0${8}-${String(10 + i).padStart(2, '0')}`, status: 'pending', is_recurring: true, recurring_parent_id: 'root' }));
-    const booster = { scheduled_date: '2026-09-01', status: 'pending', is_recurring: false, recurring_parent_id: 'root' };
-    const legacyChild = { scheduled_date: '2026-09-02', status: 'pending', is_recurring: null, recurring_parent_id: 'root' };
-    expect(countTermVisits([...base, booster], window)).toBe(8);
-    expect(countTermVisits([...base, legacyChild], window)).toBe(9);
+    const base = Array.from({ length: 8 }, (_, i) => ({ id: `b${i}`, scheduled_date: `2026-0${8}-${String(10 + i).padStart(2, '0')}`, status: 'pending', is_recurring: true, recurring_parent_id: 'root' }));
+    const booster = { id: 'boost', scheduled_date: '2026-09-01', status: 'pending', is_recurring: false, recurring_parent_id: 'root' };
+    const legacyChild = { id: 'legacy', scheduled_date: '2026-09-02', status: 'pending', is_recurring: null, recurring_parent_id: 'root' };
+    const t1 = assignPlanTerms([...base, booster], 9);
+    expect(t1.has(String(booster.id))).toBe(false);
+    expect(countTermVisits([...base, booster], 0, t1)).toBe(8);
+    const t2 = assignPlanTerms([...base, legacyChild], 9);
+    expect(countTermVisits([...base, legacyChild], 0, t2)).toBe(9);
     expect(isBoosterRow(booster)).toBe(true);
     expect(isBoosterRow(legacyChild)).toBe(false);
     expect(isPlanSeriesRow(booster)).toBe(false);
@@ -177,8 +220,9 @@ describe('term / count math (pure)', () => {
     expect(isPlanSeriesRow({ is_recurring: true, recurring_parent_id: 'root', is_callback: true })).toBe(false);
     expect(isPlanSeriesRow({ is_recurring: true, recurring_parent_id: 'root', followup_included: true })).toBe(false);
     expect(isBoosterRow({ is_recurring: true, recurring_parent_id: 'root', is_callback: true })).toBe(false);
-    const cbWindow = { index: 0, start: '2026-07-10', end: '2027-07-10' };
-    expect(countTermVisits([{ scheduled_date: '2026-09-01', status: 'pending', is_recurring: true, recurring_parent_id: 'root', is_callback: true }], cbWindow)).toBe(0);
+    const cbRows = [{ id: 'cb', scheduled_date: '2026-09-01', status: 'pending', is_recurring: true, recurring_parent_id: 'root', is_callback: true }];
+    expect(assignPlanTerms(cbRows, 4).size).toBe(0);
+    expect(countTermVisits(cbRows, 0, new Map([['cb', 0]]))).toBe(0);
     expect(hasUpcomingPlanRow([{ scheduled_date: '2099-01-01', status: 'pending', is_recurring: true, recurring_parent_id: 'root', followup_included: true }], '2026-09-25')).toBe(false);
     expect(COUNTING_SOURCE_STATUSES).toEqual(['pending', 'confirmed', 'en_route', 'on_site']);
     // a legacy NULL status counts as a source (Codex #4814 r2)
@@ -189,36 +233,35 @@ describe('term / count math (pure)', () => {
     expect(isCountingSourceStatus('cancelled')).toBe(false);
   });
 
-  test('a moved exception keeps its cadence position for term selection and counting (Codex #4814 r2)', () => {
-    const window = { index: 0, start: '2026-07-10', end: '2027-07-10' };
-    const moved = { scheduled_date: '2027-07-20', status: 'pending', date_exception: true, date_exception_cadence_date: '2027-06-11', is_recurring: true, recurring_parent_id: 'root' };
-    expect(planPositionDate(moved)).toBe('2027-06-11');
+  test('a moved exception keeps its cadence position: ordered (and termed) by its cadence date, not the appointment date (Codex #4814 r2)', () => {
+    const moved = child({ id: 'moved', scheduled_date: '2027-07-20', status: 'pending', date_exception: true, date_exception_cadence_date: '2026-10-11' });
+    expect(planPositionDate(moved)).toBe('2026-10-11');
     expect(planPositionDate({ scheduled_date: '2027-07-20', date_exception: false, date_exception_cadence_date: '2027-06-11' })).toBe('2027-07-20');
     expect(planPositionDate({ scheduled_date: new Date('2027-07-20T04:00:00Z') })).toBe('2027-07-20');
     expect(planPositionDate(null)).toBeNull();
-    // counts in the ORIGINAL term although its appointment sits in the next one
-    expect(countTermVisits([moved], window)).toBe(1);
-    expect(countTermVisits([moved], { index: 1, start: '2027-07-10', end: '2028-07-10' })).toBe(0);
-    // and the term is chosen by that position
-    expect(termWindowContaining('2026-07-10', planPositionDate(moved)).index).toBe(0);
+    const rows = [
+      child({ id: 'root', scheduled_date: '2026-07-10', status: 'completed', recurring_parent_id: null }),
+      moved,
+      child({ id: 'b', scheduled_date: '2027-01-10', status: 'pending' }),
+      child({ id: 'c', scheduled_date: '2027-04-10', status: 'pending' }),
+      child({ id: 'd', scheduled_date: '2027-07-10', status: 'pending' }),
+    ];
+    const terms = assignPlanTerms(rows, 4);
+    expect(terms.get('moved')).toBe(0); // slot 1 by cadence date although its appointment sits after 'd'
+    expect(terms.get('d')).toBe(1);
   });
 
-  test('a visit an earlier reseed added counts in the term it replaced a visit in, not where its date falls (fallback P1)', () => {
-    const term0 = { index: 0, start: '2026-07-10', end: '2027-07-10' };
-    const term1 = { index: 1, start: '2027-07-10', end: '2028-07-10' };
-    const readded = { id: 'readded', scheduled_date: '2027-07-23', status: 'pending', is_recurring: true, recurring_parent_id: 'root' };
-    const term1Visit = { id: 't1', scheduled_date: '2027-09-03', status: 'pending', is_recurring: true, recurring_parent_id: 'root' };
-    const overrides = new Map([['readded', 0]]);
-    // by date it sits in term 1 …
-    expect(countTermVisits([readded, term1Visit], term1)).toBe(2);
-    expect(countTermVisits([readded, term1Visit], term0)).toBe(0);
-    // … with the stamp it counts in term 0 only
-    expect(countTermVisits([readded, term1Visit], term1, overrides)).toBe(1);
-    expect(countTermVisits([readded, term1Visit], term0, overrides)).toBe(1);
-    // a cancelled re-added visit never counts anywhere
-    expect(countTermVisits([{ ...readded, status: 'cancelled' }], term0, overrides)).toBe(0);
-    // ids compare as strings
-    expect(countTermVisits([{ ...readded, id: 42 }], term0, new Map([['42', 0]]))).toBe(1);
+  test('a visit an earlier reseed added, then cancelled, re-opens the term it served (fallback P1)', () => {
+    const rows = [
+      child({ id: 'root', scheduled_date: '2026-07-10', status: 'completed', recurring_parent_id: null }),
+      child({ id: 'a', scheduled_date: '2026-10-10', status: 'pending' }),
+      child({ id: 'b', scheduled_date: '2027-01-10', status: 'pending' }),
+      child({ id: 'c', scheduled_date: '2027-04-10', status: 'cancelled' }),
+      child({ id: 'readded', scheduled_date: '2027-07-23', status: 'cancelled' }),
+    ];
+    const terms = assignPlanTerms(rows, 4, new Map([['readded', 0]]));
+    expect(terms.get('readded')).toBe(0);
+    expect(countTermVisits(rows, 0, terms)).toBe(3);
   });
 
   test('hasUpcomingPlanRow reads the plan rows themselves, legacy null-flagged children included', () => {
@@ -396,25 +439,27 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(r).toMatch(/whereRaw\("metadata->>'cancelled_service_id' = \?", \[String\(cancelledServiceId\)\]\)/);
   });
 
-  test('term: chosen by the cancelled row\'s PLAN position, counted by plan position over plan rows (exception fields selected), and "nothing upcoming" read from the plan rows themselves', () => {
+  test('term: membership by cadence SLOT over plan rows (exception + callback fields selected), stamps pin earlier re-adds, "nothing upcoming" read from the plan rows themselves', () => {
     const t = termFn();
     expect(t).toMatch(/'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included'\)/);
-    const count = t.indexOf('countTermVisits(seriesRows, window, termOverrides)');
+    // stamps → overrides → slot map → the cancelled row's term → count → liveness, in that order
+    const stampsRead = t.indexOf("action: 'recurring_cancel_reseed' })");
+    const slots = t.indexOf('assignPlanTerms(seriesRows, expected, termOverrides)');
+    const own = t.indexOf("if (termIndex == null) return { skipped: 'not_in_plan_sequence' };");
+    const count = t.indexOf('countTermVisits(seriesRows, termIndex, terms)');
     const whole = t.indexOf("skipped: 'term_still_whole'");
-    // earlier reseeds' stamps pin their added rows to the term they served
-    expect(t).toMatch(/whereRaw\("metadata->>'recurring_parent_id' = \?", \[String\(parentId\)\]\)/);
-    expect(t).toMatch(/termOverrides\.set\(String\(id\), meta\.term_index\)/);
-    expect(t.indexOf("action: 'recurring_cancel_reseed' })")).toBeLessThan(count);
-    // … and pick the term when the CANCELLED row is such a visit (stamps read before the window is chosen)
-    // terms anchor on the ROOT's plan position (a single-moved root keeps its cadence date)
-    expect(t).toMatch(/const anchor = planPositionDate\(parent\);/);
-    expect(t).toMatch(/const window = termOverrides\.has\(String\(cancelled\.id\)\)\s*\? termWindowAtIndex\(anchor, termOverrides\.get\(String\(cancelled\.id\)\)\)\s*: termWindowContaining\(anchor, planPositionDate\(cancelled\)\);/);
-    expect(t).not.toMatch(/termWindow(?:AtIndex|Containing)\(parent\.scheduled_date/);
-    expect(t.indexOf("action: 'recurring_cancel_reseed' })")).toBeLessThan(t.indexOf('const window = '));
     const guard = t.indexOf("if (!hasUpcomingPlanRow(seriesRows, etDateString())) return { skipped: 'no_live_visits'");
-    expect(count).toBeGreaterThan(-1);
+    expect(stampsRead).toBeGreaterThan(-1);
+    expect(slots).toBeGreaterThan(stampsRead);
+    expect(own).toBeGreaterThan(slots);
+    expect(count).toBeGreaterThan(own);
     expect(whole).toBeGreaterThan(count);
     expect(guard).toBeGreaterThan(whole);
+    expect(t).toMatch(/whereRaw\("metadata->>'recurring_parent_id' = \?", \[String\(parentId\)\]\)/);
+    expect(t).toMatch(/termOverrides\.set\(String\(id\), meta\.term_index\)/);
+    // no date-window membership anywhere in the writer
+    expect(t).not.toMatch(/termWindowContaining\(/);
+    expect(t).toMatch(/termWindowAtIndex\(planPositionDate\(parent\), termIndex\)/);
     expect(lockedBody()).not.toMatch(/live\.length === 0/);
   });
 

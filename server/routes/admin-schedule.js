@@ -17963,16 +17963,13 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }
 // reads plan rows only (no boosters) by the same position.
 async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
   const {
-    plannedVisitsPerYearForSeries, termWindowContaining, termWindowAtIndex, countTermVisits, planPositionDate, hasUpcomingPlanRow,
+    plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow,
   } = require('../services/recurring-series-cancel-reseed');
   const expected = plannedVisitsPerYearForSeries(parent);
   if (!expected) return { skipped: 'no_planned_count' };
   // Visits earlier reseeds added belong to the term they REPLACED a visit in
-  // (the stamp's term_index), not the term their end-of-series date falls in
-  // (fallback auditor P1 on 81e8083efd): otherwise the next term reads one
-  // visit fuller than it is and a cancel there goes unreplaced. The same
-  // override picks the term when the cancelled row IS such a visit
-  // (fallback auditor P1 on 4a67afdc15).
+  // (the stamp's term_index), never to a cadence slot of their own
+  // (fallback auditor P1s on 81e8083efd / 4a67afdc15).
   const stamps = await trx('activity_log')
     .where({ customer_id: parent.customer_id, action: 'recurring_cancel_reseed' })
     .whereRaw("metadata->>'recurring_parent_id' = ?", [String(parentId)])
@@ -17983,22 +17980,22 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
     if (!Number.isInteger(meta.term_index)) continue;
     for (const id of meta.added_service_ids || []) termOverrides.set(String(id), meta.term_index);
   }
-  // Terms anchor on the root's PLAN position too (Codex r4 P1): a root moved
-  // as a single occurrence keeps its cadence date, and the term must not
-  // shift with the appointment.
-  const anchor = planPositionDate(parent);
-  const window = termOverrides.has(String(cancelled.id))
-    ? termWindowAtIndex(anchor, termOverrides.get(String(cancelled.id)))
-    : termWindowContaining(anchor, planPositionDate(cancelled));
-  if (!window) return { skipped: 'no_term_window' };
   const seriesRows = await trx('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included');
-  const counting = countTermVisits(seriesRows, window, termOverrides);
+  // Term membership by cadence SLOT (Codex r6 P1) — see assignPlanTerms.
+  const terms = assignPlanTerms(seriesRows, expected, termOverrides);
+  const termIndex = terms.get(String(cancelled.id));
+  if (termIndex == null) return { skipped: 'not_in_plan_sequence' };
+  const counting = countTermVisits(seriesRows, termIndex, terms);
   if (counting >= expected) return { skipped: 'term_still_whole', counting, expected };
   // Nothing left upcoming = the plan ended (its last visit was cancelled, or
   // every remaining visit was), not a gap inside a running plan.
   if (!hasUpcomingPlanRow(seriesRows, etDateString())) return { skipped: 'no_live_visits', counting, expected };
+  // The calendar span of that term (anchored on the root's PLAN position —
+  // a single-moved root keeps its cadence date) rides on the stamp for
+  // humans; membership itself is by slot.
+  const window = termWindowAtIndex(planPositionDate(parent), termIndex) || { index: termIndex, start: null, end: null };
   return { window, counting, expected };
 }
 
