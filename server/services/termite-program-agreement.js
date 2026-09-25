@@ -51,6 +51,9 @@ const QUARTERLY_SERVICE_NAME = 'Termite Bait Station Program';
 const ANNUAL_SERVICE_NAME = 'Waves Subterranean Termite Protection — Annual';
 // maybeCreateTermiteProgramAgreement outcomes that END in a manual-prep bell
 // — reconciliation treats them as handled, never as failures to retry.
+// annual_prepay_terms statuses that end coverage — never durable evidence
+// that the account is on the plan's prepay track.
+const TERMINAL_PREPAY_TERM_STATUSES = ['cancelled', 'canceled', 'refunded', 'expired', 'lapsed', 'void', 'voided'];
 const PARKED_HANDOFF_OUTCOMES = new Set([
   'commercial', 'annual_prepay', 'figures_unresolved',
   'annual_template_not_active', 'annual_plan_billing_mismatch', 'annual_plan_billing_unverified',
@@ -683,7 +686,14 @@ function isAnnualPlanEstimate(estData) {
 async function annualPlanDurableEvidence(estimate, conn = db) {
   if (!estimate?.id) return false;
   try {
-    const term = await conn('annual_prepay_terms').where({ source_estimate_id: estimate.id }).first('id');
+    // A term counts only while it is LIVE for this estimate: the state
+    // machine moves a voided/refunded first invoice's term to
+    // cancelled/refunded (annual-prepay-renewals), and a retained terminal
+    // row must not license prepaid auto-renewal wording (Codex #4811 r6).
+    const term = await conn('annual_prepay_terms')
+      .where({ source_estimate_id: estimate.id })
+      .whereNotIn('status', TERMINAL_PREPAY_TERM_STATUSES)
+      .first('id');
     if (term) return true;
     if (estimate.annual_plan_activation_status) return true;
     if (await conn.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
@@ -1013,6 +1023,20 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       if (evidence === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
       if (!evidence) {
         logger.warn(`[termite-agreement] annual plan for estimate ${estimate.id} has no durable prepay evidence (no term, no deferral stamp) — parking for manual prep.`);
+        // Retire the open same-property rows first, exactly like the other
+        // parks: on the rollout-audit path the row being judged IS the
+        // misissued prepaid agreement, and a park that leaves it open and
+        // signable while the caller marks it handled would strand it
+        // (Codex #4811 r6).
+        let unverifiedReplacementKept = false;
+        let unverifiedRetireFailed = false;
+        try {
+          ({ keptReplacement: unverifiedReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+        } catch (err) {
+          unverifiedRetireFailed = true;
+          logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+        }
+        if (unverifiedReplacementKept) return { ok: false, skipped: 'annual_plan_billing_unverified', belled: true };
         const unverifiedBelled = await ringAdminBellDeduped(NotificationService, {
           lockKey: `termite-agreement:${customerId}`,
           titleLike: 'Termite agreement needs manual prep%',
@@ -1025,7 +1049,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but no annual prepay record exists for the estimate — confirm billing before preparing the agreement manually.${propertyClause}`,
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
         ], `manual-prep (annual plan billing unverified) for estimate ${estimate.id}`);
-        return { ok: false, skipped: 'annual_plan_billing_unverified', belled: unverifiedBelled };
+        return { ok: false, skipped: 'annual_plan_billing_unverified', belled: unverifiedBelled, retireFailed: unverifiedRetireFailed };
       }
     }
 
@@ -1993,6 +2017,7 @@ module.exports = {
   annualPlanNetFee,
   annualPlanDurableEvidence,
   PARKED_HANDOFF_OUTCOMES,
+  TERMINAL_PREPAY_TERM_STATUSES,
   maybeCreateTermiteProgramAgreement,
   normalizeAddress,
   reconcileTermiteProgramAgreements,

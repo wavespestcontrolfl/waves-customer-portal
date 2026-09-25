@@ -11,7 +11,9 @@ const {
   ANNUAL_SERVICE_NAME,
   isAnnualPlanEstimate,
   annualPlanNetFee,
+  annualPlanDurableEvidence,
   PARKED_HANDOFF_OUTCOMES,
+  TERMINAL_PREPAY_TERM_STATUSES,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,
@@ -667,6 +669,26 @@ describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)'
       expect(PARKED_HANDOFF_OUTCOMES.has(outcome)).toBe(true);
     }
     expect(PARKED_HANDOFF_OUTCOMES.has('prepay_lookup_failed')).toBe(false);
+  });
+
+  test('durable evidence: a live term counts, a cancelled/refunded term does not, the deferral stamp counts (Codex #4811 r6 P1)', async () => {
+    expect(TERMINAL_PREPAY_TERM_STATUSES).toEqual(expect.arrayContaining(['cancelled', 'refunded']));
+    const fakeConn = (termRow, hasColumn = false, stampRow = null) => {
+      const conn = (table) => ({
+        where: () => ({
+          whereNotIn: (_col, statuses) => ({ first: async () => (termRow && !statuses.includes(termRow.status) ? termRow : undefined) }),
+          first: async () => stampRow,
+        }),
+      });
+      conn.schema = { hasColumn: async () => hasColumn };
+      return conn;
+    };
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn({ id: 't', status: 'active' }))).toBe(true);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn({ id: 't', status: 'cancelled' }))).toBe(false);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn({ id: 't', status: 'refunded' }))).toBe(false);
+    expect(await annualPlanDurableEvidence({ id: 'e1', annual_plan_activation_status: 'awaiting_signature' }, fakeConn(null))).toBe(true);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn(null, true, { annual_plan_activation_status: 'activated' }))).toBe(true);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn(null, true, { annual_plan_activation_status: null }))).toBe(false);
   });
 
   test('PROGRAM_TEMPLATE_KEYS includes the annual key for customer-scoped lookups (existing-agreement checks span all three)', () => {
