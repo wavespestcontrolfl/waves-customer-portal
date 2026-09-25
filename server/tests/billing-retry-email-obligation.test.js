@@ -20,9 +20,15 @@ jest.mock('../services/automation-enroll', () => ({
   enrollSequenceFromEvent: (...args) => mockEnroll(...args),
 }));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: () => '+19415550000' }));
+jest.mock('../services/retry-collectibility', () => ({
+  loadRetryContext: jest.fn(() => ({ lookupWarnings: [] })),
+  classifyFailedPaymentRetry: jest.fn(async () => ({ disposition: 'charge' })),
+  DISPOSITIONS: { CHARGE: 'charge' },
+}));
 
 const db = require('../models/db');
 const BillingRetryEmail = require('../services/billing-retry-email-obligation');
+const RetryCollectibility = require('../services/retry-collectibility');
 
 function query({ result = [], first = null, insertId = 'queue-1', insertError = null, update = 1 } = {}) {
   const q = {};
@@ -211,5 +217,40 @@ test('an explicit Email choice cannot invoke the legacy direct provider owner', 
   await expect(BillingRetryEmail.sendPaymentRetryNotice({
     customerId: 'cust-1', paymentId: 'pay-1', retryDate: payment.next_retry_at,
   })).resolves.toMatchObject({ reason: 'deferred_owner_required', retryable: true });
+  expect(mockSendRetryNotice).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['already_collected', 'supersede_by_collector'],
+  ['absorbed_annual_prepay', 'self_supersede'],
+  ['autopay_disabled', 'disarm'],
+  ['autopay_paused', 'skip_armed'],
+  ['lane_not_monthly', 'disarm'],
+  ['customer_deleted', 'skip_silent'],
+])('a queued notice does not promise a retry after %s', async (reason, disposition) => {
+  const currentCustomer = { id: 'cust-1', autopay_enabled: false };
+  wire({ payments: [query({ first: payment })], customers: [query({ first: currentCustomer })] });
+  RetryCollectibility.classifyFailedPaymentRetry.mockResolvedValueOnce({ reason, disposition });
+
+  await expect(BillingRetryEmail.replayPaymentRetryNotice(replayMeta)).resolves.toMatchObject({
+    sent: false, blocked: true, code: 'PAYMENT_RETRY_NO_LONGER_ELIGIBLE', reason, deliveryOutcome: 'not_sent',
+  });
+  expect(RetryCollectibility.loadRetryContext).toHaveBeenCalledWith({ conn: db });
+  expect(RetryCollectibility.classifyFailedPaymentRetry).toHaveBeenCalledWith({
+    payment, customer: currentCustomer, conn: db, ctx: { lookupWarnings: [] },
+  });
+  expect(mockEnroll).not.toHaveBeenCalled();
+  expect(mockSendRetryNotice).not.toHaveBeenCalled();
+});
+
+test.each(['throw', 'lookup warning'])('unreadable retry eligibility stays retryable (%s)', async (failure) => {
+  wire({ payments: [query({ first: payment })], customers: [query({ first: { id: 'cust-1' } })] });
+  if (failure === 'throw') RetryCollectibility.classifyFailedPaymentRetry.mockRejectedValueOnce(new Error('unavailable'));
+  else RetryCollectibility.loadRetryContext.mockReturnValueOnce({ lookupWarnings: [{ lookup: 'prepay' }] });
+
+  await expect(BillingRetryEmail.replayPaymentRetryNotice(replayMeta)).resolves.toMatchObject({
+    sent: false, retryable: true, code: 'PAYMENT_RETRY_ELIGIBILITY_UNAVAILABLE', deliveryOutcome: 'not_sent',
+  });
+  expect(mockEnroll).not.toHaveBeenCalled();
   expect(mockSendRetryNotice).not.toHaveBeenCalled();
 });

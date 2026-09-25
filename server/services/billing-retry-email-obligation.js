@@ -6,6 +6,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { loadRetryContext, classifyFailedPaymentRetry, DISPOSITIONS } = require('./retry-collectibility');
 
 const ENTRY_POINT = 'billing_retry_email_deferred';
 const DESCRIPTOR_FIELD = 'billing_retry_email_notice';
@@ -165,16 +166,27 @@ async function clearProviderMarker(database, id) {
 }
 
 async function replayPaymentRetryNotice(meta = {}, database = db) {
-  const payment = await database('payments').where({ id: meta.payment_id })
-    .first('id', 'customer_id', 'status', 'next_retry_at');
+  const payment = await database('payments').where({ id: meta.payment_id }).first();
   if (!payment || String(payment.customer_id) !== String(meta.customer_id)) {
     return { sent: false, blocked: true, code: 'PAYMENT_OWNERSHIP_CHANGED', deliveryOutcome: 'not_sent' };
   }
-  if (payment.status !== 'failed' || retryDateKey(payment.next_retry_at) !== retryDateKey(meta.retry_date)) {
+  if (payment.status !== 'failed' || payment.superseded_by_payment_id || Number(payment.retry_count || 0) >= 3
+      || retryDateKey(payment.next_retry_at) !== retryDateKey(meta.retry_date)) {
     return { sent: false, blocked: true, code: 'PAYMENT_RETRY_SUPERSEDED', deliveryOutcome: 'not_sent' };
   }
-  const customer = await database('customers').where({ id: meta.customer_id }).first('id');
+  const customer = await database('customers').where({ id: meta.customer_id }).first();
   if (!customer) return { sent: false, blocked: true, code: 'CUSTOMER_NOT_FOUND', deliveryOutcome: 'not_sent' };
+  try {
+    const ctx = loadRetryContext({ conn: database });
+    const eligibility = await classifyFailedPaymentRetry({ payment, customer, ctx, conn: database });
+    if (ctx.lookupWarnings.length) throw new Error('Retry eligibility lookup unavailable');
+    if (eligibility.disposition !== DISPOSITIONS.CHARGE) {
+      return { sent: false, blocked: true, code: 'PAYMENT_RETRY_NO_LONGER_ELIGIBLE',
+        reason: eligibility.reason, deliveryOutcome: 'not_sent' };
+    }
+  } catch {
+    return { sent: false, retryable: true, code: 'PAYMENT_RETRY_ELIGIBILITY_UNAVAILABLE', deliveryOutcome: 'not_sent' };
+  }
   const choice = await currentEmailChoice(meta.customer_id, database);
   if (choice === undefined) {
     return { sent: false, retryable: true, code: 'BILLING_PREFS_UNAVAILABLE', deliveryOutcome: 'not_sent' };

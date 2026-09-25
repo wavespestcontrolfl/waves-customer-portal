@@ -113,6 +113,19 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
   });
 
+  test.each(['sms', 'push'])('a success-shaped %s suppression stays pending until delivery is accepted', async (channel) => {
+    const send = jest.fn()
+      .mockResolvedValueOnce({ sent: true, deliveryOutcome: 'not_sent', code: 'GATE_DISABLED' })
+      .mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted' });
+
+    await expect(deliver([channel], send)).resolves.toMatchObject({ complete: false, deliveredNow: [] });
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(1);
+
+    await expect(deliver([channel], send)).resolves.toMatchObject({ complete: true, deliveredNow: [channel] });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
   test('a Text-specific denial preserves selected Email and App; a global hold sends nothing', async () => {
     const send = jest.fn(async (channel) => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: `audit-${channel}` }));
     collectionsChannelPermitted.mockImplementation(async ({ channel }) => channel !== 'sms');

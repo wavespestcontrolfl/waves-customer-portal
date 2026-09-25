@@ -86,6 +86,7 @@ postgres('billing retry Email obligation durability (private PostgreSQL)', () =>
       state: 'FL',
       zip: '00000',
       active: true,
+      autopay_enabled: true,
     });
     await mockPg('notification_prefs').insert({
       customer_id: customerId,
@@ -195,6 +196,20 @@ postgres('billing retry Email obligation durability (private PostgreSQL)', () =>
     expect(await mockPg('sms_log').where({ customer_id: customerId })).toHaveLength(1);
     const payment = await mockPg('payments').where({ id: paymentId }).first('metadata');
     expect(payment.metadata.billing_retry_email_notice).toBeUndefined();
+  });
+
+  test.each([
+    [{ autopay_enabled: false }, 'autopay_disabled'],
+    [{ deleted_at: new Date() }, 'customer_deleted'],
+  ])('fresh customer state prevents a stale retry notice: %s', async (change, reason) => {
+    await mockPg('customers').where({ id: customerId }).update(change);
+    await expect(BillingRetryEmail.replayPaymentRetryNotice({
+      customer_id: customerId, payment_id: paymentId, retry_date: '2026-10-02',
+      billing_retry_email_mode: 'branded',
+    }, mockPg)).resolves.toMatchObject({
+      sent: false, blocked: true, code: 'PAYMENT_RETRY_NO_LONGER_ELIGIBLE', reason,
+    });
+    expect(mockSendPaymentRetryNotice).not.toHaveBeenCalled();
   });
 
   test('a durable provider-start marker blocks every later provider dispatch', async () => {

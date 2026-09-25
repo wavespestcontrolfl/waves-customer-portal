@@ -176,6 +176,11 @@ function checkRecruitingBookingVersion(meta, app, stage) {
 }
 
 const REGISTRY = {
+  billing_retry_email_deferred: {
+    async dispatch(meta) {
+      return require('../billing-retry-email-obligation').replayPaymentRetryNotice(meta);
+    },
+  },
   lawn_assessment_notification_deferred: {
     async recheck(meta) {
       // The durable descriptor carries the customer identity. Reuse

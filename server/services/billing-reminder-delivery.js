@@ -61,8 +61,8 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
       result = err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: 'REMINDER_OUTCOME_UNCONFIRMED' };
     }
     results[channel] = result;
-    const accepted = (result?.sent === true || result?.ok === true || result?.deliveryOutcome === 'accepted')
-      && result?.deliveryOutcome !== 'uncertain';
+    const accepted = result?.deliveryOutcome === 'accepted'
+      || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined);
     if (accepted) {
       if (!await ContactLedger.markDelivered(entry)) {
         results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
