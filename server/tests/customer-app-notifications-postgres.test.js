@@ -26,6 +26,7 @@ const express = require('express');
 const { generateToken } = require('../middleware/auth');
 const Push = require('../services/push-notifications');
 const Notifications = require('../services/notification-service');
+const AccountMembershipEmail = require('../services/account-membership-email');
 const apns = require('../services/apns');
 const fcm = require('../services/fcm');
 const connection = process.env.APP_TEST_DATABASE_URL;
@@ -88,6 +89,10 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg.schema.hasColumn('service_requests', 'status_version')).toBe(hadVersion);
     await versionMigration.up(mockPg);
     await require('../models/migrations/20260909000064_request_channel_provenance').up(mockPg);
+    const billingChannelsMigration = require('../models/migrations/20260924010200_billing_delivery_channels');
+    await billingChannelsMigration.up(mockPg); await billingChannelsMigration.up(mockPg);
+    await billingChannelsMigration.down(mockPg); await billingChannelsMigration.down(mockPg);
+    await billingChannelsMigration.up(mockPg);
     await mockPg('customers').insert([
       { id: owner, account_id: owner, is_primary_profile: true },
       { id: property, account_id: owner, is_primary_profile: false },
@@ -112,6 +117,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   }, 60000);
   afterAll(async () => {
     delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+    delete process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
     if (server) await new Promise((resolve) => server.close(resolve));
     await mockPg?.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
@@ -119,6 +125,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    process.env.GATE_BILLING_NOTIFICATION_CHANNELS = 'true';
     await mockPg('notifications').del();
     await mockPg('push_subscriptions').del();
     await mockPg('notification_prefs').del();
@@ -351,6 +358,23 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(status.body).toEqual({ available: true, enabled: true, registered: true, fresh: true });
   });
 
+  test('App readiness uses the caller transaction with a one-connection pool', async () => {
+    await device(owner);
+    const previous = mockPg;
+    const limited = require('knex')({ client: 'pg', connection, searchPath: [schema],
+      acquireConnectionTimeout: 500, pool: { min: 0, max: 1 } });
+    mockPg = limited;
+    try {
+      await limited.transaction(async (trx) => {
+        await trx('notification_prefs').where({ customer_id: owner }).forUpdate().first();
+        expect(await Push.customerStatus(property, trx)).toMatchObject({ enabled: true, fresh: true });
+      });
+    } finally {
+      mockPg = previous;
+      await limited.destroy();
+    }
+  });
+
 
   test('request App choice belongs to the requesting profile and preserves old-client saves', async () => {
     expect((await put({ requestChannel: 'push' })).status).toBe(409);
@@ -496,6 +520,307 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({ en_route_channel: 'push', payment_receipt_channel: 'sms', sms_enabled: true });
     expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({ payment_receipt_channel: 'push', sms_enabled: false, email_enabled: false });
     expect((await put({ billingReminderChannel: 'push' })).status).toBe(400);
+  });
+
+  test.each([
+    [['email']],
+    [['sms']],
+    [['push']],
+    [['sms', 'email']],
+    [['push', 'email']],
+    [['push', 'sms']],
+    [['push', 'email', 'sms']],
+  ])('enabled billing gate accepts and canonicalizes combination %j', async (invoiceChannels) => {
+    await device();
+    const response = await put({ invoiceChannels });
+    expect(response.status).toBe(200);
+    const canonical = ['email', 'sms', 'push'].filter((channel) => invoiceChannels.includes(channel));
+    expect(response.body.preferences.invoiceChannels).toEqual(canonical);
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels).toEqual(canonical);
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).invoice_channels).toBeNull();
+  });
+
+  test.each([
+    [{ invoiceChannels: [] }],
+    [{ invoiceChannels: ['sms', 'sms'] }],
+    [{ invoiceChannels: ['carrier-pigeon'] }],
+  ])('billing API rejects invalid arrays: %j', async (body) => {
+    expect((await put(body)).status).toBe(400);
+  });
+
+  test('billing arrays stay on the charged profile and legacy scalar writes cannot erase them', async () => {
+    const channels = ['email', 'sms'];
+    expect((await put({ paymentConfirmationChannels: channels })).status).toBe(200);
+    expect((await put({ paymentConfirmationChannel: 'sms' })).status).toBe(200);
+    expect((await get()).body).toMatchObject({
+      paymentConfirmationChannels: channels,
+      paymentConfirmationChannel: 'sms',
+      billingChannelsAvailable: true,
+    });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+      payment_receipt_channels: channels,
+      payment_receipt_channel: 'sms',
+    });
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).payment_receipt_channels).toBeNull();
+  });
+
+  test.each([undefined, 'false'])('billing gate %s hides arrays, rejects array writes, and preserves legacy saves', async (gate) => {
+    if (gate === undefined) delete process.env.GATE_BILLING_NOTIFICATION_CHANNELS;
+    else process.env.GATE_BILLING_NOTIFICATION_CHANNELS = gate;
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      billing_channel: 'email', invoice_channels: ['email', 'push'],
+    });
+
+    const hidden = await get();
+    expect(hidden.status).toBe(200);
+    expect(hidden.body.billingReminderChannel).toBe('email');
+    for (const key of ['billingChannelsAvailable', 'invoiceChannels', 'paymentIssueChannels',
+      'billingReminderChannels', 'paymentConfirmationChannels']) expect(hidden.body).not.toHaveProperty(key);
+
+    const rejected = await put({ invoiceChannels: ['sms'] });
+    expect(rejected).toMatchObject({
+      status: 400,
+      body: { error: 'Billing notification channel choices are not available.' },
+    });
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels)
+      .toEqual(['email', 'push']);
+
+    expect((await put({ billingReminderChannel: 'sms', weatherAlerts: false })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+      billing_channel: 'sms', invoice_channels: ['email', 'push'], weather_alerts: false,
+    });
+  });
+
+  test('billing App arrays require the App preferences query handshake', async () => {
+    await device();
+    const response = await put({ invoiceChannels: ['push'] }, '/api/notifications/preferences');
+    expect(response).toMatchObject({
+      status: 400,
+      body: { error: 'Refresh the app to manage app notifications.' },
+    });
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels).toBeNull();
+  });
+
+  test('new Email requires the charged profile or billing address, not the primary profile email', async () => {
+    await mockPg('customers').where({ id: property }).update({ email: null });
+    try {
+      expect((await put({ billingReminderChannels: ['email'] })).status).toBe(409);
+      expect((await put({ billingEmail: 'billing@example.com', billingReminderChannels: ['email'] })).status).toBe(200);
+      expect((await put({ emailEnabled: false, invoiceChannels: ['email', 'sms'] })).status).toBe(409);
+    } finally {
+      await mockPg('customers').where({ id: owner }).update({ email: 'qa-app-0@example.invalid' });
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
+    }
+  });
+
+  test('billing email destination guard rejects stranding and permits replacements, fallbacks, and dark-gate protection', async () => {
+    const emailOnly = { billing_email: 'billing@example.com', invoice_channels: ['email'] };
+    try {
+      await mockPg('customers').where({ id: property }).update({ email: null });
+      await mockPg('notification_prefs').where({ customer_id: property }).update(emailOnly);
+      expect(await put({ billingEmail: '' })).toMatchObject({ status: 409,
+        body: { error: 'Choose Text or App for every billing notification before removing the billing email.' } });
+      expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).billing_email).toBe('billing@example.com');
+
+      await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email', 'sms'], sms_enabled: false });
+      expect((await put({ billingEmail: '' })).status).toBe(409);
+      await mockPg('customers').where({ id: property }).update({ phone: '' });
+      expect((await put({ billingEmail: '', smsEnabled: true })).status).toBe(409);
+      await mockPg('customers').where({ id: property }).update({ phone: '+19415550101' });
+      expect((await put({ billingEmail: '', invoiceChannels: ['sms'], smsEnabled: true })).status).toBe(200);
+      expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+        billing_email: null, invoice_channels: ['sms'], sms_enabled: true,
+      });
+
+      await mockPg('notification_prefs').where({ customer_id: property }).update({
+        ...emailOnly, invoice_channels: ['sms'], payment_receipt_channels: ['email', 'sms'], payment_confirmation_sms: false,
+      });
+      expect((await put({ billingEmail: '' })).status).toBe(409);
+
+      await mockPg('notification_prefs').where({ customer_id: property }).update({
+        ...emailOnly, invoice_channels: ['email', 'push'], payment_receipt_channels: null, payment_confirmation_sms: true,
+      });
+      expect((await put({ billingEmail: '' })).status).toBe(409);
+
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid', phone: '+19415550101' });
+      await mockPg('notification_prefs').where({ customer_id: property }).update({ ...emailOnly, payment_receipt_channels: null });
+      expect((await put({ billingEmail: '' })).status).toBe(200);
+      expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels).toEqual(['email']);
+
+      await mockPg('customers').where({ id: property }).update({ email: null });
+      await mockPg('notification_prefs').where({ customer_id: property }).update(emailOnly);
+      process.env.GATE_BILLING_NOTIFICATION_CHANNELS = 'false';
+      expect((await put({ billingEmail: '' })).status).toBe(409);
+      expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject(emailOnly);
+    } finally {
+      process.env.GATE_BILLING_NOTIFICATION_CHANNELS = 'true';
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid', phone: '+19415550101' });
+    }
+  });
+
+  test('saved App can be retained or removed during an outage, but cannot be newly added', async () => {
+    await device();
+    expect((await put({ paymentIssueChannels: ['push'] })).status).toBe(200);
+    await mockPg('push_subscriptions').del();
+    expect((await put({ paymentIssueChannels: ['sms', 'push'] })).status).toBe(200);
+    expect((await put({ paymentIssueChannels: ['sms'] })).status).toBe(200);
+    expect((await put({ paymentIssueChannels: ['sms', 'push'] })).status).toBe(409);
+  });
+
+  test('billing channel edits cannot leave only unavailable selections', async () => {
+    await device();
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      payment_receipt_channels: ['sms', 'push'], payment_confirmation_sms: false,
+      invoice_channels: ['email', 'sms'], email_enabled: false,
+    });
+    expect((await put({ paymentConfirmationChannels: ['sms'] })).status).toBe(409);
+    expect((await put({ invoiceChannels: ['email'] })).status).toBe(409);
+    expect((await put({ paymentConfirmationChannels: ['sms'], paymentConfirmationSms: true })).status).toBe(200);
+  });
+
+  test('legacy receipt kill switch rejects receipt-channel edits without blocking other preference saves', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      payment_receipt: false, payment_receipt_channels: ['sms'], payment_confirmation_sms: true,
+    });
+    expect((await put({ weatherAlerts: false })).status).toBe(200);
+    expect((await put({ invoiceChannels: ['sms'] })).status).toBe(200);
+    expect(await put({ paymentConfirmationChannels: ['sms'] })).toMatchObject({
+      status: 409,
+      body: { error: 'Choose at least one available delivery method for each billing notification.' },
+    });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+      payment_receipt: false, payment_receipt_channels: ['sms'], weather_alerts: false,
+    });
+  });
+
+  test.each([
+    ['emailEnabled', 'invoice_channels', 'invoiceChannels', 'email'],
+    ['smsEnabled', 'invoice_channels', 'invoiceChannels', 'sms'],
+    ['paymentConfirmationSms', 'payment_receipt_channels', 'paymentConfirmationChannels', 'sms'],
+    ['pushEnabled', 'invoice_channels', 'invoiceChannels', 'push'],
+  ])('billing channel guard checks a standalone %s change and allows an explicit replacement', async (flag, column, key, channel) => {
+    await device();
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ [column]: [channel] });
+    expect((await put({ [flag]: false })).status).toBe(409);
+    const replacement = channel === 'email' ? 'sms' : 'email';
+    expect((await put({ [flag]: false, [key]: [replacement] })).status).toBe(200);
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first())[column]).toEqual([replacement]);
+  });
+
+  test('billing availability honors the App gate and every charged profile', async () => {
+    await device();
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email', 'push'] });
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
+    expect((await put({ emailEnabled: false })).status).toBe(409);
+
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ email_enabled: true, invoice_channels: null });
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ invoice_channels: ['push'] });
+    expect((await put({ pushEnabled: false })).status).toBe(409);
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).push_enabled).not.toBe(false);
+  });
+
+  test('concurrent delivery-toggle saves cannot strand a billing category', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      invoice_channels: ['email', 'sms'], email_enabled: true, sms_enabled: true,
+    });
+    const responses = await Promise.all([put({ emailEnabled: false }), put({ smsEnabled: false })]);
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 409]);
+    const saved = await mockPg('notification_prefs').where({ customer_id: property }).first();
+    expect([saved.email_enabled, saved.sms_enabled].filter((enabled) => enabled !== false)).toHaveLength(1);
+  });
+
+  test('new Email and App checks compare against the row reread under lock', async () => {
+    async function raceLockedChange(lockedUpdate, body) {
+      const blocker = await mockPg.transaction();
+      let committed = false;
+      try {
+        await blocker('notification_prefs').where({ customer_id: property }).forUpdate().first('customer_id');
+        await blocker('notification_prefs').where({ customer_id: property }).update(lockedUpdate);
+        const pending = put(body);
+        let settled;
+        void pending.then((response) => { settled = response; });
+        let waiting = false;
+        for (let attempt = 0; attempt < 50 && !waiting && !settled; attempt += 1) {
+          const result = await admin.raw(`SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+              AND wait_event_type = 'Lock' AND query ILIKE '%notification_prefs%' AND query ILIKE '%for update%'
+          ) AS waiting`);
+          waiting = result.rows[0].waiting;
+          if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect({ waiting, settled }).toEqual({ waiting: true, settled: undefined });
+        await blocker.commit();
+        committed = true;
+        return pending;
+      } finally {
+        if (!committed) await blocker.rollback();
+      }
+    }
+
+    try {
+      await mockPg('customers').where({ id: property }).update({ email: null });
+      await mockPg('notification_prefs').where({ customer_id: property }).update({
+        billing_email: 'billing@example.com', invoice_channels: ['sms'],
+      });
+      expect(await raceLockedChange({ billing_email: null }, { invoiceChannels: ['email', 'sms'] }))
+        .toMatchObject({ status: 409, body: { error: 'Add a billing email and enable email notifications before choosing Email.' } });
+
+      await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['sms', 'push'] });
+      expect(await raceLockedChange({ invoice_channels: ['sms'] }, { invoiceChannels: ['sms', 'push'] }))
+        .toMatchObject({ status: 409, body: { error: 'Connect the app and enable notifications before choosing App.' } });
+      expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channels).toEqual(['sms']);
+    } finally {
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
+    }
+  });
+
+  test('billing array audit compares legacy channels with the pre-save email destination', async () => {
+    try {
+      await mockPg('customers').where({ id: property }).update({ email: null });
+      await mockPg('notification_prefs').where({ customer_id: property }).update({
+        billing_email: 'billing@example.com', invoice_channels: null, invoice_channel: 'sms',
+      });
+      expect((await put({ billingEmail: '', invoiceChannels: ['sms'] })).status).toBe(200);
+      const audit = AccountMembershipEmail.sendAccountUpdated.mock.calls.at(-1)[0];
+      expect(audit.changedItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: 'invoiceChannels', oldValue: 'Email, Text', newValue: 'Text' }),
+      ]));
+    } finally {
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
+    }
+  });
+
+  test('billing array audit compares against the preference row reread under lock', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['sms'] });
+    const blocker = await mockPg.transaction();
+    let committed = false;
+    try {
+      await blocker('notification_prefs').where({ customer_id: property }).forUpdate().first('customer_id');
+      await blocker('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email'] });
+      const pending = put({ invoiceChannels: ['sms'] });
+      let settled;
+      void pending.then((response) => { settled = response; });
+      let waiting = false;
+      for (let attempt = 0; attempt < 50 && !waiting && !settled; attempt += 1) {
+        const result = await admin.raw(`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+            AND wait_event_type = 'Lock' AND query ILIKE '%notification_prefs%' AND query ILIKE '%for update%'
+        ) AS waiting`);
+        waiting = result.rows[0].waiting;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect({ waiting, settled }).toEqual({ waiting: true, settled: undefined });
+      await blocker.commit();
+      committed = true;
+      expect((await pending).status).toBe(200);
+      const audit = AccountMembershipEmail.sendAccountUpdated.mock.calls.at(-1)[0];
+      expect(audit.changedItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: 'invoiceChannels', oldValue: 'Email', newValue: 'Text' }),
+      ]));
+    } finally {
+      if (!committed) await blocker.rollback();
+    }
   });
 
   test('both reminder choices persist on the primary and survive legacy saves and rollback', async () => {

@@ -110,8 +110,8 @@ describe("AssessmentsHubPage usage reporting", () => {
     renderHub();
 
     const add = screen.getByRole("button", { name: "Add Assessment" });
-    // Lives in the header card next to the title, not in the tab content.
-    expect(add.closest(".rounded-md.border-hairline")).toContainElement(
+    // Header actions share the title row across command presentations.
+    expect(add.closest(".ui-command-heading")).toContainElement(
       screen.getByRole("heading", { level: 1, name: "Assessments" }),
     );
     fireEvent.click(add);
