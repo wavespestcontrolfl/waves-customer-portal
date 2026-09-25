@@ -318,6 +318,50 @@ function annualPlanFigures(data) {
   };
 }
 
+// The accepted NET annual fee, read ONLY from the authoritative container.
+// When the mapped result exists it is the source of truth (same precedence
+// as annualPlanFigures / estimate-termite-program-rows): the v1-legacy-mapper
+// writes results.tmBait and recurring.services[] side by side, and the
+// termite row there carries annualAfterDiscount / manualFinalAnnual with
+// visitsPerYear = 1 on this plan. A stale engineResult.lineItems or raw
+// lineItems row from an earlier QUARTERLY quote must never supply the
+// figure (Codex #4811 r3: $288 / 4 = $72 would otherwise become the "annual"
+// fee), so raw containers are skipped whenever the mapped result exists,
+// and any row that is not annual-shaped (plan !== annual_protection or an
+// explicit visitsPerYear !== 1) is ignored. Returns null when no net figure
+// is stored — the caller then decides gross-vs-fail-closed.
+function annualPlanNetFee(estimateData) {
+  const container = estimateData?.result && typeof estimateData.result === 'object'
+    ? estimateData.result : estimateData;
+  if (!container || typeof container !== 'object') return null;
+  const mapped = authoritativeMappedTermiteEnvelope(estimateData);
+  const netOf = (node) => {
+    const n = Number(node?.manualFinalAnnual ?? node?.annualAfterDiscount);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const annualShaped = (node) => {
+    const plan = String(node?.plan || '').toLowerCase();
+    if (plan && plan !== 'annual_protection') return false;
+    const visits = node?.visitsPerYear ?? node?.visits;
+    if (visits != null && Number(visits) !== 1) return false;
+    return true;
+  };
+  const isTermiteRow = (node) => {
+    const key = String(node?.service || node?.key || '').toLowerCase();
+    const name = String(node?.name || '').toLowerCase();
+    return key === 'termite_bait' || (!key && /termite bait/.test(name));
+  };
+  if (mapped) {
+    // Mapped result: the mapper's own rows only — never engineResult or the
+    // raw lineItems retained beside it.
+    const rows = Array.isArray(container?.recurring?.services) ? container.recurring.services : [];
+    const row = rows.find((r) => isTermiteRow(r) && annualShaped(r));
+    return row ? netOf(row) : netOf(mapped);
+  }
+  const raw = selectedTermiteAnnualPlanRows(estimateData).find((r) => isTermiteRow(r) && annualShaped(r));
+  return raw ? netOf(raw) : null;
+}
+
 // Build the Annual Protection plan's template values (setup fee, annual fee,
 // 12-month coverage window), or null when the figures can't be resolved.
 // Same fail-closed posture as the quarterly builder below: an unresolvable
@@ -326,10 +370,9 @@ function annualPlanFigures(data) {
 // Annual fee = what the customer ACCEPTED. The mapped/raw `annualFee` is the
 // gross list figure (v1-legacy-mapper copies the pre-discount value); a
 // WaveGuard or manual discount lands on the line as annualAfterDiscount /
-// manualFinalAnnual, which collectTermiteFacts already reads as the NET
-// per-application price (visitsPerYear = 1 on this plan, so per-app = the
-// annual fee). When no net figure is stored and the estimate may carry a
-// discount, fail closed exactly like the quarterly builder.
+// manualFinalAnnual on the authoritative container's termite row
+// (annualPlanNetFee). When no net figure is stored and the estimate may
+// carry a discount, fail closed exactly like the quarterly builder.
 //
 // A missing RAW start date (no visit booked yet at accept time — the common
 // case) does NOT fail closed — like the quarterly agreement's start_date,
@@ -338,10 +381,10 @@ function buildAnnualProgramAgreementValues(estimate = {}, data = null, { startDa
   const figures = annualPlanFigures(data);
   if (!figures) return null;
 
-  const facts = collectTermiteFacts(data);
+  const netAnnual = annualPlanNetFee(data);
   let annualFeeValue = null;
-  if (facts.perAppIsNet) {
-    annualFeeValue = facts.perApp;
+  if (netAnnual != null) {
+    annualFeeValue = netAnnual;
   } else if (estimateMayDiscount(estimate, data)) {
     return null;
   } else {
@@ -566,7 +609,10 @@ async function scheduledStartDate(estimateId, conn = db) {
   try {
     const row = await conn('scheduled_services')
       .where({ source_estimate_id: estimateId })
-      .whereNotIn('status', ['cancelled', 'skipped'])
+      // 'rescheduled' rows are pending-rebook phantoms in this repo's
+      // scheduling queries (annual-prepay-renewals COVERAGE_EXCLUDED_STATUSES)
+      // — an obsolete appointment must not anchor the coverage window.
+      .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       // Multi-service accepts book pest/lawn visits from the same estimate —
       // only the termite installation/service anchors the PROGRAM start.
       .whereRaw("LOWER(service_type) LIKE '%termite%'")
@@ -884,7 +930,43 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
     }
 
-    const prepay = isAnnualPlanEstimate(estData) ? false : await isAnnualPrepayAccept(estimate, billingTerm);
+    const annualPlan = isAnnualPlanEstimate(estData);
+    const explicitBillingTerm = String(billingTerm || '').toLowerCase();
+    if (annualPlan && explicitBillingTerm && explicitBillingTerm !== 'prepay_annual') {
+      // The v3 agreement states a prepaid setup + annual fee due before
+      // installation and an annual renewal. An annual-plan accept under any
+      // OTHER explicit billing term (the public route passes 'standard' for
+      // "pay per application") converts without the annual invoice or its
+      // renewal term, so a signed v3 would not match the account — park for
+      // manual prep instead of drafting mismatched terms (Codex #4811 r3).
+      // Callers that pass no billingTerm (reissue/reconcile paths) are not
+      // judged here.
+      logger.warn(`[termite-agreement] annual plan accepted under billing term '${explicitBillingTerm}' for estimate ${estimate.id} — parking for manual prep.`);
+      let mismatchReplacementKept = false;
+      let mismatchRetireFailed = false;
+      try {
+        ({ keptReplacement: mismatchReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+      } catch (err) {
+        mismatchRetireFailed = true;
+        logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+      }
+      if (mismatchReplacementKept) return { ok: false, skipped: 'annual_plan_billing_mismatch', belled: true };
+      const mismatchBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${customerId}`,
+        titleLike: 'Termite agreement needs manual prep%',
+        ...(reissueSourceContractId
+          ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+          : { metaKey: 'estimateId', metaValue: estimate.id }),
+      }, [
+        'estimate',
+        'Termite agreement needs manual prep (annual plan billing)',
+        `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan under '${explicitBillingTerm}' billing instead of annual prepay — the v3 agreement states prepaid terms, so prepare the agreement manually.${propertyClause}`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+      ], `manual-prep (annual plan billing mismatch) for estimate ${estimate.id}`);
+      return { ok: false, skipped: 'annual_plan_billing_mismatch', belled: mismatchBelled, retireFailed: mismatchRetireFailed };
+    }
+
+    const prepay = annualPlan ? false : await isAnnualPrepayAccept(estimate, billingTerm);
     if (prepay === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
     if (prepay) {
       // Fail closed: the seeded wording states per-application billing,
@@ -1835,6 +1917,7 @@ module.exports = {
   collectTermiteFacts,
   estimateMayDiscount,
   isAnnualPlanEstimate,
+  annualPlanNetFee,
   maybeCreateTermiteProgramAgreement,
   normalizeAddress,
   reconcileTermiteProgramAgreements,

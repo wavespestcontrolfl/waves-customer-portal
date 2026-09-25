@@ -10,6 +10,7 @@ const {
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SERVICE_NAME,
   isAnnualPlanEstimate,
+  annualPlanNetFee,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,
@@ -633,6 +634,28 @@ describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)'
     expect(isAnnualPlanEstimate(ownedEstData())).toBe(false);
     expect(isAnnualPlanEstimate(rentedEstData())).toBe(false);
     expect(isAnnualPlanEstimate(null)).toBe(false);
+  });
+
+  test('a stale quarterly raw row beside the mapped result never supplies the annual net fee (Codex #4811 r3 P1)', () => {
+    const data = { result: annualEstData() };
+    // Retained raw containers from an earlier QUARTERLY quote: $288/yr over 4
+    // visits. Neither may leak into the annual fee.
+    data.engineResult = { lineItems: [{ service: 'termite_bait', plan: 'quarterly', annual: 288, annualAfterDiscount: 288, manualFinalAnnual: 288, visitsPerYear: 4 }] };
+    data.result.lineItems = [{ service: 'termite_bait', plan: 'quarterly', annual: 288, annualAfterDiscount: 288, visitsPerYear: 4 }];
+    expect(annualPlanNetFee(data)).toBeNull();
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'bronze' }, data).values.program.annual_price).toBe('$480');
+    // With a discount and no authoritative net row: fail closed, never $288 or $72.
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'gold' }, data)).toBeNull();
+    // The mapper's own recurring row IS authoritative.
+    data.result.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 1, annualAfterDiscount: 432 }] };
+    expect(annualPlanNetFee(data)).toBe(432);
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'gold' }, data).values.program.annual_price).toBe('$432');
+  });
+
+  test('a quarterly-shaped recurring row (visitsPerYear 4) in the mapped container is ignored for the annual fee', () => {
+    const data = annualEstData();
+    data.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 4, annualAfterDiscount: 288 }] };
+    expect(annualPlanNetFee(data)).toBeNull();
   });
 
   test('PROGRAM_TEMPLATE_KEYS includes the annual key for customer-scoped lookups (existing-agreement checks span all three)', () => {
