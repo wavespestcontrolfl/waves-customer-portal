@@ -18029,7 +18029,17 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
       logger.info(`[recurring-cancel-reseed] ${cancelledIds.length} visits of parent=${rootId} cancelled in one batch (${source}) — plan reduction, no reseed`);
       continue;
     }
-    results.push(await reseedRecurringSeriesAfterCancel(conn, cancelledIds[0], { source }));
+    // Per-root isolation (fallback auditor P1 on 9ab2099da1): each reseed is
+    // its own transaction, so one series that fails (lock timeout, an
+    // unplaceable window, a customer row mid-merge) must not take the rest
+    // of the batch's plans down with it — the bridge would otherwise log one
+    // error and silently skip every root after it.
+    try {
+      results.push(await reseedRecurringSeriesAfterCancel(conn, cancelledIds[0], { source }));
+    } catch (e) {
+      logger.error(`[recurring-cancel-reseed] reseed failed for parent=${rootId} (${source}, cancelled=${cancelledIds[0]}): ${e.message}`);
+      results.push({ added: [], skipped: 'error', parentId: rootId, error: e.message });
+    }
   }
   return { results, skippedRoots };
 }

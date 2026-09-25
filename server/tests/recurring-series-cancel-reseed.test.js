@@ -177,6 +177,8 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(body).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?skipped: 'batch_series_cancel'/);
     expect(body).toMatch(/results\.push\(await reseedRecurringSeriesAfterCancel\(conn, cancelledIds\[0\], \{ source \}\)\)/);
     expect(schedule).toMatch(/module\.exports\.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfterCancelBatch;/);
+    // per-root isolation: one failing series never aborts the rest of the batch
+    expect(body).toMatch(/try \{\s*results\.push\(await reseedRecurringSeriesAfterCancel\([\s\S]*?\} catch \(e\) \{[\s\S]*?results\.push\(\{ added: \[\], skipped: 'error', parentId: rootId, error: e\.message \}\);/);
   });
 
   test('locked body: a plan with nothing left upcoming ended — no lone visit is added', () => {
