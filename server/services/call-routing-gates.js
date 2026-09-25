@@ -172,8 +172,23 @@ function checkTcpaConsent(extraction, opts = {}) {
 // using "may" as a modal ("it may go to him") no longer poisons the turn.
 // A force-reprocess must write a fresh decision row rather than
 // onConflict-ignore into the stale one either way.
-const V2_DECISION_VERSION = 'v2-1.13.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0'];
+// v2-1.14.0: otherSentenceIsClean (call-triage-flags.js) picked up two
+// codex round-7 fixes. STRICTER: "should" is no longer a free token in
+// BENIGN_CONDITIONAL_GLUE_WORDS (it now grounds a sentence only through
+// the anchored NOTIFICATION_ROUTING_RE shape), and a new APPROVAL_REQUEST_RE
+// ("get/have/wait for <possessive> okay/approval/sign off/…") joins the
+// declarative-poison screen, so a call that used to demote
+// caller_not_authorized/commercial_requires_quote on "We should get your
+// okay." or "have to get his sign off." now stays blocked. MORE
+// PERMISSIVE (a narrow, anchored extension, never open vocabulary):
+// REINFORCING_AFFIRMATION_RE gained a second alternative for a direct
+// past-tense reinforcement in the agent's own voice ("We confirmed your
+// appointment.") — states no new scheduling fact, same as "You're
+// confirmed." already covered, so it no longer poisons on "confirmed"/
+// "appointment". A force-reprocess must write a fresh decision row rather
+// than onConflict-ignore into the stale one either way.
+const V2_DECISION_VERSION = 'v2-1.14.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0'];
 
 function buildRouteDecision({
   callLogId,

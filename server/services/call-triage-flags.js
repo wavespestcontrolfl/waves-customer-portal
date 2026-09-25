@@ -677,42 +677,48 @@ const COMMITMENT_TURN_VOCAB = new Set([
   // of plain declarative words a non-conditional benign aside actually uses
   // had to join it): "go" (ordinary movement verb — "it should go to him");
   // "made"/"send"/"momentarily" (small-talk / "I'll send you a text
-  // momentarily" filler). "should" is deliberately NOT here (codex round 5
-  // — see BENIGN_CONDITIONAL_GLUE_WORDS below): a modal by itself is safe,
-  // but round 5 converged on keeping the BASE vocabulary as small as
-  // possible now that otherSentenceIsClean's real defense is the
-  // SCHEDULING_PREDICATE_TERMS screen, not vocabulary membership; "should"
-  // only needs the narrower notification-routing filler path.
+  // momentarily" filler). "should" is deliberately NOT here, and not in
+  // BENIGN_CONDITIONAL_GLUE_WORDS either (codex round 7, P1): a FREE
+  // "should" token let "We should get your okay." pass — no scheduling
+  // predicate, no declarative-poison term, and the whole sentence was
+  // otherwise vocabulary-safe once "should" was admitted anywhere. "should"
+  // now only reaches a sentence through NOTIFICATION_ROUTING_RE, an
+  // anchored whole-sentence shape, never a free token in any Set.
   'go', 'made', 'send', 'momentarily',
 ]);
-// A tiny closed set of CONNECTOR/filler words for TWO narrow uses — never
-// the base COMMITMENT_TURN_VOCAB, never the pinned commitment sentence:
-//   (1) a benign CONDITIONAL sentence's carve-out (codex round-3 whitelist
-//       inversion), unlocked only once the sentence has already cleared
-//       BOTH gates: it has a conditional trigger, AND every extracted
-//       clause is benign (clauseIsBenign). At that point the sentence's
-//       remaining tokens are just how the agent phrases resolving a benign
-//       routing mixup ("let me know", "goes to the wrong person/number",
-//       "I'll make sure that gets figured out") — words too specific/
-//       generic to trust unconditionally everywhere else in the turn.
-//       Codex round 4, finding 2 (live miss 17ed9362's actual single
-//       Agent: turn): "It's autonomously done, so if it goes to you, I'll
-//       make sure that's rectified." needs "autonomously"/"done"/
-//       "rectified" once its one clause ("it goes to you") clears
-//       clauseIsBenign against the PREVIOUS sentence's "notification".
-//   (2) a non-conditional declarative's OWN vocabulary check in
-//       otherSentenceIsClean (codex round 5) — "should" for "Yep, it
-//       should go to him, the notification." Round 3 put "should" in the
-//       BASE vocabulary, which round 5 flagged as one of the "words added
-//       to the shared vocabulary open new holes" — a base-vocabulary word
-//       is available to EVERY other sentence unconditionally, while this
-//       set is only reached after a sentence has already cleared the
-//       declarative-poison and scheduling-predicate screens, so it carries
-//       far less risk sitting here than in the base set.
+// A tiny closed set of CONNECTOR/filler words for a benign CONDITIONAL
+// sentence's carve-out ONLY (codex round-3 whitelist inversion) — never the
+// base COMMITMENT_TURN_VOCAB, never the pinned commitment sentence. Unlocked
+// only once the sentence has already cleared BOTH gates: it has a
+// conditional trigger, AND every extracted clause is benign (clauseIsBenign).
+// At that point the sentence's remaining tokens are just how the agent
+// phrases resolving a benign routing mixup ("let me know", "goes to the
+// wrong person/number", "I'll make sure that gets figured out") — words too
+// specific/generic to trust unconditionally everywhere else in the turn.
+// Codex round 4, finding 2 (live miss 17ed9362's actual single Agent:
+// turn): "It's autonomously done, so if it goes to you, I'll make sure
+// that's rectified." needs "autonomously"/"done"/"rectified" once its one
+// clause ("it goes to you") clears clauseIsBenign against the PREVIOUS
+// sentence's "notification".
+//
+// "should" was here too, for the non-conditional declarative's OWN
+// vocabulary check in otherSentenceIsClean (round 5) — "Yep, it should go
+// to him, the notification." Codex round 7, P1: a FREE "should" token in
+// ANY set otherSentenceIsClean's vocabulary check consults is available to
+// EVERY sentence, conditional or not, and "We should get your okay."
+// otherwise named no declarative-poison term and no scheduling predicate.
+// "should" is now recognized ONLY via NOTIFICATION_ROUTING_RE, an anchored
+// whole-sentence shape (below) — never as a free token here.
 const BENIGN_CONDITIONAL_GLUE_WORDS = new Set([
   'me', 'tell', 'goes', 'wrong', 'person', 'number', 'make', 'sure', 'gets', 'figured',
-  'autonomously', 'done', 'rectified', 'should',
+  'autonomously', 'done', 'rectified',
 ]);
+// codex round 7, P1: the ONLY way "should" grounds any sentence now — the
+// specific "a notification/email/text routes to a party" declarative shape
+// ("Yep, it should go to him, the notification."), matched whole-sentence,
+// never as a vocabulary token. Checked as an immediate pass in
+// otherSentenceIsClean, the same way REINFORCING_AFFIRMATION_RE is.
+const NOTIFICATION_ROUTING_RE = /^(?:ok|okay|yep|yes|yeah|so|and)? ?(?:it|that|the (?:notification|email|text|confirmation text)) should (?:go|be sent|be going) to (?:him|her|them|you|the (?:client|owner|homeowner|point of contact))(?: the (?:notification|email|text))?$/;
 function turnVocabularyTokenOk(tok, extraSets) {
   if (!tok) return true;
   if (COMMITMENT_TURN_VOCAB.has(tok)) return true;
@@ -1034,27 +1040,35 @@ const UNAVAILABILITY_TERMS = [
 //       AUTHORIZATION NOUN (okay/ok/approval/confirmation/go ahead/sign
 //       off/permission/authorization/blessing) directly, no "to <verb>".
 const AUTHORIZATION_NEED_RE = /\b(?:(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client) to (?:confirm|approve|sign off|okay|ok|authorize)|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing))\b/;
-// Unconditional declarative-poison check (codex rounds 2 and 4): either
-// term list, or the anchored "need <party> to <authorize>" shape, anywhere
-// in the sentence poisons regardless of conditional structure. Restored as
-// a real function and run FIRST in otherSentenceIsClean's whitelist (codex
-// round 4, finding 1) — round 3 assumed the vocabulary early-return alone
-// would already reject these words, but "him"/"need"/"confirm"/"the"/
-// "appointment" are all in COMMITMENT_TURN_VOCAB, so
-// commitmentTurnVocabularyOk(other.ns) returned true and short-circuited
-// past clauseIsBenign entirely, before it ever ran. This screen must run
-// BEFORE the whitelist early return, not after. It also guards the PINNED
-// commitment sentence (agentCommitmentSentenceVerified's final check,
-// below) as a second, independent layer: "we'll see you Sunday, he still
-// needs to confirm" already fails turnHasAffirmativeCommitmentForm's slot-
-// word-only tail today, but that's an accident of the form check, not a
-// guarantee — this check makes the safety property explicit rather than
-// incidental.
+// codex round 7, P1(b): AUTHORIZATION_NEED_RE covers "need"/"waiting on"
+// TRIGGERS; this covers the ACT of chasing that authorization down —
+// "should get your okay.", "have to get his sign off.", "once we have your
+// go ahead" — none of which say "need" or "waiting on" at all. Anchored
+// SHAPE, not a word list: (get/getting/obtain/secure/have/wait for/waiting
+// for) + a POSSESSIVE (your/his/her/their/the owner's/the homeowner's/the
+// client's — normalized text strips apostrophes) + an AUTHORIZATION NOUN.
+const APPROVAL_REQUEST_RE = /\b(?:get|getting|obtain|secure|have|wait for|waiting for) (?:your|his|her|their|the (?:owner|homeowner|client) s) (?:okay|ok|approval|confirmation|go ahead|sign off|permission|authorization|blessing)\b/;
+// Unconditional declarative-poison check (codex rounds 2, 4 and 7): either
+// term list, or either anchored shape, anywhere in the sentence poisons
+// regardless of conditional structure. Restored as a real function and run
+// FIRST in otherSentenceIsClean's whitelist (codex round 4, finding 1) —
+// round 3 assumed the vocabulary early-return alone would already reject
+// these words, but "him"/"need"/"confirm"/"the"/"appointment" are all in
+// COMMITMENT_TURN_VOCAB, so commitmentTurnVocabularyOk(other.ns) returned
+// true and short-circuited past clauseIsBenign entirely, before it ever
+// ran. This screen must run BEFORE the whitelist early return, not after.
+// It also guards the PINNED commitment sentence
+// (agentCommitmentSentenceVerified's final check, below) as a second,
+// independent layer: "we'll see you Sunday, he still needs to confirm"
+// already fails turnHasAffirmativeCommitmentForm's slot-word-only tail
+// today, but that's an accident of the form check, not a guarantee — this
+// check makes the safety property explicit rather than incidental.
 function sentenceHasDeclarativePoisonVocabulary(ns) {
   const padded = ` ${ns} `;
   return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
     || UNAVAILABILITY_TERMS.some((t) => padded.includes(t))
-    || AUTHORIZATION_NEED_RE.test(ns);
+    || AUTHORIZATION_NEED_RE.test(ns)
+    || APPROVAL_REQUEST_RE.test(ns);
 }
 // These two lists (and the regex above) ALSO do their work inside
 // clauseIsBenign, below, where they matter for a different reason: a
@@ -1155,6 +1169,7 @@ function clauseIsBenign(clauseNs, prevNs) {
   if (AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))) return false;
   if (UNAVAILABILITY_TERMS.some((t) => padded.includes(t))) return false;
   if (AUTHORIZATION_NEED_RE.test(clauseNs)) return false;
+  if (APPROVAL_REQUEST_RE.test(clauseNs)) return false;
   if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
   if (BENIGN_NON_BOOKING_TOPICS.some((t) => padded.includes(t))) return true;
   if (prevNs && isBarePronounClause(clauseNs)) {
@@ -1216,7 +1231,17 @@ const MAY_DATE_RE = /\bmay (?:\d{1,2}(?:st|nd|rd|th)?)\b|\b\d{1,2}(?:st|nd|rd|th
 // Sunday." still poisons via SCHEDULING_PREDICATE_TERMS on "sunday" — a
 // weekday is new scheduling information this narrow shape was never meant
 // to cover).
-const REINFORCING_AFFIRMATION_RE = /^(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:you re|you are|we re|we are|it s|it is|that s|that is) (?:all )?(?:confirmed|set|booked|good to go|on the books|locked in)$/;
+// codex round 7, P2: a direct PAST-TENSE reinforcement from the agent's own
+// voice ("We confirmed your appointment.") is the same no-new-fact shape as
+// "You're confirmed." above, just phrased in first person with an explicit
+// object — extended as a second alternative, still whole-sentence anchored,
+// still nothing allowed after the object ("We confirmed your appointment
+// for Sunday." still poisons — a weekday is new information outside this
+// shape) and still requiring a completed verb ("We'll confirm your
+// appointment." uses "confirm", not "confirmed", so it never matches
+// either alternative — and as a PINNED sentence it fails
+// turnHasAffirmativeCommitmentForm regardless, since it states no slot).
+const REINFORCING_AFFIRMATION_RE = /^(?:(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:you re|you are|we re|we are|it s|it is|that s|that is) (?:all )?(?:confirmed|set|booked|good to go|on the books|locked in)|(?:ok|okay|awesome|perfect|great|alright|so|yep|yes|yeah|and)? ?(?:we|i) (?:have )?(?:confirmed|booked|scheduled|got you (?:down|booked|scheduled)) (?:your|the|that|this) (?:appointment|visit|service|slot)(?: for you)?)$/;
 // True when a normalized sentence (already run through
 // stripBenignTopicPhrases) still talks about scheduling — either a term
 // from the phrase list above, the date-shaped "May" regex, or a bare 1-2
@@ -1242,19 +1267,24 @@ function sentenceHasSchedulingPredicate(strippedNs) {
 //      checked before anything below ever runs, because a closed vocabulary
 //      of ordinary words — "him"/"need"/"confirm"/"the"/"appointment" — can
 //      never express that SHAPE on its own).
-//   4. A purely REINFORCING affirmative ("You're confirmed.") passes
-//      immediately, checked as a narrow whole-sentence ANCHORED shape
-//      (REINFORCING_AFFIRMATION_RE, codex round 6 — never via vocabulary),
-//      before the scheduling-predicate screen ever sees "confirmed"/
-//      "booked"/etc. Anything longer than the exact shape falls through to
-//      the ordinary screens below.
-//   5. No SCHEDULING_PREDICATE_TERM in the sentence once benign topic
+//   4. A purely REINFORCING affirmative ("You're confirmed."/"We confirmed
+//      your appointment.") passes immediately, checked as a narrow
+//      whole-sentence ANCHORED shape (REINFORCING_AFFIRMATION_RE, codex
+//      rounds 6-7 — never via vocabulary), before the scheduling-predicate
+//      screen ever sees "confirmed"/"booked"/etc. Anything longer than the
+//      exact shape falls through to the ordinary screens below.
+//   5. The narrow notification-routing declarative ("Yep, it should go to
+//      him, the notification.") also passes immediately, checked the same
+//      way (NOTIFICATION_ROUTING_RE, codex round 7, P1) — the only place
+//      "should" grounds a sentence at all now that it is not a free token
+//      in any vocabulary Set.
+//   6. No SCHEDULING_PREDICATE_TERM in the sentence once benign topic
 //      phrases are stripped out (codex round 5, above) — "We should confirm
 //      the appointment.", "We need your confirmation of the appointment.",
 //      and "If you need it, we will book the appointment." all poison here,
 //      on "confirm"/"confirmation"/"book"+"appointment", regardless of
 //      conditional structure or vocabulary membership.
-//   6. A CONDITIONAL sentence gets ONE further requirement ON TOP of (not
+//   7. A CONDITIONAL sentence gets ONE further requirement ON TOP of (not
 //      instead of) the STRIPPED-text vocabulary check below: every
 //      extracted clause must be benign (clauseIsBenign — unchanged: still
 //      runs the authorization/unavailability/scheduling-staffing poison-term
@@ -1263,7 +1293,7 @@ function sentenceHasSchedulingPredicate(strippedNs) {
 //      bare-pronoun clause). A conditional sentence can only pass through
 //      this carve-out — vocabulary-only clearance is never enough for it,
 //      unlike a non-conditional declarative.
-//   7. Whatever remains of the STRIPPED text must be built from the base
+//   8. Whatever remains of the STRIPPED text must be built from the base
 //      COMMITMENT_TURN_VOCAB plus the small BENIGN_CONDITIONAL_GLUE_WORDS
 //      filler set (never the raw, unstripped text — the benign topic words
 //      are gone by now and never need to sit in any vocabulary Set at all).
@@ -1272,6 +1302,7 @@ function otherSentenceIsClean(other, prevNs) {
   if (turnHasNegationOrHedge(other.ns)) return false;
   if (sentenceHasDeclarativePoisonVocabulary(other.ns)) return false;
   if (REINFORCING_AFFIRMATION_RE.test(other.ns)) return true;
+  if (NOTIFICATION_ROUTING_RE.test(other.ns)) return true;
   const stripped = stripBenignTopicPhrases(other.ns);
   if (sentenceHasSchedulingPredicate(stripped)) return false;
   if (turnHasUnresolvedConditional(other.ns)) {

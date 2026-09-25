@@ -1151,6 +1151,100 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // Codex round 7, P1: round 6 removed "should" from the base vocabulary,
+  // but it was still a FREE token in BENIGN_CONDITIONAL_GLUE_WORDS,
+  // reachable by ANY sentence's vocabulary check (conditional or not).
+  // "We should get your okay." named no declarative-poison term and no
+  // scheduling predicate, so it passed on vocabulary alone. "should" is now
+  // never a free token anywhere — it only grounds a sentence through the
+  // narrow, anchored NOTIFICATION_ROUTING_RE shape.
+  test('Codex round-7 regression: "We should get your okay." still poisons (approval-request shape, modal-independent)', () => {
+    const turn = "We should get your okay. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-7 regression: "We\'ll need to get his sign off." still poisons (same approval-request shape, no "should")', () => {
+    const turn = "We'll need to get his sign off. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // The live 17ed9362 single-turn fixture (added round 4, re-verified round
+  // 5) must still ground after "should" was pulled out of the free glue set
+  // — "Yep, it should go to him, the notification." now grounds ONLY
+  // through NOTIFICATION_ROUTING_RE's anchored shape, not vocabulary.
+  test('Codex round-7: the live 17ed9362 single-turn fixture still grounds after "should" left the free glue set', () => {
+    const transcript = [
+      'Agent: Waves Pest Control, this is Adam.',
+      'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
+      'Agent: Sure — what area?',
+      'Caller: 100 Example Street in Venice.',
+      "Caller: Please make my client the point of contact so you can reach him with any appointment updates. I'll take the report and invoice.",
+      "Agent: Awesome. Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. But yeah, we'll see him on Monday at 10 o'clock.",
+      "Caller: All right, perfect. I'll let him know. Thank you.",
+      'Agent: Thank you. Bye.',
+    ].join('\n');
+    const extraction = {
+      evidence: [{
+        field_path: '/scheduling/agent_committed_booking',
+        speaker: 'agent',
+        quote: "we'll see him on Monday at 10 o'clock.",
+      }],
+      scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' }, // Monday
+    };
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(true);
+  });
+
+  // Codex round 7, P2: a direct past-tense reinforcement from the agent's
+  // own voice states no new scheduling fact any more than "You're
+  // confirmed." does — extended REINFORCING_AFFIRMATION_RE with this second
+  // anchored alternative.
+  test('Codex round-7 regression: "We confirmed your appointment." (direct past-tense reinforcement) does not poison the pinned commitment', () => {
+    const turn = "We confirmed your appointment. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  // Accepted strictness, same as the round-6 weekday case: a trailing
+  // weekday is new scheduling information outside the narrow reinforcing
+  // shape, so it still falls through to SCHEDULING_PREDICATE_TERMS.
+  test('Codex round-7: "We confirmed your appointment for Sunday." still poisons — a weekday is outside the reinforcing shape', () => {
+    const turn = "We confirmed your appointment for Sunday. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // "We'll confirm your appointment." (future, not done) must never ground
+  // AS THE PINNED COMMITMENT SENTENCE — verifying the pre-existing
+  // turnHasAffirmativeCommitmentForm gate still holds and that the
+  // round-7 REINFORCING_AFFIRMATION_RE extension (which only matches the
+  // PAST-TENSE "confirmed"/"booked"/"scheduled" verbs) does not interact
+  // with it at all.
+  test('Codex round-7: "We\'ll confirm your appointment." (future tense) never grounds as the pinned sentence', () => {
+    const futureTranscript = [
+      'Caller: Hi, checking on my appointment.',
+      "Agent: We'll confirm your appointment.",
+    ].join('\n');
+    const extraction = {
+      evidence: [{
+        field_path: '/scheduling/agent_committed_booking',
+        speaker: 'agent',
+        quote: "We'll confirm your appointment.",
+      }],
+      scheduling: { confirmed_start_at: '2026-08-02T12:00:00-04:00' },
+    };
+    expect(hasAgentCommittedEvidence(extraction, futureTranscript, '2026-07-30T15:50:00-04:00')).toBe(false);
+  });
+
   // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
   // history). Round 3 reworded this test from "Adam works Sundays." (out-
   // of-vocabulary words) to "We come out Sunday afternoon." on the theory
