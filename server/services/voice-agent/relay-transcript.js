@@ -428,7 +428,7 @@ function countBy(values) {
 
 /** Numeric timing observations only; live stats also contain raw utterance objects. */
 function storedTurnStats(stats = []) {
-  const numeric = ['callerSpeechStoppedAt', 'promptAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
+  const numeric = ['turn', 'callerSpeechStoppedAt', 'promptAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
     'modelMs', 'toolMs', 'toolCount', 'rounds', 'partialCount', 'segmentGeneration'];
   const flags = ['interrupted', 'interruptWithoutFollowupTranscript', 'timedOut'];
   return stats.map((turn) => ({

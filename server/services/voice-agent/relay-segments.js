@@ -162,6 +162,42 @@ function hasCompleteSegments(meta, excludedOwner = null) {
     || segments.some((segment) => segment.session_key === owner));
 }
 
+/**
+ * Each leg's OWN close already stamped observability evidence into its
+ * stored `latency.observability` (relay-conversation's `_eventsTelemetry()`,
+ * shaped by relay-transcript's `summarizeTurnStats`). Recomputing the
+ * call-level summary from the flattened turn_stats alone would run WITHOUT
+ * that per-leg meta and silently reset it — events_subscribed back to
+ * unknown, counts/shapes emptied, a correct `events_not_subscribed` /
+ * `insufficient_turns` flipped to a blind `no_events_received` — so this
+ * aggregates each leg's evidence into one meta object first: `subscribed`
+ * is true if ANY leg saw it true, false if every leg that reported it saw
+ * it false, else null (unknown/no data); counts sum across legs; shapes are
+ * unioned, first-seen wins per kind (never overwritten by a later leg).
+ */
+function aggregateObservability(legs) {
+  const observations = legs.map((leg) => leg?.latency?.observability).filter((o) => o && typeof o === 'object');
+  const aggFlag = (key) => {
+    const values = observations.map((o) => o.events_subscribed?.[key]);
+    if (values.some((v) => v === true)) return true;
+    if (values.length && values.every((v) => v === false)) return false;
+    return null;
+  };
+  const counts = {};
+  for (const o of observations) {
+    for (const [kind, n] of Object.entries(o.events_received || {})) {
+      counts[kind] = (counts[kind] || 0) + (Number(n) || 0);
+    }
+  }
+  const shapes = {};
+  for (const o of observations) {
+    for (const [kind, shape] of Object.entries(o.event_shapes || {})) {
+      if (!(kind in shapes)) shapes[kind] = shape;
+    }
+  }
+  return { subscribed: { speaker: aggFlag('speaker'), tokensPlayed: aggFlag('tokens_played') }, counts, shapes };
+}
+
 /** Recompute percentiles from observations, never from per-socket percentiles. */
 function summarizeSegments(meta) {
   const legs = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
@@ -181,7 +217,9 @@ function summarizeSegments(meta) {
     reservice_filed: meta.relay_reservice_filed === true || legs.some((leg) => leg.reservice_filed === true),
     ...Object.fromEntries(Object.entries({ end_reason: latest.reason, versions: latest.versions, model: latest.model })
       .filter(([, value]) => value != null)),
-    latency: telemetryComplete ? require('./relay-transcript').summarizeTurnStats(legs.flatMap((leg) => leg.turn_stats)) : null,
+    latency: telemetryComplete
+      ? require('./relay-transcript').summarizeTurnStats(legs.flatMap((leg) => leg.turn_stats), aggregateObservability(legs))
+      : null,
     segments: { count: legs.length, complete: hasCompleteSegments(meta), telemetry_complete: telemetryComplete },
   };
 }

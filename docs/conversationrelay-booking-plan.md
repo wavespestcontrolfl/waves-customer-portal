@@ -196,10 +196,17 @@ instant, not an exact measurement — "first text sent" is not "first audio
 heard").
 
 Each turn stat also carries `turn` (index), `rounds` (model round count),
-`renderer`, and `segmentGeneration` (the reconnected-leg generation it ran
-under, from `relay-recovery`/`relay-segments` — `null` when the call never
-reconnected), so a single stored metric can always be traced back to its
-session + segment + turn.
+`renderer`, and `segmentGeneration` — the PER-SOCKET generation the turn ran
+under, stamped by `relay-server.js` from the upgrade token's nonce on every
+authenticated relay socket, including the first leg of a call that never
+reconnects. It is **not** a reconnect-only or "resumed leg" marker: an
+ordinary, never-reconnected call still carries a (single, non-null)
+generation on every turn. What it correlates is a turn to the socket/leg it
+ran on — a call with N legs (N-1 reconnects) shows N distinct values across
+its turns, in mint order. `null` only when a caller passes turn stats that
+never went through a socket at all (a bake-off/synthetic fixture). So a
+single stored metric can always be traced back to its session + socket/leg +
+turn.
 
 ## Roadmap (not in this PR)
 

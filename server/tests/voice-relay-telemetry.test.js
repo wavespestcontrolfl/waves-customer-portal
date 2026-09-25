@@ -328,11 +328,35 @@ describe('events subscribed / received — trustworthy measurement (brief §3A)'
     expect(line).toContain('events=none');
   });
 
+  test('unresolvable (unknown) profile + no speaker event ever arrives ⇒ events=unknown at flush, never a false "none" (codex r1 P2)', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-6b', from: '+19415551234', send: jest.fn(), relayProfileId: 'sandbox_raw_deadbeefcafe' });
+    expect(convo._relayEventsSubscribed).toEqual({ speaker: null, tokensPlayed: null });
+    await convo.handlePrompt('hi there'); // firstSendAt gets set (fallback say()); no agent-speaking event ⇒ awaits, not logged yet
+    expect(convo._turnStats[0].logged).toBeUndefined();
+    logger.info.mockClear();
+    convo.leadCaptured = true; // keep the hangup capture floor out of this test
+    await convo.end('caller_hangup'); // flushes any turn whose event never arrived
+    const line = logger.info.mock.calls.map((c) => c[0]).find((s) => /\[voice-relay\] turn=1 /.test(s));
+    expect(line).toContain('events=unknown');
+  });
+
+  test('unresolvable (unknown) profile but a speaker event DID arrive ⇒ events=subscribed(observed), evidence overrides the unknown lookup', async () => {
+    const convo = new RelayConversation({ callSid: 'CA-obs-6c', from: '+19415551234', send: jest.fn(), relayProfileId: 'sandbox_raw_deadbeefcafe' });
+    expect(convo._relayEventsSubscribed).toEqual({ speaker: null, tokensPlayed: null });
+    await convo.handlePrompt('hi there');
+    logger.info.mockClear(); // isolate: only this call's own turn=1 line should be found below
+    convo.handleRelayEvent({ type: 'info', name: 'agentSpeaking', state: 'started' });
+    const line = logger.info.mock.calls.map((c) => c[0]).find((s) => /\[voice-relay\] turn=1 /.test(s));
+    expect(line).toContain('events=subscribed(observed)');
+  });
+
   test('each turn stat carries the session/segment generation it ran under, so a metric survives being pulled out of the session (brief §3A item 4)', async () => {
     const convo = new RelayConversation({ callSid: 'CA-obs-7', from: '+19415551234', sessionGeneration: 42, send: jest.fn() });
     await convo.handlePrompt('hi there');
     expect(convo._turnStats[0].segmentGeneration).toBe(42);
-    expect(storedTurnStats(convo._turnStats)[0]).toMatchObject({ segmentGeneration: 42 });
+    // `turn` must survive serialization too (codex r1 P2) — relay_segments[].turn_stats
+    // entries need their turn correlation, not just the segment/session one.
+    expect(storedTurnStats(convo._turnStats)[0]).toMatchObject({ turn: 1, segmentGeneration: 42 });
     // turn index / model round count / renderer were already carried — reused, not duplicated.
     expect(convo._turnStats[0]).toMatchObject({ turn: 1, rounds: expect.any(Number), renderer: expect.any(String) });
   });

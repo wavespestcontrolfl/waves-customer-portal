@@ -995,13 +995,24 @@ class RelayConversation {
     const counts = this._eventCounts;
     const eventCounts = ['caller_speaking_end', 'agent_speaking_start', 'agent_speaking_end', 'tokens_played']
       .map((kind) => `${kind}=${counts[kind] || 0}`).join(',');
+    // Three states, never a truthiness coin-flip on a null: `speaker` is
+    // true/false when the profile lookup resolved it, or null for an
+    // UNKNOWN profile (deriveRelayEventsSubscribed) — a null is not "none".
+    // When it's null but a speaker-kind event actually arrived this call,
+    // that arrival is proof positive (see reasonForMissingAudioMetric's same
+    // priority in relay-transcript), so the log says so instead of lying.
+    const speakerReceived = ['caller_speaking_end', 'agent_speaking_start', 'agent_speaking_end']
+      .some((kind) => (counts[kind] || 0) > 0);
+    const eventsState = this._relayEventsSubscribed.speaker === true ? 'subscribed'
+      : this._relayEventsSubscribed.speaker === false ? 'none'
+        : speakerReceived ? 'subscribed(observed)' : 'unknown';
     logger.info(
       `[voice-relay] turn=${stat.turn} callSid=${maskSid(this.callSid)} endpoint=${ms(stat.callerSpeechStoppedAt, stat.promptAt)} `
       + `firstToken=${ms(stat.promptAt, stat.firstTokenAt)} firstSend=${ms(stat.promptAt, stat.firstSendAt)} `
       + `firstAudio=${ms(stat.callerSpeechStoppedAt, stat.agentSpeakingStartAt)} model=${Math.round(stat.modelMs)}ms rounds=${stat.rounds} `
       + `tools=${stat.toolCount}/${Math.round(stat.toolMs)}ms effort=${stat.effort} renderer=${stat.renderer} `
       + `interrupted=${stat.interrupted} timedOut=${stat.timedOut} `
-      + `events=${this._relayEventsSubscribed.speaker ? 'subscribed' : 'none'} eventCounts=${eventCounts}`
+      + `events=${eventsState} eventCounts=${eventCounts}`
     );
   }
 
@@ -1206,10 +1217,12 @@ class RelayConversation {
     this._drainPlaying();
     const stat = {
       turn: this._userTurns.length,
-      // The reconnected-leg generation this turn ran under (relay-recovery /
-      // relay-segments' own id — null on a call with no recovery/reconnect
-      // concept in play), so a metric survives being pulled out of the
-      // session and still ties back to session + segment + turn.
+      // The PER-SOCKET generation this turn ran under (relay-server stamps
+      // it from the upgrade token's nonce on every authenticated socket,
+      // including the first leg of a call that never reconnects — this is
+      // NOT a reconnect-only field), so a metric survives being pulled out
+      // of the session and still ties back to its socket/leg: a call with N
+      // legs shows N distinct values here, one per leg.
       segmentGeneration: this.sessionGeneration != null ? this.sessionGeneration : null,
       promptAt,
       callerSpeechStoppedAt: stoppedAt != null && promptAt - stoppedAt <= CALLER_STOP_STALE_MS ? stoppedAt : null,
