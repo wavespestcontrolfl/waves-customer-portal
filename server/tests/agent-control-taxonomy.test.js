@@ -221,23 +221,20 @@ describe('agent-control lane policies', () => {
 
   // Call traces (GATE_LLM_CALL_TRACES) keep redacted bodies only for lanes
   // that opt in, and only keyed to a call row — so a traced lane must be
-  // call-ledgered (an unrecordable or session lane could never write one),
-  // and the opted-in set is the deliberate debugging surface, not everything.
-  it('the traced lanes are exactly the debugging text lanes, and every one is call-ledgered', () => {
+  // call-ledgered (an unrecordable or session lane could never write one).
+  // The opted-in set is the lanes whose prompts carry NO customer-authored
+  // text (inbound SMS / email, transcripts, review text) — the house PII
+  // rule keeps those out of any stored log, redacted or not (codex r1 #4788).
+  it('the traced lanes are exactly the report-copy lanes, and every one is call-ledgered', () => {
     const traced = Object.entries(policies.LANE_RUNTIME).filter(([, e]) => e.trace === true).map(([id]) => id).sort();
-    expect(traced).toEqual([
-      'bounce_rescue', 'call_extraction', 'call_research', 'call_sentiment', 'commercial_proposal', 'completion_recap',
-      'contact_correction', 'email_classify', 'email_reply', 'estimate_followup', 'estimator_sms_signal', 'intent_composer',
-      'invoice_summary', 'lawn_visit_narratives', 'parse_when', 'previsit_brief', 'project_report', 'report_copy',
-      'response_drafter', 'response_drafter_high_stakes', 'review_ask', 'review_gate_text', 'review_reply', 'rodent_narrative',
-      'sms_draft', 'sms_intent', 'sms_save_sale', 'sms_suggest', 'sms_tone', 'treatment_narrative',
-    ]);
+    expect(traced).toEqual(['invoice_summary', 'lawn_visit_narratives', 'previsit_brief', 'report_copy', 'rodent_narrative', 'treatment_narrative']);
     for (const id of traced) {
       expect(policies.LANE_RUNTIME[id].ledger).toBe('call');
       expect(policies.policyFor(id).trace).toBe(true);
     }
-    // Vision, content, canary, eval and Managed-Agents lanes stay untraced.
-    for (const id of ['pest_id', 'social_copy', 'blog_draft', 'embeddings', 'sms_canary_default', 'sealed_eval', 'agent_lead']) {
+    // Inbound-text, vision, content, canary, eval and Managed-Agents lanes stay untraced.
+    for (const id of ['sms_draft', 'sms_intent', 'estimator_sms_signal', 'intent_composer', 'call_extraction', 'email_classify', 'review_reply', 'completion_recap', 'parse_when',
+      'pest_id', 'social_copy', 'blog_draft', 'embeddings', 'sms_canary_default', 'sealed_eval', 'agent_lead']) {
       expect(policies.policyFor(id).trace).toBe(false);
     }
   });

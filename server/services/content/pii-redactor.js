@@ -348,14 +348,64 @@ function suspiciousUnstructured(text) {
   // emoji + currency) — be cautious.
   // We allow common latin + emoji + standard punctuation; flag anything
   // odd by checking presence of unusual private-use / control chars.
-  // eslint-disable-next-line no-control-regex
+   
   if (/[---]/.test(text)) return true;
   return false;
+}
+
+
+// ── Structured contact fields ────────────────────────────────────────────
+// The heuristics above find PII in prose: a capitalized first+last pair,
+// an introduction phrase, a house number + street suffix. A prompt that
+// serialises a customer profile carries the same PII in a shape none of
+// them see — `"name":"Jennifer"` (a profile with a null last_name), a
+// `First name: Jennifer` label line, `"phone":"9415551234"` already caught
+// but `"email"` keys whose value is not an email. This pass scrubs the VALUE
+// of every contact-shaped key in JSON (`"key": "value"`) and label
+// (`Key: value` to end of line) form, case-insensitively, replacing it with
+// the category token. It is deliberately greedy: a service called
+// `"name":"Quarterly Pest"` is scrubbed too, and that is the right trade
+// for a debugging trace — over-redaction is cheap, a stored first name is
+// not. Not part of redact() itself: public review quoting and the other
+// callers keep their exact contract; the LLM call-trace path runs this
+// FIRST and then redact().
+const STRUCTURED_FIELDS = [
+  { token: '[name]', keys: ['name', 'first_name', 'last_name', 'full_name', 'customer_name', 'contact_name', 'display_name', 'firstname', 'lastname', 'fullname', 'customername', 'contactname', 'displayname', 'customer', 'contact', 'first name', 'last name', 'full name', 'customer name', 'contact name', 'caller', 'caller name', 'callername'] },
+  { token: '[phone]', keys: ['phone', 'phone_number', 'phonenumber', 'phone number', 'mobile', 'mobile_number', 'cell', 'telephone', 'tel', 'from', 'to'] },
+  { token: '[email]', keys: ['email', 'email_address', 'emailaddress', 'email address', 'e-mail'] },
+  { token: '[address]', keys: ['address', 'street', 'street_address', 'streetaddress', 'street address', 'address_line1', 'address_line_1', 'address1', 'addressline1', 'address line 1', 'service_address', 'service address', 'property_address', 'property address', 'billing_address', 'billing address'] },
+];
+const escapeRe = (k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const STRUCTURED_RES = STRUCTURED_FIELDS.map(({ token, keys }) => {
+  const alt = keys.map(escapeRe).join('|');
+  return {
+    token,
+    // "key": "value"  — the value is a JSON string (escapes allowed), never
+    // null / number / object, so `"last_name":null` stays as-is.
+    json: new RegExp(`("(?:${alt})"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"`, 'gi'),
+    // Key: value — a label at the start of a line or after a bullet /
+    // separator, value runs to end of line (or a `|` / `;` field break).
+    label: new RegExp(`((?:^|[\\n\\r]|[-*•|;,(]\\s*)\\s*(?:${alt})\\s*[:=](?!\\s*[\\[\\n\\r])\\s*)[^\\n\\r|;]+`, 'gi'),
+  };
+});
+
+function redactStructuredFields(text) {
+  if (text === null || text === undefined) return { text: '', findings: [] };
+  let out = String(text);
+  const findings = [];
+  for (const { token, json, label } of STRUCTURED_RES) {
+    let count = 0;
+    out = out.replace(json, (m, key) => { count++; return `${key}"${token}"`; });
+    out = out.replace(label, (m, key) => { count++; return `${key}${token}`; });
+    if (count) findings.push({ type: `structured_${token.slice(1, -1)}`, count });
+  }
+  return { text: out, findings };
 }
 
 // Public API.
 module.exports = {
   redact,
+  redactStructuredFields,
   // Internals for unit tests.
   _internals: {
     PATTERNS,

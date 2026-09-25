@@ -336,3 +336,35 @@ describe('effectivelyLowercase: absolute cap on incidental capitals (Codex round
     expect(r.confidence).not.toBe('low');
   });
 });
+
+describe('redactStructuredFields: contact values in JSON and label shape (LLM call traces, codex r1 P1)', () => {
+  const { redactStructuredFields } = require('../services/content/pii-redactor');
+
+  test('a serialised profile with a null last_name — the scalar first name the prose heuristics cannot see', () => {
+    const { text, findings } = redactStructuredFields('{"name":"Jennifer","last_name":null,"phone":"9415551234","email":"j@x.io","plan":"Quarterly"}');
+    expect(text).toBe('{"name":"[name]","last_name":null,"phone":"[phone]","email":"[email]","plan":"Quarterly"}');
+    expect(findings).toEqual(expect.arrayContaining([{ type: 'structured_name', count: 1 }, { type: 'structured_phone', count: 1 }, { type: 'structured_email', count: 1 }]));
+  });
+
+  test('label lines: value runs to end of line, other lines untouched, keys are case-insensitive', () => {
+    const { text } = redactStructuredFields('CUSTOMER PROFILE\nFirst name: Jennifer\nADDRESS: 12 Palm Ct\nNotes: ants in kitchen');
+    expect(text).toBe('CUSTOMER PROFILE\nFirst name: [name]\nADDRESS: [address]\nNotes: ants in kitchen');
+  });
+
+  test('bulleted and pipe-separated fields, and a JSON value with escaped quotes', () => {
+    expect(redactStructuredFields('- Customer: Bob Smith | Service: lawn').text).toBe('- Customer: [name]| Service: lawn');
+    expect(redactStructuredFields('{"customer_name":"He said \\"hi\\""}').text).toBe('{"customer_name":"[name]"}');
+  });
+
+  test('over-redacts a product called "name" on purpose, and leaves prose with no fields alone', () => {
+    expect(redactStructuredFields('{"name":"Quarterly Pest"}').text).toBe('{"name":"[name]"}');
+    const prose = 'no fields here, call 941-555-1234 about the name of the plan';
+    expect(redactStructuredFields(prose)).toEqual({ text: prose, findings: [] });
+  });
+
+  test('is idempotent and null-safe', () => {
+    const once = redactStructuredFields('Phone: 941-555-1234\n{"email":"a@b.co"}').text;
+    expect(redactStructuredFields(once).text).toBe(once);
+    expect(redactStructuredFields(null)).toEqual({ text: '', findings: [] });
+  });
+});

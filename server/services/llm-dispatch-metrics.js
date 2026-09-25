@@ -658,7 +658,9 @@ function failureCode(failure) {
 /**
  * Keep the redacted bodies of one call, fire-and-forget. Only when
  * GATE_LLM_CALL_TRACES is on AND the lane's runtime policy opts in
- * (`trace: true`). A LOW-confidence redaction is never persisted, on any
+ * (`trace: true`). Structured contact fields are scrubbed before the prose
+ * redactor runs (a serialised profile's `"name":"Jennifer"` is invisible to
+ * the name heuristics). A LOW-confidence redaction is never persisted, on any
  * lane: the redactor reports low exactly when its name / address heuristics
  * may be blind, and a report or draft lane carries customer names as
  * readily as an inbound one — "redacted" has to mean it. Bodies are
@@ -675,12 +677,15 @@ function recordTrace(callIdPromise, { system = null, prompt = null, response = n
     const runId = ctx.runId || null;
     void Promise.resolve(callIdPromise).then((callId) => {
       if (callId === null || callId === undefined) return null;
-      const { redact } = require('./content/pii-redactor');
+      const { redact, redactStructuredFields } = require('./content/pii-redactor');
       const RANK = { high: 0, medium: 1, low: 2 };
       let worst = 'high';
+      // Structured contact fields FIRST (`"name":"Jennifer"`, `Phone: …`
+      // label lines — shapes the prose heuristics in redact() cannot see,
+      // codex r1 P1), then the canonical redactor over what is left.
       const clean = (body) => {
         if (body === null || body === undefined) return null;
-        const r = redact(String(body));
+        const r = redact(redactStructuredFields(String(body)).text);
         if (RANK[r.confidence] > RANK[worst]) worst = r.confidence;
         return r.text.slice(0, TRACE_BODY_CAP);
       };

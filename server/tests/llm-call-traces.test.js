@@ -22,7 +22,7 @@ jest.mock('../services/model-switchboard', () => ({
 }));
 let mockConfidence = 'high';
 const mockRedact = jest.fn((text) => ({ text: text.replace(/\d{3}-\d{3}-\d{4}/g, '[phone]'), confidence: mockConfidence, findings: [] }));
-jest.mock('../services/content/pii-redactor', () => ({ redact: (...a) => mockRedact(...a) }));
+jest.mock('../services/content/pii-redactor', () => ({ redact: (...a) => mockRedact(...a), redactStructuredFields: (t) => ({ text: t, findings: [] }) }));
 
 const ORIGINAL_ENV = { ...process.env };
 
