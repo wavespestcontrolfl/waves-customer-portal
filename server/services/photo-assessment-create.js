@@ -433,10 +433,12 @@ const TREE_SHRUB_NEXT_STEPS = {
 };
 // Inbound photo-text triage (source 'auto_triage') decides the next step
 // itself — the opportunity gauge picks advice, a quote ask, or an on-site
-// visit and writes it into the pending draft. The stored guidance must not
-// contradict that draft with a blanket "recommend an on-site look"
-// (codex #4810 r10), so it points at the draft instead.
-const TREE_SHRUB_TRIAGE_NEXT_STEP = 'Next step is set by the photo-text draft (advice, quote ask, or on-site visit) — see Pending Drafts.';
+// visit for the reply. The stored guidance must not contradict that reply
+// with a blanket "recommend an on-site look" (codex #4810 r10), and must
+// not promise a draft exists either: it is written before the draft is
+// parked, and a competing pending draft or a failed insert keeps the
+// assessment without one (r11).
+const TREE_SHRUB_TRIAGE_NEXT_STEP = 'From a customer photo text — the reply (advice, quote ask, or on-site visit) is decided in the conversation, not by this assessment.';
 
 // The five categories as the admin lane stores them: key/label/score/status
 // only. The report builder's customerExplanation copy is written for a

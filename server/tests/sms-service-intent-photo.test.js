@@ -62,6 +62,10 @@ describe('regex fast path', () => {
     'grubs are eating my lawn',
     'what are these webworms in the grass',
     'chinch bug damage in the yard?',
+    // "bug" in "chinch bug" is part of the lawn pest's name, not a second
+    // pest subject that ties the lawn word (codex #4810 r11).
+    'what is this chinch bug?',
+    'what are these chinch bugs?',
   ])('lawn-pest caption %p runs the lawn assessment', async (body) => {
     await expect(classifyPhotoDiagnosisIntent(body)).resolves.toMatchObject({ assessmentType: 'lawn', method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();

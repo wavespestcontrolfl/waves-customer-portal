@@ -249,13 +249,17 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject, onRevisionState
           <ActionButton tone="primary" disabled={busy} onClick={() => onApprove(draft)}>
             Approve &amp; send
           </ActionButton>
-          <ActionButton disabled={busy} onClick={() => {
-            onRevisionStateChange(draft.id, true);
-            setRevising(true);
-            setRevisedText(draft.draftResponse || "");
-          }}>
-            Revise
-          </ActionButton>
+          {/* Photo-triage drafts are approve-as-written or reject — the
+              server refuses a revision (PHOTO_TRIAGE_NOT_REVISABLE). */}
+          {draft.intent !== "photo_triage" && (
+            <ActionButton disabled={busy} onClick={() => {
+              onRevisionStateChange(draft.id, true);
+              setRevising(true);
+              setRevisedText(draft.draftResponse || "");
+            }}>
+              Revise
+            </ActionButton>
+          )}
           <ActionButton tone="danger" disabled={busy} onClick={() => onReject(draft)}>
             Reject
           </ActionButton>

@@ -353,6 +353,9 @@ async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, cr
       classifier_method: method,
       opportunity_mode: opportunity.mode,
       opportunity_reasons: opportunity.reasons,
+      // The family the gauge checked — the dispatch-time recheck
+      // (photo-triage-opportunity.js#recheckDraftOffer) checks exactly this.
+      offer_family: opportunity.family,
       quote: opportunity.quote,
     }),
   });

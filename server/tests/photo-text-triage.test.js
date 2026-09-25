@@ -364,6 +364,8 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
       // so the opportunity gauge lands on advise (lead + no facts to quote).
       opportunity_mode: 'advise',
       opportunity_reasons: ['lead', 'actionable', 'lead_not_priced'],
+      // The family the dispatch-time recheck will check (codex #4810 r11).
+      offer_family: 'lawn_care',
       quote: null,
     });
     expect(draft.draft_response).toBe(

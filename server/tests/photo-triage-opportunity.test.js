@@ -148,6 +148,7 @@ describe('outcomeFor pest', () => {
 // ── property facts + active-service checks ──────────────────────────────
 
 const TREE_ANALYSIS = (worstSignal, score) => ({ worst_signal: worstSignal, overall_score: score });
+const PEST_ANALYSIS = (service) => ({ report_contract: JSON.stringify({ identification: { category: 'insect' }, service }) });
 
 describe('gaugeOpportunity', () => {
   beforeEach(() => { mockBuildOffer.mockReset(); mockBuildOffer.mockResolvedValue(null); mockDb.mockClear(); });
@@ -262,6 +263,8 @@ describe('gaugeOpportunity', () => {
     expect(mockBuildOffer).not.toHaveBeenCalled();
     expect(result.mode).toBe('advise');
     expect(result.reasons).toContain('palm_assessment_first');
+    // Nothing stored for the dispatch recheck to substitute T&S into (r11).
+    expect(result.family).toBeNull();
   });
 
   test('the owner-visible per-application amount keeps cents', async () => {
@@ -331,7 +334,7 @@ describe('gaugeOpportunity', () => {
     mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'pest_control', label: 'x', mode: 'owned', relationship: 'owned', option: null });
     const result = await gaugeOpportunity({
       type: 'pest',
-      analysis: { report_contract: JSON.stringify({ identification: { category: 'insect' } }) },
+      analysis: PEST_ANALYSIS({ line: 'pest', key: 'pest' }),
       customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
       body: 'found this on the patio',
       images: [],
@@ -339,6 +342,54 @@ describe('gaugeOpportunity', () => {
     expect(mockBuildOffer).toHaveBeenCalledWith('existing-1', mockDb, 'pest_control');
     expect(result.mode).toBe('advise');
     expect(result.reasons).toContain('already_owned');
+    expect(result.family).toBe('pest_control');
+  });
+
+  describe('a pest ID checks the family its allowlisted service names (codex #4810 r11)', () => {
+    const EXISTING = { id: 'existing-1', pipeline_stage: 'active_customer', active: true };
+    const gauge = (service, customer = EXISTING) => gaugeOpportunity({
+      type: 'pest', analysis: PEST_ANALYSIS(service), customer, body: 'what is this', images: [],
+    });
+
+    test('a mosquito or rodent ID has no checkable family → an existing customer gets no pitch, no lookup', async () => {
+      for (const service of [{ line: 'mosquito', key: 'mosquito' }, { line: 'rodent', key: null }]) {
+        const result = await gauge(service);
+        expect(result).toMatchObject({ mode: 'advise', family: null, quote: null });
+        expect(result.reasons).toContain('offer_unavailable');
+      }
+      expect(mockBuildOffer).not.toHaveBeenCalled();
+    });
+
+    test('a lead with a mosquito ID still gets the manual-quote ask (nothing to own)', async () => {
+      const result = await gauge({ line: 'mosquito', key: 'mosquito' }, null);
+      expect(result.reasons).toContain('no_customer_record');
+      expect(result.reasons).not.toContain('offer_unavailable');
+    });
+
+    test('termite (inspection-first) checks termite ownership and is never program-priced', async () => {
+      mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('termite'));
+      const result = await gauge({ line: 'termite', key: null });
+      expect(mockBuildOffer).toHaveBeenCalledWith('existing-1', mockDb, 'termite');
+      expect(result).toMatchObject({ mode: 'advise', family: 'termite', quote: null });
+      expect(result.reasons).toContain('manual_quote');
+    });
+
+    test('a lawn-pest ID checks lawn_care; a plant-feeding insect checks tree_shrub; neither is program-priced', async () => {
+      mockBuildOffer.mockImplementation(async (_c, _db, key) => PRICED_OFFER(key));
+      const lawnPest = await gauge({ line: 'lawn', key: 'lawnPestControl' });
+      const plantPest = await gauge({ line: 'tree_shrub', key: null });
+      expect(mockBuildOffer.mock.calls.map((c) => c[2])).toEqual(['lawn_care', 'tree_shrub']);
+      expect([lawnPest.mode, plantPest.mode]).toEqual(['advise', 'advise']);
+      expect(lawnPest.reasons).toContain('manual_quote');
+      expect(plantPest.reasons).toContain('manual_quote');
+    });
+
+    test('a general pest ID on a customer without pest control is priced as the pest program', async () => {
+      mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('pest_control'));
+      const result = await gauge({ line: 'pest', key: 'pest' });
+      expect(result).toMatchObject({ mode: 'quote', family: 'pest_control' });
+      expect(result.quote.service).toBe('pest_control');
+    });
   });
 
   test('a watch-level finding never becomes a quote even when the offer core priced it, but still learns ownership', async () => {
@@ -424,7 +475,7 @@ describe('gaugeOpportunity', () => {
 describe('recheckDraftOffer', () => {
   beforeEach(() => { mockBuildOffer.mockReset(); mockBuildOffer.mockResolvedValue(null); });
   const FLAGS = (overrides = {}) => ({
-    origin: 'photo_triage', assessment_type: 'tree_shrub', opportunity_mode: 'quote',
+    origin: 'photo_triage', assessment_type: 'tree_shrub', offer_family: 'tree_shrub', opportunity_mode: 'quote',
     opportunity_reasons: ['actionable', 'quoted'], quote: { service: 'tree_shrub', per_visit: 83.33 }, ...overrides,
   });
 
@@ -440,7 +491,7 @@ describe('recheckDraftOffer', () => {
     mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
     expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).toEqual({ blocked: 'owned', family: 'tree_shrub' });
     mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'lawn_care', mode: 'unavailable', option: null });
-    const advise = FLAGS({ assessment_type: 'lawn', opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'no_offer'], quote: null });
+    const advise = FLAGS({ assessment_type: 'lawn', offer_family: 'lawn_care', opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'no_offer'], quote: null });
     expect(await recheckDraftOffer({ customerId: 'c1', flags: advise })).toEqual({ blocked: 'unavailable', family: 'lawn_care' });
     expect(mockBuildOffer).toHaveBeenLastCalledWith('c1', mockDb, 'lawn_care', { throwOnError: true });
   });
@@ -454,69 +505,24 @@ describe('recheckDraftOffer', () => {
     expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).toEqual({ blocked: 'no_longer_priced', family: 'tree_shrub' });
   });
 
-  test('quote language in the OUTGOING text forces the check even when the stored verdict says no-pitch (owner revision)', async () => {
-    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
-    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
-    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Looks like thin foliage. Want a quote for our tree & shrub program?' }))
-      .toEqual({ blocked: 'owned', family: 'tree_shrub' });
-    expect(mockBuildOffer).toHaveBeenCalledWith('c1', mockDb, 'tree_shrub', { throwOnError: true });
-    mockBuildOffer.mockClear();
-    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Looks like thin foliage. Reply if you have questions.' })).toEqual({ ok: true });
+  test('checks the family STORED at creation, never the assessment type: a palm or uncheckable photo stored none → ok without a lookup (codex #4810 r11)', async () => {
+    // A palm caption on a tree_shrub assessment: the draft's manual-quote
+    // ask is not re-judged against the unrelated standard T&S program.
+    const palm = FLAGS({ offer_family: null, opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'palm_assessment_first'], quote: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: palm })).toEqual({ ok: true });
     expect(mockBuildOffer).not.toHaveBeenCalled();
+    // A termite ID on a pest assessment is rechecked as termite, not as
+    // the pest assessment type's pest_control.
+    const pest = FLAGS({ assessment_type: 'pest', offer_family: 'termite', opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'manual_quote'], quote: null });
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'termite', mode: 'owned', option: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: pest })).toEqual({ blocked: 'owned', family: 'termite' });
+    expect(mockBuildOffer).toHaveBeenCalledWith('c1', mockDb, 'termite', { throwOnError: true });
   });
 
-  test.each([
-    'Would you like pricing for this program?',
-    'We can prepare an estimate for you.',
-    'It would cost about eighty dollars to add.',
-    'Want me to add it to your plan?',
-  ])('alternate pitch wording %p in the outgoing text forces the check (codex #4810 r8)', async (text) => {
-    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
+  test('the text is never an input — the recheck reads only the stored verdict (drafts are approve-as-written)', async () => {
     const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
-    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: text })).toEqual({ blocked: 'owned', family: 'tree_shrub' });
-  });
-
-  test('any dollar amount in the outgoing text is held outright — never parsed or compared (owner ruling: no price in the text; codex #4810 r9/r10)', async () => {
-    const quote = FLAGS();
-    mockBuildOffer.mockResolvedValue(PRICED_OFFER('tree_shrub', { perVisit: 83.33 }));
-    for (const text of ['We can do this for $80 per application.', '$80 per application.', 'Want a quote? It is $83.33 per application.']) {
-      expect(await recheckDraftOffer({ customerId: 'c1', flags: quote, outgoingText: text })).toEqual({ blocked: 'price_in_text', family: null });
-    }
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Want a quote for pest control? $80.' })).toEqual({ ok: true });
     expect(mockBuildOffer).not.toHaveBeenCalled();
-  });
-
-  test('"pest quote" names pest control; the "pest-pressure" finding label does not (codex #4810 r10)', async () => {
-    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
-    mockBuildOffer.mockImplementation(async (_c, _db, key) => (key === 'pest_control'
-      ? { serviceKey: key, mode: 'owned', option: null }
-      : CTA_OFFER(key)));
-    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Want a pest quote?' })).toEqual({ blocked: 'owned', family: 'pest_control' });
-    mockBuildOffer.mockClear();
-    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Those are pest-pressure signals; want a quote for our tree & shrub program?' }))
-      .toEqual({ ok: true });
-    expect(mockBuildOffer.mock.calls.map((c) => c[2])).toEqual(['tree_shrub']);
-  });
-
-  test('a revised pitch naming a DIFFERENT service is rechecked against that service (codex #4810 r9)', async () => {
-    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
-    const text = 'Looks like thin foliage. Want a quote for pest control?';
-    // tree_shrub is fine, but the customer already owns pest control.
-    mockBuildOffer.mockImplementation(async (_c, _db, key) => (key === 'pest_control'
-      ? { serviceKey: key, mode: 'owned', option: null }
-      : CTA_OFFER(key)));
-    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: text })).toEqual({ blocked: 'owned', family: 'pest_control' });
-    expect(mockBuildOffer).toHaveBeenCalledWith('c1', mockDb, 'pest_control', { throwOnError: true });
-    // A service the offer core cannot check fails closed.
-    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Want a quote for mosquito service?' }))
-      .toEqual({ blocked: 'unavailable', family: 'tree_shrub' });
-    // Only PITCH sentences name a family — the finding sentence ("pest-
-    // pressure signals") does not make this a pest-control pitch.
-    mockBuildOffer.mockClear();
-    const quote = FLAGS();
-    mockBuildOffer.mockImplementation(async (_c, _db, key) => PRICED_OFFER(key, { perVisit: 83.33 }));
-    expect(await recheckDraftOffer({ customerId: 'c1', flags: quote, outgoingText: "From what we can see, it's pest-pressure signals. Want a quote for our tree & shrub program? Just reply yes." }))
-      .toEqual({ ok: true });
-    expect(mockBuildOffer.mock.calls.map((c) => c[2])).toEqual(['tree_shrub']);
   });
 
   test('an advise draft that still pitches a quote is fine when the offer core simply has nothing (manual quote conversation)', async () => {

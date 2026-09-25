@@ -147,6 +147,13 @@ const TREE_SHRUB_SIGNAL_PHRASE = {
 // diagnostic module emits as a finding NAME, never customer copy itself.
 const TREE_SHRUB_HEALTHY_LABEL = 'a healthy tree or shrub';
 
+// The stored report contract, parsed; null when absent or unreadable.
+function parseContract(analysis) {
+  try {
+    return typeof analysis?.report_contract === 'string' ? JSON.parse(analysis.report_contract) : (analysis?.report_contract || null);
+  } catch { return null; }
+}
+
 // tree_shrub has no customer-safe teaser builder (no customer report page
 // exists yet — photo-assessment-create.js#TYPES.tree_shrub.customerPreview
 // is null); the admin assessment's own worst_signal + overall_score already
@@ -158,11 +165,7 @@ const TREE_SHRUB_HEALTHY_LABEL = 'a healthy tree or shrub';
 // overall_score (codex #4810 r4). overall_score is the fallback only when
 // the contract carries no category (older rows).
 function treeShrubAttention(analysis, worstSignal) {
-  let contract = null;
-  try {
-    contract = typeof analysis?.report_contract === 'string' ? JSON.parse(analysis.report_contract) : (analysis?.report_contract || null);
-  } catch { contract = null; }
-  const worst = contract?.worst_signal;
+  const worst = parseContract(analysis)?.worst_signal;
   if (worst && typeof worst === 'object' && worst.key === worstSignal) {
     if (worst.status === 'needs_attention') return true;
     const catScore = Number(worst.score);
@@ -210,20 +213,46 @@ function outcomeFor(type, analysis) {
 
 // ── Compute-only pricing ────────────────────────────────────────────────
 
-// Offer family per assessment type. pest → pest_control so an active pest
-// customer's bug photo runs the SAME ownership check (owned → no pitch)
-// instead of closing with "Reply if you'd like a quote" for the plan they
-// already have (pre-push audit r4); a customer with no plan gets null from
-// the offer core → the manual-quote ask, never an engine quote.
-const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care', pest: 'pest_control' };
+// Offer family per photo (codex #4810 r11): the family the photo actually
+// shows, never the assessment type's broad default. lawn → lawn_care;
+// tree_shrub → tree_shrub unless the caption names a palm; a pest ID reads
+// its allowlisted service metadata (pest-identification.js#PEST_LIBRARY:
+// service_line picks the family whose ownership is checked, service_key
+// says whether that family's standard program is what treats it). The
+// family is stored on the draft (flags.offer_family) so the dispatch-time
+// recheck checks exactly what creation checked.
+//   { family, programQuote } — programQuote false: the identified pest is
+//                              treated by an inspection-first, one-time, or
+//                              add-on service, never the family's program
+//                              price (termite, bed bugs, fleas, lawn pests,
+//                              plant-feeding insects) — ownership is still
+//                              checked, the owner quotes it by hand;
+//   { family: null, reason } — no family the offer core can check.
+const PEST_LINE_FAMILY = { pest: 'pest_control', lawn: 'lawn_care', tree_shrub: 'tree_shrub', termite: 'termite' };
+const PROGRAM_SERVICE_KEY = { pest_control: 'pest' };
 
 // Palms are their own assessment-first family (injections), never the
 // standard tree & shrub program — same palm-first veto the offer ladder
 // applies (cross-sell.js#startFamilyForIdentity). A palm caption stays on
-// advice + manual quoting (codex #4810 r4).
+// advice + manual quoting (codex #4810 r4), and the dispatch recheck never
+// substitutes tree & shrub for it (r11).
 const PALM_RE = /\bpalms?\b/i;
 
-// Compute-only pricing for one service — NEVER inserts an estimates row,
+function offerTarget(type, analysis, body) {
+  if (type === 'lawn') return { family: 'lawn_care', programQuote: true };
+  if (type === 'tree_shrub') {
+    return PALM_RE.test(body || '') ? { family: null, reason: 'palm_assessment_first' } : { family: 'tree_shrub', programQuote: true };
+  }
+  if (type !== 'pest') return { family: null, reason: 'no_offer' };
+  // Mosquito and rodent lines have no family the offer core can check —
+  // an existing customer may already pay for them, so fail closed.
+  const service = parseContract(analysis)?.service || {};
+  const family = PEST_LINE_FAMILY[service.line] || null;
+  if (!family) return { family: null, reason: 'offer_unavailable' };
+  return { family, programQuote: PROGRAM_SERVICE_KEY[family] === service.key };
+}
+
+// Compute-only pricing for one family — NEVER inserts an estimates row,
 // NEVER sends anything. Existing customers go through buildOfferForFamily
 // (the portal-offer core with the family fixed to what the photo shows):
 // the customer's ownership, plan baseline and every demotion rule apply,
@@ -238,12 +267,15 @@ const PALM_RE = /\bpalms?\b/i;
 //   'palm_assessment_first' — a palm photo: never the T&S program offer
 //   'already_owned'       — the family is on the customer's plan (never
 //                           re-priced; the draft carries no quote CTA)
-//   'offer_unavailable'   — fail closed: ownership lookup failed or a live
-//                           plan rate sits on the family — the customer may
-//                           already pay for it, so no quote CTA either
+//   'offer_unavailable'   — fail closed: ownership lookup failed, a live
+//                           plan rate sits on the family, or the photo's
+//                           family is one the offer core cannot check — the
+//                           customer may already pay for it, so no quote CTA
 //   'no_offer'            — the offer core declined: no recurring plan,
 //                           inactive row, unprovable premises, commercial —
 //                           a manual-quote ask is fine
+//   'manual_quote'        — the family is not owned, but the identified pest
+//                           is not treated by its program (see offerTarget)
 //   'quote_needs_review'  — offer composed but demoted to the unpriced CTA
 //                           (review-worthy facts, verified correction on
 //                           file, baseline mismatch, ambiguous tree count)
@@ -251,30 +283,35 @@ const PALM_RE = /\bpalms?\b/i;
 // the offer core derived it (owner-only metadata — the draft text carries
 // no price; rounding it here would hand the owner a wrong figure, codex
 // #4810 r4).
-async function priceForCustomer(type, customer, body, { lead = false } = {}) {
-  const serviceKey = SERVICE_KEY[type];
-  if (!serviceKey) return { reason: 'no_offer' };
-  if (type === 'tree_shrub' && PALM_RE.test(body || '')) return { reason: 'palm_assessment_first' };
+async function priceForCustomer(target, customer, { lead = false } = {}) {
   if (!customer?.id) return { reason: 'no_customer_record' };
   if (lead) return { reason: 'lead_not_priced' };
-  const offer = await buildOfferForFamily(customer.id, db, serviceKey);
-  if (!offer || offer.serviceKey !== serviceKey) return { reason: 'no_offer' };
+  if (!target.family) return { reason: target.reason };
+  const offer = await buildOfferForFamily(customer.id, db, target.family);
+  if (!offer || offer.serviceKey !== target.family) return { reason: 'no_offer' };
   // The family is already on the customer's plan: the draft must not pitch
   // it (codex #4810 r2 P1) — photo-text-triage.js drops the quote CTA on
   // this reason, and on the fail-closed one below (r4).
   if (offer.mode === 'owned') return { reason: 'already_owned' };
   if (offer.mode === 'unavailable') return { reason: 'offer_unavailable' };
-  if (offer.mode !== 'priced' || !offer.option) return { reason: 'quote_needs_review' };
-  const perApplication = Math.round((Number(offer.option.perVisit) || 0) * 100) / 100;
-  if (!(perApplication > 0)) return { reason: 'quote_needs_review' };
+  if (!target.programQuote) return { reason: 'manual_quote' };
+  const perApplication = perApplicationOf(offer);
+  if (!perApplication) return { reason: 'quote_needs_review' };
   return {
     quote: {
-      service: serviceKey,
+      service: target.family,
       label: offer.option.label || null,
       option_id: offer.option.id || null,
       per_visit: perApplication,
     },
   };
+}
+
+// A priced offer's per-application amount to the cent, or null.
+function perApplicationOf(offer) {
+  if (offer?.mode !== 'priced' || !offer.option) return null;
+  const perApplication = Math.round((Number(offer.option.perVisit) || 0) * 100) / 100;
+  return perApplication > 0 ? perApplication : null;
 }
 
 // onsite when a new/non-customer lead's actionable finding comes with either
@@ -288,38 +325,37 @@ function needsOnsite({ lead, actionable, scopeIsLarge, treatmentFailed }) {
 // ── The gauge ────────────────────────────────────────────────────────────
 
 /**
- * @returns {Promise<{ mode: 'advise'|'quote'|'onsite', reasons: string[], quote: null | { service, label, option_id, per_visit } }>}
+ * @returns {Promise<{ mode: 'advise'|'quote'|'onsite', reasons: string[], family: string|null, quote: null | { service, label, option_id, per_visit } }>}
+ * family: the offer family checked for this photo (offerTarget) — stored on
+ * the draft as flags.offer_family for the dispatch-time recheck.
  */
 async function gaugeOpportunity({ type, analysis, customer, body, /* images reserved for a future visual-scope signal */ images: _images }) {
-  const reasons = [];
   const text = typeof body === 'string' ? body : '';
-
+  const outcome = outcomeFor(type, analysis);
   // Same live-customer predicate as customer-stages.js#scopeLiveCustomers
   // (active + not deleted + a customer stage): an inactive row that still
   // carries 'active_customer' is a former customer and follows the lead
   // path (codex #4810 r4).
-  const lead = !customer || customer.active !== true || !!customer.deleted_at || !CUSTOMER_STAGES.includes(customer.pipeline_stage);
-  if (lead) reasons.push('lead');
-  const scopeIsLarge = largeScope(text);
-  if (scopeIsLarge) reasons.push('large_scope');
-  const treatmentFailed = priorTreatmentFailed(text);
-  if (treatmentFailed) reasons.push('prior_treatment_failed');
-
-  const outcome = outcomeFor(type, analysis);
-  const actionable = outcome.kind === 'actionable';
-  const harmless = outcome.kind === 'harmless';
-  if (actionable) reasons.push('actionable');
-  if (harmless) reasons.push('harmless');
-  if (outcome.cultural) reasons.push('cultural');
-  if (outcome.uncertain) reasons.push('uncertain');
+  const signals = {
+    lead: !customer || customer.active !== true || !!customer.deleted_at || !CUSTOMER_STAGES.includes(customer.pipeline_stage),
+    large_scope: largeScope(text),
+    prior_treatment_failed: priorTreatmentFailed(text),
+    actionable: outcome.kind === 'actionable',
+    harmless: outcome.kind === 'harmless',
+    cultural: outcome.cultural,
+    uncertain: outcome.uncertain,
+  };
+  const reasons = Object.keys(signals).filter((key) => signals[key]);
+  const target = offerTarget(type, analysis, text);
+  const verdict = (mode, quote = null) => ({ mode, reasons, family: target.family, quote });
 
   // Harmless always advises — never onsite, never a pitch, regardless of
   // what the caption says.
-  if (harmless) return { mode: 'advise', reasons, quote: null };
+  if (signals.harmless) return verdict('advise');
 
-  if (needsOnsite({ lead, actionable, scopeIsLarge, treatmentFailed })) {
+  if (needsOnsite({ lead: signals.lead, actionable: signals.actionable, scopeIsLarge: signals.large_scope, treatmentFailed: signals.prior_treatment_failed })) {
     reasons.push('onsite_scope');
-    return { mode: 'onsite', reasons, quote: null };
+    return verdict('onsite');
   }
 
   // The ownership/offer check runs for EVERY non-harmless outcome (watch
@@ -327,113 +363,61 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
   // whether the customer already owns this family before it asks "Reply if
   // you'd like a quote". Only an actionable/cultural finding may promote a
   // priced offer to quote mode; a watch-level finding keeps advice.
-  let priced;
-  try {
-    priced = await priceForCustomer(type, customer, text, { lead });
-  } catch (err) {
+  const priced = await priceForCustomer(target, customer, { lead: signals.lead }).catch((err) => {
     logger.error(`[photo-triage-opportunity] pricing failed for customer ${customer?.id || 'none'}: ${err.message}`);
-    priced = { reason: 'no_offer' };
-  }
-  if (priced.quote) {
-    if (actionable || outcome.cultural) {
-      reasons.push('quoted');
-      return { mode: 'quote', reasons, quote: priced.quote };
-    }
-    reasons.push('quote_withheld');
-  } else {
+    return { reason: 'no_offer' };
+  });
+  if (!priced.quote) {
     reasons.push(priced.reason || 'no_offer');
+    return verdict('advise');
   }
-
-  return { mode: 'advise', reasons, quote: null };
+  if (signals.actionable || signals.cultural) {
+    reasons.push('quoted');
+    return verdict('quote', priced.quote);
+  }
+  reasons.push('quote_withheld');
+  return verdict('advise');
 }
 
 // ── Dispatch-time recheck ────────────────────────────────────────────────
 
 const NO_PITCH_REASONS = new Set(['harmless', 'already_owned', 'offer_unavailable']);
 
+// Whether the STORED draft pitches: a quote ask, or an advise close that
+// asks "Reply if you'd like a quote." (any advise without a no-pitch reason).
+function draftPitches(flags) {
+  const reasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
+  return flags.opportunity_mode === 'quote'
+    || (flags.opportunity_mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
+}
+
 // Re-run the offer check immediately before a photo-triage draft is SENT
-// (admin-drafts approve/revise — codex #4810 r6): the creation-time check
-// is stale the moment the customer enrolls in the family, a plan rate
-// lands, or pricing facts change while the draft sits pending. Returns
+// (admin-drafts approve — codex #4810 r6): the creation-time check is stale
+// the moment the customer enrolls in the family, a plan rate lands, or
+// pricing facts change while the draft sits pending. It checks the family
+// stored at creation (flags.offer_family — a palm or uncheckable photo
+// stored none) and never parses the text: the text Approve sends is
+// exactly the gauge's fixed copy, because photo-triage drafts cannot be
+// revised (admin-drafts /revise refuses them — codex #4810 r7–r11 kept
+// finding operator wording a text parser missed; the owner rejects the
+// draft and replies from the conversation instead). Returns
 //   { ok: true }                                  — send as-is
 //   { blocked: 'owned'|'unavailable'|'no_longer_priced', family }
 //   { repriced: <per_visit>, family }             — owner-only figure drifted
-//   { blocked: 'price_in_text', family: null }   — the outgoing text states a dollar amount
 // Throws on a lookup failure — the caller fails closed (draft left pending).
-// outgoingText (codex #4810 r7): the body that will actually be sent — an
-// owner revision can ADD a quote ask to a draft whose stored verdict says
-// no-pitch, so any quote language in the outgoing text forces the check.
-// Any price/estimate wording counts as a pitch, not just "quote" — an
-// owner revision saying "want pricing?" or "we can prepare an estimate"
-// must be rechecked too (codex #4810 r8).
-// The dollar alternative sits OUTSIDE the \b wrapper: "$" is a non-word
-// character, so "\b\$" never matches at the start of a string or after a
-// space — "We can do this for $80" read as no pitch (codex #4810 r9).
-const PITCH_LANGUAGE_RE = /\b(?:quot(?:e|es|ed|ing)|pric(?:e|es|ed|ing)|estimate[sd]?|cost[s]?|rate[s]?|add it|sign(?: you)? up)\b|\$\s?\d/i;
-// Service families a pitch sentence can NAME (codex #4810 r9): a revision
-// that asks about a different service than the photo's family must be
-// rechecked against the family it names, not the stored one. Families the
-// offer core cannot check (mosquito, rodent, palm) fail closed.
-const NAMED_FAMILY = [
-  // Any standalone "pest"/"pests" in a pitch sentence ("Want a pest
-  // quote?", codex #4810 r10); the hyphenated finding label "pest-pressure
-  // signals" is not a service name.
-  ['pest_control', /\bpests?\b(?!-)/i],
-  ['lawn_care', /\blawns?\b/i],
-  ['tree_shrub', /\btrees?\b|\bshrubs?\b/i],
-  ['termite', /\btermites?\b/i],
-  [null, /\bmosquito(?:es)?\b|\brodents?\b|\bpalms?\b/i],
-];
-function familiesNamedInPitch(text) {
-  const named = new Set();
-  let unchecked = false;
-  for (const sentence of String(text || '').split(/(?<=[.!?])\s+/)) {
-    if (!PITCH_LANGUAGE_RE.test(sentence)) continue;
-    for (const [family, re] of NAMED_FAMILY) {
-      if (!re.test(sentence)) continue;
-      if (family) named.add(family);
-      else unchecked = true;
-    }
-  }
-  return { named, unchecked };
-}
-// Owner ruling 2026-09-25 ("no price as of right now"): a photo-triage
-// text never states a dollar amount. A revision that adds one cannot be
-// validated against the engine (the owner-only figure is per application
-// and may drift), so it is held outright rather than parsed and compared
-// (codex #4810 r10 P1, AGENTS.md estimator engine authority).
-const DOLLAR_AMOUNT_RE = /\$\s?\d/;
-async function recheckDraftOffer({ customerId, flags, outgoingText = null }) {
+async function recheckDraftOffer({ customerId, flags }) {
   if (!flags || flags.origin !== 'photo_triage') return { ok: true };
-  if (typeof outgoingText === 'string' && DOLLAR_AMOUNT_RE.test(outgoingText)) return { blocked: 'price_in_text', family: null };
-  const mode = flags.opportunity_mode;
-  const reasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
-  const textPitches = typeof outgoingText === 'string' && PITCH_LANGUAGE_RE.test(outgoingText);
-  const pitches = textPitches || mode === 'quote' || (mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
-  if (!pitches || !customerId) return { ok: true };
-  const family = flags.quote?.service || SERVICE_KEY[flags.assessment_type] || null;
-  // Every family the outgoing pitch NAMES is rechecked too — a tree & shrub
-  // draft revised to ask about pest control must not pass on the tree
-  // check alone (codex #4810 r9). An uncheckable named family fails closed.
-  const { named, unchecked } = textPitches ? familiesNamedInPitch(outgoingText) : { named: new Set(), unchecked: false };
-  if (unchecked) return { blocked: 'unavailable', family: family || 'the named service' };
-  const families = [...new Set([family, ...named].filter(Boolean))];
-  if (!families.length) return { ok: true };
+  const family = flags.offer_family || null;
+  if (!family || !customerId || !draftPitches(flags)) return { ok: true };
   // throwOnError: an outage here must surface as a 503 (draft left pending
   // for retry), never as confirmed staleness.
-  let offer = null;
-  for (const key of families) {
-    const answer = await buildOfferForFamily(customerId, db, key, { throwOnError: true });
-    if (answer?.mode === 'owned') return { blocked: 'owned', family: key };
-    if (answer?.mode === 'unavailable') return { blocked: 'unavailable', family: key };
-    if (key === family) offer = answer;
-  }
-  if (mode === 'quote') {
-    if (!offer || offer.mode !== 'priced' || !offer.option) return { blocked: 'no_longer_priced', family };
-    const perApplication = Math.round((Number(offer.option.perVisit) || 0) * 100) / 100;
-    if (!(perApplication > 0)) return { blocked: 'no_longer_priced', family };
-    if (perApplication !== Number(flags.quote?.per_visit)) return { repriced: perApplication, family };
-  }
+  const offer = await buildOfferForFamily(customerId, db, family, { throwOnError: true });
+  if (offer?.mode === 'owned') return { blocked: 'owned', family };
+  if (offer?.mode === 'unavailable') return { blocked: 'unavailable', family };
+  if (flags.opportunity_mode !== 'quote') return { ok: true };
+  const perApplication = perApplicationOf(offer);
+  if (!perApplication) return { blocked: 'no_longer_priced', family };
+  if (perApplication !== Number(flags.quote?.per_visit)) return { repriced: perApplication, family };
   return { ok: true };
 }
 
@@ -477,5 +461,6 @@ module.exports = {
     largeScope,
     priorTreatmentFailed,
     priceForCustomer,
+    offerTarget,
   },
 };

@@ -1030,183 +1030,248 @@ async function buildReportCrossSell(service, database, {
 // swallow a transient failure into a demoted answer when the caller is
 // deciding whether to strip a pending draft's quote — they rethrow so the
 // route leaves the draft pending with a 503.
+// The core runs as three cohesive stages (codex #4810 complexity round,
+// 2026-09-25) — premises, target, pricing — each its own function below so
+// the shared money-bearing path stays reviewable. This function is just
+// their orchestration; every gate, ordering rule, and early return lives in
+// its stage, unchanged.
 async function composePortalOffer(customerId, database, { propertyLookup = cacheOnlyPropertyLookup, targetKey: requestedTargetKey = null, throwOnError = false } = {}) {
-  {
-    if (!customerId || !database) return null;
-    if (requestedTargetKey && !OFFER_PROMPTS[requestedTargetKey]) return null;
+  if (!customerId || !database) return null;
+  if (requestedTargetKey && !OFFER_PROMPTS[requestedTargetKey]) return null;
 
-    const customer = await database('customers').where({ id: customerId }).first();
-    if (!customer || customer.active === false || customer.deleted_at) return null;
+  const premises = await resolvePortalOfferPremises(database, customerId);
+  if (!premises) return null;
+  const { customer, primaryStreet } = premises;
 
-    // Commercial properties never get the card (same doctrine as the report:
-    // the engine refuses real prices there and commercial expansion is a
-    // proposal conversation). Re-checked on the lookup-resolved type below.
-    const { isCommercialProperty } = require('../pricing-engine/commercial-helpers');
-    if (isCommercialProperty({ propertyType: customer.property_type })) return null;
+  const target = await resolvePortalOfferTarget(database, customerId, customer, primaryStreet, requestedTargetKey);
+  if (target.done) return target.basis;
+  const { targetKey, ownedKeys, evidencedOwnedKeys } = target;
 
-    // FAIL CLOSED without a provable primary premises: every downstream
-    // frame (ownership scoping, profile fields, the estimate seed) is
-    // anchored to the customer row's own address — the property the portal
-    // profile displays (select-property ⇒ customer row = property).
-    const linkage = require('../estimate-property-linkage');
-    const primaryStreet = linkage.normalizedStampedStreet(
-      customer.address_line1, customer.address_line2, customer.city, customer.zip
-    );
-    if (!primaryStreet) return null;
-    if (linkage.scopeKeyLacksLocality(primaryStreet)) return null;
-    if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet))) {
-      return null;
-    }
+  const pricing = await resolvePortalOfferPricingResult({
+    database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError,
+  });
+  if (!pricing) return null;
 
-    // FAIL CLOSED on ownership (same doctrine as customer-pricing-ai's
-    // PRICING_UNAVAILABLE): a thrown catalog join means we cannot know what
-    // the customer already buys, so no recommendation may render.
-    const { loadOwnedRecurringServiceKeys } = require('../waveguard-existing-services');
-    const streetScope = {
-      estimateStreet: primaryStreet,
-      customerPrimaryStreet: primaryStreet,
-      requireSharedLocality: true,
-    };
-    const ownedKeys = await loadOwnedRecurringServiceKeys(database, customerId, { streetScope });
+  return composePricedOfferBasis({
+    ...pricing, targetKey, ownedKeys, evidencedOwnedKeys, customer, primaryStreet,
+  });
+}
 
-    // Plan-rate ledger evidence: suppress/demote only, never advance —
-    // identical role to the report path. Loaded BEFORE the empty-ownership
-    // return so a requested family with a live plan rate but no seeded
-    // visit row still fails closed instead of reading as "nothing owned,
-    // go ahead and ask for a quote" (codex #4810 r5).
-    const { loadComponents } = require('../plan-rate-ledger');
-    const planRateFamilies = (await loadComponents(database, customerId))
-      .filter((row) => Number(row.monthly_rate) > 0)
-      .map((row) => String(row.family_key || ''))
-      .filter((key) => key && key !== 'unattributed');
-    if (requestedTargetKey && offerVocabulary(planRateFamilies).has(requestedTargetKey)) {
-      return unavailableBasis(requestedTargetKey, customer, ownedKeys, primaryStreet);
-    }
-    if (!ownedKeys.length) return null;
+// Stage 1 — premises: prove there is exactly one candidate property before
+// any ownership or pricing frame is anchored to it. FAIL CLOSED without a
+// provable primary premises: every downstream frame (ownership scoping,
+// profile fields, the estimate seed) is anchored to the customer row's own
+// address — the property the portal profile displays (select-property ⇒
+// customer row = property). Returns { customer, primaryStreet } once the
+// customer is live, residential, and provably single-premises, or null on
+// any failure.
+async function resolvePortalOfferPremises(database, customerId) {
+  const customer = await database('customers').where({ id: customerId }).first();
+  if (!customer || customer.active === false || customer.deleted_at) return null;
 
-    // A requested family the customer already owns is never re-priced —
-    // same never-re-price rule the ladder enforces by construction. Says so
-    // explicitly (mode 'owned', no option) rather than a bare null, so the
-    // caller can tell "already on the plan" from "cannot offer" and drop
-    // its quote CTA (codex #4810 r2 P1). Never reached by the ladder path.
-    if (requestedTargetKey && offerVocabulary(ownedKeys).has(requestedTargetKey)) {
-      const payload = { serviceKey: requestedTargetKey, label: OFFER_LABELS[requestedTargetKey], mode: 'owned', relationship: 'owned', option: null };
-      return { payload: { ...payload, fingerprint: offerFingerprint(payload) }, option: null, result: null, customer, ownedKeys, propertySeed: null, primaryStreet };
-    }
-    const targetKey = requestedTargetKey || pickOfferTarget(ownedKeys);
-    // Owns everything → nothing to offer (owner matrix: the referral card
-    // fills the slot, which needs no offer payload).
-    if (!targetKey) return null;
-    if (offerVocabulary(planRateFamilies).has(targetKey)) {
-      // A live plan rate on the requested family is fail-closed evidence
-      // the customer may already pay for it — say so (mode 'unavailable')
-      // rather than a bare null, so the photo lane drops its quote CTA
-      // (codex #4810 r4). The ladder path keeps returning null.
-      return requestedTargetKey ? unavailableBasis(requestedTargetKey, customer, ownedKeys, primaryStreet) : null;
-    }
+  // Commercial properties never get the card (same doctrine as the report:
+  // the engine refuses real prices there and commercial expansion is a
+  // proposal conversation). Re-checked on the lookup-resolved type below.
+  const { isCommercialProperty } = require('../pricing-engine/commercial-helpers');
+  if (isCommercialProperty({ propertyType: customer.property_type })) return null;
 
-    const evidencedOwnedKeys = [...ownedKeys, ...planRateFamilies];
+  const linkage = require('../estimate-property-linkage');
+  const primaryStreet = linkage.normalizedStampedStreet(
+    customer.address_line1, customer.address_line2, customer.city, customer.zip
+  );
+  if (!primaryStreet) return null;
+  if (linkage.scopeKeyLacksLocality(primaryStreet)) return null;
+  if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet))) {
+    return null;
+  }
 
-    // Best-effort seed — a failed estimate read must not kill the card, it
-    // just prices without the seed (and likely degrades to the CTA).
-    let propertySeed = null;
-    try {
-      propertySeed = await loadEstimateSeed(database, customerId, primaryStreet);
-    } catch (err) {
-      if (throwOnError) throw err;
-      logger.warn(`[portal-offer] estimate seed skipped (${err.message})`);
-    }
+  return { customer, primaryStreet };
+}
 
-    // Verified-correction probe: identical to the report path — the absence
-    // of a usable lookup result is what needs probing.
-    let lookupProducedResult = false;
-    // buildCustomerPricingResponse swallows a lookup throw into a profile-
-    // only price; dispatch callers need it as an error (codex #4810 r9), so
-    // it is captured here and rethrown after the pricer returns.
-    let lookupError = null;
-    const trackedPropertyLookup = async (address) => {
-      let found;
-      try {
-        found = await propertyLookup(address);
-      } catch (err) {
-        lookupError = err;
-        throw err;
-      }
-      if (found && !hasGlobalVerifyFlag(found.enriched || {})) lookupProducedResult = true;
-      return found;
-    };
+// Stage 2 — target: resolve owned-family authority and pick (or validate)
+// the family this offer will price. Plan-rate ledger evidence is
+// suppress/demote-only, never advance — identical role to the report path.
+// Returns { done: true, basis } for every early exit this stage owns (a
+// bare null, an 'unavailable' fail-closed answer, or an 'owned' refusal —
+// the ladder path never produces the latter two), or
+// { done: false, targetKey, ownedKeys, evidencedOwnedKeys } once a
+// re-priceable, not-yet-owned target family is settled.
+async function resolvePortalOfferTarget(database, customerId, customer, primaryStreet, requestedTargetKey) {
+  // FAIL CLOSED on ownership (same doctrine as customer-pricing-ai's
+  // PRICING_UNAVAILABLE): a thrown catalog join means we cannot know what
+  // the customer already buys, so no recommendation may render.
+  const { loadOwnedRecurringServiceKeys } = require('../waveguard-existing-services');
+  const streetScope = {
+    estimateStreet: primaryStreet,
+    customerPrimaryStreet: primaryStreet,
+    requireSharedLocality: true,
+  };
+  const ownedKeys = await loadOwnedRecurringServiceKeys(database, customerId, { streetScope });
 
-    const { buildCustomerPricingResponse, addressForCustomer } = require('../customer-pricing-ai');
-    const result = await buildCustomerPricingResponse({
-      customer,
-      prompt: OFFER_PROMPTS[targetKey],
-      db: database,
-      propertyLookup: trackedPropertyLookup,
-      propertySeed,
-    });
+  // Plan-rate ledger evidence: suppress/demote only, never advance —
+  // identical role to the report path. Loaded BEFORE the empty-ownership
+  // return so a requested family with a live plan rate but no seeded
+  // visit row still fails closed instead of reading as "nothing owned,
+  // go ahead and ask for a quote" (codex #4810 r5).
+  const { loadComponents } = require('../plan-rate-ledger');
+  const planRateFamilies = (await loadComponents(database, customerId))
+    .filter((row) => Number(row.monthly_rate) > 0)
+    .map((row) => String(row.family_key || ''))
+    .filter((key) => key && key !== 'unattributed');
+  if (requestedTargetKey && offerVocabulary(planRateFamilies).has(requestedTargetKey)) {
+    return { done: true, basis: unavailableBasis(requestedTargetKey, customer, ownedKeys, primaryStreet) };
+  }
+  if (!ownedKeys.length) return { done: true, basis: null };
 
-    let correctionsUnapplied = false;
-    if (!lookupProducedResult) {
-      try {
-        const { hasVerifiedOverrides } = require('../property-lookup/lookup-cache');
-        correctionsUnapplied = await hasVerifiedOverrides(addressForCustomer(customer));
-      } catch (err) {
-        if (throwOnError) throw err;
-        correctionsUnapplied = true;
-        logger.warn(`[portal-offer] verified-override probe failed, demoting to CTA (${err.message})`);
-      }
-    }
-
-    if (throwOnError && lookupError) throw lookupError;
-    // PRICING_UNAVAILABLE is the pricer's swallowed ownership-reader
-    // failure — an outage, not an answer, for a dispatch caller.
-    if (throwOnError && result?.code === 'PRICING_UNAVAILABLE') {
-      throw Object.assign(new Error('pricing ownership lookup failed'), { code: 'PRICING_UNAVAILABLE' });
-    }
-    if (!result || result.code === 'PRICING_UNAVAILABLE') return null;
-    if ((result.alreadyIncluded || []).length) return null;
-    if (isCommercialProperty({ propertyType: result.property?.propertyType })) return null;
-
-    const { incomplete: baselineIncomplete, unexpected: baselineUnexpected } = qualifyingBaselineMismatch(
-      evidencedOwnedKeys, result.currentServiceKeys
-    );
-
-    const option = result.ok ? pickOption(result.options, targetKey) : null;
-    const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
-    const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
-    const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
-      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification;
-
-    const payload = {
-      serviceKey: targetKey,
-      label: OFFER_LABELS[targetKey],
-      mode: priced ? 'priced' : 'quote_cta',
-      relationship: 'add',
-      // Per-application is the ONLY price field this payload may carry —
-      // same public-surface serialization rule as the report card.
-      option: priced ? {
-        id: option.id,
-        label: option.label,
-        cadence: option.cadence || '',
-        perVisit: option.perVisit || null,
-        waveguardTier: option.waveguardTier || null,
-        confidence: option.confidence || null,
-      } : null,
-    };
+  // A requested family the customer already owns is never re-priced —
+  // same never-re-price rule the ladder enforces by construction. Says so
+  // explicitly (mode 'owned', no option) rather than a bare null, so the
+  // caller can tell "already on the plan" from "cannot offer" and drop
+  // its quote CTA (codex #4810 r2 P1). Never reached by the ladder path.
+  if (requestedTargetKey && offerVocabulary(ownedKeys).has(requestedTargetKey)) {
+    const payload = { serviceKey: requestedTargetKey, label: OFFER_LABELS[requestedTargetKey], mode: 'owned', relationship: 'owned', option: null };
     return {
-      payload: { ...payload, fingerprint: offerFingerprint(payload) },
-      // Server-only context (never serialized to the client): the FULL
-      // quoted option (annual/monthly/perVisit and the engine-visible
-      // fields), the pricing result (currentServiceKeys = the modeled
-      // qualifying baseline), the customer row, and the seed the price used.
-      option: priced ? option : null,
-      result,
-      customer,
-      ownedKeys,
-      propertySeed,
-      primaryStreet,
+      done: true,
+      basis: { payload: { ...payload, fingerprint: offerFingerprint(payload) }, option: null, result: null, customer, ownedKeys, propertySeed: null, primaryStreet },
     };
   }
+  const targetKey = requestedTargetKey || pickOfferTarget(ownedKeys);
+  // Owns everything → nothing to offer (owner matrix: the referral card
+  // fills the slot, which needs no offer payload).
+  if (!targetKey) return { done: true, basis: null };
+  if (offerVocabulary(planRateFamilies).has(targetKey)) {
+    // A live plan rate on the requested family is fail-closed evidence
+    // the customer may already pay for it — say so (mode 'unavailable')
+    // rather than a bare null, so the photo lane drops its quote CTA
+    // (codex #4810 r4). The ladder path keeps returning null.
+    return {
+      done: true,
+      basis: requestedTargetKey ? unavailableBasis(requestedTargetKey, customer, ownedKeys, primaryStreet) : null,
+    };
+  }
+
+  const evidencedOwnedKeys = [...ownedKeys, ...planRateFamilies];
+  return { done: false, targetKey, ownedKeys, evidencedOwnedKeys };
+}
+
+// Stage 3a — pricing lookup: run the estimator, the verified-override
+// probe, and every "cannot price this" / "engine refuses this" exit.
+// throwOnError (dispatch-time rechecks, codex #4810 r8): the best-effort
+// inner catches below (estimate seed, verified-override probe) must NOT
+// swallow a transient failure into a demoted answer when the caller is
+// deciding whether to strip a pending draft's quote — they rethrow so the
+// route leaves the draft pending with a 503.
+// Returns { result, propertySeed, correctionsUnapplied } to hand to the
+// outcome stage, or null for every fail-closed/refused exit this stage owns.
+async function resolvePortalOfferPricingResult({ database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError }) {
+  // Best-effort seed — a failed estimate read must not kill the card, it
+  // just prices without the seed (and likely degrades to the CTA).
+  let propertySeed = null;
+  try {
+    propertySeed = await loadEstimateSeed(database, customerId, primaryStreet);
+  } catch (err) {
+    if (throwOnError) throw err;
+    logger.warn(`[portal-offer] estimate seed skipped (${err.message})`);
+  }
+
+  // Verified-correction probe: identical to the report path — the absence
+  // of a usable lookup result is what needs probing.
+  let lookupProducedResult = false;
+  // buildCustomerPricingResponse swallows a lookup throw into a profile-
+  // only price; dispatch callers need it as an error (codex #4810 r9), so
+  // it is captured here and rethrown after the pricer returns.
+  let lookupError = null;
+  const trackedPropertyLookup = async (address) => {
+    let found;
+    try {
+      found = await propertyLookup(address);
+    } catch (err) {
+      lookupError = err;
+      throw err;
+    }
+    if (found && !hasGlobalVerifyFlag(found.enriched || {})) lookupProducedResult = true;
+    return found;
+  };
+
+  const { buildCustomerPricingResponse, addressForCustomer } = require('../customer-pricing-ai');
+  const result = await buildCustomerPricingResponse({
+    customer,
+    prompt: OFFER_PROMPTS[targetKey],
+    db: database,
+    propertyLookup: trackedPropertyLookup,
+    propertySeed,
+  });
+
+  let correctionsUnapplied = false;
+  if (!lookupProducedResult) {
+    try {
+      const { hasVerifiedOverrides } = require('../property-lookup/lookup-cache');
+      correctionsUnapplied = await hasVerifiedOverrides(addressForCustomer(customer));
+    } catch (err) {
+      if (throwOnError) throw err;
+      correctionsUnapplied = true;
+      logger.warn(`[portal-offer] verified-override probe failed, demoting to CTA (${err.message})`);
+    }
+  }
+
+  if (throwOnError && lookupError) throw lookupError;
+  // PRICING_UNAVAILABLE is the pricer's swallowed ownership-reader
+  // failure — an outage, not an answer, for a dispatch caller.
+  if (throwOnError && result?.code === 'PRICING_UNAVAILABLE') {
+    throw Object.assign(new Error('pricing ownership lookup failed'), { code: 'PRICING_UNAVAILABLE' });
+  }
+  if (!result || result.code === 'PRICING_UNAVAILABLE') return null;
+  if ((result.alreadyIncluded || []).length) return null;
+  const { isCommercialProperty } = require('../pricing-engine/commercial-helpers');
+  if (isCommercialProperty({ propertyType: result.property?.propertyType })) return null;
+
+  return { result, propertySeed, correctionsUnapplied };
+}
+
+// Stage 3b — outcome: turn a resolved pricing result into the same payload
+// shape both portal surfaces have always serialized (fingerprint hashes
+// these exact fields — do not reorder or rename them). No fail-closed exits
+// live here; every refusal already happened in stage 3a.
+function composePricedOfferBasis({ result, propertySeed, correctionsUnapplied, targetKey, ownedKeys, evidencedOwnedKeys, customer, primaryStreet }) {
+  const { incomplete: baselineIncomplete, unexpected: baselineUnexpected } = qualifyingBaselineMismatch(
+    evidencedOwnedKeys, result.currentServiceKeys
+  );
+
+  const option = result.ok ? pickOption(result.options, targetKey) : null;
+  const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
+  const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
+  const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
+    && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification;
+
+  const payload = {
+    serviceKey: targetKey,
+    label: OFFER_LABELS[targetKey],
+    mode: priced ? 'priced' : 'quote_cta',
+    relationship: 'add',
+    // Per-application is the ONLY price field this payload may carry —
+    // same public-surface serialization rule as the report card.
+    option: priced ? {
+      id: option.id,
+      label: option.label,
+      cadence: option.cadence || '',
+      perVisit: option.perVisit || null,
+      waveguardTier: option.waveguardTier || null,
+      confidence: option.confidence || null,
+    } : null,
+  };
+  return {
+    payload: { ...payload, fingerprint: offerFingerprint(payload) },
+    // Server-only context (never serialized to the client): the FULL
+    // quoted option (annual/monthly/perVisit and the engine-visible
+    // fields), the pricing result (currentServiceKeys = the modeled
+    // qualifying baseline), the customer row, and the seed the price used.
+    option: priced ? option : null,
+    result,
+    customer,
+    ownedKeys,
+    propertySeed,
+    primaryStreet,
+  };
 }
 
 async function buildPortalOffer(customerId, database, opts = {}) {

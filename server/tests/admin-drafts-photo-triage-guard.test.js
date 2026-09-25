@@ -1,6 +1,7 @@
 /**
  * Admin drafts route — photo-triage dispatch-time offer recheck (codex
- * #4810 r6). The recheck itself is pinned in photo-triage-opportunity.test.js;
+ * #4810 r6) and the approve-as-written rule (r11: /revise refuses photo-triage
+ * drafts). The recheck itself is pinned in photo-triage-opportunity.test.js;
  * THIS file pins the route's side: owned/unavailable → 409
  * PHOTO_TRIAGE_OFFER_STALE + claim released + no send; repriced → 409
  * PHOTO_TRIAGE_REPRICED + flags.quote refreshed on the released row; a
@@ -118,7 +119,7 @@ async function withServer(fn) {
 }
 
 const PHOTO_FLAGS = {
-  origin: 'photo_triage', assessment_type: 'tree_shrub', opportunity_mode: 'quote',
+  origin: 'photo_triage', assessment_type: 'tree_shrub', offer_family: 'tree_shrub', opportunity_mode: 'quote',
   opportunity_reasons: ['actionable', 'quoted'], quote: { service: 'tree_shrub', per_visit: 83.33 },
   toPhone: '+19415550142',
 };
@@ -130,7 +131,7 @@ function photoDraft(overrides = {}) {
     customer_id: 'cust-1',
     campaign_type: null,
     purpose: null,
-    intent: 'inbound_reply',
+    intent: 'photo_triage',
     source_ref: null,
     status: 'pending',
     draft_response: "Thanks for the photo. Want a quote for our tree & shrub program? Just reply yes.",
@@ -171,7 +172,7 @@ describe('approve — photo-triage offer recheck wiring', () => {
       expect(res.status).toBe(200);
     });
     expect(mockRecheck).toHaveBeenCalledWith({
-      customerId: 'cust-1', flags: expect.objectContaining({ origin: 'photo_triage' }), outgoingText: photoDraft().draft_response,
+      customerId: 'cust-1', flags: expect.objectContaining({ origin: 'photo_triage' }),
     });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
@@ -246,7 +247,7 @@ describe('approve — photo-triage offer recheck wiring', () => {
   });
 
   test('a non-photo-triage draft never touches the recheck', async () => {
-    enqueue('message_drafts', { returning: [photoDraft({ flags: JSON.stringify({ toPhone: '+19415550142' }) })] });
+    enqueue('message_drafts', { returning: [photoDraft({ intent: 'inbound_reply', flags: JSON.stringify({ toPhone: '+19415550142' }) })] });
     enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
     enqueue('message_drafts', { update: 1 });
     sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM2' });
@@ -275,88 +276,23 @@ describe('approve — recipient resolution', () => {
   });
 });
 
-describe('revise — photo-triage offer recheck wiring', () => {
-  test('owned → 409 with the revision cleared on the released row, nothing sent', async () => {
-    enqueue('message_drafts', { returning: [photoDraft()] });
-    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
-    enqueue('message_drafts', { update: 1 });
-    mockRecheck.mockResolvedValue({ blocked: 'unavailable', family: 'tree_shrub' });
+describe('revise — photo-triage drafts are approve-as-written (codex #4810 r7–r11)', () => {
+  test('a revision is refused: 409 PHOTO_TRIAGE_NOT_REVISABLE, claim released with the edit cleared, nothing rechecked or sent', async () => {
+    enqueue('message_drafts', { returning: [photoDraft({ status: 'revised' })] });   // claim
+    enqueue('message_drafts', { update: 1 });                                        // release
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/drafts/draft-77/revise`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ revisedResponse: 'Edited copy that still asks for a quote.' }),
+        body: JSON.stringify({ revisedResponse: 'We can do it for 80 dollars per application.' }),
       });
       expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('PHOTO_TRIAGE_OFFER_STALE');
+      expect((await res.json()).code).toBe('PHOTO_TRIAGE_NOT_REVISABLE');
     });
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    const release = updates[updates.length - 1];
-    expect(release.payload.status).toBe('pending');
-    expect(release.payload).toMatchObject({ revised_response: null, final_response: null });
-    expect(JSON.parse(release.payload.flags).opportunity_reasons).toContain('offer_unavailable');
-  });
-
-  test('after a hold, the rewritten draft (flags now advise + no-pitch reason) sends without asking the offer core', async () => {
-    const heldFlags = { ...PHOTO_FLAGS, opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null };
-    enqueue('message_drafts', { returning: [photoDraft({ flags: JSON.stringify(heldFlags) })] });
-    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
-    enqueue('message_drafts', { update: 1 });
-    // The real recheck short-circuits on a no-pitch reason; here the mock
-    // pins that the route hands it the downgraded flags.
-    mockRecheck.mockImplementation(async ({ flags, outgoingText }) => (
-      flags.opportunity_reasons.includes('already_owned') && !/quote/i.test(outgoingText) ? { ok: true } : { blocked: 'owned', family: 'tree_shrub' }
-    ));
-    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM3' });
-
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/revise`, {
-        method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ revisedResponse: 'Thanks for the photo. Reply if you have questions.' }),
-      });
-      expect(res.status).toBe(200);
-    });
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('revise — a revision that ADDS a quote ask is rechecked against the outgoing body', () => {
-  test('a revision stating a price → 409 PHOTO_TRIAGE_PRICE_IN_TEXT, flags and draft text untouched, nothing sent (codex #4810 r10)', async () => {
-    enqueue('message_drafts', { returning: [photoDraft()] });
-    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
-    enqueue('message_drafts', { update: 1 });
-    mockRecheck.mockResolvedValue({ blocked: 'price_in_text', family: null });
-
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/revise`, {
-        method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ revisedResponse: 'Thanks! We can do it for $80 per application.' }),
-      });
-      expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('PHOTO_TRIAGE_PRICE_IN_TEXT');
-    });
+    expect(mockRecheck).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     const release = updates[updates.length - 1].payload;
-    expect(release.status).toBe('pending');
-    expect(release).not.toHaveProperty('flags');
+    expect(release).toMatchObject({ status: 'pending', revised_response: null, final_response: null });
     expect(release).not.toHaveProperty('draft_response');
-  });
-
-  test('held flags + revised text with a quote ask → the guard receives the revised body and holds', async () => {
-    const heldFlags = { ...PHOTO_FLAGS, opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null };
-    enqueue('message_drafts', { returning: [photoDraft({ flags: JSON.stringify(heldFlags) })] });
-    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
-    enqueue('message_drafts', { update: 1 });
-    mockRecheck.mockImplementation(async ({ outgoingText }) => (/quote/i.test(outgoingText) ? { blocked: 'owned', family: 'tree_shrub' } : { ok: true }));
-
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/revise`, {
-        method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ revisedResponse: 'Thanks! Want a quote for our tree & shrub program?' }),
-      });
-      expect(res.status).toBe(409);
-    });
-    expect(mockRecheck).toHaveBeenCalledWith(expect.objectContaining({ outgoingText: 'Thanks! Want a quote for our tree & shrub program?' }));
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });

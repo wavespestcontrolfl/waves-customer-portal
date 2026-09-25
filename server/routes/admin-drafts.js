@@ -529,41 +529,32 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
 // check right before dispatch (codex #4810 r6): owned/unavailable → 409,
 // claim released, draft left pending for the owner to rewrite; a quote
 // whose figure moved → flags.quote refreshed, 409 so the owner re-reads it;
-// lookup failure → 503 fail closed. Narrowly scoped to flags.origin ===
-// 'photo_triage'; the text itself never carries a price.
+// lookup failure → 503 fail closed. Narrowly scoped to intent
+// 'photo_triage'; the text itself never carries a price, and it is never
+// parsed — photo-triage drafts are approve-as-written only (the /revise
+// route refuses them), so the stored verdict describes what is sent.
 // customerId: the RESOLVED recipient's customer (sms_log linkage included —
 // a draft linked through its SMS row after creation must recheck against
-// that customer, codex #4810 r7); outgoingText: the body that will be sent
-// (a revision can add a quote ask the stored verdict never saw).
-async function guardPhotoTriageSend(draft, res, releaseFields = {}, { customerId = draft.customer_id, outgoingText = null } = {}) {
+// that customer, codex #4810 r7).
+async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id } = {}) {
+  // Same predicate the /revise refusal claims on (intent), so the two
+  // halves of the approve-as-written rule can never disagree on a draft.
+  if (draft.intent !== 'photo_triage') return { blocked: false };
   const flags = parseFlags(draft.flags);
-  if (flags.origin !== 'photo_triage') return { blocked: false };
   let verdict;
   const { recheckDraftOffer, stripQuotePitch, priceContextSentence, replacePriceContext } = require('../services/photo-triage-opportunity');
   try {
-    verdict = await recheckDraftOffer({ customerId: customerId || draft.customer_id, flags, outgoingText });
+    verdict = await recheckDraftOffer({ customerId: customerId || draft.customer_id, flags });
   } catch (err) {
     logger.warn(`[admin-drafts] photo-triage offer recheck failed for draft ${draft.id} (code=${err?.code || 'none'})`);
-    await releaseDraftClaim(draft.id, releaseFields);
+    await releaseDraftClaim(draft.id);
     res.status(503).json({ error: 'Photo-triage offer recheck unavailable — draft left pending, try again', code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE' });
     return { blocked: true };
   }
   if (verdict.ok) return { blocked: false };
-  // A revision stating a price: nothing stored is stale, so the flags and
-  // draft text stay as they are — only the send is refused (owner ruling
-  // 2026-09-25: no price in a photo-triage text; codex #4810 r10 P1).
-  if (verdict.blocked === 'price_in_text') {
-    await releaseDraftClaim(draft.id, releaseFields);
-    res.status(409).json({
-      error: 'Photo-triage texts never state a price — remove the dollar amount (send an estimate for pricing), then approve.',
-      code: 'PHOTO_TRIAGE_PRICE_IN_TEXT',
-    });
-    return { blocked: true };
-  }
   if (verdict.repriced !== undefined) {
     const nextFlags = { ...flags, quote: { ...(flags.quote || {}), per_visit: verdict.repriced }, quote_repriced_at: new Date().toISOString() };
     await releaseDraftClaim(draft.id, {
-      ...releaseFields,
       flags: JSON.stringify(nextFlags),
       // The owner-only price sentence is replaced, never left stale.
       context_summary: replacePriceContext(draft.context_summary, priceContextSentence(verdict.family, verdict.repriced)),
@@ -595,7 +586,6 @@ async function guardPhotoTriageSend(draft, res, releaseFields = {}, { customerId
       ? `ownership of ${verdict.family} could not be confirmed (live plan rate or lookup failure)`
       : `${verdict.family} can no longer be priced for this customer`;
   await releaseDraftClaim(draft.id, {
-    ...releaseFields,
     flags: JSON.stringify(heldFlags),
     draft_response: stripQuotePitch(draft.draft_response),
     context_summary: replacePriceContext(draft.context_summary, `Held at approve: ${why}; the quote ask was removed.`),
@@ -937,9 +927,7 @@ router.put('/:id/approve', async (req, res, next) => {
     // remove.
     const clarifyGuard = await guardClarifySend(draft, res);
     if (clarifyGuard.blocked) return;
-    const photoTriageGuard = await guardPhotoTriageSend(draft, res, {}, {
-      customerId: recipient.customerId || draft.customer_id, outgoingText: draft.draft_response,
-    });
+    const photoTriageGuard = await guardPhotoTriageSend(draft, res, { customerId: recipient.customerId });
     if (photoTriageGuard.blocked) return;
     let smsResult;
     try {
@@ -1069,6 +1057,19 @@ router.put('/:id/revise', async (req, res, next) => {
       return res.status(409).json({ error: 'Draft is no longer pending' });
     }
 
+    // Photo-triage drafts are approve-as-written or reject (codex #4810
+    // r7–r11): their dispatch recheck reads the stored gauge verdict, and
+    // free operator wording is not something a text parser can hold to the
+    // no-price / no-pitch-an-owned-family rules. Refused before any send
+    // work; the claim goes back with the edit cleared.
+    if (draft.intent === 'photo_triage') {
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      return res.status(409).json({
+        error: 'Photo-triage drafts can be approved as written or rejected, not revised — reject it and reply from the conversation.',
+        code: 'PHOTO_TRIAGE_NOT_REVISABLE',
+      });
+    }
+
     // Shared pre-send gate recheck (click-followup drafts only).
     const gateBlock = await guardClickFollowupSend(draft);
     if (gateBlock) {
@@ -1104,10 +1105,6 @@ router.put('/:id/revise', async (req, res, next) => {
 
     const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
     if (clarifyGuard.blocked) return;
-    const photoTriageGuard = await guardPhotoTriageSend(draft, res, { revised_response: null, final_response: null }, {
-      customerId: recipient.customerId || draft.customer_id, outgoingText: revisedResponse,
-    });
-    if (photoTriageGuard.blocked) return;
     let smsResult;
     try {
       smsResult = await sendManualCustomerSms({

@@ -218,9 +218,14 @@ function countTokens(lower, tokens) {
 // surround it — the identifier already reads the plant context (codex #4810
 // r1). Everything else, including 0-0 (a question with no subject word),
 // runs the pest identifier, same default as always.
+// A named lawn-soil pest spelled with a generic pest noun ("chinch bug")
+// is ONE lawn subject — its "bug" must not tie the lawn word and send the
+// photo to the pest identifier (codex #4810 r11).
+const LAWN_PEST_PHRASE_RE = /\bchinch bugs?\b/g;
+
 function photoAssessmentType(lower) {
   const lawnScore = countTokens(lower, PHOTO_LAWN_WORDS);
-  const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
+  const pestScore = countTokens(lower.replace(LAWN_PEST_PHRASE_RE, 'chinch'), PHOTO_PEST_WORDS);
   const treeShrubScore = countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
   if (lawnScore > pestScore + treeShrubScore) return 'lawn';
   if (treeShrubScore > 0 && pestScore === 0) {
