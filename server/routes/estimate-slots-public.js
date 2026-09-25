@@ -175,7 +175,7 @@ async function rejectCallSideBlockedEstimate(res, estimate = {}) {
     try { data = JSON.parse(data); } catch { data = null; }
   }
   if (!data || typeof data !== 'object') return null;
-  if (await callSideBlockForEstimateData(db, data)) {
+  if (await callSideBlockForEstimateData(db, data, { estimateStatus: estimate?.status })) {
     return res.status(404).json({ error: 'Not found' });
   }
   return null;

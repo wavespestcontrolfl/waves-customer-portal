@@ -11,6 +11,7 @@ const { isHoldStop } = require('./travel-gap');
 // location, duration, grouping or lateness cards (codex #4295 r3 P2).
 const QUALITY_EXCLUDED_STATUSES = [...require('../stops-ahead').NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 const { parseHHMM } = require('./window-rules');
+const { plannedWorkMinutes } = require('./planning-minutes');
 
 // Two customers promised the same technician at the same time. Staff and
 // phone-reschedule saves commit through such a clash by owner ruling
@@ -58,6 +59,13 @@ function doubleBookedPairs(stops) {
   return pairs;
 }
 
+// workDuration reads owner planning minutes for recognized stops under the
+// capacity gate; report that provenance instead of the legacy basis.
+function durationBasis(stops) {
+  return stops.some(stop => plannedWorkMinutes(stop) != null)
+    ? 'owner_planning_minutes_or_stored_window_or_estimate' : 'stored_window_or_estimate';
+}
+
 function measureDayQuality(RouteOptimizer, stops, {
   departureMinutes = null, targetReturnMinutes = null, breakMinutes = null, future = true,
 } = {}) {
@@ -78,7 +86,9 @@ function measureDayQuality(RouteOptimizer, stops, {
   const doubleBookedVisits = doubleBookedPairs(stops);
   const missingCoordinates = stops.filter(stop => !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
     || !Number(stop.lat) || !Number(stop.lng)).map(stop => stop.id);
-  const defaultDurations = stops.filter(stop => !(Number(stop.estimated_duration_minutes) > 0)
+  // An owner-planned stop has a known duration even with no stored estimate.
+  const defaultDurations = stops.filter(stop => plannedWorkMinutes(stop) == null
+    && !(Number(stop.estimated_duration_minutes) > 0)
     && !(parseHHMM(stop.window_end) > parseHHMM(stop.window_start) && parseHHMM(stop.window_start) != null)).map(stop => stop.id);
   const grouped = stops.some(stop => stop.visit_id);
   // A version-2 combined booking is excluded from double-booking pairs (see
@@ -113,7 +123,7 @@ function measureDayQuality(RouteOptimizer, stops, {
     feasibleInsertionWindows: null,
     insertionStatus: simulation?.arrivals.some(row => row.lateMinutes > 0) ? 'current_route_infeasible' : 'candidate_location_and_duration_required',
     uncertaintyReasons: unknown,
-    assumptions: { departureMinutes: modeledDeparture, departureProvided: departureMinutes != null, targetReturnMinutes, breakMinutes, durationBasis: 'stored_window_or_estimate',
+    assumptions: { departureMinutes: modeledDeparture, departureProvided: departureMinutes != null, targetReturnMinutes, breakMinutes, durationBasis: durationBasis(stops),
       modelBasis: 'shared_fallback_leg_model', currentTraffic: false, gapsDeductTravelAndBreaks: false },
     // IDs, promises and durations allow later comparisons without persisting
     // customer identity, addresses or GPS coordinates in the planner ledger.
@@ -174,6 +184,12 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
         'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
         'scheduled_services.status', 'scheduled_services.reservation_expires_at',
         'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',
+        // Planning-minute inputs (scheduling/planning-minutes.js) — without
+        // them workDuration's plannedWorkMinutes always reads an unnamed
+        // service and falls back to the legacy window/estimate rule, so
+        // these quality totals silently disagreed with the picker's real
+        // planned minutes under GATE_SCHEDULING_CAPACITY (Codex r1 P2).
+        'scheduled_services.service_type', 'scheduled_services.is_recurring', 'scheduled_services.is_callback',
         ...guardedCoordSelects(conn)],
     }).whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())');
     const unallocated = stops.filter(stop => !techs.some(tech => tech.id === stop.technician_id));

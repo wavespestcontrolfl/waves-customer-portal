@@ -2,7 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { CUSTOMER_STAGES } = require('../customer-stages');
 const MODELS = require('../../config/models');
-const { isEnabled } = require('../../config/feature-gates');
+const { isEnabled, customerIntelAiLive } = require('../../config/feature-gates');
 const { dispatchWithFallback } = require('../llm/call');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 
@@ -27,6 +27,11 @@ try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 class RetentionEngine {
 
   async generateRetentionOutreach(customerId) {
+    // GATE_CUSTOMER_INTEL_AI (call-time, default off): drafting is a FLAGSHIP
+    // customerCopy call keyed on the churn band the owner ruled unusable as a
+    // trigger (2026-08-29). Enforced HERE so the nightly loop and the admin
+    // route share one kill switch — no DB read, no provider call when off.
+    if (!customerIntelAiLive()) return null;
     const health = await db('customer_health_scores')
       .where('customer_id', customerId)
       .orderBy('scored_at', 'desc')

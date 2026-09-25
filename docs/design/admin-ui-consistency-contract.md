@@ -84,7 +84,7 @@ Avoid negative margins and page-specific viewport-width calculations unless the 
 Use the existing Tier-1 primitives instead of restyling local copies:
 
 - Page command header and first-level sections: `AdminCommandHeader`.
-- Directory/workspace command presentation: `AdminCommandHeader variant="workspace"`; the existing framed variant stays available to unmigrated pages.
+- Admin command headers default to the workspace presentation across all admin sections. Primary and secondary section rows are centered on separate full-width strips; overflowing rows remain scrollable from their first tab. This shared header scope includes pages whose body content retains its previous migration scope. The framed variant requires an explicit selection.
 - Surface density: `UiSurface`. Context carries the density through React portals; `Dialog` and `Sheet` also carry its CSS tokens on their portal roots. A custom portal must carry `data-ui-density={useUiDensity()}` on its root.
 - Buttons: `Button`; navigation links with the same treatment use `buttonStyles` and keep their native `href` behavior. `ui-record-actions` wraps and spaces header/footer actions; `ui-action-menu` and `ui-menu-action` present existing disclosures without changing their interaction ownership.
 - Inputs, selects, and textareas: existing form controls inside `Field` for a visible label and help/error associations. An existing native-input owner such as address autocomplete may use `inputStyles`; it keeps its existing ref, events, and provider behavior.

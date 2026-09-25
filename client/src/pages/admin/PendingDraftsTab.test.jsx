@@ -200,6 +200,25 @@ describe("PendingDraftsTab", () => {
     expect(links[0]).toHaveAttribute("href", "/admin/lawn-assessments?open=lawn%3Aa-1");
   });
 
+  it("hides Revise only on gauge-written photo-triage drafts; older ones stay revisable", async () => {
+    const base = {
+      customerPhone: "+19415550102", recipientPhone: "+19415550102", inboundMessage: "what is this",
+      draftResponse: "Thanks for the photo.", intent: "photo_triage", campaignType: null, contextSummary: null,
+      createdAt: new Date().toISOString(),
+    };
+    adminFetch.mockResolvedValue({
+      drafts: [
+        { ...base, id: "g1", customerName: "Gauged Customer", flags: { origin: "photo_triage", gauge_version: 1 } },
+        { ...base, id: "l1", customerName: "Legacy Customer", flags: { origin: "photo_triage" } },
+      ],
+      pendingCount: 2,
+    });
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Gauged Customer");
+    expect(screen.getAllByText("Revise")).toHaveLength(1);
+    expect(screen.getAllByText("Approve & send")).toHaveLength(2);
+  });
+
   it("empty queue renders the explainer", async () => {
     adminFetch.mockResolvedValue({ drafts: [], pendingCount: 0 });
     render(<PendingDraftsTab embedded />);

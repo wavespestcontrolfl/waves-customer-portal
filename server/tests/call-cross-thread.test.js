@@ -50,7 +50,7 @@ describe('buildExtractionPrompt threading', () => {
   test('bare render (the version-hash input) is unchanged — no block, stable hash', () => {
     const bare = buildExtractionPrompt('', '', '');
     expect(bare).not.toContain('PRIOR CALL FROM THIS NUMBER');
-    expect(PROMPT_HASH).toMatch(/^v9-[a-f0-9]{12}$/);
+    expect(PROMPT_HASH).toMatch(/^v10-[a-f0-9]{12}$/);
   });
 });
 

@@ -59,6 +59,11 @@ function normalizeCaller(caller) {
     organization_name: cleanText(caller.organization_name),
     phone_e164: normalizePhone(caller.phone_e164),
     phone_raw_spoken: cleanText(caller.phone_raw_spoken),
+    // phone_note (schema 1.14.0): the caller's own words on why the ANI
+    // isn't theirs. Schema already clamps at 160 chars; clamp again here
+    // too so a normalizer-only consumer (pre-validation) can't see a longer
+    // string than validation would ever accept.
+    phone_note: caller.phone_note ? cleanText(caller.phone_note)?.slice(0, 160) || null : null,
     email: usableEmail,
     // Server-derived, mirrors the V1 normalizer's email/email_raw split: an
     // as-heard capture the validation rejected ("brandon@gmail", a garbled

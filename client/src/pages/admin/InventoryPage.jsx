@@ -329,7 +329,7 @@ export default function InventoryPage() {
         }
       />
       {activeGroup.tabs.length > 1 && (
-        <div className="flex flex-wrap gap-[8px] mb-[16px]">
+        <div className="flex flex-wrap justify-center gap-[8px] mb-[16px]">
           {activeGroup.tabs.map((key) => {
             const active = tab === key;
             const LeafIcon = LEAF_META[key].Icon;

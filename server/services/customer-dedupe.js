@@ -25,6 +25,7 @@ const db = require('../models/db');
 const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -643,9 +644,14 @@ const PREF_DEFAULT_SENTINELS = {
 };
 
 async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
-  const loserRow = await trx(table).where(column, loserId).first();
+  const lockedRows = new Map();
+  // Match preference saves: lock by customer ID, independent of merge roles.
+  for (const id of [winnerId, loserId].sort()) {
+    lockedRows.set(id, await trx(table).where(column, id).forUpdate().first());
+  }
+  const loserRow = lockedRows.get(loserId);
   if (!loserRow) return 'no loser row';
-  const winnerRow = await trx(table).where(column, winnerId).first();
+  const winnerRow = lockedRows.get(winnerId);
   if (!winnerRow) {
     const count = await trx(table).where(column, loserId).update({ [column]: winnerId });
     return count;
@@ -668,9 +674,12 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   // which jsonb rejects. Dates and other typed objects pass through.
   const forUpdate = (v) => (Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object))
     ? JSON.stringify(v) : v;
-  const updates = {};
+  const updates = table === 'notification_prefs' ? mergedBillingChannelUpdates(winnerRow, loserRow) : {};
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
+    // These columns are native text[], not JSONB. The shared merge rule
+    // above preserves their intersection or refuses incompatible choices.
+    if (table === 'notification_prefs' && Object.values(BILLING_DELIVERY_FIELDS).includes(col)) continue;
     // Choice provenance follows its channel below; it is not SMS consent
     // and must not pass through the generic boolean AND rule.
     if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
@@ -1273,6 +1282,17 @@ function rowLevelMergeConflict(winner, loser) {
  * row locks. Returns { code, message } or null.
  */
 async function dbLevelMergeConflict(database, winner, loser) {
+  const [winnerPrefs, loserPrefs] = await Promise.all([winner, loser].map((row) => (
+    database('notification_prefs').where({ customer_id: row.id }).first()
+  )));
+  try {
+    mergedBillingChannelUpdates(winnerPrefs, loserPrefs);
+  } catch (err) {
+    if (err.mergeConflictCode === 'billing_delivery_channels_conflict') {
+      return { code: err.mergeConflictCode, message: err.message };
+    }
+    throw err;
+  }
   // An incompatible winner address must be anchored before the property sweep.
   // ensurePrimaryProperty deliberately preserves an existing inactive primary,
   // so this state can never satisfy the executor's active-primary invariant.

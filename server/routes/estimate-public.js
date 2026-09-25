@@ -8460,7 +8460,7 @@ async function handleEstimateView(req, res, next) {
       // lives on the CALL — and this page would otherwise keep serving a
       // wrong-identity estimate's name, address, and pricing until the
       // scheduler drained the queue.
-      || await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      || await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       if (req.path.startsWith('/estimate/')) return next();
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
@@ -8943,7 +8943,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -10573,7 +10573,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // against a linkage correction. One order everywhere:
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status');
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -10623,7 +10623,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (freshLinkData?.lead_id && ['sid', 'stamp'].includes(freshLinkData?.lead_linkage)) {
           await trx('leads').where({ id: String(freshLinkData.lead_id) }).forUpdate().first('id');
         }
-        if (freshLinkData && await staleCallLinkageReason(trx, freshLinkData, { lockCallRow: true })) {
+        if (freshLinkData && await staleCallLinkageReason(trx, freshLinkData, { lockCallRow: true, estimateStatus: freshLinkRow?.status })) {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
           throw err;
@@ -14118,7 +14118,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -14504,7 +14504,7 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate || !isEstimateAcceptActive(estimate)) {
@@ -14771,7 +14771,7 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate || !isEstimateAcceptActive(estimate)) {
@@ -15693,7 +15693,7 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate || !isEstimateAcceptActive(estimate)) {
@@ -15721,7 +15721,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -15999,7 +15999,7 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     estimateId = estimate?.id || null;
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     // Same viewability contract as /data plus the accepted-only rule the
@@ -16019,12 +16019,12 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
       const linkData = parseEstimateDataSafe(locked);
       const eng = linkData?.estimatorEngine;
       if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return null;
-      if (await callSideBlockForEstimateData(trx, linkData)) return null;
+      if (await callSideBlockForEstimateData(trx, linkData, { estimateStatus: locked.status })) return null;
       const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
       if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
         await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
       }
-      if (linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true })) return null;
+      if (linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true, estimateStatus: locked.status })) return null;
       return require('../services/referral-share').buildReferralShareForCustomer(locked.customer_id, { conn: trx });
     });
     if (!share) return res.status(404).json({ error: 'Estimate not found' });
@@ -16059,7 +16059,7 @@ router.post('/:token/change-request', softExitLimiter, async (req, res, next) =>
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimateRow = await db('estimates').where({ token: req.params.token }).first();
-    if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow))) {
+    if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow), { estimateStatus: estimateRow?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const { createEstimateOfficeRequest, recordEstimateStillDeciding } = require('../services/estimate-change-request');
@@ -16071,12 +16071,12 @@ router.post('/:token/change-request', softExitLimiter, async (req, res, next) =>
       if (kind === 'callback' && !linkData?.websiteSelfService) return true;
       const eng = linkData?.estimatorEngine;
       if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
-      if (await callSideBlockForEstimateData(trx, linkData)) return true;
+      if (await callSideBlockForEstimateData(trx, linkData, { estimateStatus: lockedRow?.status })) return true;
       const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
       if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
         await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
       }
-      return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true }));
+      return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true, estimateStatus: lockedRow?.status }));
     };
     // Unknown kinds are a validation error, never a silent change request
     // (pre-push codex P1) — but only once the token has cleared the public
@@ -16138,7 +16138,7 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
     const estimateRow = await db('estimates').where({ token: req.params.token }).first();
     // Durable call-side block: same fail-closed check every bearer-token
     // surface applies (codex P0, PR #3304 GH r9b).
-    if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow))) {
+    if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow), { estimateStatus: estimateRow?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const { createEstimateMeasurementReview } = require('../services/estimate-measurement-review');
@@ -16191,14 +16191,14 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
         const linkData = parseEstimateDataSafe(lockedRow);
         const eng = linkData?.estimatorEngine;
         if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
-        if (await callSideBlockForEstimateData(trx, linkData)) return true;
+        if (await callSideBlockForEstimateData(trx, linkData, { estimateStatus: lockedRow?.status })) return true;
         const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
         // Lead locked before call_log — repo-wide estimates → leads →
         // call_log order against the processor's stamp writers.
         if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
           await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
         }
-        return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true }));
+        return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true, estimateStatus: lockedRow?.status }));
       },
     });
     res.status(result.deduped ? 200 : 201).json(result);
@@ -16288,7 +16288,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate || !isEstimateExtensionRequestEligible(estimate)
@@ -16562,7 +16562,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const guard = resolveEstimateDeclineGuard(estimate);
@@ -16594,7 +16594,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       // → call_log), or a decline racing a linkage reconcile (which locks
       // the estimate then updates the lead) can deadlock (codex P1, PR
       // #3304 GH r7b).
-      const declineLocked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      const declineLocked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'status');
       if (!declineLocked) return { staleLinkage: false, declinedCount: 0 };
       let declineLinkData = null;
       try {
@@ -16604,7 +16604,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       if (declineLinkData?.lead_id && ['sid', 'stamp'].includes(declineLinkData?.lead_linkage)) {
         await trx('leads').where({ id: String(declineLinkData.lead_id) }).forUpdate().first('id');
       }
-      if (declineLinkData && await staleCallLinkageReason(trx, declineLinkData, { lockCallRow: true })) {
+      if (declineLinkData && await staleCallLinkageReason(trx, declineLinkData, { lockCallRow: true, estimateStatus: declineLocked.status })) {
         return { staleLinkage: true, declinedCount: 0 };
       }
       const declinedCount = await trx('estimates')
@@ -25250,7 +25250,7 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
@@ -25338,7 +25338,7 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
@@ -25389,7 +25389,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
@@ -25463,7 +25463,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     const stillOnCustomerSurface = async () => {
       const fresh = await db('estimates').where({ id: estimate.id }).first();
       if (!fresh || !isEstimateCustomerViewable(fresh)) return false;
-      return !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(fresh)));
+      return !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(fresh), { estimateStatus: fresh?.status }));
     };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
@@ -25842,7 +25842,7 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
@@ -26187,7 +26187,7 @@ async function composeEstimateDataPayload(estimate, {
             && !sibling.archived_at
             && !estimateOffCustomerSurface(sibling);
           if ((ordinaryViewable || expiredPublished)
-            && !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(sibling)))) {
+            && !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(sibling), { estimateStatus: sibling?.status }))) {
             viewable.push(sibling);
           }
         }
@@ -26825,7 +26825,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
     // a pinned document render of a blocked estimate is the same
     // disclosure.
-    const callSideBlock = await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate));
+    const callSideBlock = await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status });
     if (callSideBlock) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -26984,7 +26984,7 @@ async function handleEstimateAsk(req, res, next) {
     // r9b): when estimate-side invalidation could not be written, the
     // block lives on the call, and these routes would keep serving the
     // wrong lead's content until the scheduler drained the queue.
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });

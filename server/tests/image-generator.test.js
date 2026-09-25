@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { ImageGenerator, _internals } = require('../services/content/image-generator');
 const {
   DEFAULT_CHAIN, MODEL_MAP, MODE_SIZES,
-  parseChain, isFatalOpenAIError, sizeFor, buildPrompt, planFor,
+  parseChain, isFatalOpenAIError, sizeFor, buildPrompt, planFor, referenceRolesFor,
 } = _internals;
 
 // Helpers to build Response-like fixtures for mocked fetch.
@@ -42,8 +42,9 @@ describe('parseChain', () => {
     // Bake-off 2026-09-05: Nano Banana Pro second (fast, cheaper, close on
     // photo/cartoon); gpt-image-1 stays the last fallback.
     // OpenAI-only since 2026-09-24 (owner: no invisible watermarks — every
-    // Gemini image model embeds SynthID in the pixels).
-    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    // Gemini image model embeds SynthID in the pixels). gpt-image-2.5-sunburst
+    // leads since 2026-09-25 (owner: render on Images 2.5 — see MODEL_MAP header).
+    expect(parseChain(undefined)).toEqual(['gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
   });
   test('respects env override (chain mechanics, watermark policy explicitly relaxed)', () => {
     expect(parseChain('gemini,gpt-image-2', { allowPixelWatermark: true })).toEqual(['gemini', 'gpt-image-2']);
@@ -86,17 +87,21 @@ describe('no pixel-watermarked providers (owner directive 2026-09-24)', () => {
     expect(parseChain(undefined)).toContain('gemini-image-pro');
     expect(new ImageGenerator({ envChain: undefined, fetchFn: jest.fn() }).chain).toContain('gemini-image-pro');
     delete process.env[PIXEL_WATERMARK_OVERRIDE_ENV];
-    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    expect(parseChain(undefined)).toEqual(['gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
   });
   test('a Gemini-only env chain falls back to the OpenAI default instead of reaching Gemini', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     process.env.GEMINI_API_KEY = 'gem-test';
     const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
     const gen = new ImageGenerator({ envChain: 'gemini-image-best,gemini', fetchFn: mockFetch });
-    expect(gen.chain).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    expect(gen.chain).toEqual(['gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
     const r = await gen.generate({ title: 'Test' });
-    expect(r.model).toBe('gpt-image-2');
+    expect(r.model).toBe('gpt-image-2.5-sunburst');
     for (const call of mockFetch.mock.calls) expect(String(call[0])).not.toMatch(/generativelanguage|gemini/i);
+  });
+  test('an all-invalid env chain falls back to the caller\'s defaultChain, not the blog default', () => {
+    const gen = new ImageGenerator({ envChain: 'gemini-image-best,not-a-model', defaultChain: 'gpt-image-2,gpt-image-1.5,gpt-image-1', fetchFn: jest.fn() });
+    expect(gen.chain).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
   });
   test('an exhausted OpenAI ladder throws — it never falls through to a watermarking model', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
@@ -238,6 +243,20 @@ describe('buildPrompt', () => {
   test('embeds mode-specific aspect/dimensions (needed for Gemini)', () => {
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/1:1.*1024x1024/);
     expect(buildPrompt({ title: 'X', mode: 'blog-hero' })).toMatch(/3:2.*1536x1024/);
+  });
+});
+
+describe('referenceRolesFor', () => {
+  test('numbers each reference role by its position among the attached images', () => {
+    const logo = { kind: 'logo' };
+    const side = { kind: 'van' };
+    const rear = { kind: 'van' };
+    expect(referenceRolesFor([logo, side, rear])).toBe(
+      'HARD REFERENCE ROLES: Attached Image 1 is the complete Waves logo lockup for the uniform badges. Attached Images 2 and 3 are two photographs of the SAME single company van — side and rear views of one object, never two vehicles.'
+    );
+    expect(referenceRolesFor([side, rear])).toMatch(/^HARD REFERENCE ROLES: Attached Images 1 and 2 are two photographs of the SAME single company van/);
+    expect(referenceRolesFor([logo])).toBe('HARD REFERENCE ROLES: Attached Image 1 is the complete Waves logo lockup for the uniform badges.');
+    expect(referenceRolesFor([])).toBe('');
   });
 });
 
@@ -402,7 +421,7 @@ describe('ImageGenerator: invalid env chain falls back to default', () => {
     const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
     const gen = new ImageGenerator({ envChain: 'nothing,bogus', fetchFn: mockFetch });
     const r = await gen.generate({ title: 'Test' });
-    expect(r.model).toBe('gpt-image-2'); // first in DEFAULT_CHAIN
+    expect(r.model).toBe('gpt-image-2.5-sunburst'); // first in DEFAULT_CHAIN
   });
 });
 
@@ -490,9 +509,12 @@ describe('uniform logo reference (owner directive 2026-09-24: logo on cap + righ
 
   test('buildPrompt with the reference puts the logo on the cap and RIGHT chest, nowhere else; without it the logo stays off', () => {
     const withLogo = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }), uniformLogo: true });
-    expect(withLogo).toMatch(/Waves logo — reproduced faithfully from the attached reference image — as a small badge on the wearer's RIGHT chest/);
-    expect(withLogo).toMatch(/cap that is either light blue or red with that same Waves logo centered on the front/);
-    expect(withLogo).toMatch(/ONLY on the technician's cap and right chest/);
+    expect(withLogo).toMatch(/a roughly 3-inch badge on the wearer's anatomical RIGHT chest/);
+    expect(withLogo).toMatch(/clearly LEFT of the button placket as the viewer sees it/);
+    expect(withLogo).toMatch(/The viewer-right chest is uninterrupted red fabric/);
+    expect(withLogo).toMatch(/a roughly 2-inch badge centered on the cap front/);
+    expect(withLogo).toMatch(/Place no logo on sleeves, back, pants, gloves, or equipment/);
+    expect(withLogo).toMatch(/If the scene has no technician, do not use the logo image at all\./);
     expect(withLogo).toMatch(/other than the Waves logo on the technician's cap and right chest\./);
     expect(withLogo).toMatch(/brand marks other than the Waves logo on the technician's cap and chest — equipment and vehicles are generic and unbranded/);
     expect(withLogo).not.toMatch(/carry no readable logo/);
@@ -520,7 +542,7 @@ describe('uniform logo reference (owner directive 2026-09-24: logo on cap + righ
     const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
     const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }), uniformLogo: true });
     expect(r.logoReference).toBe(true);
-    expect(r.prompt).toMatch(/attached reference image/);
+    expect(r.prompt).toMatch(/HARD REFERENCE ROLES: Attached Image 1 is the complete Waves logo lockup/);
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const [url, opts] = mockFetch.mock.calls[0];
     expect(url).toBe('https://api.openai.com/v1/images/edits');
@@ -656,11 +678,12 @@ describe('van wrap reference (owner ruling 2026-09-24: real current wrap on the 
 
   test('buildPrompt with vanWrap + plan.van names the Ford Transit 250 wearing the wrap; without either it stays plain or absent', () => {
     const withWrap = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: VAN_PLAN, vanWrap: true });
-    expect(withWrap).toMatch(/Ford Transit 250 medium-roof cargo van wearing the Waves wrap — reproduced faithfully from the attached van reference photos/);
-    expect(withWrap).toMatch(/"WAVES" and "Lawn & Pest" lettering/);
-    expect(withWrap).toMatch(/941-241-2459/);
-    expect(withWrap).toMatch(/GoWavesFL\.com/);
-    expect(withWrap).toMatch(/belong ONLY on this one van/);
+    expect(withWrap).toMatch(/Park exactly ONE physical Waves van several metres behind the main action/);
+    expect(withWrap).toMatch(/occupying approximately 20–30% of the image width/);
+    expect(withWrap).toMatch(/Include no second, partial, mirrored, or reflected van/);
+    expect(withWrap).toMatch(/the Ford Transit 250 medium-roof body and bright-blue halftone wrap from the van photos/);
+    expect(withWrap).toMatch(/Keep WAVES, Lawn & Pest, Wave Goodbye to Pests!, 941-241-2459, and GoWavesFL\.com as separate wrap elements/);
+    expect(withWrap).toMatch(/The phone number and web address must be exact; leave tiny text unresolved rather than inventing other digits/);
     expect(withWrap).toMatch(/other than .*the Waves wrap text and graphics on the one van described above/);
     expect(withWrap).toMatch(/no company logos, brand names, or brand marks other than .*the Waves wrap on the one van described above/);
     // plan.van true but no opt-in → the plain unmarked line
@@ -691,7 +714,7 @@ describe('van wrap reference (owner ruling 2026-09-24: real current wrap on the 
     const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: VAN_PLAN, vanWrap: true });
     expect(r.vanWrapReference).toBe(true);
     expect(r.logoReference).toBe(false);
-    expect(r.prompt).toMatch(/reference photos/);
+    expect(r.prompt).toMatch(/Attached Images 1 and 2 are two photographs of the SAME single company van/);
     const [url, opts] = mockFetch.mock.calls[0];
     expect(url).toBe('https://api.openai.com/v1/images/edits');
     const files = opts.body.getAll('image[]');

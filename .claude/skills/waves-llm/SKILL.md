@@ -89,7 +89,7 @@ Currently live:
   `laneId: 'photo_scoring'` in `admin-dispatch.js`) — owner directive
   2026-09-24, Claude Opus fallback only.
 
-**Every cross-provider call site keeps an automatic fallback to Claude** so
+**Cross-provider call sites keep an automatic fallback** (Claude unless an owner-approved exception below applies) so
 a provider issue never causes a gap:
 - OpenAI features → Claude (the estimate assistant then falls to a
   deterministic template).
@@ -99,13 +99,16 @@ a provider issue never causes a gap:
   THEN Claude VISION only if both Gemini rungs miss. Two exceptions make ONE
   Gemini call with no retry: completion-photo captions
   (`TEXT_POLICIES.photoCaptions`, Gemini → Claude through the dispatcher) and
-  `satellite-analyzer.js` (Gemini → Claude → OpenAI). **Owner ruling
+  `satellite-analyzer.js` (Gemini → Sol; see the estimate-image ruling below). **Owner ruling
   2026-09-24: the four customer photo-scoring lanes below (lawn, pest,
   tree-shrub, satellite) are Gemini-first ladders — no parallel fan-out or
-  averaging.** The ruling does NOT cover every vision lane: `property_trio`,
-  `property_v2_vision`, and `turf_ocr` remain intentional consensus fan-outs,
+  averaging.** The ruling does NOT cover every vision lane: `property_trio` (text/web records, not images)
+  and `turf_ocr` remain intentional consensus fan-outs,
   and `visionAnalysis` lanes (vision-delta, lawn quality gate, hero alt,
   WDO brief) stay Anthropic-first — don't remove those without a new ruling.
+  The generated-image SCREEN is the ruled exception (owner 2026-09-25):
+  `TEXT_POLICIES.imageScreen` is GPT-5.6 Sol first with Claude VISION as the
+  backup; hero alt text stays on `visionAnalysis`.
   `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day),
   `pest-identification.js#analyzePhoto`/`identifyPest`, and
   `tree-shrub-assessment.js#analyzePhoto` all call Gemini only; Claude runs
@@ -117,13 +120,13 @@ a provider issue never causes a gap:
   `averageScores`/`mergeModelResults` still exist and still work with two
   results handed to them directly (tests, or any future caller), but live
   scoring never calls either with two live results anymore.
-  `satellite-analyzer.js` is the same idea with a third rung: Gemini (one
-  call — no `GEMINI_VISION_FALLBACK_MODEL` retry), then Claude (FLAGSHIP),
-  then OpenAI as the true last resort, stopping at the
-  first schema-valid result — no more three-way parallel fan-out with
-  agreement-based confidence. A single-source satellite result now always
-  reads `confidence: 'single_model'`, never `'high'` (which used to require
-  multi-provider agreement).
+  **Estimate-image ruling 2026-09-25:** `satellite-analyzer.js` and
+  `property-lookup-v2.js` use `TEXT_POLICIES.estimateVision`: Gemini 3.8 Flash
+  first, GPT-6 Sol only when Gemini fails or its output is invalid. No Claude,
+  third model, or parallel vision calls. `MODEL_OPENAI_ESTIMATE_VISION` owns
+  the fallback independently of text/report models and legacy `OPENAI_MODEL`
+  / `OPENAI_VISION_MODEL` pins. The satellite result remains `single_model`;
+  V2 preserves its measurement provenance with exactly one source.
   All four files validate a parsed response against its own JSON-contract
   shape before accepting it — a syntactically valid but empty/malformed
   response (e.g. `{}`, or a field out of range) is still a truthy object, so
@@ -136,7 +139,7 @@ Gemini parsing trap (twin of the DEEP thinking-block rule): Gemini 3.x
 Flash is a thinking model — always JOIN ALL text parts of the response,
 never read `parts[0]`, and budget output tokens for the thinking spend.
 
-**One deliberate exception (owner 2026-09-08, DECISIONS.md):** the lawn visit
+**Lawn visit exception (owner 2026-09-08, DECISIONS.md):** the lawn visit
 assessment (`services/lawn-visit-assessment.js`, `GATE_LAWN_VISIT_ASSESSMENT`)
 is Gemini-first with **GPT-6 Astra** (`MODEL_OPENAI_FRONTIER`) as its fallback —
 no Claude vision leg, no parallel providers. It is still a two-provider

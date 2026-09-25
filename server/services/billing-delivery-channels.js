@@ -68,9 +68,50 @@ function billingChannelsPayload(prefs = {}, { emailAvailable = true } = {}) {
   return payload;
 }
 
+// Explicit choices outrank untouched legacy defaults. Known Email/App
+// restrictions still participate so a profile merge cannot resume Text.
+function mergeLegacyChannels(prefs, category) {
+  const direct = prefs?.[LEGACY_FIELDS[category]];
+  const legacy = category === 'payment_issue' && direct == null ? prefs?.billing_channel : direct;
+  if (direct === 'email' && ['billing', 'payment_receipt'].includes(category)) return ['email'];
+  const intentional = ['email', 'both', 'push'].includes(legacy)
+    || (category === 'payment_issue' && direct === 'sms');
+  return intentional ? legacyChannels(prefs, category, true) : null;
+}
+
+function channelEnabledAfterMerge(winner, loser, category, channel) {
+  const enabled = (field) => [winner, loser].every((row) => row?.[field] !== false);
+  if (category === 'payment_receipt' && !enabled('payment_receipt')) return false;
+  if (channel === 'email') return enabled('email_enabled');
+  if (channel === 'push') return enabled('push_enabled');
+  return enabled('sms_enabled')
+    && (category !== 'payment_receipt' || enabled('payment_confirmation_sms'));
+}
+
+function mergedBillingChannelUpdates(winner = {}, loser = {}) {
+  const updates = {};
+  for (const [category, apiField] of Object.entries(CATEGORY_FIELDS)) {
+    const column = BILLING_DELIVERY_FIELDS[apiField];
+    if (![winner, loser].some((row) => Array.isArray(row?.[column]))) continue;
+    const choices = [winner, loser].map((row) => explicitBillingChannels(row, category)
+      || mergeLegacyChannels(row, category));
+    const [left, right] = choices;
+    const channels = left && right ? left.filter((channel) => right.includes(channel)) : left || right;
+    if (!channels.length
+      || !channels.some((channel) => channelEnabledAfterMerge(winner, loser, category, channel))) {
+      throw Object.assign(new Error('Billing notification choices conflict. Choose a common delivery method before merging these profiles.'), {
+        mergeConflictCode: 'billing_delivery_channels_conflict', statusCode: 409,
+      });
+    }
+    if (channels.join() !== (winner?.[column] || []).join()) updates[column] = channels;
+  }
+  return updates;
+}
+
 module.exports = {
   BILLING_DELIVERY_FIELDS,
   explicitBillingChannels,
   billingChannelAllowed,
   billingChannelsPayload,
+  mergedBillingChannelUpdates,
 };
