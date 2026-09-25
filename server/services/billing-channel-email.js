@@ -88,6 +88,7 @@ async function sendBillingChannelEmail(input, { preSendCheck } = {}) {
 
   const recipientEmail = cleanEmail(context.recipient.email);
   let boundaryBlock = null;
+  let handoffStarted = false;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'billing.notice',
@@ -136,6 +137,7 @@ async function sendBillingChannelEmail(input, { preSendCheck } = {}) {
             return { ok: false };
           }
         }
+        handoffStarted = true;
         await dispatch();
         return { ok: true };
       },
@@ -162,11 +164,11 @@ async function sendBillingChannelEmail(input, { preSendCheck } = {}) {
       sent: false,
       provider: 'email',
       providerMessageId: null,
-      deliveryOutcome: err.code === 'EMAIL_SEND_IN_PROGRESS' ? 'not_sent' : 'uncertain',
+      deliveryOutcome: !handoffStarted || err.code === 'EMAIL_SEND_IN_PROGRESS' ? 'not_sent' : 'uncertain',
       blocked: false,
       code: err.code || 'EMAIL_PROVIDER_ERROR',
       reason: EmailTemplateLibrary.redactEmailAddresses(err.message),
-      retryable: err.retryable === true || err.code === 'EMAIL_SEND_IN_PROGRESS',
+      retryable: !handoffStarted || err.retryable === true || err.code === 'EMAIL_SEND_IN_PROGRESS',
     };
   }
 }

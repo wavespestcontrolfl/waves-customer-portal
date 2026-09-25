@@ -105,6 +105,17 @@ describe('billing channel email adapter', () => {
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
+  test.each([false, true])('reports uncertainty only after provider handoff started: %s', async (afterHandoff) => {
+    mockSendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const fail = async () => { throw Object.assign(new Error('temporary provider failure'), { retryable: true }); };
+      if (afterHandoff) return withProviderHandoff(fail);
+      return fail();
+    });
+    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+      sent: false, deliveryOutcome: afterHandoff ? 'uncertain' : 'not_sent', retryable: true,
+    });
+  });
+
   test('rechecks the selected channel at the provider boundary', async () => {
     let reads = 0;
     mockDb.mockImplementation((table) => ({
