@@ -376,7 +376,7 @@ function suspiciousUnstructured(text) {
 const STRUCTURED_FIELDS = [
   { token: '[email]', stem: 'e-?mail' },
   { token: '[phone]', stem: 'phone|mobile|cell|tel(?:ephone)?|fax' },
-  { token: '[address]', stem: 'address|street|addr(?:ess)?_?line' },
+  { token: '[address]', stem: 'address|street|addr(?:ess)?_?line|city|state|province|zip|postal' },
   { token: '[name]', stem: 'name|customer|contact|caller|recipient|owner|tenant|resident|payer' },
 ];
 const KEY_CHARS = "[a-z0-9_ .'-]";

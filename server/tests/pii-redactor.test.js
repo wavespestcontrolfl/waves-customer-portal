@@ -366,6 +366,7 @@ describe('redactStructuredFields: contact values in JSON and label shape (LLM ca
     const { text } = redactStructuredFields('{"customer_phone":"9415551234","contact_email":"a@b.co","email_address":"x@y.z","ip_address":"1.2.3.4","last_name":null,"plan":"Q"}');
     expect(text).toBe('{"customer_phone":"[phone]","contact_email":"[email]","email_address":"[email]","ip_address":"[address]","last_name":null,"plan":"Q"}');
     expect(redactStructuredFields('Customer phone: 941-555-1234\nHome Address: 12 Palm Ct\nNotes: ants').text).toBe('Customer phone: [phone]\nHome Address: [address]\nNotes: ants');
+    expect(redactStructuredFields('{"city":"Bradenton","state":"FL","zip":"34202","postal_code":"34202"}').text).toBe('{"city":"[address]","state":"[address]","zip":"[address]","postal_code":"[address]"}');
   });
 
   test('is idempotent and null-safe', () => {
