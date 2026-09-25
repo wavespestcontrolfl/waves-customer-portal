@@ -186,9 +186,15 @@ function unverified(target, date) {
 /** A stored order that is not a whole, window-ordered sequence: a stop with
  *  no position, two stops sharing one, or a later promise numbered ahead of
  *  an earlier one. */
-function storedOrderStale(rows) {
+function storedOrderStale(rows, members = rows) {
   const positions = rows.map(row => row.route_order);
   if (positions.some(p => p == null) || new Set(positions.map(Number)).size !== positions.length) return true;
+  // A numeric gap (1, 3) is leftover numbering from a stop that left the
+  // day. Checked on the ungrouped rows, where a visit group's members hold
+  // consecutive positions; a completed prefix (today's route resuming at 4)
+  // is not a gap (Codex #4829 r5 P2).
+  const numbered = members.map(row => Number(row.route_order)).filter(Number.isFinite).sort((a, b) => a - b);
+  if (numbered.some((p, i) => i > 0 && p !== numbered[i - 1] + 1)) return true;
   const starts = currentOrder(rows).map(row => (row.arrivalRange || effectiveWindowRange(row))?.startMin)
     .filter(Number.isFinite);
   return starts.some((start, i) => i > 0 && start < starts[i - 1]);
@@ -433,7 +439,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // numbering, not a plan. Simulate the day in promised-window order too and
   // certify whichever fits better; commit persists the certified order. A
   // complete, window-ordered dispatch order stays the only baseline.
-  const sequencers = capacity && storedOrderStale(groupedPending) ? [currentOrder, clockOrder] : [currentOrder];
+  const sequencers = capacity && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
   const simulate = (order, usedLegs) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
@@ -659,5 +665,5 @@ module.exports = {
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
-  _internals: { clockOrder },
+  _internals: { clockOrder, storedOrderStale },
 };

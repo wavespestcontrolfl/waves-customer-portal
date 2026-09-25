@@ -86,7 +86,9 @@ function measureDayQuality(RouteOptimizer, stops, {
   const doubleBookedVisits = doubleBookedPairs(stops);
   const missingCoordinates = stops.filter(stop => !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
     || !Number(stop.lat) || !Number(stop.lng)).map(stop => stop.id);
-  const defaultDurations = stops.filter(stop => !(Number(stop.estimated_duration_minutes) > 0)
+  // An owner-planned stop has a known duration even with no stored estimate.
+  const defaultDurations = stops.filter(stop => plannedWorkMinutes(stop) == null
+    && !(Number(stop.estimated_duration_minutes) > 0)
     && !(parseHHMM(stop.window_end) > parseHHMM(stop.window_start) && parseHHMM(stop.window_start) != null)).map(stop => stop.id);
   const grouped = stops.some(stop => stop.visit_id);
   // A version-2 combined booking is excluded from double-booking pairs (see

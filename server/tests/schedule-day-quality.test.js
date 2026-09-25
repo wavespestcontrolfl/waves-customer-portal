@@ -179,3 +179,18 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     expect(result.days[0].byTech[0].assumptions.durationBasis).toBe('stored_window_or_estimate');
   });
 });
+
+test('an owner-planned stop with no stored estimate is not a default duration (Codex #4829 r5 P2)', () => {
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  try {
+    const planned = { ...stop(9, 1), window_end: null, estimated_duration_minutes: null,
+      service_type: 'Quarterly Pest Control Service', is_recurring: true, is_callback: false };
+    const result = measureDayQuality(Model, [planned], workday);
+    expect(result.defaultDurations).toEqual([]);
+    expect(result.serviceMinutes).toBe(25);
+    const unnamed = { ...stop(9, 1), window_end: null, estimated_duration_minutes: null, service_type: 'Mosquito' };
+    expect(measureDayQuality(Model, [unnamed], workday).defaultDurations).toEqual(['visit-1']);
+  } finally {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+  }
+});

@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { plannedWorkMinutes } = require('../services/scheduling/planning-minutes');
 const { workDuration } = require('../services/route-reorder-window-fit');
-const { evaluateArrivalPlacement, _internals: { clockOrder } } = require('../services/scheduling/arrival-route');
+const { evaluateArrivalPlacement, _internals: { clockOrder, storedOrderStale } } = require('../services/scheduling/arrival-route');
 const { ROUTE_WRITE_GUARD_COLUMNS } = require('../services/route-reorder');
 
 const date = '2027-01-15';
@@ -120,6 +120,15 @@ describe('stale stored order', () => {
     ];
     expect(evaluateArrivalPlacement(context(rows), options(16 * 60, 30)).routeOrder)
       .toEqual(['morning', 'afternoon', '__candidate__']);
+  });
+
+  test('a numeric gap in the stored order is stale; a resumed route and a visit group are not', () => {
+    const at = (id, start, routeOrder) => stop(id, start, 60, { route_order: routeOrder });
+    expect(storedOrderStale([at('a', 9 * 60, 1), at('b', 11 * 60, 3)])).toBe(true);
+    expect(storedOrderStale([at('a', 9 * 60, 4), at('b', 11 * 60, 5)])).toBe(false);
+    // A two-member visit group holds positions 1-2 as one grouped row.
+    const members = [at('g1', 9 * 60, 1), at('g2', 9 * 60, 2), at('b', 11 * 60, 3)];
+    expect(storedOrderStale([members[0], members[2]], members)).toBe(false);
   });
 
   test('clock order keeps a same-customer co-visit adjacent when another customer sorts between them', () => {
