@@ -155,7 +155,13 @@ async function classifyServiceIntent(body) {
 
 // Words that pick the LAWN assessment. Everything else that triggers
 // photo_diagnosis runs the pest identifier.
-const PHOTO_LAWN_WORDS = ['lawn', 'grass', 'yard', 'turf', 'weed', 'weeds'];
+// Lawn-soil pests (grubs, sod webworms, armyworms, chinch) are LAWN
+// diagnostics, not pest identification — they count for the lawn
+// assessment (pre-push audit r7: "grubs in my lawn" must stay lawn).
+const PHOTO_LAWN_WORDS = [
+  'lawn', 'grass', 'yard', 'turf', 'weed', 'weeds', 'sod',
+  'grub', 'grubs', 'worm', 'worms', 'webworm', 'webworms', 'armyworm', 'armyworms', 'chinch',
+];
 // Every pest class the classifier prompt names (bug, insect, spider,
 // rodent, termite) plus the common sightings customers actually type — a
 // mixed "spider on my plant" caption must reach the pest identifier, not
@@ -168,7 +174,7 @@ const PHOTO_PEST_WORDS = [
   'hornets', 'mosquito', 'mosquitoes', 'mosquitos', 'flea', 'fleas', 'tick',
   'ticks', 'scorpion', 'scorpions', 'silverfish', 'caterpillar',
   'caterpillars', 'aphid', 'aphids', 'mealybug', 'mealybugs', 'whitefly',
-  'whiteflies', 'mite', 'mites', 'grub', 'grubs', 'worm', 'worms', 'moth',
+  'whiteflies', 'mite', 'mites', 'moth',
   'moths', 'gnat', 'gnats', 'fly', 'flies', 'earwig', 'earwigs', 'millipede',
   'millipedes', 'centipede', 'centipedes', 'snail', 'snails', 'slug', 'slugs',
   'lizard', 'lizards', 'gecko', 'geckos', 'frog', 'frogs',

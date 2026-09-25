@@ -56,6 +56,17 @@ describe('regex fast path', () => {
       .resolves.toMatchObject({ assessmentType: 'pest' });
   });
 
+  // Lawn-soil pests are lawn diagnostics: they route to the lawn assessment,
+  // never the pest identifier (pre-push audit r7).
+  test.each([
+    'grubs are eating my lawn',
+    'what are these worms in the grass',
+    'chinch bug damage in the yard?',
+  ])('lawn-pest caption %p runs the lawn assessment', async (body) => {
+    await expect(classifyPhotoDiagnosisIntent(body)).resolves.toMatchObject({ assessmentType: 'lawn', method: 'regex' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
   // codex #4810 r1: every pest class the classifier prompt names (spider,
   // rodent...) and the common sightings must count as pest words, or a
   // mixed caption fast-paths to a plant-health assessment.
