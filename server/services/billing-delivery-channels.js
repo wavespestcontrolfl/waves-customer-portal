@@ -70,19 +70,34 @@ function billingChannelsPayload(prefs = {}, { emailAvailable = true } = {}) {
 
 // Explicit choices outrank untouched legacy defaults. Known Email/App
 // restrictions still participate so a profile merge cannot resume Text.
+function mergeLegacyChannels(prefs, category) {
+  const direct = prefs?.[LEGACY_FIELDS[category]];
+  const legacy = category === 'payment_issue' && direct == null ? prefs?.billing_channel : direct;
+  if (direct === 'email') return ['email'];
+  const intentional = ['email', 'both', 'push'].includes(legacy)
+    || (category === 'payment_issue' && direct === 'sms');
+  return intentional ? legacyChannels(prefs, category, true) : null;
+}
+
+function channelEnabledAfterMerge(winner, loser, category, channel) {
+  const enabled = (field) => [winner, loser].every((row) => row?.[field] !== false);
+  if (channel === 'email') return enabled('email_enabled');
+  if (channel === 'push') return enabled('push_enabled');
+  return enabled('sms_enabled')
+    && (category !== 'payment_receipt' || enabled('payment_confirmation_sms'));
+}
+
 function mergedBillingChannelUpdates(winner = {}, loser = {}) {
   const updates = {};
   for (const [category, apiField] of Object.entries(CATEGORY_FIELDS)) {
     const column = BILLING_DELIVERY_FIELDS[apiField];
     if (![winner, loser].some((row) => Array.isArray(row?.[column]))) continue;
     const choices = [winner, loser].map((row) => explicitBillingChannels(row, category)
-      || (row?.[LEGACY_FIELDS[category]] === 'email' ? ['email']
-        : (row?.[LEGACY_FIELDS[category]] === 'push'
-          || (category === 'payment_issue' && row?.payment_issue_channel == null && row?.billing_channel === 'push'))
-          ? legacyChannels(row, category, true) : null));
+      || mergeLegacyChannels(row, category));
     const [left, right] = choices;
     const channels = left && right ? left.filter((channel) => right.includes(channel)) : left || right;
-    if (!channels.length) {
+    if (!channels.length
+      || !channels.some((channel) => channelEnabledAfterMerge(winner, loser, category, channel))) {
       throw Object.assign(new Error('Billing notification choices conflict. Choose a common delivery method before merging these profiles.'), {
         mergeConflictCode: 'billing_delivery_channels_conflict', statusCode: 409,
       });

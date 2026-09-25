@@ -644,9 +644,9 @@ const PREF_DEFAULT_SENTINELS = {
 };
 
 async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
-  const loserRow = await trx(table).where(column, loserId).first();
+  const loserRow = await trx(table).where(column, loserId).forUpdate().first();
   if (!loserRow) return 'no loser row';
-  const winnerRow = await trx(table).where(column, winnerId).first();
+  const winnerRow = await trx(table).where(column, winnerId).forUpdate().first();
   if (!winnerRow) {
     const count = await trx(table).where(column, loserId).update({ [column]: winnerId });
     return count;

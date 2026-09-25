@@ -174,6 +174,26 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     await mockPg('notification_prefs').where({ customer_id: owner }).del();
     await merge();
     expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).payment_receipt_channels).toEqual(['sms']);
+
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({
+      invoice_channels: ['email', 'sms'], payment_receipt_channels: null, payment_receipt_channel: 'sms',
+    });
+    await mockPg('notification_prefs').insert({ customer_id: outsider, invoice_channels: ['sms', 'push'] });
+    const writer = await mockPg.transaction();
+    let committed = false;
+    try {
+      await writer('notification_prefs').where({ customer_id: owner }).forUpdate().first('customer_id');
+      await writer('notification_prefs').where({ customer_id: owner }).update({ invoice_channels: ['email', 'push'] });
+      const pendingMerge = merge();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await writer.commit();
+      committed = true;
+      await pendingMerge;
+      expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).invoice_channels)
+        .toEqual(['push']);
+    } finally {
+      if (!committed) await writer.rollback();
+    }
   });
 
   test.each([['email', 'push'], ['push', 'email']])('profile merge preserves a request Email choice: %s + %s', async (winner, loser) => {
