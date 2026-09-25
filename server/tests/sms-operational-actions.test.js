@@ -828,26 +828,25 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
   });
 
-  test('R2 owner ruling 2026-09-24 (settled r5): a payment is evidence for any "other" ask the model may weigh, but closes without the model only a strong payment question', () => {
+  test('R2 owner ruling 2026-09-24 (settled r7): a payment is evidence for any "other" ask the model may weigh, and never closes without the model', () => {
     const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
     const invoicePaid = { type: 'payment', payment_source: 'invoice', id: 'invoice-1', ref: 'payment:invoice-1', paid_at: '2040-03-11T15:00:00Z',
-      text: 'Invoice Quarterly paid 2040-03-11', candidate_invoices: 1, candidate_invoice_id: 'invoice-1', candidate_invoice_number: 'WPC-1' };
+      text: 'Invoice Quarterly paid 2040-03-11' };
     const smsReceipt = { type: 'payment', payment_source: 'sms', id: 'sms-1', status: 'delivered', message_type: 'receipt' };
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
     const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
     const nonPaymentOther = { kind: 'other', description: 'My son should be there for the visit', sms_context: ctx };
     expect(admissibleWitness(invoicePaid, paymentOther)).toBe(true);
     expect(admissibleWitness(smsReceipt, paymentOther)).toBe(true);
-    expect(systemEventFulfillment({ records: [invoicePaid], failures: [] }, paymentOther)).toMatchObject({ reason: 'system_event', record_id: 'invoice-1' });
-    // Not about money: still admissible (the model decides), never a system-event close.
     expect(admissibleWitness(invoicePaid, nonPaymentOther)).toBe(true);
-    expect(systemEventFulfillment({ records: [invoicePaid], failures: [] }, nonPaymentOther)).toBeNull();
+    // Codex #4816 r7: whether money landing answers THIS question is semantic
+    // ("why is my balance wrong?", "send the receipt"), so no payment ask —
+    // however strongly worded — closes without the model.
+    for (const description of ['What is the Zelle number?', 'Did my payment go through?', 'Why is my balance wrong?', 'Can you send the receipt?']) {
+      expect(systemEventFulfillment({ records: [invoicePaid], failures: [] }, { kind: 'other', description, sms_context: ctx })).toBeNull();
+    }
     // Payment evidence is `other`-only — even a payment-worded ask of another kind does not admit it.
     expect(admissibleWitness(invoicePaid, { kind: 'callback', description: 'Call me about my payment' })).toBe(false);
-    // A quote-only mention (evidence array) counts as much as description; plurals count (Codex r5).
-    for (const quote of ['Can I get an invoice for this?', 'Did both payments go through?', 'Can you send the receipts?']) {
-      expect(systemEventFulfillment({ records: [invoicePaid], failures: [] }, { kind: 'other', evidence: [{ quote }], sms_context: ctx })).toMatchObject({ reason: 'system_event' });
-    }
     // Money going the other way is never answered by money landing (Codex r5).
     for (const description of ['Where is my refund?', 'I want to dispute this charge', 'You double charged me']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
@@ -866,55 +865,37 @@ describe('fulfillment proof', () => {
     }
   });
 
-  test('Codex #4816 r2: a payment-method change request is never answered by a payment; an ambiguous payment waits for the model', () => {
-    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
-    const paid = (candidate_invoices) => ({ id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
-      paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11', candidate_invoices,
-      candidate_invoice_id: candidate_invoices === 1 ? 'invoice-1' : null, candidate_invoice_number: candidate_invoices === 1 ? 'WPC-1' : null });
+  test('Codex #4816 r2: a payment-method change request is never answered by a payment', () => {
+    const paid = { id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
+      paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11' };
     const splitBillingAsk = { kind: 'other', description: 'Can you separate the charges under two payment methods?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
-    expect(admissibleWitness(paid(1), splitBillingAsk)).toBe(false);
-    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Please update my card on file' })).toBe(false);
-    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Set up autopay for me' })).toBe(false);
-    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Can you change the card on the account?' })).toBe(false);
+    expect(admissibleWitness(paid, splitBillingAsk)).toBe(false);
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Please update my card on file' })).toBe(false);
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Set up autopay for me' })).toBe(false);
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Can you change the card on the account?' })).toBe(false);
     // Naming the tender is not a method change (Codex r3).
-    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Did my card payment go through?' })).toBe(true);
-    expect(admissibleWitness(paid(1), { kind: 'other', description: 'Was the autopay charged this month?' })).toBe(true);
-    const zelleAsk = { kind: 'other', description: 'What is the Zelle number?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
-    expect(admissibleWitness(paid(2), zelleAsk)).toBe(true);
-    expect(systemEventFulfillment({ records: [paid(2)], failures: [] }, zelleAsk)).toBeNull();
-    expect(systemEventFulfillment({ records: [paid(1)], failures: [] }, zelleAsk)).toMatchObject({ reason: 'system_event', record_id: 'invoice-1' });
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Did my card payment go through?' })).toBe(true);
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Was the autopay charged this month?' })).toBe(true);
+    // Codex #4816 r7: bare "split"/"separate" describe a payment, not a method change.
+    expect(admissibleWitness(paid, { kind: 'other', description: 'I split the payment into two charges; did both payments go through?' })).toBe(true);
+    expect(admissibleWitness(paid, { kind: 'other', description: 'Did you receive the separate payment?' })).toBe(true);
   });
 
-  test('Codex #4816 r6: the no-model close needs the witness to BE the sole request-time candidate; ledger-only money is model evidence', () => {
+  test('Codex #4816 r7: a cancellation after the text answers a cancel ask for the model only; it never closes "still coming?"', () => {
     const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
-    const ask = { kind: 'other', description: 'Did my payment go through?', sms_context: ctx };
-    const base = { type: 'payment', paid_at: '2040-03-11T15:00:00Z', candidate_invoices: 1, candidate_invoice_id: 'invoice-A', candidate_invoice_number: 'WPC-A' };
-    const paidA = { ...base, id: 'invoice-A', ref: 'payment:invoice-A', payment_source: 'invoice', text: 'Invoice A paid 2040-03-11' };
-    // Invoice B was created and paid after the text: candidate count is still 1 (A), but B is not A.
-    const paidB = { ...base, id: 'invoice-B', ref: 'payment:invoice-B', payment_source: 'invoice', text: 'Invoice B paid 2040-03-11' };
-    expect(systemEventFulfillment({ records: [paidA], failures: [] }, ask)).toMatchObject({ reason: 'system_event', record_id: 'invoice-A' });
-    expect(admissibleWitness(paidB, ask)).toBe(true);
-    expect(systemEventFulfillment({ records: [paidB], failures: [] }, ask)).toBeNull();
-    // Zero candidates at request time: never the shortcut.
-    expect(systemEventFulfillment({ records: [{ ...paidA, candidate_invoices: 0, candidate_invoice_id: null, candidate_invoice_number: null }], failures: [] }, ask)).toBeNull();
-    // A receipt text closes only when it names the sole candidate invoice.
-    const receiptA = { ...base, id: 'sms-1', ref: 'payment:sms-1', payment_source: 'sms', status: 'delivered', message_type: 'receipt', created_at: '2040-03-11T15:00:00Z', text: 'Payment received, thank you. Invoice WPC-A: $125' };
-    expect(systemEventFulfillment({ records: [receiptA], failures: [] }, ask)).toMatchObject({ reason: 'system_event', record_id: 'sms-1' });
-    expect(systemEventFulfillment({ records: [{ ...receiptA, text: 'Payment received, thank you. Invoice WPC-B: $400' }], failures: [] }, ask)).toBeNull();
-    // Ledger-only prepayment: admissible for the model, never the shortcut.
-    const ledger = { ...base, id: 'pay-1', ref: 'payment:pay-1', payment_source: 'ledger', created_at: '2040-03-11T15:00:00Z', text: 'Payment of $200.00 recorded 2040-03-11: Account credit prepayment — zelle' };
-    expect(admissibleWitness(ledger, { kind: 'other', description: 'Did you receive my Zelle prepayment?' })).toBe(true);
-    expect(systemEventFulfillment({ records: [ledger], failures: [] }, ask)).toBeNull();
+    const cancelled = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'cancelled', created_at: '2040-03-01T15:00:00Z',
+      cancelled_at: '2040-03-11T15:00:00Z', text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status cancelled; cancelled after the request' };
+    const cancelAsk = { kind: 'other', description: 'Please cancel my appointment on Thursday', sms_context: ctx };
+    expect(admissibleWitness(cancelled, cancelAsk)).toBe(true);
+    expect(systemEventFulfillment({ records: [cancelled], failures: [] }, cancelAsk)).toBeNull();
+    // Cancelled before the text: no witness.
+    expect(admissibleWitness({ ...cancelled, cancelled_at: '2040-03-09T15:00:00Z' }, cancelAsk)).toBe(false);
+    // A callback is answered by a call or field progress, never a cancellation.
+    expect(admissibleWitness(cancelled, { kind: 'callback', sms_context: ctx })).toBe(false);
   });
 
-  test('Codex #4816 r1: "check" alone is not a payment question; production confirmation/reschedule-link sends are admissible for their kinds', () => {
-    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
-    const invoicePaid = { type: 'payment', payment_source: 'invoice', id: 'invoice-1', ref: 'payment:invoice-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice X paid 2040-03-11', candidate_invoices: 1, candidate_invoice_id: 'invoice-1', candidate_invoice_number: 'WPC-1' };
-    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
-    // "check" is not a payment term: the model may still weigh the payment, it never closes on its own.
-    expect(systemEventFulfillment({ records: [invoicePaid], failures: [] }, { kind: 'other', description: 'Please check whether the technician is coming', sms_context: ctx })).toBeNull();
-    expect(systemEventFulfillment({ records: [invoicePaid], failures: [] }, { kind: 'other', description: 'Did my payment go through?', sms_context: ctx })).toMatchObject({ reason: 'system_event' });
+  test('Codex #4816 r1: production confirmation/reschedule-link sends are admissible for their kinds', () => {
     const delivered = (message_type) => ({ type: 'sms', status: 'delivered', message_type, created_at: '2040-03-11T15:00:00Z' });
     expect(admissibleWitness(delivered('appointment_rescheduled'), { kind: 'send_appointment_confirmation' })).toBe(true);
     // Estimate-acceptance bookings stamp this one (routes/estimate-public.js → send-customer-message).
@@ -925,7 +906,7 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(delivered('receipt'), { kind: 'send_reschedule_link' })).toBe(false);
   });
 
-  test('R1 owner ruling 2026-09-24: a visit or payment system event is fulfilled deterministically, with no model call', () => {
+  test('R1 owner ruling 2026-09-24: visit progress is fulfilled deterministically, with no model call', () => {
     const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
     const other = { kind: 'other', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
     const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed',
@@ -1032,6 +1013,21 @@ describe('fulfillment proof', () => {
     expect(dispatchWithFallback.mock.calls[0][1].text).not.toContain('CVV is 123');
     expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'sms:1', quote: text }, evidence, { kind: 'other' }))
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
+  });
+
+  test('Codex #4816 r7: a staff ledger note never reaches the provider unscrubbed, and only admissible records are offered as witnesses', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const note = 'Zelle prepayment — card 4242 4242 4242 4242 CVV 123';
+    const ledger = { ref: 'payment:pay-1', type: 'payment', payment_source: 'ledger', id: 'pay-1', created_at: '2040-03-11T15:00:00Z',
+      description: note, text: `Payment of $200.00 recorded 2040-03-11: ${note}` };
+    const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'Sent you the Zelle number' };
+    const ask = { kind: 'other', description: 'What is the Zelle number?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    await verifySmsFulfillment(ask, { records: [ledger, staffSms], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls[0][1].text;
+    expect(prompt).not.toContain('4242 4242 4242 4242');
+    expect(prompt).not.toContain('CVV 123');
+    expect(prompt).not.toContain('"description":"Zelle');
+    expect(prompt).toContain('"witness_refs":["payment:pay-1"]');
   });
 
   test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {

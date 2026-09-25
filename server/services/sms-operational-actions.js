@@ -605,13 +605,14 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       skippedNoWitness += 1;
       continue;
     }
-    // R1 (owner ruling 2026-09-24): a visit or payment system event that
-    // already answers this ask closes it deterministically — no model call,
-    // and `verify` is never invoked for it.
+    // R1 (owner ruling 2026-09-24): visible field progress that already
+    // answers this ask closes it deterministically — no model call, and
+    // `verify` is never invoked for it (payments always go to the model,
+    // Codex #4816 r7).
     const systemVerdict = systemEventFulfillment(evidence, current);
     // Inside an open window only a system event may act. For a kind whose
     // event needs the model's service/scope check (schedule_visit,
-    // technician_follow_up, an ambiguous payment) an admissible visit or
+    // technician_follow_up, any payment, a cancellation) an admissible visit or
     // payment record reaches `verify` at once (Codex #4816 r2); a message
     // witness (a staff text, a call) waits for the deadline before it costs
     // a model call, exactly as a stated-deadline row always has.
