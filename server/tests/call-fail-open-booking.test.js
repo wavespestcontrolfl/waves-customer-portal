@@ -1481,6 +1481,16 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   test.each([
+    "The okay will come in the email. We'll see you Sunday at noon.",
+    "Your approval should come through the email. We'll see you Sunday at noon.",
+  ])('Codex round-18 regression: a pending approval as the subject poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",
     "We're set for the morning. We'll see you Sunday at noon.",
@@ -1833,6 +1843,20 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     const r = canAutoRoute(ex, opts({ transcript }));
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    ["We'll see you Sunday at 10 o'clock p.", '2026-08-02T10:00:00-04:00'],
+    ["We'll see you Sunday at 10 o'clock p.", '2026-08-02T22:00:00-04:00'],
+    ["We'll see you Sunday at 10 a.", '2026-08-02T10:00:00-04:00'],
+  ])('Codex round-18 regression: a lone period initial after the hour fails binding — %s @ %s', (sentence, slot) => {
+    const ns = normalizeCommitmentText(sentence);
+    expect(quoteBindsConfirmedSlot(ns, slot, '2026-07-30T15:50:00-04:00')).toBe(false);
+  });
+
+  test('Codex round-18: "10 o\'clock" with no initial still binds by business hours', () => {
+    const ns = normalizeCommitmentText("We'll see you Sunday at 10 o'clock.");
+    expect(quoteBindsConfirmedSlot(ns, '2026-08-02T10:00:00-04:00', '2026-07-30T15:50:00-04:00')).toBe(true);
   });
 
   // AT_WEEKDAY_RE false-positive guards, exercised directly against

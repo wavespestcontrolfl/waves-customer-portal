@@ -1202,6 +1202,15 @@ const BENIGN_MODAL_ROUTING_RE = /\b(?:(you) may (?:get|receive) (?:a|an|the) (?:
 function sentenceHasModalUncertainty(ns) {
   return MODAL_UNCERTAINTY_RE.test(ns.replace(BENIGN_MODAL_ROUTING_RE, (_span, you, itThat) => you || itThat));
 }
+// Codex round 17, P1 (:1020): an approval named as the SUBJECT of a future
+// or pending verb — "The okay will come in the email." / "Your approval
+// should come through." — is still outstanding authorization, and once the
+// benign topic ("email") is stripped every remaining token is whitelisted.
+// Anchored shape on the RAW sentence: a determiner + an approval noun
+// (AUTHORIZATION_NOUN_ALT minus "confirmation", which names the ordinary
+// booking-confirmation message: "The confirmation will come by text.") + a
+// future/pending auxiliary.
+const PENDING_APPROVAL_SUBJECT_RE = /\b(?:the|your|his|her|their|that|this|an|a|our) (?:okay|ok|yes|approval|go ahead|green light|sign off|permission|authorization|blessing) (?:will|ll|would|should|shall|is going to|s going to|has to|needs to|still|is still|s still|is coming|s coming|comes|come|is pending|s pending)\b/;
 function sentenceHasDeclarativePoisonVocabulary(ns) {
   const padded = ` ${ns} `;
   return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
@@ -1212,6 +1221,7 @@ function sentenceHasDeclarativePoisonVocabulary(ns) {
     || THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(ns)
     || SUBJECT_LED_APPROVAL_NEED_RE.test(ns)
     || DELEGATED_DECISION_RE.test(ns)
+    || PENDING_APPROVAL_SUBJECT_RE.test(ns)
     || sentenceHasModalUncertainty(ns);
 }
 // These two lists (and the regex above) ALSO do their work inside
@@ -1707,6 +1717,11 @@ function parseSpokenSlot(normalizedSentence) {
   })));
   if (toks.includes('noon')) times.add('12 pm');
   if (toks.includes('midnight')) times.add('12 am');
+  // Codex round 17, P1 (:1705): a LONE period initial right after the hour
+  // ("10 o'clock p." → "10 o clock p") states a period the parser can't
+  // read; falling back to business-hours inference would bind the wrong
+  // half of the day. Reject the time outright (fails binding) instead.
+  if (toks.some((t, i) => (t === 'a' || t === 'p') && PERIOD_ATTACHED_PREV_RE.test(at(i - 1)))) times.add('invalid');
   return {
     weekdays: new Set(toks.filter((t) => WEEKDAY_NAMES.includes(t))),
     months: new Set(toks.filter((t) => MONTH_NAMES.includes(t))),
