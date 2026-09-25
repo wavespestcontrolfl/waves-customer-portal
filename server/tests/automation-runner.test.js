@@ -689,6 +689,22 @@ describe('sendStepLocked (via sendStep) — consultation-booking block wiring', 
     expect(sentArgs.text).toContain('Pick a time: https://x');
   });
 
+  test('a testRecipient send checks the block against the ACTUAL recipient, not the enrollment address', async () => {
+    buildConsultationEmailBlock.mockResolvedValue({ html: '', text: '' });
+    setDbQueues(queuesForNewLeadSend({
+      id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}',
+      html_body: '<h2>Hi {{first_name}}</h2>{{consultation_booking}}',
+      text_body: 'Hi {{first_name}}. {{consultation_booking_text}}',
+      from_email: 'automations@wavespestcontrol.com', enabled: true,
+    }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-t' });
+
+    await sendStep('enrollment-lead-1', { testRecipient: 'operator@wavespestcontrol.com' });
+
+    expect(buildConsultationEmailBlock).toHaveBeenCalledWith({ leadId: 'lead-789', recipientEmail: 'operator@wavespestcontrol.com' });
+    expect(sendgrid.sendOne.mock.calls[0][0].to).toBe('operator@wavespestcontrol.com');
+  });
+
   test('a step body with NO placeholder never calls buildConsultationEmailBlock', async () => {
     setDbQueues(queuesForNewLeadSend({
       id: 'step-1', step_order: 0, subject: 'Hi {{first_name}}',

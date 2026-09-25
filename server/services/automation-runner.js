@@ -428,15 +428,17 @@ function enrollmentLeadId(enrollment) {
 // the lead lookup and availability query entirely. Never throws: a lead id
 // with no eligible lead, or any downstream error, is buildConsultationEmailBlock's
 // own fail-closed '' — this wrapper's only job is the cheap skip.
-async function resolveConsultationBlock(step, enrollment) {
+async function resolveConsultationBlock(step, enrollment, recipient) {
   const body = `${step.html_body || ''}${step.text_body || ''}`;
   if (!body.includes('{{consultation_booking')) return EMPTY_CONSULTATION_BLOCK;
   const leadId = enrollmentLeadId(enrollment);
   if (!leadId) return EMPTY_CONSULTATION_BLOCK;
   const { buildConsultationEmailBlock } = require('./lead-consultation-email-block');
-  // The enrollment's recipient rides along: the block mints a bearer link
-  // only when that address is the lead's OWN email (pre-push audit P1).
-  return buildConsultationEmailBlock({ leadId, recipientEmail: enrollment.email });
+  // The ACTUAL recipient rides along (testRecipient || enrollment.email —
+  // the address the mail goes to, pre-push audit P1): the block mints a
+  // bearer link only when that address is the lead's OWN email, so an
+  // operator test-send to another inbox gets the block empty.
+  return buildConsultationEmailBlock({ leadId, recipientEmail: recipient });
 }
 
 async function sendStepLocked(enrollment, { testRecipient } = {}) {
@@ -470,7 +472,8 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const subject = substitute(step.subject || `(${template.name})`, personal);
   const asmGroupId = automationAsmGroupId(template);
   const fromEmail = normalizeAutomationFromEmail(step.from_email);
-  const consultationBlock = await resolveConsultationBlock(step, enrollment);
+  const recipient = testRecipient || enrollment.email;
+  const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
   const { html, text } = renderAutomationStepContent({
     template,
     htmlBody: step.html_body,
@@ -480,8 +483,6 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     consultationHtml: consultationBlock.html,
     consultationText: consultationBlock.text,
   });
-
-  const recipient = testRecipient || enrollment.email;
 
   const sendRow = await db('automation_step_sends').insert({
     enrollment_id: enrollment.id,
