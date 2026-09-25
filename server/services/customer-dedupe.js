@@ -644,9 +644,14 @@ const PREF_DEFAULT_SENTINELS = {
 };
 
 async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
-  const loserRow = await trx(table).where(column, loserId).forUpdate().first();
+  const lockedRows = new Map();
+  // Match preference saves: lock by customer ID, independent of merge roles.
+  for (const id of [winnerId, loserId].sort()) {
+    lockedRows.set(id, await trx(table).where(column, id).forUpdate().first());
+  }
+  const loserRow = lockedRows.get(loserId);
   if (!loserRow) return 'no loser row';
-  const winnerRow = await trx(table).where(column, winnerId).forUpdate().first();
+  const winnerRow = lockedRows.get(winnerId);
   if (!winnerRow) {
     const count = await trx(table).where(column, loserId).update({ [column]: winnerId });
     return count;

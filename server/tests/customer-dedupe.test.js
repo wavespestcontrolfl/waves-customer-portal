@@ -526,6 +526,15 @@ describe('mergeSingletonPrefRow', () => {
     return { trx, state, locks };
   }
 
+  it.each([['W', 'L'], ['L', 'W']])('locks preferences in customer-ID order for winner %s and loser %s', async (winnerId, loserId) => {
+    const { trx, locks } = stubTrx({
+      winnerRow: { customer_id: 'W', invoice_channels: ['email'] },
+      loserRow: { customer_id: 'L', invoice_channels: ['email'] },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', winnerId, loserId);
+    expect(locks).toEqual(['L', 'W']);
+  });
+
   it('notification_prefs: consent ANDs, channels take the least-SMS value, empty fields fill', async () => {
     const { trx, state } = stubTrx({
       winnerRow: { id: 'p1', customer_id: 'W', sms_enabled: true, billing_channel: 'sms', quiet_hours_start: null, created_at: 'x', updated_at: 'x' },
