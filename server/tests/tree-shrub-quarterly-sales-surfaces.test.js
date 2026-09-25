@@ -62,6 +62,7 @@ describe('service library list — new-appointment picker (codex r11)', () => {
       orWhereExists(fn) {
         const inner = {
           select() { return this; }, from(t) { calls.exists.push(t); return this; },
+          join(t) { calls.exists.push(['join', t]); return this; },
           whereRaw(sql) { calls.exists.push(sql); return this; },
           where(col, val) { calls.exists.push([col, val]); return this; },
           whereNotIn(col, vals) { calls.exists.push([col, 'NOT IN', vals]); return this; },
@@ -105,6 +106,8 @@ describe('service library list — new-appointment picker (codex r11)', () => {
       // grandfather (codex r13).
       ['scheduled_services.status', 'NOT IN', expect.arrayContaining(['completed', 'cancelled', 'skipped'])],
       ['scheduled_services.is_recurring', true],
+      // ...or as an add-on line of a combined recurring visit (codex r14).
+      'scheduled_service_addons', ['join', 'scheduled_services'], 'scheduled_service_addons.service_id = services.id',
     ]));
   });
 
@@ -125,15 +128,18 @@ describe('new-appointment write boundary (codex r12)', () => {
   const CUSTOMER = '5a3f2c1d-9b8e-4f6a-a1b2-c3d4e5f60789';
   const OTHER = '0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e';
 
-  // heldBy: customers with a LIVE recurring visit on the retired row.
-  const run = async ({ customerId, serviceIds, serviceTypes, heldBy = [] }) => {
+  // heldBy: customers with a LIVE recurring visit on the retired row, as the
+  // visit's primary line (heldVia 'primary') or an add-on line ('addon').
+  const run = async ({ customerId, serviceIds, serviceTypes, heldBy = [], heldVia = 'primary' }) => {
     const db = require('../models/db');
+    const bare = (col) => col.replace(/^scheduled_services\.|^scheduled_service_addons\./, '');
     db.mockImplementation((table) => {
       const q = { table, filters: {} };
       const b = {
-        whereIn(col, vals) { q.filters[col.replace('scheduled_services.', '')] = vals; return this; },
-        where(col, val) { q.filters[col.replace('scheduled_services.', '')] = [val]; return this; },
-        whereNotIn(col, vals) { q.filters[`not:${col.replace('scheduled_services.', '')}`] = vals; return this; },
+        join() { return this; },
+        whereIn(col, vals) { q.filters[bare(col)] = vals; return this; },
+        where(col, val) { q.filters[bare(col)] = [val]; return this; },
+        whereNotIn(col, vals) { q.filters[`not:${bare(col)}`] = vals; return this; },
         distinct() { return this; },
         select() {
           const rows = [{ id: RETIRED_ID, service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care', short_name: 'Quarterly T&S' }]
@@ -142,7 +148,8 @@ describe('new-appointment write boundary (codex r12)', () => {
         },
         pluck() {
           const live = q.filters.is_recurring?.[0] === true && (q.filters['not:status'] || []).includes('completed');
-          return Promise.resolve(live && heldBy.includes(q.filters.customer_id[0]) ? [RETIRED_ID] : []);
+          const via = table === 'scheduled_service_addons' ? 'addon' : 'primary';
+          return Promise.resolve(live && via === heldVia && heldBy.includes(q.filters.customer_id[0]) ? [RETIRED_ID] : []);
         },
       };
       return b;
@@ -158,6 +165,11 @@ describe('new-appointment write boundary (codex r12)', () => {
 
   test('allows it for the grandfathered customer', async () => {
     expect(await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER] })).toEqual([]);
+  });
+
+  test('a customer holding the plan as an add-on line is still grandfathered (codex r14)', async () => {
+    expect(await run({ customerId: CUSTOMER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon' })).toEqual([]);
+    expect((await run({ customerId: OTHER, serviceIds: [RETIRED_ID], heldBy: [CUSTOMER], heldVia: 'addon' })).map((r) => r.id)).toEqual([RETIRED_ID]);
   });
 
   test('live services and missing ids pass without a lookup', async () => {

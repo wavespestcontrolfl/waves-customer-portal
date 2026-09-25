@@ -7096,7 +7096,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
       customerId,
       serviceIds: [serviceId, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.serviceId) : [])],
-      serviceTypes: serviceId ? [] : [serviceType],
+      // Names too, id or not: an ID-less add-on persists by name alone.
+      serviceTypes: [serviceType, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.name || a?.serviceName) : [])],
     });
     if (notHeldRetired.length) {
       return res.status(409).json({

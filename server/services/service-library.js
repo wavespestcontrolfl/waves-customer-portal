@@ -330,6 +330,14 @@ async function getServices({ category, billingType, isActive, isArchived, includ
             this.select(db.raw('1')).from('scheduled_services').whereRaw('scheduled_services.service_id = services.id'),
             customerId,
           );
+        }).orWhereExists(function () {
+          // Held as an add-on line of a combined recurring visit.
+          whereCustomerHoldsService(
+            this.select(db.raw('1')).from('scheduled_service_addons')
+              .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
+              .whereRaw('scheduled_service_addons.service_id = services.id'),
+            customerId,
+          );
         });
       }
     });
@@ -378,7 +386,8 @@ async function getServices({ category, billingType, isActive, isArchived, includ
 }
 
 // The one "customer is still on this (retired) plan" test: a live recurring
-// visit on the service — waveguard-existing-services' active-recurring
+// visit on the service, as its primary line or an add-on line (callers join
+// scheduled_service_addons for the latter) — waveguard-existing-services' active-recurring
 // predicate (TERMINAL_STATUSES + is_recurring). A completed, skipped or
 // one-off history row does not grandfather anyone (codex r13 on #4786).
 function whereCustomerHoldsService(qb, customerId) {
@@ -412,11 +421,21 @@ async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes }
     || names.has(lower(r.name)) || (r.short_name && names.has(lower(r.short_name)))
     || [...names].some((n) => n.replace(/\s+/g, '_') === r.service_key));
   if (!retired.length) return [];
+  const retiredIds = retired.map((r) => r.id);
   const held = customerId && UUID_RE.test(String(customerId))
-    ? await whereCustomerHoldsService(
-      db('scheduled_services').whereIn('scheduled_services.service_id', retired.map((r) => r.id)),
-      String(customerId),
-    ).distinct('scheduled_services.service_id').pluck('scheduled_services.service_id')
+    ? [
+      ...await whereCustomerHoldsService(
+        db('scheduled_services').whereIn('scheduled_services.service_id', retiredIds),
+        String(customerId),
+      ).distinct('scheduled_services.service_id').pluck('scheduled_services.service_id'),
+      // Held as an add-on line of a combined recurring visit.
+      ...await whereCustomerHoldsService(
+        db('scheduled_service_addons')
+          .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
+          .whereIn('scheduled_service_addons.service_id', retiredIds),
+        String(customerId),
+      ).distinct('scheduled_service_addons.service_id').pluck('scheduled_service_addons.service_id'),
+    ]
     : [];
   const heldSet = new Set(held.map(String));
   return retired.filter((r) => !heldSet.has(String(r.id)));

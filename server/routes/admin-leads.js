@@ -1611,7 +1611,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // already on that plan — the shared admin write gate (codex r13 on #4786).
     // A lead with no live customer holds nothing.
     const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
-      customerId, serviceIds: [serviceId], serviceTypes: serviceId ? [] : [svcType],
+      customerId, serviceIds: [serviceId], serviceTypes: [svcType],
     });
     if (notHeldRetired.length) {
       return res.status(409).json({
