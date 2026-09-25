@@ -11806,17 +11806,33 @@ function retiredGateInputsForVisitEdit({
   const onVisit = new Set([current.service_id, ...currentAddons.map((a) => a?.service_id)].filter(Boolean).map(String));
   const namesOnVisit = new Set(currentAddons.map((a) => norm(a?.service_name)).filter(Boolean));
   const renamed = typeof serviceType === 'string' && !!serviceType.trim() && norm(serviceType) !== norm(current.service_type);
+  const storedLine = (l) => currentAddons.find((a) => (l.serviceId
+    ? String(a?.service_id || '') === String(l.serviceId)
+    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName))));
+  const postedFor = (a) => lines.find((l) => (a?.service_id
+    ? String(l.serviceId || '') === String(a.service_id)
+    : (!l.serviceId && norm(l.serviceName) === norm(a?.service_name))));
+  // Every retained add-on name — catalog-backed or not (codex r23: a live
+  // 6x T&S add-on riding a parent that just turned quarterly is the retired
+  // plan by name + cadence, while its id stays live) — with the cadence it
+  // will actually run at: the reposted line's own, else the stored one
+  // (null rides the parent).
   const retainedIds = plansRetainedLines ? [...onVisit] : [];
   const retainedNames = plansRetainedLines
     ? [
       ...(typeof current.service_type === 'string' && current.service_type.trim() ? [current.service_type] : []),
-      ...currentAddons.filter((a) => !a?.service_id && typeof a?.service_name === 'string' && a.service_name.trim())
-        .map((a) => ({ label: a.service_name, recurrence: a.recurring_pattern ? { pattern: a.recurring_pattern, intervalDays: null } : null })),
+      ...currentAddons.filter((a) => typeof a?.service_name === 'string' && a.service_name.trim())
+        .map((a) => {
+          const posted = postedFor(a);
+          return {
+            label: a.service_name,
+            recurrence: posted
+              ? addonLineRecurrence(posted)
+              : addonLineRecurrence({ recurringPattern: a.recurring_pattern, recurringIntervalDays: a.recurring_interval_days }),
+          };
+        }),
     ]
     : [];
-  const storedLine = (l) => currentAddons.find((a) => (l.serviceId
-    ? String(a?.service_id || '') === String(l.serviceId)
-    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName))));
   const repatterned = current.is_recurring && !plansRetainedLines
     ? lines.filter((l) => {
       const stored = storedLine(l);
@@ -12429,12 +12445,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     const recurrencePosted = !!isRecurring;
     if (updates.service_id || labelPosted || postedAddons.length || recurrencePosted) {
       const current = await db('scheduled_services').where({ id: req.params.id })
-        .first('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern');
+        .first('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_interval_days');
       if (current) {
+        // A posted interval counts as a cadence change too (codex r23: custom
+        // every 60 days → every 90 days is the retired quarterly cadence).
+        const postedInterval = Number.parseInt(recurringIntervalDays, 10);
+        const intervalChanged = Number.isInteger(postedInterval) && postedInterval > 0
+          && postedInterval !== Number.parseInt(current.recurring_interval_days, 10);
         const plansRetainedLines = recurrencePosted
-          && (!current.is_recurring || (!!recurringPattern && recurringPattern !== current.recurring_pattern));
+          && (!current.is_recurring || (!!recurringPattern && recurringPattern !== current.recurring_pattern) || intervalChanged);
         const currentAddons = updates.service_id || postedAddons.length || plansRetainedLines
-          ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).select('service_id', 'service_name', 'recurring_pattern')
+          ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
+            .select('service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days')
           : [];
         const gate = retiredGateInputsForVisitEdit({
           current, currentAddons, postedServiceId: updates.service_id, postedAddons, serviceType, plansRetainedLines,

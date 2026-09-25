@@ -14,10 +14,11 @@ jest.mock('../models/db', () => {
     const builder = {};
     let limitN = null;
     let offsetN = 0;
-    for (const m of ['select', 'where', 'whereNull', 'whereExists', 'havingRaw', 'orderByRaw', 'clone']) {
+    for (const m of ['select', 'where', 'whereNull', 'whereExists', 'clone']) {
       builder[m] = () => builder;
     }
     builder.orderByRaw = (sql) => { state.orderBy = String(sql); return builder; };
+    builder.havingRaw = (sql, bindings) => { state.having = [String(sql), bindings]; return builder; };
     builder.limit = (n) => { limitN = n; return builder; };
     builder.offset = (n) => { offsetN = n; state.pages = (state.pages || 0) + 1; return builder; };
     builder.then = (resolve, reject) => Promise.resolve(
@@ -169,4 +170,17 @@ test('the paged T&S read orders by a unique tie-breaker after the last-service d
   db.__state.orderBy = null;
   await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
   expect(db.__state.orderBy).toMatch(/\) ASC, customers\.id ASC$/);
+});
+
+test('the SQL prefilter admits a customer due exactly at the cadence cutoff, on the Eastern calendar (codex r23)', async () => {
+  // 16:00Z on Sept 25 is Sept 25 ET; 42 days before is Aug 14 — inclusive.
+  db.__state.rows = [];
+  db.__state.having = null;
+  await executeTool('find_overdue_customers', { service_category: 'tree_shrub', overdue_days: 0 });
+  expect(db.__state.having[0]).toMatch(/\) <= \?$/);
+  expect(db.__state.having[1][1]).toBe('2026-08-14');
+  // 21:00 ET on Sept 25 (Sept 26 UTC): still Sept 25 on the Eastern calendar.
+  jest.setSystemTime(new Date('2026-09-26T01:00:00Z'));
+  await executeTool('find_overdue_customers', { service_category: 'tree_shrub', overdue_days: 3 });
+  expect(db.__state.having[1][1]).toBe('2026-08-11');
 });

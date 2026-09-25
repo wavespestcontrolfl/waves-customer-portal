@@ -1093,6 +1093,25 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     source = 'ENGINE_INPUTS';
   }
   if (!v1Input) return { recomputed: false, reason: 'NO_INPUTS' };
+  // A browser-posted create/revision save may only price a currently-sold
+  // Tree & Shrub program (codex r23 on #4786): the V2 translator already
+  // refuses a retired tier, but the raw ENGINE_INPUTS fallback shape went
+  // straight to generateEstimate, which deliberately still prices `light`
+  // for a legacy replay. Declared persisted replays
+  // (replaySavedPricingKnobs) keep repricing the grandfathered quote;
+  // everything else fails CLOSED like the translator (never the
+  // CLIENT_FALLBACK persist).
+  if (source === 'ENGINE_INPUTS' && deps.replaySavedPricingKnobs !== true) {
+    const tsTier = v1Input.services?.treeShrub?.tier;
+    const tierAbsent = tsTier === undefined || tsTier === null || (typeof tsTier === 'string' && tsTier.trim() === '');
+    if (!tierAbsent && !require('./pricing-engine/retired-sale-catalog').isSellableTreeShrubTier(tsTier)) {
+      const err = new Error('Tree & Shrub program must be standard or enhanced.');
+      err.statusCode = 400;
+      err.code = 'TREE_SHRUB_INPUT_INVALID';
+      err.failClosed = true;
+      throw err;
+    }
+  }
 
   // SERVER-AUTHORITATIVE identity override. priorQualifyingServices (the
   // WaveGuard tier input) and the recurring-customer flag (the 15% one-time

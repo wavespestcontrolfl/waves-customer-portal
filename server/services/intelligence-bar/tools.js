@@ -589,8 +589,10 @@ async function findOverdueCustomers(input) {
 
   for (const cat of categories) {
     const baseFreq = frequencies[cat] || 90;
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - baseFreq - overdue_days);
+    // The prefilter boundary on the same Eastern calendar the per-customer
+    // filter below uses, INCLUSIVE: a customer served exactly
+    // baseFreq + overdue_days days ago is due today (codex r23 on #4786).
+    const cutoffEt = etDateString(addETDays(new Date(), -(baseFreq + overdue_days)));
 
     let customersQuery = db('customers')
       .select(
@@ -628,7 +630,7 @@ async function findOverdueCustomers(input) {
           .whereRaw('service_records.customer_id = customers.id')
           .whereRaw('service_type ~* ?', [patterns[cat]]);
       })
-      .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) < ?", [patterns[cat], cutoff.toISOString().split('T')[0]])
+      .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) <= ?", [patterns[cat], cutoffEt])
       // customers.id breaks last-service-date ties so the paged read below
       // sees each row exactly once (codex r21 on #4786).
       .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC, customers.id ASC", [patterns[cat]]);

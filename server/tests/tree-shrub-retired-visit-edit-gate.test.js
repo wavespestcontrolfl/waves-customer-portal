@@ -1,4 +1,4 @@
-// Codex r17/r18/r19/r20/r22 on #4786: the visit-edit retired-for-sale gate must see every
+// Codex r17/r18/r19/r20/r22/r23 on #4786: the visit-edit retired-for-sale gate must see every
 // line the save ADDS — catalog ids, a changed primary label, and the name of
 // an ID-less add-on line (normalizeUpdateDetailsAddons keeps an unresolved
 // serviceName and persists it by name alone) — and nothing the visit already
@@ -60,7 +60,7 @@ describe('retiredGateInputsForVisitEdit', () => {
       postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care', plansRetainedLines: true,
     })).toEqual({
       serviceIds: [RETIRED_ID, LIVE_ID],
-      serviceTypes: ['Quarterly Tree & Shrub Care', { label: 'Mosquito add-on', recurrence: null }],
+      serviceTypes: ['Quarterly Tree & Shrub Care', { label: 'Quarterly Pest Control', recurrence: null }, { label: 'Mosquito add-on', recurrence: null }],
     });
     // Already recurring, or a save that does not post recurrence: nothing retained is re-checked.
     expect(retiredGateInputsForVisitEdit({
@@ -111,6 +111,34 @@ describe('retiredGateInputsForVisitEdit', () => {
     })).toEqual({ serviceIds: [], serviceTypes: [] });
   });
 
+  // codex r23 P1: a live catalog-backed T&S add-on riding a parent whose
+  // cadence just changed is the retired plan by name + cadence even though
+  // its id stays live — its name reaches the gate with the cadence it will
+  // run at (the reposted line's own, else the stored one; null rides the
+  // parent, so the route's booking cadence applies).
+  test('a cadence change on the parent gates every retained add-on name, catalog-backed or not', () => {
+    const recurring = { ...current, is_recurring: true, service_type: 'Monthly Lawn Care', recurring_pattern: 'monthly' };
+    const stored = [
+      { service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: null, recurring_interval_days: null },
+      { service_id: RETIRED_ID, service_name: 'Quarterly T&S', recurring_pattern: 'custom', recurring_interval_days: 90 },
+    ];
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: stored, postedServiceId: null, postedAddons: [], serviceType: 'Monthly Lawn Care', plansRetainedLines: true,
+    })).toEqual({
+      serviceIds: [LIVE_ID, RETIRED_ID],
+      serviceTypes: [
+        'Monthly Lawn Care',
+        { label: 'Bi-Monthly Tree & Shrub Care', recurrence: null },
+        { label: 'Quarterly T&S', recurrence: { pattern: 'custom', intervalDays: 90 } },
+      ],
+    });
+    // A reposted line's own cadence wins over the stored one.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: stored, postedServiceId: null, serviceType: 'Monthly Lawn Care', plansRetainedLines: true,
+      postedAddons: [{ serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'bimonthly' }],
+    }).serviceTypes).toContainEqual({ label: 'Bi-Monthly Tree & Shrub Care', recurrence: { pattern: 'bimonthly', intervalDays: null } });
+  });
+
   test('addonLineRecurrence reads a line\'s own pattern or interval, else null', () => {
     expect(addonLineRecurrence({ recurringPattern: 'quarterly' })).toEqual({ pattern: 'quarterly', intervalDays: null });
     expect(addonLineRecurrence({ recurringPattern: 'custom', recurringIntervalDays: '90' })).toEqual({ pattern: 'custom', intervalDays: 90 });
@@ -123,12 +151,14 @@ describe('retiredGateInputsForVisitEdit', () => {
   test('the route hands every posted add-on line, with the stored pattern, to the helper', () => {
     const source = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
     expect(source).toMatch(/const postedAddons = Array\.isArray\(replaceAddons\) \? replaceAddons\.filter\(Boolean\) : \[\];/);
-    expect(source).toMatch(/where\(\{ scheduled_service_id: req\.params\.id \}\)\.select\('service_id', 'service_name', 'recurring_pattern'\)/);
     expect(source).toMatch(/current, currentAddons, postedServiceId: updates\.service_id, postedAddons, serviceType, plansRetainedLines,/);
     // Activation / cadence change is confirmed against the row's own flag and
     // stored pattern, never the posted values alone (codex r18/r20).
-    expect(source).toMatch(/\.first\('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern'\)/);
-    expect(source).toMatch(/const plansRetainedLines = recurrencePosted\s*&& \(!current\.is_recurring \|\| \(!!recurringPattern && recurringPattern !== current\.recurring_pattern\)\);/);
+    expect(source).toMatch(/\.first\('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_interval_days'\)/);
+    expect(source).toMatch(/\.select\('service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days'\)/);
+    // A changed interval is a cadence change too (codex r23).
+    expect(source).toMatch(/const plansRetainedLines = recurrencePosted\s*&& \(!current\.is_recurring \|\| \(!!recurringPattern && recurringPattern !== current\.recurring_pattern\) \|\| intervalChanged\);/);
+    expect(source).toMatch(/&& postedInterval !== Number\.parseInt\(current\.recurring_interval_days, 10\);/);
     // The posted cadence reaches the gate on both write paths (codex r20).
     const recurrenceArg = /recurrence: (?:recurrencePosted|isRecurring) \? \{ pattern: recurringPattern, intervalDays: recurringIntervalDays \} : null,/g;
     expect((source.match(recurrenceArg) || []).length).toBe(2);

@@ -1416,3 +1416,41 @@ describe('createOrReuseAdminEstimate — reusing a lead\'s GROUPED draft is judg
     expect(updates.filter((u) => u.table === 'estimates')).toHaveLength(1);
   });
 });
+
+// Codex r23 P1 on #4786: the raw ENGINE_INPUTS fallback shape is browser-
+// controlled on create/revision saves, and generateEstimate deliberately
+// still prices `light` for a legacy replay — so the save path itself must
+// refuse a retired tier, failing CLOSED (never the CLIENT_FALLBACK persist).
+// A declared persisted replay (replaySavedPricingKnobs) keeps repricing the
+// grandfathered quote.
+describe('serverRecomputeFromEstimateData — retired Tree & Shrub tier on raw engine inputs', () => {
+  const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+  const deps = () => ({
+    generateEstimate: jest.fn(() => ({ lineItems: [], summary: {}, warnings: [] })),
+    needsSync: () => false,
+    syncConstantsFromDB: jest.fn(),
+    mapV1ToLegacyShape: jest.fn((r) => r),
+    translateV2CallToV1Input: null,
+  });
+  const inputs = (tier) => ({ engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { treeShrub: { tier, access: 'easy', treeCount: 4 } } } });
+
+  test.each(['light', 'LIGHT', 'premium', 'gold'])('a browser save with tier %p fails closed with a 400', async (tier) => {
+    const d = deps();
+    await expect(serverRecomputeFromEstimateData(inputs(tier), d))
+      .rejects.toMatchObject({ statusCode: 400, code: 'TREE_SHRUB_INPUT_INVALID', failClosed: true });
+    expect(d.generateEstimate).not.toHaveBeenCalled();
+  });
+
+  test.each(['standard', 'enhanced', '', undefined])('a browser save with tier %p prices', async (tier) => {
+    const d = deps();
+    await serverRecomputeFromEstimateData(inputs(tier), d);
+    expect(d.generateEstimate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a declared persisted replay of the grandfathered quote still prices light', async () => {
+    const d = deps();
+    await serverRecomputeFromEstimateData(inputs('light'), { ...d, replaySavedPricingKnobs: true });
+    expect(d.generateEstimate).toHaveBeenCalledTimes(1);
+    expect(d.generateEstimate.mock.calls[0][0].services.treeShrub.tier).toBe('light');
+  });
+});
