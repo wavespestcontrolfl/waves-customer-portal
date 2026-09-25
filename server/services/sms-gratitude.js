@@ -122,19 +122,24 @@ const asksForMoney = (text) => {
   return MANUAL_PAYMENT_REQUEST_RE.test(masked) || PAYMENT_LINK_RE.test(masked);
 };
 // A typed link hands the customer something to act on (sign, pay, book,
-// accept, fill in) unless it is the one link in the text and is labelled a
-// report or receipt, the same evidence CLOSED_OUTBOUND_RE accepts from
-// templates. "Please sign: <contract link>" stays open.
+// accept, fill in) unless it is the one link in the text and the words right
+// before it label it a report or receipt. A label elsewhere does not count:
+// "Your report is ready. Please sign: <contract link>" stays open.
+const TYPED_LINK_LABEL_RE = /\b(?:report|receipt)s?(?: (?:is|are))?(?: (?:here|ready|attached|below|available))*\s*[:–—-]?\s*$/i;
 const typedLinkOpen = (text) => {
-  const links = (maskLinks(String(text || '')).match(/\b(?:pay)?linktoken\b/g) || []).length;
-  return links > 0 && !(links === 1 && CLOSED_OUTBOUND_RE.test(text));
+  const masked = maskLinks(String(text || ''));
+  const links = [...masked.matchAll(/\b(?:pay)?linktoken\b/g)];
+  return links.length > 0 && !(links.length === 1 && links[0][0] === 'linktoken'
+    && TYPED_LINK_LABEL_RE.test(masked.slice(0, links[0].index)));
 };
 // Text is the only evidence: an attachment (or an unknown media count) could
 // be an invoice or a form, so a typed send with media or no text abstains.
 const manualClosure = (text, manualReply, row) => manualReply && row.mediaCount === 0
   && text.trim() !== '' && !asksForMoney(text) && !typedLinkOpen(text);
+// A hand-typed attachment (or unknown media count) stays open wherever it
+// sits in the thread, not only as the previous outbound.
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
-  || (isHandTyped(row) && (MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text) || asksForMoney(text) || typedLinkOpen(text)));
+  || (isHandTyped(row) && (row.mediaCount !== 0 || MANUAL_PROMISE_RE.test(text) || MANUAL_QUESTION_RE.test(text) || asksForMoney(text) || typedLinkOpen(text)));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
 const BANK_ACK_RE = /^Hello [\p{L}\p{M}'’ -]+! We got your bank payment for invoice [\w-]+\. ACH transfers take 3-5 business days to clear, and we'll send a receipt as soon as it does\.$/u;
 

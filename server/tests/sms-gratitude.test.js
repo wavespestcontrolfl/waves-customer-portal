@@ -260,6 +260,8 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Please sign: https://portal.wavespestcontrol.com/contract/abc',
     'Book here https://portal.wavespestcontrol.com/book/abc',
     'Your report: https://example.invalid/report/abc and please sign https://example.invalid/contract/abc',
+    'Your report is ready. Please sign: https://portal.wavespestcontrol.com/contract/abc',
+    'Your receipt is below. Book your next visit https://portal.wavespestcontrol.com/book/abc',
   ])('a typed action link stays open: %s', raw => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme(raw))] }).eligible).toBe(false);
   });
@@ -268,6 +270,18 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
       { ...manual('Please sign: https://portal.wavespestcontrol.com/contract/abc'), createdAt: '2030-01-10T14:58:00Z' },
       report,
     ] }).reason).toBe('earlier_open_context');
+  });
+  test.each([['an attachment', 1], ['an unknown media count', undefined]])('an earlier typed send with %s is still open behind a later typed text', (_label, mediaCount) => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...manual('Contract attached'), id: 'manual-0', mediaCount, createdAt: '2030-01-10T14:58:00Z' },
+      manual('Here you go'),
+    ] }).reason).toBe('earlier_open_context');
+  });
+  test.each([
+    'Here is your report: https://example.invalid/report/abc',
+    'Your receipt is here https://portal.wavespestcontrol.com/receipt/abc',
+  ])('a hand-typed labelled report or receipt link is still a closure: %s', raw => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme(raw))] }).eligible).toBe(true);
   });
   test('a hand-typed report link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Here is your report: https://example.invalid/report/abc')] }).eligible).toBe(true);
