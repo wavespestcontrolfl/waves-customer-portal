@@ -16,6 +16,7 @@ const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
 const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
+const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
@@ -128,6 +129,12 @@ function parseInvoiceLineItems(raw) {
     }
   }
   return [];
+}
+
+async function explicitBillingAppSelected(customerId, category) {
+  if (!customerId) return false;
+  const prefs = await db("notification_prefs").where({ customer_id: customerId }).first();
+  return explicitBillingChannels(prefs || {}, category)?.includes("push") === true;
 }
 
 // Fail-closed: does the invoice carry ANY positive charge beyond the covered base
@@ -4863,7 +4870,16 @@ const InvoiceService = {
     const customer = await db("customers")
       .where({ id: invoice.customer_id })
       .first();
-    if (!customer?.phone) {
+    let canRouteWithoutPhone = false;
+    try {
+      canRouteWithoutPhone = !customer?.phone
+        && await explicitBillingAppSelected(customer?.id, "invoice");
+    } catch (prefsErr) {
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
+      throw prefsErr;
+    }
+    if (!customer?.phone && !canRouteWithoutPhone) {
       const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
       if (restored) await reverseSmsCreditOnFailure();
       throw new Error("Customer has no phone number");
@@ -6631,7 +6647,9 @@ const InvoiceService = {
     const customer = await db("customers")
       .where({ id: invoice.customer_id })
       .first();
-    if (!customer?.phone) return { sent: false, reason: "no-phone" };
+    const canRouteWithoutPhone = !customer?.phone
+      && await explicitBillingAppSelected(customer?.id, "payment_receipt");
+    if (!customer?.phone && !canRouteWithoutPhone) return { sent: false, reason: "no-phone" };
 
     // Template body has a {card_line} placeholder that renders as e.g.
     // " (Visa ending 4242)" when card metadata is present, or empty otherwise.

@@ -445,6 +445,30 @@ describe('payment lifecycle email sender', () => {
     });
   });
 
+  test('queues an App-only payment failure for a customer without a phone', async () => {
+    const explicitPrefs = { email_enabled: true, payment_issue_channels: ['push'] };
+    const queueLookup = chain({ first: null });
+    const queueInsert = chain({ returning: [{ id: 'app-1' }] });
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      customers: [chain({ first: customer({ phone: null }) }), chain({ first: customer({ phone: null }) })],
+      notification_prefs: [chain({ first: explicitPrefs }), chain({ first: explicitPrefs })],
+      sms_log: [queueLookup, queueInsert],
+    });
+
+    const result = await PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1', paymentIntentId: 'pi_app', attemptId: 'ch_app', invoiceId: 'inv-1',
+    });
+
+    expect(result).toMatchObject({ ok: true, queueId: 'app-1', channels: { scheduled: true } });
+    expect(queueInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      to_phone: '',
+      metadata: expect.stringContaining('"billingDeliveryCategory":"payment_issue"'),
+    }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['off-session', false],
     ['verified customer-initiated', true],

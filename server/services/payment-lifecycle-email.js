@@ -611,7 +611,7 @@ async function sendPaymentFailed({
   const explicit = explicitBillingChannels(prefs || {}, 'payment_issue');
   if (!explicit || !explicit.some((channel) => channel === 'sms' || channel === 'push')) return emailResult;
   const customer = await loadCustomer(effectiveCustomerId);
-  if (!customer?.phone) return emailResult;
+  if (!customer?.phone && !explicit.includes('push')) return emailResult;
   const body = await require('./sms-template-renderer').renderSmsTemplate('payment_failed', {
     first_name: customer.first_name || 'there',
     service_type: invoice?.title || invoice?.service_type || 'your Waves invoice',
@@ -662,7 +662,7 @@ async function sendPaymentFailed({
           customer_id: effectiveCustomerId,
           direction: 'outbound',
           from_phone: require('../config/twilio-numbers').getOutboundNumber(),
-          to_phone: customer.phone,
+          to_phone: customer.phone || '',
           message_body: body,
           message_type: 'payment_failed',
           status: 'scheduled',

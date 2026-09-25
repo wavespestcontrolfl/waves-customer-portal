@@ -330,6 +330,28 @@ describe('webhook + invoice credit', () => {
     renderSmsTemplate.mockResolvedValue(null);
   });
 
+  it('routes an App-only deposit receipt without inventing a phone recipient', async () => {
+    forceRecordableViaFailOpen();
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const { handler } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1' },
+      customerRow: { id: 'cust-1', phone: '', first_name: 'Sam' },
+      prefsRow: { payment_receipt_channels: ['push'] },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '',
+      customerId: 'cust-1',
+      metadata: expect.objectContaining({ billingDeliveryCategory: 'payment_receipt' }),
+    }));
+    renderSmsTemplate.mockResolvedValue(null);
+  });
+
   it('requeues a quiet-held deposit receipt onto the scheduled-SMS rail', async () => {
     forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');

@@ -414,7 +414,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
       : (channel === 'email' || channel === 'both' || (!phone || smsOptedOut))))
     : (!phone && !!leadEmail);
 
-  if (wantSms && phone) {
+  if (wantSms && (phone || explicitChannels?.includes('push'))) {
     await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge, paymentIntentId }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
     });
