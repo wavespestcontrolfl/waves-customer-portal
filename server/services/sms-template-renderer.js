@@ -13,7 +13,9 @@ async function renderSmsTemplate(templateKey, vars, context = {}, opts = {}) {
       // apostrophe) would otherwise make the dedup probe miss its own send.
       if (body) return normalizeGsmPunctuation(body);
     }
-  } catch { /* missing template */ }
+  } catch (err) {
+    if (opts.throwOnError) throw err;
+  }
   return undefined;
 }
 

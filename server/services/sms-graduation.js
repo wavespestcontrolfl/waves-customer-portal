@@ -511,9 +511,11 @@ async function fetchSuggestOutcomes({ intent, dbi = db, cohortVersions, voicePro
  * regression after the flip STOPS auto-send. Fail closed: escalation intents,
  * and any signal-fetch error, return not-eligible.
  */
-async function evaluateAutoSendEligibility({ intent, dbi = db, voiceProfileVersion } = {}) {
+async function evaluateAutoSendEligibility({ intent, dbi = db, voiceProfileVersion, gratitudeSourceDigest = null } = {}) {
   if (intent === GRATITUDE_INTENT) {
-    return require('./sms-gratitude-qualification').evaluateGratitudeQualification({ dbi, voiceProfileVersion });
+    return require('./sms-gratitude-qualification').evaluateGratitudeQualification({
+      dbi, voiceProfileVersion, sourceDigest: gratitudeSourceDigest,
+    });
   }
   const { isEscalationIntent } = require('./sms-suggest-mode');
   if (isEscalationIntent(intent)) {

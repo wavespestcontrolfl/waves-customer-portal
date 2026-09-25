@@ -105,6 +105,36 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
+// callback_number_needed hold — keyed on the DESTINATION NUMBER (codex
+// round 6 on PR #4807, structural). Rounds 2–5 keyed it on the visit
+// (appointmentId / metadata.scheduled_service_id / metadata.visit_id), and
+// every round found another sender with no visit context at all — estimate
+// and invoice follow-ups text customers.phone, which for a call-created
+// customer IS the number the caller disclaimed. The check now reads
+// disclaimed_number_holds for the send's own `to`, so it covers EVERY SMS
+// this pipeline sends regardless of what metadata the caller threads.
+// Checked at step 6.45 (audited block) AND again inside
+// providerPreparationCheck at the provider handoff (round-6 P1: a hold
+// committed during preDispatchCheck or the provider's own async
+// preparation must still stop the send). twilio.js's sendSMS dispatch()
+// runs the same predicate once more as its LAST await before
+// messages.create() — on the caller's handoff transaction when there is
+// one — which is also what covers the legacy callers that reach sendSMS
+// without this pipeline. SMS only — push never dials the number. Fails
+// CLOSED (see disclaimed-number-holds.js).
+const CALLBACK_NUMBER_HOLD_BLOCK = Object.freeze({
+  ok: false,
+  code: 'CALLBACK_NUMBER_HOLD',
+  reason: 'Caller disclaimed this number (callback_number_needed)',
+  // Durable-but-liftable (the office resolving the callback card clears
+  // it) — a retryable miss, never a permanent suppression.
+  retryable: true,
+});
+async function callbackNumberHoldBlocksSend(input) {
+  if (input.channel !== 'sms') return false;
+  return require('../disclaimed-number-holds').disclaimedNumberBlocksSend({ to: input.to });
+}
+
 // Annual-offer delivery guard (delivery-guards slice, re-cut of #4569): no
 // sender rechecks annual-plan eligibility itself — it passes estimateId(s)
 // through to this send library. Codex round 3 on #4608 (structural move,
@@ -326,7 +356,7 @@ async function sendCustomerMessageCore(input) {
     ...inputRest
   } = input;
   const providerCoordination = require('./provider-handoff-reservation');
-  if (isEnabled('smsGratitudeReplies')
+  if (require('../sms-gratitude-context').gratitudeClaimsPossible()
     && providerCoordination.isProviderHandoffHandle(suppliedProviderHandoffReservation)) {
     providerHandoffReservation = suppliedProviderHandoffReservation;
   }
@@ -615,6 +645,35 @@ async function sendCustomerMessageCore(input) {
     }
   }
 
+  // 6.45 callback_number_needed hold (see callbackNumberHoldBlocksSend
+  //      above) — every SMS, keyed on `to`. Re-checked at the provider
+  //      boundary below (providerPreparationCheck) and in twilio.js's
+  //      dispatch().
+  if (await callbackNumberHoldBlocksSend(sendInput)) {
+    const blocked = { code: CALLBACK_NUMBER_HOLD_BLOCK.code, reason: CALLBACK_NUMBER_HOLD_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['callback_number_hold'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
+      retryable: true,
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
   // 6.5 Caller-supplied recheck before provider preparation. Assigned lead
   //     replies additionally guard the actual SDK request withSmsHandoff.
   //     Callers with race-sensitive sends (clarify
@@ -740,6 +799,14 @@ async function sendCustomerMessageCore(input) {
         { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true },
         'move_hold_boundary',
       );
+    }
+    // callback_number_needed boundary re-check (codex round-6 P1): step
+    // 6.45 ran before preDispatchCheck and the provider's own async
+    // preparation — a hold committed in between (the call pipeline's
+    // booking transaction landing while a follow-up was mid-flight) must
+    // still stop the send here, the same way the move hold above does.
+    if (await callbackNumberHoldBlocksSend(sendInput)) {
+      return rememberBoundaryBlock({ ...CALLBACK_NUMBER_HOLD_BLOCK }, 'callback_number_hold_boundary');
     }
     const callerVerdict = await runCallerPreSendCheck();
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');

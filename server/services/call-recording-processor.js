@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -126,7 +126,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
-const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -866,6 +866,7 @@ const CONFIRM_REASON_TEXT = {
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
+  callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -1541,6 +1542,102 @@ async function recordFirstTouchHoldOwned(args, procToken) {
   return null;
 }
 
+const EMAIL_CARD_REASON_CODES = ['email_unverified', 'email_invalid'];
+
+function safeParseJsonPayload(payload) {
+  try { return typeof payload === 'string' ? JSON.parse(payload) : (payload || {}); } catch (_e) { return {}; }
+}
+
+// A stable comparison key for "is this the same email review question"
+// (Codex P1 round 3, finding #2): mintEmailReviewCardsFenced compares EVERY
+// live card against this, not a `.first()` pick that could grab the wrong
+// sibling when both email_unverified and email_invalid are live at once.
+// Two payloads with the same signature describe the identical question —
+// same candidates, same disagreement flag, same release target; anything
+// else means the office needs to see fresh evidence.
+function emailCardSignature(reasonCode, payload) {
+  const candidates = Array.isArray(payload?.email_candidates)
+    ? payload.email_candidates.map((c) => String(c?.value || '').trim().toLowerCase()).filter(Boolean).sort()
+    : [];
+  const hasTarget = !!payload && Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
+  const target = hasTarget ? (payload.email_release_target || null) : 'no-opinion';
+  return JSON.stringify([reasonCode || null, !!payload?.email_disagreement, candidates, target]);
+}
+
+// The single address (or blank) a card's evidence supports holding a
+// first-touch send to — a PURE function of the current evidence, never a
+// database read (Codex P1 round 3, findings #1 and #6):
+//   - An operator's mid-run correction always wins — a hold row whose
+//     corrected_at is set keeps its OWN held_email, never re-derived from
+//     fresh evidence (customer-email-fanout is the only writer of
+//     corrected_at, and it already retargeted the hold itself).
+//   - An explicit `email_release_target: null` means the dictation itself
+//     is ambiguous — never fall back to guessing a candidate to fill the
+//     gap. A disagreement flag, or more than one candidate with no
+//     explicit target, is the same "no single confirmed address" shape:
+//     all three hold blank rather than pick.
+//   - Otherwise the one address the evidence names — an explicit target
+//     when the payload sets one, else the sole candidate.
+function deriveEmailHoldTarget(evidencePayload, existingHoldRow) {
+  if (existingHoldRow?.corrected_at && String(existingHoldRow.held_email || '').trim()) {
+    return {
+      held_email: existingHoldRow.held_email,
+      email_release_target: String(existingHoldRow.held_email).trim().toLowerCase(),
+    };
+  }
+  const payload = evidencePayload || {};
+  const candidates = Array.isArray(payload.email_candidates) ? payload.email_candidates : [];
+  const hasExplicitTarget = Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
+  const explicitTarget = hasExplicitTarget ? payload.email_release_target : undefined;
+  const ambiguous = !!payload.email_disagreement
+    || (hasExplicitTarget && explicitTarget === null)
+    || (candidates.length > 1 && !explicitTarget);
+  if (ambiguous) return { held_email: '', email_release_target: null };
+  const raw = (typeof explicitTarget === 'string' && explicitTarget)
+    ? explicitTarget
+    : (candidates.length === 1 ? candidates[0]?.value : null);
+  const normalized = raw ? String(raw).trim().toLowerCase() : null;
+  return { held_email: normalized || '', email_release_target: normalized };
+}
+
+// The single evidence payload THIS PASS stands behind, whether or not it
+// minted a card — full agreement with no card at all is still evidence (a
+// single confirmed address, or none when the call has no email), and more
+// than one live email concern in the same pass is never auto-resolved
+// (same "no single confirmed address" shape deriveEmailHoldTarget's
+// ambiguous branch already covers).
+function emailPassEvidence(cards, resolvedEmail) {
+  if (cards.length === 1) return safeParseJsonPayload(cards[0].payload);
+  if (cards.length > 1) return { email_disagreement: true };
+  return { email_release_target: resolvedEmail === undefined ? null : resolvedEmail };
+}
+
+// Cheap, unlocked relevance check (Codex P2 round 3): the mint now runs on
+// EVERY processed call (finding #3 — a full-agreement reprocess must reach
+// it too), and most calls have nothing for it to do. Only worth the fenced
+// transaction when a live email card exists to supersede or a hold row
+// exists whose target this pass could change; the transaction re-reads
+// both under FOR UPDATE regardless, so a false positive (or the fail-open
+// on a lookup error) only costs an extra no-op transaction, never a missed
+// supersede.
+async function emailMintMayBeRelevant(callLogId) {
+  try {
+    const liveCard = await db('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('status', ['open', 'in_progress'])
+      .whereIn('reason_code', EMAIL_CARD_REASON_CODES)
+      .first('id');
+    if (liveCard) return true;
+    if (await db.schema.hasTable('first_touch_holds')) {
+      const holdRow = await db('first_touch_holds').where({ call_log_id: callLogId }).first('id');
+      if (holdRow) return true;
+    }
+    return false;
+  } catch (_e) {
+    return true;
+  }
+}
+
 // Mint email read-back cards ATOMICALLY with the release-claim invalidation
 // (Codex #3084 r54): an autocommit card insert followed by a separate repen
 // left a window where a release — its one card question already answered
@@ -1555,8 +1652,35 @@ async function recordFirstTouchHoldOwned(args, procToken) {
 // claims still valid) cannot exist; a failed mint leaves no card, which the
 // token-fenced end-of-run recovery covers. repen's r44 durable-state error
 // still propagates (the caller fails the run retryably).
-async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid, invalidateClaims = true }) {
-  if (!cards.length) return;
+//
+// SUPERSEDE, never refresh in place (Codex P1 rounds 2/3 — findings #1–#3,
+// #6): a prior design rewrote a live card's payload in place, which left
+// three open holes — the office could load a card, have its evidence
+// silently swapped under the same id, and still submit a Resolve/Accept
+// against stale evidence with no version conflict; a `.first()` pick over
+// live cards could grab the wrong sibling when both email_unverified and
+// email_invalid were live; and a full-agreement reprocess that minted no
+// card at all had no path back to a stale open card at all. Every call now
+// closes the gap the same way: load every live email card, compare each to
+// this pass's desired evidence by signature, close (never edit) anything
+// that differs with a terminal 'resolved'/'auto' status the office sees on
+// the Resolved tab's Auto-closed filter, insert this pass's fresh evidence
+// where nothing already matches it, and derive the hold's target from a
+// pure function of that evidence. A stale click against a closed card's id
+// now hits transitionCore's existing `!OPEN_STATES.includes(status)` 409
+// before anything else runs.
+//
+// `resolvedEmail` (Codex P1 round 3): the single address (or null) THIS
+// pass stands behind when it mints no email card — undefined means the
+// caller has nothing to report this pass (skip entirely, same as the
+// `cards.length` short-circuit below). Every real call site now always
+// supplies it, so a full-agreement reprocess (which mints no card) still
+// reconciles a stale open card down to "resolved, nothing to hold".
+async function mintEmailReviewCardsFenced({
+  callLogId, procToken, cards, callSid, invalidateClaims = true, resolvedEmail = undefined,
+}) {
+  if (!cards.length && resolvedEmail === undefined) return;
+  if (!cards.length && !(await emailMintMayBeRelevant(callLogId))) return;
   try {
     const minted = await db.transaction(async (trx) => {
       // Advisory lock FIRST (Codex #3084 r55): with no hold rows yet — the
@@ -1567,11 +1691,9 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
       // shared per-call advisory lock serializes this mint against every
       // card writer regardless of what rows exist.
       await lockTriageCall(trx, callLogId);
-      if (await trx.schema.hasTable('first_touch_holds')) {
-        await trx('first_touch_holds')
-          .where({ call_log_id: callLogId })
-          .forUpdate()
-          .select('id');
+      const holdsTable = await trx.schema.hasTable('first_touch_holds');
+      if (holdsTable) {
+        await trx('first_touch_holds').where({ call_log_id: callLogId }).forUpdate().select('id');
       }
       const owned = await trx('call_log')
         .where({ id: callLogId })
@@ -1579,13 +1701,133 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
         .forUpdate()
         .first('id');
       if (!owned) return false;
+
+      // Every live email card, both reason codes, loaded together — not
+      // picked one at a time — so nothing is missed (finding #2).
+      const liveCards = await trx('triage_items')
+        .where({ call_log_id: callLogId })
+        .whereIn('reason_code', EMAIL_CARD_REASON_CODES)
+        .whereIn('status', ['open', 'in_progress'])
+        .forUpdate()
+        .select('id', 'reason_code', 'payload');
+      const satisfiedReasonCodes = new Set();
+      for (const live of liveCards) {
+        const desired = cards.find((c) => c.reason_code === live.reason_code);
+        const same = !!desired
+          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload))
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload));
+        if (same) {
+          satisfiedReasonCodes.add(desired.reason_code);
+          continue; // identical evidence — no-op, card untouched
+        }
+        // Pre-generate the replacement's id (if any) so the closed row can
+        // reference it — the partial unique index requires closing this row
+        // BEFORE the fresh one can be inserted, so the new id doesn't exist
+        // as a row yet when it's stamped here.
+        if (desired && !desired.id) desired.id = crypto.randomUUID();
+        await trx('triage_items').where({ id: live.id }).update({
+          status: 'resolved',
+          resolution_source: 'auto',
+          resolution_note: 'Superseded — a reprocess found different email evidence.',
+          resolved_at: new Date(),
+          updated_at: new Date(),
+          payload: JSON.stringify({
+            ...safeParseJsonPayload(live.payload),
+            superseded_at: new Date().toISOString(),
+            superseded_by: desired?.id || null,
+            superseded_reason: 'stale_email_evidence',
+          }),
+        });
+      }
+      // A disagreement an operator already confirmed by read-back (Codex
+      // round-9 P2): a force-reprocess that yields the SAME evidence must not
+      // reopen it. liveCards above only sees open/in_progress rows, so without
+      // this the pass re-inserted an identical open card and staff had to
+      // repeat the confirmation after every reprocess — and for a
+      // customer-less lead the earlier email_confirmed_at predates the new
+      // card, so emailDisagreementConfirmed rejected it outright. Only a
+      // human read-back confirmation (payload.confirmed_email) counts; an
+      // auto-superseded card never does. The hold itself already keeps the
+      // confirmed address (retargetConfirmedHold stamps corrected_at, which
+      // deriveEmailHoldTarget honors).
+      const pendingCards = cards.filter((c) => !satisfiedReasonCodes.has(c.reason_code));
+      const confirmedReasonCodes = new Set();
+      if (pendingCards.length) {
+        const confirmedCards = await trx('triage_items')
+          .where({ call_log_id: callLogId, status: 'resolved', resolution_source: 'human' })
+          .whereIn('reason_code', pendingCards.map((c) => c.reason_code))
+          .select('reason_code', 'payload');
+        for (const done of confirmedCards) {
+          const donePayload = safeParseJsonPayload(done.payload);
+          if (!String(donePayload?.confirmed_email || '').trim()) continue;
+          const desired = pendingCards.find((c) => c.reason_code === done.reason_code);
+          if (desired && emailCardSignature(done.reason_code, donePayload)
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload))) {
+            satisfiedReasonCodes.add(desired.reason_code);
+            confirmedReasonCodes.add(desired.reason_code);
+          }
+        }
+      }
       for (const card of cards) {
+        if (satisfiedReasonCodes.has(card.reason_code)) continue;
         await trx('triage_items')
           .insert(card)
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore();
       }
-      if (invalidateClaims) {
+
+      if (holdsTable) {
+        const holdRow = await trx('first_touch_holds').where({ call_log_id: callLogId }).first('held_email', 'corrected_at');
+        const target = deriveEmailHoldTarget(emailPassEvidence(cards, resolvedEmail), holdRow);
+        // A PENDING row's retarget bumps updated_at; a RELEASING row's never
+        // does here (pre-push audit P1 on 77294c72e2, same rule as
+        // customer-email-fanout's releasing retarget and admin-triage's
+        // retargetConfirmedHold): its updated_at is the claimant's lease
+        // stamp, and resumeHeldFirstTouch settles only while the stamp still
+        // equals its claim. A full-agreement reconcile (invalidateClaims
+        // false) must leave that claim alone; when the pass DOES invalidate
+        // claims, repenHoldsForFreshEmailReview below does it deliberately.
+        await trx('first_touch_holds')
+          .where({ call_log_id: callLogId, status: 'pending' })
+          .update({ held_email: target.held_email, updated_at: new Date() });
+        await trx('first_touch_holds')
+          .where({ call_log_id: callLogId, status: 'releasing' })
+          .update({ held_email: target.held_email });
+      }
+      // Mirror admin-triage transitionCore's / triage-auto-resolve's
+      // review_status sync (Codex round-4 P1, finding #4): superseding the
+      // call's LAST live card with no replacement (full agreement on
+      // reprocess) previously left call_log.review_status stuck 'open'
+      // forever — the finalizer only writes 'open' when the pass itself
+      // has confirmation reasons, so a pass with none never re-closes it,
+      // and call-intelligence keeps telling staff to clear a card that no
+      // longer exists. A call with any open/in_progress card remaining
+      // (including a fresh replacement this same pass just inserted) stays
+      // 'open'; otherwise it closes to 'resolved' — the same terminal
+      // status the superseded row itself took.
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: callLogId })
+        .whereIn('status', ['open', 'in_progress'])
+        .count({ n: '*' })
+        .first();
+      await trx('call_log')
+        .where({ id: callLogId })
+        .update({ review_status: Number(stillOpen?.n || 0) > 0 ? 'open' : 'resolved', updated_at: new Date() });
+      // Invalidate release claims only when THIS transaction leaves a live
+      // email review question behind (Codex round-10 P1): the caller's
+      // invalidateClaims says the pass HAS email reasons, but when every
+      // desired card is satisfied by an operator's read-back confirmation
+      // (above) nothing is retained or inserted — there is no fresh question
+      // to wait on, and repenHoldsForFreshEmailReview would turn a
+      // 'releasing' confirmation release into a forced-resend marker, so a
+      // send that already succeeded could go again. Decided from this
+      // transaction's own card decisions, never the caller's reason list:
+      // every desired card is either retained (an identical live card), or
+      // inserted (any non-matching live card of its reason code was closed
+      // above, under the per-call advisory lock every card writer takes, so
+      // the insert cannot be ignored), or satisfied by a confirmation.
+      const leavesLiveEmailCard = cards.some((c) => !confirmedReasonCodes.has(c.reason_code));
+      if (invalidateClaims && leavesLiveEmailCard) {
         const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
         await repenHoldsForFreshEmailReview(callLogId, trx);
       }
@@ -1602,8 +1844,10 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
     // card, the ledger sweep can read that historical disposition as
     // approval and release the fresh extraction before the end-of-run
     // recovery ever files its card. Retryable, same path as the r44
-    // durable-state failures.
-    logger.error(`[call-proc] fenced email card mint failed for ${maskSid(callSid)}: ${mintErr.message} — failing the run (retryable)`);
+    // durable-state failures. Code/name only (Codex P1 round 3, finding
+    // #8): a knex error's .message embeds the bound payload, which can
+    // carry candidate emails.
+    logger.error(`[call-proc] fenced email card mint failed for ${maskSid(callSid)}: ${mintErr.code || mintErr.name || 'error'} — failing the run (retryable)`);
     const stateErr = new Error('email_review_state_unavailable');
     stateErr.emailReviewStateUnavailable = true;
     throw stateErr;
@@ -1730,6 +1974,206 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
     quoteRequested: extracted.quote_requested === true || svc.quote_requested === true,
     quotePromised: extracted.quote_promised === true || svc.quote_promised === true,
   };
+}
+
+// Owner ruling 2026-09-24 (the $300 flea call): a price the caller ALREADY
+// agreed to on the call must never be re-priced by the estimator engine —
+// the spoken word beats the estimator (see resolveCallQuoteSignals's
+// quote-requested/-promised split above). ONE shared resolver + label
+// formatter (utils/call-agreed-price.js, codex #4815 r6 P2), the same pair
+// the estimator engine's entry backstop reads, so the two gates can never
+// disagree and every log line and bell renders the full agreed terms —
+// range, billing unit, and every accepted component.
+const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');
+
+// codex #4815 r2 P2 (refined r3 P2): whether the post-finalization
+// price-agreed sweep must stand down because the booking-triggered
+// pre-draft hook's assessment exception (quotePromised:true — an
+// assessment booking IS an owed quote, regardless of any price also agreed
+// on the call) OWNS a live estimate for this same call. Chains onto the
+// SAME settled promise the hook itself sequences on (bookingPreDraftPromise)
+// rather than racing it: that hook can supersede this call's same-generation
+// estimator_draft_block while composing, and the sweep re-stamping it
+// mid-composer made the exception's outcome timing-dependent — sometimes a
+// legitimate assessment-booking insert bounced off the very block the
+// sweep just wrote. Awaiting first makes the order deterministic.
+//
+// Keyed on estimateId, NOT the outcome's own `drafted` flag (codex #4815
+// r3 P2): maybePreDraftForBooking/maybeDraftEstimateForCall report
+// `drafted: false` for an ALREADY-VALID exception estimate just as often as
+// for a genuine skip — an existing/reconciled draft (`skipped:
+// 'already_drafted'`), a duplicate-guard hit (`skipped:
+// 'duplicate_open_estimate'`), and the call-delegated path's OWN
+// "existing draft recovery" branch (`created: false` with `estimateId`
+// set) all carry a real estimateId while `drafted` reads false. Reading
+// `drafted` alone let the sweep archive that live, valid assessment
+// estimate. Any outcome carrying an estimateId — fresh or pre-existing —
+// stands the sweep down; only a genuine skip/failure with NO estimateId
+// (gate off, not an assessment, booking dead, composer error) lets it
+// proceed.
+//
+// Isolated as its own function so this ordering is unit-testable
+// independent of the ~10,000-line processRecording method it lives in.
+// Never throws — bookingPreDraftPromise itself never rejects (every branch
+// of its chain resolves), and the catch here is belt-and-braces only.
+async function bookingPreDraftAssessmentDrafted(bookingPreDraftPromise) {
+  if (!bookingPreDraftPromise) return false;
+  try {
+    const outcome = await bookingPreDraftPromise;
+    return outcome?.estimateId != null;
+  } catch {
+    return false;
+  }
+}
+
+// codex #4815 r9 P2: when the pre-finalization agreed-price invalidation
+// fails, finalization QUEUES the verdict; the assessment pre-draft (which
+// runs first, by design) is then refused by that queued entry and returns
+// no estimateId. If the post-finalization sweep then lands and clears the
+// entry, nothing re-ran the composer — the owner-approved Waves Assessment
+// pre-draft was lost for good. Re-run it ONCE, only when the first run
+// returned no estimate BECAUSE the agreed-price verdict refused it (not a
+// gate-off / not-assessment / dead-visit skip). The re-run carries the same
+// pass identity, so a newer claim still fences its insert. Never throws.
+async function rerunAssessmentPreDraftAfterQuarantineClear({ bookingPreDraftPromise, rerun, callSid }) {
+  if (!bookingPreDraftPromise || typeof rerun !== 'function') return null;
+  try {
+    const first = await bookingPreDraftPromise;
+    if (first?.estimateId != null || first?.blockedBy !== 'price_agreed_on_call') return null;
+    const outcome = await rerun();
+    if (outcome?.estimateId != null) {
+      logger.info(`[call-proc] assessment pre-draft re-run after the agreed-price queue cleared for ${maskSid(callSid)} (estimate ${outcome.estimateId})`);
+    }
+    return outcome || null;
+  } catch (err) {
+    logger.warn(`[call-proc] assessment pre-draft re-run failed for ${maskSid(callSid)}: ${err.message}`);
+    return null;
+  }
+}
+
+// codex #4815 r3 P1 (r5 P1: live-owner mode retired — the pre-finalization
+// price-agreed call site now defers its durable-queue write into the
+// finalization transaction itself, so it never reaches this fallback at
+// all; see that transaction): shared last-resort fallback when a durable
+// quarantine-retry queue write (markQuarantinePending) itself fails to
+// land — reused by the identity-conflict quarantine catch and the
+// price-agreed POST-finalization sweep, both DETACHED continuations that
+// run AFTER finalization already cleared processing_token to null.
+// whereNull matches the settled row (or correctly no-ops with "a newer
+// pass owns it" if a peer genuinely reclaimed since).
+//
+// Routes through the SAME bounded accounting the ordinary extraction_failed
+// path uses (codex #4815 r5 P1) — increments extraction_attempts and files
+// the exhausted-retry triage card at the cap — rather than a bare status
+// write: a bare write never advanced the retry budget, so processAllPending
+// retried the call every 10 minutes forever instead of stopping at
+// CALL_EXTRACTION_MAX_ATTEMPTS, with no card ever filed once exhausted.
+//
+// The VERDICT rides the SAME statement (codex #4815 r8 P1 — the fail-closed
+// state that survives retry exhaustion): the retry lane alone kept the
+// call's estimates blocked only while callReprocessInFlight read it as
+// in-flight. Once extraction_attempts hit CALL_EXTRACTION_MAX_ATTEMPTS (or
+// the call aged past the 7-day window) the call read as SETTLED, and with
+// no quarantine marker the stale draft became viewable, sendable and
+// acceptable again while only a triage card remained. The entry this
+// statement adds to the multi-entry quarantine queue is judged by
+// callDraftVerdict regardless of retry state, so the call fails closed from
+// this write until the verdict is RESOLVED — never merely because retries
+// ran out: the drainer (sweepPendingQuarantines) revalidates it as soon as
+// the call settles — exhausted and aged-out included — and either replays
+// the invalidation (then retires the entry) or drops it on a genuine
+// re-qualification. The human path is the exhausted-retry triage card this
+// function files: fix the cause and Reprocess the recording; the settled
+// pass is then drained the same way. Atomic: either the retry-lane
+// transition AND the verdict land, or neither does.
+async function pushCallToRetryLaneAfterQuarantineFailure({
+  call, callSid, procGeneration, reason,
+}) {
+  try {
+    const { QUARANTINE_QUEUE_APPEND_SQL, quarantineQueueEntry } = require('../utils/estimate-claim-sql');
+    let lastResortQ = db('call_log').where({ id: call.id }).whereNull('processing_token');
+    if (procGeneration != null) {
+      lastResortQ = lastResortQ.where('processing_generation', procGeneration);
+    }
+    const pushedRows = await lastResortQ.update({
+      processing_status: 'extraction_failed',
+      extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
+      metadata: db.raw(QUARANTINE_QUEUE_APPEND_SQL, [String(reason), JSON.stringify(quarantineQueueEntry(reason, procGeneration))]),
+      updated_at: new Date(),
+    }).returning(['extraction_attempts']);
+    if (pushedRows.length) {
+      const attempts = Number(pushedRows[0]?.extraction_attempts) || 0;
+      logger.error(`[call-proc] quarantine queue write failed for ${maskSid(callSid)} (${reason}) — call pushed to the bounded retry lane (attempt ${attempts})`);
+      await fileExtractionExhaustedTriage(call.id, attempts, new Error(`durable quarantine queue write failed (${reason})`), callSid);
+    } else {
+      logger.info(`[call-proc] quarantine retry-lane write skipped for ${maskSid(callSid)} (${reason}) — a newer pass owns the call`);
+    }
+  } catch (lastResortErr) {
+    logger.error(`[call-proc] quarantine retry-lane write ALSO failed for ${maskSid(callSid)} (${reason}): ${lastResortErr.message}`);
+  }
+}
+
+// codex #4815 r3 P1: retiring the earlier engine "draft ready" bell (or the
+// deduped generic quote-promised bell it upgraded in place) must never
+// fire on a false pretense. Two guards a bare forceUpdate/updateOnly call
+// missed:
+//   - invalidated must be TRUE — no draft was actually archived (a fresh
+//     pass with nothing yet to retire, `invalidated:false`) must leave
+//     whatever bell exists alone, or staff are told a draft was retired
+//     that never existed.
+//   - quotePromised must survive when it was already true — an agreed
+//     price only retires the ENGINE'S draft attempt, not a genuinely
+//     promised WRITTEN quote (owner ruling: "keep that path"). Overwriting
+//     the bell to "No quote is owed" and quote_promised:false erased a
+//     real obligation and would also defeat quotePromisedAlreadyNotified's
+//     own metadata->>'quote_promised' = 'true' dedupe downstream. When
+//     promised, the bell instead drops the estimate link/amount and keeps
+//     both quote_promised:true and the send-it instruction.
+// Shared by both invalidation call sites so this decision lives once.
+//
+// Retried from the BELL's own state (codex #4815 r8 P2): when this
+// invocation invalidated nothing new (a later reprocess sees the draft
+// already stamped), the retirement still runs if the call's live engine bell
+// references a draft this verdict ALREADY retired — the case where an
+// earlier retirement's notification update failed transiently and nothing
+// would otherwise ever retry it. A bell already retired, or pointing at a
+// live draft, is left alone.
+async function retirePriceAgreedEstimatorBell({
+  call, callSid, callerName, callAgreedPrice, callQuotePromised, invalidated, customerId, logPrefix,
+}) {
+  if (!invalidated) {
+    let staleEstimateId = null;
+    try {
+      const { staleDraftBellForCall } = require('./estimator-engine');
+      staleEstimateId = typeof staleDraftBellForCall === 'function'
+        ? await staleDraftBellForCall(call?.twilio_call_sid || callSid, { reason: 'price_agreed_on_call' })
+        : null;
+    } catch { staleEstimateId = null; }
+    if (!staleEstimateId) return;
+  }
+  try {
+    const { notify: notifyEstimator } = require('./estimator-engine');
+    const link = customerId ? `/admin/customers/${customerId}` : '/admin/communications';
+    const priceLabel = formatAgreedPriceLabel(callAgreedPrice);
+    const promised = callQuotePromised === true;
+    await notifyEstimator({
+      call,
+      title: promised ? 'Price agreed on call — send the promised quote' : 'Price agreed on call — draft retired',
+      body: promised
+        ? `${callerName}: a price (${priceLabel}) was agreed on this call and the AI estimate draft was retired, but the agent still promised a written quote. Send it before end of day.`
+        : `${callerName}: a price (${priceLabel}) was agreed on this call, so the AI estimate draft was retired. No quote is owed — the price is already set.`,
+      estimateId: null,
+      quotePromised: promised,
+      link,
+      forceUpdate: true,
+      updateOnly: true,
+      // Rewrite the bell(s) that advertise the retired draft, not merely
+      // the newest bell for the call (codex #4815 r9 P2).
+      retiredByReason: 'price_agreed_on_call',
+    });
+  } catch (notifyErr) {
+    logger.warn(`[call-proc] ${logPrefix} bell retirement failed for ${maskSid(callSid)}: ${notifyErr.message}`);
+  }
 }
 
 // One quote-promised bell per call PER PATH. Reprocessing the same recording
@@ -2551,24 +2995,90 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   return null;
 }
 
-async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false }) {
-  try {
-    const AppointmentReminders = require('./appointment-reminders');
-    await AppointmentReminders.registerAppointment(
-      scheduledServiceId,
-      customerId,
-      `${scheduledDate}T${windowStart || '08:00'}`,
-      serviceType,
-      'call_recording',
-      // closeReminderWindows: a WINDOWLESS visit registers the canonical
-      // pre-closed placeholder at the date+08:00 slot instead of an ARMED
-      // reminder at a fabricated start — the cron must never text a time
-      // nobody chose (Codex #3361 r24 P1; same rule the confirm hook's
-      // registration leg applies).
-      { sendConfirmation: false, closeReminderWindows }
-    );
-  } catch (err) {
-    logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
+async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
+  // Codex round-2 finding #4 (PR #4807), tightened round 3: the AUTHORITATIVE
+  // stamp for the two main call-booking paths (fresh insert, idempotency-
+  // conflict reuse) now lands INSIDE the booking transaction itself
+  // (stampCallbackNumberHoldForCall, above the trx that creates svc) — that
+  // atomic write can never be skipped by a crash between commit and this
+  // post-commit helper. This write is the FALLBACK for paths that reach
+  // registerScheduleSideEffects without going through that transaction (the
+  // replay-repair self-heal below). Nulling call_sms_cleared_at (+
+  // recipient) in the SAME update closes finding #1's atomicity half — a
+  // fresh hold must never read as already-cleared by a stale clearance a
+  // reused/reprocessed row still carries from an earlier call. Round-3 P1:
+  // a THROWN failure here must refuse to arm messaging — proceeding to
+  // registerAppointment on an unconfirmed hold is exactly the gap this
+  // hardening closes, so skip it and log code/name only.
+  //
+  // Round-5 P1: a bare whereNull('callback_number_hold_at') no-ops on
+  // FORCE-REPROCESS of a call that was already cleared — the row still
+  // carries the OLD hold_at (non-null) from the first pass, so the guard
+  // blocks the write even though this pass just re-raised
+  // callback_number_needed, and the stale call_sms_cleared_at (>= the old
+  // hold_at) keeps reading as cleared while a new review card opens. Fixed
+  // by widening the guard to "install a fresh hold whenever this row is not
+  // CURRENTLY held" — null hold_at (never held) OR a hold_at that the
+  // row's own cleared_at already satisfies — so a reprocess that raises the flag again always
+  // gets a hold_at newer than any leftover clearance. Idempotent WITHIN one
+  // pass on purpose, not on every retry: once this update lands, hold_at is
+  // non-null and cleared_at is null, so the widened guard reads "currently
+  // held" and a second call in the SAME pass (there is exactly one path
+  // that can call this more than once per call — see
+  // stampCallbackNumberHoldForCall below) is a genuine no-op instead of
+  // pointlessly bumping the timestamp again.
+  let holdStampFailed = false;
+  if (scheduledServiceId && callbackNumberHoldActive) {
+    try {
+      // Codex round 6 (structural): the number-keyed hold every SMS is
+      // actually checked against (disclaimed-number-holds.js). Idempotent
+      // with the in-transaction write for the main booking paths; this is
+      // the fallback for paths that never ran that transaction.
+      // Round 7 P1: ensure-only (the pass's decision point armed it) —
+      // never re-arms; a clearance the office made after this pass decided
+      // stands, and the visit stamp below is skipped over it.
+      const numberHold = await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
+        phone: disclaimedPhone, customerId, callLogId,
+      });
+      if (!(numberHold.recorded && numberHold.active === false)) await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .where((qb) => {
+          qb.whereNull('callback_number_hold_at')
+            .orWhereRaw('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at');
+        })
+        .update({
+          callback_number_hold_at: new Date(),
+          call_sms_cleared_at: null,
+          call_sms_cleared_recipient: null,
+        });
+    } catch (holdErr) {
+      holdStampFailed = true;
+      logger.error(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId} — refusing to arm messaging: ${holdErr.code || holdErr.name || 'db_error'}`);
+    }
+  }
+  // Messaging (reminders/confirmation) is gated on the hold stamp actually
+  // landing — arming it on an unconfirmed hold is precisely the gap round-3
+  // P1 closes. Everything below (inspection credit) is unrelated to
+  // messaging and still runs.
+  if (!holdStampFailed) {
+    try {
+      const AppointmentReminders = require('./appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        scheduledServiceId,
+        customerId,
+        `${scheduledDate}T${windowStart || '08:00'}`,
+        serviceType,
+        'call_recording',
+        // closeReminderWindows: a WINDOWLESS visit registers the canonical
+        // pre-closed placeholder at the date+08:00 slot instead of an ARMED
+        // reminder at a fabricated start — the cron must never text a time
+        // nobody chose (Codex #3361 r24 P1; same rule the confirm hook's
+        // registration leg applies).
+        { sendConfirmation: false, closeReminderWindows }
+      );
+    } catch (err) {
+      logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
+    }
   }
 
   // Inspection credit: fast redemption for a confirmed call booking, same
@@ -7091,6 +7601,12 @@ const CallRecordingProcessor = {
     // instead (PR #3304 — replaces the token-NULL predicates).
     let procGeneration = null;
     let claimBlocked = false;
+    // A forced-quarantine verdict whose invalidation AND durable queue write
+    // did not land this pass (codex #4815 r5 P1 / r8 P1). Declared here, at
+    // pass scope, so the outer guard's extraction_failed release can write
+    // it ATOMICALLY with the retry-lane transition: a verdict that rides only
+    // the retry lane stops blocking the moment retries are exhausted.
+    let pendingQuarantineMarker = null;
     // Claim + contact CAS baseline in ONE transaction (codex #3413 r27):
     // a separate post-claim read left a window where an admin edit landing
     // between the claim commit and the snapshot read became the baseline —
@@ -8405,7 +8921,12 @@ const CallRecordingProcessor = {
           // and the queue covers the case where that budget is already
           // spent (codex P0, PR #3304 GH r8d).
           const { markQuarantinePending } = require('./estimator-engine');
-          await markQuarantinePending(call.id, extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail', { procGeneration });
+          const rejectionReason = extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail';
+          const queued = await markQuarantinePending(call.id, rejectionReason, { procGeneration });
+          // Neither landed (codex #4815 r8 P1): the outer guard's
+          // extraction_failed release writes the verdict atomically with
+          // the retry-lane transition, so retry exhaustion never unblocks.
+          if (!queued) pendingQuarantineMarker = { reason: rejectionReason, procGeneration };
           throw new Error(`draft invalidation failed on the ${extracted.is_spam ? 'spam' : 'voicemail'} verdict: ${invalidation.error || 'unknown'}`);
         }
       }
@@ -8607,6 +9128,52 @@ const CallRecordingProcessor = {
     let v2RoutingBlocked = false;
     let v2SmsBlocked = false;
     let v2SmsConsentExplicit = false;
+    // P1-C (callback_number_needed reminder hold): set true the moment the
+    // disclaimed-caller-ID hold blocks the confirmation SMS; stamped onto
+    // scheduled_services.callback_number_hold_at once the visit is booked so
+    // the reminder cron can honor the same hold days later.
+    let callbackNumberNeededHoldActive = false;
+    // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
+    // the decision point — the same statement that flips the boolean above
+    // — before the card is published and before any further awaited work,
+    // so no sender (an invoice/estimate follow-up mid-flight, even at its
+    // provider check) sees the flag decided with no row. armDisclaimedNumber
+    // Hold serializes with the card's /resolve under the per-call triage
+    // lock and is the ONE write in this pass that may re-arm a cleared row
+    // (a genuine reprocess raising the flag again); every later write in
+    // the pass is ensure-only and cannot undo a clearance that lands after
+    // this decision. A failure fails the pass closed (the capped
+    // extraction_failed retry) — code/name only in the log (a Knex message
+    // can render the bound phone number).
+    //
+    // Round 8 P1: the write is FENCED to this pass's processing claim —
+    // armDisclaimedNumberHold verifies processing_token (+ generation)
+    // with a FOR UPDATE on call_log inside the same transaction as the
+    // insert (lock order: triage advisory lock → call_log row → hold row,
+    // the mintEmailReviewCardsFenced order; /resolve takes the advisory
+    // lock first too). A superseded worker writes nothing and gets false
+    // back: the caller abandons the pass (abandonToPeer), the same
+    // outcome as the stillOwnsClaim boundaries — it must never arm, or
+    // re-arm over a human clearance, from a stale extraction.
+    let callbackNumberHoldArmed = false;
+    const armCallbackNumberHoldAtDecision = async () => {
+      if (callbackNumberHoldArmed) return true;
+      try {
+        const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
+          phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
+          procToken, procGeneration,
+        });
+        if (armed?.claimLost) return false;
+        callbackNumberHoldArmed = true;
+        return true;
+      } catch (holdErr) {
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] disclaimed-number hold write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
+      }
+    };
     // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
     // inbound consent (no explicit sms_consent_given). The non-ANI recipient
     // hold at the send site keys off this — a send cleared by explicit consent
@@ -8757,6 +9324,23 @@ const CallRecordingProcessor = {
       }
     } catch (dictationErr) {
       logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
+    }
+
+    // ── V1/V2 email disagreement hold (owner ruling, 2026-09-25) ─────────
+    // adoptV2PrimaryFields already nulled extracted.email and stamped both
+    // raw candidates onto extracted.email_candidates when the legs disagreed
+    // (see extraction-compat.js). Runs LAST — after the dictation decoder and
+    // its quarantine arbiter above, which read a NULL extracted.email and may
+    // have confidently adopted one of the two candidates from transcript
+    // evidence alone. Neither gets final say here: re-null and fold both
+    // candidates into dictationEmailPayload so the standard decoder-only
+    // forced-card path below files ONE card with both spellings for the
+    // office to read back, instead of either extractor's guess winning.
+    if (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2) {
+      const held = applyEmailDisagreementHold(extracted, dictationEmailPayload);
+      extracted = held.extracted;
+      dictationEmailPayload = held.dictationEmailPayload;
+      logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
     }
 
     // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
@@ -9006,6 +9590,31 @@ const CallRecordingProcessor = {
           v2SmsBlocked = !tcpa.canSms;
           v2SmsClearedByImpliedConsent = tcpa.canSms && tcpa.reason === 'implied_consent_inbound';
           v2EmailBlocked = !tcpa.canEmail;
+          // callback_number_needed (schema 1.14.0, live miss 2026-09-25, call
+          // 6fee5f34): the caller told us the ANI isn't theirs and gave no
+          // callback of their own — TCPA consent (if any) was given by
+          // whoever answers THAT line, not necessarily this caller, so the
+          // confirmation/reminder SMS leg holds here regardless of what tcpa
+          // decided. Booking is unaffected (not in BLOCKING_TRIAGE_FLAGS);
+          // email is unaffected (a different, non-ANI-keyed channel when one
+          // is on file). Clearing this hold is a human verdict (the
+          // callback_number_needed card) — never automatic. Pure decision
+          // in call-triage-flags.js so it's unit-testable independent of
+          // this pass's DB/LLM calls.
+          if (callbackNumberNeededBlocksSms(finalFlags)) {
+            v2SmsBlocked = true;
+            v2SmsClearedByImpliedConsent = false;
+            // P1-C: this hold must outlive the confirmation send — the
+            // 72h/24h reminder cron (appointment-reminders.js) runs on its
+            // own schedule with no notion of a call-level SMS hold, and
+            // would otherwise text the disclaimed ANI days later. Stamped
+            // onto the visit once scheduledServiceId is known (below).
+            callbackNumberNeededHoldActive = true;
+            // Round 7 P1: persisted NOW — before the route decision, the
+            // advisory card below, and anything else this pass awaits.
+            // Round 8 P1: a lost claim abandons the pass (nothing written).
+            if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
+          }
 
           const routeDecision = buildRouteDecision({
             callLogId: call.id,
@@ -9224,6 +9833,9 @@ const CallRecordingProcessor = {
           }
         }
       } catch (err) {
+        // A failed decision-point hold write is NOT a routing-gate error to
+        // soften: the pass must fail closed (round 7 P1).
+        if (err?.code === 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED') throw err;
         // Fail closed (soft): hold only the appointment for triage. No TCPA/DNC
         // decision was made here, so do NOT suppress SMS/email follow-up — the
         // call may be a real lead and email/newsletter should still proceed.
@@ -9285,6 +9897,28 @@ const CallRecordingProcessor = {
               computeDeterministicTriageFlags(v2Ext, { contactPhone, addressValidation: v2AddressValidation })
             );
           } catch (_e) { /* fall back to model flags only */ }
+        }
+        // Finding #4 (round 4 P1, PR #4807): the enforce branch above arms
+        // v2SmsBlocked + callbackNumberNeededHoldActive the moment
+        // callback_number_needed is in finalFlags, but that branch is
+        // guarded off in shadow mode (CALL_EXTRACTION_V2_DRIVES_ROUTING
+        // false) — this documented prod posture (V2_ENABLED=true,
+        // DRIVES_ROUTING=false) was arming NEITHER, so a disclaimed ANI
+        // kept getting confirmation/reminder texts with no durable hold and
+        // no review card. v2SmsBlocked/callbackNumberNeededHoldActive are
+        // read by the SAME common code (confirmation send gate,
+        // registerScheduleSideEffects) regardless of which branch set them
+        // — arm them here, from the SAME merged bridgeTriageFlags the card
+        // below is about to file from, so shadow mode behaves exactly like
+        // enforce mode for this one signal.
+        if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {
+          v2SmsBlocked = true;
+          v2SmsClearedByImpliedConsent = false;
+          callbackNumberNeededHoldActive = true;
+          // Round 7 P1: persisted NOW — before the bridge files the card
+          // below and before any further awaited work.
+          // Round 8 P1: a lost claim abandons the pass (nothing written).
+          if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
         }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the
@@ -9450,35 +10084,59 @@ const CallRecordingProcessor = {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
           }
-          // Card mint + claim invalidation ride ONE token-fenced
-          // transaction (Codex #3084 r54 — see mintEmailReviewCardsFenced;
-          // r43's invalidation and r44's durable-state error semantics
-          // both preserved, now atomic with the card writes).
-          await mintEmailReviewCardsFenced({
-            callLogId: call.id,
-            procToken,
-            callSid,
-            cards: needsConfirmation.slice(0, 10)
-              .filter((flag) => flag === 'email_unverified' || flag === 'email_invalid')
-              .map((flag) => buildTriageItem({
-                callLogId: call.id,
-                flag,
-                onFileAddress,
-                extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
-                severity: 'advisory',
-                // + the address the run adopted at filing time (the release
-                // target the evidence sweep may verify); null when the
-                // dictation demoted it — then only a human can settle it.
-                extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
-              })),
-          });
         }
+        // Card mint + claim invalidation ride ONE token-fenced transaction
+        // (Codex #3084 r54 — see mintEmailReviewCardsFenced; r43's
+        // invalidation and r44's durable-state error semantics both
+        // preserved, now atomic with the card writes). Called even with NO
+        // email flags in needsConfirmation (Codex P1 round 3, finding #3):
+        // this whole bridge block used to run the mint only when
+        // needsConfirmation was non-empty, so a full-agreement reprocess
+        // (e.g. after an enforce→shadow demotion) never reached it and a
+        // stale open disagreement card from an earlier cycle was never
+        // superseded. Hoisted out of the `if` above so it always runs once
+        // per pass; the mint's own relevance pre-check keeps the common
+        // case (nothing live, nothing held) cheap.
+        await mintEmailReviewCardsFenced({
+          callLogId: call.id,
+          procToken,
+          callSid,
+          // Codex round-6 P1: this call site never set invalidateClaims,
+          // silently defaulting to true — a full-agreement reconcile
+          // (cards: [], nothing live minted this pass) still ran
+          // repenHoldsForFreshEmailReview, converting an unmarked
+          // 'releasing' row and letting a provider call that ALREADY
+          // succeeded this pass be force-sent again. Same predicate as the
+          // enforce branch below: only invalidate when this pass actually
+          // mints a live email card.
+          invalidateClaims: needsConfirmation.includes('email_unverified') || needsConfirmation.includes('email_invalid'),
+          cards: needsConfirmation.slice(0, 10)
+            .filter((flag) => flag === 'email_unverified' || flag === 'email_invalid')
+            .map((flag) => buildTriageItem({
+              callLogId: call.id,
+              flag,
+              onFileAddress,
+              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+              severity: 'advisory',
+              // + the address the run adopted at filing time (the release
+              // target the evidence sweep may verify); null when the
+              // dictation demoted it — then only a human can settle it.
+              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+            })),
+          // Codex P1 (round 3): this cycle's single agreed address (or
+          // null) — lets the mint reconcile a STALE open disagreement card
+          // even when this pass's own needsConfirmation carries no email
+          // flag at all (full agreement on reprocess).
+          resolvedEmail: String(extracted.email || '').trim().toLowerCase() || null,
+        });
       } catch (bridgeErr) {
         // The bridge is advisory EXCEPT for the r44 invalidation: with the
         // card durably inserted and the hold claims NOT invalidated, an
         // in-flight release can send the unreviewed address — that state
         // must fail the run, not be skipped.
         if (bridgeErr.emailReviewStateUnavailable) throw bridgeErr;
+        // …and a failed decision-point hold write (round 7 P1).
+        if (bridgeErr?.code === 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED') throw bridgeErr;
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
       }
     } else {
@@ -9529,30 +10187,38 @@ const CallRecordingProcessor = {
         }
         if (emailReasons.length) {
           bridgeNeedsConfirmation.push(...emailReasons);
-          // Same Needs Review surfacing as the shadow branch: the inbox is
-          // driven by triage_items rows, so without these an auto-routed call
-          // in enforce/V2-off mode would never show the read-back prompt.
-          // Same fenced mint as the shadow branch (Codex #3084 r54): the
-          // card writes and the r43 claim invalidation ride one
-          // token-fenced transaction; r44's durable-state error still
-          // throws into the extraction_failed retry. Decoder evidence
-          // (candidates + the exact read-back question) rides each card.
-          await mintEmailReviewCardsFenced({
-            callLogId: call.id,
-            procToken,
-            callSid,
-            invalidateClaims: emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid'),
-            cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
-              callLogId: call.id,
-              flag,
-              onFileAddress,
-              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
-              severity: 'advisory',
-              // Same filing-time release-target snapshot as the shadow branch.
-              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
-            })),
-          });
         }
+        // Same Needs Review surfacing as the shadow branch: the inbox is
+        // driven by triage_items rows, so without these an auto-routed call
+        // in enforce/V2-off mode would never show the read-back prompt.
+        // Same fenced mint as the shadow branch (Codex #3084 r54): the
+        // card writes and the r43 claim invalidation ride one
+        // token-fenced transaction; r44's durable-state error still
+        // throws into the extraction_failed retry. Decoder evidence
+        // (candidates + the exact read-back question) rides each card.
+        // Called even with NO email reasons (Codex P1 round 3): a
+        // full-agreement reprocess mints no email card at all, but a STALE
+        // open disagreement card from an earlier cycle still needs
+        // reconciling down to this cycle's single agreed address —
+        // `resolvedEmail` carries it, and the mint's own guard skips the
+        // fenced transaction entirely when there is nothing open to
+        // reconcile.
+        await mintEmailReviewCardsFenced({
+          callLogId: call.id,
+          procToken,
+          callSid,
+          invalidateClaims: emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid'),
+          cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
+            callLogId: call.id,
+            flag,
+            onFileAddress,
+            extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+            severity: 'advisory',
+            // Same filing-time release-target snapshot as the shadow branch.
+            extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+          })),
+          resolvedEmail: String(extracted.email || '').trim().toLowerCase() || null,
+        });
       } catch (emailErr) {
         // Advisory EXCEPT the r44 invalidation — see the shadow branch.
         if (emailErr.emailReviewStateUnavailable) throw emailErr;
@@ -9660,6 +10326,7 @@ const CallRecordingProcessor = {
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
+    const callAgreedPrice = resolveCallAgreedPrice(v2CanonicalExtraction);
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
     const callSecondaryContact = callSecondaryContacts[0] || null;
     // Capture the caller's email BEFORE the secondary-contact scrub below clears
@@ -9923,6 +10590,43 @@ const CallRecordingProcessor = {
             phone,
             name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
           });
+
+          // caller_id_disclaimed (schema 1.14.0, live miss 2026-09-25, call
+          // 6fee5f34): the caller said `phone` (the ANI, our only key to
+          // create this customer) is NOT their own number. No dedicated
+          // phone-verification column exists for this meaning (see
+          // callerIdDisclaimedNoteText) — stamp crm_notes instead. Fail-open,
+          // same posture as the line-type check just above: never blocks or
+          // delays creation, which has already committed.
+          //
+          // Gated on callExtractionV2PrimaryEnabled() (codex round-3 P2):
+          // v2CanonicalExtraction is populated even in V2 SHADOW mode (V2
+          // enabled but not driving routing/adoption) — writing a canonical
+          // customer field (crm_notes) off an unpromoted model's output
+          // there would violate the shadow contract every other adoption
+          // site in this file already honors (adoptV2PrimaryFields only
+          // runs when this same gate is on).
+          try {
+            const disclaimedNote = callExtractionV2PrimaryEnabled()
+              ? callerIdDisclaimedNoteText(v2CanonicalExtraction?.caller, { ani: contactPhone })
+              : null;
+            if (disclaimedNote) {
+              await db('customers').where({ id: customerId }).update({
+                crm_notes: db.raw(
+                  "CASE WHEN COALESCE(crm_notes, '') = '' THEN ? ELSE crm_notes || ? END",
+                  [disclaimedNote, `\n\n${disclaimedNote}`],
+                ),
+              });
+            }
+          } catch (e) {
+            // e.message on a Knex query-builder failure can render the SQL
+            // (incl. bindings — the caller's free-text phone_note/crm_notes)
+            // straight into the log (P1: never log the failed CRM-note
+            // binding). Same non-payload code/name convention as this
+            // file's other DB-failure handlers (e.g. the recovery-marker
+            // and address-evidence reconcile catches above).
+            logger.warn(`[call-proc] caller-id-disclaimed note stamp failed for ${customerId}: ${e.code || e.name || 'db_error'}`);
+          }
 
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently
@@ -11325,6 +12029,42 @@ const CallRecordingProcessor = {
         'Superseded — the reprocessed extraction carries no service address, so the prior property-role proposals no longer apply.',
         { procGeneration },
       );
+    }
+
+    // callback_number_needed — NUMBER-keyed hold (codex round 6, PR #4807,
+    // structural). Written here, once the customer is resolved and BEFORE
+    // anything below can text (secondary-contact opt-ins, the booking and
+    // its confirmation, card links, and every later sender that reads
+    // customers.phone or a lead's phone — estimate/invoice follow-ups carry
+    // no visit id at all): sendCustomerMessage checks every SMS `to` against
+    // this row, so the hold no longer depends on a booking existing.
+    // customerId may still be null (shared-phone ambiguity, explicit
+    // unlink) — the hold is number-scoped either way. The booking
+    // transaction writes the same row again (idempotent).
+    //
+    // Round 7 P1: the row was already PERSISTED at the decision point
+    // (armCallbackNumberHoldAtDecision); this later write is ensure-only —
+    // it fills customer_id now that the customer is resolved and never
+    // re-arms, so an office Resolve that landed after this pass decided
+    // stands. A failure HERE
+    // aborts the pass (fail closed) rather than continue unheld: a call
+    // that books nothing has no later write to fall back on, and the
+    // pass's own catch already turns a throw into the capped
+    // extraction_failed retry (reprocessing is idempotent) with a blocking
+    // card at the cap. The rethrown error carries code/name only — a Knex
+    // message can render the bound phone number into the log.
+    if (callbackNumberNeededHoldActive) {
+      try {
+        await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
+          phone: contactPhone, customerId: customerId || call.customer_id || null, callLogId: call.id,
+        });
+      } catch (holdErr) {
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] disclaimed-number hold write failed for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
+      }
     }
 
     // Secondary-contact persistence (additive, gated, non-blocking). Runs
@@ -13663,10 +14403,51 @@ const CallRecordingProcessor = {
     // processing or eat the promise. The settled chain is retained so the
     // assessment pre-draft hook below can sequence AFTER it (never a second
     // concurrent composer run for the same call).
+    //
+    // callAgreedPrice != null excludes the engine even when quote-flavored
+    // (owner ruling 2026-09-24 — the spoken word beats the estimator): a
+    // price already accepted on the call must not be re-priced from
+    // scratch. This covers BOTH the plain quote-requested case AND the
+    // quote-promised case (a written quote can still be owed even with a
+    // verbal price already agreed) — seeding the agreed amount into the
+    // composer so a genuine quote-promised call could still draft a
+    // LOCKED estimate at that figure was judged not cleanly reachable
+    // within this fix's scope (the pricing pipeline has no "lock at this
+    // amount" entry point), so it skips here too; the synchronous
+    // quote-promised bell above is unaffected and stays the cue to send
+    // the written quote by hand.
     let estimatorEnginePromise = null;
     let reconcileOnlyDraftLinksPending = false;
+    // Set only on the price_agreed_on_call skip below: a second,
+    // post-finalization invalidation sweep (mirrors the spam/voicemail
+    // terminal path's own two-pass pattern a few thousand lines up) catches
+    // a detached composer from an older overlapping pass that inserts a
+    // draft AFTER this pass's pre-write block stamp but before its own
+    // token clears.
+    let agreedPriceDraftSweepPending = false;
+    // pendingQuarantineMarker (declared before the outer guard, codex #4815
+    // r8 P1) is set below when the pre-finalization price-agreed
+    // invalidation did not land (codex #4815 r5 P1): the durable retry-queue
+    // write for it is deferred into the finalization transaction itself (the
+    // db.transaction a few thousand lines down that clears processing_token)
+    // rather than attempted here, non-transactionally, with its own cascade
+    // of fallbacks — see that transaction for why.
+    // Set below, by the booking-triggered pre-draft hook, ONLY when
+    // GATE_ESTIMATOR_BOOKING_PREDRAFTS is on for THIS call (codex #4815 r2
+    // P2): the price-agreed sweep chains onto this SAME settled promise
+    // instead of racing it — that hook can supersede the same-generation
+    // estimator_draft_block (quotePromised:true, the documented assessment
+    // exception) while composing, and the sweep re-stamping it mid-composer
+    // made the exception's outcome timing-dependent instead of
+    // deterministic.
+    let bookingPreDraftPromise = null;
+    // The same pre-draft, re-runnable once by the price-agreed sweep when a
+    // QUEUED agreed-price verdict blocked it and that sweep then landed and
+    // cleared the entry (codex #4815 r9 P2). Same pass identity.
+    let rerunBookingPreDraft = null;
     if (estimatorEngineOn() && !extracted.is_spam
-      && (callQuotePromised || callQuoteRequested)) {
+      && (callQuotePromised || callQuoteRequested)
+      && callAgreedPrice == null) {
       // Fire-and-forget: the DEEP composer + property pipeline can take
       // minutes, and the scheduling/confirmation work below must not wait on
       // a drafting pass. The engine's own dedupe guards make re-entry safe
@@ -13705,43 +14486,103 @@ const CallRecordingProcessor = {
               // public and sendable with nothing scheduled. Push the call
               // into the retry lane so the whole pass runs again; the
               // estimator re-quarantines from a clean slate.
-              try {
-                let lastResortQ = db('call_log').where({ id: call.id })
-                  .whereNull('processing_token');
-                // Generation-fenced (pre-push P1, PR #3304): this detached
-                // handler can fire after a NEWER pass claimed and finalized
-                // — overwriting its settled status with extraction_failed
-                // would recreate the exact NULL-token ambiguity the
-                // generation counter closes. Same generation = still ours.
-                if (procGeneration != null) {
-                  lastResortQ = lastResortQ.where('processing_generation', procGeneration);
-                }
-                const pushed = await lastResortQ.update({
-                  processing_status: 'extraction_failed',
-                  updated_at: new Date(),
-                });
-                if (pushed) {
-                  logger.error(`[call-proc] quarantine queue write failed for ${callSid} — call pushed to the retry lane`);
-                } else {
-                  logger.info(`[call-proc] quarantine retry-lane write skipped for ${callSid} — a newer pass owns the call`);
-                }
-              } catch (lastResortErr) {
-                logger.error(`[call-proc] quarantine retry-lane write ALSO failed for ${callSid}: ${lastResortErr.message}`);
-              }
+              await pushCallToRetryLaneAfterQuarantineFailure({
+                call, callSid, procGeneration, reason: 'email_identity_conflict',
+              });
             }
           }
         });
     } else {
       // Reconcile-only pass (codex P1, PR #3304 GH r6): even when this run
       // is not an eligible drafting run — gate off, retry no longer
-      // quote-flavored, spam-classified — a linkage correction must still
-      // invalidate any existing draft for this call, or the stale draft
-      // keeps its old lead links and a live public token indefinitely.
-      // It runs AFTER the token-fenced finalization (codex P0 GH r7b):
-      // this pass still holds processing_token here, and the fallback
-      // linkage context deliberately refuses a call with a live token, so
-      // firing now would silently no-op on exactly the transient-context
-      // case it exists for. See the post-finalization hook below.
+      // quote-flavored, spam-classified, OR a price was agreed on the call
+      // — a linkage correction must still invalidate any existing draft for
+      // this call, or the stale draft keeps its old lead links and a live
+      // public token indefinitely. It runs AFTER the token-fenced
+      // finalization (codex P0 GH r7b): this pass still holds
+      // processing_token here, and the fallback linkage context
+      // deliberately refuses a call with a live token, so firing now would
+      // silently no-op on exactly the transient-context case it exists for.
+      // See the post-finalization hook below.
+      //
+      // callAgreedPrice != null is stronger than an ordinary reconcile
+      // (codex #4815 r1 P1): reconcileDraftLinksForCall below only re-links
+      // an existing draft's lead — it does nothing when the lead itself is
+      // unchanged, so a force-reprocess that newly finds an agreed price
+      // left any existing (possibly differently-priced) draft from an
+      // earlier pass live and sendable, with nothing stopping a detached
+      // composer from that same earlier, still-overlapping pass from
+      // inserting a fresh one right behind it. Reuse the SAME forced-
+      // invalidation path the identity-conflict quarantine and the
+      // spam/voicemail terminal verdict use (invalidateDraftForCall stamps
+      // the call-level estimator_draft_block FIRST — the fence every draft
+      // creator's in-lock check (callRejectedForDrafting) and every public-
+      // estimate read (staleCallLinkageReason) honor regardless of the
+      // reason string — THEN archives every live estimator_engine draft for
+      // this call), fenced to THIS pass's own claim so a peer that reclaimed
+      // the call is never overridden. Best-effort/non-throwing: unlike the
+      // spam/voicemail terminal verdict, this pass is not disqualifying the
+      // call itself, so a failure here must not fail the whole run — the
+      // post-finalization sweep below is the second, belt-and-braces pass.
+      if (callAgreedPrice != null) {
+        logger.info(`[call-proc] estimator engine skipped for ${maskSid(callSid)} — price agreed on call (${formatAgreedPriceLabel(callAgreedPrice)}), skipped:'price_agreed_on_call'`);
+        try {
+          const { invalidateDraftForCall } = require('./estimator-engine');
+          const invalidation = await invalidateDraftForCall(call.id, {
+            reason: 'price_agreed_on_call',
+            // NEVER an accepted/declined/expired row (codex #4815 r2 P0):
+            // an agreed-price cleanup is not a verdict on the estimate or
+            // whoever already acted on it.
+            scope: 'nonterminal_drafts',
+            ownershipFence: { callLogId: call.id, procToken, procGeneration },
+          });
+          if (!invalidation.ok) {
+            // codex #4815 r5 P1: the durable queue write used to be
+            // attempted HERE, non-transactionally, with its own fallback
+            // ladder (a live-owner retry-lane push, then a parallel
+            // finalStatus='extraction_failed' flip) when it ALSO failed.
+            // That parallel transition wrote through NORMAL finalization —
+            // never touched extraction_attempts, returned success:true —
+            // so processAllPending retried the call every 10 minutes
+            // forever instead of stopping at CALL_EXTRACTION_MAX_ATTEMPTS,
+            // and no exhausted-retry card ever filed. Deferred instead: the
+            // finalization transaction below (the db.transaction a few
+            // thousand lines down that clears processing_token) writes
+            // this SAME marker atomically with the terminal status. Either
+            // both the status and the marker commit, or neither does — a
+            // marker write failure there throws, the transaction rolls
+            // back (a stale claim the normal reclaim picks up), and the
+            // ALREADY-ESTABLISHED extraction_failed path in the outer
+            // catch takes over: it increments extraction_attempts, files
+            // the exhausted-retry card at the cap, and reports
+            // success:false — the one bounded-retry accounting this call
+            // needs, not a second one built beside it.
+            logger.warn(`[call-proc] price-agreed draft invalidation did not land for ${maskSid(callSid)} — the finalization transaction will queue the durable retry`);
+            pendingQuarantineMarker = { reason: 'price_agreed_on_call', procGeneration };
+          } else {
+            // Retire the earlier engine run's "draft ready" bell — or the
+            // deduped generic quote-promised bell it upgraded in place —
+            // in the SAME row (codex #4815 r2 P2, refined r3 P1): otherwise
+            // staff are still told to send an amount the draft above just
+            // archived. Only when a draft was ACTUALLY invalidated, and a
+            // genuinely promised written quote is never silently cleared.
+            const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+              .filter(Boolean)
+              .join(' ') || (phone ? maskPhone(phone) : 'Unknown caller');
+            await retirePriceAgreedEstimatorBell({
+              call, callSid, callerName, callAgreedPrice, callQuotePromised,
+              invalidated: invalidation.invalidated === true,
+              customerId, logPrefix: 'price-agreed',
+            });
+          }
+        } catch (invalidateErr) {
+          logger.warn(`[call-proc] price-agreed draft invalidation threw for ${maskSid(callSid)}: ${invalidateErr.message}`);
+          // A thrown invalidation attempt landed nothing either — same
+          // durable-retry need as an explicit invalidation.ok:false above.
+          pendingQuarantineMarker = { reason: 'price_agreed_on_call', procGeneration };
+        }
+        agreedPriceDraftSweepPending = true;
+      }
       reconcileOnlyDraftLinksPending = true;
     }
 
@@ -14683,6 +15524,65 @@ const CallRecordingProcessor = {
                     return null;
                   }
                 };
+                // Codex round-3 P1 (findings #2 + #3): the disclaimed-
+                // caller-ID hold must land INSIDE this booking transaction —
+                // not only the post-commit registerScheduleSideEffects call,
+                // whose catch previously swallowed a failed write and let
+                // messaging arm unheld — and must cover the
+                // ai_call_pipeline_followup second-treatment row too, which
+                // ensureCallFollowUpVisit creates with no hold of its own
+                // (dispatch confirming it later texted the disclaimed ANI).
+                // One UPDATE by source_call_log_id catches every live row
+                // this call created (primary + any follow-up) regardless of
+                // which of the ensureCallFollowUpVisit call sites (fresh
+                // insert, idempotency-conflict reuse, marker/slot-match
+                // reuse) this pass took — called right after each, so the
+                // follow-up row (if any) already exists to be caught.
+                // Deliberately NOT caught here: a genuine write failure
+                // aborts the whole transaction (schedErr path) rather than
+                // let a booking the caller disclaimed their number on commit
+                // unheld — the outer catch's "no booking, no SMS, office
+                // reviews" outcome is the correct fail-closed answer.
+                // Round-5 P1: widened past a bare whereNull the same way and
+                // for the same reason as registerScheduleSideEffects's
+                // fallback writer above — a force-reprocess of a previously
+                // CLEARED call must still install a fresh hold_at (newer
+                // than the leftover cleared_at) when callback_number_needed
+                // is raised again, or the stale clearance keeps satisfying
+                // cleared_at >= hold_at while a new review card opens.
+                // Idempotent within THIS pass (not across retries) for the
+                // same reason: once landed, hold_at is non-null and
+                // cleared_at is null, so a second call in the same pass (the
+                // primary row, then again for a follow-up row sharing this
+                // source_call_log_id) reads "currently held" and no-ops
+                // rather than bumping the timestamp a second time.
+                const stampCallbackNumberHoldForCall = async () => {
+                  if (!callbackNumberNeededHoldActive) return;
+                  // Codex round 6 (structural): the NUMBER-keyed hold every
+                  // SMS is checked against, in this same transaction — a
+                  // failure aborts the booking exactly like the visit stamp
+                  // below. Idempotent per (number, call).
+                  // Round 7 P1: ensure-only — the decision point already
+                  // armed it; this write never re-arms. active=false means
+                  // the office resolved the card (verified the number)
+                  // after this pass decided: that clearance stands, and the
+                  // visit-level hold is not re-stamped over it either.
+                  const numberHold = await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
+                    phone: contactPhone, customerId, callLogId: call.id, conn: trx,
+                  });
+                  if (numberHold.recorded && numberHold.active === false) return;
+                  await trx('scheduled_services')
+                    .where({ source_call_log_id: call.id })
+                    .where((qb) => {
+                      qb.whereNull('callback_number_hold_at')
+                        .orWhereRaw('call_sms_cleared_at IS NOT NULL AND call_sms_cleared_at >= callback_number_hold_at');
+                    })
+                    .update({
+                      callback_number_hold_at: new Date(),
+                      call_sms_cleared_at: null,
+                      call_sms_cleared_recipient: null,
+                    });
+                };
                 const existing = await findExistingCallAppointment({
                   customerId,
                   call,
@@ -14789,9 +15689,18 @@ const CallRecordingProcessor = {
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
                     attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                    // Codex round-4 P1 (PR #4807): this row's source_call_log_id
+                    // linkage may itself be durable from an earlier pass (a
+                    // reprocess landing here via the `linked` lookup in
+                    // findExistingCallAppointment) rather than freshly attached
+                    // in THIS pass — either way the hold must be present before
+                    // this trx commits. Idempotent (whereNull-guarded, keyed on
+                    // source_call_log_id), so a no-op when it already stuck.
+                    await stampCallbackNumberHoldForCall();
                   } else if (!primaryRowSkipped && !reuseHeldForAddress) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                    await stampCallbackNumberHoldForCall();
                   } else if (!primaryRowSkipped && reuseHeldForAddress && callFollowUpPlan) {
                     // Only when no AI follow-up child exists yet (an earlier
                     // pass may have created it; it was pulled above, not
@@ -15010,6 +15919,16 @@ const CallRecordingProcessor = {
                   reusedExistingSchedule = true;
                   attachedManualBookingId = attachable.row.id;
                   attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  // Codex round-4 P1 (PR #4807): the update just above stamped
+                  // source_call_log_id onto this human-created booking — the
+                  // ONLY linkage the hold stamp keys on — but this attach path
+                  // deliberately never calls ensureCallFollowUpVisit (see the
+                  // "Deliberately NO ensureCallFollowUpVisit" note below), which
+                  // was round 3's only call site for the stamp. Without this
+                  // call the row's existing confirmation/reminder send goes out
+                  // unheld to a caller who just disclaimed their ANI. Same trx
+                  // as the attach update, so it commits or rolls back with it.
+                  await stampCallbackNumberHoldForCall();
                   const primaryRow = stamped;
                   // The deal still closed — same idempotent, ownership-guarded
                   // conversion as the reuse path above, same re-service
@@ -15410,6 +16329,7 @@ const CallRecordingProcessor = {
                     });
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
+                  await stampCallbackNumberHoldForCall();
                   return created;
                 }
                 // Idempotency conflict: another writer already created a row with this key.
@@ -15458,6 +16378,7 @@ const CallRecordingProcessor = {
                   if (!existingByKeySkipped) {
                     followUpCreated = await ensureCallFollowUpVisit(existingByKey);
                   }
+                  await stampCallbackNumberHoldForCall();
                   return existingByKey;
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
@@ -15637,6 +16558,9 @@ const CallRecordingProcessor = {
                   scheduledDate,
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
+                  callbackNumberHoldActive: callbackNumberNeededHoldActive,
+                  disclaimedPhone: contactPhone,
+                  callLogId: call.id,
                 });
               } else if (attachedManualBookingId) {
                 if (disputeHeldReuse) await noteRetainedVisit();
@@ -15726,6 +16650,9 @@ const CallRecordingProcessor = {
                   windowStart: replaySlotStart ? String(replaySlotStart).slice(0, 5) : null,
                   serviceType: svc.service_type,
                   closeReminderWindows: !replaySlotStart,
+                  callbackNumberHoldActive: callbackNumberNeededHoldActive,
+                  disclaimedPhone: contactPhone,
+                  callLogId: call.id,
                 });
                 // Post-registration slot verify (Codex #3361 r26 P2): the
                 // fresh read above still leaves a gap before the reminder
@@ -16173,6 +17100,18 @@ const CallRecordingProcessor = {
               .ignore()
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
+          // callback_number_needed hold persistence moved to
+          // registerScheduleSideEffects (codex round-2 finding #4): stamped
+          // there, immediately before the reminder row is armed, instead of
+          // here — many awaits (routing, customer/lead writes, this whole
+          // confirmation-decision block) separate this point from booking,
+          // and a visit landing inside the 72h/24h window could have been
+          // texted before a stamp written only here ever committed. Lifted
+          // by the SAME durable clearance signal the card-request backstop
+          // already honors: call_sms_cleared_at (the confirm-leg clearance
+          // just above, or the office-confirm hook in
+          // outbound-review-confirm.js, or the triage-card / phone-edit
+          // clearance paths in customer-phone-fanout.js).
           // Card-on-file spec §3 Phase 5.3, REORDERED by owner ruling
           // 2026-08-06: the card/Auto Pay link goes out FIRST, before the
           // confirmation text — right after the call, when the appointment
@@ -16233,6 +17172,17 @@ const CallRecordingProcessor = {
             // call_sms_cleared_at stamp and NO call-recipient override:
             // call-level clearance was not given, so the stamp the pre-visit
             // backstop keys on must not assert it.
+            // SCOPED OUT of the callback_number_needed email-fallback ruling
+            // (2026-09-25): requestCardForAppointment has no email-only
+            // delivery mode today — its invitation email is a companion
+            // that only fires AFTER a CONFIRMED SMS dispatch (see
+            // startInvitationEmailLeg in appointment-card-request.js), so
+            // there is no clean way to reach an email-only recipient here
+            // without a real change to that (payment-adjacent, bearer-token)
+            // funnel. Staying 'none' is the SAFE default: no card link goes
+            // anywhere rather than risk one on the disclaimed ANI. Follow-up:
+            // build an email-only delivery mode there if the office wants
+            // the card ask to go out automatically for this case.
             try {
               const { requestCardForAppointment } = require('./appointment-card-request');
               await requestCardForAppointment({ scheduledServiceId, trigger: 'ai_call_pipeline', delivery: 'none' });
@@ -17040,7 +17990,18 @@ const CallRecordingProcessor = {
         const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require('./estimator-engine/booking-predraft');
         if (bookingPreDraftsEnabled()) {
           const preDraftBookingId = appointmentResult.scheduledServiceId;
-          void (estimatorEnginePromise || Promise.resolve())
+          rerunBookingPreDraft = () => maybePreDraftForBooking(preDraftBookingId, {
+            ownerProcToken: procToken,
+            ownerProcGeneration: procGeneration,
+          });
+          // Tracked (not void-discarded) so the price-agreed sweep below
+          // can chain onto this SAME settled promise (codex #4815 r2 P2)
+          // instead of racing it — this hook can supersede the same-generation
+          // estimator_draft_block (quotePromised:true, the documented
+          // assessment exception) while composing, and the sweep
+          // re-stamping it mid-composer made that exception's outcome
+          // timing-dependent. Never rejects: every branch below resolves.
+          bookingPreDraftPromise = (estimatorEnginePromise || Promise.resolve())
             .catch(() => {})
             // THIS pass's identity rides the delegation (codex P1, PR
             // #3304 — generation-rework GH round): the hook runs after the
@@ -17048,16 +18009,17 @@ const CallRecordingProcessor = {
             // token — and without the generation the delegated pass-start
             // clear could not retire this pass's own (or an older)
             // generation-stamped draft block.
-            .then(() => maybePreDraftForBooking(preDraftBookingId, {
-              ownerProcToken: procToken,
-              ownerProcGeneration: procGeneration,
-            }))
+            .then(() => rerunBookingPreDraft())
             .then((outcome) => {
               if (outcome?.drafted) {
                 logger.info(`[call-proc] assessment pre-draft created for ${maskSid(callSid)} (estimate ${outcome.estimateId})`);
               }
+              return outcome;
             })
-            .catch((err) => logger.warn(`[call-proc] assessment pre-draft failed for ${maskSid(callSid)}: ${err.message}`));
+            .catch((err) => {
+              logger.warn(`[call-proc] assessment pre-draft failed for ${maskSid(callSid)}: ${err.message}`);
+              return null;
+            });
         }
       } catch (predraftErr) {
         logger.warn(`[call-proc] assessment pre-draft hook unavailable: ${predraftErr.message}`);
@@ -17104,7 +18066,9 @@ const CallRecordingProcessor = {
         { callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt },
         procToken,
       );
-    } else if (customerId && !extracted.email && extracted.email_raw && !v2EmailBlocked
+    } else if (customerId && !extracted.email
+        && (extracted.email_raw || (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2))
+        && !v2EmailBlocked
         && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
       // A DEMOTED address (dictation policy moved the unconfirmed guess to
       // email_raw) still owes this customer the first-touch drip once the
@@ -17113,7 +18077,10 @@ const CallRecordingProcessor = {
       // newsletter hold Step 8 records. The EMPTY held address is inert to
       // every automated release — the invalid-address guard blocks sends
       // and the sweep skips empty-address rows — so only the correction's
-      // explicit address releases it.
+      // explicit address releases it. A V1/V2 email DISAGREEMENT (owner
+      // ruling 2026-09-25) is the same "owed drip, no address to send to"
+      // shape — extracted.email_candidates carries the evidence instead of
+      // email_raw, so it takes the same branch.
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email was demoted to read-back review`);
       beehiivResult = { skipped: 'email_under_review' };
       // Token-fenced through the merge (r44/r45) — see the primary
@@ -17133,6 +18100,10 @@ const CallRecordingProcessor = {
             last_name: capitalizeName(extracted.last_name),
             id: customerId,
           },
+          // Consultation-booking email block (dark behind
+          // GATE_LEAD_INSPECTION_LINK) needs a lead id to render; `leadId`
+          // is this same call's own leads-table row, already resolved above.
+          context: { leadId: leadId || undefined },
         });
         beehiivResult = { local: r };
       } catch (err) {
@@ -17363,6 +18334,7 @@ const CallRecordingProcessor = {
         // (codex r1 P2a). Same enforce-mode test used elsewhere in this file.
         v2Promoted: CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED,
         maskedCallSid: maskSid(callSid),
+        contactPhone, // → callbackNumberCoachingNote's ANI-comparison (call-triage-flags.js P1)
         // Checked inside, immediately before the score row is written: the
         // provider await between here and there is minutes long.
         stillOwnsClaim,
@@ -17797,6 +18769,24 @@ const CallRecordingProcessor = {
           ),
           updated_at: new Date(),
         });
+      // codex #4815 r5 P1: the durable price-agreed quarantine-retry
+      // marker commits ATOMICALLY with the terminal status it protects —
+      // either both land or neither does. Fenced on `written > 0`: if this
+      // pass lost ownership of the row, the marker is not this pass's to
+      // write either — a peer's own pass owns the call now. A write
+      // failure here THROWS (markQuarantinePending's trx form) and rolls
+      // the whole transaction back, so the call stays claimed and falls
+      // through to the outer extraction_failed catch below — the one
+      // bounded-retry accounting (extraction_attempts increment,
+      // exhausted-retry triage card) this failure needs, not a parallel
+      // one built beside it.
+      if (written > 0 && pendingQuarantineMarker) {
+        const { markQuarantinePending } = require('./estimator-engine');
+        await markQuarantinePending(call.id, pendingQuarantineMarker.reason, {
+          procGeneration: pendingQuarantineMarker.procGeneration,
+          trx,
+        });
+      }
       // The customer_creation_failed card rides the SAME transaction as the
       // status it describes: filed after finalization it could outlive the
       // pass — a force reprocess repairing the call while the insert was
@@ -18144,6 +19134,121 @@ const CallRecordingProcessor = {
       }
     }
 
+    // SECOND price-agreed invalidation pass, after the terminal status
+    // committed (codex #4815 r1 P1 — same two-pass shape as the
+    // spam/voicemail terminal verdict's own post-write sweep, thousands of
+    // lines up): the pre-write pass stamps the durable call-side block
+    // first, so a detached composer that had already locked the call could
+    // still have inserted between that stamp and its scan, or the pre-write
+    // pass's own invalidation attempt could have failed. This sweeps
+    // whatever landed. Best-effort — the block marker keeps any straggler
+    // unsendable, whether or not this sweep itself succeeds.
+    if (finalized > 0 && agreedPriceDraftSweepPending) {
+      // Detached (codex #4815 r3 P2): awaiting bookingPreDraftAssessmentDrafted
+      // here blocked the SEQUENTIAL processAllPending batch on a minutes-long
+      // composer promise — chain fire-and-forget onto the SAME tracked
+      // pre-draft promise instead (the identical pattern the pre-draft hook
+      // itself already uses for estimatorEnginePromise a few thousand lines
+      // up), so this pass returns immediately while the sweep still never
+      // runs before the pre-draft hook settles. That hook (quotePromised:
+      // true, the documented assessment exception) can supersede this call's
+      // same-generation estimator_draft_block while composing, and the
+      // sweep re-stamping it mid-composer made the exception's outcome
+      // timing-dependent — sometimes a legitimate assessment-booking
+      // insert bounced off the very block the sweep just wrote. Chaining
+      // preserves that ordering guarantee without the block.
+      void bookingPreDraftAssessmentDrafted(bookingPreDraftPromise).then(async (assessmentExceptionDrafted) => {
+        if (assessmentExceptionDrafted) {
+          logger.info(`[call-proc] post-finalization price-agreed sweep stood down for ${maskSid(callSid)} — the booking pre-draft's assessment exception owns a live estimate`);
+          return;
+        }
+        try {
+          const { invalidateDraftForCall: invalidateAgreedPriceAgain } = require('./estimator-engine');
+          const sweepInvalidation = await invalidateAgreedPriceAgain(call.id, {
+            reason: 'price_agreed_on_call',
+            // NEVER an accepted/declined/expired row (codex #4815 r2 P0),
+            // same as the pre-write pass above.
+            scope: 'nonterminal_drafts',
+            // Generation-fenced like the reconcile-only pass above: the
+            // terminal write cleared this pass's token, so a newer
+            // force-reprocess can claim the call and start composing a
+            // valid replacement (e.g. the extraction was corrected and no
+            // price is agreed after all) — an unfenced sweep would stamp the
+            // obsolete verdict over that replacement. Same generation = still
+            // ours; a newer claim wins and this sweep no-ops (ownershipLost).
+            ownershipFence: { callLogId: call.id, procToken, procGeneration },
+          });
+          if (!sweepInvalidation.ok) {
+            // Durable retry (codex #4815 r2 P1) — same reasoning as the
+            // pre-write pass: a log line alone left nothing to catch a
+            // stale draft if this LAST attempt also failed.
+            logger.warn(`[call-proc] post-finalization price-agreed draft sweep did not land for ${maskSid(callSid)} — queuing a durable retry`);
+            const { markQuarantinePending } = require('./estimator-engine');
+            // Generation-fenced (codex #4815 r7 P1): 'ownership_lost' (a
+            // newer pass claimed the call before this detached write) is
+            // truthy — nothing queued, and nothing to escalate.
+            const queued = await markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });
+            if (!queued) {
+              // codex #4815 r3 P1 (r5 P1: now routes through the bounded
+              // extraction-failure accounting): this sweep runs DETACHED,
+              // after finalization already cleared processing_token — the
+              // pre-write pass's own failure instead defers its marker
+              // write into the finalization transaction (see there), so it
+              // never reaches this fallback. A false here previously left
+              // the call processed with no block and no queued retry at
+              // all.
+              await pushCallToRetryLaneAfterQuarantineFailure({
+                call, callSid, procGeneration, reason: 'price_agreed_on_call',
+              });
+            }
+          } else {
+            // This sweep LANDED the invalidation (codex #4815 r7 P0): when
+            // the pre-write pass failed, finalization queued this
+            // generation's durable retry — and that entry's whole job is
+            // the invalidation that just committed. Retire it now,
+            // generation-matched (never a newer pass's entry, never a
+            // different verdict's), instead of leaving it to block new
+            // drafts until the scheduler drains it. An ownership loss
+            // landed nothing, so its entry stays for the drainer.
+            let clearedOwnEntry = 0;
+            if (!sweepInvalidation.ownershipLost) {
+              const { clearOwnQuarantinePending } = require('./estimator-engine');
+              clearedOwnEntry = await clearOwnQuarantinePending(call.id, { reason: 'price_agreed_on_call', generation: procGeneration });
+            }
+            // Same bell retirement as the pre-write pass (codex #4815 r2
+            // P2, refined r3 P1) — covers the case where THAT attempt
+            // failed (queued above) and this sweep is the one that
+            // actually landed.
+            const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+              .filter(Boolean)
+              .join(' ') || (phone ? maskPhone(phone) : 'Unknown caller');
+            await retirePriceAgreedEstimatorBell({
+              call, callSid, callerName, callAgreedPrice, callQuotePromised,
+              invalidated: sweepInvalidation.invalidated === true,
+              customerId, logPrefix: 'post-finalization price-agreed',
+            });
+            // The queued entry this sweep just cleared is what refused the
+            // assessment pre-draft that ran first (codex #4815 r9 P2) —
+            // re-run it once, same pass identity, so the owner-approved
+            // Waves Assessment quote is not lost. AFTER the bell retirement:
+            // the re-run's own bell must not be the one retired.
+            if (clearedOwnEntry > 0) {
+              await rerunAssessmentPreDraftAfterQuarantineClear({
+                bookingPreDraftPromise, rerun: rerunBookingPreDraft, callSid,
+              });
+            }
+          }
+        } catch (sweepErr) {
+          logger.warn(`[call-proc] post-finalization price-agreed draft sweep failed (non-blocking): ${sweepErr.message}`);
+        }
+      }).catch((chainErr) => {
+        // Belt-and-braces only — bookingPreDraftAssessmentDrafted never
+        // rejects and the try/catch above swallows every failure inside
+        // the .then itself.
+        logger.warn(`[call-proc] post-finalization price-agreed sweep chain failed (non-blocking): ${chainErr.message}`);
+      });
+    }
+
     // The pass did not complete if its final fenced write matched no rows: a
     // peer reclaimed the token, this attempt's terminal status never landed,
     // and its zero-triage layers were skipped above for the same reason.
@@ -18183,6 +19288,16 @@ const CallRecordingProcessor = {
         // same blocking card at the cap. (Re-running after partial side
         // effects is bounded-safe: the idempotency keys, won-status skips,
         // and same-date dup holds make reprocessing a supported operation.)
+        //
+        // A forced-quarantine verdict this pass could not persist
+        // (pendingQuarantineMarker — its invalidation AND queue write, or
+        // the finalization transaction carrying the queue write, failed)
+        // rides THIS same statement into the multi-entry quarantine queue
+        // (codex #4815 r8 P1): the retry lane alone stops blocking once
+        // the budget is spent or the call ages out, while the queued entry
+        // keeps every estimate guard fail-closed until the drainer resolves
+        // the verdict. Atomic with the release — both land or neither does.
+        const { QUARANTINE_QUEUE_APPEND_SQL, quarantineQueueEntry } = require('../utils/estimate-claim-sql');
         const releasedRows = await db('call_log')
           .where({ id: call.id })
           .where('processing_token', procToken)
@@ -18190,6 +19305,12 @@ const CallRecordingProcessor = {
             processing_status: 'extraction_failed',
             extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
             processing_token: null,
+            ...(pendingQuarantineMarker ? {
+              metadata: db.raw(QUARANTINE_QUEUE_APPEND_SQL, [
+                String(pendingQuarantineMarker.reason),
+                JSON.stringify(quarantineQueueEntry(pendingQuarantineMarker.reason, pendingQuarantineMarker.procGeneration)),
+              ]),
+            } : {}),
             updated_at: new Date(),
           }).returning(['extraction_attempts']);
         if (!releasedRows.length) {
@@ -18921,6 +20042,9 @@ CallRecordingProcessor._test = {
   voicemailCallbackAlertPlan,
   shouldHoldLeadEmailEnrollment,
   mintEmailReviewCardsFenced,
+  emailCardSignature,
+  deriveEmailHoldTarget,
+  emailPassEvidence,
   transcribeRecording,
   extractCallDataV2,
   CALL_EXTRACTION_ROUTE,
@@ -18941,6 +20065,10 @@ CallRecordingProcessor._test = {
   snapshotStampedLeadStates,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
+  bookingPreDraftAssessmentDrafted,
+  pushCallToRetryLaneAfterQuarantineFailure,
+  retirePriceAgreedEstimatorBell,
+  rerunAssessmentPreDraftAfterQuarantineClear,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
   resolveCallBillingPayer,
@@ -19002,6 +20130,16 @@ CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMP
 // ET-offset-vs-instant rule would drift from it.
 CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
 CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
+
+// Production contract for admin-triage.js's callback_number_needed clear
+// check (finding #3, round 4 P1, PR #4807 — NOT test-only): the direction-
+// aware ANI-vs-dialed-number resolution used to decide whether a customer's
+// on-file phone is a genuine replacement for the disclaimed number must be
+// the SAME one the call pipeline used to resolve the contact at hold time,
+// or the two can drift (an outbound call's disclaimed number is to_phone,
+// not from_phone). It lived only under `_test` — every real caller outside
+// this file got `undefined`.
+CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

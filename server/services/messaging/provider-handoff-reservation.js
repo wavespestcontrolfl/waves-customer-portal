@@ -2,7 +2,6 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { isEnabled } = require('../../config/feature-gates');
 
 const handles = new WeakSet();
 const GRATITUDE_RESERVATION_OWNER = Symbol('gratitude_reservation_owner');
@@ -51,14 +50,21 @@ function gratitudeReservationOwner(input, callbacks = {}) {
     : null;
 }
 
+// Coordination follows claim possibility, not the live gate: an older
+// instance can still claim during a rolling disable, and a retained uncertain
+// claim outlives the gate, until the activation stamp is cleared.
+function gratitudeCoordinationActive() {
+  return require('../sms-gratitude-context').gratitudeClaimsPossible();
+}
+
 function canonicalCoordinationApplies(input, callbacks = {}) {
-  if (!isEnabled('smsGratitudeReplies')) return false;
+  if (!gratitudeCoordinationActive()) return false;
   if (!input || input.audience !== 'customer' || !['sms', 'push'].includes(input.channel)) return false;
   return !trustedGratitudeOwnsReservation(input, callbacks);
 }
 
 function directCoordinationApplies({ messageType, reservationOwner = null } = {}) {
-  if (!isEnabled('smsGratitudeReplies')) return false;
+  if (!gratitudeCoordinationActive()) return false;
   if (messageType === 'ai_gratitude' && reservationOwner === GRATITUDE_RESERVATION_OWNER) return false;
   return !['internal_alert', 'admin_alert'].includes(String(messageType || ''));
 }

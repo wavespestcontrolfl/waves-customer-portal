@@ -248,7 +248,11 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const notifier = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
-    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [], dropped: 1 }) };
+    // A dropped model proposal alone never bells (owner ruling 2026-09-24); a
+    // real exception (here: a non-durable irrigation fact) still does.
+    const exceptionFact = { field: 'irrigation_controller_location', value: 'The controller is beside the garage',
+      quote: 'The controller is beside the garage', duration: 'visit_only', property_id: context.properties[0].id };
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [exceptionFact], dropped: 1 }) };
     const preview = await replaySmsProfile(args);
     expect(preview).toMatchObject({ dry_run: true, notification: { action: 'create_notification' } });
     expect(await mockPg('notifications')).toHaveLength(0);
@@ -267,12 +271,47 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const notifier = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
-    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [], dropped: 1 }) };
+    const exceptionFact = { field: 'irrigation_controller_location', value: 'The controller is beside the garage',
+      quote: 'The controller is beside the garage', duration: 'visit_only', property_id: context.properties[0].id };
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [exceptionFact], dropped: 1 }) };
     const preview = await replaySmsProfile(args);
     expect(await mockPg('notifications')).toHaveLength(0);
     expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toMatchObject({ applied: 0, proposed: 0 });
     expect(await mockPg('notifications')).toHaveLength(1);
     expect((await mockPg('sms_log').first()).operational_analysis.replay.notification).toEqual(preview.notification);
+  });
+
+  test('owner ruling 2026-09-24: dropped model proposals alone never ring the review bell; a real exception still does', async () => {
+    const droppedOnly = { facts: [], dropped: 2 };
+    const outcome = await recordMessageOperations(mockPg, message, droppedOnly, context);
+    expect(outcome).toMatchObject({ recorded: 0, applied: 0, proposed: 0 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis).toMatchObject({ facts: [], dropped: 2 });
+
+    const nextMessage = { ...message, id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}`,
+      message_body: 'We do not have any pets.', created_at: new Date(message.created_at.getTime() + 1000) };
+    await mockPg('sms_log').insert(nextMessage);
+    const withException = { dropped: 2, facts: [{ field: 'pet_details', quote: nextMessage.message_body,
+      value: nextMessage.message_body, property_id: context.properties[0].id, duration: 'durable' }] };
+    await recordMessageOperations(mockPg, nextMessage, withException, context);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0]).toMatchObject([
+      'alert', 'SMS instructions need review', expect.any(String),
+      { metadata: expect.objectContaining({ unverified_count: 2 }) },
+    ]);
+  });
+
+  test('owner ruling 2026-09-24: a dropped-only replay preview carries no notification disposition', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [], dropped: 3 }) };
+    const preview = await replaySmsProfile(args);
+    expect(preview).toMatchObject({ dry_run: true, unverified_count: 3 });
+    expect(preview).not.toHaveProperty('notification');
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash }))
+      .toEqual({ recorded: 0, applied: 0, proposed: 0, preserved: 0 });
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('replay holds preserved proposal dispositions against concurrent staff rejection through commit', async () => {

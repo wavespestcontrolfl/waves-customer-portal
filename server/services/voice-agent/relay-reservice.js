@@ -130,8 +130,9 @@ async function requestReserviceText(input = {}, ctx = {}) {
 
   const lane = String(input.lane || '').trim().toLowerCase();
   if (!LANE_CATEGORY[lane]) {
-    return 'Which service is the problem with — pest control or lawn care? Ask the caller, then call '
-      + 'request_reservice again with lane set to "pest" or "lawn".';
+    return 'The lane is unknown. Ask the caller an OPEN-ENDED question about what they are seeing and '
+      + 'where (never "pest control or lawn care?"), work out from their answer whether it is a pest or '
+      + 'lawn problem, then call request_reservice again with lane set to "pest" or "lawn".';
   }
   // ⭐ SCRUBBED AT THE SOURCE, FAIL CLOSED. `issue` is caller-authored text
   // headed for durable rows (service_requests.subject/description) and the

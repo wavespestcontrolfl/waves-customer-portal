@@ -54,8 +54,8 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 async function renderBilling(customer) {
   render(<BillingTab customer={customer} refreshCustomer={vi.fn()} />);
   await waitFor(() => expect(api.getBalance).toHaveBeenCalled());
-  // The loading panel resolves before assertions run.
-  await screen.findByText(/Payment History/i);
+  // The loading copy also mentions payment history; wait for the section title.
+  await screen.findByText(/^Payment History$/i);
 }
 
 describe('BillingTab — cancelled account is read-only (C4)', () => {

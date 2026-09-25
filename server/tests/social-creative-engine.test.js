@@ -68,6 +68,9 @@ describe('CREATIVE_FLAGS', () => {
     delete process.env.SOCIAL_IMAGE_PROVIDER;
     process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS = 'true';
     expect(Engine.CREATIVE_FLAGS.chain).toBe(Engine.SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN);
+    expect(Engine.CREATIVE_FLAGS.defaultChain).toBe(Engine.SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN);
+    delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS;
+    expect(Engine.CREATIVE_FLAGS.defaultChain).toBe(Engine.SOCIAL_DEFAULT_CHAIN);
   });
 });
 
@@ -180,6 +183,8 @@ describe('generateVariants', () => {
 
     expect(variants).toHaveLength(2);
     expect(new Set(variants.map((v) => v.conceptKey)).size).toBe(2);
+    // An all-invalid SOCIAL_IMAGE_PROVIDER must land on the social chain, not the blog one.
+    expect(ImageGenerator).toHaveBeenLastCalledWith(expect.objectContaining({ defaultChain: Engine.CREATIVE_FLAGS.defaultChain }));
     for (const variant of variants) {
       expect(variant.imageUrl).toMatch(/^https:\/\/cdn\.test\//);
       expect(variant.gbpImageUrl).toMatch(/^https:\/\/cdn\.test\//);

@@ -10,7 +10,7 @@ const mockTwilioCreate = jest.fn();
 
 jest.mock('twilio', () => jest.fn(() => ({ messages: { create: mockTwilioCreate } })));
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test', verifyServiceSid: 'VA_test' } }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(gate => gate !== 'smsGratitudeReplies'), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(gate => gate !== 'smsGratitudeReplies'), gateEnvValue: jest.fn(() => false), gateEnvTimestamp: jest.fn(() => null) }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-sms-templates', () => ({ isTemplateActive: jest.fn(async () => true) }));
 jest.mock('../services/sms-guard', () => ({ validateOutbound: jest.fn(() => ({ ok: true })) }));
@@ -18,6 +18,13 @@ jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(() => 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true, push: null })) }));
 jest.mock('../services/audit-log', () => ({ auditInternalAdminAlertDeliveryIssue: jest.fn(() => Promise.resolve()) }));
+
+// callback_number_needed (PR #4807): every SMS is checked against
+// disclaimed_number_holds (sendCustomerMessage + sendSMS's dispatch). Not
+// under test here — stubbed to "never held" so no hold read reaches the db.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberBlocksSend: jest.fn(async () => false),
+}));
 
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');

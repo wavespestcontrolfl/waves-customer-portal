@@ -173,7 +173,18 @@ unassigned work remains a fixed blocker. Public responses expose no full route,
 provider legs or exact route coordinates. Scheduling traffic lookups share a
 40-request/800-element allowance per application process per 15 minutes across
 HTTP requests and fall back to the conservative model when exhausted; response
-data remains request-local. Gate-off availability is unchanged apart from the
+data remains request-local. Existing stops are planned at the owner planning
+minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
+window span; the visit being offered keeps its own resolved allowance. Detour
+cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
+/book availability engine behind /api/booking/availability and the public
+reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
+`SCHEDULING_MAX_DETOUR_MINUTES` (default 30; an empty day counts the whole trip
+from HQ). Staff and phone booking see every fit. The finder's per-slot `return_time`
+(modeled return to HQ) and result-level `rejections` tally are staff/diagnostic
+fields only: /api/booking/availability builds each public slot field by field
+(`routes/booking.js`) and the estimate routes build theirs through
+`classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
@@ -559,8 +570,18 @@ for a scheduled-service token the visit's `prep_view_count` /
 miss = the key moved, so the page re-resolves and renders the new guide),
 which pairs with the manual prep sender's re-key / release fence on those
 view columns so an opened page never changes guide or 404s behind the
-customer; the `prep_guide_views` log row follows; response shape
-unchanged),
+customer; the `prep_guide_views` log row follows. Response blocks (#4790):
+in addition to `paragraph` / `heading` / `details` / `callout`, the
+anonymous payload may carry `{ type: 'list', items: string[] }` check-list
+blocks, and prose in paragraph / callout `content`, list `items[]` and
+details `label` / `value` (NOT heading content, which both surfaces print
+verbatim) may contain author-written inline markdown links
+`[label](https://…)` that the page and PDF render with an
+http/https/mailto/tel allowlist. Server-side interpolation now also
+substitutes `items[]` and details `label`, and breaks any `](` inside a
+substituted VALUE (`neutralizeLinkSyntax`) so a customer-influenced field
+can never complete link syntax — only template-authored markdown becomes
+an anchor),
 `/api/public/prep/:token/pdf` (downloadable PDF twin of the prep page —
 action-bar Download parity with service reports; same 32-hex token format
 gate, same 60 req/min limiter, same privacy headers, generic 404; payload
@@ -897,6 +918,10 @@ MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
 estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
 on both paths; the response otherwise describes only the requested parcel).
+Operational `meta.providerStatus` (credential configuration and attempted-provider
+health) is staff-only; `publicLookupMeta` removes it from every public response.
+The public `errors` array includes only the known outside-service-area verdict;
+`publicLookupErrors` removes provider failures and internal diagnostic messages.
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,
@@ -1317,6 +1342,63 @@ estimate documents retain the strict framing policy. Query markers do not
 grant draft access or change token, payment, consent, or booking eligibility.
 The iframe exchanges only height/step messages with its parent, which checks
 the sender window and exact origin; no customer details or tokens are posted.
+`pricing.frequencies[].perServiceTreatments[].palmCount` (palm-care bullet
+lane, owner 2026-09-24; restructured to a single evidence + stamping
+chokepoint in Codex round 4 on #4789 after three earlier rounds each found
+a different per-builder carry that leaked a raw or stale value — NO
+pricing-bundle builder attaches this field itself any more): a positive
+integer riding a Tree & Shrub treatment row ONLY when the quote actually
+PRICED those palms. The v4.7 routine palm-care reserve (armed in prod
+2026-09-24 ~23:53Z) prices a SERVICE-LINE palm count either way (folded
+into the legacy per-tree term while unarmed), but a PROPERTY-sourced count
+prices NOTHING until the reserve is armed — every quote saved before the
+arm time is unarmed. `pricedTreeShrubPalmCount`
+(`server/services/pricing-engine/tree-shrub-palm-priced.js`) is the one
+evidence predicate: priced when `palmCountSource === 'service_line'`, OR
+the reserve's `perPalmAnnual`/`minutesPerPalmVisit` knob is armed;
+evidence-less legacy rows (no source, no knob) fail closed — no bullet.
+`treeShrubPalmCountForEstData` (estimate-public.js) resolves the one
+authoritative count per request: a FRESH engine result (this request just
+re-ran pricing) is checked first and is final for T&S once present,
+outranking anything stored; otherwise the MAPPED envelope
+(`result.results.tsMeta`, gated through the predicate — then the mapped
+`result.recurring.services[]` tree_shrub row, ALSO gated through the
+predicate rather than trusted, since a raw engine line can land in that
+exact slot too, e.g. one-tap-purchase.js) is authoritative and exclusive
+whenever it exists — a revision can leave an older raw `engineResult`
+behind, so raw line items are read only when no mapped envelope exists at
+all. `stampTreeShrubPalmCount` then applies that ONE resolved count to
+the FINAL pricing bundle, on every `buildPricingBundle` return path
+(a fresh build, the `sendSnapshot` fast path, and the pricing-cache fast
+path all funnel through it) — it sets the field on every tree_shrub
+`perServiceTreatments` row and unconditionally DELETES it otherwise, so a
+stale or raw value from an older cached/snapshotted bundle, or from any
+future producer, can never survive to the client. Validated
+positive-integer, clamped ≤200 by the pricing engine; omitted entirely (not
+`0`, not `null`) whenever the estimate has no palms OR the palms it has
+weren't priced, so existing clients that don't know the field see no
+change. A ROWLESS single-service T&S card (an engine-backed multi-service
+split, no `perServiceTreatments` on that card) instead carries the count
+directly on the frequency. The full set of paths the stamper writes, all
+under the same priced-only validation, omission, and chokepoint rule:
+`pricing.frequencies[].perServiceTreatments[].palmCount`,
+`pricing.frequencies[].palmCount` (rowless solo-T&S ladder),
+`pricing.services[].frequencies[].perServiceTreatments[].palmCount`,
+`pricing.services[].frequencies[].palmCount` (rowless split T&S card), and
+`pricing.serviceCadenceCombos[].perServiceTreatments[].palmCount`. On the
+`sendSnapshot` and pricing-cache fast paths, when stored evidence alone
+cannot resolve a count (an engine-inputs-only estimate, whose build stamped
+from the fresh engine run), the count already stamped in the frozen/cached
+bundle is reused — only the stamper writes this field, so a stamped value
+is trusted. Display-only:
+drives one extra customer-facing inclusion bullet ("Includes care for your
+N palms — seasonal palm nutrition and root-zone treatment when needed", singular
+for 1) and has no effect on any price, fee, line item, or booking/acceptance
+math anywhere in the contract. The legacy server-rendered estimate page
+(`use_v2_view=false` / the GrowthBook control arm) shows the identical
+sentence on its own Tree & Shrub service-price card, resolved through the
+same `treeShrubPalmCountForEstData` evidence function (stored evidence
+only — this render path never re-runs the engine).
 `/accept` fails CLOSED when the accepted plan's money cannot be resolved
 (#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
 — `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application

@@ -31,10 +31,14 @@ jest.mock('../models/db', () => {
   qb.select = jest.fn();
   qb.first = jest.fn();
   qb.update = jest.fn(() => Promise.resolve(1));
-  const db = jest.fn(() => qb);
+  const prefsQb = {};
+  prefsQb.where = jest.fn(() => prefsQb);
+  prefsQb.first = jest.fn(async () => null);
+  const db = jest.fn((table) => table === 'notification_prefs' ? prefsQb : qb);
   db.transaction = jest.fn(async (cb) => cb(db));
   db.raw = jest.fn((sql) => sql);
   db.__qb = qb;
+  db.__prefsQb = prefsQb;
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -83,6 +87,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.transaction.mockImplementation(async (cb) => cb(db));
   db.__qb.update.mockResolvedValue(1);
+  db.__prefsQb.first.mockReset().mockResolvedValue(null);
   // Standing default: the real dbLevelMergeConflict now also queries
   // scheduled_services for a same-family recurring-series conflict
   // (ADMIN-BUG-R15) on every call, beyond the one customer-rows `.select()`
@@ -253,6 +258,19 @@ describe('merge_customers', () => {
       error: expect.stringMatching(/inactive primary property.*reconcile/i),
     });
     expect(refused.preview).toBeUndefined();
+    expect(mockDescribeMergeEffects).not.toHaveBeenCalled();
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
+  });
+
+  test('disjoint billing notification choices refuse the preview before an approval card is created', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    db.__prefsQb.first.mockResolvedValueOnce({ invoice_channels: ['email'] })
+      .mockResolvedValueOnce({ invoice_channels: ['sms'] });
+    const result = await executeCustomerLifecycleTool('merge_customers', {
+      winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID,
+    }, {});
+    expect(result.code).toBe('billing_delivery_channels_conflict');
+    expect(result.preview).toBeUndefined();
     expect(mockDescribeMergeEffects).not.toHaveBeenCalled();
     expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
@@ -480,7 +498,7 @@ describe('merge_customers', () => {
     // executor's DB-dependent refusal probes (billing-mode history,
     // multi-property siblings) — never a count of its own (codex #4348 r7
     // P2 shared those probes; moving/effects/fingerprint stay the engine's).
-    expect([...new Set(db.mock.calls.map((c) => c[0]))].sort()).toEqual(['customers', 'invoices', 'scheduled_services']);
+    expect([...new Set(db.mock.calls.map((c) => c[0]))].sort()).toEqual(['customers', 'invoices', 'notification_prefs', 'scheduled_services']);
     expect(db.__qb.count).not.toHaveBeenCalled(); // no local counting
   });
 

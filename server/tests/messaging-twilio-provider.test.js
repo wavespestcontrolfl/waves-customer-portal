@@ -70,6 +70,20 @@ describe('Twilio messaging provider adapter', () => {
     );
   });
 
+  test.each([
+    ['forwards humanAuthored for a composer-typed body', { humanAuthored: true }, true],
+    ['does not forward humanAuthored for an unchanged AI draft', { humanAuthored: false }, false],
+    ['does not infer humanAuthored from a manual message type', { original_message_type: 'manual' }, false],
+    ['ignores a non-boolean humanAuthored', { humanAuthored: 'true' }, false],
+  ])('%s', async (_label, metadata, expected) => {
+    await sendViaTwilio(baseInput({ metadata }));
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ humanAuthored: expected }),
+    );
+  });
+
   test('forwards the optional final provider predicate unchanged', async () => {
     const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
 

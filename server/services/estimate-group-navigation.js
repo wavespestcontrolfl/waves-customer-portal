@@ -27,7 +27,7 @@ async function publishedGroupLinks(database, estimate, { lock = false } = {}) {
       || estimateOffCustomerSurface(candidate)) continue;
     // The public reader uses the same durable call-side verdict. An
     // estimate-side quarantine marker may be absent after a failed write.
-    if (await callSideBlockForEstimateData(database, parseEstimateData(candidate.estimate_data))) continue;
+    if (await callSideBlockForEstimateData(database, parseEstimateData(candidate.estimate_data), { estimateStatus: candidate.status })) continue;
     published.push(candidate);
   }
   return published;

@@ -2995,6 +2995,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             totalBeforeDiscount: item.totalBeforeDiscount ?? item.total ?? null,
             recurringCustomerDiscountRate: item.recurringCustomerDiscountRate ?? null,
             tier: item.tier ?? null,
+            // Palm pricing evidence on the Tree & Shrub row: the customer
+            // card's palm-care bullet shows a count only when this proves the
+            // quote priced the palms (pricedTreeShrubPalmCount, #4789).
+            ...(item.service === 'tree_shrub' && item.palmCount !== undefined
+              ? {
+                palmCount: item.palmCount,
+                palmCountSource: item.palmCountSource ?? null,
+                palmReserveActive: item.palmReserveActive ?? null,
+                pricingKnobs: item.pricingKnobs ?? null,
+              }
+              : {}),
             // Mosquito rows name their program via selectedProgram/tier and
             // carry station/dunk addOns — both feed the audit's COGS
             // overrides (GH codex on #3628).
@@ -3957,6 +3968,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
           await db('newsletter_subscribers').where({ id: result.subscriber.id }).update({
             quote_lead_automation_pending: true,
+            // Carried through double opt-in so the confirmed enrollment can
+            // still stamp the lead (consultation-booking block, Codex
+            // #4813 r1 P1). Latest quote wins.
+            quote_lead_id: lead.id,
             updated_at: new Date(),
           });
           try {
@@ -3975,6 +3990,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 first_name: contactFirstName || null,
                 last_name: contactLastName || null,
               },
+              // Consultation-booking email block (dark behind
+              // GATE_LEAD_INSPECTION_LINK) needs a lead id to render.
+              context: { leadId: lead.id },
             });
             logger.info(`[public-quote] existing subscriber id=${result.subscriber?.id} new_lead ${r.enrolled ? 'queued' : 'skipped'}`);
           } catch (e) {

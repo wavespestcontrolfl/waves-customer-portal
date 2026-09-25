@@ -375,7 +375,10 @@ function draftSendPolicyFields(draft, recipient) {
  * later.
  */
 function blockedSendResponse(res, smsResult) {
-  return res.status(422).json({
+  // The photo-triage late recheck's outage is transient — same retryable
+  // 503 contract as its route-level check (codex #4810 r13).
+  const status = smsResult.code === 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE' ? 503 : 422;
+  return res.status(status).json({
     error: smsResult.reason || smsResult.code || 'SMS send blocked/failed',
     code: smsResult.code,
     nextAllowedAt: smsResult.nextAllowedAt,
@@ -520,6 +523,149 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
       dispatchedMissing,
     }),
   };
+}
+
+// Photo-triage drafts (services/photo-text-triage.js): the opportunity
+// gauge's ownership/offer check ran at CREATION; by approval the customer
+// may have enrolled in the family, a plan rate may have landed, or the
+// owner-only per-application figure may have drifted. Re-run the SAME
+// check right before dispatch (codex #4810 r6): owned/unavailable → 409,
+// claim released, draft left pending for the owner to rewrite; a quote
+// whose figure moved → flags.quote refreshed, 409 so the owner re-reads it;
+// lookup failure → 503 fail closed. Narrowly scoped to intent
+// 'photo_triage'; the text itself never carries a price, and it is never
+// parsed — photo-triage drafts are approve-as-written only (the /revise
+// route refuses them), so the stored verdict describes what is sent.
+// customerId: the RESOLVED recipient's customer (sms_log linkage included —
+// a draft linked through its SMS row after creation must recheck against
+// that customer, codex #4810 r7).
+// Holds that leave the row exactly as it is — the copy itself is unusable,
+// so nothing stored is patched: a pre-gauge draft (old universal copy,
+// nothing to recheck — the owner revises it, still allowed for these, or
+// rejects it) and an audience change (the copy was chosen for another
+// customer or for a lead).
+const PHOTO_TRIAGE_PLAIN_HOLDS = {
+  pre_gauge: {
+    error: 'This photo-triage draft predates the opportunity check — revise it before sending, or reject it.',
+    code: 'PHOTO_TRIAGE_PRE_GAUGE',
+  },
+  recipient_changed: {
+    error: 'This photo-triage draft was written before the sender was linked to this customer or became a customer — reject it and reply from the conversation.',
+    code: 'PHOTO_TRIAGE_RECIPIENT_CHANGED',
+  },
+};
+
+// Stale pitch holds: the no-pitch reason recorded on the downgraded verdict
+// and the owner-facing explanation, per recheck answer.
+const PHOTO_TRIAGE_STALE_HOLDS = {
+  owned: { reason: 'already_owned', why: (family) => `the customer now has ${family} on their plan` },
+  unavailable: { reason: 'offer_unavailable', why: (family) => `ownership of ${family} could not be confirmed (live plan rate or lookup failure)` },
+  no_longer_priced: { reason: 'quote_needs_review', why: (family) => `${family} can no longer be priced for this customer` },
+};
+
+// The customer a photo-triage draft is going to NOW. The SMS row's current
+// linkage wins: resolveDraftRecipient prefers the draft's own customer_id,
+// which a later re-link of the SMS row never updates (codex #4810 r15). A
+// NULL there is not an unlink signal — the draft's customer came from the
+// phone lookup, not this column, so it may never have been set.
+async function currentPhotoTriageCustomer(draft, customerId) {
+  if (draft.sms_log_id) {
+    const smsRow = await db('sms_log').where({ id: draft.sms_log_id }).first();
+    if (smsRow?.customer_id) return smsRow.customer_id;
+  }
+  return customerId || draft.customer_id;
+}
+
+// The send-time hook form of the recheck (preDispatchCheck/preProviderCheck
+// contract): stale → blocked; an outage → the same retryable code the
+// route-level 503 uses, never a raw exception message.
+// The customer is re-resolved on every call — the SMS row can be re-linked
+// while the send pipeline awaits (codex #4810 r16).
+function photoTriageLateCheck(recheckDraftOffer, draft, customerId, flags) {
+  return async () => {
+    try {
+      const late = await recheckDraftOffer({ customerId: await currentPhotoTriageCustomer(draft, customerId), flags });
+      return late.ok ? { ok: true } : { ok: false, code: 'PHOTO_TRIAGE_OFFER_STALE', reason: 'photo-triage offer changed before dispatch — draft left pending' };
+    } catch {
+      return { ok: false, code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE', reason: 'Photo-triage offer recheck unavailable — draft left pending, try again', retryable: true };
+    }
+  };
+}
+
+async function guardPhotoTriageSend(draft, res, { customerId = draft.customer_id } = {}) {
+  // Same predicate the /revise refusal claims on (intent), so the two
+  // halves of the approve-as-written rule can never disagree on a draft.
+  if (draft.intent !== 'photo_triage') return { blocked: false };
+  const flags = parseFlags(draft.flags);
+  let verdict;
+  const { recheckDraftOffer, stripQuotePitch, priceContextSentence, replacePriceContext } = require('../services/photo-triage-opportunity');
+  try {
+    verdict = await recheckDraftOffer({ customerId: await currentPhotoTriageCustomer(draft, customerId), flags });
+  } catch (err) {
+    logger.warn(`[admin-drafts] photo-triage offer recheck failed for draft ${draft.id} (code=${err?.code || 'none'})`);
+    await releaseDraftClaim(draft.id);
+    res.status(503).json({ error: 'Photo-triage offer recheck unavailable — draft left pending, try again', code: 'PHOTO_TRIAGE_RECHECK_UNAVAILABLE' });
+    return { blocked: true };
+  }
+  if (verdict.ok) {
+    // Same recheck again at sendCustomerMessage's last await before the
+    // provider handoff (codex #4810 r12): the manual-reply reservation and
+    // validator pipeline run between here and the send, and the customer
+    // can enroll meanwhile. A non-ok answer there blocks the send; the
+    // failed-send path releases the claim, and the next approve lands in
+    // the handling below.
+    // Run at BOTH late hooks — preDispatchCheck (after the validators) and
+    // preProviderCheck (at the Twilio handoff, after the provider's own
+    // awaits; codex #4810 r13). An outage there answers the same retryable
+    // code the route-level 503 uses, never a raw exception message.
+    const lateCheck = photoTriageLateCheck(recheckDraftOffer, draft, customerId, flags);
+    return { blocked: false, preDispatchCheck: lateCheck, preProviderCheck: lateCheck };
+  }
+  const plainHold = PHOTO_TRIAGE_PLAIN_HOLDS[verdict.blocked];
+  if (plainHold) {
+    await releaseDraftClaim(draft.id);
+    res.status(409).json(plainHold);
+    return { blocked: true };
+  }
+  if (verdict.repriced !== undefined) {
+    const nextFlags = { ...flags, quote: { ...(flags.quote || {}), per_visit: verdict.repriced }, quote_repriced_at: new Date().toISOString() };
+    await releaseDraftClaim(draft.id, {
+      flags: JSON.stringify(nextFlags),
+      // The owner-only price sentence is replaced, never left stale.
+      context_summary: replacePriceContext(draft.context_summary, priceContextSentence(verdict.family, verdict.repriced)),
+    });
+    res.status(409).json({
+      error: `The offer core now prices ${verdict.family} at $${verdict.repriced.toFixed(2)} per application — the draft's owner-only figure was refreshed; review and approve again.`,
+      code: 'PHOTO_TRIAGE_REPRICED',
+    });
+    return { blocked: true };
+  }
+  // Downgrade the stored gauge verdict on the released row so the owner's
+  // next click passes the recheck instead of being held forever (pre-push
+  // audit r6): mode → advise, the no-pitch reason recorded, the stale
+  // owner-only quote dropped, AND the pitch sentence replaced in the draft
+  // text itself — a plain second Approve must not send the stale ask.
+  const stale = PHOTO_TRIAGE_STALE_HOLDS[verdict.blocked];
+  const heldReason = stale.reason;
+  const priorReasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
+  const heldFlags = {
+    ...flags,
+    opportunity_mode: 'advise',
+    opportunity_reasons: priorReasons.includes(heldReason) ? priorReasons : [...priorReasons, heldReason],
+    quote: null,
+    offer_recheck_held_at: new Date().toISOString(),
+  };
+  const why = stale.why(verdict.family);
+  await releaseDraftClaim(draft.id, {
+    flags: JSON.stringify(heldFlags),
+    draft_response: stripQuotePitch(draft.draft_response),
+    context_summary: replacePriceContext(draft.context_summary, `Held at approve: ${why}; the quote ask was removed.`),
+  });
+  res.status(409).json({
+    error: `Photo-triage draft held: ${why} — the quote ask was removed from the draft; review the new copy, then approve.`,
+    code: 'PHOTO_TRIAGE_OFFER_STALE',
+  });
+  return { blocked: true };
 }
 
 // Post-guard failure release. A clarify draft past its dispatch decision
@@ -852,6 +998,8 @@ router.put('/:id/approve', async (req, res, next) => {
     // remove.
     const clarifyGuard = await guardClarifySend(draft, res);
     if (clarifyGuard.blocked) return;
+    const photoTriageGuard = await guardPhotoTriageSend(draft, res, { customerId: recipient.customerId });
+    if (photoTriageGuard.blocked) return;
     let smsResult;
     try {
       smsResult = await sendManualCustomerSms({
@@ -865,7 +1013,9 @@ router.put('/:id/approve', async (req, res, next) => {
         // stored-preference consentBasis); legacy null-purpose drafts keep
         // the conversational shape exactly.
         ...sendPolicy,
-        preDispatchCheck: clarifyGuard.preDispatchCheck,
+        // At most one is set: clarify and photo-triage drafts are distinct intents.
+        preDispatchCheck: clarifyGuard.preDispatchCheck || photoTriageGuard.preDispatchCheck,
+        preProviderCheck: photoTriageGuard.preProviderCheck,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
@@ -978,6 +1128,22 @@ router.put('/:id/revise', async (req, res, next) => {
       const existing = await db('message_drafts').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Draft not found' });
       return res.status(409).json({ error: 'Draft is no longer pending' });
+    }
+
+    // Photo-triage drafts are approve-as-written or reject (codex #4810
+    // r7–r11): their dispatch recheck reads the stored gauge verdict, and
+    // free operator wording is not something a text parser can hold to the
+    // no-price / no-pitch-an-owned-family rules. Refused before any send
+    // work; the claim goes back with the edit cleared.
+    // Only gauge-written drafts (flags.gauge_version); an older or
+    // hand-written photo-triage draft stays revisable (codex #4810 r14).
+    const { isGaugedDraft } = require('../services/photo-triage-opportunity');
+    if (draft.intent === 'photo_triage' && isGaugedDraft(parseFlags(draft.flags))) {
+      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      return res.status(409).json({
+        error: 'Photo-triage drafts can be approved as written or rejected, not revised — reject it and reply from the conversation.',
+        code: 'PHOTO_TRIAGE_NOT_REVISABLE',
+      });
     }
 
     // Shared pre-send gate recheck (click-followup drafts only).

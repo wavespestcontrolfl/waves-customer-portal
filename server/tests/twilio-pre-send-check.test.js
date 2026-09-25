@@ -23,6 +23,7 @@ jest.mock('../config/feature-gates', () => ({
   // Push channel routing reads this at send time; false keeps routing inert
   // so these tests keep asserting the legacy SMS path.
   gateEnvValue: jest.fn(() => false),
+  gateEnvTimestamp: jest.fn(() => null),
 }));
 jest.mock('../models/db', () => jest.fn());
 // Codex round 3 on #4608 (structural move, P1 PRRT_kwDOR3YQi86j8Ydm): the
@@ -50,6 +51,13 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
+}));
+
+// callback_number_needed (PR #4807): every SMS is checked against
+// disclaimed_number_holds (sendCustomerMessage + sendSMS's dispatch). Not
+// under test here — stubbed to "never held" so no hold read reaches the db.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberBlocksSend: jest.fn(async () => false),
 }));
 
 const TwilioService = require('../services/twilio');
@@ -174,6 +182,43 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       expect(result.success).toBe(true);
       expect(events).toEqual(['locked', 'sdk', 'released', 'sms_log']);
     } finally { jest.useRealTimers(); require('../models/db').mockReset(); }
+  });
+
+  test.each([
+    ['stamps human_authored on the sms_log row for a composer-typed body', { humanAuthored: true }, true],
+    ['leaves human_authored off for an automated or unchanged-draft manual send', { humanAuthored: false }, false],
+    ['leaves human_authored off when the option is absent', {}, false],
+  ])('%s', async (_label, extra, expected) => {
+    const rows = [];
+    require('../models/db').mockImplementation(() => ({ insert: async row => { rows.push(row); } }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Yes, the app is the easiest way to move it.', {
+        messageType: 'manual', fromNumber: FROM, ...extra,
+      });
+      expect(result.success).toBe(true);
+      expect(rows).toHaveLength(1);
+      const metadata = JSON.parse(rows[0].metadata);
+      expect(metadata.pre_handoff_stamp).toBe(true);
+      expect(metadata.human_authored === true).toBe(expected);
+      expect(Object.prototype.hasOwnProperty.call(metadata, 'human_authored')).toBe(expected);
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  test.each([
+    ['a typed send with no media option (scheduled dispatch) records zero media', { humanAuthored: true }, []],
+    ['a typed send with media urls but no media option stays unknown', { humanAuthored: true, mediaUrls: ['https://example.invalid/a.jpg'] }, undefined],
+    ['an automated send records no media evidence', { humanAuthored: false }, undefined],
+    ['a caller-supplied media array is kept as is', { humanAuthored: true, media: [] }, []],
+  ])('%s', async (_label, extra, expected) => {
+    const rows = [];
+    require('../models/db').mockImplementation(() => ({ insert: async row => { rows.push(row); } }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Yes, the app is the easiest way to move it.', {
+        messageType: 'manual', fromNumber: FROM, ...extra,
+      });
+      expect(result.success).toBe(true);
+      expect(JSON.parse(rows[0].metadata).media).toEqual(expected);
+    } finally { require('../models/db').mockReset(); }
   });
 
   test('a direct customer caller publishes before its handoff and settles the normalized accepted provider context afterward', async () => {

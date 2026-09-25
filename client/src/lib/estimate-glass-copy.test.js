@@ -19,6 +19,8 @@ import {
   glassTierDisplay,
   setCommercialGlass,
   setGlassDefault,
+  treeShrubPalmBulletText,
+  withTreeShrubPalmBullet,
   GLASS_COPY,
   GLASS_DAY_LINES,
 } from './estimate-glass-copy';
@@ -369,6 +371,37 @@ describe('commercial glass release', () => {
     expect(applyCommercialExteriorScope(commercial, true, true)).toEqual(commercial);
     expect(applyCommercialExteriorScope(commercial, true, null)).toEqual(commercial);
     expect(applyCommercialExteriorScope(commercial, false, false)).toEqual(commercial);
+  });
+
+  it('withTreeShrubPalmBullet appends the palm-care bullet only for a positive integer count (owner 2026-09-24)', () => {
+    const base = ['Ornamental inspection during service visits', 'Seasonal plant-health treatment support'];
+    expect(withTreeShrubPalmBullet(base, 4)).toEqual([
+      ...base,
+      'Includes care for your 4 palms — seasonal palm nutrition and root-zone treatment when needed',
+    ]);
+    expect(withTreeShrubPalmBullet(base, 1)).toEqual([
+      ...base,
+      'Includes care for your 1 palm — seasonal palm nutrition and root-zone treatment when needed',
+    ]);
+    // Zero/absent/invalid — list comes back unchanged (same reference contents).
+    expect(withTreeShrubPalmBullet(base, 0)).toEqual(base);
+    expect(withTreeShrubPalmBullet(base, undefined)).toEqual(base);
+    expect(withTreeShrubPalmBullet(base, -1)).toEqual(base);
+    expect(withTreeShrubPalmBullet(base, 2.5)).toEqual(base);
+    expect(withTreeShrubPalmBullet(null, 4)).toBeNull();
+  });
+
+  it('treeShrubPalmBulletText — pure text builder used by both the row-list appender and the rowless T&S card (Codex #3)', () => {
+    expect(treeShrubPalmBulletText(4)).toBe(
+      'Includes care for your 4 palms — seasonal palm nutrition and root-zone treatment when needed',
+    );
+    expect(treeShrubPalmBulletText(1)).toBe(
+      'Includes care for your 1 palm — seasonal palm nutrition and root-zone treatment when needed',
+    );
+    expect(treeShrubPalmBulletText(0)).toBeNull();
+    expect(treeShrubPalmBulletText(undefined)).toBeNull();
+    expect(treeShrubPalmBulletText(-1)).toBeNull();
+    expect(treeShrubPalmBulletText(2.5)).toBeNull();
   });
 
   it('gives commercial rows their own inclusions with no residential guarantee claims', () => {

@@ -15,6 +15,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const { convertHeicToJpeg, MAX_HEIC_BYTES } = require('../services/heic-to-jpeg');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -30,6 +31,7 @@ const STATUS_LABELS = {
   scheduled: 'Scheduled',
   resolved: 'Resolved',
 };
+const REQUEST_PHOTO_RE = /^data:image\/(jpeg|jpg|png|webp|heic|heif);base64,/i;
 
 // Strip HTML-ish characters before storage so admin/UI surfaces can never
 // render injected markup (mirrors routes/requests.js).
@@ -44,6 +46,7 @@ const listSchema = Joi.object({
   limit: Joi.number().integer().min(1).max(200).default(50),
   page: Joi.number().integer().min(1).default(1),
 });
+const requestIdSchema = Joi.string().uuid().required();
 
 const updateSchema = Joi.object({
   status: Joi.string().valid(...STATUSES).optional(),
@@ -120,6 +123,46 @@ router.get('/', async (req, res, next) => {
     const total = await countQuery.count('id as count').first();
 
     res.json({ requests, total: parseInt(total?.count || 0, 10), limit, page });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/requests/:id/photos — load request evidence on demand.
+// Keep base64 photo data out of the triage list; staff fetch it only when
+// opening the attachment strip for one request.
+router.get('/:id/photos', async (req, res, next) => {
+  try {
+    const { value: requestId, error } = requestIdSchema.validate(req.params.id);
+    if (error) return res.status(400).json({ error: 'Invalid service request id' });
+    const request = await db('service_requests')
+      .where({ id: requestId })
+      .first('id', 'photos');
+    if (!request) return res.status(404).json({ error: 'Service request not found' });
+
+    let photos = request.photos;
+    if (typeof photos === 'string') {
+      try { photos = JSON.parse(photos); } catch { photos = []; }
+    }
+    const viewable = [];
+    for (const photo of Array.isArray(photos) ? photos : []) {
+      const match = typeof photo === 'string' && REQUEST_PHOTO_RE.exec(photo);
+      if (!match) continue;
+      if (!/^hei[cf]$/i.test(match[1])) {
+        viewable.push(photo);
+        continue;
+      }
+      // Only a viewing derivative changes: retain the stored original evidence.
+      const encoded = photo.slice(match[0].length);
+      if (encoded.length > Math.ceil(MAX_HEIC_BYTES / 3) * 4) continue;
+      try {
+        const jpeg = await convertHeicToJpeg(Buffer.from(encoded, 'base64'));
+        viewable.push(`data:image/jpeg;base64,${jpeg.toString('base64')}`);
+      } catch {
+        // One corrupt/unsupported image must not hide the other evidence.
+        logger.warn(`[admin-requests] HEIC preview unavailable for request ${requestId}`);
+      }
+    }
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ photos: viewable, unavailableCount: Array.isArray(photos) ? photos.length - viewable.length : 0 });
   } catch (err) { next(err); }
 });
 

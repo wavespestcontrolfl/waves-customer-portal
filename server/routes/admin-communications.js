@@ -46,6 +46,7 @@ const {
   supersedeStaleDecision,
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
+const { gratitudeClaimsPossible } = require('../services/sms-gratitude-context');
 const {
   excludeUnresolvedSendReservations,
   releaseById: releaseReservationById,
@@ -530,7 +531,10 @@ router.post('/sms', async (req, res, next) => {
     // Provider coordination must publish the same From endpoint the SDK will
     // use. Resolve it before any thread-lock transaction, then freeze it into
     // both an existing caller-owned reservation and canonical delivery.
-    const providerCoordinationEnabled = isEnabled('smsGratitudeReplies');
+    // Coordination follows claim possibility, not the live gate: during a
+    // rolling disable an older instance can still claim until the activation
+    // stamp is cleared.
+    const providerCoordinationEnabled = gratitudeClaimsPossible();
     let providerCoordinationFromNumber = null;
     let providerCoordinationCustomerId = trustedCustomerId || null;
     if (providerCoordinationEnabled) {
@@ -618,10 +622,12 @@ router.post('/sms', async (req, res, next) => {
     // after 30 minutes but retains an explicitly uncertain provider outcome.
     let autoSendInFlight = false;
     let staleAtClaim = false;
-    // The autonomous-claim lookup only matters while Phase E is enabled. The
-    // recovery reservation below is separate: it is also required gate-off
-    // whenever this send claims or parks a suggestion.
-    const autoSendInterlock = isEnabled('smsAutoSend');
+    // The autonomous-claim lookup AND reservation publication matter while
+    // either autonomous lane is enabled, and while a gratitude claim can still
+    // be made or retained after its gate is disabled (activation stamp set).
+    // The recovery reservation below is also required whenever this send
+    // claims or parks a suggestion.
+    const autoSendInterlock = isEnabled('smsAutoSend') || gratitudeClaimsPossible();
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
       if (parkPhoneLast10) {
@@ -3657,9 +3663,9 @@ router.post('/schedule-sms', async (req, res, next) => {
         // is mid-send to this thread — it could land as a duplicate when this
         // one dispatches. The 'scheduled' sms_log row inserted below is itself
         // the marker the auto-send's guard sees, so this check only needs to
-        // cover the reverse race (auto claimed first). Gated → no-op while
-        // auto-send is dormant.
-        if (isEnabled('smsAutoSend')
+        // cover the reverse race (auto claimed first). No-op while both
+        // autonomous lanes are dormant and gratitude was never activated.
+        if ((isEnabled('smsAutoSend') || gratitudeClaimsPossible())
           && await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: normalizePhoneLast10(to), customerId: trustedCustomerId })) {
           const conflict = new Error('An automated reply is going out to this conversation right now — refresh in a moment before scheduling.');
           conflict.statusCode = 409;

@@ -824,7 +824,18 @@ function initScheduledJobs() {
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const { sweepUngeocodedCustomers } = require('./geocoder');
-      await runExclusive('geocoder-backstop', () => sweepUngeocodedCustomers());
+      await runExclusive('geocoder-backstop', async () => {
+        // Appointment pins are independent of the customer's primary address.
+        // Keep recovery in this job, ahead of the unrelated customer backlog.
+        // A service-query failure must not suppress the existing customer
+        // safety net; both sweeps still share this one exclusive lease.
+        try {
+          await require('./geocoder-service-locations').sweepUngeocodedServices({ dryRun: false });
+        } catch (err) {
+          logger.error(`[geocoder] service-location backstop failed (${err.code || 'service_sweep_error'}): ${err.message}`);
+        }
+        await sweepUngeocodedCustomers();
+      });
     } catch (err) {
       logger.error(`[geocoder] backstop sweep failed: ${err.message}`);
     }
@@ -3415,6 +3426,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN (offset one minute) — Delayed gratitude replies
+  // Independent of the scheduled-SMS sweep: queued operational sends never
+  // wait behind courtesy replies, and a stalled scheduled-SMS recovery never
+  // runs a gratitude reply past its ten-minute deadline. The five-minute
+  // cadence fits the eight-minute eligibility window.
+  // No cron lease: runExclusive would pin a pool connection for the whole
+  // sweep, and each send already holds a second one through the provider call
+  // while Twilio's own sms_log insert needs a third (DB_POOL_MAX=2 is
+  // supported). Overlap is safe without it — every claim is send-once per
+  // inbound under the thread lock — so an in-process guard only skips a tick
+  // that would overlap this instance's still-running sweep.
+  // =========================================================================
+  let gratitudeSweepRunning = false;
+  cron.schedule('1-59/5 * * * *', async () => {
+    if (!isEnabled('smsGratitudeReplies') || gratitudeSweepRunning) return;
+    gratitudeSweepRunning = true;
+    try {
+      const result = await require('./sms-auto-send').processGratitudeAutoSendCandidates();
+      if (result?.attempted) logger.info(`[sms-gratitude] delayed send sweep: ${result.sent} sent of ${result.attempted} attempted`);
+    } catch (err) {
+      logger.warn(`[sms-gratitude] delayed send sweep failed: ${err.message}`);
+    } finally {
+      gratitudeSweepRunning = false;
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
@@ -5221,8 +5259,18 @@ function initScheduledJobs() {
         .whereNull('c.deleted_at')
         .select('chs.customer_id');
 
+      // Retention drafts are a FLAGSHIP customerCopy call per at-risk
+      // customer, keyed on the churn band the owner ruled unusable
+      // (2026-08-29; win-back is a manual send). The engine itself enforces
+      // GATE_CUSTOMER_INTEL_AI (customerIntelAiLive) on every caller; this
+      // skip only saves the per-customer reads and logs the count.
+      const { customerIntelAiLive } = require('../config/feature-gates');
+      const intelAiOn = customerIntelAiLive();
       let outreachGenerated = 0;
-      for (const c of atRisk) {
+      if (!intelAiOn) {
+        logger.info(`[customer-intel] GATE_CUSTOMER_INTEL_AI off — skipped retention drafting for ${atRisk.length} at-risk customers`);
+      }
+      for (const c of intelAiOn ? atRisk : []) {
         const result = await RetentionEngine.generateRetentionOutreach(c.customer_id);
         if (result) outreachGenerated++;
       }
