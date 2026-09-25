@@ -8301,3 +8301,4 @@ module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermit
 module.exports.perApplicationFeeUnresolvedBody = perApplicationFeeUnresolvedBody;
 module.exports.acquireConverterInvoiceDepositLocks = acquireConverterInvoiceDepositLocks;
 module.exports.isTermiteAnnualSignBeforePayAccept = isTermiteAnnualSignBeforePayAccept;
+module.exports.frozenTermiteAnnualFinancialsFor = frozenTermiteAnnualFinancialsFor;

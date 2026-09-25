@@ -338,7 +338,7 @@ router.post('/:token/sign', async (req, res, next) => {
       // Deliberately detached (AGENTS.md's fire-and-forget rule) — `void`
       // marks that on purpose rather than letting it look like an
       // accidentally unawaited call.
-      void activateTermiteAnnualPlanForSignedContract({ contractId: response.body.contract.id }).catch((err) => {
+      void activateTermiteAnnualPlanForSignedContract({ contractId: response.body.contract.id, trigger: 'signature' }).catch((err) => {
         logger.error(`[contracts-public] termite annual plan activation errored for contract ${response.body.contract.id}: ${err.message}`);
       });
     }

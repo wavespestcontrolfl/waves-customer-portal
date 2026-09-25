@@ -5891,8 +5891,8 @@ function initScheduledJobs() {
         try {
           const { reconcileTermiteAnnualActivations } = require('./termite-annual-activation');
           const annualRecon = await reconcileTermiteAnnualActivations();
-          if (annualRecon.activated || annualRecon.failed || annualRecon.delivered || annualRecon.deliveryFailed) {
-            logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed, ${annualRecon.delivered || 0} delivered, ${annualRecon.deliveryFailed || 0} delivery failed`);
+          if (annualRecon.activated || annualRecon.failed || annualRecon.delivered || annualRecon.deliveryFailed || annualRecon.charged || annualRecon.collectionHeld) {
+            logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed, ${annualRecon.delivered || 0} delivered, ${annualRecon.deliveryFailed || 0} delivery failed, ${annualRecon.charged || 0} charged, ${annualRecon.collectionHeld || 0} held`);
           }
         } catch (err) {
           logger.error(`Termite annual plan activation reconciliation failed: ${err.message}`);

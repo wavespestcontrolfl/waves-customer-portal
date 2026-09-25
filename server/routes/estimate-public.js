@@ -13105,10 +13105,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             logger.error(`[estimate-accept] post-charge invoice read failed for ${invoiceId} (estimate ${estimate.id}) — classifying ambiguous: ${readErr.message}`);
           }
           const freshStatus = String(freshInvoice?.status || '').toLowerCase();
+          const postChargeOutcome = RecurringCards.classifySavedMethodChargeInvoice(freshInvoice);
           if (freshReadFailed) {
             prepayAutoCharge = { status: 'ambiguous', reason: 'post_charge_status_unverified' };
             invoicePayUrl = null;
-          } else if (['paid', 'prepaid'].includes(freshStatus)) {
+          } else if (postChargeOutcome === 'paid') {
             // covered_by_credit / 'prepaid' = account credit covered the
             // whole quoted amount and NO card charge ran (Codex r9): the
             // charge service enqueues no receipt on that early return, so
@@ -13119,7 +13120,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'paid', ...(coveredByCredit ? { coveredByCredit: true } : {}) };
             invoicePayUrl = null; // nothing left to pay — never advertise a pay link
             logger.info(`[estimate-accept] prepay invoice ${invoiceId} auto-charged at accept for customer ${customerId} (estimate ${estimate.id})`);
-          } else if (freshStatus === 'processing' && String(freshInvoice?.payment_method || '') === 'us_bank_account') {
+          } else if (postChargeOutcome === 'bank_processing') {
             // A saved BANK method (autopay-active customers can be
             // ACH-enrolled) debits asynchronously — 'processing' is a
             // successfully INITIATED collection, not a decline (pre-push
@@ -13134,7 +13135,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'processing' };
             invoicePayUrl = null;
             logger.info(`[estimate-accept] prepay invoice ${invoiceId} ACH debit initiated at accept for customer ${customerId} (estimate ${estimate.id})`);
-          } else if (freshStatus === 'processing') {
+          } else if (postChargeOutcome === 'card_incomplete') {
             // A non-bank 'processing' is an incomplete CARD intent — never
             // a pay link beside it and never a resolved job. A 3DS
             // requires_action park can NEVER complete off-session (Codex
@@ -13196,7 +13197,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'ambiguous', reason: 'job_not_owned' };
             invoicePayUrl = null;
             logger.warn(`[estimate-accept] prepay charge ceded for invoice ${invoiceId} (estimate ${estimate.id}): job claim superseded`);
-          } else if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(chargeErr.code) || chargeErr.reconciliationRequired) {
+          } else if (RecurringCards.isAmbiguousSavedMethodChargeError(chargeErr)) {
             prepayAutoCharge = { status: 'ambiguous', reason: chargeErr.code || chargeErr.message };
             invoicePayUrl = null;
             logger.warn(`[estimate-accept] prepay auto-charge outcome ambiguous for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);

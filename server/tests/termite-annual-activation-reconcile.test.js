@@ -24,6 +24,10 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     jest.dontMock('../services/invoice');
     jest.dontMock('../services/annual-prepay-renewals');
     jest.dontMock('../services/estimate-converter');
+    jest.dontMock('../services/termite-annual-signature-charge');
+    jest.dontMock('../routes/admin-customers');
+    jest.dontMock('../routes/estimate-public');
+    jest.dontMock('../services/new-recurring-welcome-sms');
   });
 
   const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
@@ -311,7 +315,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
   }
 
   function setup({
-    estimates, contracts, terms = new Map(), invoices = new Map(), termCreateImpl, invoiceCreateImpl, deliveryImpl, notifyAdminImpl,
+    estimates, contracts, terms = new Map(), invoices = new Map(), termCreateImpl, invoiceCreateImpl, deliveryImpl, notifyAdminImpl, chargeImpl,
   } = {}) {
     const conn = makeFakeConn({
       estimates, contracts, terms, invoices,
@@ -360,10 +364,18 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
     jest.doMock('../services/estimate-converter', () => ({ canAutoSendDraftInvoice: jest.fn(() => true), convertEstimate }));
+    // Signature charge: no enrolled method by default — the pay link goes
+    // out exactly as before (its own behavior is covered by
+    // termite-annual-signature-charge.test.js).
+    const chargeAnnualInvoiceAtSignature = jest.fn(chargeImpl || (async () => ({ status: 'skipped', reason: 'no_enrolled_method', deliverPayLink: true })));
+    jest.doMock('../services/termite-annual-signature-charge', () => ({ chargeAnnualInvoiceAtSignature }));
+    jest.doMock('../routes/admin-customers', () => ({ _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn().mockResolvedValue(undefined) } }));
+    jest.doMock('../routes/estimate-public', () => ({ registerAcceptedEstimateAppointmentReminder: jest.fn().mockResolvedValue(null) }));
+    jest.doMock('../services/new-recurring-welcome-sms', () => ({ sendNewRecurringWelcome: jest.fn().mockResolvedValue(undefined) }));
 
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
     return {
-      reconcileTermiteAnnualActivations, conn, createTermForAnnualPrepay, invoiceCreate, sendViaSMSAndEmail, notifyAdmin, terms, invoices,
+      reconcileTermiteAnnualActivations, conn, createTermForAnnualPrepay, invoiceCreate, sendViaSMSAndEmail, notifyAdmin, terms, invoices, chargeAnnualInvoiceAtSignature,
     };
   }
 

@@ -34,6 +34,15 @@ async function recordConsent({
   // charge + future invoices) instead of the base card text — the UI must
   // have rendered the SAME variant at the checkbox (GATE_PREPAY_CARD_AND_CHARGE).
   consentVariant = null,
+  // Authorization that came from a SIGNED AGREEMENT rather than a consent
+  // checkbox (termite annual plan charged at signature, owner ruling
+  // 2026-09-25): the snapshot is the agreement text the customer actually
+  // signed, its version names the agreement (never a 'v<N>' card-copy
+  // version, so it can't read as Auto Pay enrollment consent), and
+  // evidenceContractId points at the signed customer_contracts row.
+  consentTextSnapshot = null,
+  consentTextVersion = null,
+  evidenceContractId = null,
   // A caller that must decide something ELSE atomically with this row (the
   // pay surface re-judges Bill-To ownership in the same transaction, so a
   // withdrawal committing mid-request cannot leave consent recorded against
@@ -44,17 +53,21 @@ async function recordConsent({
   if (!stripePaymentMethodId) throw new Error('recordConsent: stripePaymentMethodId required');
   if (!VALID_SOURCES.has(source)) throw new Error(`recordConsent: invalid source "${source}"`);
 
-  const consentText = getConsentText(methodType, { variant: consentVariant });
+  if ((consentTextSnapshot || evidenceContractId) && !(consentTextSnapshot && consentTextVersion && evidenceContractId)) {
+    throw new Error('recordConsent: an agreement-backed consent needs its snapshot, version, and contract id');
+  }
+  const consentText = consentTextSnapshot || getConsentText(methodType, { variant: consentVariant });
 
   const [row] = await database('payment_method_consents').insert({
     customer_id: customerId,
     payment_method_id: paymentMethodId,
     stripe_payment_method_id: stripePaymentMethodId,
     source,
-    consent_text_version: CONSENT_VERSION,
+    consent_text_version: consentTextVersion || CONSENT_VERSION,
     consent_text_snapshot: consentText,
     ip,
     user_agent: userAgent,
+    ...(evidenceContractId ? { evidence_contract_id: evidenceContractId } : {}),
   }).returning('*');
 
   logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${CONSENT_VERSION}, methodType=${methodType})`);

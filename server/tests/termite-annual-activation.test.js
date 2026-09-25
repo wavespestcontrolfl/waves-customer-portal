@@ -19,6 +19,10 @@ describe('termite annual plan activation on sign', () => {
     jest.dontMock('../services/invoice');
     jest.dontMock('../services/estimate-converter');
     jest.dontMock('../services/invoice-helpers');
+    jest.dontMock('../services/termite-annual-signature-charge');
+    jest.dontMock('../routes/admin-customers');
+    jest.dontMock('../routes/estimate-public');
+    jest.dontMock('../services/new-recurring-welcome-sms');
   });
 
   const CONTRACT_ID = 'contract-1';
@@ -69,10 +73,12 @@ describe('termite annual plan activation on sign', () => {
     };
   }
 
-  // Builds a fake trx callable, table-routed like a real knex instance, plus
+  // Builds a fake knex callable, table-routed like a real knex instance, plus
   // spies for the update() calls the module makes on 'estimates' and
-  // 'annual_prepay_terms' so assertions can inspect exactly what was
-  // written without a real database.
+  // 'annual_prepay_terms'. estimateUpdate only records writes whose WHERE
+  // actually matches the row (the pre-transaction attempt stamp is
+  // conditioned on awaiting_signature). The same handle serves as both the
+  // outer conn and the transaction.
   function makeTrx({ contract, estimate }) {
     const estimateUpdate = jest.fn().mockResolvedValue(1);
     const termUpdate = jest.fn().mockResolvedValue(1);
@@ -81,12 +87,18 @@ describe('termite annual plan activation on sign', () => {
         return { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(contract) };
       }
       if (table === 'estimates') {
-        return {
-          where: jest.fn().mockReturnThis(),
-          forUpdate: jest.fn().mockReturnThis(),
+        const filters = {};
+        const builder = {
+          where: jest.fn((f) => { Object.assign(filters, f); return builder; }),
+          forUpdate: jest.fn(() => builder),
           first: jest.fn().mockResolvedValue(estimate),
-          update: estimateUpdate,
+          update: jest.fn(async (patch) => {
+            const matches = Object.entries(filters).every(([k, v]) => k === 'id' || estimate[k] === v);
+            if (!matches) return 0;
+            return estimateUpdate(patch);
+          }),
         };
+        return builder;
       }
       if (table === 'annual_prepay_terms') {
         return { where: jest.fn().mockReturnThis(), update: termUpdate };
@@ -100,9 +112,12 @@ describe('termite annual plan activation on sign', () => {
     contract, estimate,
     convertEstimateImpl,
     canAutoSend = true, deliveryImpl,
+    chargeImpl,
+    overlapImpl,
   } = {}) {
     const { trx, estimateUpdate, termUpdate } = makeTrx({ contract, estimate });
-    const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
+    const conn = trx;
+    conn.transaction = jest.fn(async (cb) => cb(trx));
     const notifyAdmin = jest.fn().mockResolvedValue(true);
     const sendViaSMSAndEmail = jest.fn(deliveryImpl || (async () => ({ ok: true, sms: { ok: true }, email: { ok: true } })));
     const canAutoSendDraftInvoice = jest.fn(() => canAutoSend);
@@ -111,25 +126,41 @@ describe('termite annual plan activation on sign', () => {
     const convertEstimate = jest.fn(convertEstimateImpl || (async () => ({
       annualPlanActivationStatus: 'activated', draftInvoiceId: 'invoice-1', annualPrepayTermId: 'term-1',
     })));
+    // Default: no enrolled method — the pay link goes out as before.
+    const chargeAnnualInvoiceAtSignature = jest.fn(chargeImpl || (async () => ({ status: 'skipped', reason: 'no_enrolled_method', deliverPayLink: true })));
+    const lockAndAssertNoAnnualPrepayOverlap = jest.fn(overlapImpl || (async () => undefined));
+    const registerAcceptedEstimateAppointmentReminder = jest.fn().mockResolvedValue(null);
+    const sendNewRecurringWelcome = jest.fn().mockResolvedValue(undefined);
 
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
     jest.doMock('../services/estimate-converter', () => ({ canAutoSendDraftInvoice, convertEstimate }));
+    jest.doMock('../services/termite-annual-signature-charge', () => ({ chargeAnnualInvoiceAtSignature }));
+    jest.doMock('../routes/admin-customers', () => ({ _private: { lockAndAssertNoAnnualPrepayOverlap } }));
+    jest.doMock('../routes/estimate-public', () => ({ registerAcceptedEstimateAppointmentReminder }));
+    jest.doMock('../services/new-recurring-welcome-sms', () => ({ sendNewRecurringWelcome }));
 
     const { activateTermiteAnnualPlanForSignedContract, reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
     return {
       activateTermiteAnnualPlanForSignedContract,
       reconcileTermiteAnnualActivations,
       conn,
+      trx,
       estimateUpdate,
       termUpdate,
       notifyAdmin,
       sendViaSMSAndEmail,
       canAutoSendDraftInvoice,
       convertEstimate,
+      chargeAnnualInvoiceAtSignature,
+      lockAndAssertNoAnnualPrepayOverlap,
+      registerAcceptedEstimateAppointmentReminder,
+      sendNewRecurringWelcome,
     };
   }
+
+  const deliveryFailedBell = expect.objectContaining({ dedupeKey: `termite-annual-activation:${ESTIMATE_ID}:delivery_failed` });
 
   test('awaiting_signature: replays the accept-context into convertEstimate with activationRun:true, stamps consent, and delivers', async () => {
     const contract = makeContract();
@@ -160,38 +191,151 @@ describe('termite annual plan activation on sign', () => {
     expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
   });
 
-  test('the activation-attempt stamp is written BEFORE convertEstimate runs', async () => {
+  test('codex round-3 P2: the activation-attempt stamp is committed on its own, BEFORE the conversion transaction opens', async () => {
     const contract = makeContract();
     const estimate = makeEstimate();
     const callOrder = [];
-    const { trx } = makeTrx({ contract, estimate });
-    // Wrap the estimates table mock to record write order.
-    const originalTrx = trx.getMockImplementation();
-    trx.mockImplementation((table) => {
-      const built = originalTrx(table);
-      if (table === 'estimates' && built.update) {
-        const realUpdate = built.update;
-        built.update = jest.fn((patch) => {
-          if (patch && Object.hasOwn(patch, 'annual_plan_activation_attempted_at')) callOrder.push('attempt-stamp');
-          return realUpdate(patch);
-        });
-      }
-      return built;
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate, convertEstimate,
+    } = setup({ contract, estimate });
+    estimateUpdate.mockImplementation(async (patch) => {
+      if (Object.hasOwn(patch, 'annual_plan_activation_attempted_at')) callOrder.push('attempt-stamp');
+      return 1;
     });
-    const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
-    const convertEstimate = jest.fn(async () => {
+    const openTransaction = conn.transaction.getMockImplementation();
+    conn.transaction.mockImplementation(async (cb) => { callOrder.push('transaction'); return openTransaction(cb); });
+    convertEstimate.mockImplementation(async () => {
       callOrder.push('convert');
-      return { annualPlanActivationStatus: 'activated', draftInvoiceId: 'invoice-1', annualPrepayTermId: 'term-1' };
+      throw new Error('conversion blew up');
     });
-    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-    jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue(true) }));
-    jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail: jest.fn().mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true } }) }));
-    jest.doMock('../services/estimate-converter', () => ({ canAutoSendDraftInvoice: jest.fn(() => true), convertEstimate }));
-    const { activateTermiteAnnualPlanForSignedContract } = require('../services/termite-annual-activation');
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result).toMatchObject({ skipped: 'error' });
+    expect(callOrder).toEqual(['attempt-stamp', 'transaction', 'convert']);
+  });
+
+  test('codex round-3 P1: takes the shared per-customer annual-prepay lock + overlap recheck (excluding this estimate) before converting', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, trx, lockAndAssertNoAnnualPrepayOverlap, convertEstimate,
+    } = setup({ contract, estimate });
 
     await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
 
-    expect(callOrder).toEqual(['attempt-stamp', 'convert']);
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
+      trx, 'customer-1', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), false, expect.any(String), ESTIMATE_ID,
+    );
+    expect(lockAndAssertNoAnnualPrepayOverlap.mock.invocationCallOrder[0])
+      .toBeLessThan(convertEstimate.mock.invocationCallOrder[0]);
+  });
+
+  test('codex round-3 P1: overlapping coverage fails CLOSED — no conversion, no invoice, bell, estimate stays awaiting', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, convertEstimate, notifyAdmin, chargeAnnualInvoiceAtSignature, sendViaSMSAndEmail,
+    } = setup({
+      contract,
+      estimate,
+      overlapImpl: async () => {
+        const err = new Error('overlap');
+        err.annualPrepayOverlap = { error: 'Customer already has an annual prepay term through 2027-01-01.' };
+        throw err;
+      },
+    });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result).toMatchObject({ skipped: 'error' });
+    expect(result.error).toMatch(/overlapping annual coverage/);
+    expect(convertEstimate).not.toHaveBeenCalled();
+    expect(chargeAnnualInvoiceAtSignature).not.toHaveBeenCalled();
+    expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate', expect.stringContaining('needs manual follow-up'), expect.any(String),
+      expect.objectContaining({ dedupeKey: `termite-annual-activation:${ESTIMATE_ID}:activation_error` }),
+    );
+  });
+
+  test('codex round-3 P1: deferred converter side effects are dispatched after the activation commits', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const reminderRow = { id: 'ss-2', service_type: 'Termite Bait', scheduled_date: '2026-10-10' };
+    const welcomeSms = { customer: { id: 'customer-1' }, entryPoint: 'estimate_converter_welcome' };
+    const tierUpgradeNotification = {
+      type: 'estimate', title: 'Tier review', body: 'b', options: {},
+    };
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, registerAcceptedEstimateAppointmentReminder, sendNewRecurringWelcome, notifyAdmin,
+    } = setup({
+      contract,
+      estimate,
+      convertEstimateImpl: async () => ({
+        annualPlanActivationStatus: 'activated',
+        draftInvoiceId: 'invoice-1',
+        annualPrepayTermId: 'term-1',
+        deferredFollowUpReminderRows: [reminderRow],
+        welcomeSms,
+        tierUpgradeNotification,
+      }),
+    });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(registerAcceptedEstimateAppointmentReminder).toHaveBeenCalledWith({
+      appointment: reminderRow, customerId: 'customer-1', serviceType: 'Termite Bait',
+    });
+    expect(sendNewRecurringWelcome).toHaveBeenCalledWith(welcomeSms);
+    expect(notifyAdmin).toHaveBeenCalledWith('estimate', 'Tier review', 'b', {});
+  });
+
+  test('item 3: nothing is booked before signature — activation bells staff to schedule, naming the customer\'s accept-time pick', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate({
+      annual_plan_deferred_invoice: makeAcceptContext({ requestedFirstVisit: { date: '2026-10-14', windowStart: '09:00:00' } }),
+    });
+    const { activateTermiteAnnualPlanForSignedContract, conn, notifyAdmin } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate',
+      expect.stringContaining('schedule the installation'),
+      expect.stringContaining('2026-10-14 (09:00 window)'),
+      expect.objectContaining({ dedupeKey: `termite-annual-activation:${ESTIMATE_ID}:schedule_first_visit` }),
+    );
+  });
+
+  test('owner ruling 2026-09-25: a successful signature charge sends NO pay link', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, sendViaSMSAndEmail, chargeAnnualInvoiceAtSignature,
+    } = setup({ contract, estimate, chargeImpl: async () => ({ status: 'paid', reason: null, deliverPayLink: false }) });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn, trigger: 'signature' });
+
+    expect(chargeAnnualInvoiceAtSignature).toHaveBeenCalledWith(expect.objectContaining({
+      estimateId: ESTIMATE_ID, contractId: CONTRACT_ID, invoiceId: 'invoice-1', trigger: 'signature',
+    }));
+    expect(result.signatureCharge).toMatchObject({ status: 'paid' });
+    expect(result.invoiceDelivery).toBeNull();
+    expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('owner ruling 2026-09-25: an ambiguous signature charge sends NO pay link either', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, sendViaSMSAndEmail } = setup({
+      contract, estimate, chargeImpl: async () => ({ status: 'ambiguous', reason: 'STRIPE_AMBIGUOUS_OUTCOME', deliverPayLink: false }),
+    });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result.activated).toBe(true);
+    expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 
   test('codex P1-A: delivers the invoice via the SAME wrapper + gate the ordinary prepay_annual accept uses, exactly once', async () => {
@@ -241,7 +385,7 @@ describe('termite annual plan activation on sign', () => {
 
     expect(result.activated).toBe(true);
     expect(result.invoiceDelivery).toMatchObject({ sms: { scheduled: true } });
-    expect(notifyAdmin).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalledWith('estimate', expect.any(String), expect.any(String), deliveryFailedBell);
   });
 
   test('a delivery outcome that resolves ok:false WITHOUT throwing still bells and reports failure', async () => {
@@ -299,7 +443,7 @@ describe('termite annual plan activation on sign', () => {
     expect(estimateUpdate).toHaveBeenCalledTimes(1);
   });
 
-  test('an empty/missing accept-context degrades to convertEstimate defaults rather than failing', async () => {
+  test('an empty/missing accept-context replays no accept opts (the converter decides, failing closed on a missing frozen price)', async () => {
     const contract = makeContract();
     const estimate = makeEstimate({ annual_plan_deferred_invoice: null });
     const { activateTermiteAnnualPlanForSignedContract, conn, convertEstimate } = setup({ contract, estimate });
@@ -310,8 +454,10 @@ describe('termite annual plan activation on sign', () => {
     expect(convertEstimate).toHaveBeenCalledWith(ESTIMATE_ID, expect.objectContaining({
       activationRun: true,
       billingTerm: 'prepay_annual',
-      prepayInvoiceAmount: undefined,
     }));
+    // Absent accept opts are left out entirely (the converter's own
+    // frozen-price check is what fails a snapshot-less activation closed).
+    expect(convertEstimate.mock.calls[0][1]).not.toHaveProperty('prepayInvoiceAmount');
   });
 
   test('a malformed accept-context (not an object) degrades to convertEstimate defaults rather than failing', async () => {
