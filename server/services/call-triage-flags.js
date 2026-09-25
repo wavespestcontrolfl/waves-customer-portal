@@ -1106,7 +1106,10 @@ const APPROVAL_REQUEST_RE = new RegExp(`\\b(?:get|getting|obtain|secure|have|wai
 // okay." / "Just have to get an approval." — names the same outstanding
 // authorization with an article instead of an owner. Fails closed: "we
 // have the okay" also poisons, which only ever leaves a turn in triage.
-const NON_POSSESSIVE_APPROVAL_RE = new RegExp(`\\b(?:need|needs|needed|require|requires|get|getting|obtain|secure|have|wait for|waiting for) (?:the|an|a|some) ${AUTHORIZATION_NOUN_ALT}\\b`);
+// Codex round 16, P1 (:1109): DEMONSTRATIVE determiners — "We need that
+// okay." / "need this approval" — are the same outstanding-authorization
+// shape, so that/this/any join the determiner set.
+const NON_POSSESSIVE_APPROVAL_RE = new RegExp(`\\b(?:need|needs|needed|require|requires|get|getting|obtain|secure|have|wait for|waiting for) (?:the|an|a|some|that|this|any) ${AUTHORIZATION_NOUN_ALT}\\b`);
 // Codex round 9, P1 (:713): neither AUTHORIZATION_NEED_RE nor
 // APPROVAL_REQUEST_RE covers a DIRECTIVE the agent gives to have a third
 // party grant approval — "I will tell him to okay it." names no "need"/
@@ -1371,6 +1374,10 @@ const SCHEDULING_PREDICATE_TERMS = [
   ' august ', ' september ', ' october ', ' november ', ' december ',
   ' tomorrow ', ' today ', ' tonight ', ' next week ',
   ' am ', ' pm ', ' clock ', ' noon ', ' midnight ',
+  // Codex round 16, P1 (:1373): spoken day periods are admitted by
+  // COMMITMENT_TURN_VOCAB, so an OTHER sentence naming one ("We're set for
+  // the morning.") must count as scheduling content, like am/pm.
+  ' morning ', ' afternoon ',
   ' technician ', ' tech ', ' crew ', ' route ', ' slot ', ' calendar ',
   ' available ', ' availability ', ' unavailable ',
   ' quote ', ' estimate ', ' price ',

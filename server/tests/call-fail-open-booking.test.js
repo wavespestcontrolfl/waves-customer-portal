@@ -1481,6 +1481,18 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   test.each([
+    "We need that okay. We'll see you Sunday at noon.",
+    "We need this approval. We'll see you Sunday at noon.",
+    "We're set for the morning. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon. You're set for the afternoon.",
+  ])('Codex round-17 regression: demonstrative approval / spoken day period in another sentence poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
     "We'll see you Sunday at noon. We are all booked.",
     "We'll see you Sunday at noon. We're booked.",
   ])('Codex round-12 regression: "We are (all) booked." is a capacity statement and poisons — %s', (turn) => {
