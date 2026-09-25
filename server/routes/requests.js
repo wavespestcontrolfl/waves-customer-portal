@@ -20,6 +20,8 @@ const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
 const { situationalHardStop } = require('../services/cancellation-resolution/resolve');
 const { etDateString } = require('../utils/datetime-et');
+const { isEnabled } = require('../config/feature-gates');
+const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
 
 // Shape the portal reads to render the truthful post-submit state (H0).
 // `processed` is true only when the processor reports a clean, churned run;
@@ -123,6 +125,11 @@ const createSchema = Joi.object({
   // nothing and keep today's path.
   expectedPropertyId: Joi.string().trim().max(64).allow(null, '').optional(),
   photos: Joi.array().items(Joi.string().max(MAX_ENCODED_PHOTO_CHARS)).max(MAX_PHOTOS).optional(),
+  photoIdSource: Joi.object({
+    type: Joi.string().valid('pest', 'lawn', 'tree_shrub').required(),
+    id: Joi.string().guid().required(),
+    photoIds: Joi.array().items(Joi.string().guid()).unique().max(MAX_PHOTOS).default([]),
+  }).optional(),
   // Cancellation resolution engine (PR E, GATE_CANCEL_FLOW_V2) — additive,
   // all optional so every existing client payload validates unchanged. The
   // structured v2 reason + the card the customer saw and what they did with
@@ -244,7 +251,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           : {}),
       });
     }
-    const photoData = photoValidation.photos;
+    let photoData = photoValidation.photos;
 
     // Under a SECONDARY saved-property selection (GATE_APP_PROPERTY_SCOPE)
     // GET /schedule withholds the picker (it books the primary address), so
@@ -256,6 +263,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // predicate applies (single home: scoped=false, but the customer still
     // sees — and pins — that one property; uncapped codex r1p P1).
     let resolvedPropertyId = null;
+    let requestScope;
     // The server-validated saved property this ticket is about (codex #4207
     // r1j): persisted on the row, part of the dedupe key, and shown to staff
     // — a secondary-house ticket must name its house.
@@ -268,10 +276,12 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     });
     try {
       const scope = await resolveSessionScope(req);
+      requestScope = scope;
       secondarySelection = isSecondarySelection(scope);
       if (scope && scope.enabled && scope.property) resolvedPropertyId = String(scope.property.id);
       if (scope && scope.enabled && scope.scoped && scope.property) requestProperty = ticketProperty(scope.property);
     } catch (scopeErr) {
+      if (value.photoIdSource) throw scopeErr; // never widen private evidence access on a scope failure
       logger.warn(`Property scope check failed for ${req.customer.id}: ${scopeErr.message}`);
       // The resolver failed, but the auth middleware already validated the
       // token's claim against an ACTIVE row of this customer (req.property).
@@ -295,6 +305,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         code: 'property_selection_stale',
       });
     }
+    if (value.photoIdSource && !isEnabled('customerPhotoId')) return res.status(404).json({ error: 'Photo ID not found.' });
     // Lightweight server-side dedupe — reject identical create within 60s
     const dupeWindow = new Date(Date.now() - 60 * 1000);
     const dupeQuery = db('service_requests')
@@ -303,6 +314,8 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // (only once a saved property is in play — single-home and gate-off
     // sessions keep today's exact dedupe).
     if (requestProperty) dupeQuery.whereRaw("COALESCE(metadata->>'propertyId', '') = ?", [requestProperty.id]);
+    // Two different Photo IDs with the same prefilled subject are not retries.
+    if (value.photoIdSource) dupeQuery.whereRaw("metadata->'photoIdSource'->>'id' = ?", [value.photoIdSource.id]);
     const dupe = await dupeQuery
       .where('created_at', '>=', dupeWindow)
       .first();
@@ -388,7 +401,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           urgency: dupe.urgency,
           locationOnProperty: dupe.location_on_property,
           status: dupe.status,
-          photoCount: 0,
+          photoCount: Array.isArray(dupe.photos) ? dupe.photos.length : 0,
           createdAt: dupe.created_at,
         },
         // A retry is still a truthful outcome (H0): the sweep above is the
@@ -396,6 +409,18 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // from this branch — the original request's already went out.
         ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at) } : {}),
       });
+    }
+
+    // A retry already has copied evidence; only a new request needs storage.
+    if (value.photoIdSource) {
+      const evidence = await requestPhotoIdEvidence(req, value.photoIdSource, requestScope);
+      if (evidence.error) return res.status(evidence.status).json({ error: evidence.error });
+      if (evidence.missingPhotos && !photoData.length) {
+        return res.status(409).json({ error: 'Original photos are unavailable. Please attach a new photo to your request.' });
+      }
+      const combined = validateRequestPhotos([...photoData, ...evidence.photos]);
+      if (!combined.ok) return res.status(combined.status).json({ error: combined.error });
+      photoData = combined.photos;
     }
 
     // An INACTIVE account never creates a fresh request: the allow-inactive
@@ -626,7 +651,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         location_on_property: validLocation,
         photos: JSON.stringify(photoData),
         status: 'new',
-        ...(requestProperty ? { metadata: JSON.stringify({ propertyId: requestProperty.id, property: requestProperty }) } : {}),
+        ...((requestProperty || value.photoIdSource) ? { metadata: JSON.stringify({
+          ...(requestProperty ? { propertyId: requestProperty.id, property: requestProperty } : {}),
+          ...(value.photoIdSource ? { photoIdSource: value.photoIdSource } : {}),
+        }) } : {}),
       })
       .returning('*');
 

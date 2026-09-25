@@ -540,7 +540,7 @@ async function markEstimateManuallyAccepted({
     // marker-only terminal invalidation.
     {
       const freshLinkRow = await trx('estimates').where({ id: estimateId })
-        .forUpdate().first('estimate_data', 'archived_at');
+        .forUpdate().first('estimate_data', 'archived_at', 'status');
       // Propagate the LOCKED re-read back onto `estimate` (codex P1): every
       // check below this point — including the existing-member prepay guard
       // — read `estimate.estimate_data` from the earlier UNLOCKED select, so
@@ -579,11 +579,13 @@ async function markEstimateManuallyAccepted({
           await trx('leads').where({ id: String(manualAcceptData.lead_id) }).forUpdate().first('id');
         }
         const { staleCallLinkageReason } = require('./admin-estimate-persistence');
-        if (await staleCallLinkageReason(trx, manualAcceptData, { lockCallRow: true })) {
+        // The LOCKED row's status (codex #4815 r8 P2): a queued row-scoped
+        // verdict judges a terminal row by it; omitted = fail closed.
+        if (await staleCallLinkageReason(trx, manualAcceptData, { lockCallRow: true, estimateStatus: freshLinkRow?.status })) {
           throw quarantined;
         }
         const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-        if (await callSideBlockForEstimateData(trx, manualAcceptData)) {
+        if (await callSideBlockForEstimateData(trx, manualAcceptData, { estimateStatus: freshLinkRow?.status })) {
           throw quarantined;
         }
       }

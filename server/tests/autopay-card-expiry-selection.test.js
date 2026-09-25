@@ -85,7 +85,7 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
   test.each([
     ['30_day', '2026-09-10T15:00:00Z', 30],
     ['7_day', '2026-09-24T15:00:00Z', 7],
-  ])('%s escalation uses its own cooldown window', async (_stage, now, cooldownDays) => {
+  ])('%s escalation uses its own cooldown window', async (stage, now, cooldownDays) => {
     jest.setSystemTime(new Date(now));
     getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
     wireDb({
@@ -94,7 +94,10 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
         last_four: '4242', exp_month: '9', exp_year: '26' }])],
     });
     await sendCardExpiryWarnings();
-    expect(eventExistsRecently).toHaveBeenCalledWith('c1', 'card_expiring_soon', cooldownDays, 'pm-cur');
+    expect(eventExistsRecently).toHaveBeenCalledWith('c1', 'card_expiring_soon', cooldownDays, 'pm-cur', { reminder_stage: stage });
+    // The stage rides the autopay_log row so the next pass can key on it.
+    expect(require('../services/autopay-log').logAutopay).toHaveBeenCalledWith('c1', 'card_expiring_soon',
+      expect.objectContaining({ details: expect.objectContaining({ reminder_stage: stage }) }));
   });
 
   test('chargeable current card NOT expiring soon → no warning even if a replaced card is in the window', async () => {

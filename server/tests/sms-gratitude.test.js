@@ -2,6 +2,7 @@ const {
   isGratitudeOnly, buildGratitudeReply, evaluateGratitudeContext,
   gratitudeTimingReason, QUIET_WINDOW_MS, MAX_REPLY_AGE_MS,
 } = require('../services/sms-gratitude');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 const received = '2030-01-10T15:00:00.000Z';
 const inbound = { id: 'in-1', direction: 'inbound', body: 'Thank you Adam', createdAt: received, mediaCount: 0 };
@@ -58,7 +59,6 @@ describe('automated template closures (owner decision 2026-09-24)', () => {
       .toEqual({ eligible: true, reason: 'gratitude_after_closure', reply: 'Our pleasure, Jeanette!' });
   });
   test.each([
-    ['manual', 'Hello Jeanette! Your appointment is tomorrow.'],
     ['billing_reminder', 'Hello Jeanette! Your invoice is ready.'],
     [undefined, 'Hello Jeanette! Your appointment is tomorrow.'],
   ])('other outbound types still need closure evidence: %s', (messageType, body) => {
@@ -69,6 +69,263 @@ describe('automated template closures (owner decision 2026-09-24)', () => {
     expect(evaluateGratitudeContext({ ...context, history: [
       template('appointment_reminder', 'Hello Jeanette! Can you confirm 9 AM tomorrow?'),
     ] }).reason).toBe('outbound_needs_attention');
+  });
+});
+
+describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
+  const manual = body => ({ ...report, id: 'manual-1', messageType: 'manual', humanAuthored: true, body });
+  const earlierRequest = { ...inbound, id: 'earlier', createdAt: '2030-01-10T14:58:00Z', body: 'Can I move my appointment from the app?' };
+  test.each([
+    { humanAuthored: false }, { humanAuthored: undefined }, { humanAuthored: 'true' },
+  ])("a 'manual' row without the send-time human_authored stamp is not a typed reply: %p", override => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...manual('Yes, you can download the Waves app and reschedule appts there.'), ...override }] }).reason)
+      .toBe('closure_not_established');
+  });
+  test.each([
+    'Thanks, I updated the address.',
+    'Thank you, the report is attached.',
+    'Thanks, address updated.',
+    'Thank you, issue resolved.',
+  ])('a typed answer that opens with thanks is still an answer: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
+  });
+  test.each([
+    'Your payment has been received',
+    'That invoice was already paid',
+    'No balance on your account',
+  ])('a typed payment settlement is a closure: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
+  });
+  test.each([
+    'We still need your gate code',
+    "We're waiting on the photo",
+    'Once we get the signed agreement we can schedule',
+    "Haven't received the pictures yet",
+  ])('a declarative information request still needs an answer: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
+  });
+  test('a bare thanks after a hand-typed text qualifies', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Yes, you can download the Waves app and reschedule appts there.')] }))
+      .toEqual({ eligible: true, reason: 'gratitude_after_closure', reply: 'Our pleasure, Dana!' });
+  });
+  test('a hand-typed text that asks a question still abstains', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Does Friday at 9 work for you?')] }).reason)
+      .toBe('outbound_needs_attention');
+  });
+  test.each([
+    'Let me adjust, give a minute',
+    'Give me a minute and I will resend it',
+    'Have it to you in 15 minutes',
+    'Have it to you in 1 minute',
+    'In a min',
+    'Should be done in an hour',
+    'In a few minutes',
+    'In a couple hours',
+    'Should be there in about 20 minutes',
+    'In ten minutes',
+    'In 5 or 10 minutes',
+    'Give me 5 minutes',
+    'Be there in 20',
+    'Be right there',
+    'Be over shortly',
+    'One moment',
+    'Just a sec',
+    'Let me check',
+    'Checking now',
+    'Looking into it',
+    'Hold on',
+    'I can get that to you later today',
+    'See you tomorrow!',
+    'Next week works',
+    'Give me two minutes',
+    'Should have it in six minutes',
+    'Give me a couple minutes',
+    'In a bit',
+    'Give me about twenty minutes',
+    'Give us roughly ten minutes',
+    'Give me maybe another 5 mins',
+    'It will take about half an hour',
+    'Need a few more minutes',
+    'Give me until Friday',
+    'Will do, till Monday at the latest',
+    'I can have that by end of day',
+    'Should have it before noon',
+    'We will be out on Thursday',
+    'It should arrive Friday',
+    'Expect it Friday',
+    "I'm gonna move your tree and shrub care to Wednesday",
+    'On the way, 15-20 min',
+    'On my way now',
+    'Leaving now',
+    'Swinging by now to take a look',
+    'Heading over shortly',
+    'Should be there by 3',
+  ])('a hand-typed time promise abstains: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
+  });
+  test.each([
+    'Can you send a picture',
+    'Which option would you prefer',
+    'Let me know what day works',
+    'Please confirm someone will be home. Thanks',
+    'Hi Dana, can you send a picture',
+    'Sure, could you confirm the address',
+    'Just let me know what day works',
+    'Feel free to let us know',
+    'Sounds good and lmk if anything changes',
+    'I was wondering if Friday works for you',
+    'Wanted to see whether Friday works',
+    'Does Friday work for you',
+    'Just checking if 9am is still good for you',
+    'Friday at 9 works for you',
+    'Curious what time is best',
+    'Send me a picture of the issue',
+    'Email me the invoice number',
+    'Tell me which option you prefer',
+    'Text us a good time',
+    'Please provide a photo of the issue',
+    'Provide us the gate code',
+  ])('a hand-typed question without a question mark still needs an answer: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).reason).toBe('outbound_needs_attention');
+  });
+  test.each(['Thanks, Dana!', 'Anytime!', 'Happy to help', 'You are welcome!', 'No problem', 'Not a problem Steve!'])('a hand-typed courtesy is not a closure to thank again: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [report, { ...manual(body), createdAt: '2030-01-10T14:59:30Z' }] }).reason)
+      .toBe('courtesy_already_sent');
+  });
+  test.each([
+    'Here is your payment link: https://example.invalid/pay/abc',
+    'Please pay your invoice here: https://example.invalid/pay/abc',
+    'Your balance due is on the portal',
+    'Your old invoice was paid, but please pay your new invoice here',
+    'Payment received for March. The April invoice is due Friday',
+    'Your old invoice was paid, please pay your new invoice here',
+    'Last month went through and the new invoice is due Friday',
+    'Old balance cleared - please pay the new one here',
+    'Your old invoice was paid: please pay the new invoice here',
+    'Your old invoice was paid so please pay the new invoice here',
+    'Here is your invoice and here is the link: https://example.invalid/i/abc',
+    'Invoice: https://example.invalid/i/abc',
+    'Here is your invoice: https://example.invalid/i/abc',
+    'Here you go https://portal.example.invalid/pay/abc',
+  ])('a hand-typed payment request is not a closure: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(false);
+  });
+  test.each([
+    'Your invoice has been paid, no balance due. Thanks!',
+    'Payment received and applied, you are all set',
+    'Payment received: you are all set',
+  ])('a hand-typed settlement is still a closure: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(body)] }).eligible).toBe(true);
+  });
+  test.each([
+    ['media-only', '', 1],
+    ['text with media', 'Here you go', 1],
+    ['unknown media count', 'Here you go', undefined],
+    ['empty body', '   ', 0],
+  ])('a hand-typed send is judged on its text alone, so %s abstains', (_label, body, mediaCount) => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...manual(body), mediaCount }] }).eligible).toBe(false);
+  });
+  test('an earlier hand-typed payment request is still open behind a later closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...manual('Here is your invoice: https://example.invalid/i/abc'), createdAt: '2030-01-10T14:58:00Z' },
+      report,
+    ] }).reason).toBe('earlier_open_context');
+  });
+  test.each([
+    'Your receipt: https://example.invalid/receipt/abc',
+    'Payment received',
+    "We've completed your service",
+  ])('a hand-typed closure caption with media still abstains: %s', body => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...manual(body), mediaCount: 1 }] }).reason).toBe('media_or_unknown');
+  });
+  test("an automated row stored as 'manual' is not held to the hand-typed pending rules", () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...manual('Your appointment is Friday'), humanAuthored: false, createdAt: '2030-01-10T14:58:00Z' },
+      report,
+    ] }).eligible).toBe(true);
+  });
+  test.each([
+    'Here you go https://portal.wavespestcontrol.com/pay/abc',
+    'Invoice: https://portal.wavespestcontrol.com/i/abc',
+    'Here is your invoice https://portal.wavespestcontrol.com/pay/statement/abc?x=1',
+  ])('a payment link still reads as a request after the stored-body scheme strip: %s', raw => {
+    const stored = stripSmsUrlScheme(raw);
+    expect(stored).not.toMatch(/https:/);
+    expect(evaluateGratitudeContext({ ...context, history: [manual(stored)] }).eligible).toBe(false);
+  });
+  test('a stored scheme-less receipt link is still a closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme('Your receipt: https://portal.wavespestcontrol.com/receipt/abc'))] }).eligible).toBe(true);
+  });
+  test.each([
+    'Please sign: https://portal.wavespestcontrol.com/contract/abc',
+    'Book here https://portal.wavespestcontrol.com/book/abc',
+    'Your report: https://example.invalid/report/abc and please sign https://example.invalid/contract/abc',
+    'Your report is ready. Please sign: https://portal.wavespestcontrol.com/contract/abc',
+    'Your receipt is below. Book your next visit https://portal.wavespestcontrol.com/book/abc',
+  ])('a typed action link stays open: %s', raw => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme(raw))] }).eligible).toBe(false);
+  });
+  test('an earlier typed action link is still open behind a later closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...manual('Please sign: https://portal.wavespestcontrol.com/contract/abc'), createdAt: '2030-01-10T14:58:00Z' },
+      report,
+    ] }).reason).toBe('earlier_open_context');
+  });
+  test.each([['an attachment', 1], ['an unknown media count', undefined]])('an earlier typed send with %s is still open behind a later typed text', (_label, mediaCount) => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...manual('Contract attached'), id: 'manual-0', mediaCount, createdAt: '2030-01-10T14:58:00Z' },
+      manual('Here you go'),
+    ] }).reason).toBe('earlier_open_context');
+  });
+  test.each([
+    'Here is your report: https://example.invalid/report/abc',
+    'Your receipt is here https://portal.wavespestcontrol.com/receipt/abc',
+  ])('a hand-typed labelled report or receipt link is still a closure: %s', raw => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme(raw))] }).eligible).toBe(true);
+  });
+  test('a scheduled typed send is judged by its provider row, not the re-stamped queued row', () => {
+    const queued = { ...manual('Yup, just texted her'), id: 'queued-1', mediaCount: null, createdAt: '2030-01-10T14:59:40Z' };
+    const delivered = { ...manual('Yup, just texted her'), id: 'provider-1', scheduledSourceId: 'queued-1' };
+    expect(evaluateGratitudeContext({ ...context, history: [delivered, queued] }).eligible).toBe(true);
+    expect(evaluateGratitudeContext({ ...context, history: [queued] }).reason).toBe('media_or_unknown');
+  });
+  test('a hand-typed report link is still a closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Here is your report: https://example.invalid/report/abc')] }).eligible).toBe(true);
+  });
+  test('a hand-typed receipt link is still a closure', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Your receipt: https://example.invalid/receipt/abc')] }).eligible).toBe(true);
+  });
+  test('a hand-typed reply answers an earlier operational text', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [earlierRequest,
+      manual('Yes, you can download the Waves app and reschedule appts there.')] }).eligible).toBe(true);
+  });
+  test.each([
+    { body: 'Can you also check the garage?', mediaCount: 0 },
+    { body: 'Here is the photo', mediaCount: 1 },
+  ])('a customer text sent after the hand-typed reply still vetoes: %p', later => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      manual('Yes, you can download the Waves app and reschedule appts there.'),
+      { ...inbound, id: 'later', createdAt: '2030-01-10T14:59:30Z', ...later },
+    ] }).reason).toBe('operational_context');
+  });
+  test('a template after an earlier operational text still abstains', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [earlierRequest,
+      { ...report, messageType: 'appointment_reminder', body: 'Hello Dana! Reminder: your appointment is tomorrow between 8 and 10 AM.' }] }).reason)
+      .toBe('operational_context');
+  });
+  test('our en-route template stays a closure even though it says on the way', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [{ ...report, messageType: 'tech_en_route',
+      body: 'Hello Dana! Your technician Adam is on the way.' }] }).eligible).toBe(true);
+  });
+  test('a hand-typed refund or apology text still needs attention', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [manual('Yes, that refund already went through.')] }).reason)
+      .toBe('outbound_needs_attention');
+  });
+  test('an earlier promise of ours still holds before a hand-typed reply', () => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      { ...report, id: 'promise', createdAt: '2030-01-10T14:58:00Z', body: 'I will send the estimate tonight.' },
+      manual('Advent pest control, based out of Palmetto'),
+    ] }).reason).toBe('earlier_open_context');
   });
 });
 

@@ -243,7 +243,8 @@ test.each([
   await expect(BillingRetryEmail.replayPaymentRetryNotice(replayMeta)).resolves.toMatchObject({
     sent: false, blocked: true, code: 'PAYMENT_RETRY_NO_LONGER_ELIGIBLE', reason, deliveryOutcome: 'not_sent',
   });
-  expect(RetryCollectibility.loadRetryContext).toHaveBeenCalledWith({ conn: db });
+  // Eligibility is judged on the retry date the notice names, not today.
+  expect(RetryCollectibility.loadRetryContext).toHaveBeenCalledWith({ asOf: '2026-09-29', conn: db });
   expect(RetryCollectibility.classifyFailedPaymentRetry).toHaveBeenCalledWith({
     payment, customer: currentCustomer, conn: db, ctx: { lookupWarnings: [] },
   });

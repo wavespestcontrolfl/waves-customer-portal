@@ -66,6 +66,22 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
   return false;
 }
 
+// The call's SETTLED processing generation — the pass identity a detached
+// entry point (the booking pre-draft's admin re-draft / appointment tagger,
+// the clarify re-price) adopts so the engine's pass-start clears and the
+// row-scoped supersession can retire generation-stamped markers. Valid
+// exactly while the call is settled: an in-flight claim owns the pass
+// identity, so this returns null then (the live pass performs its own
+// clears). null too for a missing row or an unstamped generation. Throws
+// on a read failure; callers own the fail-safe (adopt nothing).
+async function settledCallGeneration(dbc, callLogId) {
+  if (!callLogId) return null;
+  const row = await dbc('call_log').where({ id: callLogId })
+    .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at', 'processing_generation');
+  if (!row || callReprocessInFlight(row) || row.processing_generation == null) return null;
+  return Number(row.processing_generation);
+}
+
 // Pass-identity fence for CALL-ORIGIN inserts (codex P1, PR #3304 —
 // generation-rework GH round). Fence doctrine: token match = in-flight me;
 // SAME generation = no newer claim since mine (survives this pass's own
@@ -86,6 +102,192 @@ async function callPassStillOwned(dbc, callLogId, { ownerProcToken = null, owner
       && Number(row.processing_generation) === Number(ownerProcGeneration));
 }
 
+// Terminal, money-bearing estimate statuses — a customer has already
+// accepted or declined, or the row expired. estimateOffCustomerSurface
+// reads estimatorEngine.linkage_invalidated_at BEFORE the accepted/declined
+// early-allow, so stamping it on one of these rows revokes the customer's
+// PERMANENT access to an estimate they already acted on — correct for an
+// identity-conflict or rejected-call verdict (the whole call's identity is
+// in question, so an acceptance built on it is too), never correct for a
+// mere agreed-price cleanup (codex #4815 r2 P0).
+const TERMINAL_ESTIMATE_STATUSES = Object.freeze(['accepted', 'declined', 'expired']);
+
+// Verdicts whose call-side estimator_draft_block is ROW-SCOPED (codex #4815
+// r6 P0, structural): an agreed-price cleanup is a verdict about specific
+// stale DRAFTS, not about the call's identity or workability. Its marker
+// therefore (a) refuses NEW drafts for the call — until a re-qualifying
+// pass explicitly supersedes it — and (b) blocks EXISTING estimates only
+// when that row carries this same verdict's own per-row stamp (the exact
+// rows invalidateDraftForCall marked, archived or deferred). An accepted /
+// declined / expired row, a booking-linked assessment draft, or a fresh
+// re-qualified draft is never one of those rows, so the call marker can no
+// longer revoke its public token the way a call-wide verdict does. Every
+// other reason (identity conflict, spam / voicemail / no-attribution) stays
+// CALL-WIDE, exactly as before.
+const ROW_SCOPED_DRAFT_BLOCK_REASONS = Object.freeze(['price_agreed_on_call']);
+
+function isRowScopedDraftBlockReason(reason) {
+  return ROW_SCOPED_DRAFT_BLOCK_REASONS.includes(String(reason || ''));
+}
+
+// THE one reading of the call-side draft-verdict markers
+// (estimator_draft_block + every QUEUED verdict — the per-reason
+// estimator_quarantine_queue and the legacy estimator_quarantine_pending,
+// see quarantineQueueEntries below). Every
+// reader — callSideBlockForEstimateData and staleCallLinkageReason for an
+// EXISTING estimate, callRejectedForDrafting for a NEW draft — goes through
+// here instead of interpreting the raw marker itself (codex #4815 r6 P0: the
+// P0 appeared twice because three readers each applied the marker
+// call-wide on their own). Returns { marker, reason } or null.
+//   forNewDraft  — true when the caller (a draft creator's in-lock guard)
+//                  is deciding whether a NEW draft may be inserted;
+//   estimateData — otherwise, the judged EXISTING row's estimate_data.
+//   estimateStatus — the judged EXISTING row's `status` column, when the
+//                  caller has it (it is not part of estimate_data). Unknown
+//                  (undefined) never proves a row terminal — fail closed.
+//   supersededBelowGeneration — ignore a marker whose recorded writer
+//                  generation is OLDER than this (see callRejectedForDrafting).
+// The QUEUED marker (the invalidation itself has not landed yet, so the
+// verdict's own per-row stamps do not exist) follows the SAME row scoping as
+// the landed one, derived from the verdict's SCAN scope instead of its
+// stamps (codex #4815 r7 P0): a queued ROW-SCOPED (agreed-price) entry keeps
+// refusing new drafts and every existing row the landed invalidation WOULD
+// mark — but never a terminal (accepted / declined / expired) or
+// booking-linked row, which that invalidation's scope excludes
+// (invalidateDraftForCall scope 'nonterminal_drafts') and so could never
+// mark. Blocking those rows until the drainer ran made every accepted or
+// booking-linked estimate for the call 404 on its permanent public token,
+// indefinitely whenever the drain job was down. A queued CALL-WIDE entry
+// (identity conflict, spam / voicemail / no-attribution) still blocks every
+// row: its landed form marks terminal rows too.
+// The assessment pre-draft exception's DURABLE provenance (codex #4815 r8
+// P2): linkEstimateToBooking stamps scheduled_service_id only while the
+// visit is still a live assessment — a booking that went terminal during
+// the (minutes-long) composition skips the linkage, yet the fresh draft is
+// still the exception's own quote (the promise was made on the CALL) and
+// the price-agreed sweep stands down for it. Without a durable mark a later
+// force-reprocess's agreed-price invalidation archived that unlinked
+// exception with no replacement. maybePreDraftForBooking therefore stamps
+// estimate_data.assessment_exception = { call_log_id, generation,
+// scheduled_service_id, at } on every exception draft, linked or not, and
+// every reader of the exclusion honors EITHER stamp.
+function estimateEarnsAssessmentException(estimateData) {
+  if (!estimateData || typeof estimateData !== 'object') return false;
+  if (estimateData.scheduled_service_id != null) return true;
+  const ex = estimateData.assessment_exception;
+  return !!(ex && typeof ex === 'object' && ex.call_log_id);
+}
+
+// SQL mirror of estimateEarnsAssessmentException's NEGATION, for the
+// invalidation scan (strictExistingDraftForCall excludeBookingLinked).
+const ASSESSMENT_EXCEPTION_ABSENT_SQL = "((estimate_data ->> 'scheduled_service_id') IS NULL"
+  + " AND COALESCE(estimate_data -> 'assessment_exception' ->> 'call_log_id', '') = '')";
+
+function scopedVerdictExcludesRow(estimateData, estimateStatus) {
+  if (estimateStatus != null
+    && TERMINAL_ESTIMATE_STATUSES.includes(String(estimateStatus).toLowerCase())) return true;
+  // The exact stamps the assessment pre-draft exception writes — the
+  // scan's excludeBookingLinked predicate (ASSESSMENT_EXCEPTION_ABSENT_SQL),
+  // mirrored.
+  return estimateEarnsAssessmentException(estimateData);
+}
+
+// THE QUARANTINE QUEUE holds MULTIPLE pending verdicts, one per reason
+// (codex #4815 r8 P1, structural). It used to be ONE key
+// (estimator_quarantine_pending) rewritten wholesale by jsonb_set: an
+// identity-conflict invalidation whose block write failed queued
+// email_identity_conflict, and a later agreed-price invalidation that also
+// had to queue REPLACED it — without ever revalidating it. Because the
+// agreed-price verdict is row-scoped, accepted and booking-linked
+// estimates then passed although the call-wide identity verdict was never
+// disproved. Now:
+//   - writers (markQuarantinePending) add or refresh ONLY their own
+//     reason's entry in estimator_quarantine_queue — { <reason>: { reason,
+//     at, generation } } — never touching another reason's;
+//   - readers see EVERY entry (callDraftVerdict judges call-wide entries
+//     first, so the strongest applicable verdict is the one reported);
+//   - the drainer revalidates and retires each entry independently, and a
+//     generation-matched clear (clearOwnQuarantinePending) removes only
+//     its own reason + generation.
+// The legacy single-entry key is still READ (and drained / cleared) as one
+// more entry, so a row queued by an earlier deploy keeps failing closed
+// until its verdict is resolved; nothing writes it any more.
+const QUARANTINE_QUEUE_KEY = 'estimator_quarantine_queue';
+const LEGACY_QUARANTINE_KEY = 'estimator_quarantine_pending';
+// The queue map as a jsonb OBJECT (a missing or malformed value reads as
+// empty, never as an error that would abort the caller's statement).
+const QUARANTINE_QUEUE_MAP_SQL = `(CASE WHEN jsonb_typeof(metadata->'${QUARANTINE_QUEUE_KEY}') = 'object'
+  THEN metadata->'${QUARANTINE_QUEUE_KEY}' ELSE '{}'::jsonb END)`;
+// Adds / refreshes ONE reason's entry. Bindings: [reason, entryJson].
+const QUARANTINE_QUEUE_APPEND_SQL = `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${QUARANTINE_QUEUE_KEY}}',
+  ${QUARANTINE_QUEUE_MAP_SQL} || jsonb_build_object(?::text, ?::jsonb), true)`;
+
+function quarantineQueueEntry(reason, generation = null) {
+  return {
+    reason: String(reason),
+    at: new Date().toISOString(),
+    ...(generation != null ? { generation: Number(generation) } : {}),
+  };
+}
+
+// Every queued verdict on a call's metadata, CALL-WIDE entries first.
+// `slot` names where the entry lives: 'legacy' for the old single key,
+// otherwise the queue map's key (the reason).
+function quarantineQueueEntries(md) {
+  const entries = [];
+  if (!md || typeof md !== 'object') return entries;
+  const legacy = md[LEGACY_QUARANTINE_KEY];
+  if (legacy && typeof legacy === 'object' && legacy.reason) {
+    entries.push({ ...legacy, reason: String(legacy.reason), slot: 'legacy' });
+  }
+  const queue = md[QUARANTINE_QUEUE_KEY];
+  if (queue && typeof queue === 'object' && !Array.isArray(queue)) {
+    for (const [slot, entry] of Object.entries(queue)) {
+      if (entry && typeof entry === 'object' && entry.reason) {
+        entries.push({ ...entry, reason: String(entry.reason), slot });
+      }
+    }
+  }
+  // Stable: call-wide (0) before row-scoped (1).
+  return entries
+    .map((entry, i) => ({ entry, i, rank: isRowScopedDraftBlockReason(entry.reason) ? 1 : 0 }))
+    .sort((a, b) => (a.rank - b.rank) || (a.i - b.i))
+    .map(({ entry }) => entry);
+}
+
+function callDraftVerdict(md, {
+  forNewDraft = false, estimateData = null, estimateStatus = null, supersededBelowGeneration = null,
+} = {}) {
+  const current = (marker) => marker?.reason && (supersededBelowGeneration == null
+    || marker.generation == null
+    || Number(marker.generation) >= Number(supersededBelowGeneration));
+  const block = md?.estimator_draft_block;
+  if (current(block)) {
+    const reason = String(block.reason);
+    // A re-qualifying pass stamps superseded_at BEFORE the creators'
+    // in-lock guard (codex #4815 r6 P1) so its fresh draft can land; the
+    // rows the verdict already marked stay dead via their own per-row
+    // stamps, which are all an existing row is judged by.
+    const eng = estimateData?.estimatorEngine || {};
+    const markedThisRow = eng.invalidation_pending_reason === reason
+      || (!!eng.linkage_invalidated_at && eng.invalidation_reason === reason);
+    const applies = !isRowScopedDraftBlockReason(reason)
+      || (forNewDraft ? !block.superseded_at : markedThisRow);
+    if (applies) return { marker: 'draft_block', reason };
+  }
+  // EVERY queued verdict is judged on its own scope (codex #4815 r8 P1) —
+  // a row-scoped entry sparing a terminal / exception row never hides a
+  // call-wide entry queued beside it.
+  for (const queued of quarantineQueueEntries(md)) {
+    if (!current(queued)) continue;
+    const applies = forNewDraft
+      || !isRowScopedDraftBlockReason(queued.reason)
+      || !scopedVerdictExcludesRow(estimateData, estimateStatus);
+    if (applies) return { marker: 'quarantine_pending', reason: queued.reason };
+  }
+  return null;
+}
+
 // The DURABLE call-side verdict as seen from an ESTIMATE row: when a
 // quarantine could not write its estimate-side marker, the block lives on
 // the call, and the public surfaces — which only ever read the estimate —
@@ -93,7 +295,10 @@ async function callPassStillOwned(dbc, callLogId, { ownerProcToken = null, owner
 // its bearer token until the scheduler drained the queue (codex P1, PR
 // #3304 GH r9). Returns the blocking reason, or null. Cheap: one indexed
 // lookup, and only for engine-drafted rows.
-async function callSideBlockForEstimateData(dbc, data) {
+// `estimateStatus` (codex #4815 r7 P0): the row's status column — lets a
+// queued row-scoped verdict spare a terminal row (see callDraftVerdict).
+// Omitted, the row is judged as possibly non-terminal (fail closed).
+async function callSideBlockForEstimateData(dbc, data, { estimateStatus = null } = {}) {
   const callLogId = data?.estimatorEngine?.callLogId || null;
   if (!callLogId) return null;
   try {
@@ -104,8 +309,8 @@ async function callSideBlockForEstimateData(dbc, data) {
     // call is gone has no provenance left to validate.
     if (!row) return 'call_missing';
     const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
-    if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
+    const verdict = callDraftVerdict(md, { estimateData: data, estimateStatus });
+    if (verdict) return verdict.reason;
     // An IN-FLIGHT call — a held claim token OR a queued retry lane — is
     // mid-decision: its block marker may be milliseconds (or one sweep)
     // away, and the marker read above ran before that write. The public
@@ -315,8 +520,21 @@ module.exports = {
   REPRICE_PENDING_ABSENT_SQL,
   ADDRESS_UNVERIFIED_ABSENT_SQL,
   callReprocessInFlight,
+  settledCallGeneration,
   callPassStillOwned,
   callSideBlockForEstimateData,
+  callDraftVerdict,
+  quarantineQueueEntries,
+  quarantineQueueEntry,
+  QUARANTINE_QUEUE_KEY,
+  LEGACY_QUARANTINE_KEY,
+  QUARANTINE_QUEUE_MAP_SQL,
+  QUARANTINE_QUEUE_APPEND_SQL,
+  estimateEarnsAssessmentException,
+  ASSESSMENT_EXCEPTION_ABSENT_SQL,
+  isRowScopedDraftBlockReason,
+  ROW_SCOPED_DRAFT_BLOCK_REASONS,
+  TERMINAL_ESTIMATE_STATUSES,
   stampCallUnitAnswer,
   clearCallUnitAnswer,
   callUnitAnswer,

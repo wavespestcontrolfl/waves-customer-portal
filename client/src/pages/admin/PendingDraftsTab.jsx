@@ -77,7 +77,10 @@ function communicationsHref(draft) {
   return `/admin/communications?${params.toString()}`;
 }
 
-const ASSESSMENT_TYPES = new Set(["lawn", "pest"]);
+// Matches the assessments page's own ASSESSMENT_TYPES
+// (client/src/pages/admin/PhotoAssessmentsPage.jsx), which already handles
+// ?open=tree_shrub:<id>.
+const ASSESSMENT_TYPES = new Set(["lawn", "pest", "tree_shrub"]);
 
 // Photo-triage drafts carry the assessment they were written from
 // (flags.assessment_type / assessment_id, stamped server-side by
@@ -246,13 +249,18 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject, onRevisionState
           <ActionButton tone="primary" disabled={busy} onClick={() => onApprove(draft)}>
             Approve &amp; send
           </ActionButton>
-          <ActionButton disabled={busy} onClick={() => {
-            onRevisionStateChange(draft.id, true);
-            setRevising(true);
-            setRevisedText(draft.draftResponse || "");
-          }}>
-            Revise
-          </ActionButton>
+          {/* Gauge-written photo-triage drafts (flags.gauge_version) are
+              approve-as-written or reject — the server refuses a revision
+              (PHOTO_TRIAGE_NOT_REVISABLE). Older ones stay revisable. */}
+          {!(draft.intent === "photo_triage" && draft.flags?.gauge_version) && (
+            <ActionButton disabled={busy} onClick={() => {
+              onRevisionStateChange(draft.id, true);
+              setRevising(true);
+              setRevisedText(draft.draftResponse || "");
+            }}>
+              Revise
+            </ActionButton>
+          )}
           <ActionButton tone="danger" disabled={busy} onClick={() => onReject(draft)}>
             Reject
           </ActionButton>

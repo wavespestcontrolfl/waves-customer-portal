@@ -78,8 +78,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v9');
-    expect(PROMPT_HASH).toMatch(/^v9-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v10');
+    expect(PROMPT_HASH).toMatch(/^v10-[a-f0-9]{12}$/);
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
@@ -125,6 +125,16 @@ describe('v2 extraction prompt', () => {
     const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
     expect(prompt).toContain('the PRIMARY entry FIRST — the accepted one if any (caller_response "accepted"), else the first price stated on the call — followed by the remaining distinct prices in the order they were stated');
     expect(prompt).not.toContain('most consequential first');
+  });
+
+  // v10: caller_id_disclaimed + phone_note (call-agent live miss 2026-09-25,
+  // call 6fee5f34) — the model must flag when the caller says the incoming
+  // ANI isn't theirs, and prefer any spoken callback over the ANI.
+  test('includes the caller_id_disclaimed / phone_note rules', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('caller_id_disclaimed');
+    expect(prompt).toContain('phone_note');
+    expect(prompt).toContain('prefer a spoken callback number over the incoming Twilio ANI');
   });
 
   test('extractionPromptVersion appends an order-sensitive catalog hash', () => {
@@ -229,7 +239,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.13.0');
+    expect(SCHEMA_VERSION).toBe('1.14.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

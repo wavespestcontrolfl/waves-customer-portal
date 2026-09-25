@@ -6,7 +6,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
-jest.mock('../config/models', () => ({ TEXT_POLICIES: { visionAnalysis: 'visionAnalysis' }, GEMINI_IMAGE_BEST: 'gemini-x', GEMINI_IMAGE_STABLE: 'gemini-y' }));
+jest.mock('../config/models', () => ({ TEXT_POLICIES: { visionAnalysis: 'visionAnalysis', imageScreen: 'imageScreen' }, GEMINI_IMAGE_BEST: 'gemini-x', GEMINI_IMAGE_STABLE: 'gemini-y' }));
 
 const { dispatchWithFallback } = require('../services/llm/call');
 const gen = require('../services/content/image-generator')._internals;
@@ -196,7 +196,7 @@ describe('screenGeneratedImage', () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": [], "notes": "a hand on a dial"}' });
     const r = await screenGeneratedImage({ buffer });
     expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
-    expect(dispatchWithFallback.mock.calls[0][0]).toBe('visionAnalysis');
+    expect(dispatchWithFallback.mock.calls[0][0]).toBe('imageScreen');
     expect(dispatchWithFallback.mock.calls[0][1].images[0].data).toBe(buffer.toString('base64'));
     // The caller's remaining slot time bounds the vision chain; a spent deadline skips the screen (Codex r7 P2 on #3964).
     expect(dispatchWithFallback.mock.calls[0][1].timeoutMs).toBeUndefined();

@@ -177,6 +177,10 @@ function checkRecruitingBookingVersion(meta, app, stage) {
 
 const REGISTRY = {
   billing_retry_email_deferred: {
+    // Email-only replay: the row is queued without a phone on purpose, so
+    // the executor's recipient gate must not read its blank phone as a
+    // failed lookup (codex #4803 r5).
+    replayWithoutPhone: true,
     async dispatch(meta) {
       return require('../billing-retry-email-obligation').replayPaymentRetryNotice(meta);
     },
@@ -1488,6 +1492,11 @@ async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatc
   return defaultDispatch();
 }
 
+// True only for a registered dispatch that never needs a recipient phone.
+function replaysWithoutPhone(entryPoint) {
+  return entryFor(entryPoint)?.replayWithoutPhone === true;
+}
+
 // undefined = no locked handoff registered: the sender dispatches normally.
 // Errors propagate: the provider wrapper distinguishes a failed read before
 // the handoff (retryable, nothing left) from a failure after acceptance.
@@ -1665,6 +1674,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
 module.exports = {
   recheckDeferredReplay,
   dispatchDeferredReplay,
+  replaysWithoutPhone,
   deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,

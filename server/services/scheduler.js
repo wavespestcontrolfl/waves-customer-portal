@@ -96,12 +96,17 @@ async function resolveScheduledRecipient(msg, claimMeta) {
   }
 }
 
+// Only a registered Email-only replay proceeds without a phone: its row was
+// queued blank on purpose. Every other billing row that reaches the executor
+// without a resolved phone is a failed or empty lookup and stays on the
+// bounded recipient-refresh rail above (codex #4803 r5).
 function canReplayBillingWithoutPhone(msg, claimMeta) {
   return Boolean(msg.customer_id
-    && (!String(msg.to_phone || '').trim() || (claimMeta?.refresh_customer_phone === true
-      && claimMeta.recipient_identity_unverified !== true && claimMeta.explicit_recipient !== true))
+    && claimMeta?.requires_registered_dispatch === true
+    && require('./messaging/deferred-replay-registry').replaysWithoutPhone(claimMeta.entry_point)
+    && claimMeta.recipient_identity_unverified !== true && claimMeta.explicit_recipient !== true
     && ['invoice', 'payment_issue', 'billing', 'payment_receipt']
-      .includes(claimMeta?.billingDeliveryCategory));
+      .includes(claimMeta.billingDeliveryCategory));
 }
 
 // Deposit-receipt replays re-check payment_receipt_channel at send time —
@@ -832,7 +837,18 @@ function initScheduledJobs() {
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const { sweepUngeocodedCustomers } = require('./geocoder');
-      await runExclusive('geocoder-backstop', () => sweepUngeocodedCustomers());
+      await runExclusive('geocoder-backstop', async () => {
+        // Appointment pins are independent of the customer's primary address.
+        // Keep recovery in this job, ahead of the unrelated customer backlog.
+        // A service-query failure must not suppress the existing customer
+        // safety net; both sweeps still share this one exclusive lease.
+        try {
+          await require('./geocoder-service-locations').sweepUngeocodedServices({ dryRun: false });
+        } catch (err) {
+          logger.error(`[geocoder] service-location backstop failed (${err.code || 'service_sweep_error'}): ${err.message}`);
+        }
+        await sweepUngeocodedCustomers();
+      });
     } catch (err) {
       logger.error(`[geocoder] backstop sweep failed: ${err.message}`);
     }
@@ -4026,10 +4042,17 @@ function initScheduledJobs() {
               || ((claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
                 ? claimMeta.consent_basis
                 : undefined),
+            // A deferred billing notice re-enters the same channel routing
+            // its immediate attempt used: the persisted delivery category
+            // and the branded-Email sidecar marker ride along (codex #4833
+            // r3), so an explicit Email / App choice is neither texted nor
+            // double-emailed on the morning replay.
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.billingDeliveryCategory ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory } : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,
@@ -5256,8 +5279,18 @@ function initScheduledJobs() {
         .whereNull('c.deleted_at')
         .select('chs.customer_id');
 
+      // Retention drafts are a FLAGSHIP customerCopy call per at-risk
+      // customer, keyed on the churn band the owner ruled unusable
+      // (2026-08-29; win-back is a manual send). The engine itself enforces
+      // GATE_CUSTOMER_INTEL_AI (customerIntelAiLive) on every caller; this
+      // skip only saves the per-customer reads and logs the count.
+      const { customerIntelAiLive } = require('../config/feature-gates');
+      const intelAiOn = customerIntelAiLive();
       let outreachGenerated = 0;
-      for (const c of atRisk) {
+      if (!intelAiOn) {
+        logger.info(`[customer-intel] GATE_CUSTOMER_INTEL_AI off — skipped retention drafting for ${atRisk.length} at-risk customers`);
+      }
+      for (const c of intelAiOn ? atRisk : []) {
         const result = await RetentionEngine.generateRetentionOutreach(c.customer_id);
         if (result) outreachGenerated++;
       }

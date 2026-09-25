@@ -14,7 +14,12 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // from it) and service_request.prices[] (every distinct price on a call
 // that states more than one; price stays the single primary entry). New
 // instructions the model must follow, so this is a new cohort.
-const PROMPT_VERSION = 'v9';
+// v10: caller.caller_id_disclaimed + caller.phone_note (call-agent live miss
+// 2026-09-25, call 6fee5f34: "this is our office line... I pick up, and
+// then text") — the model is now instructed to flag when the caller says
+// the incoming number is not their own and to prefer a spoken callback over
+// the ANI. New instructions, so this is a new cohort.
+const PROMPT_VERSION = 'v10';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -132,6 +137,10 @@ PHONE:
 - phone_raw_spoken: Verbatim as spoken in transcript (e.g. "nine four one, five five five...").
 - phone_source: "spoken" if caller stated a number, "caller_id" if using Twilio ANI only, "both" if spoken matches ANI, "unknown" if neither available.
 - If no number is spoken, set phone_e164 to null (server will fall back to ANI).
+- ALWAYS prefer a spoken callback number over the incoming Twilio ANI: when the caller states ANY number to be reached at — their cell, a direct line, "call me at..." — that is phone_e164/phone_raw_spoken, even if it never gets compared to the ANI out loud.
+- caller_id_disclaimed: set true, with an evidence quote, ONLY when the caller explicitly says the number reaching us is NOT their own — a shared office line, a front-desk phone, a coworker's or spouse's phone they're borrowing ("this is our office line, they route it to me", "I'm calling from the shop phone", "this is my husband's cell"). Do not infer it from silence or from a business name alone — it takes an explicit statement that THIS number isn't theirs. Leave null when nothing was said about whose number it is.
+- phone_note: when caller_id_disclaimed is true, capture the caller's own explanation in their words (trimmed, <=160 chars) — e.g. "office line, routes to me, I text back from my cell". null otherwise.
+- A disclaimed caller ID with no spoken callback number (phone_source stays "caller_id"/"unknown") means we have NO verified way to text this caller back — that is exactly the case phone_note and caller_id_disclaimed exist to flag; do not silently fall back to treating the ANI as good enough once you've heard the caller say otherwise.
 
 EMAIL:
 - Only extract when the caller clearly says or spells the complete email address.

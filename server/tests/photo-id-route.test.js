@@ -21,6 +21,7 @@ let idCounter = 0;
 let mockDropIssueOnTransactionStart = false;
 
 function resetTables() {
+  for (const table of Object.keys(TABLES)) TABLES[table] = [];
   TABLES.pest_identifications = [];
   TABLES.lawn_diagnostics = [];
   TABLES.tree_shrub_assessments = [];
@@ -115,6 +116,13 @@ const mockResolveSessionScope = jest.fn(async () => ({
 const mockApplyPropertyPredicateCalls = [];
 const mockStoreFunnelPhotos = jest.fn(async () => {});
 const mockStoreTreeShrubPhotos = jest.fn(async () => {});
+const mockGetViewUrl = jest.fn(async (key) => `https://private.example/${key}`);
+const mockGetPhotoBase64 = jest.fn(async () => ({ mimeType: 'image/jpeg', data: 'YQ==' }));
+jest.mock('../services/photos', () => ({
+  CUSTOMER_DWELL_TTL_SECONDS: 86400,
+  getViewUrl: (...args) => mockGetViewUrl(...args),
+  getPhotoBase64: (...args) => mockGetPhotoBase64(...args),
+}));
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -493,13 +501,15 @@ describe('pest issue association', () => {
     });
   });
 
-  test('list and detail expose the additive association fields', async () => {
+  test('list and detail preserve issue fields alongside saved photo evidence', async () => {
     await withServer(async (base) => {
       const created = await post(base, '/api/photo-id/pest', photoBody({ observed_on: '2026-09-20' })).then((res) => res.json());
       const list = await fetch(`${base}/api/photo-id`).then((res) => res.json());
       expect(list.items[0]).toMatchObject({ issue_id: created.issue_id, observed_on: '2026-09-20' });
+      TABLES.pest_identification_photos = [{ id: 'issue-photo', identification_id: created.id, customer_visible: true, s3_key: 'issue-photo-key', mime_type: 'image/jpeg', photo_index: 0 }];
       const detail = await fetch(`${base}/api/photo-id/pest/${created.id}`).then((res) => res.json());
       expect(detail).toMatchObject({ issue_id: created.issue_id, observed_on: '2026-09-20' });
+      expect(detail.photos).toEqual([{ id: 'issue-photo', mime_type: 'image/jpeg', url: 'https://private.example/issue-photo-key' }]);
     });
   });
 });
@@ -1533,4 +1543,69 @@ describe('comms-free module contract', () => {
     expect(requireCalls.some((r) => /notification-service/i.test(r))).toBe(false);
     expect(requireCalls.some((r) => /nodemailer|sendgrid|resend/i.test(r))).toBe(false);
   });
+});
+
+describe('saved Photo ID evidence', () => {
+  const photoId = '11111111-1111-4111-8111-111111111111';
+  const hiddenId = '22222222-2222-4222-8222-222222222222';
+  test.each([
+    ['pest', 'pest_identification_photos', 'identification_id', 'photo_index'],
+    ['lawn', 'lawn_diagnostic_photos', 'diagnostic_id', 'photo_index'],
+    ['tree_shrub', 'tree_shrub_assessment_photos', 'assessment_id', 'photo_order'],
+  ])('%s detail returns only visible photos in order, with no storage keys', async (type, table, fk, order) => {
+    await withServer(async (base) => {
+      const created = await post(base, `/api/photo-id/${type}`, photoBody());
+      const { id } = await created.json();
+      TABLES[table] = [
+        { id: hiddenId, [fk]: id, [order]: 0, s3_key: 'internal', customer_visible: false },
+        { id: 'missing', [fk]: id, [order]: 2, s3_key: null, customer_visible: true },
+        { id: photoId, [fk]: id, [order]: 1, s3_key: 'saved', mime_type: 'image/jpeg', customer_visible: true },
+      ];
+      const res = await fetch(`${base}/api/photo-id/${type}/${id}`);
+      expect(res.headers.get('cache-control')).toBe('private, no-store');
+      const body = await res.json();
+      expect(body.photos).toEqual([
+        { id: photoId, mime_type: 'image/jpeg', url: 'https://private.example/saved' },
+        { id: 'missing', url: null },
+      ]);
+      expect(JSON.stringify(body)).not.toContain('s3_key');
+      expect(mockGetViewUrl).toHaveBeenCalledTimes(1);
+      mockGetViewUrl.mockClear();
+      const stranger = await fetch(`${base}/api/photo-id/${type}/${id}`, { headers: { 'x-test-customer-id': OTHER_CUSTOMER_ID } });
+      expect(stranger.status).toBe(404);
+      expect(mockGetViewUrl).not.toHaveBeenCalled();
+      mockResolveSessionScope.mockRejectedValueOnce(new Error('scope unavailable'));
+      expect((await fetch(`${base}/api/photo-id/${type}/${id}`)).status).toBe(500);
+      expect(mockGetViewUrl).not.toHaveBeenCalled();
+    });
+  });
+
+  test('request attachment reads recheck ownership, property and selected photo IDs; storage errors never silently drop evidence', async () => {
+    const { requestPhotoIdEvidence } = require('../services/customer-photo-id-evidence');
+    const id = '33333333-3333-4333-8333-333333333333';
+    TABLES.pest_identifications = [{ id, customer_id: CUSTOMER_ID, mode: 'customer', property_id: 'home-a' }];
+    TABLES.pest_identification_photos = [
+      { id: photoId, identification_id: id, customer_visible: true, s3_key: 'saved' },
+      { id: hiddenId, identification_id: id, customer_visible: false, s3_key: 'internal' },
+    ];
+    const req = { customer: { id: CUSTOMER_ID } };
+    const source = { type: 'pest', id, photoIds: [photoId] };
+    expect(await requestPhotoIdEvidence(req, source)).toEqual({ photos: ['data:image/jpeg;base64,YQ=='] });
+    expect((await requestPhotoIdEvidence({ customer: { id: OTHER_CUSTOMER_ID } }, source)).status).toBe(404);
+    expect((await requestPhotoIdEvidence(req, { ...source, photoIds: [hiddenId] })).status).toBe(409);
+    mockGetPhotoBase64.mockRejectedValueOnce(new Error('storage offline'));
+    expect((await requestPhotoIdEvidence(req, source)).status).toBe(503);
+    expect((await requestPhotoIdEvidence(req, source, { enabled: true, scoped: true, property: { id: 'home-b' } })).status).toBe(404);
+    expect(await requestPhotoIdEvidence(req, { ...source, photoIds: [] })).toEqual({ photos: [] });
+    TABLES.pest_identification_photos = [];
+    expect(await requestPhotoIdEvidence(req, { ...source, photoIds: [] })).toEqual({ photos: [], missingPhotos: true });
+  });
+});
+
+test('preview signing failure retains the photo ID, emits a safe diagnostic and returns no storage URL', async () => {
+  const { customerPhotoViews } = require('../services/customer-photo-id-evidence');
+  TABLES.pest_identification_photos = [{ id: 'photo-signing-failed', identification_id: 'parent', customer_visible: true, s3_key: 'private-key' }];
+  mockGetViewUrl.mockRejectedValueOnce(new Error('secret signed URL must not be logged'));
+  expect(await customerPhotoViews('pest', 'parent')).toEqual([{ id: 'photo-signing-failed', mime_type: undefined, url: null }]);
+  expect(require('../services/logger').warn).toHaveBeenCalledWith('[photo-id] preview signing failed for photo photo-signing-failed');
 });

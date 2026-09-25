@@ -358,8 +358,13 @@ async function readGratitudeContext({
     direction: row.direction,
     body: row.message_body,
     messageType: jsonObject(row.metadata)?.original_message_type || row.message_type,
+    // Set at send time only for Comms-composer bodies (services/twilio.js);
+    // 'manual' by itself is also written by automated senders.
+    humanAuthored: jsonObject(row.metadata)?.human_authored === true,
     createdAt: row.created_at,
     mediaCount: mediaCountFromMetadata(row.metadata),
+    // Provider row of a /schedule-sms send; names the queued row it delivered.
+    scheduledSourceId: jsonObject(row.metadata)?.scheduled_sms_log_id ?? null,
   }));
   const pendingWork = await pendingGratitudeWork(dbh, { customerId: customer.id, threadKey });
   const policy = evaluateGratitudeContext({

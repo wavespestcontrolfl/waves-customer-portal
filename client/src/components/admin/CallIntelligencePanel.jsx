@@ -232,6 +232,13 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt,
               {[humanize(view.intent.primary_service_category), view.intent.specific_service_name, humanize(view.intent.service_intent), humanize(view.intent.urgency)].filter(Boolean).join(" · ")}
             </Row>
             <Row label="Pests">{view.intent.pests_observed.map(humanize).join(", ")}</Row>
+            {view.caller?.caller_id_disclaimed === true && (
+              <Row label="Caller ID">
+                <span className="text-alert-fg">
+                  {["Not caller's own number", view.caller.phone_note].filter(Boolean).join(" — ")}
+                </span>
+              </Row>
+            )}
             <Row label="Property">{[view.property.address, humanize(view.property.property_type), view.property.pets_on_property ? `pets: ${view.property.pet_notes || "yes"}` : null].filter(Boolean).join(" · ")}</Row>
             <Row label="Appointment">
               {view.appointment.status && view.appointment.status !== "none"

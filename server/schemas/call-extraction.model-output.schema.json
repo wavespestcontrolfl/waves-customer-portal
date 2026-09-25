@@ -124,6 +124,21 @@
           ],
           "description": "How the phone number was obtained. 'caller_id' = from Twilio ANI only, 'spoken' = caller stated it, 'both' = matches ANI and spoken."
         },
+        "caller_id_disclaimed": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.14.0 additive. true ONLY when the caller explicitly states the number reaching us is NOT their own — a shared/office line, a receptionist's desk phone, someone else's cell they borrowed. null when the call gives no signal either way; false is never set (the model omits the field or returns null instead — an unstated caller ID is not evidence it IS theirs). The Twilio ANI must not be trusted as a personal callback number when true and no spoken number backs it up; see phone_source and phone_note."
+        },
+        "phone_note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160,
+          "description": "1.14.0 additive. The caller's own words explaining the number, verbatim or lightly trimmed (e.g. \"this is our office line, they route calls to me and I text back\"). Only set alongside caller_id_disclaimed=true. null when nothing was said about the number itself."
+        },
         "email": {
           "type": [
             "string",

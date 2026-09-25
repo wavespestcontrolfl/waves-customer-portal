@@ -15,10 +15,23 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false } = {}) {
   const text = (v) => String(v == null ? '' : v).trim();
   const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
+  // V1/V2 email DISAGREEMENT (owner ruling 2026-09-25): adoptV2PrimaryFields
+  // nulls extracted.email pending office read-back when the two call
+  // extractors captured different spellings, stamping BOTH raw candidates
+  // onto extracted.email_candidates (extraction-compat.js). The caller DID
+  // give a reachable email — the extractors just disagree on the spelling —
+  // so this counts as reachback exactly like a single valid email would.
+  // Without it, a blocked/anonymous-caller voicemail whose only reachback is
+  // a disputed spelling fails this gate before the read-back card logic
+  // ever runs, and a real service voicemail is silently classified
+  // non-workable with no lead and no card (codex P1).
+  const hasEmailDisagreementReachback = Array.isArray(extracted.email_candidates)
+    && extracted.email_candidates.length >= 2;
   if (!phone) {
-    return hasServiceIntent && EMAIL_RE.test(text(extracted.email).toLowerCase());
+    return hasServiceIntent
+      && (EMAIL_RE.test(text(extracted.email).toLowerCase()) || hasEmailDisagreementReachback);
   }
-  const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
+  const hasReachback = !!(text(extracted.email) || text(extracted.address_line1) || hasEmailDisagreementReachback);
   return hasServiceIntent && (hasReachback || voicemail === true);
 }
 

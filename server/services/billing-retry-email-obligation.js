@@ -180,7 +180,10 @@ async function replayPaymentRetryNotice(meta = {}, database = db) {
   const customer = await database('customers').where({ id: meta.customer_id }).first();
   if (!customer) return { sent: false, blocked: true, code: 'CUSTOMER_NOT_FOUND', deliveryOutcome: 'not_sent' };
   try {
-    const ctx = loadRetryContext({ conn: database });
+    // Eligibility on the date the notice names, not today: a pause that
+    // ends before the retry date does not cancel the promised notice, and
+    // one that covers it does (codex #4833 r3).
+    const ctx = loadRetryContext({ asOf: retryDateKey(meta.retry_date), conn: database });
     const eligibility = await classifyFailedPaymentRetry({ payment, customer, ctx, conn: database });
     if (ctx.lookupWarnings.length) throw new Error('Retry eligibility lookup unavailable');
     if (eligibility.disposition !== DISPOSITIONS.CHARGE) {

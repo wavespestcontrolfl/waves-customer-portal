@@ -15,6 +15,7 @@ const { collectionsChannelPermitted } = require("../collections/rail-guard");
 const ContactLedger = require("../collections/contact-ledger");
 const { billingChannelAllowed, explicitBillingChannels } = require('../billing-delivery-channels');
 const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
+const { isDefiniteRejection } = require('../sendgrid-mail');
 
 const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
   late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
@@ -25,6 +26,8 @@ const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
 };
 
 const EMAIL_ELIGIBLE_INVOICE_STATUSES = new Set(["sent", "viewed", "overdue", "unpaid"]);
+// Overdue stage thresholds, highest first; below 14 days is the 7-day stage.
+const LATE_PAYMENT_STAGE_DAYS = [90, 60, 30, 14];
 const CONTACT_EMAIL = "contact@wavespestcontrol.com";
 
 function clean(value) {
@@ -37,6 +40,25 @@ function cleanEmail(value) {
 
 function isEmailLike(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
+}
+
+// The invoice title and service-date phrasing every late-payment text
+// renders, shared by the explicit-channel and legacy paths.
+function latePaymentCopy(invoice) {
+  const completedOn = formatDateOnly(invoice?.service_date);
+  return {
+    invoiceTitle: invoice?.title || invoice?.service_type || "your service",
+    completedOn,
+    dateClause: completedOn ? ` completed on ${completedOn}` : "",
+  };
+}
+
+function smsLogMetadata(row) {
+  try {
+    return (typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata) || {};
+  } catch {
+    return {};
+  }
 }
 
 function invoiceCanReceiveLatePaymentEmail(invoice) {
@@ -150,15 +172,26 @@ class BalanceReminder {
           if (await this.sendReminder(service, balance, pending.metadata.tier, daysUntil)) sent++;
           continue;
         }
-        const prevReminders = channels ? progress.filter((event) => event.complete
-          && new Date(event.deliveredAt) > new Date(Date.now() - 14 * 86400000))
-          .map((event) => ({ created_at: event.deliveredAt })) : await db("sms_log")
+        const smsHistory = await db("sms_log")
           .where({
             customer_id: service.cust_id,
             message_type: "balance_reminder",
           })
           .where("created_at", ">", new Date(Date.now() - 14 * 86400000))
           .orderBy("created_at", "desc");
+        // Explicit channels count every keyed episode with a delivered leg
+        // (a partially delivered episode still reached the customer) plus
+        // the legacy sms_log history: a reminder texted before the
+        // customer's first channel save carries no event key and must still
+        // consume the 14-day allowance. An sms_log row is skipped only when
+        // its episode was counted here, so a keyed Text is counted once.
+        const window = new Date(Date.now() - 14 * 86400000);
+        const counted = progress.filter((event) => event.deliveredAt && new Date(event.deliveredAt) > window);
+        const countedKeys = new Set(counted.map((event) => event.metadata.notificationEventKey));
+        const prevReminders = channels ? [
+          ...counted.map((event) => ({ created_at: event.deliveredAt })),
+          ...smsHistory.filter((row) => !countedKeys.has(smsLogMetadata(row).notificationEventKey)),
+        ] : smsHistory;
 
         if (prevReminders.length >= 3) continue;
         if (
@@ -496,6 +529,7 @@ class BalanceReminder {
 
     const triggerEventId = `late_payment:${latestInvoice.id}:${config.stageDays}`;
     const idempotencyKey = `late_payment_email:${latestInvoice.id}:${config.stageDays}`;
+    let providerHandoffStarted = false;
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: config.templateKey,
@@ -523,6 +557,7 @@ class BalanceReminder {
           const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
             .filter((entry) => isEmailLike(entry.email));
           if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
+          providerHandoffStarted = true;
           await dispatch();
           return { ok: true };
         },
@@ -573,7 +608,16 @@ class BalanceReminder {
       if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
         return { ok: false, skipped: true, reason: 'template_unavailable' };
       }
-      return { ok: false, error: err.message };
+      // Same evidence rule as the invoice follow-up wrapper: a failure
+      // before the provider handoff, or a definite provider refusal, is
+      // known not sent and may reopen the reservation; an unknown failure
+      // after the handoff (5xx / network) stays uncertain so the keyed
+      // reservation is held instead of re-sent.
+      const definitelyNotSent = err.code !== 'EMAIL_SEND_IN_PROGRESS'
+        && (err.providerOutcome?.deliveryOutcome === 'not_sent'
+          || (err.providerOutcome?.deliveryOutcome !== 'uncertain'
+            && (!providerHandoffStarted || isDefiniteRejection(err))));
+      return { ok: false, error: err.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
     }
   }
 
@@ -587,17 +631,22 @@ class BalanceReminder {
     const source = 'balance_reminder_late_payment_check';
     const progress = await reminderProgress(customer.id, source, channels);
     const pending = progress.find((event) => !event.complete && event.metadata.invoiceId === invoice.id);
-    if (!pending && progress.some((event) => event.complete && new Date(event.deliveredAt) > new Date(Date.now() - 7 * 86400000))) return false;
-    const stage = balance.daysOverdue >= 90 ? 90 : balance.daysOverdue >= 60 ? 60 : balance.daysOverdue >= 30 ? 30 : balance.daysOverdue >= 14 ? 14 : 7;
+    // A fresh episode keeps the legacy seven-day spacing: any keyed episode
+    // with a delivered leg (partial delivery still reached the customer)
+    // and the sms_log history (reminders texted before the first explicit
+    // channel save carry no key) both count.
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000);
+    if (!pending && (progress.some((event) => event.deliveredAt && new Date(event.deliveredAt) > sevenDaysAgo)
+      || await db('sms_log').where({ customer_id: customer.id, message_type: 'late_payment' })
+        .where('created_at', '>', sevenDaysAgo).first())) return false;
+    const stage = LATE_PAYMENT_STAGE_DAYS.find((days) => balance.daysOverdue >= days) || 7;
     const templateKey = pending?.metadata.templateKey || `late_payment_${stage}d`;
     const eventKey = pending?.metadata.notificationEventKey || `balance-late-payment:${invoice.id}:${templateKey}`;
     if (progress.some((event) => event.complete && event.metadata.notificationEventKey === eventKey)) return false;
     const link = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
       kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: customer.id,
     });
-    const invoiceTitle = invoice.title || invoice.service_type || 'your service';
-    const completedOn = formatDateOnly(invoice.service_date);
-    const dateClause = completedOn ? ` completed on ${completedOn}` : '';
+    const { invoiceTitle, completedOn, dateClause } = latePaymentCopy(invoice);
     const message = await renderSmsTemplate(templateKey, {
       first_name: customer.first_name || 'there', invoice_title: invoiceTitle,
       service_date: completedOn || 'your service date', service_date_clause: dateClause, pay_url: link,
@@ -698,13 +747,10 @@ class BalanceReminder {
           customerId: customer.id,
         },
       );
-      const invoiceTitle =
-        oldestInvoice?.title || oldestInvoice?.service_type || "your service";
       // service_date is a JS Date (pg `date` column); the old string concat
       // produced "Invalid Date" (toLocaleDateString never throws, so the
       // try/catch was dead code) and the SMS guard blocked the send.
-      const completedOn = formatDateOnly(oldestInvoice?.service_date);
-      const dateClause = completedOn ? ` completed on ${completedOn}` : "";
+      const { invoiceTitle, completedOn, dateClause } = latePaymentCopy(oldestInvoice);
 
       let message;
       let templateKey;

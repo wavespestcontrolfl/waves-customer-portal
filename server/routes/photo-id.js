@@ -58,6 +58,7 @@ const { storeFunnelPhotos, storeTreeShrubCustomerPhotos } = require('../utils/fu
 const { reserviceStreamlineAccess } = require('../services/reservice-link');
 const { resolveSessionScope, applyPropertyPredicate, isSecondarySelection } = require('../services/account-properties');
 const { etDateString } = require('../utils/datetime-et');
+const { customerPhotoViews } = require('../services/customer-photo-id-evidence');
 const {
   PhotoIdIssueError,
   parseIssueFields,
@@ -1208,12 +1209,14 @@ router.get('/:type/:id', async (req, res, next) => {
     const table = TYPE_TABLE[type];
     if (!table || !UUID_RE.test(String(id || ''))) return res.status(404).json({ error: 'Not found' });
 
-    const scope = await resolvePropertyScope(req);
+    const scope = await resolvePropertyScope(req, { strict: true });
     const rowQuery = db(table).where({ id, customer_id: req.customer.id, mode: 'customer' });
     applyPropertyPredicate(rowQuery, scope, table);
     const row = await rowQuery.first();
     if (!row) return res.status(404).json({ error: 'Not found' });
 
+    res.set('Cache-Control', 'private, no-store');
+    const photos = await customerPhotoViews(type, row.id);
     const access = await reserviceStreamlineAccess(req.customer.id);
 
     if (type === 'pest') {
@@ -1230,7 +1233,7 @@ router.get('/:type/:id', async (req, res, next) => {
       });
       const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partial, build: () => pestResult });
       return res.status(200).json({
-        id: row.id, type: 'pest', created_at: row.created_at, result: finalPestResult, next_step: nextStep,
+        id: row.id, type: 'pest', created_at: row.created_at, result: finalPestResult, next_step: nextStep, photos,
         ...(issuesEnabled ? { issue_id: row.issue_id, observed_on: serializeObservedOn(row.observed_on) } : {}),
       });
     }
@@ -1246,7 +1249,7 @@ router.get('/:type/:id', async (req, res, next) => {
       });
       const { result: finalLawnResult } = finalizeCustomerResult('lawn', { complete: !lawnUnreliable, build: () => lawnResult });
       return res.status(200).json({
-        id: row.id, type: 'lawn', created_at: row.created_at, result: finalLawnResult, next_step: nextStep,
+        id: row.id, type: 'lawn', created_at: row.created_at, result: finalLawnResult, next_step: nextStep, photos,
       });
     }
 
@@ -1267,7 +1270,7 @@ router.get('/:type/:id', async (req, res, next) => {
       build: () => treeResult,
     });
     return res.status(200).json({
-      id: row.id, type: 'tree_shrub', created_at: row.created_at, result: finalTreeResult, next_step: nextStep,
+      id: row.id, type: 'tree_shrub', created_at: row.created_at, result: finalTreeResult, next_step: nextStep, photos,
     });
   } catch (err) {
     return next(err);
