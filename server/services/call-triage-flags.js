@@ -596,12 +596,19 @@ function normalizeForGrounding(s) {
 // token in that turn fails the grounding. Curated, conservative, fail-closed
 // — a benign turn containing "not" is sacrificed to triage rather than
 // risking a booking the agent rejected.
+// Codex round 10, P1 (:655): a bare rejection token ("Yeah, but no.") named
+// none of the phrases below, so a caller's flat "no"/"nope"/"nah" never
+// tripped this screen on its own — only multi-word hedges did. Added as
+// defense in depth alongside pulling "but" out of the shared commitment
+// vocabulary (above): either fix alone already closes the specific "Yeah,
+// but no." regression, but a bare rejection token is exactly the shape this
+// screen exists to catch, so it belongs here regardless.
 const NEGATION_HEDGE_TOKENS = [
   ' not ', ' won t ', ' wont ', ' can t ', ' cant ', ' cannot ', ' don t ',
   ' dont ', ' doesn t ', ' doesnt ', ' isn t ', ' isnt ', ' unable ',
   ' instead ', ' unless ', ' rather ', ' maybe ', ' might ',
   ' unfortunately ', ' call you back ', ' have to check ', ' let me check ',
-  ' see if ', ' ask someone ',
+  ' see if ', ' ask someone ', ' no ', ' nope ', ' nah ',
 ];
 function turnHasNegationOrHedge(normalizedTurn) {
   const padded = ` ${normalizedTurn} `;
@@ -650,9 +657,25 @@ function turnHasUnresolvedConditional(normalizedTurn) {
 // construction and fails closed to triage. Numbers are permitted as tokens;
 // what they may MEAN is validated separately by quoteBindsConfirmedSlot.
 // The negation/conditional screens above stay as defense in depth.
+// Codex round 10, P1 (:655): "yeah" and "but" were added here (codex round
+// 9) only because the real PINNED grounding sentence started with "But
+// yeah, …" — but this Set is also the closed vocabulary every OTHER
+// sentence's stripped text is checked against (turnVocabularyTokenOk /
+// otherSentenceIsClean), so a free "but" here let an OTHER sentence go
+// contrastive-clean too: "We'll see you Sunday at noon. Yeah, but no."
+// named no scheduling predicate and no declarative-poison term, and every
+// token (yeah/but/no) happened to be vocabulary, so the rejection the
+// caller actually spoke ("no") read as a benign aside. "but"/"yeah" are
+// discourse OPENERS, not ordinary content words that belong anywhere in a
+// sentence — they already live in COMMITMENT_OPENER_TOKENS for exactly that
+// reason. Pulled out of the shared/base vocabulary; commitmentTurnVocabularyOk
+// (the PINNED-sentence-only check, below) now admits them via
+// COMMITMENT_OPENER_TOKENS as an explicit extra set instead, so "But yeah,
+// we'll see you Sunday at noon." still grounds as the pinned sentence, but
+// no OTHER sentence can borrow either word to launder a rejection.
 const COMMITMENT_TURN_VOCAB = new Set([
   'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
-  'good', 'yep', 'yes', 'yeah', 'but', 'and', 'then', 'all', 'set', 'right',
+  'good', 'yep', 'yes', 'and', 'then', 'all', 'set', 'right',
   'we', 'i', 'll', 'will', 're', 'are', 'you', 'your', 'it', 'that', 's',
   // Third-party point-of-contact commitments ("we'll see him Monday", a
   // booking made for someone other than the caller — codex P1, live miss
@@ -727,8 +750,14 @@ function turnVocabularyTokenOk(tok, extraSets) {
   if (/^\d{1,2}(st|nd|rd|th)$/.test(tok)) return true;
   return false;
 }
+// PINNED-sentence-only vocabulary check (codex round 10, P1 :655): openers
+// like "but"/"yeah" are valid ONLY at the head of the pinned commitment
+// sentence itself (COMMITMENT_OPENER_TOKENS, below — turnHasAffirmativeCommitmentForm
+// already requires them there), never as free tokens OTHER sentences can
+// also draw on, so they're passed here as an explicit extra set rather than
+// living in the shared COMMITMENT_TURN_VOCAB.
 function commitmentTurnVocabularyOk(normalizedTurn) {
-  return normalizedTurn.split(' ').every((tok) => turnVocabularyTokenOk(tok));
+  return normalizedTurn.split(' ').every((tok) => turnVocabularyTokenOk(tok, [COMMITMENT_OPENER_TOKENS]));
 }
 
 // Affirmative sentence FORM (codex P0, interrogatives): normalization strips
@@ -1071,13 +1100,30 @@ const APPROVAL_REQUEST_RE = /\b(?:get|getting|obtain|secure|have|wait for|waitin
 // causative forms ("have"/"get") read naturally without it ("have him sign
 // off"); being lenient here only widens what poisons, never what grounds.
 const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = /\b(?:tell|ask|have|get) (?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all) (?:to )?(?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?\b/;
-// Unconditional declarative-poison check (codex rounds 2, 4, 7 and 9): either
-// term list, or either anchored shape, anywhere in the sentence poisons
-// regardless of conditional structure. Restored as a real function and run
-// FIRST in otherSentenceIsClean's whitelist (codex round 4, finding 1) —
-// round 3 assumed the vocabulary early-return alone would already reject
-// these words, but "him"/"need"/"confirm"/"the"/"appointment" are all in
-// COMMITMENT_TURN_VOCAB, so commitmentTurnVocabularyOk(other.ns) returned
+// Codex round 9, P1 (:1048): AUTHORIZATION_NEED_RE's shape (a) only covers
+// "need(s) <PARTY> to <verb>" where the party needing to act is the OBJECT
+// of "need" — it never matches a SUBJECT-LED phrasing where the party
+// needing to act IS the sentence's subject: "You need to okay it." names no
+// object party at all (there's nothing between "need" and "to"), and every
+// one of its words (you/need/to/okay/it) is ordinary COMMITMENT_TURN_VOCAB,
+// so it read as clean. A fourth anchored SHAPE, same family as (a)/(b)/the
+// third-party directive above: a PARTY (the same third-party/caller set,
+// now including the "he/she/they" subject forms and "you"/"y'all"/"you
+// guys" for the caller) as the SENTENCE'S SUBJECT, directly followed by a
+// need-auxiliary (need/needs/have/has/got/gotta/must), an optional "to",
+// and an AUTHORIZATION VERB, with the same optional trailing object
+// ("it"/"on it") as the other shapes — "you need to okay it", "he has to
+// sign off", "they must approve it", "you guys gotta authorize it". Also
+// covers the phrase-verb "give the go ahead" (no trailing-object variant
+// needed; the phrase already ends the verb).
+const SUBJECT_LED_APPROVAL_NEED_RE = /\b(?:you|he|she|they|someone|the owner|the homeowner|the client|y all|you guys) (?:need|needs|have|has|got|gotta|must)(?: to)? (?:confirm|approve|sign off|sign|okay|ok|authorize|give the go ahead)(?: it| on it)?\b/;
+// Unconditional declarative-poison check (codex rounds 2, 4, 7, 9 and this
+// round): either term list, or any anchored shape, anywhere in the sentence
+// poisons regardless of conditional structure. Restored as a real function
+// and run FIRST in otherSentenceIsClean's whitelist (codex round 4, finding
+// 1) — round 3 assumed the vocabulary early-return alone would already
+// reject these words, but "him"/"need"/"confirm"/"the"/"appointment" are all
+// in COMMITMENT_TURN_VOCAB, so commitmentTurnVocabularyOk(other.ns) returned
 // true and short-circuited past clauseIsBenign entirely, before it ever
 // ran. This screen must run BEFORE the whitelist early return, not after.
 // It also guards the PINNED commitment sentence
@@ -1092,7 +1138,8 @@ function sentenceHasDeclarativePoisonVocabulary(ns) {
     || UNAVAILABILITY_TERMS.some((t) => padded.includes(t))
     || AUTHORIZATION_NEED_RE.test(ns)
     || APPROVAL_REQUEST_RE.test(ns)
-    || THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(ns);
+    || THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(ns)
+    || SUBJECT_LED_APPROVAL_NEED_RE.test(ns);
 }
 // These two lists (and the regex above) ALSO do their work inside
 // clauseIsBenign, below, where they matter for a different reason: a
@@ -1195,6 +1242,7 @@ function clauseIsBenign(clauseNs, prevNs) {
   if (AUTHORIZATION_NEED_RE.test(clauseNs)) return false;
   if (APPROVAL_REQUEST_RE.test(clauseNs)) return false;
   if (THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(clauseNs)) return false;
+  if (SUBJECT_LED_APPROVAL_NEED_RE.test(clauseNs)) return false;
   if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
   if (BENIGN_NON_BOOKING_TOPICS.some((t) => padded.includes(t))) return true;
   if (prevNs && isBarePronounClause(clauseNs)) {
@@ -1288,10 +1336,32 @@ const REINFORCING_AFFIRMATION_RE = /^(?:(?:ok|okay|awesome|perfect|great|alright
 // without cents) rather than risk missing a real time or date mention — the
 // safe direction for an OTHER sentence, which is never the one that needs to
 // state a time.
+// Codex round 10, P1 (:1345): a conditional's CONSEQUENT can itself be a
+// full booking commitment — "If the email goes to you, we'll have you
+// down." has a benign antecedent (clauseIsBenign only ever extracts and
+// checks the antecedent, never the consequent — see extractConditionalClauses,
+// above), and its consequent "we'll have you down" names no
+// SCHEDULING_PREDICATE_TERMS phrase at all ("have you down" was never added
+// to that list). Every word of the consequent (we/ll/have/you/down) is
+// ordinary COMMITMENT_TURN_VOCAB or BENIGN_CONDITIONAL_GLUE_WORDS
+// ("goes" — unlocked once the antecedent clears clauseIsBenign), so the
+// sentence read as clean and a second, un-grounded booking commitment
+// slipped through as "benign" scheduling routing chatter. Rather than fork
+// a growing list of consequent-commitment phrasings, reuse the SAME
+// COMMITMENT_HEADS templates the pinned-sentence binder already recognizes
+// as a booking commitment (turnHasAffirmativeCommitmentForm, above): any
+// one of those exact head phrases appearing anywhere in the (stripped)
+// sentence is, by construction, scheduling content, so it counts toward
+// this predicate screen the same as any SCHEDULING_PREDICATE_TERMS phrase.
+function sentenceContainsCommitmentHead(strippedNs) {
+  const padded = ` ${strippedNs} `;
+  return COMMITMENT_HEADS.some((head) => padded.includes(` ${head.endsWith(' ') ? head : `${head} `}`));
+}
 function sentenceHasSchedulingPredicate(strippedNs) {
   const padded = ` ${strippedNs} `;
   if (MAY_DATE_RE.test(strippedNs)) return true;
   if (SCHEDULING_PREDICATE_TERMS.some((t) => padded.includes(t))) return true;
+  if (sentenceContainsCommitmentHead(strippedNs)) return true;
   return strippedNs.split(' ').some((tok) => /^\d{1,2}(?:st|nd|rd|th)?$/.test(tok));
 }
 // Top-level CLEARANCE test for ONE sentence OTHER than the pinned

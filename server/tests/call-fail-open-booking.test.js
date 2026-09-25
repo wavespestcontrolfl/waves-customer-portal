@@ -1413,6 +1413,52 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     }
   });
 
+  // Codex round 10, P1 (:1048): AUTHORIZATION_NEED_RE's "need <party> to
+  // <verb>" shape only matched when the party needing to act sat BETWEEN
+  // "need" and "to" — a SUBJECT-LED phrasing ("You need to okay it.") names
+  // no such object party at all, and every word (you/need/to/okay/it) was
+  // ordinary COMMITMENT_TURN_VOCAB, so it read as clean. Added
+  // SUBJECT_LED_APPROVAL_NEED_RE, the fourth anchored shape in the same
+  // family.
+  test('Codex round-10 regression: "You need to okay it." still poisons (subject-led approval requirement)', () => {
+    const turn = "You need to okay it. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 10, P1 (:655): this PR (round 9) added "yeah" and "but" to
+  // the SHARED COMMITMENT_TURN_VOCAB (needed only because the real pinned
+  // grounding sentence opened "But yeah, …"), but that Set is also what
+  // every OTHER sentence is checked against — so "Yeah, but no." named no
+  // scheduling predicate and no declarative-poison term, and every token
+  // was vocabulary, laundering an explicit rejection as a clean aside. "but"
+  // is now pinned-sentence-only (via COMMITMENT_OPENER_TOKENS), and a bare
+  // "no"/"nope"/"nah" is a negation/hedge token in its own right.
+  test('Codex round-10 regression: "Yeah, but no." still poisons (explicit rejection must not launder through shared vocabulary)', () => {
+    const turn = "We'll see you Sunday at noon. Yeah, but no.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 10, P1 (:1345): a conditional's ANTECEDENT can clear
+  // clauseIsBenign (a benign-topic clause — "the email goes to you") while
+  // its CONSEQUENT is itself a full, un-grounded booking commitment ("we'll
+  // have you down") that names no SCHEDULING_PREDICATE_TERMS phrase.
+  // sentenceHasSchedulingPredicate now also recognizes any of the pinned-
+  // sentence binder's own COMMITMENT_HEADS templates anywhere in the
+  // sentence as scheduling content.
+  test('Codex round-10 regression: "If the email goes to you, we\'ll have you down." still poisons (consequent is itself a commitment head)', () => {
+    const turn = "We'll see you Sunday at noon. If the email goes to you, we'll have you down.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
   // history). Round 3 reworded this test from "Adam works Sundays." (out-
   // of-vocabulary words) to "We come out Sunday afternoon." on the theory
