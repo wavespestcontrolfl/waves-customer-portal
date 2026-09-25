@@ -69,6 +69,7 @@ describeOrSkip('20260924030001_termite_annual_plan_stamps — real Postgres DDL'
       SELECT confupdtype, confdeltype
       FROM pg_constraint
       WHERE conname = 'annual_prepay_terms_renewed_from_term_id_foreign'
+        AND conrelid = 'annual_prepay_terms'::regclass
     `)).rows[0];
     expect(fk).toBeDefined();
     expect(fk.confdeltype).toBe('n'); // 'n' = SET NULL
@@ -77,6 +78,7 @@ describeOrSkip('20260924030001_termite_annual_plan_stamps — real Postgres DDL'
     const unique = (await db.raw(`
       SELECT conname FROM pg_constraint
       WHERE conname = 'annual_prepay_terms_renewed_from_term_unique' AND contype = 'u'
+        AND conrelid = 'annual_prepay_terms'::regclass
     `)).rows;
     expect(unique.length).toBe(1);
 
