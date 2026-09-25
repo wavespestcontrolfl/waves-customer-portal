@@ -1592,6 +1592,17 @@ class RelayConversation {
    * interrupt() recorded it.
    */
   _closeStreamedRoundEarly(streamState, msg, reason) {
+    if (reason === 'failed') {
+      // Best effort: end the token group Twilio has open (it has only seen
+      // last:false frames) so the next turn's speech can't attach to it. The
+      // socket may be the thing that failed, so a throw here is expected.
+      try {
+        this._closeStreamEntry(streamState);
+      } catch (err) {
+        logger.warn(`[voice-relay] stream renderer close after a failed send also failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        if (streamState.entry) streamState.entry.streamOpen = false;
+      }
+    }
     streamState.closed = true;
     const sentText = streamState.entry ? streamState.entry.planned.trim() : '';
     const toolUseBlocks = msg.content.filter((b) => b.type === 'tool_use');
@@ -2744,7 +2755,16 @@ class RelayConversation {
       // no endSession — the session stays open for the caller's next turn.
       if (result.aborted) return;
       if (result.failed) {
+        // Same recovery the mid-stream model-failure path gives the caller —
+        // handoff if the failure policy says so, else the failure copy —
+        // instead of leaving them in dead air. Best effort: the send path
+        // itself just failed.
         logger.error(`[voice-relay] stream renderer ended the round after a failed send callSid=${maskSid(this.callSid)}`);
+        try {
+          if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy('modelError', this.language));
+        } catch (err) {
+          logger.warn(`[voice-relay] failure copy after a failed send also failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        }
         return;
       }
 

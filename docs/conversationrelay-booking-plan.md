@@ -336,7 +336,11 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    the entry, the air, or history — an aborted signal (barge-in) or a
    `failed` round ends via `_closeStreamedRoundEarly`: history keeps only
    the sent prefix plus any `tool_use` paired with a "not run" result, no
-   tool runs, and no further frame is sent. `_closeStreamEntry` is a no-op
+   tool runs, and no further frame is sent — except that a `failed` round
+   first makes a best-effort `last:true` close of the open token group and
+   then gets the same recovery as a mid-stream model failure (handoff if
+   the failure policy says so, else the failure copy), so the caller is
+   never left in dead air. `_closeStreamEntry` is a no-op
    on an entry `interrupt()` already cut, so a late close can never send a
    stray `last:true` or overwrite the played-text record.
 

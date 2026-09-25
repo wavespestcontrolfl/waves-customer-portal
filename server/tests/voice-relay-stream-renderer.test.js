@@ -933,6 +933,35 @@ describe('stream renderer — full round loop', () => {
     expect(captured[1]).toBeUndefined();
   });
 
+  test('a send that fails after earlier chunks went out closes the open utterance and speaks the failure copy', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    let n = 0;
+    const send = jest.fn(() => { n += 1; if (n === 2) throw new Error('socket hiccup'); });
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-df1', from: '+19415551234', send, endSession });
+    const promptPromise = convo.handlePrompt('hello');
+    await flush();
+    const round = captured[0];
+    round.textCb('Sure. '); // chunk 1 — sent, last:false
+    await flush();
+    round.textCb('One moment please. '); // chunk 2 — its send throws
+    await flush();
+    round.resolve({ content: [{ type: 'text', text: 'Sure. One moment please.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    const calls = send.mock.calls;
+    expect(calls[0]).toEqual(['Sure. ', false]); // interior chunks keep their whitespace
+    expect(calls[2]).toEqual(['', true]); // the open token group is closed
+    const copy = require('../services/voice-agent/relay-language').copy('modelError', null);
+    expect(calls.slice(3).map(([t]) => t).join('')).toBe(copy); // then the failure copy
+    const first = convo._transcript.find((e) => e.role === 'agent');
+    expect(first.planned).toBe('Sure.'); // only what really went out
+    expect(first.streamOpen).toBe(false);
+    expect(endSession).not.toHaveBeenCalled();
+    expect(convo.messages.filter((m) => m.role === 'assistant').map((m) => m.content)).toEqual([[{ type: 'text', text: 'Sure.' }]]);
+  });
+
   test('a send that throws mid-chain does not reject flushChain and is not reported as a supersession', async () => {
     const { IsolatedConvo, captured } = isolatedConvoFactory();
     process.env.VOICE_RELAY_RENDERER = 'stream';
@@ -959,7 +988,8 @@ describe('stream renderer — full round loop', () => {
       await expect(promptPromise).resolves.toBeUndefined();
       await flush(); // let any stray microtask (a would-be unhandled rejection) settle
 
-      expect(sendCalls).toBe(1); // only the failing call — sentence 2 never sent
+      expect(sendCalls).toBe(2); // the failing chunk, then the failure copy — sentence 2 never sent
+      expect(send.mock.calls[1][0]).not.toMatch(/One moment/);
       expect(unhandled).toEqual([]); // no unhandled rejection surfaced anywhere
       // A failed send is NOT a supersession: the call is still this socket's,
       // so the round ends on its own failure path — never endSession('superseded').
@@ -969,7 +999,10 @@ describe('stream renderer — full round loop', () => {
       // the round closes via _closeStreamedRoundEarly: nothing reached
       // Twilio (the send threw), so neither the transcript nor the model's
       // history claims any agent text for this round.
-      expect(convo._transcript.filter((e) => e.role === 'agent')).toEqual([]);
+      // Nothing from the FAILED round is claimed (the send threw); the one
+      // agent line is the failure copy, a separate best-effort utterance.
+      const agentLines = convo._transcript.filter((e) => e.role === 'agent');
+      expect(agentLines.map((e) => e.text)).toEqual([require('../services/voice-agent/relay-language').copy('modelError', null)]);
       expect(convo.messages.filter((m) => m.role === 'assistant')).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
