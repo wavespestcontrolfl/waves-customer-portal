@@ -695,8 +695,16 @@ const COMMITMENT_TURN_VOCAB = new Set([
 // make sure that gets figured out") — words too specific/generic to trust
 // unconditionally everywhere else in the turn, so they stay out of the
 // base COMMITMENT_TURN_VOCAB and only unlock here.
+// codex round 4, finding 2 (live miss 17ed9362's actual single Agent: turn,
+// never split across turns as an earlier regression test wrongly did):
+// "It's autonomously done, so if it goes to you, I'll make sure that's
+// rectified." needs "autonomously"/"done"/"rectified" once its one clause
+// ("it goes to you") clears clauseIsBenign against the PREVIOUS sentence's
+// "notification". Glue-scoped, not base vocabulary, same as the rest of
+// this set.
 const BENIGN_CONDITIONAL_GLUE_WORDS = new Set([
   'me', 'tell', 'goes', 'wrong', 'person', 'number', 'make', 'sure', 'gets', 'figured',
+  'autonomously', 'done', 'rectified',
 ]);
 function turnVocabularyTokenOk(tok, extraSets) {
   if (!tok) return true;
@@ -880,6 +888,13 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
   if (!containing.length) return false;
   return containing.every(({ ns, interrogative, otherSentencesClean }) => !interrogative
     && otherSentencesClean
+    // codex round 4: the PINNED sentence gets the same unconditional
+    // declarative-poison screen as every other sentence — "we'll see you
+    // Sunday, he still needs to confirm" already fails
+    // turnHasAffirmativeCommitmentForm's slot-word-only tail below, but
+    // that's the form check's accident, not a guarantee this screen makes
+    // explicit.
+    && !sentenceHasDeclarativePoisonVocabulary(ns)
     && commitmentTurnVocabularyOk(ns)
     && !turnHasNegationOrHedge(ns)
     && !turnHasUnresolvedConditional(ns)
@@ -964,14 +979,43 @@ const UNAVAILABILITY_TERMS = [
   ' cannot make ', ' cannot ', ' unable ', ' not free ', ' has no time ',
   ' doesn t have time ', ' does not have time ',
 ];
-// Both lists above are also, by construction, already excluded from the
-// base COMMITMENT_TURN_VOCAB (codex round-3 whitelist inversion) — a
-// declarative sentence naming "homeowner"/"approval"/"unavailable"/etc.
-// fails otherSentenceIsClean's plain vocabulary check on its own, with no
-// separate unconditional scan needed here; the standalone
-// sentenceHasDeclarativePoisonVocabulary wrapper this comment used to
-// describe was retired for that reason. These two lists now do their work
-// entirely inside clauseIsBenign, below, where they still matter: a
+// Anchored companion to AUTHORIZATION_PARTY_OR_ACT_TERMS (codex round 4,
+// finding 1): "I need him to confirm the appointment." names no term from
+// that phrase list, and every one of its individual WORDS (i/need/him/to/
+// confirm/the/appointment) is ordinary COMMITMENT_TURN_VOCAB on its own —
+// round 3's assumption that these two lists are "by construction" excluded
+// from the base vocabulary was true only because the words each list uses
+// happened not to overlap with base vocab THEN; "him"/"need"/"confirm" are
+// all base vocab now. One regex for the SHAPE (someone still has to sign
+// off on this) rather than an ever-growing word list: "need(s)"/"going to
+// need" + a PARTY (him/her/them/someone/the owner/the homeowner/the
+// client) + "to" + an AUTHORIZATION VERB (confirm/approve/sign off/okay/ok/
+// authorize).
+const AUTHORIZATION_NEED_RE = /\b(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client) to (?:confirm|approve|sign off|okay|ok|authorize)\b/;
+// Unconditional declarative-poison check (codex rounds 2 and 4): either
+// term list, or the anchored "need <party> to <authorize>" shape, anywhere
+// in the sentence poisons regardless of conditional structure. Restored as
+// a real function and run FIRST in otherSentenceIsClean's whitelist (codex
+// round 4, finding 1) — round 3 assumed the vocabulary early-return alone
+// would already reject these words, but "him"/"need"/"confirm"/"the"/
+// "appointment" are all in COMMITMENT_TURN_VOCAB, so
+// commitmentTurnVocabularyOk(other.ns) returned true and short-circuited
+// past clauseIsBenign entirely, before it ever ran. This screen must run
+// BEFORE the whitelist early return, not after. It also guards the PINNED
+// commitment sentence (agentCommitmentSentenceVerified's final check,
+// below) as a second, independent layer: "we'll see you Sunday, he still
+// needs to confirm" already fails turnHasAffirmativeCommitmentForm's slot-
+// word-only tail today, but that's an accident of the form check, not a
+// guarantee — this check makes the safety property explicit rather than
+// incidental.
+function sentenceHasDeclarativePoisonVocabulary(ns) {
+  const padded = ` ${ns} `;
+  return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
+    || UNAVAILABILITY_TERMS.some((t) => padded.includes(t))
+    || AUTHORIZATION_NEED_RE.test(ns);
+}
+// These two lists (and the regex above) ALSO do their work inside
+// clauseIsBenign, below, where they matter for a different reason: a
 // CONDITIONAL sentence's clause is checked directly against them (clause
 // text is a raw-text substring, not yet vocabulary-tokenized) before the
 // clause is ever allowed to unlock the expanded conditional-carve-out
@@ -1068,6 +1112,7 @@ function clauseIsBenign(clauseNs, prevNs) {
   const padded = ` ${clauseNs} `;
   if (AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))) return false;
   if (UNAVAILABILITY_TERMS.some((t) => padded.includes(t))) return false;
+  if (AUTHORIZATION_NEED_RE.test(clauseNs)) return false;
   if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
   if (BENIGN_NON_BOOKING_TOPICS.some((t) => padded.includes(t))) return true;
   if (prevNs && isBarePronounClause(clauseNs)) {
@@ -1102,9 +1147,21 @@ function clauseIsBenign(clauseNs, prevNs) {
 // "goes to the wrong number", "I'll make sure that gets figured out"). A
 // sentence that fails (a) or (b) gets NO expanded vocabulary and must pass
 // on the base closed vocabulary alone, like any other declarative.
+//
+// The declarative poison screen (codex round 4, finding 1) runs FIRST,
+// before the vocabulary early return — "I need him to confirm the
+// appointment." is built entirely from ordinary COMMITMENT_TURN_VOCAB
+// words (i/need/him/to/confirm/the/appointment all individually belong),
+// so commitmentTurnVocabularyOk alone would return true and never reach
+// clauseIsBenign or any authorization check at all. A closed vocabulary of
+// WORDS cannot express a SHAPE like "someone still has to sign off" when
+// every word in that shape also has an innocent use elsewhere — that is
+// exactly why sentenceHasDeclarativePoisonVocabulary (unconditional
+// phrase/regex screen) has to run before, not after, the whitelist.
 function otherSentenceIsClean(other, prevNs) {
   if (other.interrogative) return false;
   if (turnHasNegationOrHedge(other.ns)) return false;
+  if (sentenceHasDeclarativePoisonVocabulary(other.ns)) return false;
   if (commitmentTurnVocabularyOk(other.ns)) return true;
   if (!turnHasUnresolvedConditional(other.ns)) return false;
   const clauses = extractConditionalClauses(other.raw);

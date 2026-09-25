@@ -125,8 +125,22 @@ function checkTcpaConsent(extraction, opts = {}) {
 // instead — again strictly MORE conservative, never less — so a
 // force-reprocess must write a fresh decision row rather than
 // onConflict-ignore into the stale auto-routed one.
-const V2_DECISION_VERSION = 'v2-1.10.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0'];
+// v2-1.11.0: round 3's whitelist inversion assumed a declarative naming an
+// unmet authorization requirement would always fail the base vocabulary
+// check on its own — but "I need him to confirm the appointment." is built
+// entirely from ordinary COMMITMENT_TURN_VOCAB words (i/need/him/to/
+// confirm/the/appointment), so the vocabulary early return short-circuited
+// past every authorization check before it ever ran. The declarative
+// poison screen (sentenceHasDeclarativePoisonVocabulary, now including the
+// anchored AUTHORIZATION_NEED_RE "need <party> to <authorize>" shape) now
+// runs FIRST in otherSentenceIsClean, ahead of the vocabulary early return,
+// and also guards the pinned commitment sentence itself. A call whose old
+// pass demoted caller_not_authorized or commercial_requires_quote on this
+// shape now stays blocked instead — again strictly MORE conservative, never
+// less — so a force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale auto-routed one.
+const V2_DECISION_VERSION = 'v2-1.11.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0'];
 
 function buildRouteDecision({
   callLogId,

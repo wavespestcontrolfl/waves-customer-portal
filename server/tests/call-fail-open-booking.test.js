@@ -970,6 +970,45 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // Codex round 4, finding 1: round 3's whitelist inversion assumed a
+  // declarative naming an unmet authorization requirement would always
+  // fail commitmentTurnVocabularyOk on its own — but "I need him to confirm
+  // the appointment." is built entirely from ordinary base-vocabulary words
+  // (i/need/him/to/confirm/the/appointment), so the early
+  // `commitmentTurnVocabularyOk → return true` short-circuited past every
+  // authorization check before it ever ran. sentenceHasDeclarativePoisonVocabulary
+  // (restored, now including the anchored AUTHORIZATION_NEED_RE shape) must
+  // run FIRST in otherSentenceIsClean, ahead of the vocabulary early return.
+  test('Codex round-4 regression: "I need him to confirm the appointment." still poisons even though every word is base vocabulary', () => {
+    const turn = "I need him to confirm the appointment. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Same shape, different party/verb combination, to pin the regex (not a
+  // token list) rather than the one literal sentence above.
+  test('Codex round-4 regression: "She\'s going to need someone to sign off." still poisons (AUTHORIZATION_NEED_RE, not a literal phrase)', () => {
+    const turn = "She's going to need someone to sign off. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex round 4, finding 1 (pinned-sentence path): the same declarative
+  // poison screen now also guards the PINNED commitment sentence itself,
+  // as an explicit, non-accidental check (it previously only failed here
+  // via turnHasAffirmativeCommitmentForm's slot-word-only tail).
+  test('Codex round-4 regression: a declarative unmet-authorization clause FUSED into the pinned sentence still poisons', () => {
+    const sameQuote = "We'll see you Sunday at noon, he still needs to confirm.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, sameQuote);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: sameQuote }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   // Codex round-3 whitelist inversion (otherSentenceIsClean): a non-
   // conditional declarative now has to be BUILT from the closed vocabulary,
   // not merely free of blacklisted words — "Adam works Sundays." (this
@@ -998,18 +1037,24 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   // kind of clearly-fictitious placeholder this file already uses elsewhere
   // (AGENTS.md "Customer PII in the repo" — no realistic identifying detail
   // in tests, even synthetic).
-  test('hasAgentCommittedEvidence grounds a third-party "see him ... 10 o\'clock" commitment past a notification-routing conditional (live miss 17ed9362 shape)', () => {
+  //
+  // Codex round 4, finding 2: an earlier draft of this test SPLIT the live
+  // agent turn across two separate "Agent:" lines and reworded "It's
+  // autonomously done ... I'll make sure that's rectified" down to "I'll
+  // make sure that gets figured out" — both changes moved the notification-
+  // routing sentence out of the SAME turn as the pinned commitment (so
+  // otherSentenceIsClean never even ran on it) and swapped in easier
+  // vocabulary, masking the actual gap this PR exists to fix. The live call
+  // is genuinely ONE agent turn with several sentences; this test now uses
+  // that exact turn, unsplit, with the real wording.
+  test('hasAgentCommittedEvidence grounds a third-party "see him ... 10 o\'clock" commitment past a notification-routing conditional (live miss 17ed9362 shape, single unsplit turn)', () => {
     const transcript = [
       'Agent: Waves Pest Control, this is Adam.',
       'Caller: Hi, I handle refinances and need to set up a WDO inspection for a client.',
       'Agent: Sure — what area?',
       'Caller: 100 Example Street in Venice.',
-      "Agent: We can do 10 o'clock on Monday.",
-      'Caller: That works for me.',
       "Caller: Please make my client the point of contact so you can reach him with any appointment updates. I'll take the report and invoice.",
-      'Agent: Okay.',
-      "Agent: Okay, and then it should, the notification should go to him. If it does go to you, I'll make sure that gets figured out for Monday.",
-      "Agent: But yeah, we'll see him on Monday at 10 o'clock.",
+      "Agent: Awesome. Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. But yeah, we'll see him on Monday at 10 o'clock.",
       "Caller: All right, perfect. I'll let him know. Thank you.",
       'Agent: Thank you. Bye.',
     ].join('\n');
@@ -1017,11 +1062,11 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
       evidence: [{
         field_path: '/scheduling/agent_committed_booking',
         speaker: 'agent',
-        quote: "But yeah, we'll see him on Monday at 10 o'clock.",
+        quote: "we'll see him on Monday at 10 o'clock.",
       }],
-      scheduling: { confirmed_start_at: '2026-08-03T10:00:00-04:00' }, // Monday
+      scheduling: { confirmed_start_at: '2026-09-28T10:00:00-04:00' }, // Monday
     };
-    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-07-30T15:50:00-04:00')).toBe(true);
+    expect(hasAgentCommittedEvidence(extraction, transcript, '2026-09-24T17:50:00Z')).toBe(true);
   });
 
   // P1 coverage gap (local fallback auditor): AT_WEEKDAY_RE (the bare
