@@ -287,7 +287,7 @@ class PaymentExpiry {
         const cooldownDays = reminderStage === '7_day' ? 7 : 30;
         const recentNotice = await db('sms_log')
           .where({ customer_id: card.customer_id, message_type: 'payment_expiry' })
-          .where('created_at', '>', db.raw(`NOW() - INTERVAL '${cooldownDays} days'`))
+          .where('created_at', '>', db.raw("NOW() - (? * INTERVAL '1 day')", [cooldownDays]))
           .first();
 
         if (recentNotice) { await emailPromise; continue; }

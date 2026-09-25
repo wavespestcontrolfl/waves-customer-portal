@@ -139,7 +139,7 @@ describe('PaymentExpiry.checkExpiringCards routing outcome', () => {
     });
 
     await expect(paymentExpiry.checkExpiringCards()).resolves.toMatchObject({ notified: 1 });
-    expect(db.raw).toHaveBeenCalledWith("NOW() - INTERVAL '7 days'");
+    expect(db.raw).toHaveBeenCalledWith("NOW() - (? * INTERVAL '1 day')", [7]);
     expect(interactionInsert).toHaveBeenCalledWith(expect.objectContaining({
       interaction_type: `${channel}_outbound`, channel,
     }));

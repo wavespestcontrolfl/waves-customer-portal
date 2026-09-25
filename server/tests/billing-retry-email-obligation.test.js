@@ -76,6 +76,14 @@ beforeEach(() => {
   mockIsEnabled.mockReturnValue(false);
 });
 
+test.each(['2026-09-30T01:00:00Z', new Date('2026-09-30T01:00:00Z'), '2026-09-29'])(
+  'retry identity preserves the Eastern calendar date for %s', (retryDate) => {
+    const notice = BillingRetryEmail.pendingDescriptor({ customerId: 'cust-1', paymentId: 'pay-1', retryDate, preferenceState: true });
+    expect(notice.retry_date).toBe('2026-09-29');
+    expect(notice.key).toBe('payment.retry_notice:pay-1:2026-09-29');
+  },
+);
+
 test('a failed queue insert leaves the payment descriptor for the periodic reconciler', async () => {
   const failedInsert = query({ insertError: new Error('queue unavailable') });
   const paymentRead = query({ first: payment });

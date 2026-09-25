@@ -2,7 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
-const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
@@ -13,7 +13,10 @@ const DESCRIPTOR_FIELD = 'billing_retry_email_notice';
 const COVERED_REASONS = new Set(['enrolled', 'deduped', 'no_email', 'no_customer']);
 
 function retryDateKey(retryDate) {
-  return dateOnlyString(retryDate) || String(retryDate || '').slice(0, 10);
+  // A descriptor already carries an ET calendar date, not midnight UTC.
+  if (typeof retryDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(retryDate)) return retryDate;
+  const instant = new Date(retryDate);
+  return retryDate && Number.isFinite(instant.getTime()) ? etDateString(instant) : '';
 }
 
 function obligationKey(paymentId, retryDate) {
