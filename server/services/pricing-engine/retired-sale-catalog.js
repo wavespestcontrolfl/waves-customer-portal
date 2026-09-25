@@ -28,10 +28,14 @@
 //   'premium' alias (12x, fully removed from TREE_SHRUB.tiers — never
 //   resurrected, so it can't carry a `hidden` flag and must be named
 //   explicitly). Every new-sale boundary that accepts a `treeShrub.tier`
-//   value from a caller (property-lookup-v2.js, public-quote.js,
-//   customer-pricing-ai.js, the Intelligence Bar agent estimate tools, the
-//   voice-agent relay files) should reject on this check for a NEW
-//   quote/draft. It is deliberately NOT applied inside `priceTreeShrub`
+//   value from a caller (property-lookup-v2.js, public-quote.js, the
+//   Intelligence Bar agent estimate tools, customer-pricing-ai.js, the
+//   voice-agent relay files) should reject a non-sellable tier for a NEW
+//   quote/draft — in practice every boundary wired up so far reads the
+//   POSITIVE isSellableTreeShrubTier below instead (codex P1 round 3: the
+//   negative form here wrongly passes a malformed/hallucinated tier value
+//   that was never actually retired, e.g. 'gold'). It is deliberately NOT
+//   applied inside `priceTreeShrub`
 //   itself, or the scheduling/converter/seeder readers of an ALREADY
 //   selected or stored cadence (estimate-converter.js,
 //   self-booking-plan-sync.js, slot-reservation.js) — those must keep

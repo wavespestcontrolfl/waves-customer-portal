@@ -38,7 +38,7 @@ const {
   normalizeLawnTrack,
   normalizeProtocolKey,
 } = require('../protocol-reader');
-const { isRetiredTreeShrubTier } = require('../pricing-engine/retired-sale-catalog');
+const { isSellableTreeShrubTier } = require('../pricing-engine/retired-sale-catalog');
 const { agentEstimatePreviewFingerprint, agentEngineResultDigest } = require('../agent-estimate-preview');
 const { clearEstimatePricingCache } = require('../estimate-pricing-cache');
 const { executeProcurementTool } = require('./procurement-tools');
@@ -1363,13 +1363,18 @@ function unknownServiceKeysError(services = {}) {
 // boundary (every Agent Estimate draft is `source='ai_agent'`, never a
 // replay of the one grandfathered customer's real plan, which lives outside
 // this tool entirely), so reject outright rather than carve out a replay
-// exception. Shared chokepoint: isRetiredTreeShrubTier
-// (pricing-engine/retired-sale-catalog.js) — never a local copy.
+// exception. Shared chokepoint: isSellableTreeShrubTier
+// (pricing-engine/retired-sale-catalog.js) — never a local copy. Uses the
+// POSITIVE (allowlist) predicate, same as the other two new-sale boundaries
+// property-lookup-v2.js and public-quote.js (codex P1 round 3 pre-push):
+// the negative isRetiredTreeShrubTier only flags the two explicitly-retired
+// keys ('light'/'premium') and would silently pass a malformed/hallucinated
+// tier value (a typo, or an LLM-invented tier) straight through to pricing.
 function retiredTreeShrubTierError(services = {}) {
   const tier = services?.treeShrub?.tier;
   if (tier === undefined || tier === null || tier === '') return null;
-  if (!isRetiredTreeShrubTier(tier)) return null;
-  return `Tree & Shrub tier '${tier}' is retired for new sales (owner directive 2026-09-24) and cannot be quoted on a new draft. Use 'enhanced' (9x, upsell) or omit tier for the mandated 'standard' (6x) default.`;
+  if (isSellableTreeShrubTier(tier)) return null;
+  return `Tree & Shrub tier '${tier}' is not a currently sold program and cannot be quoted on a new draft. Use 'standard' (6x, mandated default) or 'enhanced' (9x, upsell) — or omit tier for the mandated 'standard' default.`;
 }
 
 function optionalBoundedNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {

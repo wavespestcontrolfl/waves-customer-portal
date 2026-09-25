@@ -1568,7 +1568,7 @@ describe('Agent Estimate compute input boundary', () => {
       services: { treeShrub: { tier: 'light' } },
     });
 
-    expect(result.error).toMatch(/retired/i);
+    expect(result.error).toMatch(/not a currently sold program/i);
     expect(result.error).toMatch(/light/i);
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
@@ -1578,7 +1578,7 @@ describe('Agent Estimate compute input boundary', () => {
       homeSqFt: 2000,
       services: { treeShrub: { tier: 'premium' } },
     });
-    expect(retired.error).toMatch(/retired/i);
+    expect(retired.error).toMatch(/not a currently sold program/i);
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
 
     mockGenerateEstimate.mockReturnValueOnce(LAWN_TREE_ENGINE_RESULT);
@@ -1590,17 +1590,35 @@ describe('Agent Estimate compute input boundary', () => {
     expect(mockGenerateEstimate).toHaveBeenCalled();
   });
 
+  // codex P1 round 3 pre-push: this guard must use the POSITIVE
+  // isSellableTreeShrubTier allowlist (same as property-lookup-v2.js and
+  // public-quote.js), not the negative isRetiredTreeShrubTier — the
+  // negative form only names 'light'/'premium' and would silently pass a
+  // malformed/hallucinated tier value straight through to pricing.
+  test('rejects a malformed/unknown tier value that was never actually retired', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { treeShrub: { tier: 'gold' } },
+    });
+    expect(result.error).toMatch(/not a currently sold program/i);
+    expect(result.error).toMatch(/gold/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
   // validateAgentEngineInput gates the revision path (computeAgentDraftPreview,
   // used by both create_agent_estimate_draft and the revise-after-feedback
   // flow) — the same retired-tier check, tested directly since it's a pure
   // function.
-  test('validateAgentEngineInput rejects retired T&S tiers, allows the sold ones and an absent tier', () => {
+  test('validateAgentEngineInput rejects retired T&S tiers and unknown tiers, allows the sold ones and an absent tier', () => {
     expect(_private.validateAgentEngineInput({
       homeSqFt: 2000, services: { treeShrub: { tier: 'light' } },
-    })).toMatch(/retired/i);
+    })).toMatch(/not a currently sold program/i);
     expect(_private.validateAgentEngineInput({
       homeSqFt: 2000, services: { treeShrub: { tier: 'premium' } },
-    })).toMatch(/retired/i);
+    })).toMatch(/not a currently sold program/i);
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: { tier: 'gold' } },
+    })).toMatch(/not a currently sold program/i);
     expect(_private.validateAgentEngineInput({
       homeSqFt: 2000, services: { treeShrub: { tier: 'enhanced' } },
     })).toBeNull();
