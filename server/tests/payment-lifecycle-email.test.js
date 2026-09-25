@@ -315,7 +315,7 @@ describe('payment lifecycle email sender', () => {
     }));
   });
 
-  test.each(['preparation', 'refused guard', 'failed guard', 'aborted guard', 'provider'])('retry notice preserves %s failure evidence for its durable owner', async (failure) => {
+  test.each(['preparation', 'refused guard', 'failed guard', 'aborted guard', 'provider', 'rejected provider'])('retry notice preserves %s failure evidence for its durable owner', async (failure) => {
     const prefs = { payment_issue_channels: ['email'] };
     setDbQueues({
       payments: [chain({ first: payment() })],
@@ -328,7 +328,13 @@ describe('payment lifecycle email sender', () => {
       if (failure === 'failed guard' || failure === 'aborted guard') throw new Error('queue write failed');
       return failure !== 'refused guard';
     });
-    const provider = jest.fn(async () => { throw new Error('provider response unavailable'); });
+    const provider = jest.fn(async () => {
+      // A definite SendGrid refusal (429 here) carries its status; an
+      // unknown post-handoff failure does not.
+      const err = new Error(failure === 'rejected provider' ? 'SendGrid 429' : 'provider response unavailable');
+      if (failure === 'rejected provider') err.status = 429;
+      throw err;
+    });
     EmailTemplates.sendTemplate.mockImplementationOnce(async (input) => {
       if (failure === 'preparation') throw new Error('template unavailable');
       if (failure === 'aborted guard') {
@@ -346,10 +352,11 @@ describe('payment lifecycle email sender', () => {
       deliveryOutcome: failure === 'provider' ? 'uncertain' : 'not_sent',
       retryable: failure !== 'provider',
     });
-    expect(provider).toHaveBeenCalledTimes(failure === 'provider' ? 1 : 0);
+    expect(provider).toHaveBeenCalledTimes(failure.includes('provider') ? 1 : 0);
     expect(beforeProviderHandoff).toHaveBeenCalledTimes(failure === 'preparation' ? 0 : 1);
     if (failure.includes('guard')) expect(result.reason).toBe('pre_provider_handoff_failed');
-    if (failure === 'provider') expect(beforeProviderHandoff.mock.invocationCallOrder[0])
+    if (failure === 'rejected provider') expect(result.reason).toBe('provider_rejected');
+    if (failure.includes('provider')) expect(beforeProviderHandoff.mock.invocationCallOrder[0])
       .toBeLessThan(provider.mock.invocationCallOrder[0]);
   });
 

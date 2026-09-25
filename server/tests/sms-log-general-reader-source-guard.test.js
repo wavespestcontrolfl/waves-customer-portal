@@ -512,8 +512,13 @@ const ALLOWLIST = [
   },
   {
     file: 'services/workflows/balance-reminder.js',
-    snippet: '.map((event) => ({ created_at: event.deliveredAt })) : await db("sms_log")',
+    snippet: 'const smsHistory = await db("sms_log")',
     reason: 'message_type restricted to \'balance_reminder\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
+  },
+  {
+    file: 'services/workflows/balance-reminder.js',
+    snippet: '|| await db(\'sms_log\').where({ customer_id: customer.id, message_type: \'late_payment\' })',
+    reason: 'message_type restricted to \'late_payment\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/workflows/balance-reminder.js',

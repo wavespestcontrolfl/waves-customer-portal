@@ -378,10 +378,11 @@ describe('collections policy + ledger on latePaymentCheck', () => {
         chain({ first: invoice() }),
         chain({ first: invoice() }),
       ],
-      sms_log: [
-        chain({ first: { count: '0' } }),
-        chain({ first: null }),
-      ],
+      // The explicit branch reads the legacy seven-day cooldown once; the
+      // legacy branch reads its 90-day count and the same cooldown.
+      sms_log: Array.isArray(prefs.billing_channels)
+        ? [chain({ first: null })]
+        : [chain({ first: { count: '0' } }), chain({ first: null })],
       notification_prefs: [chain({ first: prefs })],
       collections_contact_ledger: [chain({ result: [] }), chain({ result: [] })],
       customer_interactions: [...interactions],
@@ -503,10 +504,76 @@ describe('collections policy + ledger on latePaymentCheck', () => {
         scheduled_services: [chain({ result: [service] })],
         notification_prefs: [chain({ first: { billing_channels: ['email'] } })],
         collections_contact_ledger: [chain({ result: oldProgress })],
+        sms_log: [chain({ result: [] })],
       });
       await BalanceReminder.dailyCheck();
       expect(send).toHaveBeenCalledWith(service, balance, 'gentle', expect.any(Number));
     } finally { balanceRead.mockRestore(); send.mockRestore(); }
+  });
+
+  test('legacy reminders texted before the first explicit channel save still consume the 14-day allowance', async () => {
+    const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 6 * 86400000) });
+    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const dayAgo = (days) => new Date(Date.now() - days * 86400000);
+    // One keyed episode (already counted through its ledger event) plus two
+    // legacy rows with no event key: three reminders in the window.
+    const keyed = { id: 'led-1', channel: 'sms', occurred_at: dayAgo(2),
+      metadata: { delivered: true, notificationEventKey: 'balance-reminder:inv-1:gentle:May 25, 2026' } };
+    const smsHistory = [
+      { id: 'sms-keyed', created_at: dayAgo(2), metadata: { notificationEventKey: 'balance-reminder:inv-1:gentle:May 25, 2026' } },
+      { id: 'sms-legacy-1', created_at: dayAgo(5), metadata: null },
+      { id: 'sms-legacy-2', created_at: dayAgo(9), metadata: '{}' },
+    ];
+    const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    const send = jest.spyOn(BalanceReminder, 'sendReminder').mockResolvedValue(true);
+    try {
+      setDbQueues({
+        scheduled_services: [chain({ result: [service] })],
+        notification_prefs: [chain({ first: { billing_channels: ['sms'] } })],
+        collections_contact_ledger: [chain({ result: [keyed] })],
+        sms_log: [chain({ result: smsHistory })],
+      });
+      await BalanceReminder.dailyCheck();
+      expect(send).not.toHaveBeenCalled();
+    } finally { balanceRead.mockRestore(); send.mockRestore(); }
+  });
+
+  test('a keyed Text is counted once, through its ledger episode, never again through its sms_log row', async () => {
+    const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 3.5 * 86400000) });
+    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const dayAgo = (days) => new Date(Date.now() - days * 86400000);
+    const keyed = { id: 'led-1', channel: 'sms', occurred_at: dayAgo(4),
+      metadata: { delivered: true, notificationEventKey: 'balance-reminder:inv-1:gentle:May 25, 2026' } };
+    const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    const send = jest.spyOn(BalanceReminder, 'sendReminder').mockResolvedValue(true);
+    try {
+      setDbQueues({
+        scheduled_services: [chain({ result: [service] })],
+        notification_prefs: [chain({ first: { billing_channels: ['sms'] } })],
+        collections_contact_ledger: [chain({ result: [keyed] })],
+        sms_log: [chain({ result: [{ id: 'sms-keyed', created_at: dayAgo(4),
+          metadata: { notificationEventKey: 'balance-reminder:inv-1:gentle:May 25, 2026' } }] })],
+      });
+      await BalanceReminder.dailyCheck();
+      // One prior reminder → the firm tier is still allowed (<= 1).
+      expect(send).toHaveBeenCalledWith(service, balance, 'firm', expect.any(Number));
+    } finally { balanceRead.mockRestore(); send.mockRestore(); }
+  });
+
+  test('an explicit late-payment reminder respects the legacy seven-day sms_log cooldown', async () => {
+    // The explicit branch's single cooldown read returns a legacy row.
+    const queues = setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [chain({ result: [] }), chain({ first: { id: 'inv-1', token: 'token-1' } }), chain({ first: invoice() })],
+      notification_prefs: [chain({ first: { billing_channels: ['sms'] } })],
+      collections_contact_ledger: [chain({ result: [] })],
+      sms_log: [chain({ first: { id: 'sms-legacy', created_at: new Date(Date.now() - 3 * 86400000) } })],
+    });
+    await BalanceReminder.latePaymentCheck();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    expect(queues.get('sms_log')).toHaveLength(0);
   });
 
   test('a no-phone Email delivery is durable progress and the next run emits no duplicate audit or ledger row', async () => {

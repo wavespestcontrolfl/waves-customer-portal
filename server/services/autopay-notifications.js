@@ -20,6 +20,58 @@ const { billingChannelAllowed } = require('./billing-delivery-channels');
  * to avoid duplicate sends.
  */
 
+// A customer without a phone is reachable only through an explicit App or
+// Email choice. Each selected leg is dispatched on its own, keyed like the
+// other billing workflows (billingDeliveryLeg + appOnly for App), and each
+// accepted leg records its own autopay_log progress so an unfinished sibling
+// still sends on a later run instead of being retired by the accepted one.
+const NO_PHONE_LEGS = ['push', 'email'];
+
+// Selected legs that have not yet been accepted for this billing cycle.
+async function pendingPreChargeLegs(customerId) {
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+  const pending = [];
+  for (const channel of NO_PHONE_LEGS) {
+    if (billingChannelAllowed(prefs || {}, 'billing', channel) !== true) continue;
+    if (await eventExistsRecently(customerId, 'pre_charge_reminder_sent', 25, null, { channel })) continue;
+    pending.push(channel);
+  }
+  return pending;
+}
+
+async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCents }) {
+  const chargeDate = etDateString(target);
+  const eventKey = `autopay-pre-charge:${customer.id}:${chargeDate}`;
+  let delivered = 0;
+  let code = null;
+  for (const channel of legs) {
+    const result = await sendCustomerMessage({
+      ...sendInput,
+      to: null,
+      channel,
+      metadata: {
+        ...sendInput.metadata,
+        billingDeliveryCategory: 'billing',
+        notificationEventKey: eventKey,
+        billingDeliveryLeg: channel,
+        ...(channel === 'push' ? { appOnly: true } : {}),
+      },
+    });
+    if (result.code === 'lane_changed') return { laneChanged: true, reason: result.reason };
+    if (result.deliveryOutcome === 'accepted') {
+      await logAutopay(customer.id, 'pre_charge_reminder_sent', {
+        amountCents,
+        details: { charge_date: chargeDate, channel },
+      });
+      delivered++;
+    } else {
+      code = result.code || result.reason || 'unknown';
+      logger.warn(`[autopay-notifications] pre-charge ${channel} leg not delivered for ${customer.id}: ${code}`);
+    }
+  }
+  return { delivered, code };
+}
+
 async function sendPreChargeReminders() {
   // Target = ET calendar date, 3 days from now. billing_day is a calendar
   // day-of-month (1-31), so this match must be done in ET.
@@ -64,18 +116,20 @@ async function sendPreChargeReminders() {
 
   for (const c of customers) {
     try {
-      if (!c.phone) {
-        const prefs = await db('notification_prefs').where({ customer_id: c.id }).first();
-        if (!['email', 'push'].some((channel) => billingChannelAllowed(prefs || {}, 'billing', channel) === true)) { skipped++; continue; }
-      }
+      // No phone: only an explicit App / Email choice can carry the
+      // reminder, and each selected leg is dispatched on its own below
+      // (null = the customer has a phone and gets the single Text).
+      const pendingLegs = c.phone ? null : await pendingPreChargeLegs(c.id);
 
       // Skip if paused through the charge date
       if (isPaused(c, target)) {
         skipped++; continue;
       }
 
-      // Dedup: one reminder per customer per billing cycle
-      const already = await eventExistsRecently(c.id, 'pre_charge_reminder_sent', 25);
+      // Dedup: one reminder per customer per billing cycle (per selected
+      // leg for a no-phone customer, so an accepted App never retires an
+      // unfinished Email).
+      const already = pendingLegs ? !pendingLegs.length : await eventExistsRecently(c.id, 'pre_charge_reminder_sent', 25);
       if (already) { skipped++; continue; }
 
       const dateStr = target.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
@@ -93,10 +147,8 @@ async function sendPreChargeReminders() {
         logger.warn(`[autopay-notifications] autopay_pre_charge template missing/disabled for customer ${c.id}`);
         skipped++; continue;
       }
-      const sendResult = await sendCustomerMessage({
-        to: c.phone,
+      const sendInput = {
         body,
-        channel: 'sms',
         audience: 'customer',
         purpose: 'autopay',
         customerId: c.id,
@@ -127,7 +179,18 @@ async function sendPreChargeReminders() {
             ? { ok: true }
             : { ok: false, code: 'lane_changed', reason: `lane is ${mode} at dispatch` };
         },
-      });
+      };
+      const amountCents = Math.round(parseFloat(c.monthly_rate) * 100);
+      if (pendingLegs) {
+        const outcome = await sendPreChargeLegs({ customer: c, target, legs: pendingLegs, sendInput, amountCents });
+        if (outcome.laneChanged) {
+          logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${outcome.reason}`);
+          skipped++; continue;
+        }
+        if (!outcome.delivered) throw new Error(`autopay reminder blocked: ${outcome.code || 'unknown'}`);
+        sent++; continue;
+      }
+      const sendResult = await sendCustomerMessage({ to: c.phone, channel: 'sms', ...sendInput });
       if (sendResult.code === 'lane_changed') {
         logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${sendResult.reason}`);
         skipped++; continue;
@@ -137,7 +200,7 @@ async function sendPreChargeReminders() {
       }
 
       await logAutopay(c.id, 'pre_charge_reminder_sent', {
-        amountCents: Math.round(parseFloat(c.monthly_rate) * 100),
+        amountCents,
         details: { charge_date: etDateString(target) },
       });
       sent++;
@@ -292,10 +355,11 @@ async function sendCardExpiryWarnings() {
         if (!routesEmail && billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; skipped++; continue; }
       }
 
-      // Keep each escalation reachable: a 30-day notice must not suppress
-      // the distinct 7-day stage roughly three weeks later.
+      // Keep each escalation reachable: the cooldown is keyed by stage, so a
+      // 60-day notice cannot delay the 30-day pass and a 30-day notice
+      // cannot suppress the distinct 7-day stage roughly three weeks later.
       const cooldownDays = reminderStage === '7_day' ? 7 : 30;
-      const already = await eventExistsRecently(r.customer_id, eventType, cooldownDays, r.payment_method_id);
+      const already = await eventExistsRecently(r.customer_id, eventType, cooldownDays, r.payment_method_id, { reminder_stage: reminderStage });
       if (already) { await emailPromise; skipped++; continue; }
 
       const expStr = `${String(r.exp_month).padStart(2, '0')}/${String(r.exp_year).slice(-2)}`;
@@ -338,7 +402,7 @@ async function sendCardExpiryWarnings() {
 
       await logAutopay(r.customer_id, eventType, {
         paymentMethodId: r.payment_method_id,
-        details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4 },
+        details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4, reminder_stage: reminderStage },
       });
       await emailPromise;
       sent++;
