@@ -841,7 +841,7 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
     // the commitment sentence.
     const chunks = (String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
     const sentences = chunks
-      .map((c) => ({ ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
+      .map((c) => ({ raw: c, ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
       .filter((s) => s.ns);
     for (let i = 0; i < sentences.length; i += 1) {
       const s = sentences[i];
@@ -849,7 +849,7 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
       const otherSentencesClean = sentences.every((other, j) => j === i
         || (!other.interrogative
           && !turnHasNegationOrHedge(other.ns)
-          && !sentenceHasNonBenignConditional(other.ns, sentences[j - 1]?.ns)));
+          && !sentenceHasNonBenignConditional(other.ns, other.raw, sentences[j - 1]?.ns)));
       containing.push({ ...s, otherSentencesClean });
     }
   }
@@ -918,24 +918,6 @@ function sentenceReferencesAuthorizationPartyOrAct(ns) {
   const padded = ` ${ns} `;
   return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t));
 }
-// The SCHEDULING half stays conditional-gated ONLY — an adjacent sentence
-// that merely MENTIONS a weekday, month or time in passing ("Adam works
-// Sundays. We will see you Sunday at noon.", "I'll email you the invoice.
-// We will see you Sunday at noon.") must not poison just for naming one;
-// only a genuine CONDITIONAL on the scheduling itself should (see
-// sentenceHasNonBenignConditional below).
-const SCHEDULING_TERMS = [
-  ' see you ', ' book ', ' booked ', ' booking ', ' schedule ', ' scheduled ',
-  ' scheduling ', ' appointment ', ' noon ', ' midnight ', ' am ', ' pm ',
-  ' o clock ', ' oclock ',
-];
-function sentenceReferencesScheduling(ns) {
-  const padded = ` ${ns} `;
-  if (SCHEDULING_TERMS.some((t) => padded.includes(t))) return true;
-  if (WEEKDAY_NAMES.some((w) => padded.includes(` ${w} `))) return true;
-  if (MONTH_NAMES.some((m) => padded.includes(` ${m} `))) return true;
-  return /(?:^| )\d{1,2}(?: 00)? ?(am|pm)(?= |$)/.test(padded);
-}
 // "Subject to homeowner approval." (codex round 7m regression) is a
 // conditional with no "if"/"unless"/etc. trigger word — turnHasUnresolvedConditional
 // alone would call it clean. "subject to" is added here as an additional
@@ -946,22 +928,59 @@ function sentenceReferencesScheduling(ns) {
 // "approval" are both in that list), so this trigger now only matters for
 // a hypothetical "subject to" conditional that names no authorization party.
 //
-// A benign topic word can land in the sentence BEFORE the conditional
-// ("Yep, it should go to him, the NOTIFICATION. ... so if it goes to you,
-// I'll make sure that's rectified." — the referent "it" is the notification
-// named one sentence earlier), so the benign-topic lookup checks the
-// conditional sentence itself AND the one immediately before it in the same
-// turn, not the whole turn (an unbounded turn-wide scan would let a benign
-// word anywhere in a long turn launder an unrelated conditional).
-function sentenceHasNonBenignConditional(ns, prevNs) {
+// The benign/poison call is decided by the CONDITION CLAUSE alone (codex
+// P1, round 2 of this PR's local+Codex audit: "If the technician is
+// available, I will email you. We will see you Sunday at noon." was wrongly
+// read as benign because "email" sits in the CONSEQUENT, not the
+// condition — a whole-sentence-or-context scan let the consequent launder
+// an unrelated condition). The clause is everything between the trigger
+// word and the next comma, or the end of the sentence if there is none.
+// DEFAULT IS POISON for that clause, same shape as the outer screen:
+// availability, space, weather, approval, the tech, or the schedule itself
+// all still poison with no term enumerated for any of them; only a clause
+// IDENTIFIABLY about who a notification/email/text/invoice/report goes to
+// is benign. A BARE-PRONOUN clause ("if it does", "if it goes to you") names
+// no topic of its own, so ONLY then does the referent resolve against the
+// PREVIOUS sentence's benign nouns ("Yep, it should go to him, the
+// NOTIFICATION. ... so if it goes to you, I'll make sure that's rectified."
+// — "it" is the notification named one sentence earlier); a clause with any
+// actual content word never falls back to the previous sentence.
+const CONDITION_TRIGGER_RE = /\b(if|unless|provided|as long as|assuming|subject to|depending|pending|when|once|should the)\b/i;
+function extractConditionClause(rawSentence) {
+  const s = String(rawSentence || '');
+  const m = CONDITION_TRIGGER_RE.exec(s);
+  if (!m) return null;
+  const after = s.slice(m.index + m[0].length);
+  const commaIdx = after.indexOf(',');
+  const clauseRaw = commaIdx === -1 ? after : after.slice(0, commaIdx);
+  return normalizeCommitmentText(clauseRaw);
+}
+const CONDITION_CLAUSE_GLUE_WORDS = new Set([
+  'it', 'that', 'this', 'they', 'he', 'she', 'is', 'are', 'was', 'were',
+  'does', 'do', 'did', 'goes', 'go', 'went', 'gone', 'comes', 'come', 'came',
+  'to', 'you', 'us', 'we', 'i', 'me', 'him', 'her', 'them', 'not', 'up',
+  'down', 'out', 'back', 'over', 'there', 'here', 's', 'll', 'd', 'the', 'a',
+]);
+function isBarePronounClause(clauseNs) {
+  const toks = clauseNs.split(' ').filter(Boolean);
+  return toks.length > 0 && toks.every((t) => CONDITION_CLAUSE_GLUE_WORDS.has(t));
+}
+function sentenceHasNonBenignConditional(ns, rawSentence, prevNs) {
   if (sentenceReferencesAuthorizationPartyOrAct(ns)) return true;
   const padded = ` ${ns} `;
   const isConditional = turnHasUnresolvedConditional(ns) || padded.includes(' subject to ');
   if (!isConditional) return false;
-  if (sentenceReferencesScheduling(ns)) return true;
-  const context = ` ${prevNs ? `${prevNs} ` : ''}${ns} `;
-  const isBenign = BENIGN_NON_BOOKING_TOPICS.some((t) => context.includes(t));
-  return !isBenign;
+  const clause = extractConditionClause(rawSentence);
+  // A conditional was detected but the trigger couldn't be isolated in the
+  // raw text (shouldn't normally happen — fail closed rather than guess).
+  if (clause == null) return true;
+  const clausePadded = ` ${clause} `;
+  if (BENIGN_NON_BOOKING_TOPICS.some((t) => clausePadded.includes(t))) return false;
+  if (prevNs && isBarePronounClause(clause)) {
+    const prevPadded = ` ${prevNs} `;
+    if (BENIGN_NON_BOOKING_TOPICS.some((t) => prevPadded.includes(t))) return false;
+  }
+  return true;
 }
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves

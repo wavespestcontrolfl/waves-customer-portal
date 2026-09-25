@@ -797,10 +797,33 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  // The scheduling half of the old combined term list stays
-  // conditional-gated only: an adjacent sentence that merely MENTIONS a
-  // weekday or time in passing — not conditional ON it, and naming no
-  // authorization party — must not poison just for naming one.
+  // Same round-2 finding, Codex's own phrasing (GitHub review round 1 on
+  // this PR): still a bare declarative, no conditional wording at all.
+  test('Codex regression: "Homeowner approval is still required." (declarative, no conditional) still poisons', () => {
+    const turn = "Homeowner approval is still required. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Codex regression (GitHub review round 1 on this PR): the benign/poison
+  // call must look at the CONDITION CLAUSE ("the technician is available"),
+  // not the consequent ("I will email you") — "email" sitting in the
+  // consequent must not launder a condition that is actually about
+  // technician availability.
+  test('Codex regression: a conditional on TECHNICIAN AVAILABILITY still poisons even though its consequent mentions email', () => {
+    const turn = "If the technician is available, I'll email you. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // The clause-scoped conditional check (sentenceHasNonBenignConditional)
+  // only applies to a genuine CONDITIONAL sentence — a plain declarative
+  // that merely MENTIONS a weekday or unrelated topic in passing, naming no
+  // authorization party, must not poison just for naming one.
   test('an adjacent sentence merely mentioning an unrelated topic (invoice email) does not poison the pinned commitment', () => {
     const turn = "I'll email you the invoice. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
