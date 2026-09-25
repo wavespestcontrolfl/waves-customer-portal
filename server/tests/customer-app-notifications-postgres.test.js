@@ -26,6 +26,7 @@ const express = require('express');
 const { generateToken } = require('../middleware/auth');
 const Push = require('../services/push-notifications');
 const Notifications = require('../services/notification-service');
+const AccountMembershipEmail = require('../services/account-membership-email');
 const apns = require('../services/apns');
 const fcm = require('../services/fcm');
 const connection = process.env.APP_TEST_DATABASE_URL;
@@ -672,6 +673,45 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     const replacement = channel === 'email' ? 'sms' : 'email';
     expect((await put({ [flag]: false, [key]: [replacement] })).status).toBe(200);
     expect((await mockPg('notification_prefs').where({ customer_id: property }).first())[column]).toEqual([replacement]);
+  });
+
+  test('billing availability honors the App gate and every charged profile', async () => {
+    await device();
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email', 'push'] });
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
+    expect((await put({ emailEnabled: false })).status).toBe(409);
+
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ email_enabled: true, invoice_channels: null });
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ invoice_channels: ['push'] });
+    expect((await put({ pushEnabled: false })).status).toBe(409);
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).push_enabled).not.toBe(false);
+  });
+
+  test('concurrent delivery-toggle saves cannot strand a billing category', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      invoice_channels: ['email', 'sms'], email_enabled: true, sms_enabled: true,
+    });
+    const responses = await Promise.all([put({ emailEnabled: false }), put({ smsEnabled: false })]);
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 409]);
+    const saved = await mockPg('notification_prefs').where({ customer_id: property }).first();
+    expect([saved.email_enabled, saved.sms_enabled].filter((enabled) => enabled !== false)).toHaveLength(1);
+  });
+
+  test('billing array audit compares legacy channels with the pre-save email destination', async () => {
+    try {
+      await mockPg('customers').where({ id: property }).update({ email: null });
+      await mockPg('notification_prefs').where({ customer_id: property }).update({
+        billing_email: 'billing@example.com', invoice_channels: null, invoice_channel: 'sms',
+      });
+      expect((await put({ billingEmail: '', invoiceChannels: ['sms'] })).status).toBe(200);
+      const audit = AccountMembershipEmail.sendAccountUpdated.mock.calls.at(-1)[0];
+      expect(audit.changedItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: 'invoiceChannels', oldValue: 'Email, Text', newValue: 'Text' }),
+      ]));
+    } finally {
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
+    }
   });
 
   test('both reminder choices persist on the primary and survive legacy saves and rollback', async () => {
