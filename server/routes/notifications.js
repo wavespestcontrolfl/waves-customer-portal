@@ -524,6 +524,12 @@ function billingKeysToValidate({ before, channels, updates, current, clearsBilli
       return updates.pushEnabled === false
         && Array.isArray(before[BILLING_DELIVERY_FIELDS[key]]) && before[BILLING_DELIVERY_FIELDS[key]].includes('push');
     }
+    // A legacy full-category receipt opt-out is already unavailable. Keep it
+    // untouched on unrelated/global edits, but do not accept a channel edit
+    // that would present any receipt method as usable.
+    if (key === 'paymentConfirmationChannels' && before.payment_receipt === false) {
+      return updates[key] !== undefined;
+    }
     return updates[key] !== undefined
       || (clearsBillingEmail && channels[key].includes('email'))
       || (Array.isArray(before[BILLING_DELIVERY_FIELDS[key]]) && channels[key].some((channel) =>
@@ -535,7 +541,8 @@ function billingKeysToValidate({ before, channels, updates, current, clearsBilli
 function billingCandidateStranded(candidate, appAvailable) {
   const textAvailable = candidate.prefs.sms_enabled !== false
     && Boolean(String(candidate.customer?.phone || '').trim());
-  return candidate.keys.some((key) => !candidate.channels[key].some((channel) =>
+  return candidate.keys.some((key) => (key === 'paymentConfirmationChannels'
+    && candidate.prefs.payment_receipt === false) || !candidate.channels[key].some((channel) =>
     (channel === 'email' && candidate.emailAvailable && candidate.prefs.email_enabled !== false)
     || (channel === 'sms' && textAvailable
       && (key !== 'paymentConfirmationChannels' || candidate.prefs.payment_confirmation_sms !== false))
@@ -812,12 +819,10 @@ router.put('/preferences', async (req, res, next) => {
       : req.customerId;
     const existingPrimary = String(primaryId) === String(req.customerId) ? existing : await ensurePrefs(primaryId);
 
-    let previousBillingEmailAvailable = true;
     const checksBillingEmail = hasBillingArrayUpdates || updates.billingEmail !== undefined || disablesBillingDelivery;
-    const currentCustomerHasEmail = checksBillingEmail && await customerEmailAvailable(req.customerId);
-    if (checksBillingEmail) {
-      previousBillingEmailAvailable = currentCustomerHasEmail || deliverableEmail(existing.billing_email);
-    }
+    let auditBefore = { ...(existing || {}) };
+    for (const col of CHANNEL_DB_COLUMNS) auditBefore[col] = existingPrimary?.[col];
+    let previousBillingEmailAvailable = true;
     // Older native builds render an unknown channel as Text and may echo it
     // when saving another setting. Their saves must not erase an App choice.
     // The same rule applies while the new UI gate is off during rollback.
@@ -858,10 +863,19 @@ router.put('/preferences', async (req, res, next) => {
         ...(Object.keys(channelDbUpdates).length ? [primaryId] : []),
         ...(checksBillingEmail ? [primaryId, ...billingProfileIds] : []),
       ];
+      const lockedPrefs = new Map();
       for (const id of [...new Set(prefRowIds)].sort()) {
-        await trx('notification_prefs').where({ customer_id: id }).forUpdate().first('customer_id');
+        const row = await trx('notification_prefs').where({ customer_id: id }).forUpdate().first();
+        if (row) lockedPrefs.set(String(id), row);
       }
+      const lockedExisting = lockedPrefs.get(String(req.customerId)) || existing || {};
+      const lockedPrimary = lockedPrefs.get(String(primaryId)) || existingPrimary || {};
+      auditBefore = { ...lockedExisting };
+      for (const col of CHANNEL_DB_COLUMNS) auditBefore[col] = lockedPrimary[col];
       if (checksBillingEmail) {
+        const lockedCustomer = await trx('customers').where({ id: req.customerId }).first('email');
+        previousBillingEmailAvailable = deliverableEmail(lockedCustomer?.email)
+          || deliverableEmail(lockedExisting.billing_email);
         billingDeliveryError = await billingAvailabilityError({ req, trx, updates, propertyDbUpdates,
           channelDbUpdates, primaryId, profileIds: billingProfileIds });
         if (billingDeliveryError) return;
@@ -890,12 +904,10 @@ router.put('/preferences', async (req, res, next) => {
 
     // Change log: non-channel fields compare against the current customer's prior
     // row; channel fields against the primary profile's prior row.
-    const before = { ...(existing || {}) };
-    for (const col of CHANNEL_DB_COLUMNS) before[col] = existingPrimary?.[col];
     sendAccountUpdatedForPrefs({
       req,
       targetCustomerId: req.customerId,
-      items: preferenceChangeItems(updates, before, payload, { scope: 'Account', emailAvailable: previousBillingEmailAvailable }),
+      items: preferenceChangeItems(updates, auditBefore, payload, { scope: 'Account', emailAvailable: previousBillingEmailAvailable }),
       section: 'Notification preferences',
     });
 

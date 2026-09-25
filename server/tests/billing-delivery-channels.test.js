@@ -64,6 +64,15 @@ describe('billing delivery channel contract', () => {
       .toEqual(['push']);
   });
 
+  test('legacy payment issues inherit the billing scalar only while their dedicated scalar is NULL', () => {
+    expect(billingChannelsPayload({
+      payment_issue_channel: null, billing_channel: 'push', email_enabled: false,
+    }).paymentIssueChannels).toEqual(['push']);
+    expect(billingChannelsPayload({
+      payment_issue_channel: 'sms', billing_channel: 'push', email_enabled: false,
+    }).paymentIssueChannels).toEqual(['sms']);
+  });
+
   test('legacy email-only payment receipts stay email-only when deliverable and fall back to sms otherwise', () => {
     const prefs = { payment_receipt_channel: 'email' };
     expect(billingChannelsPayload(prefs).paymentConfirmationChannels).toEqual(['email']);

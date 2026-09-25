@@ -661,6 +661,21 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await put({ paymentConfirmationChannels: ['sms'], paymentConfirmationSms: true })).status).toBe(200);
   });
 
+  test('legacy receipt kill switch rejects receipt-channel edits without blocking other preference saves', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      payment_receipt: false, payment_receipt_channels: ['sms'], payment_confirmation_sms: true,
+    });
+    expect((await put({ weatherAlerts: false })).status).toBe(200);
+    expect((await put({ invoiceChannels: ['sms'] })).status).toBe(200);
+    expect(await put({ paymentConfirmationChannels: ['sms'] })).toMatchObject({
+      status: 409,
+      body: { error: 'Choose at least one available delivery method for each billing notification.' },
+    });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+      payment_receipt: false, payment_receipt_channels: ['sms'], weather_alerts: false,
+    });
+  });
+
   test.each([
     ['emailEnabled', 'invoice_channels', 'invoiceChannels', 'email'],
     ['smsEnabled', 'invoice_channels', 'invoiceChannels', 'sms'],
@@ -756,6 +771,38 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       ]));
     } finally {
       await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
+    }
+  });
+
+  test('billing array audit compares against the preference row reread under lock', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['sms'] });
+    const blocker = await mockPg.transaction();
+    let committed = false;
+    try {
+      await blocker('notification_prefs').where({ customer_id: property }).forUpdate().first('customer_id');
+      await blocker('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email'] });
+      const pending = put({ invoiceChannels: ['sms'] });
+      let settled;
+      void pending.then((response) => { settled = response; });
+      let waiting = false;
+      for (let attempt = 0; attempt < 50 && !waiting && !settled; attempt += 1) {
+        const result = await admin.raw(`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+            AND wait_event_type = 'Lock' AND query ILIKE '%notification_prefs%' AND query ILIKE '%for update%'
+        ) AS waiting`);
+        waiting = result.rows[0].waiting;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect({ waiting, settled }).toEqual({ waiting: true, settled: undefined });
+      await blocker.commit();
+      committed = true;
+      expect((await pending).status).toBe(200);
+      const audit = AccountMembershipEmail.sendAccountUpdated.mock.calls.at(-1)[0];
+      expect(audit.changedItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: 'invoiceChannels', oldValue: 'Email', newValue: 'Text' }),
+      ]));
+    } finally {
+      if (!committed) await blocker.rollback();
     }
   });
 
