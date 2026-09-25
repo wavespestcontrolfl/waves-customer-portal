@@ -1555,8 +1555,37 @@ async function recordFirstTouchHoldOwned(args, procToken) {
 // claims still valid) cannot exist; a failed mint leaves no card, which the
 // token-fenced end-of-run recovery covers. repen's r44 durable-state error
 // still propagates (the caller fails the run retryably).
-async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid, invalidateClaims = true }) {
-  if (!cards.length) return;
+// `resolvedEmail` (Codex P1 round 3): the single address THIS pass would
+// show/release when it carries no disagreement — undefined when the caller
+// has nothing to reconcile against (skips the check entirely, same as the
+// pre-existing `cards.length` short-circuit), null/''/a string otherwise
+// (a reprocess that now finds no email at all still needs to reconcile a
+// stale disagreement card down to "nothing to hold"). Lets a full-agreement
+// reprocess — which mints NO email card at all — still find and settle a
+// stale open disagreement card from an earlier cycle; see the reconciliation
+// block below.
+async function mintEmailReviewCardsFenced({
+  callLogId, procToken, cards, callSid, invalidateClaims = true, resolvedEmail = undefined,
+}) {
+  if (!cards.length) {
+    if (resolvedEmail === undefined) return;
+    // Cheap, unlocked pre-check: only worth opening the fenced transaction
+    // when a live disagreement card actually exists to reconcile. The
+    // transaction below re-reads under FOR UPDATE before writing anything.
+    let hasOpenDisagreement = false;
+    try {
+      const openCard = await db('triage_items')
+        .where({ call_log_id: callLogId })
+        .whereIn('status', ['open', 'in_progress'])
+        .whereIn('reason_code', ['email_unverified', 'email_invalid'])
+        .first('id', 'payload');
+      if (openCard) {
+        const p = typeof openCard.payload === 'string' ? JSON.parse(openCard.payload) : openCard.payload;
+        hasOpenDisagreement = !!(p && p.email_disagreement);
+      }
+    } catch (_e) { /* best-effort pre-check only — fall through and skip */ }
+    if (!hasOpenDisagreement) return;
+  }
   try {
     const minted = await db.transaction(async (trx) => {
       // Advisory lock FIRST (Codex #3084 r55): with no hold rows yet — the
@@ -1579,6 +1608,20 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
         .forUpdate()
         .first('id');
       if (!owned) return false;
+      // Codex P1 (round 2): read BEFORE the loop so the disagreement-card
+      // refresh below can note a mid-run operator correction on the very
+      // card whose blank hold that correction would otherwise look erased
+      // from — the clear further down preserves corrected_at rows, but the
+      // card itself must say so too, or the office sees two-candidate
+      // evidence with no sign the customer already has a confirmed address.
+      let correctedHold = null;
+      if (await trx.schema.hasTable('first_touch_holds')) {
+        correctedHold = await trx('first_touch_holds')
+          .where({ call_log_id: callLogId })
+          .whereIn('status', ['pending', 'releasing'])
+          .whereNotNull('corrected_at')
+          .first('held_email', 'corrected_at');
+      }
       let hasDisagreementCard = false;
       for (const card of cards) {
         // V1/V2 email disagreement (owner ruling 2026-09-25): a force-
@@ -1628,6 +1671,15 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
               // cycle can never ride along on a fresh, unresolved
               // two-candidate card.
               email_release_target: payloadObj.email_release_target,
+              // Codex P1 (round 2): the hold's held_email is about to be
+              // PRESERVED (never cleared) below because the operator
+              // corrected it mid-run — without this note the card would
+              // show two fresh candidates with no sign a confirmed address
+              // already exists, and an operator resolving as-is would
+              // clobber it with resumeHeldFirstTouch's stale in-memory read.
+              mid_run_correction: correctedHold
+                ? { held_email: correctedHold.held_email, corrected_at: correctedHold.corrected_at }
+                : undefined,
             };
             await trx('triage_items')
               .where({ id: existing.id })
@@ -1640,6 +1692,84 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore();
       }
+      // Codex P1 (round 3): a reprocess that no longer disagrees must
+      // reconcile a STALE open disagreement card, not leave it behind. Two
+      // shapes land here — (a) this pass minted its own non-disagreement
+      // email card, which the ordinary insert above just silently skipped
+      // via onConflict-ignore because the old card is still open, or (b)
+      // this pass found full agreement and produced NO email card at all
+      // (`cards` empty, `resolvedEmail` carries the agreed address instead).
+      // Either way, the office must see THIS cycle's evidence, not the old
+      // two-candidate ask, and the hold must be retargeted to match — never
+      // left recording the freshly-agreed address behind a card that still
+      // claims the question is open (or, worse, silently released it to an
+      // address the operator never reviewed on this card).
+      // Best-effort (try/catch'd): reconciliation improves consistency on
+      // top of the mint's core safety guarantee (never releasing to an
+      // unconfirmed target), which holds regardless — a failed reconcile
+      // just leaves the stale card exactly as before, same as pre-fix.
+      // Never escalates to the r55 hard-failure path: unlike the card
+      // mint/insert above, a stuck reconcile read has no unreviewed-address
+      // exposure to fail closed against.
+      if (!hasDisagreementCard) {
+        try {
+          const openDisagreement = await trx('triage_items')
+            .where({ call_log_id: callLogId })
+            .whereIn('status', ['open', 'in_progress'])
+            .whereIn('reason_code', ['email_unverified', 'email_invalid'])
+            .forUpdate()
+            .first('id', 'reason_code', 'payload');
+          if (openDisagreement) {
+            let existingPayload = {};
+            try {
+              existingPayload = typeof openDisagreement.payload === 'string'
+                ? JSON.parse(openDisagreement.payload) : (openDisagreement.payload || {});
+            } catch (_e) { /* corrupt payload — overwrite with the fresh evidence below */ }
+            if (existingPayload.email_disagreement) {
+              // This cycle's OWN card at the same reason_code (if it minted
+              // one) carries the authoritative fresh evidence — a matching
+              // card's release target/candidates win over a bare
+              // `resolvedEmail` string, which only stands in when this
+              // cycle minted no email card at all (full agreement).
+              const matchingCard = cards.find((c) => c.reason_code === openDisagreement.reason_code);
+              let matchingPayload = null;
+              if (matchingCard) {
+                try { matchingPayload = JSON.parse(matchingCard.payload); } catch (_e) { matchingPayload = null; }
+              }
+              const agreedLc = matchingPayload
+                ? (matchingPayload.email_release_target
+                  ?? (matchingPayload.email_candidates?.[0]?.value
+                    ? String(matchingPayload.email_candidates[0].value).trim().toLowerCase() : null))
+                : (resolvedEmail ? String(resolvedEmail).trim().toLowerCase() : null);
+              const reconciledPayload = {
+                ...existingPayload,
+                ...(matchingPayload || {}),
+                email_disagreement: null,
+                email_candidates: matchingPayload?.email_candidates
+                  || (agreedLc ? [{ value: agreedLc }] : []),
+                email_as_heard: matchingPayload?.email_as_heard ?? agreedLc,
+                email_release_target: agreedLc,
+                disagreement_resolved_on_reprocess: true,
+              };
+              await trx('triage_items')
+                .where({ id: openDisagreement.id })
+                .update({ payload: JSON.stringify(reconciledPayload), updated_at: new Date() });
+              if (await trx.schema.hasTable('first_touch_holds')) {
+                // Same corrected_at exemption as the disagreement-clear
+                // path above — an operator's mid-run correction still
+                // outranks this reconciliation.
+                await trx('first_touch_holds')
+                  .where({ call_log_id: callLogId })
+                  .whereIn('status', ['pending', 'releasing'])
+                  .whereNull('corrected_at')
+                  .update({ held_email: agreedLc || '', updated_at: new Date() });
+              }
+            }
+          }
+        } catch (reconcileErr) {
+          logger.warn(`[call-proc] stale disagreement card reconciliation skipped for ${maskSid(callSid)}: ${reconcileErr.message}`);
+        }
+      }
       if (hasDisagreementCard && await trx.schema.hasTable('first_touch_holds')) {
         // The hold's held target: no single confirmed address survives a
         // disagreement — clear it so recordFirstTouchHold's "preserve the
@@ -1648,9 +1778,20 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
         // cycle's two-candidate card replaces it. Scoped to rows not yet
         // released/blocked — a row that already sent under the old cycle's
         // address is a historical fact this must not rewrite.
+        //
+        // Codex P1 (round 2): NEVER over an operator's explicit correction
+        // (`corrected_at`, the same marker customer-email-fanout stamps and
+        // recordFirstTouchHold's merge preserves) — a mid-run force-
+        // reprocess correction retargets the pending row exactly like this,
+        // and this unconditional clear previously erased it before
+        // recordFirstTouchHold ever ran (its own preservation branch
+        // requires a NONEMPTY held_email to restore, so once cleared the
+        // correction was gone for good). Same `.whereNull('corrected_at')`
+        // guard the end-of-run recovery retarget uses (below, r50).
         await trx('first_touch_holds')
           .where({ call_log_id: callLogId })
           .whereIn('status', ['pending', 'releasing'])
+          .whereNull('corrected_at')
           .update({ held_email: '', updated_at: new Date() });
       }
       if (invalidateClaims) {
@@ -9556,6 +9697,11 @@ const CallRecordingProcessor = {
                 // dictation demoted it — then only a human can settle it.
                 extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
               })),
+            // Codex P1 (round 3): this cycle's single agreed address (or
+            // null) — lets the mint reconcile a STALE open disagreement
+            // card even when this pass's own needsConfirmation carries no
+            // email flag at all (full agreement on reprocess).
+            resolvedEmail: String(extracted.email || '').trim().toLowerCase() || null,
           });
         }
       } catch (bridgeErr) {
@@ -9614,30 +9760,38 @@ const CallRecordingProcessor = {
         }
         if (emailReasons.length) {
           bridgeNeedsConfirmation.push(...emailReasons);
-          // Same Needs Review surfacing as the shadow branch: the inbox is
-          // driven by triage_items rows, so without these an auto-routed call
-          // in enforce/V2-off mode would never show the read-back prompt.
-          // Same fenced mint as the shadow branch (Codex #3084 r54): the
-          // card writes and the r43 claim invalidation ride one
-          // token-fenced transaction; r44's durable-state error still
-          // throws into the extraction_failed retry. Decoder evidence
-          // (candidates + the exact read-back question) rides each card.
-          await mintEmailReviewCardsFenced({
-            callLogId: call.id,
-            procToken,
-            callSid,
-            invalidateClaims: emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid'),
-            cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
-              callLogId: call.id,
-              flag,
-              onFileAddress,
-              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
-              severity: 'advisory',
-              // Same filing-time release-target snapshot as the shadow branch.
-              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
-            })),
-          });
         }
+        // Same Needs Review surfacing as the shadow branch: the inbox is
+        // driven by triage_items rows, so without these an auto-routed call
+        // in enforce/V2-off mode would never show the read-back prompt.
+        // Same fenced mint as the shadow branch (Codex #3084 r54): the
+        // card writes and the r43 claim invalidation ride one
+        // token-fenced transaction; r44's durable-state error still
+        // throws into the extraction_failed retry. Decoder evidence
+        // (candidates + the exact read-back question) rides each card.
+        // Called even with NO email reasons (Codex P1 round 3): a
+        // full-agreement reprocess mints no email card at all, but a STALE
+        // open disagreement card from an earlier cycle still needs
+        // reconciling down to this cycle's single agreed address —
+        // `resolvedEmail` carries it, and the mint's own guard skips the
+        // fenced transaction entirely when there is nothing open to
+        // reconcile.
+        await mintEmailReviewCardsFenced({
+          callLogId: call.id,
+          procToken,
+          callSid,
+          invalidateClaims: emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid'),
+          cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
+            callLogId: call.id,
+            flag,
+            onFileAddress,
+            extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+            severity: 'advisory',
+            // Same filing-time release-target snapshot as the shadow branch.
+            extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+          })),
+          resolvedEmail: String(extracted.email || '').trim().toLowerCase() || null,
+        });
       } catch (emailErr) {
         // Advisory EXCEPT the r44 invalidation — see the shadow branch.
         if (emailErr.emailReviewStateUnavailable) throw emailErr;

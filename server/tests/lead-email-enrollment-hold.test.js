@@ -20,6 +20,10 @@ jest.mock('../models/db', () => {
     // uncertain-send ('releasing' + unmarked) rows keep a force-resend
     // ticket, everything else re-pends plain.
     whereNull: jest.fn(() => chain),
+    // The r2/r3 P1 fixes read a hold's `corrected_at` marker (mid-run
+    // correction preservation) and reconcile a stale disagreement card —
+    // both add a plain whereNotNull filter alongside the existing whereNull.
+    whereNotNull: jest.fn(() => chain),
     whereNot: jest.fn(() => chain),
     // Table-scoped (r56): the recovery path now reads first_touch_holds
     // and the call_log ownership row inside the fenced mint — a failure

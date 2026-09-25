@@ -192,6 +192,34 @@ router.get('/', async (req, res) => {
   }
 });
 
+// V1/V2 email disagreement (owner ruling 2026-09-25, codex round-2 P1): a
+// card carrying `email_disagreement` evidence has NO single confirmed
+// address — the hold's held_email was deliberately cleared to '' because no
+// candidate was ever chosen. Resolving that card as-is (Resolve, or an
+// Accept call verdict) without first confirming an address closes the card
+// terminally, leaves the customer permanently email-less, and strands the
+// pending hold: the ledger sweep explicitly skips blank-target rows
+// (`.whereNot('held_email', '')` in lead-first-touch-resume.js), and a
+// resolved card is never re-surfaced. The correction path that DOES work is
+// editing the customer's email record — customer-email-fanout's
+// propagateCustomerEmailChange retargets the hold and resolves the card
+// itself. Refuse the bare resolution instead of resuming an unconfirmed
+// target: true once EITHER the hold's held_email or the customer's own
+// email is a real, non-blank address.
+async function emailDisagreementConfirmed(trx, callLogId, holdsTable) {
+  if (!callLogId) return true;
+  if (holdsTable) {
+    const hold = await trx('first_touch_holds').where({ call_log_id: callLogId }).first('held_email');
+    if (String(hold?.held_email || '').trim()) return true;
+  }
+  const call = await trx('call_log').where({ id: callLogId }).first('customer_id');
+  if (call?.customer_id) {
+    const cust = await trx('customers').where({ id: call.customer_id }).first('email');
+    if (String(cust?.email || '').trim()) return true;
+  }
+  return false;
+}
+
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
@@ -264,6 +292,19 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
         return { outcome: 'stale_version' };
+      }
+    }
+    if (nextStatus === 'resolved' && emailReviewCard) {
+      // Judge the LIVE payload, not the route's pre-lock snapshot — a
+      // force-reprocess can refresh a plain card into a disagreement one
+      // (or the reverse) while this action waited for the lock.
+      const livePayloadRaw = live?.payload ?? item.payload;
+      const livePayload = typeof livePayloadRaw === 'string'
+        ? (() => { try { return JSON.parse(livePayloadRaw); } catch { return null; } })()
+        : livePayloadRaw;
+      if (livePayload?.email_disagreement
+          && !(await emailDisagreementConfirmed(trx, item.call_log_id, holdsTable))) {
+        return { outcome: 'email_disagreement_unconfirmed' };
       }
     }
     const updated = await trx('triage_items')
@@ -416,6 +457,10 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
     case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
+    case 'email_disagreement_unconfirmed': return res.status(409).json({
+      error: 'V1 and V2 disagreed on the spelled email — correct the customer\'s email on the customer record with the confirmed spelling before resolving this card.',
+      code: 'EMAIL_DISAGREEMENT_UNCONFIRMED',
+    });
     default: return res.json({ ok: true, id, status: nextStatus });
   }
 }
@@ -1042,6 +1087,7 @@ router.post('/:id/verdict', async (req, res) => {
     let conflictCardSettled = false;
     let staleConflictVersion = false;
     let relinkedRecoveryTask = false;
+    let emailDisagreementUnconfirmed = false;
     await db.transaction(async (trx) => {
       // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
       // first_touch_holds rows → triage_items. The advisory lock is the
@@ -1090,6 +1136,29 @@ router.post('/:id/verdict', async (req, res) => {
       const live = await trx('triage_items').where({ id }).first('payload');
       if (live?.payload?.reschedule_proposal) {
         throw Object.assign(new Error('Review or dismiss the reschedule proposal instead of recording a call verdict.'), { proposalConflict: true });
+      }
+      if (verdict === 'accept') {
+        // Same guard as transitionCore's plain Resolve (codex round-2 P1):
+        // an Accept call verdict bulk-resolves every open card on the call,
+        // including an email_unverified/invalid card carrying an unresolved
+        // V1/V2 disagreement — releasing that without a confirmed address
+        // strands the hold forever (the sweep skips blank held_email rows)
+        // and the closed card leaves no work item to fix it.
+        const { EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
+        const openEmailCards = await trx('triage_items')
+          .where({ call_log_id: item.call_log_id })
+          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+          .whereIn('status', OPEN_STATES)
+          .select('payload');
+        for (const card of openEmailCards) {
+          const payload = typeof card.payload === 'string'
+            ? (() => { try { return JSON.parse(card.payload); } catch { return null; } })()
+            : card.payload;
+          if (payload?.email_disagreement && !(await emailDisagreementConfirmed(trx, item.call_log_id, holdsTable))) {
+            emailDisagreementUnconfirmed = true;
+            return;
+          }
+        }
       }
       // A house-number conflict card on a CONFIRMED call is that call's
       // only scheduling ask (the processor's booking hold suppressed the
@@ -1234,6 +1303,12 @@ router.post('/:id/verdict', async (req, res) => {
     }
     if (relinkedRecoveryTask) {
       return res.status(409).json({ error: 'This call was relinked to another customer since the task was filed — reprocess the call to refresh it, then review it.', code: 'CONFLICT_CUSTOMER_RELINKED' });
+    }
+    if (emailDisagreementUnconfirmed) {
+      return res.status(409).json({
+        error: 'V1 and V2 disagreed on the spelled email — correct the customer\'s email on the customer record with the confirmed spelling before recording this verdict.',
+        code: 'EMAIL_DISAGREEMENT_UNCONFIRMED',
+      });
     }
     if (resolved === 0) {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
@@ -1393,4 +1468,5 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
 module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
-  heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS };
+  heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
+  emailDisagreementConfirmed };
