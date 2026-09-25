@@ -722,6 +722,11 @@ describe("TwilioService.sendTechEnRoute", () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(AppointmentEmail.sendTechEnRouteEmail).toHaveBeenCalledTimes(1);
       expect(result.emailSent).toBe(true);
+      // codex round-2 P2: an accepted email fallback under this hold is a
+      // DEFINITIVE handled notice — reporting success:false here made
+      // track-transitions treat it as retryable and could re-fire a stale
+      // "on the way" text once the hold cleared.
+      expect(result.success).toBe(true);
     });
 
     test("arrival: SMS is never attempted while the visit is held; the email fallback carries the notice", async () => {
@@ -741,6 +746,8 @@ describe("TwilioService.sendTechEnRoute", () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(AppointmentEmail.sendTechArrivedEmail).toHaveBeenCalledTimes(1);
       expect(result.emailSent).toBe(true);
+      // codex round-2 P2 — see the en-route twin above.
+      expect(result.success).toBe(true);
     });
   });
 });

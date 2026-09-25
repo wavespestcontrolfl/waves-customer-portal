@@ -475,9 +475,28 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
       .where({ customer_id: customerId, direction: 'outbound', status: 'scheduled' })
   ).update({ to_phone: newPhone.slice(0, 20), updated_at: now });
 
+  // callback_number_needed hold clearance (codex round-2 finding #2, PR
+  // #4807): the customer's phone on file WAS the disclaimed ANI (that is
+  // how the record was created), and reaching this point already proves
+  // it just changed to a genuinely DIFFERENT, validated number — a staff
+  // phone edit is exactly the kind of human verification that should lift
+  // the hold. Every LIVE visit for this customer, not just call-linked
+  // ones: the corrected number is now the account's phone regardless of
+  // which visit's call disclaimed the old one. call_sms_cleared_at >=
+  // callback_number_hold_at by construction (GREATEST), matching the
+  // timestamp rule the hold predicate reads (callbackNumberHoldFromRow).
+  counts.callbackNumberHoldsCleared = await conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['pending', 'confirmed'])
+    .whereNotNull('callback_number_hold_at')
+    .update({
+      call_sms_cleared_at: conn.raw('GREATEST(callback_number_hold_at, now())'),
+      updated_at: now,
+    });
+
   if (Object.values(counts).some(Boolean)) {
     // Counts only — never the phone values (PII stays out of logs).
-    logger.info(`[contact-fanout] customer ${customerId} phone: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.contracts} contract(s), ${counts.promoters} promoter(s) (${counts.promoterSkipped} skipped), ${counts.bookingIntents} booking intent(s), ${counts.scheduledSms} scheduled SMS`);
+    logger.info(`[contact-fanout] customer ${customerId} phone: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.contracts} contract(s), ${counts.promoters} promoter(s) (${counts.promoterSkipped} skipped), ${counts.bookingIntents} booking intent(s), ${counts.scheduledSms} scheduled SMS, ${counts.callbackNumberHoldsCleared} callback-number hold(s) cleared`);
   }
   return counts;
 }
@@ -487,7 +506,7 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
 // render THIS string, so the disclosure can never silently drift from the
 // service's actual side effects — extend it in the same commit that adds a
 // new synced surface.
-const CONTACT_FANOUT_DISCLOSURE = 'a name or phone change also updates every open copy still carrying the old value (leads, estimates, contracts, referral promoter, booking recovery, active automations, newsletter greeting, queued template sends, scheduled SMS)';
+const CONTACT_FANOUT_DISCLOSURE = 'a name or phone change also updates every open copy still carrying the old value (leads, estimates, contracts, referral promoter, booking recovery, active automations, newsletter greeting, queued template sends, scheduled SMS) and lifts any disclaimed-caller-ID SMS hold on the customer\'s live visits';
 
 module.exports = {
   propagateCustomerNameChange,

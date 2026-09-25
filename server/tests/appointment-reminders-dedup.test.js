@@ -467,7 +467,11 @@ describe('appointment reminder reschedule windows', () => {
       first: jest.fn().mockResolvedValue(customer || null),
     });
     const customerQueries = [customerQuery, landlineQuery];
-    const scheduledServiceQueries = [chain({ first: jest.fn().mockResolvedValue(null) }), techQuery];
+    // safeSendAppointment's callback_number_needed hold check (codex round-2
+    // finding #7) reads scheduled_services via .select(...), not .first(...)
+    // — a 3rd entry, not-held by default (empty result set).
+    const holdCheckQuery = chain({ select: jest.fn().mockResolvedValue([]) });
+    const scheduledServiceQueries = [chain({ first: jest.fn().mockResolvedValue(null) }), techQuery, holdCheckQuery];
     const notificationPrefsQueries = [prefsQuery];
 
     if (sendResult) {
@@ -887,6 +891,10 @@ describe('appointment reminder cron delivery windows', () => {
     });
     const techQuery = chain({
       first: jest.fn().mockResolvedValue({ tech_name: 'Sam' }),
+      // Also serves safeSendAppointment's callback_number_needed hold check
+      // (codex round-2 finding #7), which reads scheduled_services via
+      // .select(...) rather than .first(...) — not held (empty result).
+      select: jest.fn().mockResolvedValue([]),
     });
     const landlineQuery = chain({
       first: jest.fn().mockResolvedValue(customer),

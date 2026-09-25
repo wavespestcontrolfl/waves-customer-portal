@@ -1751,8 +1751,16 @@ describe('the email leg (owner delivery rule 2026-07-23: both channels)', () => 
 describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)', () => {
   const HELD_VISIT = { ...VISIT, callback_number_hold_at: new Date(Date.now() - 3600000), call_sms_cleared_at: null };
 
+  // callbackNumberHoldActiveForVisit reads via .select(...), not .first(...)
+  // — keep both handlers in sync so the mock reflects the same row either
+  // query style asks for.
+  function setHeldVisitFixture(row = HELD_VISIT) {
+    mockTableHandlers.scheduled_services.first = () => ({ ...row });
+    mockTableHandlers.scheduled_services.select = () => [{ ...row }];
+  }
+
   test('disclaimed ANI + email on file: one invitation email, zero SMS, the claim consumed exactly once', async () => {
-    mockTableHandlers.scheduled_services.first = () => ({ ...HELD_VISIT });
+    setHeldVisitFixture();
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
 
     expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent_email_only_disclaimed_ani' });
@@ -1780,7 +1788,7 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
   });
 
   test('disclaimed ANI + no email on file: stays the delivery_suppressed outcome — claim and row release, no SMS ever attempted', async () => {
-    mockTableHandlers.scheduled_services.first = () => ({ ...HELD_VISIT });
+    setHeldVisitFixture();
     // sendAutopaySetupInvitation's own "no usable email" signal.
     mockSendSetupInvitation.mockResolvedValueOnce(null);
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
@@ -1803,23 +1811,25 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
     expect(mockSendSetupInvitation).not.toHaveBeenCalled();
   });
 
-  test('a hold-read failure fails closed to the ordinary delivery_suppressed outcome', async () => {
-    // Only the hold-check's own query (columns callback_number_hold_at /
-    // call_sms_cleared_at) throws — the visit-load .first() a few lines
+  test('a hold-read failure FAILS CLOSED — treated as held, tried by email rather than silently suppressed (codex round-2 finding #3)', async () => {
+    // Only the hold-check's own query (callbackNumberHoldActiveForVisit
+    // reads via .select(...)) throws — the visit-load .first() a few lines
     // above it in requestCardForAppointment must keep resolving normally,
     // or the whole request wrongly aborts with a generic 'error:...' skip
-    // instead of exercising this specific failure path.
-    mockTableHandlers.scheduled_services.first = (chain, ...cols) => {
-      if (cols.includes('callback_number_hold_at')) throw new Error('db down');
-      return { ...VISIT };
-    };
+    // instead of exercising this specific failure path. An unreadable hold
+    // state is a consent question, not an availability one: it must never
+    // read as "safe to text", so it takes the SAME email-only path a
+    // genuine hold would.
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT });
+    mockTableHandlers.scheduled_services.select = () => { throw new Error('db down'); };
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
-    expect(res.reason).toBe('delivery_suppressed');
-    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+    expect(res.reason).toBe('sent_email_only_disclaimed_ani');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendSetupInvitation).toHaveBeenCalledTimes(1);
   });
 
   test('once the invitation email has gone out, clearing the hold later does not re-send a second one', async () => {
-    mockTableHandlers.scheduled_services.first = () => ({ ...HELD_VISIT });
+    setHeldVisitFixture();
     const first = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
     expect(first.reason).toBe('sent_email_only_disclaimed_ani');
     expect(mockSendSetupInvitation).toHaveBeenCalledTimes(1);
@@ -1829,7 +1839,7 @@ describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)',
     // regardless of trigger or delivery, exactly as it does for a real
     // text (checks 3+4's "lost claim race" test uses the same lever).
     mockTableHandlers.scheduled_services.update = () => 0;
-    mockTableHandlers.scheduled_services.first = () => ({ ...HELD_VISIT, call_sms_cleared_at: new Date(), card_link_sent_at: new Date() });
+    setHeldVisitFixture({ ...HELD_VISIT, call_sms_cleared_at: new Date(), card_link_sent_at: new Date() });
 
     const second = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
     expect(second.reason).toBe('link_already_sent');

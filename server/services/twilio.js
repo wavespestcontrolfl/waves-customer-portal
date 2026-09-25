@@ -392,6 +392,17 @@ const ARRIVAL_DELIVERY = {
   // retryable miss so a later same-job signal can text the newly confirmed
   // recipient — the email's idempotency key dedupes repeats (#2956 r8/r9).
   async sms(ctx) {
+    // callback_number_needed hold (codex round-2 P2): unlike the opt-in
+    // case above, an accepted email here IS the notice — a DEFINITIVE
+    // handled outcome, not a retryable miss. Reporting false previously
+    // made track-transitions retry and could send a stale "arrived" text
+    // once the hold cleared. Checked before heldAllSms so the two holds'
+    // different retry semantics can never collide.
+    if (ctx.callbackNumberHoldActive) {
+      const emailRes = await sendArrivalEmailLeg(ctx);
+      if (emailRes?.ok) return { success: true, results: ctx.results, emailSent: true };
+      return settleArrivalMiss(ctx, emailRes);
+    }
     if (ctx.heldAllSms) {
       const emailRes = await sendArrivalEmailLeg(ctx);
       return { success: false, results: ctx.results, emailSent: !!emailRes?.ok };
@@ -1744,7 +1755,14 @@ const TwilioService = {
       }
     }
 
-    return { success: delivered || (channel === 'push' && emailFallbackAccepted), results, emailSent: emailFallbackAccepted };
+    // codex round-2 P2 (PR #4807): a successful email fallback under the
+    // callback_number_needed hold is a DEFINITIVE handled notice, not a
+    // transient miss — reporting success:false here made track-transitions
+    // treat it as retryable and could re-fire a stale "on the way" text
+    // once the hold cleared. Scoped to the hold specifically; the
+    // landline/no-contacts email-fallback cases keep their prior (push-only)
+    // success semantics, unchanged.
+    return { success: delivered || (channel === 'push' && emailFallbackAccepted) || (callbackNumberHoldActive && emailFallbackAccepted), results, emailSent: emailFallbackAccepted };
   },
 
   /**
@@ -1865,12 +1883,16 @@ const TwilioService = {
       // heldAllSms the way the 'sms'/'email' branches do).
       smsLegAvailable: (smsAllowed || channel === "push") && contacts.length > 0 && !callbackNumberHoldActive,
       // The opt-in hold emptied a NON-empty list: no SMS leg right now, but
-      // the hold is TRANSIENT (the recipient may still reply YES). Only while
-      // texting is enabled — a disabled SMS leg is permanent, and must not
-      // turn a delivered email into a retryable miss. The callback_number_needed
-      // hold is folded in the same way (also transient — lifted once the
-      // visit's call-level SMS clearance is recorded).
-      heldAllSms: (smsAllowed && !contacts.length && unfilteredContacts.length > 0) || callbackNumberHoldActive,
+      // the hold is TRANSIENT (the recipient may still reply YES) — an
+      // email success here stays a RETRYABLE miss so a later same-job
+      // signal can still text the newly confirmed recipient (#2956 r10/r11).
+      // Deliberately NOT folding callbackNumberHoldActive in here (codex
+      // round-2 P2): that hold's "transient" is a different shape (cleared
+      // by a durable call_sms_cleared_at stamp, not a reply), and an
+      // accepted email under it IS the notice, not a retry candidate — see
+      // callbackNumberHoldActive on ctx and ARRIVAL_DELIVERY.sms below.
+      heldAllSms: smsAllowed && !contacts.length && unfilteredContacts.length > 0,
+      callbackNumberHoldActive,
       attemptSmsLegs,
       results,
     });

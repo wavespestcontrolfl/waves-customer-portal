@@ -142,8 +142,12 @@ function wireSendPathViaEmailFallback(reminderRow, flagUpdate, svcRow) {
       flagUpdate,
     ],
     scheduled_services: [
-      chain({ first: jest.fn().mockResolvedValue(svcRow) }), // live-status guard (+ callback hold read)
+      chain({ first: jest.fn().mockResolvedValue(svcRow) }), // live-status guard
       chain({ first: jest.fn().mockResolvedValue({ tech_name: null }) }), // getCustomerAndTech join
+      // safeSendAppointment's own callback_number_needed hold check (codex
+      // round-2 finding #7 — the boundary now re-reads the columns itself
+      // rather than trusting a value computed earlier in the scan).
+      chain({ select: jest.fn().mockResolvedValue([svcRow]) }),
     ],
     notification_prefs: [chain({ first: jest.fn().mockResolvedValue(null) })],
     customers: [
@@ -167,8 +171,10 @@ function wireSendPathPlainSms(reminderRow, flagUpdate, svcRow) {
       flagUpdate,
     ],
     scheduled_services: [
-      chain({ first: jest.fn().mockResolvedValue(svcRow) }), // live-status guard (+ callback hold read)
+      chain({ first: jest.fn().mockResolvedValue(svcRow) }), // live-status guard
       chain({ first: jest.fn().mockResolvedValue({ tech_name: null }) }), // getCustomerAndTech join
+      // safeSendAppointment's own callback_number_needed hold check.
+      chain({ select: jest.fn().mockResolvedValue([svcRow]) }),
     ],
     notification_prefs: [chain({ first: jest.fn().mockResolvedValue(null) })],
     customers: [

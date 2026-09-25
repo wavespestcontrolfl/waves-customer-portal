@@ -2552,7 +2552,29 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   return null;
 }
 
-async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false }) {
+async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false }) {
+  // Codex round-2 finding #4 (PR #4807): must land BEFORE the reminder row
+  // below is armed — a booking already inside the 72h/24h send window could
+  // otherwise be texted before the hold's UPDATE commits, and a worker exit
+  // between the two would leave it unheld with no reminder-side guard at
+  // all. whereNull guards a concurrent pass; nulling call_sms_cleared_at (+
+  // recipient) in the SAME update closes finding #1's atomicity half — a
+  // fresh hold must never read as already-cleared by a stale clearance a
+  // reused/reprocessed row still carries from an earlier call.
+  if (scheduledServiceId && callbackNumberHoldActive) {
+    try {
+      await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .whereNull('callback_number_hold_at')
+        .update({
+          callback_number_hold_at: new Date(),
+          call_sms_cleared_at: null,
+          call_sms_cleared_recipient: null,
+        });
+    } catch (holdErr) {
+      logger.warn(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId}: ${holdErr.code || holdErr.name || 'db_error'}`);
+    }
+  }
   try {
     const AppointmentReminders = require('./appointment-reminders');
     await AppointmentReminders.registerAppointment(
@@ -15691,6 +15713,7 @@ const CallRecordingProcessor = {
                   scheduledDate,
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
+                  callbackNumberHoldActive: callbackNumberNeededHoldActive,
                 });
               } else if (attachedManualBookingId) {
                 if (disputeHeldReuse) await noteRetainedVisit();
@@ -15780,6 +15803,7 @@ const CallRecordingProcessor = {
                   windowStart: replaySlotStart ? String(replaySlotStart).slice(0, 5) : null,
                   serviceType: svc.service_type,
                   closeReminderWindows: !replaySlotStart,
+                  callbackNumberHoldActive: callbackNumberNeededHoldActive,
                 });
                 // Post-registration slot verify (Codex #3361 r26 P2): the
                 // fresh read above still leaves a gap before the reminder
@@ -16227,27 +16251,18 @@ const CallRecordingProcessor = {
               .ignore()
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
-          // P1-C: persist the callback_number_needed hold onto the visit so
-          // the 72h/24h reminder cron (appointment-reminders.js) — which
-          // runs independently of this pass and has no notion of a
-          // call-level SMS hold — does not text the disclaimed ANI days
-          // later. Lifted by the SAME durable clearance signal the
-          // card-request backstop already honors: once anything stamps
-          // call_sms_cleared_at for this visit (the confirm-leg clearance
+          // callback_number_needed hold persistence moved to
+          // registerScheduleSideEffects (codex round-2 finding #4): stamped
+          // there, immediately before the reminder row is armed, instead of
+          // here — many awaits (routing, customer/lead writes, this whole
+          // confirmation-decision block) separate this point from booking,
+          // and a visit landing inside the 72h/24h window could have been
+          // texted before a stamp written only here ever committed. Lifted
+          // by the SAME durable clearance signal the card-request backstop
+          // already honors: call_sms_cleared_at (the confirm-leg clearance
           // just above, or the office-confirm hook in
-          // outbound-review-confirm.js), checkAndSendReminders treats the
-          // hold as resolved and resumes sending. whereNull guards against
-          // stomping a hold a concurrent pass already recorded.
-          if (scheduledServiceId && callbackNumberNeededHoldActive) {
-            try {
-              await db('scheduled_services')
-                .where({ id: scheduledServiceId })
-                .whereNull('callback_number_hold_at')
-                .update({ callback_number_hold_at: new Date() });
-            } catch (holdErr) {
-              logger.warn(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId}: ${holdErr.code || holdErr.name || 'db_error'}`);
-            }
-          }
+          // outbound-review-confirm.js, or the triage-card / phone-edit
+          // clearance paths in customer-phone-fanout.js).
           // Card-on-file spec §3 Phase 5.3, REORDERED by owner ruling
           // 2026-08-06: the card/Auto Pay link goes out FIRST, before the
           // confirmation text — right after the call, when the appointment

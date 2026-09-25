@@ -304,6 +304,25 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
       await clearCallUnitAnswer(trx, item.call_log_id);
     }
+    if (item.reason_code === 'callback_number_needed' && nextStatus === 'resolved' && item.call_log_id) {
+      // Resolving this card is the office's word that a usable callback
+      // number is now confirmed — lift the SMS hold on every LIVE visit
+      // this call created, in the SAME transaction as the resolve (codex
+      // round-2 finding #2, PR #4807). Dismiss does NOT clear: it means
+      // "leave the note, no verified number" — the hold (and its email
+      // fallback, callbackNumberHoldActiveForVisit) must stand.
+      // call_sms_cleared_at >= callback_number_hold_at by construction
+      // (GREATEST), matching the timestamp rule the hold predicate reads
+      // (appointment-reminders.js's callbackNumberHoldFromRow).
+      await trx('scheduled_services')
+        .where({ source_call_log_id: item.call_log_id })
+        .whereIn('status', ['pending', 'confirmed'])
+        .whereNotNull('callback_number_hold_at')
+        .update({
+          call_sms_cleared_at: trx.raw('GREATEST(callback_number_hold_at, now())'),
+          updated_at: new Date(),
+        });
+    }
     if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
       // A promise exception is not closed by generic bookkeeping alone: the
       // underlying call_commitments row and its outbox_messages row must

@@ -33,6 +33,7 @@ function makeConn(cfg = {}) {
       orWhereRaw: (sql, bindings) => { calls.push({ table, op: 'orWhereRaw', arg: { sql, bindings } }); return qb; },
       whereNot: (arg) => { calls.push({ table, op: 'whereNot', arg }); return qb; },
       whereNull: () => qb,
+      whereNotNull: (col) => { calls.push({ table, op: 'whereNotNull', arg: col }); return qb; },
       whereNotExists: () => { calls.push({ table, op: 'whereNotExists' }); return qb; },
       whereIn: (col, vals) => { calls.push({ table, op: 'whereIn', arg: { col, vals } }); return qb; },
       whereNotIn: (col, vals) => { calls.push({ table, op: 'whereNotIn', arg: { col, vals } }); return qb; },
@@ -256,7 +257,7 @@ describe('propagateCustomerPhoneChange', () => {
       referral_promoters: { firstQueue: [{ id: 7, customer_phone: '9415551234' }] },
     });
     const counts = await propagateCustomerPhoneChange({ before: PHONE_BEFORE, after: PHONE_AFTER }, conn);
-    expect(counts).toEqual({ leads: 1, estimates: 1, contracts: 1, promoters: 1, promoterSkipped: 0, bookingIntents: 1, scheduledSms: 1 });
+    expect(counts).toEqual({ leads: 1, estimates: 1, contracts: 1, promoters: 1, promoterSkipped: 0, bookingIntents: 1, scheduledSms: 1, callbackNumberHoldsCleared: 1 });
 
     expect(conn.__updates('leads')[0].arg.phone).toBe('+19415556789');
     expect(conn.__updates('estimates')[0].arg.customer_phone).toBe('+19415556789');
@@ -340,6 +341,33 @@ describe('propagateCustomerPhoneChange', () => {
       before: PHONE_BEFORE, after: { id: 'cust-1', phone: '555-123' },
     }, conn)).toEqual(ZERO_PHONE_COUNTS);
     expect(conn.__calls).toHaveLength(0);
+  });
+
+  // callback_number_needed hold clearance (codex round-2 finding #2, PR
+  // #4807): a genuine phone edit is a human verification the disclaimed-ANI
+  // hold should not survive — every LIVE visit for the customer with an
+  // active hold gets call_sms_cleared_at stamped in the same pass. A
+  // no-genuine-change edit (matched above) never reaches this at all.
+  test('a genuine phone edit clears every live visit\'s callback_number_needed hold', async () => {
+    const conn = makeConn();
+    await propagateCustomerPhoneChange({ before: PHONE_BEFORE, after: PHONE_AFTER }, conn);
+    const svcUpdate = conn.__updates('scheduled_services')[0];
+    expect(svcUpdate).toBeDefined();
+    expect(svcUpdate.arg.call_sms_cleared_at).toEqual({
+      __raw: 'GREATEST(callback_number_hold_at, now())',
+      __bindings: undefined,
+    });
+    const svcCalls = conn.__calls.filter((c) => c.table === 'scheduled_services');
+    expect(svcCalls.some((c) => c.op === 'whereIn' && c.arg.col === 'status')).toBe(true);
+    expect(svcCalls.some((c) => c.op === 'whereNotNull' && c.arg === 'callback_number_hold_at')).toBe(true);
+  });
+
+  test('no-op phone edits never touch scheduled_services at all', async () => {
+    const conn = makeConn();
+    await propagateCustomerPhoneChange({
+      before: PHONE_BEFORE, after: { id: 'cust-1', phone: '(941) 555-1234' },
+    }, conn);
+    expect(conn.__updates('scheduled_services')).toHaveLength(0);
   });
 });
 
