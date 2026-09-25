@@ -24,6 +24,7 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
   function makeDb(recurringServices, {
     annualTotal = 250, estimateUpdate, priorActivationStatus = null, priorDeferredInvoice = null, customerUpdate,
+    customerPropertyType = 'residential',
   } = {}) {
     const estimate = {
       id: 'estimate-1',
@@ -42,7 +43,7 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       first_name: 'Pat',
       last_name: 'Customer',
       city: 'Venice',
-      property_type: 'residential',
+      property_type: customerPropertyType,
     };
     const custUpdate = customerUpdate || jest.fn().mockResolvedValue(1);
 
@@ -95,9 +96,10 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
     createTermForAnnualPrepay = jest.fn().mockResolvedValue(null),
     invoiceSubtotal = annualTotal,
     invoiceTaxAmount = 0,
+    customerPropertyType,
   } = {}) {
     const db = makeDb(recurringServices, {
-      annualTotal, estimateUpdate, priorActivationStatus, priorDeferredInvoice, customerUpdate,
+      annualTotal, estimateUpdate, priorActivationStatus, priorDeferredInvoice, customerUpdate, customerPropertyType,
     });
     const invoiceTrx = jest.fn((table) => db(table));
     invoiceTrx.raw = jest.fn().mockResolvedValue(undefined);
@@ -204,7 +206,10 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(frozen.annualPrepayAmount).toBeGreaterThan(0);
       expect(frozen.annualPrepayAmount).toBeLessThanOrEqual(250);
       expect(frozen.annualPlanSetup).toEqual({ description: 'Station Setup', amount: 199 });
-      expect(frozen.taxRate).toBeNull();
+      // Codex round-4 P1: residential tax is frozen as an EXPLICIT zero,
+      // never null (null replayed as undefined and let the invoice
+      // recompute tax from the customer's current classification).
+      expect(frozen.taxRate).toBe(0);
       expect(frozen.taxAmount).toBe(0);
       expect(Math.round(frozen.subtotal * 100)).toBe(Math.round((frozen.annualPrepayAmount + 199) * 100));
       expect(frozen.total).toBe(frozen.subtotal);
@@ -466,14 +471,48 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(createArgs.dueDate).toBe(etDateString());
     });
 
-    test('taxRate: residential (no commercial recurring) invoices at the untaxed default, matching the ordinary path', async () => {
-      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, { gateOn: true, ...awaiting() });
+    test('codex round-4 P1: residential replays the frozen tax as an EXPLICIT 0 — never undefined, so InvoiceService.create cannot recompute it', async () => {
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, {
+        gateOn: true, ...awaiting(parkedContext({ taxRate: 0 })),
+      });
 
       await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
         .rejects.toThrow('Annual prepay term was not created');
 
       const createArgs = invoiceService.create.mock.calls[0][0];
-      expect(createArgs.taxRate).toBeUndefined();
+      expect(createArgs.taxRate).toBe(0);
+    });
+
+    test('codex round-4 P1: a legacy snapshot parked with a null rate (frozen $0 tax) also replays 0', async () => {
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, {
+        gateOn: true, ...awaiting(parkedContext({ taxRate: null })),
+      });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+
+      expect(invoiceService.create.mock.calls[0][0].taxRate).toBe(0);
+    });
+
+    test('codex round-4 P1: a customer reclassified COMMERCIAL between accept and signature still bills the frozen zero and activates', async () => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const createTermForAnnualPrepay = jest.fn().mockResolvedValue({ id: 'term-42' });
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, {
+        gateOn: true,
+        customerPropertyType: 'commercial',
+        estimateUpdate,
+        createTermForAnnualPrepay,
+        ...awaiting(parkedContext({ taxRate: 0 })),
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', activationOpts);
+
+      // The explicit 0 is what InvoiceService.create's explicit-rate branch
+      // honors for a commercial account (rate 0 → tax 0), so the minted tax
+      // never exceeds the frozen zero and the snapshot guard passes.
+      expect(invoiceService.create.mock.calls[0][0].taxRate).toBe(0);
+      expect(result.annualPlanActivationStatus).toBe('activated');
+      expect(result.annualPrepayTermId).toBe('term-42');
     });
 
     test('successful activation: stamps the estimate activated (with annual_plan_activated_at) in the SAME transaction the term/invoice committed in, and returns the term id', async () => {

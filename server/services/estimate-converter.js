@@ -4368,8 +4368,13 @@ async function computeTermiteAnnualFrozenFinancials({
     ? { description: setupRow.name || 'Station Setup', amount: roundCents(Number(setupRow.price)) }
     : null;
   // Commercial-only, exactly like the ordinary branch: residential prepay
-  // stays untaxed (taxRate null here → undefined at InvoiceService.create).
-  let taxRate = null;
+  // is untaxed. Codex round-4 P1: the residential zero is frozen as an
+  // EXPLICIT 0 and replayed as 0 — a null here became `undefined` at
+  // InvoiceService.create, which then recomputed tax from the customer's
+  // CURRENT classification, so an account reclassified commercial between
+  // accept and signature minted tax above the frozen zero and the snapshot
+  // guard wedged the signed agreement in awaiting_signature forever.
+  let taxRate = 0;
   if (hasCommercialRecurring) {
     const baseRate = await resolveCommercialPrepayBaseRate(estimate.customer_id, { database });
     taxRate = resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
@@ -7125,8 +7130,13 @@ const EstimateConverter = {
               taxableOneTimeAmount: prepayRodentSetupForTax,
             })
             : undefined;
+          // A frozen snapshot always replays an explicit rate (codex
+          // round-4 P1): residential is frozen as 0, and a legacy snapshot
+          // parked with a null rate carried a frozen $0 tax, so it replays
+          // 0 too — never `undefined`, which would let InvoiceService.create
+          // recompute tax from the customer's current classification.
           const prepayTaxRate = frozenAnnualPlanFinancials
-            ? (frozenAnnualPlanFinancials.taxRate ?? undefined)
+            ? (frozenAnnualPlanFinancials.taxRate ?? 0)
             : liveCommercialPrepayTaxRate;
           // Acceptance deposit credits against this prepay invoice through
           // create()'s depositCredit param, exactly like the standard branch
