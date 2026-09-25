@@ -13,12 +13,14 @@ jest.mock('../models/db', () => {
   const dbFn = () => {
     const builder = {};
     let limitN = null;
-    for (const m of ['select', 'where', 'whereNull', 'whereExists', 'havingRaw', 'orderByRaw']) {
+    let offsetN = 0;
+    for (const m of ['select', 'where', 'whereNull', 'whereExists', 'havingRaw', 'orderByRaw', 'clone']) {
       builder[m] = () => builder;
     }
     builder.limit = (n) => { limitN = n; return builder; };
+    builder.offset = (n) => { offsetN = n; state.pages = (state.pages || 0) + 1; return builder; };
     builder.then = (resolve, reject) => Promise.resolve(
-      state.rows.slice(0, limitN ?? state.rows.length).map((r) => ({ ...r })),
+      state.rows.slice(offsetN, offsetN + (limitN ?? state.rows.length)).map((r) => ({ ...r })),
     ).then(resolve, reject);
     return builder;
   };
@@ -118,4 +120,27 @@ test('a one_time T&S add-on line is not the customer\'s active plan (codex r18)'
   expect(planSql).toBeDefined();
   expect(planSql).toContain('FROM scheduled_service_addons');
   expect(planSql).toContain(ADDON_LINE_IS_PLAN_SQL);
+});
+
+test('every prefiltered T&S row is paged through before the limit applies (codex r19)', async () => {
+  // 1,200 older not-yet-due quarterly customers sort ahead of one genuinely
+  // overdue 6-week customer with a newer last visit: a SQL cap of any size
+  // would drop them; paging must reach the last page.
+  db.__state.rows = [
+    ...Array.from({ length: 1200 }, (_, i) => row(`quarterly-${i}`, 'Quarterly Tree & Shrub Care Service', 85 - (i % 10))),
+    row('six-week-due', 'Every 6 Weeks Tree & Shrub Care Service', 44),
+  ];
+  db.__state.pages = 0;
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub', limit: 5 });
+  expect(result.overdue_customers.map((c) => c.id)).toEqual(['six-week-due']);
+  expect(result.total_found).toBe(1);
+  expect(db.__state.pages).toBe(3);
+});
+
+test('other categories still read one page at the requested limit', async () => {
+  db.__state.rows = Array.from({ length: 30 }, (_, i) => row(`pest-${i}`, 'Quarterly Pest Control Service', 100 + i));
+  db.__state.pages = 0;
+  const result = await executeTool('find_overdue_customers', { service_category: 'pest', limit: 10 });
+  expect(result.overdue_customers).toHaveLength(10);
+  expect(db.__state.pages).toBe(1);
 });

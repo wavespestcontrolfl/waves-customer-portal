@@ -12,10 +12,18 @@ const { loadPublicServicesMenu, isPublicSelectableServiceKey, publicSelectableSe
 function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
   const conn = () => {
     let filters = {};
+    let notIn = {};
     const q = {
       where(cond) { filters = { ...filters, ...cond }; return q; },
+      whereNotIn(col, vals) { notIn = { ...notIn, [col]: vals }; return q; },
       orderBy() { return q; },
-      async select() { if (throws) throw new Error('db down'); return rows.filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v)).map((r) => ({ ...r })); },
+      async select() {
+        if (throws) throw new Error('db down');
+        return rows
+          .filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v))
+          .filter((r) => Object.entries(notIn).every(([k, vals]) => !vals.includes(r[k])))
+          .map((r) => ({ ...r }));
+      },
       async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id, service_key: r.service_key, name: r.name, billing_type: r.billing_type, visits_per_year: r.visits_per_year, frequency: r.frequency, booking_enabled: r.booking_enabled, public_quote_selectable: r.public_quote_selectable, ...(r.config_key ? { data: r.data } : {}) } : null; },
     };
     return q;
@@ -50,6 +58,13 @@ describe('public services menu', () => {
     const mistingRow = row({ service_key: 'mosquito_misting_system', name: 'Mosquito Misting System Service', category: 'mosquito' });
     expect(menuItem(mistingRow)).toMatchObject({ mode: 'one_time', family: 'Mosquito Control', public_instant_quote: false });
     expect(PUBLIC_INSTANT_QUOTE_KEYS.has('mosquito_misting_system')).toBe(false);
+  });
+  test('a retired-for-sale row never reaches the live menu, even re-selected by an admin (codex r19)', async () => {
+    const items = await loadPublicServicesMenu(fakeConn([
+      row({ service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care Service', category: 'tree_shrub', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4, public_quote_selectable: true }),
+      row({ service_key: 'tree_shrub_program', name: 'Bi-Monthly Tree & Shrub Care Service', category: 'tree_shrub', billing_type: 'recurring', frequency: 'bimonthly', visits_per_year: 6 }),
+    ]));
+    expect(items.map((i) => i.service_key)).toEqual(['tree_shrub_program']);
   });
   test('menu is empty (not an error) before the column exists', async () => {
     expect(await loadPublicServicesMenu(fakeConn([row({ service_key: 'x', name: 'X Service' })], { hasColumn: false }))).toEqual([]);

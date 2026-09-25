@@ -257,8 +257,14 @@ function menuItem(row, opts = {}) {
 
 async function loadPublicServicesMenu(conn = db) {
   if (!(await conn.schema.hasColumn('services', 'public_quote_selectable'))) return [];
+  // A retired-for-sale row is never advertised, even if an admin re-selects
+  // it in the Service Library (codex r19 P1): RETIRED_SALE_SERVICE_KEYS is
+  // the authority for "never offered as a new sale"; FORMERLY_PUBLIC_KEYS
+  // below is only cached-form compatibility for keys already posted.
+  const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
   const rows = await conn('services')
     .where({ is_active: true, is_archived: false, public_quote_selectable: true })
+    .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
     .orderBy([{ column: 'category' }, { column: 'sort_order' }, { column: 'name' }])
     .select('service_key', 'name', 'category', 'billing_type', 'frequency', 'visits_per_year');
   // One targeted read of the persisted count per menu build (only when the

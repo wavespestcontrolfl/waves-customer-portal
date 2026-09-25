@@ -631,12 +631,17 @@ async function findOverdueCustomers(input) {
       .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) < ?", [patterns[cat], cutoff.toISOString().split('T')[0]])
       .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC", [patterns[cat]]);
     // T&S: the 42-day prefilter admits not-yet-due 60/90-day customers, and
-    // they sort oldest-first — a SQL limit would let them crowd out a truly
-    // overdue 6-week customer. Filter per customer first; the final slice
-    // below applies the limit.
-    // (T&S keeps a generous safety cap instead.)
-    customersQuery = customersQuery.limit(cat === 'tree_shrub' ? 2000 : limit);
-    const customers = await customersQuery;
+    // they sort oldest-first — ANY SQL cap would let them crowd out a truly
+    // overdue 6-week customer with a newer last visit (codex r11/r19 on
+    // #4786). Page through every prefiltered row, filter per customer, and
+    // let the final slice below apply the limit; total_found stays exact.
+    const pageSize = cat === 'tree_shrub' ? 500 : limit;
+    const customers = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await customersQuery.clone().limit(pageSize).offset(offset);
+      customers.push(...page);
+      if (cat !== 'tree_shrub' || page.length < pageSize) break;
+    }
 
     for (const c of customers) {
       const daysSince = c.last_service_date
