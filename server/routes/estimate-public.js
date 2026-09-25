@@ -17871,6 +17871,21 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   });
 }
 
+// Canonical T&S visit-count alias FIELD NAMES — every camelCase/snake_case
+// spelling a recurring tree & shrub row can carry, plus the bare `v`
+// tier-row shorthand. selectedTreeShrubServiceRow (the restamp, below) and
+// recurringTreeShrubRowAtRetiredCadence (this gate) BOTH read/write this
+// exact list so they can never drift apart again (codex P0 round 4: the
+// restamp used to overwrite only v/visits/visitsPerYear/appsPerYear, so a
+// stale snake_case visits_per_year: 4 survived a customer picking the
+// current Standard tier, and the gate's own all-alias scan then still saw
+// a retired 4x row and 409'd a valid accept).
+const TREE_SHRUB_VISIT_COUNT_ALIAS_KEYS = Object.freeze([
+  'v', 'visits', 'visitsPerYear', 'visits_per_year',
+  'appsPerYear', 'apps_per_year', 'apps',
+  'treatmentsPerYear', 'treatments_per_year',
+]);
+
 // Retired T&S tiers = the 12x Premium AND, as of 2026-09-24 (owner
 // directive: stop offering quarterly tree & shrub care), the 4x Light. The
 // 9x Enhanced (every 6 weeks, tree_shrub_6week) was un-retired 2026-07-23
@@ -17898,15 +17913,14 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
     // just exactly 6 (or 4) — so a stale/malformed row carrying a raw
     // visit-count alias of 7, 8, 10 or 11 would read as the live
     // 'bimonthly' pattern below and wrongly pass as "not retired". Only 6x
-    // and 9x are current T&S programs: when ANY raw visit-count alias
-    // (visitCountAliasValues' own vocabulary — visitsPerYear/visits_per_year/
-    // appsPerYear/apps_per_year/visits/apps/treatmentsPerYear/
-    // treatments_per_year — plus the bare tier-row `v` shorthand, which is
-    // not in that vocabulary) is present and finite, it must be exactly 6
-    // or 9 or the row is retired, checked before the normalized pattern is
-    // ever consulted.
-    const rawVisitAliases = [...converter.visitCountAliasValues(svc), svc?.v]
-      .map((value) => Number(value))
+    // and 9x are current T&S programs: when ANY raw visit-count alias (the
+    // canonical TREE_SHRUB_VISIT_COUNT_ALIAS_KEYS list above — every alias
+    // spelling selectedTreeShrubServiceRow also writes, so a freshly
+    // restamped row can never carry a stale off-count value here) is
+    // present and finite, it must be exactly 6 or 9 or the row is retired,
+    // checked before the normalized pattern is ever consulted.
+    const rawVisitAliases = TREE_SHRUB_VISIT_COUNT_ALIAS_KEYS
+      .map((key) => Number(svc?.[key]))
       .filter((value) => Number.isFinite(value) && value > 0);
     if (rawVisitAliases.length > 0) {
       return rawVisitAliases.some((value) => value !== 6 && value !== 9);
@@ -21000,11 +21014,15 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
     row.perTreatment = perTreatment;
     row.perVisit = perTreatment;
   }
+  // Overwrite EVERY visit-count alias, not just the camelCase ones the UI
+  // renders (codex P0 round 4): a stale snake_case visits_per_year (or any
+  // other untouched alias) left over from the row's PRIOR tier used to
+  // survive this restamp, so recurringTreeShrubRowAtRetiredCadence's own
+  // all-alias scan could still see a retired off-count value on a row the
+  // customer just re-selected to a current tier. Same canonical key list
+  // that gate reads from.
   if (visits != null) {
-    row.v = visits;
-    row.visits = visits;
-    row.visitsPerYear = visits;
-    row.appsPerYear = visits;
+    for (const key of TREE_SHRUB_VISIT_COUNT_ALIAS_KEYS) row[key] = visits;
   }
   return row;
 }

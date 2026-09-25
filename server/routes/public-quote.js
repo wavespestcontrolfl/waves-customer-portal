@@ -1050,9 +1050,18 @@ function dropKeyedOnlyServices(bodyServices) {
 // per file. Extracted so it's directly unit-testable without a full HTTP
 // harness.
 function publicQuoteTreeShrubTierRejection(tier) {
-  const requested = String(tier || '').trim().toLowerCase();
-  if (!requested) return null;
-  if (!isSellableTreeShrubTier(requested)) {
+  // Absent means undefined/null/blank-after-trim ONLY (codex P0 round 4):
+  // `String(tier || '')` used to coerce EVERY other type first, so an array
+  // like ['standard'] stringified into the valid string 'standard' and
+  // slipped past the deliberately type-strict allowlist below, while
+  // present-but-falsy values (false, 0) coerced to '' and were wrongly
+  // treated as absent instead of refused. Pass the RAW value through —
+  // isSellableTreeShrubTier's own normalizedTierKey already rejects any
+  // non-string type outright, so a garbage type (array/object/boolean/
+  // number) reaches the SAME "not sellable" refusal a bad string gets.
+  if (tier === undefined || tier === null) return null;
+  if (typeof tier === 'string' && tier.trim() === '') return null;
+  if (!isSellableTreeShrubTier(tier)) {
     return 'Tree & Shrub program must be standard or enhanced.';
   }
   return null;

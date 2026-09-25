@@ -1285,8 +1285,15 @@ Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all
 residential services. Consumed by the Astro build for the agent-readable
-/pricing.md surface and directly by AI agents. Exact per-property pricing
-stays on POST /api/public/quote/calculate).
+/pricing.md surface and directly by AI agents (both surfaces read this
+same computed payload — neither carries its own copy of the sweep).
+Exact per-property pricing stays on POST /api/public/quote/calculate.
+The `tree_shrub_care` row contracted with the Light tier's retirement
+(2026-09-24): the sweep is now `standard`/`enhanced` only (`light` dropped
+from the tier sweep the same way the lawn row above dropped its retired
+6x column), so the published low end is Standard-derived (`low` ≈ $28,
+was lower under Light's cheaper 4x rate) and `notes` now reads "6 or 9
+applications per year by tier" instead of the old 4/6/9 wording).
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public

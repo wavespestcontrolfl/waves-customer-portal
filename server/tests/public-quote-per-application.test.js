@@ -278,6 +278,23 @@ describe('publicQuoteTreeShrubTierRejection — Light (4x/quarterly) refused on 
     expect(publicQuoteTreeShrubTierRejection('gold')).toMatch(/standard or enhanced/i);
   });
 
+  // codex P0 round 4: String(tier || '') used to coerce every non-string
+  // type FIRST, so ['standard'] stringified into the valid string
+  // 'standard' and slipped past the allowlist, while present-but-falsy
+  // values (false, 0) coerced to '' and were wrongly treated as absent
+  // instead of refused. Only undefined/null/blank-after-trim are absent —
+  // every other type must reach the same "not sellable" 400.
+  test('a non-string tier is rejected outright, never coerced into a valid string (codex P0 r4)', () => {
+    expect(publicQuoteTreeShrubTierRejection(['standard'])).toMatch(/standard or enhanced/i);
+    expect(publicQuoteTreeShrubTierRejection(['light'])).toMatch(/standard or enhanced/i);
+    expect(publicQuoteTreeShrubTierRejection({ toString: () => 'standard' })).toMatch(/standard or enhanced/i);
+  });
+
+  test('present-but-falsy values (false, 0) are rejected, not treated as absent (codex P0 r4)', () => {
+    expect(publicQuoteTreeShrubTierRejection(false)).toMatch(/standard or enhanced/i);
+    expect(publicQuoteTreeShrubTierRejection(0)).toMatch(/standard or enhanced/i);
+  });
+
   test('end-to-end: generateEstimate would otherwise price an explicit light request unchanged (why the route boundary — not the engine — must reject it)', () => {
     // The engine itself still knows how to price the grandfathered
     // customer's plan; the public route is the correct place to refuse a

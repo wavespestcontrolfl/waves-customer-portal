@@ -335,6 +335,37 @@ describe('rewriteTreeShrubRecurringServices — palm rows are never tier-rewritt
     expect(services[1].name).toBe('Bi-Monthly Tree & Shrub Care Service');
     expect(changed).toBe(true);
   });
+
+  // codex P0 round 4: a customer re-selecting the current Standard tier on
+  // an in-flight estimate whose stored T&S row still carries a stale
+  // snake_case visits_per_year: 4 (from some earlier, now-superseded state)
+  // must have the restamp clear that alias too — otherwise the retired-
+  // cadence gate's own all-alias scan still sees a retired 4x row on data
+  // the customer just fixed, and a valid accept 409s.
+  test('restamping onto Standard clears a stale snake_case visits_per_year alias (codex P0 r4)', () => {
+    const frequency = { key: 'standard', monthly: 51.75, annual: 621, perTreatment: 103.5, visitsPerYear: 6, billingFrequencyKey: 'monthly' };
+    const staleRow = { name: 'Tree & Shrub Care', visits_per_year: 4, mo: 40 };
+
+    const { services } = rewriteTreeShrubRecurringServices([staleRow], frequency);
+    const restamped = services[0];
+
+    // Every alias the gate reads now agrees with the newly selected tier —
+    // the stale snake_case value did not survive the restamp.
+    expect(restamped.visits_per_year).toBe(6);
+    expect(restamped.visitsPerYear).toBe(6);
+    expect(restamped.v).toBe(6);
+
+    expect(recurringTreeShrubRowAtRetiredCadence({
+      recurring: { services: [restamped] },
+    })).toBe(false);
+
+    // The SAME stale row, left un-restamped (no tier re-selection), must
+    // still be caught as retired — this isn't a case where the gate went
+    // blind, only one where a genuine restamp now actually clears it.
+    expect(recurringTreeShrubRowAtRetiredCadence({
+      recurring: { services: [staleRow] },
+    })).toBe(true);
+  });
 });
 
 describe('remainingUnitCatalogKey — converted T&S rows link their catalog row', () => {
