@@ -69,6 +69,7 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     "it's still there after the last visit",
     "our lawn guy came out and couldn't fix it",
     'our lawn company tried treating it and it did not work',
+    "the spray we put down didn't work",
   ])('%p reads as prior treatment failed', (body) => expect(priorTreatmentFailed(body)).toBe(true));
 
   // codex review 2026-09-25: "tried"/"treated" ALONE (no failure/recurrence
@@ -80,6 +81,7 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     'our lawn company already treated it',
     "I couldn't get a better photo, sorry",
     'the nest is still there, should I knock it down?',
+    "my sprinkler didn't work and this shrub has spots",
   ])('%p is not a prior failure', (body) => expect(priorTreatmentFailed(body)).toBe(false));
 });
 

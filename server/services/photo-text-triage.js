@@ -256,27 +256,28 @@ function composeBody({ label, advice, opportunity }) {
   }
 
   if (opportunity.mode === 'quote' && opportunity.quote) {
-    // AGENTS.md P1 "per application price copy": the customer-facing unit
-    // is "per application" (never "per visit"), and never a combined plan
-    // total ($X/mo, $X/yr). quote.per_visit is the engine's per-application
-    // amount (photo-triage-opportunity.js#perApplicationFrom).
+    // NO dollar amount in the customer text (codex #4810 r1–r3): AGENTS.md
+    // "estimator engine authority" blocks existing customers from engine
+    // drafting, and this lane is not one of the two owner-approved mint
+    // exceptions. The draft offers the quote; the offer core's
+    // per-application figure rides flags.quote + context_summary for the
+    // OWNER, who adds it (or sends the estimate) when approving.
     const serviceLabel = QUOTE_SERVICE_LABEL[opportunity.quote.service] || 'service';
-    // Per-application amount only — no cadence count (the offer payload
-    // carries cadence as display text, not a number; pre-push audit), no
-    // totals. The estimate the owner sends after "yes" states the program.
-    const perApplication = Math.round(Number(opportunity.quote.per_visit) || 0);
-    const quoteLine = `Our ${serviceLabel} program is about $${perApplication} per application. Want me to add it?`;
+    const quoteLine = `Want a quote for our ${serviceLabel} program? Just reply yes.`;
     return joinSentences([lead, advice, quoteLine]);
   }
 
   // advise
   const harmless = opportunity.reasons.includes('harmless');
   // Already on the customer's plan (codex #4810 r2 P1): never pitch the
-  // service they have — no quote CTA, no promise of a visit either.
+  // service they have — no quote CTA, no promise of a visit, and no claim
+  // that the program covers this finding either (r3 P2: owning the family
+  // says nothing about whether this condition is in the program — T&S
+  // injections and premium add-ons are quoted separately).
   const owned = opportunity.reasons.includes('already_owned');
   const close = harmless
     ? 'No treatment is needed.'
-    : owned ? 'Your current program covers this. Reply if you have questions.' : "Reply if you'd like a quote.";
+    : owned ? 'Reply if you have questions.' : "Reply if you'd like a quote.";
   return joinSentences([lead, advice, close]);
 }
 
@@ -328,7 +329,11 @@ async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, cr
     intent: DRAFT_INTENT,
     status: 'pending',
     context_summary: `Photo triage ran a ${created.type} assessment on this text's photo and gauged it as ${opportunity.mode}`
-      + ` (${opportunity.reasons.join(', ') || 'no signals'}). Review the assessment before approving.`,
+      + ` (${opportunity.reasons.join(', ') || 'no signals'}).`
+      + (opportunity.quote?.per_visit
+        ? ` Offer core priced ${opportunity.quote.service} at about $${opportunity.quote.per_visit} per application — owner-only; the draft text carries no price.`
+        : '')
+      + ' Review the assessment before approving.',
     flags: JSON.stringify({
       origin: DRAFT_INTENT,
       assessment_type: created.type,

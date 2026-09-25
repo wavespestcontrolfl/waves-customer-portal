@@ -517,20 +517,20 @@ describe('draft text builder', () => {
     expect(draft('Dana', 'a healthy lawn', ADVISE_HARMLESS)).not.toMatch(/quote/i);
   });
 
-  test('advise for a service already on the plan: no quote pitch, no visit promise (codex #4810 r2 P1)', () => {
+  test('advise for a service already on the plan: no quote pitch, no visit promise, no coverage claim (codex #4810 r2 P1, r3 P2)', () => {
     const text = draft('Dana', 'chinch bug activity', ADVISE_OWNED);
-    expect(text).toBe("Thanks for the photo, Dana. From what we can see, it's chinch bug activity. Your current program covers this. Reply if you have questions.");
-    expect(text).not.toMatch(/quote|\$\d|visit|schedul/i);
+    expect(text).toBe("Thanks for the photo, Dana. From what we can see, it's chinch bug activity. Reply if you have questions.");
+    expect(text).not.toMatch(/quote|\$\d|visit|schedul|cover/i);
   });
 
-  test('quote: names the service and a per-application price, never "per visit" or a combined monthly/annual total (AGENTS.md P1)', () => {
+  test('quote: offers the program by name and NEVER a dollar amount (existing customers are blocked from engine drafting; the price is owner-only context)', () => {
     const text = draft('Morgan', 'water or heat stress', QUOTE(), 'It looks like stress from water, heat, or pruning.');
     expect(text).toBe(
       "Thanks for the photo, Morgan. From what we can see, it's water or heat stress. "
       + 'It looks like stress from water, heat, or pruning. '
-      + 'Our tree & shrub program is about $83 per application. Want me to add it?',
+      + 'Want a quote for our tree & shrub program? Just reply yes.',
     );
-    expect(text).not.toMatch(/\/mo\b|\/yr\b|per month|per year|per visit|visits a year/i);
+    expect(text).not.toMatch(/\$\d|\/mo\b|\/yr\b|per month|per year|per visit|per application/i);
   });
 
   test('tree_shrub healthy (no worst_signal): a customer-friendly label, not the internal "no major visible stress" sentinel', () => {

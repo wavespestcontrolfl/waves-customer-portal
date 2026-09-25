@@ -100,7 +100,11 @@ const LARGE_SCOPE_RE = new RegExp(`\\b(both sides|around the (?:house|property)|
 // review 2026-09-25); only these outcome phrases count.
 // "couldn't"/"still there" need their object too — "couldn't get a better
 // photo" and "the nest is still there" describe no treatment (pre-push audit).
-const PRIOR_TREATMENT_RE = /\b(didn.?t work|did not work|won.?t go away|can.?t get rid|keeps coming back|still (?:there|here) after|couldn.?t (?:get rid|fix|kill|stop|control|treat|clear))\b/i;
+// "didn't work" needs a treatment/remedy subject nearby — "my sprinkler
+// didn't work and this shrub has spots" is an equipment failure, not a
+// failed treatment (codex #4810 r3).
+const TREATMENT_SUBJECT = '(?:spray\\w*|treat\\w*|product|remedy|application|pesticide|fungicide|insecticide|granules?|fertiliz\\w*|sevin|neem|soap|put down|used|tried)';
+const PRIOR_TREATMENT_RE = new RegExp(`\\b(?:${TREATMENT_SUBJECT}\\b[^.!?]{0,40}\\b(?:didn.?t|did not) work|won.?t go away|can.?t get rid|keeps coming back|still (?:there|here) after|couldn.?t (?:get rid|fix|kill|stop|control|treat|clear))\\b`, 'i');
 // "our lawn guy/company ... failed [to fix it]" — a wider gap between the
 // subject and the verdict, and the one failure word (failed) the plain list
 // above doesn't already cover on its own.
