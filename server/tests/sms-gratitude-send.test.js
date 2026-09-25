@@ -569,6 +569,23 @@ test('one sweep hashes the pinned sources once and hands the digest to every can
   }
 });
 
+test.each([
+  ['a new qualification run', { eligible: false, blockers: ['Gratitude qualification blocked: running.'] }],
+  ['a newly activated voice profile', { eligible: false, blockers: ['Gratitude qualification blocked: voice profile changed.'] }],
+])('%s during provider preparation blocks the final handoff', async (_label, verdict) => {
+  sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
+    graduation.evaluateAutoSendEligibility.mockResolvedValueOnce(verdict);
+    const check = await providerPreSendCheck({ dbi: db });
+    return check.ok
+      ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'f'.repeat(32)}` }
+      : { sent: false, deliveryOutcome: 'not_sent', code: check.code };
+  });
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'not_eligible' });
+  expect(graduation.evaluateAutoSendEligibility).toHaveBeenLastCalledWith(expect.objectContaining({
+    intent: GRATITUDE_INTENT, dbi: db, voiceProfileVersion: null,
+  }));
+});
+
 test('demoting the intent during provider preparation blocks the final handoff', async () => {
   sendCustomerMessage.mockImplementationOnce(async ({ providerPreSendCheck }) => {
     mockState.intentMode = 'shadow';

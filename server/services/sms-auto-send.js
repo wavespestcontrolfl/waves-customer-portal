@@ -486,6 +486,7 @@ async function maybeAutoSend(params = {}) {
     return await dispatchClaimedSend({
       claim,
       gratitudeLane,
+      eligibilityPin: { voiceProfileVersion: ready.voiceProfileVersion, sourceDigest: params.gratitudeSourceDigest },
       draftId: params.draftId,
       intent: params.intent,
       reply: gratitudeLane ? claim.reply : params.reply,
@@ -566,7 +567,7 @@ async function autoSendReadiness(params, gratitudeLane) {
     logger.info(`[sms-auto-send] intent=${intent} not eligible; blockers: ${(elig.blockers || []).join(' | ')}`);
     return { reason: 'not_eligible' };
   }
-  return { customerId: caller.customerId };
+  return { customerId: caller.customerId, voiceProfileVersion: profile.version };
 }
 
 /**
@@ -614,9 +615,11 @@ async function pinDraftVoiceProfile({ intent, voiceProfileVersion = null }) {
 /**
  * Gratitude's provider-boundary predicate. Run after Twilio's final awaited
  * guard, using its held connection when present, so earlier provider
- * preparation cannot stale this read.
+ * preparation cannot stale this read. Everything readiness decided from
+ * shared state (gate, intent mode, qualification under the pinned voice
+ * profile and source digest) is decided again here, not a subset.
  */
-function gratitudeHandoffCheck(claim) {
+function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
   return async ({ dbi = db } = {}) => {
     const pendingWork = await pendingGratitudeWork(dbi, {
       customerId: claim.customerId,
@@ -635,10 +638,17 @@ function gratitudeHandoffCheck(claim) {
       activatedAt: gratitudeActivation(),
     });
     const modeRow = await dbi('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
+    const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
+      intent: GRATITUDE_INTENT,
+      dbi,
+      voiceProfileVersion: eligibilityPin.voiceProfileVersion ?? null,
+      gratitudeSourceDigest: eligibilityPin.sourceDigest,
+    });
     const reason = pendingWork ? 'pending_work'
       : advanced ? 'thread_advanced'
       : timing || (!isEnabled('smsGratitudeReplies') ? 'gate_off' : null)
-        || (modeRow?.mode !== AUTOSEND_MODE ? 'mode_not_autosend' : null);
+        || (modeRow?.mode !== AUTOSEND_MODE ? 'mode_not_autosend' : null)
+        || (elig?.eligible !== true ? 'not_eligible' : null);
     return reason ? { ok: false, code: reason, reason } : { ok: true };
   };
 }
@@ -700,7 +710,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
  * answered autonomously — they resolve as ignored (drafts return to the
  * judge), exactly like the manual send's post-send sweep.
  */
-async function dispatchClaimedSend({ claim, gratitudeLane, draftId, intent, reply, customerId }) {
+async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draftId, intent, reply, customerId }) {
   const suggest = require('./sms-suggest-mode');
   const parkedIds = claim.parkedIds || [];
   const reopenParked = async (reason) => {
@@ -720,7 +730,7 @@ async function dispatchClaimedSend({ claim, gratitudeLane, draftId, intent, repl
     await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
     return { sent: false, reason: 'reservation_failed' };
   }
-  const checkHandoff = gratitudeLane ? gratitudeHandoffCheck(claim) : undefined;
+  const checkHandoff = gratitudeLane ? gratitudeHandoffCheck(claim, eligibilityPin) : undefined;
   let result;
   try {
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
