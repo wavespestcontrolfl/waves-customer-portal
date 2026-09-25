@@ -41,7 +41,17 @@ const REQUIRED_TYPES = {
 // A SENT Gmail label is context only: it is not a delivery receipt.
 const ANSWER_TYPES = ['sms', 'call', 'email_delivery'];
 const HUMAN_SMS_TYPES = ['manual', 'ai_approved', 'ai_revised'];
-const SMS_TYPES = { send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirmation'] };
+// System confirmation sends stamp message_type 'confirmation' (first booking)
+// or 'appointment_rescheduled' / 'reschedule_series_confirmation' (a move);
+// 'appointment_confirmation' is the send's PURPOSE and preference key, never
+// its message_type. The reschedule-link workflow stamps
+// 'reschedule_link_promise' (send-customer-message: original_message_type).
+// Codex #4816 r1: a kind that now times out (R5) must admit the production
+// send that answers it, or the deadline bells on finished work.
+const SMS_TYPES = {
+  send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirmation', 'appointment_rescheduled', 'reschedule_series_confirmation'],
+  send_reschedule_link: [...HUMAN_SMS_TYPES, 'reschedule_link_promise'],
+};
 // Owner ruling 2026-09-24: an "are you still coming" (other) or "call me
 // back" (callback) ask is nullified once the tech is actually moving on the
 // job — en route, on site, or completed all count as visible progress.
@@ -62,7 +72,10 @@ const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route'
 const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'autopay_charge_success', 'autopay_retry_success'];
 // A payment record is only ever evidence for an `other` ask that is itself
 // about money — never a blanket "any payment closes any open ask".
-const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay|card|check)\b/i;
+// 'check' is deliberately absent: "please check whether the tech is coming"
+// is not a payment question (Codex #4816 r1). A payment by check reads as
+// "pay"/"paid"/"payment" in practice.
+const PAYMENT_MENTION = /\b(?:pay|payment|paid|zelle|venmo|invoice|balance|receipt|autopay|card)\b/i;
 function mentionsPayment(commitment) {
   const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((item) => item?.quote || '');
   return PAYMENT_MENTION.test([commitment.description || '', ...quotes].join(' '));
@@ -391,7 +404,16 @@ function groundFulfillment(parsed, evidence, commitment) {
 // system-event closure gets exactly the same property-scope, truncation and
 // revalidation guarantees as a model-grounded one.
 const SYSTEM_EVENT_TYPES = ['visit', 'payment'];
+// Only the asks the owner ruled on: a nagging "still coming?" / "call me
+// back" (other, callback) is answered by ANY field progress at the property,
+// and a money question by ANY payment landing. A schedule_visit or
+// technician_follow_up names a particular service, and a visit record alone
+// cannot prove it is that service (Codex #4816 r1: a lawn visit must not
+// close a termite-inspection request), so those keep the model's
+// service/scope comparison.
+const SYSTEM_EVENT_KINDS = ['other', 'callback'];
 function systemEventFulfillment(evidence, commitment) {
+  if (!SYSTEM_EVENT_KINDS.includes(commitment.kind)) return null;
   const witness = evidence.records.find((record) => SYSTEM_EVENT_TYPES.includes(record.type)
     && admissibleWitness(record, commitment, evidence.records));
   if (!witness) return null;

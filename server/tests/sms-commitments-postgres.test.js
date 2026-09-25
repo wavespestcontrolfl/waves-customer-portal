@@ -1109,7 +1109,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  test('R1 owner ruling 2026-09-24: a logged reschedule move closes a NULL-due "schedule_visit" commitment deterministically', async () => {
+  test('Codex #4816 r1: a logged reschedule move is a witness for "schedule_visit" but still goes through the model (service match), never a system-event close', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'schedule_visit', due_at: null,
       quote: 'Can we move to next week?', description: 'Can we move to next week?' };
@@ -1125,13 +1125,11 @@ postgres('SMS commitments on PostgreSQL', () => {
     }).returning('id');
     await mockPg('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: message.customer_id,
       original_date: etDateString(message.created_at), new_date: nextWeek, initiated_by: 'admin', created_at: after });
-    const verify = jest.fn(() => { throw new Error('verify must never be called for a system-event closure'); });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'different_service', evidence_hash: 'x', retry_after: null }));
     const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
-    expect(verify).not.toHaveBeenCalled();
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
-    const commitment = await mockPg('call_commitments').first();
-    expect(commitment.status).toBe('fulfilled');
-    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', reason: 'system_event', record_type: 'visit', record_id: visit.id });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -1477,34 +1475,11 @@ postgres('SMS commitments on PostgreSQL', () => {
     const type = isVisit ? 'visit' : 'email_delivery';
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `${type}:${witness.id}`,
       quote: isVisit ? 'Quarterly Lawn' : 'Your appointment is confirmed' } });
-    if (isVisit) {
-      // R1 (owner ruling 2026-09-24): a visit witness now closes through the
-      // synchronous system-event check (sms-commitment-fulfillment.js),
-      // never through `verify` — so the race this test simulates (the
-      // witness changing between the outer evidence read and the
-      // transaction's own re-read) can no longer be injected from inside a
-      // `verify` stub. A real, uncommitted row lock reproduces it
-      // deterministically instead of racing on timing: the outer (non-tx)
-      // evidence read still sees the pre-update committed row (so the
-      // system-event check still fires with no model call), but
-      // revalidateSmsFulfillment's own `forUpdate().skipLocked()` on that
-      // same row skips it while this transaction holds it, and fails closed.
-      const race = await mockPg.transaction();
-      await race(table).where({ id: witness.id }).update({ status: 'cancelled' });
-      try {
-        expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 0 });
-        expect((await mockPg('call_commitments').first()).status).toBe('open');
-        expect(dispatchWithFallback).not.toHaveBeenCalled();
-      } finally {
-        await race.commit();
-      }
-      return;
-    }
     const verify = async (row, evidence, opts) => {
       const verdict = await verifySmsFulfillment(row, evidence, opts);
       expect(verdict.verdict).toBe('fulfilled');
-      await mockPg(table).where({ id: witness.id }).update(
-        change === 'bounced' ? { status: 'bounced', bounced_at: now } : { text_snapshot: 'Please ignore the prior confirmation' });
+      await mockPg(table).where({ id: witness.id }).update(isVisit ? { status: 'cancelled' }
+        : change === 'bounced' ? { status: 'bounced', bounced_at: now } : { text_snapshot: 'Please ignore the prior confirmation' });
       return verdict;
     };
     expect(await refreshSmsCommitments({ conn: mockPg, now, verify })).toMatchObject({ fulfilled: 0 });

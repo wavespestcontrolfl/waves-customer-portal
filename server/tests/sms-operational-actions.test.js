@@ -723,6 +723,15 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
       .toEqual({ due_at: null, due_basis: null });
   });
 
+  test('Codex #4816 r1: a stated-but-unresolved time never gets a manufactured default deadline', () => {
+    expect(resolveDueDeadline({ kind: 'callback', basis: 'request', due_at: null, due_text: 'tomorrow at 9 or 10', timing_unverified: true }, at))
+      .toEqual({ due_at: null, due_basis: null });
+    expect(resolveDueDeadline({ kind: 'schedule_visit', basis: 'request', due_at: null, due_text: 'mid Oct' }, at))
+      .toEqual({ due_at: null, due_basis: null });
+    expect(resolveDueDeadline({ kind: 'callback', basis: 'promise', due_at: null, due_text: 'tomorrow' }, at))
+      .toEqual({ due_at: null, due_basis: null });
+  });
+
   test('send_reschedule_link shares the 24h scheduling window', () => {
     expect(DEFAULT_DEADLINE_HOURS.send_reschedule_link).toBe(24);
   });
@@ -826,6 +835,30 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(invoicePaid, { kind: 'callback', description: 'Call me about my payment' })).toBe(false);
     // A quote-only mention (evidence array) counts as much as description.
     expect(admissibleWitness(invoicePaid, { kind: 'other', evidence: [{ quote: 'Can I get an invoice for this?' }] })).toBe(true);
+  });
+
+  test('Codex #4816 r1: a visit never system-closes a schedule_visit or technician_follow_up (service match stays with the model)', () => {
+    const { systemEventFulfillment } = require('../services/sms-commitment-fulfillment');
+    const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed', property_id: PROPERTY_ID,
+      created_at: '2040-03-11T15:00:00Z', booked_at: '2040-03-11T15:00:00Z', completed_at: '2040-03-12T15:00:00Z', transitioned_at: '2040-03-12T15:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status completed' };
+    for (const kind of ['schedule_visit', 'technician_follow_up']) {
+      const commitment = { kind, sms_context: { property_id: PROPERTY_ID, source_at: '2040-03-10T15:00:00Z' } };
+      expect(admissibleWitness(visitWitness, commitment)).toBe(true);
+      expect(systemEventFulfillment({ records: [visitWitness], failures: [] }, commitment)).toBeNull();
+    }
+  });
+
+  test('Codex #4816 r1: "check" alone is not a payment question; production confirmation/reschedule-link sends are admissible for their kinds', () => {
+    const invoicePaid = { type: 'payment', payment_source: 'invoice', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice X paid 2040-03-11' };
+    expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Please check whether the technician is coming' })).toBe(false);
+    expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Did my payment go through?' })).toBe(true);
+    const delivered = (message_type) => ({ type: 'sms', status: 'delivered', message_type, created_at: '2040-03-11T15:00:00Z' });
+    expect(admissibleWitness(delivered('appointment_rescheduled'), { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness(delivered('reschedule_series_confirmation'), { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness(delivered('reschedule_link_promise'), { kind: 'send_reschedule_link' })).toBe(true);
+    expect(admissibleWitness(delivered('reschedule_link_promise'), { kind: 'send_appointment_confirmation' })).toBe(false);
+    expect(admissibleWitness(delivered('receipt'), { kind: 'send_reschedule_link' })).toBe(false);
   });
 
   test('R1 owner ruling 2026-09-24: a visit or payment system event is fulfilled deterministically, with no model call', () => {

@@ -294,6 +294,11 @@ const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 // (legacy behavior — refreshSmsCommitments' null-due branch still applies).
 function resolveDueDeadline(item, messageCreatedAt) {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
+  // The customer DID state a time ("tomorrow at 9 or 10", "mid Oct") that the
+  // extractor could not resolve to a clock instant: leave it undated rather
+  // than manufacture a per-kind deadline that contradicts what was said
+  // (Codex #4816 r1). The row still closes on evidence; it never bells.
+  if (item.due_text || item.timing_unverified) return { due_at: null, due_basis: null };
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
