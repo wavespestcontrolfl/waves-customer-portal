@@ -11806,16 +11806,36 @@ function retiredGateInputsForVisitEdit({
   const lines = (postedAddons || []).filter(Boolean);
   const named = (l) => typeof l.serviceName === 'string' && !!l.serviceName.trim();
   const labelOf = (l) => ({ label: l.serviceName.trim(), recurrence: addonLineRecurrence(l) });
-  const postedCatalogIds = [postedServiceId, ...lines.map((l) => l.serviceId)].filter(Boolean).map(String);
-  const onVisit = new Set([current.service_id, ...currentAddons.map((a) => a?.service_id)].filter(Boolean).map(String));
-  const namesOnVisit = new Set(currentAddons.map((a) => norm(a?.service_name)).filter(Boolean));
   const renamed = typeof serviceType === 'string' && !!serviceType.trim() && norm(serviceType) !== norm(current.service_type);
-  const storedLine = (l) => currentAddons.find((a) => (l.serviceId
+  const pairs = (l, a) => (l.serviceId
     ? String(a?.service_id || '') === String(l.serviceId)
-    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName))));
-  const postedFor = (a) => lines.find((l) => (a?.service_id
-    ? String(l.serviceId || '') === String(a.service_id)
-    : (!l.serviceId && norm(l.serviceName) === norm(a?.service_name))));
+    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName)));
+  const storedLine = (l) => currentAddons.find((a) => pairs(l, a));
+  const postedFor = (a) => lines.find((l) => pairs(l, a));
+  // ADDED lines are counted by MULTIPLICITY (codex r26 on #4786): each
+  // posted line consumes one stored occurrence of its identity (catalog id,
+  // else an id-less name; the primary line's own id is one occurrence too,
+  // taken first by a same-id posted primary). A posted line with no
+  // occurrence left is a new sale — a second copy of an add-on already on
+  // the visit is gated like any other added line instead of hiding behind
+  // the first.
+  const consumedAddons = new Set();
+  let primaryIdFree = !!current.service_id;
+  const takeAddon = (l) => {
+    const idx = currentAddons.findIndex((a, i) => !consumedAddons.has(i) && pairs(l, a));
+    if (idx < 0) return false;
+    consumedAddons.add(idx);
+    return true;
+  };
+  const takePrimaryId = (id) => {
+    if (!primaryIdFree || !id || String(id) !== String(current.service_id)) return false;
+    primaryIdFree = false;
+    return true;
+  };
+  const primaryAddedIds = postedServiceId && !takePrimaryId(postedServiceId) && !takeAddon({ serviceId: postedServiceId })
+    ? [String(postedServiceId)]
+    : [];
+  const addedLines = lines.filter((l) => !takeAddon(l) && !takePrimaryId(l.serviceId));
   // The cadence a retained add-on will actually run at: the reposted line's
   // own, else the stored one (null rides the parent).
   const storedRecurrence = (a) => addonLineRecurrence({ recurringPattern: a?.recurring_pattern, recurringIntervalDays: a?.recurring_interval_days });
@@ -11853,13 +11873,14 @@ function retiredGateInputsForVisitEdit({
     : [];
   return {
     serviceIds: [...new Set([
-      ...postedCatalogIds.filter((id) => !onVisit.has(id)),
+      ...primaryAddedIds,
+      ...addedLines.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
       ...retainedIds,
       ...repatterned.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
     ])],
     serviceTypes: [
       ...(renamed ? [serviceType] : []),
-      ...lines.filter((l) => !l.serviceId && named(l) && !namesOnVisit.has(norm(l.serviceName))).map(labelOf),
+      ...addedLines.filter((l) => !l.serviceId && named(l)).map(labelOf),
       ...retainedNames,
       ...repatterned.filter(named).map(labelOf),
     ],

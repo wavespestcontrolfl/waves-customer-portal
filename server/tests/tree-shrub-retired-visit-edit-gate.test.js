@@ -44,6 +44,41 @@ describe('retiredGateInputsForVisitEdit', () => {
     })).toEqual({ serviceIds: [], serviceTypes: [] });
   });
 
+  test('a second copy of an add-on already on the visit is an added line (codex r26)', () => {
+    // One stored quarterly T&S add-on (id-backed) and one id-less name; the
+    // save reposts each twice. The first copies are the visit's own lines,
+    // the second copies are new sales — by id and by name.
+    expect(retiredGateInputsForVisitEdit({
+      current,
+      currentAddons: [{ service_id: RETIRED_ID, service_name: 'Quarterly T&S', recurring_pattern: null }, { service_id: null, service_name: 'Quarterly Tree & Shrub', recurring_pattern: null }],
+      postedServiceId: LIVE_ID,
+      postedAddons: [
+        { serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null },
+        { serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null },
+        { serviceId: null, serviceName: 'Quarterly Tree & Shrub', recurringPattern: null },
+        { serviceId: null, serviceName: 'Quarterly Tree & Shrub', recurringPattern: 'quarterly', recurringIntervalDays: null },
+      ],
+      serviceType: 'Quarterly Pest Control',
+    })).toEqual({
+      serviceIds: [RETIRED_ID],
+      serviceTypes: [{ label: 'Quarterly Tree & Shrub', recurrence: { pattern: 'quarterly', intervalDays: null } }],
+    });
+    // The primary line's own id is one occurrence: a posted add-on carrying
+    // it is a move, a second one is added.
+    expect(retiredGateInputsForVisitEdit({
+      current: { ...current, service_id: RETIRED_ID }, currentAddons: [], postedServiceId: LIVE_ID,
+      postedAddons: [{ serviceId: RETIRED_ID, serviceName: 'Quarterly T&S' }, { serviceId: RETIRED_ID, serviceName: 'Quarterly T&S' }],
+      serviceType: 'Quarterly Pest Control',
+    })).toEqual({ serviceIds: [LIVE_ID, RETIRED_ID], serviceTypes: [] });
+    // A same-id posted primary takes the primary occurrence first, so the
+    // stored add-on occurrence still covers the reposted add-on.
+    expect(retiredGateInputsForVisitEdit({
+      current: { ...current, service_id: RETIRED_ID }, currentAddons: [{ service_id: RETIRED_ID, service_name: 'Quarterly T&S' }], postedServiceId: RETIRED_ID,
+      postedAddons: [{ serviceId: RETIRED_ID, serviceName: 'Quarterly T&S' }],
+      serviceType: 'Quarterly Pest Control',
+    })).toEqual({ serviceIds: [], serviceTypes: [] });
+  });
+
   test('added catalog ids and a changed primary label are gated too', () => {
     expect(retiredGateInputsForVisitEdit({
       current, currentAddons: [], postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care',

@@ -135,6 +135,28 @@ test('a one_time T&S add-on line is not the customer\'s active plan (codex r18)'
   expect(planSql).not.toMatch(/JOIN services ON services\.id = scheduled_service/);
 });
 
+test('the active-plan subqueries read ownership statuses: an open rescheduled row is still the plan (codex r26)', async () => {
+  const seen = [];
+  const original = db.raw;
+  db.raw = (sql, bindings, ...rest) => { seen.push([String(sql), bindings]); return original(sql, bindings, ...rest); };
+  try {
+    db.__state.rows = [];
+    await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  } finally {
+    db.raw = original;
+  }
+  const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
+  const { terminalHistoryStatuses } = require('../services/service-library');
+  expect(TERMINAL_STATUSES).toContain('rescheduled');
+  const planReads = seen.filter(([sql]) => /as active_plan_service_(key|type)/.test(sql));
+  expect(planReads).toHaveLength(2);
+  for (const [sql, bindings] of planReads) {
+    expect(sql).toMatch(/status NOT IN \(/);
+    expect(bindings).not.toContain('rescheduled');
+    expect(bindings).toEqual(expect.arrayContaining(terminalHistoryStatuses()));
+  }
+});
+
 test('every prefiltered T&S row is paged through before the limit applies (codex r19)', async () => {
   // 1,200 older not-yet-due quarterly customers sort ahead of one genuinely
   // overdue 6-week customer with a newer last visit: a SQL cap of any size

@@ -540,7 +540,6 @@ async function queryCustomers(input, readCustomerIds = []) {
 
 
 async function findOverdueCustomers(input) {
-  const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
   const { service_category, overdue_days = 0, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 50, 200);
 
@@ -560,7 +559,13 @@ async function findOverdueCustomers(input) {
   // "Tree & Shrub" label while linking the cadence-specific service_id.
   const TREE_SHRUB_KEY_INTERVAL = { tree_shrub_quarterly: 90, tree_shrub_6week: 42, tree_shrub_program: 60 };
   const tsKeySql = Object.keys(TREE_SHRUB_KEY_INTERVAL).map(() => '?').join(', ');
-  const terminalSql = TERMINAL_STATUSES.map(() => '?').join(', ');
+  // The active-plan lookups read OWNERSHIP statuses (an open 'rescheduled'
+  // row is still the customer's plan — service-library's
+  // terminalHistoryStatuses, the list the holder gate and the picker read;
+  // codex r26 on #4786). Last-visit history reads service_records, not
+  // scheduled_services statuses.
+  const PLAN_TERMINAL_STATUSES = require('../service-library').terminalHistoryStatuses();
+  const terminalSql = PLAN_TERMINAL_STATUSES.map(() => '?').join(', ');
   const treeShrubIntervalDays = (serviceType, serviceKey) => {
     if (TREE_SHRUB_KEY_INTERVAL[serviceKey]) return TREE_SHRUB_KEY_INTERVAL[serviceKey];
     const t = String(serviceType || '').toLowerCase();
@@ -620,10 +625,10 @@ async function findOverdueCustomers(input) {
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
               AND ${require('../service-library').ADDON_LINE_IS_PLAN_SQL}
         ) plan ORDER BY plan.scheduled_date ASC LIMIT 1) as active_plan_service_key`, [
-          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...TERMINAL_STATUSES,
-          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...TERMINAL_STATUSES,
+          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...PLAN_TERMINAL_STATUSES,
+          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...PLAN_TERMINAL_STATUSES,
         ]),
-        db.raw(`(SELECT service_type FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND service_type ~* ? AND is_recurring = true AND status NOT IN (${TERMINAL_STATUSES.map(() => '?').join(', ')}) ORDER BY scheduled_date ASC LIMIT 1) as active_plan_service_type`, [patterns[cat], ...TERMINAL_STATUSES]),
+        db.raw(`(SELECT service_type FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND service_type ~* ? AND is_recurring = true AND status NOT IN (${terminalSql}) ORDER BY scheduled_date ASC LIMIT 1) as active_plan_service_type`, [patterns[cat], ...PLAN_TERMINAL_STATUSES]),
         db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ~* ?) as next_scheduled", [patterns[cat]]),
       )
       .where('customers.active', true)

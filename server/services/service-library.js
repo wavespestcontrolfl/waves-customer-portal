@@ -411,16 +411,20 @@ const HOLDER_ADDON_IS_SERVICE_SQL = '(scheduled_service_addons.service_id = serv
   + ' OR scheduled_service_addons.service_key_snapshot = services.service_key'
   + ' OR lower(scheduled_service_addons.service_name) IN (lower(services.name), lower(services.short_name)))';
 
-function whereCustomerHoldsService(qb, customerId) {
+// TERMINAL_STATUSES is a COVERAGE view: 'rescheduled' is a phantom row until
+// SmartRebooker actions it. For OWNERSHIP it is an open obligation
+// (cancellation-resolution/restart.js), so it stays plan evidence — for the
+// holder gate, the picker and the Intelligence Bar overdue scan alike (codex
+// r24/r26 on #4786).
+function terminalHistoryStatuses() {
   const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
-  // TERMINAL_STATUSES is a COVERAGE view: 'rescheduled' is a phantom row
-  // until SmartRebooker actions it. For OWNERSHIP it is an open obligation
-  // (cancellation-resolution/restart.js), so it stays holder evidence here
-  // (codex r24 on #4786).
-  const TERMINAL_HISTORY_STATUSES = TERMINAL_STATUSES.filter((status) => status !== 'rescheduled');
+  return TERMINAL_STATUSES.filter((status) => status !== 'rescheduled');
+}
+
+function whereCustomerHoldsService(qb, customerId) {
   return qb
     .where('scheduled_services.customer_id', customerId)
-    .whereNotIn('scheduled_services.status', TERMINAL_HISTORY_STATUSES)
+    .whereNotIn('scheduled_services.status', terminalHistoryStatuses())
     .where('scheduled_services.is_recurring', true);
 }
 
@@ -942,6 +946,7 @@ module.exports = {
   ADDON_LINE_IS_PLAN_SQL,
   HOLDER_VISIT_IS_SERVICE_SQL,
   HOLDER_ADDON_IS_SERVICE_SQL,
+  terminalHistoryStatuses,
   getServiceById,
   getServiceByKey,
   createService,
