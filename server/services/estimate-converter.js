@@ -4302,7 +4302,130 @@ function annualPlanRowsFor(estimateData, billingTerm) {
 // such an offer viewable and acceptable.
 function isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm) {
   const rows = annualPlanRowsFor(estimateData, billingTerm);
-  return rows.length > 0 && (termiteAnnualPlanSelectionEnabled() || annualPlanHasDeliveredOffer(estimate));
+  if (rows.length === 0) return false;
+  // Codex round-3 P0: once an estimate has actually parked, the PERSISTED
+  // stamp is authoritative over re-evaluating the live gate/delivered-offer
+  // rule — a gate disabled between accept and signature must never un-park
+  // an in-flight signed agreement. Without this, activationRun's own read of
+  // this same estimate (annual_plan_activation_status === 'awaiting_signature'
+  // by construction, since termite-annual-activation.js only ever calls in
+  // under that exact status) could resolve isTermiteAnnualPlanAccept=false
+  // with the gate off, running the ordinary conversion WITHOUT ever setting
+  // annualPlanActivationStatus='activated' — and
+  // termite-annual-activation.js's own defense-in-depth check then throws
+  // and rolls back a signed contract's conversion forever.
+  if (estimate.annual_plan_activation_status === 'awaiting_signature'
+    || estimate.annual_plan_activation_status === 'activated') return true;
+  return termiteAnnualPlanSelectionEnabled() || annualPlanHasDeliveredOffer(estimate);
+}
+
+// Codex round-3 P1: "never reprice" a signed agreement. Everything the
+// customer accepted is frozen at park time — the annual fee NET of the
+// prepay discount, every one-time setup line, the tax rate AND tax dollars,
+// and the pre-credit invoice total — and activation bills exactly these
+// figures instead of re-deriving them (ANNUAL_PREPAY_DISCOUNT_PCT is an env
+// value and a commercial tax rate is a live county/exemption lookup; either
+// can move between accept and signature). Mirrors the ordinary
+// prepay_annual branch's own math call-for-call (same resolvers, same
+// cents rounding InvoiceService.create applies), so a frozen bill is
+// byte-identical to what an immediate prepay accept would have minted.
+async function computeTermiteAnnualFrozenFinancials({
+  database, estimate, estimateData, opts,
+}) {
+  const monthlyRate = parseFloat(estimate.monthly_total || 0);
+  const recurringServices = recurringServicesFromEstimateData(estimateData);
+  const suppressRecurringConversion = shouldSuppressRecurringConversion({
+    billingTerm: 'prepay_annual',
+    monthlyRate,
+    annualTotal: estimate.annual_total,
+    oneTimeTotal: estimate.onetime_total,
+    recurringServices,
+    estimateData,
+  });
+  const isLegacyRodentRow = legacyRodentRowPredicateFor(estimateData);
+  const recurringServicesForConversion = suppressRecurringConversion
+    ? []
+    : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isLegacyRodentRow(svc));
+  const hasCommercialRecurring = recurringServicesForConversion.some(
+    (svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_'),
+  );
+  const annualPrepayBase = resolveAnnualPrepayDraftAmount({
+    prepayInvoiceAmount: opts.prepayInvoiceAmount,
+    annualTotal: estimate.annual_total,
+    monthlyRate,
+  });
+  const prepayResolved = resolveAnnualPrepayInvoiceTotal({
+    baseAnnual: annualPrepayBase,
+    recurringServices: recurringServicesForConversion,
+    estimateData,
+  });
+  const prepayDiscountApplied = prepayResolved.discount > 0;
+  const rodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
+  const setupRow = annualPlanRowsFor(estimateData, 'prepay_annual').find(
+    (row) => row && (row.kind === 'setup' || row.service === 'termite_bait_installation'),
+  );
+  const annualPlanSetup = Number(setupRow?.price) > 0
+    ? { description: setupRow.name || 'Station Setup', amount: roundCents(Number(setupRow.price)) }
+    : null;
+  // Commercial-only, exactly like the ordinary branch: residential prepay
+  // stays untaxed (taxRate null here → undefined at InvoiceService.create).
+  let taxRate = null;
+  if (hasCommercialRecurring) {
+    const baseRate = await resolveCommercialPrepayBaseRate(estimate.customer_id, { database });
+    taxRate = resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
+      prepayDiscountApplied,
+      baseRate,
+      taxableOneTimeAmount: rodentSetupAmount,
+    });
+  }
+  const subtotal = roundCents(prepayResolved.amount + rodentSetupAmount + (annualPlanSetup?.amount || 0));
+  const taxAmount = taxRate ? roundCents(subtotal * taxRate) : 0;
+  return {
+    version: 1,
+    annualPrepayAmount: prepayResolved.amount,
+    prepayDiscountApplied,
+    prepayDiscountRate: prepayResolved.rate,
+    rodentSetupAmount,
+    annualPlanSetup,
+    taxRate,
+    subtotal,
+    taxAmount,
+    total: roundCents(subtotal + taxAmount),
+  };
+}
+
+function roundCents(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+// Activation reads the frozen snapshot back and FAILS CLOSED on anything
+// missing or malformed (the caller bells and the estimate stays
+// awaiting_signature) — never a silent fallback to live repricing.
+function frozenTermiteAnnualFinancialsFor(estimate) {
+  let context = estimate?.annual_plan_deferred_invoice;
+  if (typeof context === 'string') {
+    try { context = JSON.parse(context); } catch { context = null; }
+  }
+  const frozen = context && typeof context === 'object' ? context.frozenFinancials : null;
+  const finite = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  const setupOk = frozen && (frozen.annualPlanSetup == null
+    || (finite(frozen.annualPlanSetup.amount) && typeof frozen.annualPlanSetup.description === 'string'));
+  const valid = frozen && frozen.version === 1
+    && finite(frozen.annualPrepayAmount) && frozen.annualPrepayAmount > 0
+    && typeof frozen.prepayDiscountApplied === 'boolean'
+    && finite(frozen.rodentSetupAmount)
+    && (frozen.taxRate == null || finite(frozen.taxRate))
+    && finite(frozen.subtotal) && finite(frozen.taxAmount) && finite(frozen.total)
+    && setupOk
+    && Math.round(frozen.subtotal * 100) === Math.round((frozen.annualPrepayAmount
+      + frozen.rodentSetupAmount + (frozen.annualPlanSetup?.amount || 0)) * 100)
+    && Math.round(frozen.total * 100) === Math.round((frozen.subtotal + frozen.taxAmount) * 100);
+  if (!valid) {
+    const err = new Error(`Termite annual plan for estimate ${estimate?.id} has no valid frozen accepted-price snapshot — refusing to reprice at signature`);
+    err.code = 'TERMITE_ANNUAL_FROZEN_FINANCIALS_INVALID';
+    throw err;
+  }
+  return frozen;
 }
 
 // Termite annual-plan sign-before-pay (slice 3a restructure): parks the
@@ -4318,7 +4441,7 @@ function isTermiteAnnualSignBeforePayAccept(estimate, estimateData, billingTerm)
 // later/edited acceptance), and a retry once already 'activated' is a
 // no-op that reports the terminal status rather than overwriting it.
 async function parkTermiteAnnualPlanAccept({
-  database, estimateId, estimate, opts,
+  database, estimateId, estimate, estimateData, opts,
 }) {
   if (estimate.annual_plan_activation_status === 'activated') {
     return { annualPlanActivationStatus: 'activated' };
@@ -4326,6 +4449,13 @@ async function parkTermiteAnnualPlanAccept({
   if (estimate.annual_plan_activation_status === 'awaiting_signature' && estimate.annual_plan_deferred_invoice) {
     return { annualPlanActivationStatus: 'awaiting_signature' };
   }
+  // Codex round-3 P1: freeze the customer-accepted pricing NOW, before any
+  // tier/pipeline work runs — never park without it. A failure here fails
+  // the accept itself (retryable) rather than parking an agreement whose
+  // signature-time bill could silently drift from what was quoted.
+  const frozenFinancials = await computeTermiteAnnualFrozenFinancials({
+    database, estimate, estimateData, opts,
+  });
   // Whitelisted accept-time opts only — never the whole `opts` object,
   // which can carry a live `database`/transaction handle that must never
   // be serialized. This is everything the ordinary prepay_annual branch
@@ -4333,6 +4463,7 @@ async function parkTermiteAnnualPlanAccept({
   const acceptContext = {
     version: 1,
     parkedAt: new Date().toISOString(),
+    frozenFinancials,
     prepayInvoiceAmount: opts.prepayInvoiceAmount != null ? Number(opts.prepayInvoiceAmount) : null,
     firstApplicationAmount: opts.firstApplicationAmount != null ? Number(opts.firstApplicationAmount) : null,
     allowFirstApplicationFallback: opts.allowFirstApplicationFallback !== false,
@@ -4499,7 +4630,7 @@ const EstimateConverter = {
       // this same function with activationRun:true and these persisted
       // opts spread back in once the signature commits.
       return parkTermiteAnnualPlanAccept({
-        database, estimateId, estimate, opts,
+        database, estimateId, estimate, estimateData, opts,
       });
     }
 
@@ -6878,10 +7009,21 @@ const EstimateConverter = {
         recurringServices: recurringServicesForConversion,
         estimateData,
       });
-      const annualPrepayAmount = billingTerm === 'prepay_annual'
-        ? prepayResolved.amount
-        : annualPrepayBase;
-      const prepayDiscountApplied = prepayResolved.discount > 0;
+      // Codex round-3 P1 (never reprice): a termite annual-plan activation
+      // bills EXACTLY the figures frozen when the customer accepted —
+      // fail-closed (throws → the activation bells, estimate stays
+      // awaiting_signature) when that snapshot is missing or malformed.
+      const frozenAnnualPlanFinancials = isTermiteAnnualPlanAccept && activationRun && billingTerm === 'prepay_annual'
+        ? frozenTermiteAnnualFinancialsFor(estimate)
+        : null;
+      const annualPrepayAmount = frozenAnnualPlanFinancials
+        ? frozenAnnualPlanFinancials.annualPrepayAmount
+        : billingTerm === 'prepay_annual'
+          ? prepayResolved.amount
+          : annualPrepayBase;
+      const prepayDiscountApplied = frozenAnnualPlanFinancials
+        ? frozenAnnualPlanFinancials.prepayDiscountApplied
+        : prepayResolved.discount > 0;
       const standardFirstApplicationAmount = billingTerm === 'standard'
         ? resolveFirstApplicationAmount({
           firstApplicationAmount: opts.firstApplicationAmount,
@@ -6936,7 +7078,9 @@ const EstimateConverter = {
           // program minimum's protected floor can cap the discount to a sliver
           // of the annual, and the invoice must claim the same rate the public
           // page showed at approval.
-          const prepayDiscountPctLabel = annualPrepayDiscountPctLabel(prepayResolved.rate);
+          const prepayDiscountPctLabel = annualPrepayDiscountPctLabel(
+            frozenAnnualPlanFinancials ? frozenAnnualPlanFinancials.prepayDiscountRate : prepayResolved.rate,
+          );
           // Commercial plans are not a WaveGuard membership and tier is the
           // non-member 'none'; label them 'Commercial' rather than letting the
           // truthy 'none' render as "WaveGuard none".
@@ -6961,10 +7105,10 @@ const EstimateConverter = {
           // property_type='commercial' is visible — then blend by the taxable
           // pest share. Never hardcode 7%.
           const prepayRodentSetupForTax = frozenRodentBaitSetupAmount(estimateData);
-          const prepayCommercialBaseRate = hasCommercialRecurring
+          const prepayCommercialBaseRate = hasCommercialRecurring && !frozenAnnualPlanFinancials
             ? await resolveCommercialPrepayBaseRate(customerId, { database })
             : 0;
-          const prepayTaxRate = hasCommercialRecurring
+          const liveCommercialPrepayTaxRate = hasCommercialRecurring && !frozenAnnualPlanFinancials
             ? resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
               prepayDiscountApplied,
               baseRate: prepayCommercialBaseRate,
@@ -6973,6 +7117,9 @@ const EstimateConverter = {
               taxableOneTimeAmount: prepayRodentSetupForTax,
             })
             : undefined;
+          const prepayTaxRate = frozenAnnualPlanFinancials
+            ? (frozenAnnualPlanFinancials.taxRate ?? undefined)
+            : liveCommercialPrepayTaxRate;
           // Acceptance deposit credits against this prepay invoice through
           // create()'s depositCredit param, exactly like the standard branch
           // below — prepay-annual accepts owe the $49 deposit (owner decision
@@ -7011,7 +7158,9 @@ const EstimateConverter = {
           // line; annual-prepay-renewals' seeded-visit fallback subtracts
           // setup lines before dividing by visits (setup is not per-visit
           // coverage money).
-          const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
+          const prepayRodentSetupAmount = frozenAnnualPlanFinancials
+            ? frozenAnnualPlanFinancials.rodentSetupAmount
+            : frozenRodentBaitSetupAmount(estimateData);
           // Termite annual-plan's OWN one-time setup fee (service
           // 'termite_bait_installation', name 'Station Setup', kind 'setup'
           // — v1-legacy-mapper.js ~1173) rides as its own invoice line here,
@@ -7029,9 +7178,13 @@ const EstimateConverter = {
               (row) => row && (row.kind === 'setup' || row.service === 'termite_bait_installation'),
             )
             : null;
-          const annualPlanSetupFeeAmount = Number(annualPlanSetupRow?.price) > 0
-            ? Math.round(Number(annualPlanSetupRow.price) * 100) / 100
-            : 0;
+          const annualPlanSetupFeeAmount = frozenAnnualPlanFinancials
+            ? (frozenAnnualPlanFinancials.annualPlanSetup?.amount || 0)
+            : Number(annualPlanSetupRow?.price) > 0
+              ? Math.round(Number(annualPlanSetupRow.price) * 100) / 100
+              : 0;
+          const annualPlanSetupDescription = frozenAnnualPlanFinancials?.annualPlanSetup?.description
+            || annualPlanSetupRow?.name || 'Station Setup';
           {
           const inv = await database.transaction(async (invoiceTrx) => {
             await acquireConverterInvoiceDepositLocks(invoiceTrx, {
@@ -7061,7 +7214,7 @@ const EstimateConverter = {
                 unit_price: prepayRodentSetupAmount,
               }] : []),
               ...(annualPlanSetupFeeAmount > 0 ? [{
-                description: annualPlanSetupRow?.name || 'Station Setup',
+                description: annualPlanSetupDescription,
                 quantity: 1,
                 unit_price: annualPlanSetupFeeAmount,
               }] : [])],
@@ -7073,6 +7226,18 @@ const EstimateConverter = {
                 : {}),
             });
             appliedPrepayDepositCredit = Number(created?.applied_deposit_credit) || 0;
+            // Frozen-price enforcement (codex round-3 P1): the minted bill
+            // must be the accepted one — the same subtotal to the cent, and
+            // never MORE tax than was accepted (a verified exemption may
+            // only lower it). Throwing rolls the invoice back.
+            if (frozenAnnualPlanFinancials && created?.id) {
+              const mintedSubtotalCents = Math.round(Number(created.subtotal) * 100);
+              const mintedTaxCents = Math.round(Number(created.tax_amount || 0) * 100);
+              if (mintedSubtotalCents !== Math.round(frozenAnnualPlanFinancials.subtotal * 100)
+                || mintedTaxCents > Math.round(frozenAnnualPlanFinancials.taxAmount * 100)) {
+                throw new Error(`termite annual invoice for estimate ${estimateId} does not match the accepted price snapshot (subtotal ${created.subtotal} vs ${frozenAnnualPlanFinancials.subtotal}, tax ${created.tax_amount} vs ${frozenAnnualPlanFinancials.taxAmount})`);
+              }
+            }
             if (created?.id && appliedPrepayDepositCredit > 0) {
               const allocated = await consumeDepositCredit({
                 estimateId,

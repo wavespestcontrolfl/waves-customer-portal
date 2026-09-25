@@ -93,6 +93,8 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
     hasDeliveredOffer = false,
     customerUpdate,
     createTermForAnnualPrepay = jest.fn().mockResolvedValue(null),
+    invoiceSubtotal = annualTotal,
+    invoiceTaxAmount = 0,
   } = {}) {
     const db = makeDb(recurringServices, {
       annualTotal, estimateUpdate, priorActivationStatus, priorDeferredInvoice, customerUpdate,
@@ -102,7 +104,9 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
     invoiceTrx.isTransaction = true;
     db.transaction = jest.fn(async (callback) => callback(invoiceTrx));
     const invoiceService = {
-      create: jest.fn().mockResolvedValue({ id: 'invoice-1', total: annualTotal }),
+      create: jest.fn().mockResolvedValue({
+        id: 'invoice-1', subtotal: invoiceSubtotal, tax_amount: invoiceTaxAmount, total: invoiceSubtotal + invoiceTaxAmount,
+      }),
       voidInvoice: jest.fn().mockResolvedValue({ id: 'invoice-1', status: 'void' }),
     };
     const renewals = { createTermForAnnualPrepay };
@@ -180,6 +184,30 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(Object.hasOwn(acceptContext, 'coverageServiceType')).toBe(true);
       expect(Object.hasOwn(acceptContext, 'manualDiscountItemization')).toBe(true);
       expect(Object.hasOwn(acceptContext, 'adoptedExistingAppointmentId')).toBe(true);
+    });
+
+    test('codex round-3 P1: the park FREEZES what the customer accepted — net annual fee, the setup line, tax, subtotal and total', async () => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const annualPlanRows = [
+        { plan: 'annual_protection', service: 'termite_bait', annual: 250 },
+        {
+          service: 'termite_bait_installation', name: 'Station Setup', price: 199, kind: 'setup',
+        },
+      ];
+      const { EstimateConverter } = setup(termiteAnnualLine, { gateOn: true, estimateUpdate, annualPlanRows });
+
+      await EstimateConverter.convertEstimate('estimate-1', convertOpts);
+
+      const acceptContext = JSON.parse(estimateUpdate.mock.calls[0][0].annual_plan_deferred_invoice);
+      const frozen = acceptContext.frozenFinancials;
+      expect(frozen.version).toBe(1);
+      expect(frozen.annualPrepayAmount).toBeGreaterThan(0);
+      expect(frozen.annualPrepayAmount).toBeLessThanOrEqual(250);
+      expect(frozen.annualPlanSetup).toEqual({ description: 'Station Setup', amount: 199 });
+      expect(frozen.taxRate).toBeNull();
+      expect(frozen.taxAmount).toBe(0);
+      expect(Math.round(frozen.subtotal * 100)).toBe(Math.round((frozen.annualPrepayAmount + 199) * 100));
+      expect(frozen.total).toBe(frozen.subtotal);
     });
 
     test('accept-time opts are captured verbatim into the accept-context', async () => {
@@ -366,6 +394,32 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
     const activationOpts = {
       billingTerm: 'prepay_annual', skipAutoSchedule: true, activationRun: true, autoSendInvoice: false,
     };
+    // What the park froze at accept time (codex round-3 P1) — activation
+    // bills exactly these figures.
+    function parkedContext({
+      annual = 250, setup = null, taxRate = null, taxAmount = 0, discountApplied = false, discountRate = 0,
+    } = {}) {
+      const subtotal = annual + (setup ? setup.amount : 0);
+      return {
+        version: 1,
+        parkedAt: '2026-09-20T12:00:00.000Z',
+        frozenFinancials: {
+          version: 1,
+          annualPrepayAmount: annual,
+          prepayDiscountApplied: discountApplied,
+          prepayDiscountRate: discountRate,
+          rodentSetupAmount: 0,
+          annualPlanSetup: setup,
+          taxRate,
+          subtotal,
+          taxAmount,
+          total: subtotal + taxAmount,
+        },
+      };
+    }
+    const awaiting = (context = parkedContext(), extra = {}) => ({
+      priorActivationStatus: 'awaiting_signature', priorDeferredInvoice: context, ...extra,
+    });
 
     test('codex P1: the annual plan setup fee (service termite_bait_installation, kind setup) rides its own REAL invoice line — never the rodent resolver', async () => {
       const annualPlanRows = [
@@ -374,7 +428,12 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
           service: 'termite_bait_installation', name: 'Station Setup', price: 199, kind: 'setup',
         },
       ];
-      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, { gateOn: true, annualPlanRows });
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, {
+        gateOn: true,
+        annualPlanRows,
+        invoiceSubtotal: 449,
+        ...awaiting(parkedContext({ setup: { description: 'Station Setup', amount: 199 } })),
+      });
 
       await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
         .rejects.toThrow('Annual prepay term was not created');
@@ -387,7 +446,7 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
     test('no setup row on the estimate — only the annual line rides the invoice', async () => {
       const annualPlanRows = [{ plan: 'annual_protection', service: 'termite_bait', annual: 250 }];
-      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, { gateOn: true, annualPlanRows });
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, { gateOn: true, annualPlanRows, ...awaiting() });
 
       await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
         .rejects.toThrow('Annual prepay term was not created');
@@ -398,7 +457,7 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
     test('P2 by design: dueDate defaults to today ET, exactly like every other prepay_annual accept — the parallel minter this replaces omitted it', async () => {
       const { etDateString } = require('../utils/datetime-et');
-      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, { gateOn: true });
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, { gateOn: true, ...awaiting() });
 
       await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
         .rejects.toThrow('Annual prepay term was not created');
@@ -408,7 +467,7 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
     });
 
     test('taxRate: residential (no commercial recurring) invoices at the untaxed default, matching the ordinary path', async () => {
-      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, { gateOn: true });
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, { gateOn: true, ...awaiting() });
 
       await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
         .rejects.toThrow('Annual prepay term was not created');
@@ -423,7 +482,7 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       const {
         EstimateConverter, invoiceService, renewals,
       } = setup(termiteAnnualLine, {
-        gateOn: true, estimateUpdate, createTermForAnnualPrepay,
+        gateOn: true, estimateUpdate, createTermForAnnualPrepay, ...awaiting(),
       });
 
       const result = await EstimateConverter.convertEstimate('estimate-1', activationOpts);
@@ -438,6 +497,60 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       );
       expect(activationStampCall).toBeTruthy();
       expect(activationStampCall[0].annual_plan_activated_at).toBeInstanceOf(Date);
+    });
+
+    test('codex round-3 P0: gate turned OFF between accept and signature — the persisted awaiting_signature stamp still activates (never falls into the ordinary un-stamped path)', async () => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const createTermForAnnualPrepay = jest.fn().mockResolvedValue({ id: 'term-7' });
+      const { EstimateConverter } = setup(termiteAnnualLine, {
+        gateOn: false, hasDeliveredOffer: false, estimateUpdate, createTermForAnnualPrepay, ...awaiting(),
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', activationOpts);
+
+      expect(result.annualPlanActivationStatus).toBe('activated');
+      expect(result.annualPrepayTermId).toBe('term-7');
+    });
+
+    test('codex round-3 P1: bills the FROZEN accepted figures even when the live estimate would now price differently', async () => {
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, {
+        gateOn: true,
+        annualTotal: 400, // live price moved after the customer accepted 250
+        invoiceSubtotal: 250,
+        ...awaiting(parkedContext({ annual: 250 })),
+      });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+
+      const createArgs = invoiceService.create.mock.calls[0][0];
+      expect(createArgs.lineItems).toHaveLength(1);
+      expect(createArgs.lineItems[0].unit_price).toBe(250);
+    });
+
+    test('codex round-3 P1: a missing frozen snapshot fails CLOSED — no invoice, never a live reprice', async () => {
+      const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+        gateOn: true,
+        ...awaiting({ version: 1, parkedAt: '2026-09-20T12:00:00.000Z', prepayInvoiceAmount: 250 }),
+      });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toMatchObject({ code: 'TERMITE_ANNUAL_FROZEN_FINANCIALS_INVALID' });
+
+      expect(invoiceService.create).not.toHaveBeenCalled();
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+    });
+
+    test('codex round-3 P1: a minted invoice that does not match the frozen subtotal rolls back', async () => {
+      const { EstimateConverter, renewals } = setup(termiteAnnualLine, {
+        gateOn: true,
+        invoiceSubtotal: 262.5,
+        ...awaiting(parkedContext({ annual: 250 })),
+      });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toThrow('does not match the accepted price snapshot');
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
     });
 
     test('a non-annual-plan prepay_annual accept ignores activationRun entirely (no annual-plan rows, nothing termite-specific happens)', async () => {
