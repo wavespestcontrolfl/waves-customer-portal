@@ -17,8 +17,10 @@ jest.mock('../models/db', () => mockDb);
 const mockWithCustomerCommsLock = jest.fn(async (database, _customerId, callback) => (
   database.transaction(callback)
 ));
+const mockLockCustomerEmail = jest.fn(async () => {});
 jest.mock('../utils/customer-comms-lock', () => ({
   withCustomerCommsLock: mockWithCustomerCommsLock,
+  lockCustomerEmail: mockLockCustomerEmail,
 }));
 
 const mockWithInvoiceDepositSettlement = jest.fn(async (invoiceId, callback, database) => (
@@ -41,9 +43,15 @@ const mockSendTemplate = jest.fn(async (input) => {
   }
   return { sent: true, message: { provider_message_id: providerResult.messageId } };
 });
+const mockLoadTemplateByKey = jest.fn(async () => ({
+  template: { template_key: 'billing.notice', send_stream: 'transactional_required' },
+}));
+const mockActiveSuppressionFor = jest.fn(async () => null);
 
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: mockSendTemplate,
+  loadTemplateByKey: mockLoadTemplateByKey,
+  activeSuppressionFor: mockActiveSuppressionFor,
   redactEmailAddresses: (value) => value,
 }));
 jest.mock('../services/invoice-helpers', () => ({
@@ -78,6 +86,11 @@ describe('billing channel email adapter', () => {
     mockWithCustomerCommsLock.mockImplementation(async (database, _customerId, callback) => (
       database.transaction(callback)
     ));
+    mockLockCustomerEmail.mockResolvedValue();
+    mockLoadTemplateByKey.mockResolvedValue({
+      template: { template_key: 'billing.notice', send_stream: 'transactional_required' },
+    });
+    mockActiveSuppressionFor.mockResolvedValue(null);
     mockWithInvoiceDepositSettlement.mockImplementation(async (invoiceId, callback, database) => (
       database.transaction((trx) => {
         const invoice = rows.invoices?.id === invoiceId ? rows.invoices : null;
@@ -194,6 +207,28 @@ describe('billing channel email adapter', () => {
     });
   });
 
+  test('locks the address and rechecks canonical suppression before provider dispatch', async () => {
+    const handoffOrder = [];
+    mockLockCustomerEmail.mockImplementationOnce(async (trx, email) => {
+      expect(trx).toBe(mockDb);
+      expect(email).toBe('casey@example.com');
+      handoffOrder.push('address-lock');
+    });
+    mockActiveSuppressionFor.mockImplementationOnce(async (template, email, group, trx) => {
+      expect(template).toMatchObject({ template_key: 'billing.notice' });
+      expect(email).toBe('casey@example.com');
+      expect(group).toBe('transactional_required');
+      expect(trx).toBe(mockDb);
+      handoffOrder.push('suppression-read');
+      return { suppression_type: 'bounce', group_key: null };
+    });
+
+    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+      sent: false, blocked: true, code: 'EMAIL_SUPPRESSED', deliveryOutcome: 'not_sent',
+    });
+    expect(handoffOrder).toEqual(['address-lock', 'suppression-read']);
+  });
+
   test('refuses an invoice that does not belong to the selected customer', async () => {
     rows.invoices = { id: 'inv-1', customer_id: 'cust-other', status: 'sent' };
 
@@ -260,6 +295,7 @@ describe('billing channel email adapter', () => {
     });
     expect(selfPayAtDispatch).toHaveBeenNthCalledWith(2, 'inv-1', lockedTrx);
     expect(recipientLocks).toEqual(['customers', 'notification_prefs']);
+    expect(mockLockCustomerEmail).toHaveBeenCalledWith(lockedTrx, 'casey@example.com');
     expect(commsLocked).toBe(false);
     expect(invoiceLocked).toBe(false);
   });

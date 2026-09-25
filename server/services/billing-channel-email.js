@@ -3,7 +3,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
 
 const CATEGORY_LABELS = Object.freeze({
   invoice: 'Invoice update',
@@ -106,6 +106,25 @@ async function preSendBlock(preSendCheck) {
   );
 }
 
+async function suppressionBlock(trx, recipientEmail) {
+  await lockCustomerEmail(trx, recipientEmail);
+  const loaded = await EmailTemplateLibrary.loadTemplateByKey('billing.notice', trx);
+  if (!loaded?.template) {
+    return blocked('BILLING_EMAIL_RECHECK_FAILED', 'Billing email template is unavailable', { retryable: true });
+  }
+  const suppression = await EmailTemplateLibrary.activeSuppressionFor(
+    loaded.template,
+    recipientEmail,
+    'transactional_required',
+    trx,
+  );
+  if (!suppression) return null;
+  const detail = suppression.group_key
+    ? `${suppression.suppression_type} (${suppression.group_key})`
+    : suppression.suppression_type;
+  return blocked('EMAIL_SUPPRESSED', `Suppressed: ${detail || 'active suppression'}`);
+}
+
 async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendCheck, dispatch, state }) {
   const fresh = await loadContext(input, trx, { lockRecipients: true, invoice });
   if (fresh.error) state.boundaryBlock = fresh.error;
@@ -116,6 +135,7 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
       { retryable: true },
     );
   } else state.boundaryBlock = await preSendBlock(preSendCheck);
+  if (!state.boundaryBlock) state.boundaryBlock = await suppressionBlock(trx, recipientEmail);
   if (state.boundaryBlock) return { ok: false };
 
   state.handoffStarted = true;

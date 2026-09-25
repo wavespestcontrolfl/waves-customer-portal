@@ -10,6 +10,10 @@ jest.mock('../models/db', () => {
 const mockSendTemplate = jest.fn();
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: mockSendTemplate,
+  loadTemplateByKey: jest.fn(async () => ({
+    template: { template_key: 'billing.notice', send_stream: 'transactional_required' },
+  })),
+  activeSuppressionFor: jest.fn(async () => null),
   redactEmailAddresses: (value) => value,
 }));
 jest.mock('../services/customer-contact', () => ({
@@ -23,6 +27,7 @@ jest.mock('../services/customer-contact', () => ({
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const { sendBillingChannelEmail } = require('../services/billing-channel-email');
+const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -99,6 +104,10 @@ postgres('billing email recipient locks (PostgreSQL)', () => {
         .rejects.toMatchObject({ code: '55P03' });
       await expect(blockedWrite('customers', { email: 'qa-new-primary@example.invalid' }))
         .rejects.toMatchObject({ code: '55P03' });
+      await expect(mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '100ms'");
+        await lockCustomerEmail(trx, 'qa-billing@example.invalid');
+      })).rejects.toMatchObject({ code: '55P03' });
     } catch (err) {
       lockProofError = err;
     } finally {
