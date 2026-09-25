@@ -11,6 +11,7 @@ const {
   ANNUAL_SERVICE_NAME,
   isAnnualPlanEstimate,
   annualPlanNetFee,
+  PARKED_HANDOFF_OUTCOMES,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,
@@ -659,6 +660,13 @@ describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)'
     const data = annualEstData();
     data.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 4, annualAfterDiscount: 288 }] };
     expect(annualPlanNetFee(data)).toBeNull();
+  });
+
+  test('every annual-plan park is a completed handoff for reconciliation (Codex #4811 r5 P2)', () => {
+    for (const outcome of ['commercial', 'annual_prepay', 'figures_unresolved', 'annual_template_not_active', 'annual_plan_billing_mismatch', 'annual_plan_billing_unverified']) {
+      expect(PARKED_HANDOFF_OUTCOMES.has(outcome)).toBe(true);
+    }
+    expect(PARKED_HANDOFF_OUTCOMES.has('prepay_lookup_failed')).toBe(false);
   });
 
   test('PROGRAM_TEMPLATE_KEYS includes the annual key for customer-scoped lookups (existing-agreement checks span all three)', () => {

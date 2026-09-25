@@ -49,6 +49,12 @@ const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 // outright-purchase program in generated records.
 const QUARTERLY_SERVICE_NAME = 'Termite Bait Station Program';
 const ANNUAL_SERVICE_NAME = 'Waves Subterranean Termite Protection — Annual';
+// maybeCreateTermiteProgramAgreement outcomes that END in a manual-prep bell
+// — reconciliation treats them as handled, never as failures to retry.
+const PARKED_HANDOFF_OUTCOMES = new Set([
+  'commercial', 'annual_prepay', 'figures_unresolved',
+  'annual_template_not_active', 'annual_plan_billing_mismatch', 'annual_plan_billing_unverified',
+]);
 const OWNERSHIP_BELL_LABELS = {
   rent: 'rented-stations',
   own: 'purchased-stations',
@@ -614,8 +620,13 @@ async function scheduledStartDate(estimateId, conn = db) {
       // — an obsolete appointment must not anchor the coverage window.
       .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       // Multi-service accepts book pest/lawn visits from the same estimate —
-      // only the termite installation/service anchors the PROGRAM start.
+      // only the BAIT program's installation/service anchors the PROGRAM
+      // start. Other termite work sold alongside (trenching, spot treatment,
+      // an inspection) is not the coverage start (Codex #4811 r5). The
+      // converter labels the program rows 'Termite Bait' / 'Termite Bait
+      // Installation' (service-type map + one-time item names).
       .whereRaw("LOWER(service_type) LIKE '%termite%'")
+      .whereRaw("(LOWER(service_type) LIKE '%bait%' OR LOWER(service_type) LIKE '%station%')")
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
     if (!row?.scheduled_date) return { raw: null, label: null };
@@ -1553,9 +1564,16 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     if (isCommercialEstimate(linkedEstimate, linkedEstData)) {
       misissue = 'park_expected';
     } else {
-      const prepayState = isAnnualPlanEstimate(linkedEstData) ? false : await isAnnualPrepayAccept(linkedEstimate, null);
+      // Annual plan: the row is only rightly issued when durable prepay
+      // evidence exists (the same predicate maybeCreate applies on the
+      // no-billingTerm path) — an older dyno may have issued the prepaid v3
+      // wording for a standard-billing accept (Codex #4811 r5).
+      const annualRow = isAnnualPlanEstimate(linkedEstData);
+      const prepayState = annualRow ? false : await isAnnualPrepayAccept(linkedEstimate, null);
       if (prepayState === 'error') { results.failed += 1; continue; } // retry tomorrow
-      if (prepayState) {
+      const annualEvidence = annualRow ? await annualPlanDurableEvidence(linkedEstimate) : true;
+      if (annualEvidence === 'error') { results.failed += 1; continue; } // retry tomorrow
+      if (prepayState || !annualEvidence) {
         misissue = 'park_expected';
       } else {
         const preparedNow = buildTermiteProgramAgreementValues(linkedEstimate, linkedEstData, { startDateLabel: null });
@@ -1829,7 +1847,10 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       signedAfter: row.created_at || null,
       reissueSourceContractId: row.id,
     });
-    const parked = ['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped);
+    // Every manual-prep park is a completed handoff (the bell is the
+    // deliverable) — including the annual-plan parks, or the cancelled source
+    // would be re-selected every cron run (Codex #4811 r5).
+    const parked = PARKED_HANDOFF_OUTCOMES.has(result.skipped);
     if (result.ok && result.contractId && !result.skipped) {
       await markSupersededHandled(row, 'replaced');
       results.created += 1;
@@ -1971,6 +1992,7 @@ module.exports = {
   isAnnualPlanEstimate,
   annualPlanNetFee,
   annualPlanDurableEvidence,
+  PARKED_HANDOFF_OUTCOMES,
   maybeCreateTermiteProgramAgreement,
   normalizeAddress,
   reconcileTermiteProgramAgreements,
