@@ -120,6 +120,24 @@ it('saves only changed billing categories and never changes the global text or e
   expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationSms');
 });
 
+it('requires a usable alternative before clearing the only billing email destination', async () => {
+  const noAccountEmail = { ...customer, email: '' };
+  prefs = { ...prefs, billingEmail: 'billing@example.invalid', emailEnabled: true, smsEnabled: true,
+    invoiceChannels: ['email'], paymentIssueChannels: ['email'], billingReminderChannels: ['email'], paymentConfirmationChannels: ['email'] };
+  render(<BillingTab customer={noAccountEmail} />);
+  await screen.findByRole('group', { name: 'Invoices' });
+  fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  expect(screen.getByRole('alert')).toHaveTextContent(/Add an available Text or App option/);
+  expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
+  for (const group of ['Invoices', 'Payment problems', 'Billing reminders', 'Payment receipts']) fireEvent.click(billingChannel(group, 'Text'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await screen.findByRole('button', { name: 'Saved', exact: true });
+  expect(api.updateNotificationPrefs).toHaveBeenCalledWith(expect.objectContaining({
+    billingEmail: '', invoiceChannels: ['email', 'sms'], paymentIssueChannels: ['email', 'sms'], billingReminderChannels: ['email', 'sms'], paymentConfirmationChannels: ['email', 'sms'],
+  }));
+});
+
 it('prevents removing the final channel with mouse or keyboard activation', async () => {
   prefs.smsEnabled = true;
   render(<BillingTab customer={customer} />);

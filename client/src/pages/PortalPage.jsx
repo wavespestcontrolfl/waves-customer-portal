@@ -5835,6 +5835,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const [yearFilter, setYearFilter] = useState('All');
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
+  const [savedBillingEmail, setSavedBillingEmail] = useState('');
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
   const [invoiceChannel, setInvoiceChannel] = useState('sms');
   const [savedInvoiceChannel, setSavedInvoiceChannel] = useState('sms');
@@ -5975,6 +5976,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         setBillingPrefsLoadError(!prefsData);
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
+          setSavedBillingEmail(prefsData.billingEmail || '');
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
           setInvoiceChannel(prefsData.invoiceChannel || 'sms');
           setSavedInvoiceChannel(prefsData.invoiceChannel || 'sms');
@@ -6633,7 +6635,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // portal-wide email opt-out (Settings → Email Messages off): the receipt
   // senders skip their email legs when email_enabled=false, so an email-only
   // channel would suppress the text AND never email — the notice just drops.
-  const hasBillingEmail = !!(String(billingEmail || '').trim() || customer?.email) && emailPrefEnabled;
+  const hasBillingEmail = !!(String(billingEmail || '').trim() || String(customer?.email || '').trim()) && emailPrefEnabled;
   const billingChannelAvailability = {
     email: hasBillingEmail,
     sms: smsPrefEnabled && !!String(customer?.phone || '').trim(),
@@ -6655,6 +6657,16 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 
   const saveBillingPrefs = () => {
     if (billingPrefsSaving) return;
+    const leavesEmailWithoutRecipient = BILLING_CHANNEL_FIELDS.some((field) => {
+      const channels = billingChannels[field.key] || [];
+      return channels.includes('email') && !channels.some((channel) => channel !== 'email'
+        && billingChannelAvailability[channel]
+        && (field.key !== 'paymentConfirmationChannels' || channel !== 'sms' || !paymentSmsOff));
+    });
+    if (billingChannelsAvailable && String(savedBillingEmail).trim() && !String(billingEmail).trim() && !hasBillingEmail && leavesEmailWithoutRecipient) {
+      setBillingPrefsStatus('email-required');
+      return;
+    }
     if (billingChannelsAvailable && BILLING_CHANNEL_FIELDS.some((field) => !(billingChannels[field.key] || []).length)) {
       setBillingPrefsStatus('error');
       return;
@@ -6706,6 +6718,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setSavedInvoiceChannel(invoiceChannel);
           setSavedPaymentIssueChannel(paymentIssueChannel);
         }
+        setSavedBillingEmail(billingEmail);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was
@@ -7630,9 +7643,11 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           </details>
         )}
 
-        {billingPrefsStatus === 'error' && (
+        {(billingPrefsStatus === 'error' || billingPrefsStatus === 'email-required') && (
           <div role="alert" style={{ marginBottom: 10, fontSize: 14, fontWeight: 700, color: B.red, background: `${B.red}12`, borderRadius: 8, padding: '10px 14px' }}>
-            Couldn&rsquo;t save your billing preferences. Please try again.
+            {billingPrefsStatus === 'email-required'
+              ? 'Add an available Text or App option to each Email-only category before clearing this address.'
+              : 'Couldn’t save your billing preferences. Please try again.'}
           </div>
         )}
         <button type="submit" disabled={billingPrefsSaving} data-glass-accent="" style={{
