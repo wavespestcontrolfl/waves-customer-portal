@@ -99,3 +99,23 @@ test('other categories keep their fixed interval', async () => {
   const result = await executeTool('find_overdue_customers', { service_category: 'pest' });
   expect(result.overdue_customers.map((c) => c.expected_frequency_days)).toEqual([90]);
 });
+
+test('a one_time T&S add-on line is not the customer\'s active plan (codex r18)', async () => {
+  // The harness returns rows, so pin the SQL the add-on branch of the
+  // active-plan subquery is built with: the one add-on-line predicate the
+  // write gate and the picker read.
+  const seen = [];
+  const original = db.raw;
+  db.raw = (sql, ...rest) => { seen.push(String(sql)); return original(sql, ...rest); };
+  try {
+    db.__state.rows = [];
+    await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  } finally {
+    db.raw = original;
+  }
+  const { ADDON_LINE_IS_PLAN_SQL } = require('../services/service-library');
+  const planSql = seen.find((sql) => /as active_plan_service_key/.test(sql));
+  expect(planSql).toBeDefined();
+  expect(planSql).toContain('FROM scheduled_service_addons');
+  expect(planSql).toContain(ADDON_LINE_IS_PLAN_SQL);
+});

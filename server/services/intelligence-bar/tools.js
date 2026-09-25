@@ -605,12 +605,15 @@ async function findOverdueCustomers(input) {
             WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
           UNION ALL
-          -- Plan carried as an add-on line of a combined recurring visit.
+          -- Plan carried as an add-on line of a combined recurring visit (a
+          -- one_time add-on line is not a plan — service-library's
+          -- ADDON_LINE_IS_PLAN_SQL, codex r18 on #4786).
           SELECT services.service_key, scheduled_services.scheduled_date FROM scheduled_service_addons
             JOIN scheduled_services ON scheduled_services.id = scheduled_service_addons.scheduled_service_id
             JOIN services ON services.id = scheduled_service_addons.service_id
             WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
+              AND ${require('../service-library').ADDON_LINE_IS_PLAN_SQL}
         ) plan ORDER BY plan.scheduled_date ASC LIMIT 1) as active_plan_service_key`, [
           ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...TERMINAL_STATUSES,
           ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...TERMINAL_STATUSES,

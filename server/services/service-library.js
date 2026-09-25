@@ -331,11 +331,14 @@ async function getServices({ category, billingType, isActive, isArchived, includ
             customerId,
           );
         }).orWhereExists(function () {
-          // Held as an add-on line of a combined recurring visit.
+          // Held as an add-on line of a combined recurring visit (a one_time
+          // add-on line is not a plan — the same predicate the write gate
+          // applies, so the picker never offers what the save refuses).
           whereCustomerHoldsService(
             this.select(db.raw('1')).from('scheduled_service_addons')
               .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
-              .whereRaw('scheduled_service_addons.service_id = services.id'),
+              .whereRaw('scheduled_service_addons.service_id = services.id')
+              .whereRaw(ADDON_LINE_IS_PLAN_SQL),
             customerId,
           );
         });
@@ -385,11 +388,18 @@ async function getServices({ category, billingType, isActive, isArchived, includ
   return { services, total: parseInt(countResult.total, 10), limit: safeLimit, offset: safeOffset };
 }
 
+// An add-on line is part of a PLAN only when it is not its own one_time line
+// (admin-schedule lineDueOnRecurringDate: a NULL pattern rides the parent
+// visit's cadence). The write gate, the sellable picker and the Intelligence
+// Bar overdue scan all read this one predicate (codex r17/r18 on #4786).
+const ADDON_LINE_IS_PLAN_SQL = "(scheduled_service_addons.recurring_pattern IS NULL OR scheduled_service_addons.recurring_pattern <> 'one_time')";
+
 // The one "customer is still on this (retired) plan" test: a live recurring
 // visit on the service, as its primary line or an add-on line (callers join
-// scheduled_service_addons for the latter) — waveguard-existing-services' active-recurring
-// predicate (TERMINAL_STATUSES + is_recurring). A completed, skipped or
-// one-off history row does not grandfather anyone (codex r13 on #4786).
+// scheduled_service_addons for the latter and add ADDON_LINE_IS_PLAN_SQL) —
+// waveguard-existing-services' active-recurring predicate (TERMINAL_STATUSES
+// + is_recurring). A completed, skipped or one-off history row does not
+// grandfather anyone (codex r13 on #4786).
 function whereCustomerHoldsService(qb, customerId) {
   const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
   return qb
@@ -432,17 +442,13 @@ async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes }
         db('scheduled_services').whereIn('scheduled_services.service_id', retiredIds),
         String(customerId),
       ).distinct('scheduled_services.service_id').pluck('scheduled_services.service_id'),
-      // Held as an add-on line of a combined recurring visit. The line rides
-      // its parent's cadence unless it carries its own pattern, and a
-      // one_time line is not a plan (admin-schedule lineDueOnRecurringDate)
-      // — codex r17 on #4786.
+      // Held as an add-on line of a combined recurring visit (a one_time
+      // add-on line is not a plan — codex r17 on #4786).
       ...await whereCustomerHoldsService(
         db('scheduled_service_addons')
           .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
           .whereIn('scheduled_service_addons.service_id', retiredIds)
-          .where((line) => line
-            .whereNull('scheduled_service_addons.recurring_pattern')
-            .orWhereNot('scheduled_service_addons.recurring_pattern', 'one_time')),
+          .whereRaw(ADDON_LINE_IS_PLAN_SQL),
         String(customerId),
       ).distinct('scheduled_service_addons.service_id').pluck('scheduled_service_addons.service_id'),
     ]
@@ -886,6 +892,7 @@ module.exports = {
   serviceDurationMinutes,
   getServices,
   retiredServicesNotHeldBy,
+  ADDON_LINE_IS_PLAN_SQL,
   getServiceById,
   getServiceByKey,
   createService,

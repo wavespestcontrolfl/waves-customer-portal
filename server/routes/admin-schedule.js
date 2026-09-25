@@ -7090,22 +7090,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    // Retired-for-sale catalog rows (quarterly T&S, retired 2026-09-24) book
-    // only for a customer already on that plan — the same exception the
-    // new-appointment picker applies (service-library getServices sellable).
-    const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
-      customerId,
-      serviceIds: [serviceId, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.serviceId) : [])],
-      // Names too, id or not: an ID-less add-on persists by name alone.
-      serviceTypes: [serviceType, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.name || a?.serviceName) : [])],
-    });
-    if (notHeldRetired.length) {
-      return res.status(409).json({
-        error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
-        code: 'RETIRED_SERVICE_NOT_SELLABLE',
-      });
-    }
-
     // Duplicate-series guard: a second ACTIVE recurring series of the same
     // service family for one customer is almost always a booking mistake —
     // the verified cause of customers holding two live quarterly series
@@ -7255,6 +7239,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
           });
         }
       }
+    }
+    // Retired-for-sale catalog rows (quarterly T&S, retired 2026-09-24) book
+    // only for a customer already on that plan — the same exception the
+    // new-appointment picker applies (service-library getServices sellable).
+    // Runs AFTER the linked estimate is loaded (codex r18 P1): an ACCEPTED
+    // quote carrying the retired plan is grandfathering evidence in its own
+    // right (retiredSaleKeysVouchedByAcceptedEstimate) — "Mark Won, then
+    // book" has no live visit yet for the holder test to find.
+    const vouchedByQuote = retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate);
+    const notHeldRetired = (await require('../services/service-library').retiredServicesNotHeldBy({
+      customerId,
+      serviceIds: [serviceId, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.serviceId) : [])],
+      // Names too, id or not: an ID-less add-on persists by name alone.
+      serviceTypes: [serviceType, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.name || a?.serviceName) : [])],
+    })).filter((r) => !vouchedByQuote.has(r.service_key));
+    if (notHeldRetired.length) {
+      return res.status(409).json({
+        error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+        code: 'RETIRED_SERVICE_NOT_SELLABLE',
+      });
     }
     // Booking from a phone "yes": a sent/viewed quote the customer accepted
     // verbally gets its win recorded AFTER the appointment commits (below), so
@@ -11759,23 +11763,51 @@ async function computeUpdateDetailsFinancialPlan({
   };
 }
 
-// The retired-for-sale gate's inputs for a visit EDIT (codex r13/r17 on
+// The retired-for-sale gate's inputs for a visit EDIT (codex r13/r17/r18 on
 // #4786): only what the save ADDS to the visit — catalog ids not already on
 // it (primary or add-on line), a changed primary label, and the name of every
 // ID-less add-on line not already on the visit by name. A grandfathered
-// visit that keeps its own lines is never re-checked.
-function retiredGateInputsForVisitEdit({ current, currentAddons = [], postedCatalogIds = [], postedAddonNames = [], serviceType }) {
+// visit that keeps its own lines is never re-checked — EXCEPT when the edit
+// turns a one-off visit into a recurring one (`becomesRecurring`): that
+// sells the retained lines as a plan, so they go through the gate as if
+// newly added (a one-off retired visit can never become a new retired
+// series for a customer not on that plan).
+function retiredGateInputsForVisitEdit({
+  current, currentAddons = [], postedCatalogIds = [], postedAddonNames = [], serviceType, becomesRecurring = false,
+}) {
   const norm = (v) => String(v || '').trim().toLowerCase();
   const onVisit = new Set([current.service_id, ...currentAddons.map((a) => a?.service_id)].filter(Boolean).map(String));
   const namesOnVisit = new Set(currentAddons.map((a) => norm(a?.service_name)).filter(Boolean));
   const renamed = typeof serviceType === 'string' && !!serviceType.trim() && norm(serviceType) !== norm(current.service_type);
+  const retainedIds = becomesRecurring ? [...onVisit] : [];
+  const retainedNames = becomesRecurring
+    ? [current.service_type, ...currentAddons.filter((a) => !a?.service_id).map((a) => a?.service_name)]
+      .filter((name) => typeof name === 'string' && name.trim())
+    : [];
   return {
-    serviceIds: postedCatalogIds.filter((id) => !onVisit.has(String(id))),
+    serviceIds: [...new Set([...postedCatalogIds.filter((id) => !onVisit.has(String(id))).map(String), ...retainedIds])],
     serviceTypes: [
       ...(renamed ? [serviceType] : []),
       ...postedAddonNames.filter((name) => !namesOnVisit.has(norm(name))),
+      ...retainedNames,
     ],
   };
+}
+
+// Retired-sale catalog keys an ACCEPTED linked estimate vouches for on a
+// booking (codex r18 P1 on #4786). Every acceptance path — the customer
+// PUT /accept (retiredTreeShrubRequoteNeeded), manual acceptance
+// (estimate-manual-acceptance) and POST /'s own preflight for an unaccepted
+// quote — refuses the retired 4x T&S plan, so an accepted quote that still
+// carries it predates the retirement or belongs to the customer already on
+// it: booking its visits is honoring that sale, not making a new one. An
+// open (sent/viewed) quote vouches for nothing.
+function retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate) {
+  if (!linkedEstimate || linkedEstimate.status !== 'accepted') return new Set();
+  let data = linkedEstimate.estimate_data || {};
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+  const { recurringTreeShrubRowAtRetiredCadence } = require('./estimate-public');
+  return new Set(recurringTreeShrubRowAtRetiredCadence(data) ? ['tree_shrub_quarterly'] : []);
 }
 
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
@@ -12335,13 +12367,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // service_type and service_id are written independently, so a changed
     // label goes through the gate by name whether or not an id rides along.
     const labelPosted = typeof serviceType === 'string' && !!serviceType.trim();
-    if (postedCatalogIds.length || labelPosted || postedAddonNames.length) {
-      const current = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_id', 'service_type');
+    // Making the visit recurring sells its retained lines as a plan (codex
+    // r18 P1): confirmed against the row's own is_recurring below.
+    const recurrencePosted = !!isRecurring;
+    if (postedCatalogIds.length || labelPosted || postedAddonNames.length || recurrencePosted) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_id', 'service_type', 'is_recurring');
       if (current) {
-        const currentAddons = postedCatalogIds.length || postedAddonNames.length
+        const becomesRecurring = recurrencePosted && !current.is_recurring;
+        const currentAddons = postedCatalogIds.length || postedAddonNames.length || becomesRecurring
           ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).select('service_id', 'service_name')
           : [];
-        const gate = retiredGateInputsForVisitEdit({ current, currentAddons, postedCatalogIds, postedAddonNames, serviceType });
+        const gate = retiredGateInputsForVisitEdit({ current, currentAddons, postedCatalogIds, postedAddonNames, serviceType, becomesRecurring });
         const notHeldRetired = gate.serviceIds.length || gate.serviceTypes.length
           ? await require('../services/service-library').retiredServicesNotHeldBy({ customerId: current.customer_id, ...gate })
           : [];
@@ -23664,6 +23700,7 @@ router._test = {
   propagatePriceServiceToFollowingSiblings,
   PRICE_SERVICE_OVERRIDE_KEYS,
   retiredGateInputsForVisitEdit,
+  retiredSaleKeysVouchedByAcceptedEstimate,
 };
 
 module.exports = router;

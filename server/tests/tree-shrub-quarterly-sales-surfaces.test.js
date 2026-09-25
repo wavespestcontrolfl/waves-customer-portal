@@ -123,7 +123,16 @@ describe('service library list — new-appointment picker (codex r11)', () => {
       ['scheduled_services.is_recurring', true],
       // ...or as an add-on line of a combined recurring visit (codex r14).
       'scheduled_service_addons', ['join', 'scheduled_services'], 'scheduled_service_addons.service_id = services.id',
+      // ...that is not its own one_time line — the write gate's predicate,
+      // so the picker never offers what the save refuses (codex r18).
+      require('../services/service-library').ADDON_LINE_IS_PLAN_SQL,
     ]));
+  });
+
+  test('the one add-on-line predicate excludes only one_time lines (codex r18)', () => {
+    const { ADDON_LINE_IS_PLAN_SQL } = require('../services/service-library');
+    expect(ADDON_LINE_IS_PLAN_SQL).toMatch(/scheduled_service_addons\.recurring_pattern IS NULL/);
+    expect(ADDON_LINE_IS_PLAN_SQL).toMatch(/scheduled_service_addons\.recurring_pattern <> 'one_time'/);
   });
 
   test('a non-uuid customer id is ignored', async () => {
@@ -156,15 +165,8 @@ describe('new-appointment write boundary (codex r12)', () => {
       const b = {
         join() { return this; },
         whereIn(col, vals) { q.filters[bare(col)] = vals; return this; },
-        where(col, val) {
-          if (typeof col === 'function') {
-            const grouped = { whereNull(c) { q.filters[`null:${bare(c)}`] = true; return this; }, orWhereNot(c, v) { q.filters[`not:${bare(c)}`] = [v]; return this; } };
-            col.call(grouped, grouped);
-            return this;
-          }
-          q.filters[bare(col)] = [val];
-          return this;
-        },
+        where(col, val) { q.filters[bare(col)] = [val]; return this; },
+        whereRaw(sql) { q.filters[`raw:${sql}`] = true; return this; },
         whereNotIn(col, vals) { q.filters[`not:${bare(col)}`] = vals; return this; },
         distinct() { return this; },
         select() {
@@ -175,9 +177,9 @@ describe('new-appointment write boundary (codex r12)', () => {
         pluck() {
           const live = q.filters.is_recurring?.[0] === true && (q.filters['not:status'] || []).includes('completed');
           const via = table === 'scheduled_service_addons' ? 'addon' : 'primary';
+          const { ADDON_LINE_IS_PLAN_SQL } = require('../services/service-library');
           const lineIsPlan = via !== 'addon'
-            || (q.filters['null:recurring_pattern'] === true && (q.filters['not:recurring_pattern'] || []).includes('one_time')
-              && (addonPattern === null || addonPattern !== 'one_time'));
+            || (q.filters[`raw:${ADDON_LINE_IS_PLAN_SQL}`] === true && addonPattern !== 'one_time');
           return Promise.resolve(live && lineIsPlan && via === heldVia && heldBy.includes(q.filters.customer_id[0]) ? [RETIRED_ID] : []);
         },
       };
