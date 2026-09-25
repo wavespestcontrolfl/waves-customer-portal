@@ -171,6 +171,12 @@ router.post('/:id/cancel', async (req, res, next) => {
       } catch (seamErr) {
         require('../services/logger').error(`[admin-services] cancel void/reversal seam failed for ${req.params.id}: ${seamErr.message}`);
       }
+      // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
+      // inside a 9-application plan adds one back at the end of the series.
+      // Gated, failure-isolated, post-commit.
+      await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+        db: require('../models/db'), serviceId: req.params.id, source: 'admin-services-v1-cancel',
+      });
     }
 
     res.json({

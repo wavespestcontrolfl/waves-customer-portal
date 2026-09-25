@@ -2803,6 +2803,13 @@ const gates = {
   // it would insert, inside a transaction it rolls back, and logs the count
   // only — no writes). This entry is for logGateStatus only.
   recurringSeriesTopUp: process.env.GATE_RECURRING_SERIES_TOPUP === 'true',
+  // Post-cancel recurring-series reseed (owner ruling 2026-09-24): a
+  // single-visit cancel inside a counted plan adds one visit back at the
+  // END of the series (services/recurring-series-cancel-reseed.js →
+  // routes/admin-schedule.js#reseedRecurringSeriesAfterCancel). Ships DARK:
+  // off unless exactly 'true'. Read live per call by
+  // cancelReseedsRecurringLive(); this entry is for logGateStatus only.
+  cancelReseedsRecurring: process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -2843,6 +2850,12 @@ function discountStackingLive() {
 // on what "on" means.
 function recurringSeriesTopUpLive() {
   return process.env.GATE_RECURRING_SERIES_TOPUP === 'true';
+}
+
+// Same live-read contract as recurringSeriesTopUpLive: a flip is a live
+// kill/enable with no redeploy. Kill = unset GATE_CANCEL_RESEEDS_RECURRING.
+function cancelReseedsRecurringLive() {
+  return process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true';
 }
 
 function leadInspectionLinkLive() {
@@ -2908,5 +2921,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive };
 // gates 1775330914

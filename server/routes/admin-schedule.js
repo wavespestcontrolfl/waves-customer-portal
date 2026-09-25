@@ -108,6 +108,7 @@ const PREPAID_STAMP_REFUSALS = [
 const {
   auditRecurringScheduleAnomalies,
   auditRecurringScheduleCoverage,
+  readStoppedRecurringRoots,
 } = require('../services/recurring-schedule-audit');
 const {
   detectWaveGuardPlanKeys,
@@ -9864,6 +9865,12 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // the voids restore any applied credit) — shared hook across
             // every cancellation path, so none can forget it.
             await voidOpenInvoicesForCancelledService(id);
+            // Counted-plan reseed (owner ruling 2026-09-24): a single-visit
+            // cancel inside a 9-application plan adds one back at the end of
+            // the series. Gated, failure-isolated, post-commit.
+            await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+              db, serviceId: id, source: 'admin-schedule-bulk-cancel',
+            });
             // One-time card-on-file hold: charge in-window late-cancel fee or
             // release outside it — same as the single-cancel paths.
             // payload.waiveCardHoldFee = business-initiated cancel, release
@@ -17827,6 +17834,133 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
   return result;
 }
 
+// ---- Post-cancel reseed (owner ruling 2026-09-24) -------------------------
+//
+// A single-visit cancel inside a counted plan (9 lawn applications a year,
+// 4 quarterly pest visits) must not silently shorten the plan: add ONE visit
+// back at the END of the series. Reached only from the four single-visit
+// cancel surfaces via services/recurring-series-cancel-reseed.js, after
+// their commit — plan-level cancels ('following' / 'series' scope,
+// cancel-plan, cancel-signup, offboarding) stop the series and never call
+// this.
+//
+// Lock order = the completion path's (runRecurringSeriesMaintenance) and the
+// top-up's (topUpRecurringSeriesWithLocks): per-parent maintenance advisory
+// lock, then the customer-comms lock, then the customers row FOR UPDATE —
+// taken BEFORE any scheduled_services write, so it can never invert against
+// the series cancel / merge-undo paths that share those keys.
+//
+// Rule: the plan's term is the 365-day window (anchored on the series root)
+// that contains the cancelled visit's date; the expected count is the
+// pattern's visits-per-year (custom: 365 / recurring_interval_days). When
+// the term now holds FEWER counting visits than that, the series gets one
+// more via reconcileRecurringSeriesVisitCount (targetCount = live upcoming +
+// 1) — the same writer the "visit count" editor and the ongoing top-up use,
+// so cadence, blackout, weekend, add-on mirror and pricing rules cannot
+// drift. Refusals (all reported as `skipped`, never thrown):
+//   - not a cancelled, recurring row / no series root;
+//   - the series was STOPPED (recurring_plan_alerts ledger: cancel_series /
+//     let_lapse — readStoppedRecurringRoots, the same reader the accepted-
+//     plan audit and the converter consult);
+//   - the customer is deleted / held / inactive / churned
+//     (TOPUP_CUSTOMER_INELIGIBILITY_RULES, FOR UPDATE like the top-up);
+//   - annual-prepay series, family on plan hold, duplicate series
+//     (TOPUP_SERIES_INELIGIBILITY_RULES);
+//   - the term is still whole (a deliberate "visit count" trim already
+//     reconciled it, or the cancelled visit was outside the counted term);
+//   - the reconciler could not place a date (at MAX_SERIES_VISIT_COUNT, no
+//     placeable day).
+// An ongoing series keeps its flag on the added row; a counted (non-ongoing)
+// series adds a non-ongoing row, exactly as the visit-count editor does.
+async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
+  const {
+    plannedVisitsPerYearForSeries, termWindowContaining, countTermVisits,
+  } = require('../services/recurring-series-cancel-reseed');
+  const cols = await trx('scheduled_services').columnInfo();
+  const cancelled = await trx('scheduled_services').where({ id: cancelledServiceId }).first();
+  if (!cancelled) return { added: [], skipped: 'not_found' };
+  if (cancelled.status !== 'cancelled') return { added: [], skipped: 'not_cancelled' };
+  if (cancelled.is_recurring !== true) return { added: [], skipped: 'not_recurring' };
+  const parentId = cancelled.recurring_parent_id || cancelled.id;
+  await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+  await lockCustomerComms(trx, cancelled.customer_id);
+  let parent = await trx('scheduled_services').where({ id: parentId }).first();
+  if (!parent) return { added: [], skipped: 'no_series_root' };
+  if (parent.recurring_parent_id) return { added: [], skipped: 'not_series_root' };
+  // Series-scope price/service overrides beat the parent's own columns —
+  // same overlay the completion path and the top-up apply.
+  parent = overlayRecurringTemplateOverrides(parent, cols);
+  if (parent.is_recurring !== true || !parent.recurring_pattern) return { added: [], skipped: 'not_recurring' };
+  if (String(parent.customer_id) !== String(cancelled.customer_id)) return { added: [], skipped: 'owner_mismatch' };
+
+  const stopped = await readStoppedRecurringRoots(trx, [parent.customer_id]);
+  if (stopped.has(parentId)) return { added: [], skipped: 'series_stopped' };
+
+  const customer = await trx('customers').where({ id: parent.customer_id })
+    .forUpdate()
+    .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
+  const customerSkip = topupCustomerSkipReason(customer);
+  if (customerSkip) return { added: [], skipped: customerSkip };
+  const seriesSkip = await topupSeriesSkipReason(trx, parent, parentId, cols);
+  if (seriesSkip) return { added: [], skipped: seriesSkip };
+
+  const expected = plannedVisitsPerYearForSeries(parent);
+  if (!expected) return { added: [], skipped: 'no_planned_count' };
+  const window = termWindowContaining(parent.scheduled_date, cancelled.scheduled_date);
+  if (!window) return { added: [], skipped: 'no_term_window' };
+  const seriesRows = await trx('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+    .select('id', 'status', 'scheduled_date');
+  const counting = countTermVisits(seriesRows, window);
+  if (counting >= expected) return { added: [], skipped: 'term_still_whole', counting, expected };
+
+  const live = await liveUpcomingSeriesVisits(trx, parentId);
+  if (live.length >= MAX_SERIES_VISIT_COUNT) return { added: [], skipped: 'at_max_visit_count', counting, expected };
+  const ongoingSeries = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
+  const result = await reconcileRecurringSeriesVisitCount(trx, {
+    parentId, parent, cols,
+    targetCount: live.length + 1,
+    actorId: null,
+    // Extend-only by construction (target = live + 1): the trim branch, the
+    // only consumer of the claim token, is unreachable.
+    claimToken: null,
+    baselineCount: null,
+    ongoingSeries,
+  });
+  return {
+    added: result.added,
+    skipped: result.added.length ? null : 'not_placed',
+    counting, expected, parentId, customerId: parent.customer_id,
+  };
+}
+
+// The writing wrapper — same shape as topUpRecurringSeries: ALWAYS opens and
+// commits its OWN transaction, then registers a reminder for every added
+// visit once it's visible to a fresh connection (no confirmation SMS, no
+// other customer comms — the office's cancellation notice already went out
+// for the cancelled visit; the added one is a plain future occurrence).
+async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { source = 'cancel' } = {}) {
+  if (conn.isTransaction) {
+    throw new Error('reseedRecurringSeriesAfterCancel must not be called with an already-open transaction — it registers reminders through a FRESH connection right after its own commit. Call with the plain db handle after the cancel committed.');
+  }
+  const result = await conn.transaction((trx) => reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId));
+  for (const child of result.added) {
+    await registerSpawnedVisitReminder({
+      scheduledServiceId: child.id,
+      customerId: child.customerId,
+      scheduledDate: child.date,
+      windowStart: child.windowStart,
+      serviceType: child.serviceType,
+      source: 'recurring_cancel_reseed',
+    });
+    // Same terminal re-check the auto-extend and the top-up run: a series
+    // cancel can take the per-parent lock right after our commit.
+    await cancelSpawnedReminderIfVisitTerminal(conn, child.id, 'recurring-cancel-reseed');
+    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (term had ${result.counting}/${result.expected})`);
+  }
+  return result;
+}
+
 // PUT /api/admin/schedule/:id/status — change status with automations.
 //
 // Second call site to migrate to services/job-status.js#transitionJobStatus
@@ -23587,6 +23721,10 @@ module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
 module.exports.topUpRecurringSeries = topUpRecurringSeries;
 module.exports.topUpRecurringSeriesLocked = topUpRecurringSeriesLocked;
 module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
+// Post-cancel counted-plan reseed (owner ruling 2026-09-24) — consumed lazily
+// by services/recurring-series-cancel-reseed.js from the four single-visit
+// cancel surfaces, same avoid-a-route-load-cycle reason as above.
+module.exports.reseedRecurringSeriesAfterCancel = reseedRecurringSeriesAfterCancel;
 // Shared "your appointment moved" notice (arrival-window copy, recipient
 // routing, terminal/slot recheck, guarded reminder close/re-arm) — consumed
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go

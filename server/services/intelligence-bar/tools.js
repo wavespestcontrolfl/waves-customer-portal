@@ -3089,6 +3089,12 @@ async function cancelAppointment(input, actionContext = {}) {
   } catch (e) {
     logger.error(`[intelligence-bar] cancel follow-through failed for ${appointment_id}: ${e.message}`);
   }
+  // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
+  // inside a 9-application plan adds one back at the end of the series.
+  // Gated, failure-isolated, post-commit.
+  await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+    db, serviceId: appointment_id, source: 'intelligence-bar-cancel',
+  });
 
   const customer = await db('customers').where('id', appt.customer_id).first();
 
