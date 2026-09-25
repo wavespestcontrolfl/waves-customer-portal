@@ -242,4 +242,59 @@ describe('mintEmailReviewCardsFenced — V1/V2 email disagreement refresh (codex
     const heldClearCall = db._chain.update.mock.calls.find((c) => c[0] && c[0].held_email === '');
     expect(heldClearCall).toBeUndefined();
   });
+
+  // Codex r1 P1 (round 2): a stale DECISIVE arbiter verdict from an earlier
+  // cycle's existing card must never survive the refresh — the whole point
+  // of applyEmailDisagreementHold is that no heuristic (including a prior
+  // cycle's arbiter) settles a disagreement. The refresh's ...existingPayload
+  // spread previously let the OLD row's arbiter field ride through untouched.
+  test('a stale decisive arbiter verdict on the EXISTING card does not survive the refresh', async () => {
+    mockFirstResult = {
+      id: 'existing-card-1',
+      payload: JSON.stringify({
+        flag: 'email_unverified',
+        email_candidates: [{ value: 'stale@example.com' }],
+        // An earlier cycle's arbiter decisively adopted one address —
+        // exactly the class of bug (a heuristic silently settling a
+        // disagreement) this whole feature exists to prevent.
+        arbiter: { verdict: 'adopt', chosen_value: 'stale@example.com', confidence: 0.95 },
+      }),
+    };
+    // This cycle's fresh card carries NO arbiter evidence at all (the
+    // dictation decoder did not run this pass) — the refresh must not
+    // fall back to the stale row's decisive verdict.
+    await mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [DISAGREEMENT_CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    const payloadUpdateCall = db._chain.update.mock.calls.find((c) => c[0] && typeof c[0].payload === 'string');
+    const mergedPayload = JSON.parse(payloadUpdateCall[0].payload);
+    expect(mergedPayload.arbiter).toBeUndefined();
+  });
+
+  test('a demoted arbiter verdict from THIS cycle overwrites a stale decisive one on the existing card', async () => {
+    mockFirstResult = {
+      id: 'existing-card-1',
+      payload: JSON.stringify({
+        flag: 'email_unverified',
+        arbiter: { verdict: 'adopt', chosen_value: 'stale@example.com', confidence: 0.95 },
+      }),
+    };
+    const CARD_WITH_DEMOTED_ARBITER = {
+      call_log_id: 'call-1',
+      reason_code: 'email_unverified',
+      payload: JSON.stringify({
+        flag: 'email_unverified',
+        email_candidates: [{ value: 'janedoee@example.com' }, { value: 'janedoe@example.com' }],
+        email_disagreement: { v1: 'janedoee@example.com', v2: 'janedoe@example.com' },
+        // applyEmailDisagreementHold already demoted this cycle's arbiter.
+        arbiter: { verdict: 'review', chosen_value: 'janedoee@example.com', confidence: 0.95 },
+      }),
+    };
+    await mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [CARD_WITH_DEMOTED_ARBITER], callSid: 'CA1', invalidateClaims: false,
+    });
+    const payloadUpdateCall = db._chain.update.mock.calls.find((c) => c[0] && typeof c[0].payload === 'string');
+    const mergedPayload = JSON.parse(payloadUpdateCall[0].payload);
+    expect(mergedPayload.arbiter.verdict).toBe('review');
+  });
 });

@@ -1609,6 +1609,14 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
               email_as_heard: payloadObj.email_as_heard,
               confirmation_question: payloadObj.confirmation_question,
               email_disagreement: payloadObj.email_disagreement,
+              // Codex P1 (round 2): the ...existingPayload spread above would
+              // otherwise let a STALE decisive arbiter verdict from an
+              // earlier cycle survive the refresh — applyEmailDisagreementHold
+              // already demoted THIS cycle's arbiter (adopt/adopt_with_confirmation
+              // → review) before the card reached here, so that demoted value
+              // (or its absence, when this cycle carries no arbiter evidence
+              // at all) must always win, never the existing row's copy.
+              arbiter: payloadObj.arbiter,
               ...(payloadObj.email_release_target !== undefined ? { email_release_target: payloadObj.email_release_target } : {}),
             };
             await trx('triage_items')
