@@ -1495,6 +1495,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const q = serviceSearch.trim();
     if (!q) { setServiceResults([]); setServiceLoading(false); return; }
     setServiceLoading(true);
+    // A response belongs to the customer + query that asked for it (codex
+    // r27): once either changes, the superseded request's response is
+    // dropped instead of overwriting the current customer's results.
+    let superseded = false;
     const handle = setTimeout(async () => {
       try {
         const params = new URLSearchParams();
@@ -1507,6 +1511,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (selectedCustomer?.id) params.set('sellable_customer_id', selectedCustomer.id);
         params.set('limit', '50');
         const r = await adminFetch(`/admin/services?${params}`);
+        if (superseded) return;
         setServiceResults((r.services || []).map((s) => ({
           id: s.id,
           service_key: s.service_key,
@@ -1523,12 +1528,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           retiredForSale: s.retired_for_sale === true,
         })));
       } catch {
-        setServiceResults([]);
+        if (!superseded) setServiceResults([]);
       } finally {
-        setServiceLoading(false);
+        if (!superseded) setServiceLoading(false);
       }
     }, 200);
-    return () => clearTimeout(handle);
+    return () => { superseded = true; clearTimeout(handle); };
   }, [serviceSearch, selectedCustomer?.id]);
 
   // A retired-for-sale line (quarterly T&S) is only offered because the
@@ -1540,6 +1545,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (retiredLinesCustomerRef.current === customerId) return;
     retiredLinesCustomerRef.current = customerId;
     setServices((arr) => (arr.some((line) => line.retiredForSale) ? arr.filter((line) => !line.retiredForSale) : arr));
+    // The previous customer's search results (a retired row among them) are
+    // not offered to the next one while their own search is in flight.
+    setServiceResults([]);
   }, [selectedCustomer?.id]);
 
   useEffect(() => {

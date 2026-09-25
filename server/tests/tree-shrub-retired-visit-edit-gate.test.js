@@ -79,6 +79,53 @@ describe('retiredGateInputsForVisitEdit', () => {
     })).toEqual({ serviceIds: [], serviceTypes: [] });
   });
 
+  test('two stored copies of one add-on each pair with their own posted line for the cadence checks (codex r27)', () => {
+    // A recurring every-60-days visit carries two Standard T&S add-ons on the
+    // same catalog id: one one_time (listed first), one riding the parent.
+    // The save keeps both and turns the parent quarterly: the riding copy is
+    // the retained plan line and must reach the gate; the one_time copy must
+    // not swallow it.
+    const recurring = { ...current, is_recurring: true, service_type: 'Lawn Care', recurring_pattern: 'custom', recurring_interval_days: 60 };
+    const stored = [
+      { id: 'a1', service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: 'one_time', recurring_interval_days: null },
+      { id: 'a2', service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: null, recurring_interval_days: null },
+    ];
+    const expected = { serviceIds: [LIVE_ID], serviceTypes: ['Lawn Care', { label: 'Bi-Monthly Tree & Shrub Care', recurrence: null }] };
+    // Posted in stored order, no row ids: identity pairing in order.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: stored, postedServiceId: null, serviceType: 'Lawn Care', plansRetainedLines: true,
+      postedAddons: [
+        { serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'one_time' },
+        { serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: null },
+      ],
+    })).toEqual(expected);
+    // Posted in the opposite order WITH row ids: each line pairs with its own row.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: stored, postedServiceId: null, serviceType: 'Lawn Care', plansRetainedLines: true,
+      postedAddons: [
+        { id: 'a2', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: null },
+        { id: 'a1', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'one_time' },
+      ],
+    })).toEqual(expected);
+    // Without a parent cadence change, repatterning only the riding copy to
+    // quarterly is read against ITS stored row (null → quarterly), not the
+    // one_time copy's.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring, currentAddons: stored, postedServiceId: LIVE_ID, serviceType: 'Lawn Care',
+      postedAddons: [
+        { id: 'a1', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'one_time' },
+        { id: 'a2', serviceId: LIVE_ID, serviceName: 'Bi-Monthly Tree & Shrub Care', recurringPattern: 'quarterly' },
+      ],
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: [{ label: 'Bi-Monthly Tree & Shrub Care', recurrence: { pattern: 'quarterly', intervalDays: null } }] });
+    // A posted line whose row id names a stored row of a DIFFERENT service is
+    // a changed line: the new service is gated as added, never paired by id.
+    expect(retiredGateInputsForVisitEdit({
+      current, currentAddons: [{ id: 'a1', service_id: LIVE_ID, service_name: 'Bi-Monthly Tree & Shrub Care', recurring_pattern: null }],
+      postedServiceId: LIVE_ID, serviceType: 'Quarterly Pest Control',
+      postedAddons: [{ id: 'a1', serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null }],
+    })).toEqual({ serviceIds: [RETIRED_ID], serviceTypes: [] });
+  });
+
   test('added catalog ids and a changed primary label are gated too', () => {
     expect(retiredGateInputsForVisitEdit({
       current, currentAddons: [], postedServiceId: RETIRED_ID, postedAddons: [], serviceType: 'Quarterly Tree & Shrub Care',
@@ -242,7 +289,8 @@ describe('retiredGateInputsForVisitEdit', () => {
     // Activation / cadence change is confirmed against the row's own flag and
     // stored pattern, never the posted values alone (codex r18/r20).
     expect(source).toMatch(/\.first\('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_interval_days'\)/);
-    expect(source).toMatch(/\.select\('service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days'\)/);
+    // Stored row ids ride along so a posted line pairs with its own stored row (codex r27).
+    expect(source).toMatch(/\.select\('id', 'service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days'\)/);
     // A changed interval is a cadence change too (codex r23).
     expect(source).toMatch(/const plansRetainedLines = recurrencePosted\s*&& \(!current\.is_recurring \|\| \(!!recurringPattern && recurringPattern !== current\.recurring_pattern\) \|\| intervalChanged\);/);
     expect(source).toMatch(/&& postedInterval !== Number\.parseInt\(current\.recurring_interval_days, 10\);/);

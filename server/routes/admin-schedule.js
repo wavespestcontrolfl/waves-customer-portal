@@ -11810,32 +11810,47 @@ function retiredGateInputsForVisitEdit({
   const pairs = (l, a) => (l.serviceId
     ? String(a?.service_id || '') === String(l.serviceId)
     : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName)));
-  const storedLine = (l) => currentAddons.find((a) => pairs(l, a));
-  const postedFor = (a) => lines.find((l) => pairs(l, a));
-  // ADDED lines are counted by MULTIPLICITY (codex r26 on #4786): each
-  // posted line consumes one stored occurrence of its identity (catalog id,
-  // else an id-less name; the primary line's own id is one occurrence too,
-  // taken first by a same-id posted primary). A posted line with no
-  // occurrence left is a new sale — a second copy of an add-on already on
-  // the visit is gated like any other added line instead of hiding behind
-  // the first.
-  const consumedAddons = new Set();
+  // Posted lines are paired to stored rows ONE-TO-ONE (codex r26/r27 on
+  // #4786): first by the stored row's own id when a posted line carries it
+  // (and the same identity), then by identity — catalog id, else id-less
+  // name — in posted order. EVERY read of "which stored row is this posted
+  // line" (storedLine) and "which posted line keeps this stored row"
+  // (postedFor) goes through the pairing, so two stored copies of one
+  // service (one one_time, one riding the parent) each resolve to their own
+  // posted line, and a posted line left unpaired is an added line — a second
+  // copy of an add-on already on the visit is gated like any new line. The
+  // primary line's own catalog id is one occurrence too: a same-id posted
+  // primary takes it first, else a posted primary that matches a stored
+  // add-on's service moves that row to the primary.
+  const pairedLine = new Map(); // stored row index -> posted line
+  const pairedStored = new Map(); // posted line -> stored row
+  const pairUp = (l, idx) => { pairedLine.set(idx, l); pairedStored.set(l, currentAddons[idx]); };
+  const sameRow = (l, a) => l.id != null && a?.id != null && String(l.id) === String(a.id);
+  for (const l of lines) {
+    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && sameRow(l, a) && pairs(l, a));
+    if (idx >= 0) pairUp(l, idx);
+  }
   let primaryIdFree = !!current.service_id;
-  const takeAddon = (l) => {
-    const idx = currentAddons.findIndex((a, i) => !consumedAddons.has(i) && pairs(l, a));
-    if (idx < 0) return false;
-    consumedAddons.add(idx);
-    return true;
-  };
   const takePrimaryId = (id) => {
     if (!primaryIdFree || !id || String(id) !== String(current.service_id)) return false;
     primaryIdFree = false;
     return true;
   };
-  const primaryAddedIds = postedServiceId && !takePrimaryId(postedServiceId) && !takeAddon({ serviceId: postedServiceId })
-    ? [String(postedServiceId)]
-    : [];
-  const addedLines = lines.filter((l) => !takeAddon(l) && !takePrimaryId(l.serviceId));
+  const primaryAddedIds = [];
+  if (postedServiceId && !takePrimaryId(postedServiceId)) {
+    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && String(a?.service_id || '') === String(postedServiceId));
+    // The moved row stays on the visit as the primary, riding the parent.
+    if (idx >= 0) pairUp({ serviceId: String(postedServiceId), serviceName: null, recurringPattern: null, recurringIntervalDays: null }, idx);
+    else primaryAddedIds.push(String(postedServiceId));
+  }
+  for (const l of lines) {
+    if (pairedStored.has(l)) continue;
+    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && pairs(l, a));
+    if (idx >= 0) pairUp(l, idx);
+  }
+  const storedLine = (l) => pairedStored.get(l) || null;
+  const postedFor = (a) => pairedLine.get(currentAddons.indexOf(a)) || null;
+  const addedLines = lines.filter((l) => !pairedStored.has(l) && !takePrimaryId(l.serviceId));
   // The cadence a retained add-on will actually run at: the reposted line's
   // own, else the stored one (null rides the parent).
   const storedRecurrence = (a) => addonLineRecurrence({ recurringPattern: a?.recurring_pattern, recurringIntervalDays: a?.recurring_interval_days });
@@ -12489,7 +12504,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           && (!current.is_recurring || (!!recurringPattern && recurringPattern !== current.recurring_pattern) || intervalChanged);
         const currentAddons = updates.service_id || postedAddons?.length || plansRetainedLines
           ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
-            .select('service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days')
+            .select('id', 'service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days')
           : [];
         const gate = retiredGateInputsForVisitEdit({
           current, currentAddons, postedServiceId: updates.service_id, postedAddons, serviceType, plansRetainedLines,
@@ -22462,7 +22477,7 @@ router.get('/services-dropdown', async (req, res, next) => {
             excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key),
             // Pickers hide it (the edit dialog keeps it only as the visit's
             // current service); the write routes refuse it for non-holders.
-            ...(RETIRED_SALE_SERVICE_KEYS.has(s.service_key) ? { retiredForSale: true } : {}),
+            ...(RETIRED_SALE_SERVICE_KEYS.has(s.service_key) ? { retiredForSale: true, shortName: s.short_name || null } : {}),
           });
         }
         groups = Object.values(byCategory);

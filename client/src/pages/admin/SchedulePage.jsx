@@ -1933,6 +1933,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // the server recomputes the same exclusion on save.
         excludedFromPercentDiscount: a.excludedFromPercentDiscount === true,
         serviceKey: a.serviceKey || null,
+        // The STORED identity of this line, untouched by picks made in this
+        // session: the retired-row picker filter reads it so the line's own
+        // retired service stays selectable after trying another option.
+        _storedServiceKey: a.serviceKey || null,
+        _storedServiceType: a.serviceName || "",
         serviceCategory: a.serviceCategory || null,
         estimatedDuration: a.estimatedDuration != null ? String(a.estimatedDuration) : "",
         recurringPattern: a.recurringPattern || null,
@@ -4136,13 +4141,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // disabled, with the reason, instead of a confirmed-looking removal
     // that only fails at the PUT.
     removeLocked = false,
-    // The catalog key THIS line currently carries (codex r26 on #4786): a
-    // retired-for-sale row stays listed only for the line that is on it —
-    // the primary's key must not unlock the retired row on every add-on
-    // line's picker, nor hide it from the add-on line that actually is on it.
+    // The STORED catalog key and label of THIS line (codex r26/r27 on
+    // #4786): a retired-for-sale row stays listed only for the line that is
+    // on it — the primary's key must not unlock the retired row on every
+    // add-on line's picker, nor hide it from the add-on line that actually
+    // is on it. A legacy row with no key snapshot is matched by its label
+    // against the row's name or short name, the way the server's holder
+    // lookup recognizes it.
     lineServiceKey = null,
+    lineStoredLabel = null,
   }) => {
     const picking = pickerKey === pickerId;
+    const normLabel = (v) => String(v || "").trim().toLowerCase();
+    const ownRetiredRow = (svc) => (lineServiceKey
+      ? svc.serviceKey === lineServiceKey
+      : !!normLabel(lineStoredLabel)
+        && [svc.name, svc.shortName].some((n) => normLabel(n) === normLabel(lineStoredLabel)));
     return (
       <div
         style={{
@@ -4249,7 +4263,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   const group = {
                     ...rawGroup,
                     items: rawGroup.items.filter(
-                      (svc) => !svc.retiredForSale || (svc.serviceKey && svc.serviceKey === lineServiceKey),
+                      (svc) => !svc.retiredForSale || ownRetiredRow(svc),
                     ),
                   };
                   if (!group.items.length) return null;
@@ -5111,6 +5125,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 // other in this modal can touch.
                 lineDiscountLocked: primaryGrossUnknown,
                 lineServiceKey: service.serviceKey || null,
+                lineStoredLabel: service.serviceType || null,
                 label: serviceLines.length > 0 ? "Primary service" : null,
               })}
               {serviceLines.map((line, idx) =>
@@ -5118,7 +5133,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   {renderServiceLine({
                     pickerId: line._key,
                     serviceType: line.serviceType,
-                    lineServiceKey: line.serviceKey || null,
+                    lineServiceKey: line._storedServiceKey || null,
+                    lineStoredLabel: line._storedServiceType || null,
                     estimatedDuration: line.estimatedDuration,
                     price: line.price,
                     onField: (k, v) => updateLine(line._key, k, v),

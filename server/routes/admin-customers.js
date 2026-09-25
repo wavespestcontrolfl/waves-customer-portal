@@ -1521,7 +1521,11 @@ function annualPrepayRetiredPlanLabels({ coverageServiceType, planLabel, coverag
     coverage_service_type: coverageServiceType,
     coverage_visit_count: visitCount,
   });
-  return [coverageServiceType, planLabel, `${coverageServiceType} ${effectiveCadence} ${visitCount}x`];
+  // The synthesized label carries the cadence the term will actually run at
+  // (explicit, else the label's, else the visit count's — a defaulted
+  // four-visit T&S term reads quarterly), never the raw count token: "4x"
+  // under an explicit bimonthly override is not the retired plan (codex r27).
+  return [coverageServiceType, planLabel, `${coverageServiceType} ${effectiveCadence}`];
 }
 
 function parseDateOnlyInput(value, field) {

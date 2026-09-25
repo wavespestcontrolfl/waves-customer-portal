@@ -329,6 +329,22 @@ describe('retired-plan gate reads the effective count/cadence (codex r17)', () =
     }))).toEqual([]);
   });
 
+  test('an explicit cadence override wins over the visit count (codex r27)', () => {
+    // Staff prepays a current bimonthly plan but overrides the count to four
+    // applications: the term schedules bimonthly, so it is not the retired plan.
+    expect(namesRetired(annualPrepayRetiredPlanLabels({
+      coverageServiceType: 'Tree & Shrub Care', planLabel: 'Tree & Shrub Care Annual Prepay', coverageCadence: 'bimonthly', visitCount: 4,
+    }))).toEqual([]);
+    // A label that names the cadence wins the same way.
+    expect(namesRetired(annualPrepayRetiredPlanLabels({
+      coverageServiceType: 'Bi-Monthly Tree & Shrub Care', planLabel: 'Bi-Monthly Tree & Shrub Care Annual Prepay', coverageCadence: null, visitCount: 4,
+    }))).toEqual([]);
+    // No explicit or label cadence: the count still reads as the term's cadence.
+    expect(namesRetired(annualPrepayRetiredPlanLabels({
+      coverageServiceType: 'Tree & Shrub Care', planLabel: 'Tree & Shrub Care Annual Prepay', coverageCadence: 'nonsense', visitCount: 4,
+    }))).toEqual(['tree_shrub_quarterly']);
+  });
+
   test('both prepay endpoints read the one helper', () => {
     const source = require('fs').readFileSync(require.resolve('../routes/admin-customers'), 'utf8');
     const sites = source.match(/serviceTypes: annualPrepayRetiredPlanLabels\(\{ coverageServiceType, planLabel, coverageCadence, visitCount \}\)/g) || [];
