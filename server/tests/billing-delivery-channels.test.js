@@ -81,4 +81,12 @@ describe('billing delivery channel contract', () => {
     }, { emailAvailable: false });
     expect(payload.invoiceChannels).toEqual(['email', 'push']);
   });
+
+  test.each(['email', 'both'])('legacy billing %s retains the existing SMS fallback when email is unavailable', (legacy) => {
+    const prefs = { billing_channel: legacy };
+    expect(billingChannelsPayload(prefs).billingReminderChannels).toEqual(legacy === 'email' ? ['email'] : ['email', 'sms']);
+    expect(billingChannelsPayload(prefs, { emailAvailable: false }).billingReminderChannels).toEqual(['sms']);
+    expect(billingChannelsPayload({ ...prefs, email_enabled: false }).billingReminderChannels).toEqual(['sms']);
+    expect(billingChannelsPayload({ ...prefs, billing_channels: ['email'], email_enabled: false }, { emailAvailable: false }).billingReminderChannels).toEqual(['email']);
+  });
 });
