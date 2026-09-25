@@ -2980,6 +2980,32 @@ describe('create_pending_estimate server reprice (P1-8)', () => {
     expect(writes).toEqual([]);
   });
 
+  // codex P1 round 4 pre-push (Claude fallback): flagged create_pending_estimate
+  // as possibly NOT covered by the retired-tier guard, since it never calls
+  // retiredTreeShrubTierError directly. It doesn't need to — its SERVER
+  // REPRICE step above runs the full computeEstimate pipeline (same one
+  // compute_estimate uses), which already calls retiredTreeShrubTierError
+  // and returns {error} for a retired tier; createPendingEstimate then
+  // refuses the write on priced.error before any DB write happens. Pinning
+  // this end-to-end so a future refactor of the reprice step can't silently
+  // drop that coverage.
+  test('the server reprice step rejects a retired T&S tier before any write (codex P1 r4 — indirect coverage via computeEstimate)', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineInputs: { homeSqFt: 2000, services: { treeShrub: { tier: 'light' } } },
+    });
+
+    expect(result.error).toMatch(/server reprice failed/i);
+    expect(result.error).toMatch(/not a currently sold program/i);
+    expect(result.error).toMatch(/light/i);
+    expect(writes).toEqual([]);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
   test('writes SERVER-computed totals, null notes, and operator review material in estimate_data', async () => {
     const { database, writes } = makeDatabase();
     mockDb.mockImplementation(database);

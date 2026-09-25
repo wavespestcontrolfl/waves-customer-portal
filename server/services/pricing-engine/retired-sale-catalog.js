@@ -27,15 +27,23 @@
 //   TREE_SHRUB.tiers[key].hidden (light, 2026-09-24) plus the legacy
 //   'premium' alias (12x, fully removed from TREE_SHRUB.tiers — never
 //   resurrected, so it can't carry a `hidden` flag and must be named
-//   explicitly). Every new-sale boundary that accepts a `treeShrub.tier`
-//   value from a caller (property-lookup-v2.js, public-quote.js, the
-//   Intelligence Bar agent estimate tools, customer-pricing-ai.js, the
-//   voice-agent relay files) should reject a non-sellable tier for a NEW
-//   quote/draft — in practice every boundary wired up so far reads the
-//   POSITIVE isSellableTreeShrubTier below instead (codex P1 round 3: the
-//   negative form here wrongly passes a malformed/hallucinated tier value
-//   that was never actually retired, e.g. 'gold'). It is deliberately NOT
-//   applied inside `priceTreeShrub`
+//   explicitly). Every new-sale boundary that accepts a CALLER-CONTROLLED
+//   `treeShrub.tier` value should reject a non-sellable tier for a NEW
+//   quote/draft — property-lookup-v2.js, public-quote.js, and the
+//   Intelligence Bar agent estimate tools all do, reading the POSITIVE
+//   isSellableTreeShrubTier below (codex P1 round 3: the negative form here
+//   wrongly passes a malformed/hallucinated tier value that was never
+//   actually retired, e.g. 'gold'). customer-pricing-ai.js's tree_shrub
+//   variant ladder is closed-enum by construction instead (only
+//   'standard'/'enhanced' entries exist in its own candidate array — 'light'
+//   was dropped from the array itself in round 1, so there is no runtime
+//   value to check). The voice-agent relay files (Sandy's get_pricing tool)
+//   never forward a caller-supplied tier for tree_shrub AT ALL — the handler
+//   hardcodes `{ access: 'easy' }` with no tier field, so the engine's own
+//   TREE_SHRUB.defaultTier always resolves it; verified codex P1 round 4 —
+//   there is nothing there for this module to gate unless a future change
+//   adds a tier parameter to that tool, at which point it must read this
+//   module too. It is deliberately NOT applied inside `priceTreeShrub`
 //   itself, or the scheduling/converter/seeder readers of an ALREADY
 //   selected or stored cadence (estimate-converter.js,
 //   self-booking-plan-sync.js, slot-reservation.js) — those must keep
