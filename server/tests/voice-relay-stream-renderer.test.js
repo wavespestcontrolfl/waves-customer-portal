@@ -119,6 +119,71 @@ describe('relay-stream-renderer — pure chunking + hold policy', () => {
     expect(needsHold(sentence)).toBe(true);
   });
 
+  // P1-b: a future/modal write commitment claims the same outcome a
+  // completed one does ("I'll book that" ~ "booked"), so it must hold too —
+  // before this fix WRITE_COMMITMENT_RE did not exist and these all
+  // streamed immediately.
+  test.each([
+    "I'll book that for you.",
+    'I will schedule that now.',
+    "I'm going to reschedule that.",
+    'I am going to refund that.',
+    "We'll submit that today.",
+    'We will send that over.',
+    'Let me text you the details.',
+    'I can email that to you.',
+    "I'm charging your card now.",
+    'I am transferring the file.',
+    'Going to file that for you.',
+    'Let me set up your appointment.',
+    'Let me put you down for that.',
+    'Booking that now.',
+    'Scheduling that for you.',
+    'Sending that over right away.',
+  ])('a future/modal write commitment needs holding: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(true);
+  });
+
+  // Read-only verbs are never in the write-commitment list, so a modal
+  // prefix in front of one must still stream (P1-b requirement).
+  test.each([
+    'Let me check on that for you.',
+    'One moment while I pull that up.',
+    "I'm looking into that now.",
+    "I'll see what I can find.",
+    'Let me take a look at your account.',
+  ])('a read-only modal sentence still streams: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(false);
+  });
+
+  // P2-e: a '.' right after a common abbreviation or a single-letter
+  // initial is not a sentence boundary — holding longer is always safe.
+  test('an abbreviation period is not treated as a sentence boundary', () => {
+    expect(splitSentences('We service St. Petersburg. Anything else?')).toEqual({
+      sentences: ['We service St. Petersburg. '],
+      rest: 'Anything else?',
+    });
+    expect(splitSentences('Please ask Dr. Smith. Thanks.')).toEqual({
+      sentences: ['Please ask Dr. Smith. '],
+      rest: 'Thanks.',
+    });
+    expect(splitSentences('We open at nine a.m. every day. See you then.')).toEqual({
+      sentences: ['We open at nine a.m. every day. '],
+      rest: 'See you then.',
+    });
+    expect(splitSentences('Contact the U.S. Postal Service. They can help.')).toEqual({
+      sentences: ['Contact the U.S. Postal Service. '],
+      rest: 'They can help.',
+    });
+  });
+
+  test('a single-letter initial is not treated as a sentence boundary', () => {
+    expect(splitSentences('J. Smith called. He wants a callback.')).toEqual({
+      sentences: ['J. Smith called. '],
+      rest: 'He wants a callback.',
+    });
+  });
+
   test("the 'one moment' / 'the first thing' fillers still stream (bare spelled numbers and ordinals do not hold)", () => {
     expect(needsHold('One moment while I pull that up. ')).toBe(false);
     expect(needsHold('The first thing I will check is your account. ')).toBe(false);
@@ -526,7 +591,9 @@ describe('stream renderer — full round loop', () => {
     expect(convo._sessionSuperseded).toHaveBeenCalled();
   });
 
-  test('the progressive-flush supersession gate is checked once per round, not once per sentence', async () => {
+  // P1-d: EVERY progressive flush revalidates session ownership — not just
+  // the round's first — serialized in order through a per-round chain.
+  test('every progressive flush revalidates session ownership, once per sentence, not once per round', async () => {
     const { IsolatedConvo, captured } = isolatedConvoFactory();
     process.env.VOICE_RELAY_RENDERER = 'stream';
     const send = jest.fn();
@@ -534,15 +601,15 @@ describe('stream renderer — full round loop', () => {
     convo._sessionSuperseded = jest.fn().mockResolvedValue(false);
 
     // A write-tool round: _finalizeStreamedRound's hasPendingWrite branch
-    // never calls _sessionSuperseded itself, so the ONLY call this round can
-    // produce is the progressive-flush gate's — isolating that count cleanly
+    // never calls _sessionSuperseded itself, so every call this round
+    // produces is the per-sentence chain's — isolating the count cleanly
     // from the (separate, pre-existing) held-tail recheck.
     const promptPromise = convo.handlePrompt('book me for tuesday');
     await flush();
     const round1 = captured[0];
-    round1.textCb('Sure. '); // sentence 1 — starts the gate
-    round1.textCb('One moment. '); // sentence 2 — queues behind the same gate
-    round1.textCb('Let me check on that. '); // sentence 3 — queues too
+    round1.textCb('Sure. '); // sentence 1 — its own check
+    round1.textCb('One moment. '); // sentence 2 — its own check, chained after 1's
+    round1.textCb('Let me check on that. '); // sentence 3 — its own check, chained after 2's
     round1.resolve({
       content: [
         { type: 'text', text: 'Sure. One moment. Let me check on that.' },
@@ -555,11 +622,176 @@ describe('stream renderer — full round loop', () => {
     expect(round2).toBeTruthy();
     // Empty content on purpose: round 2 has nothing left to say, so its own
     // (separate, pre-existing) held-tail recheck never triggers — isolating
-    // this assertion to ONLY the progressive-flush gate's call count.
+    // this assertion to ONLY the progressive-flush chain's call count.
     round2.resolve({ content: [], stop_reason: 'end_turn' });
     await promptPromise;
 
+    // Order preserved despite one check per sentence.
     expect(send.mock.calls.map(([t]) => t).join('')).toBe('Sure. One moment. Let me check on that. ');
-    expect(convo._sessionSuperseded).toHaveBeenCalledTimes(1);
+    expect(convo._sessionSuperseded).toHaveBeenCalledTimes(3); // one per sentence, not one for the whole round
+  });
+
+  // P1-d regression: a takeover landing AFTER the round's first sentence
+  // must still be caught before a LATER one sends — this is exactly what a
+  // once-per-round gate (checked only before the first flush) would miss.
+  test('a takeover mid-round is caught before a later sentence sends, not just the first', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-s11', from: '+19415551234', send, endSession });
+    let calls = 0;
+    // Not superseded for sentence 1's check; superseded from sentence 2's on.
+    convo._sessionSuperseded = jest.fn(async () => { calls += 1; return calls >= 2; });
+
+    const promptPromise = convo.handlePrompt('what areas do you serve');
+    await flush();
+    const round = captured[0];
+    round.textCb('Sure. '); // sentence 1 — check finds NOT superseded → sends
+    round.textCb('We serve the whole county. '); // sentence 2 — check finds superseded → withheld
+    round.resolve({ content: [{ type: 'text', text: 'Sure. We serve the whole county.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    expect(send.mock.calls.map(([t]) => t).join('')).toBe('Sure. '); // sentence 1 only
+    expect(send.mock.calls.some(([t]) => t.includes('whole county'))).toBe(false); // sentence 2 never spoken
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+    expect(convo._sessionSuperseded).toHaveBeenCalledTimes(2);
+  });
+
+  // P1-a: a played event that catches up to the CURRENT (still-growing)
+  // planned text must not retire the entry — it may grow further.
+  test('a played event that catches up mid-stream does not retire the still-open entry', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-p1a-1', from: '+19415551234', send });
+
+    const promptPromise = convo.handlePrompt('tell me about your services');
+    await flush();
+    const round = captured[0];
+    round.textCb('We handle pest control. '); // sentence 1 flushes
+    await flush();
+    expect(send.mock.calls.length).toBeGreaterThan(0);
+
+    // Twilio reports full playback of what's been sent SO FAR — but the
+    // entry is still open (more chunks may still come this round).
+    convo._appendPlayed('We handle pest control.');
+    const entry = convo._transcript.find((e) => e.role === 'agent');
+    expect(entry.streamOpen).toBe(true);
+    expect(entry.done).toBe(false); // NOT retired — still open
+    expect(convo._playing).toContain(entry); // still tracked for the next played event / a barge-in
+
+    round.resolve({ content: [{ type: 'text', text: 'We handle pest control.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+  });
+
+  // P1-a regression: without the fix, the entry above is evicted from
+  // `_playing` the instant played catches up mid-stream — a LATER barge-in
+  // then finds nothing to truncate (interrupt()'s `_playing` is empty) and
+  // `entry.interrupted` never gets set.
+  test('a barge-in after an early played-catch-up still finds and truncates the same growing entry', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-p1a-2', from: '+19415551234', send });
+
+    const promptPromise = convo.handlePrompt('tell me about your services');
+    await flush();
+    const round = captured[0];
+    round.textCb('We handle pest control. '); // sentence 1 flushes
+    await flush();
+    convo._appendPlayed('We handle pest control.'); // early catch-up — must NOT retire (still open)
+
+    round.textCb('We also do lawn care and mosquito control too. '); // entry keeps growing
+    await flush();
+
+    convo.interrupt({ utteranceUntilInterrupt: 'We handle pest control. We also do lawn care' });
+    const entry = convo._transcript.find((e) => e.role === 'agent');
+    expect(entry.interrupted).toBe(true); // found and truncated, not lost
+    expect(entry.done).toBe(true);
+    expect(entry.text).toMatch(/\[interrupted\]/);
+
+    round.textCb('This must never be spoken.');
+    await promptPromise;
+    expect(send.mock.calls.some(([t]) => String(t).includes('never be spoken'))).toBe(false);
+  });
+
+  // P1-c: a barge-in landing WHILE the held tail's own late-supersession
+  // recheck is in flight must close the round with ONLY the sent prefix in
+  // history — never the model's full generated text (which here includes
+  // the held $149 amount the caller never heard).
+  test('a barge-in during the tail-release supersession check closes history with only the sent prefix', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-p1c', from: '+19415551234', send, endSession });
+    // P1-d means EVERY progressive send also calls _sessionSuperseded — the
+    // FIRST call here is that check for "Sure thing." itself (must resolve
+    // normally so it actually flushes); only the SECOND call, the held
+    // tail's own release check, is where the barge-in lands mid-await.
+    let calls = 0;
+    convo._sessionSuperseded = jest.fn(() => new Promise((resolve) => {
+      calls += 1;
+      if (calls === 1) { resolve(false); return; }
+      setImmediate(() => {
+        convo.interrupt({ utteranceUntilInterrupt: 'Sure thing.' });
+        resolve(false);
+      });
+    }));
+
+    const promptPromise = convo.handlePrompt('how much is a visit');
+    await flush();
+    const round = captured[0];
+    round.textCb('Sure thing. '); // safe filler — flushes
+    await flush();
+    round.textCb('That will be $149 for the visit.'); // HELD (amount) — becomes the tail
+    round.resolve({ content: [{ type: 'text', text: 'Sure thing. That will be $149 for the visit.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    const spoken = send.mock.calls.map(([t]) => t).join('');
+    expect(spoken).not.toMatch(/\$149/); // the held tail never spoke
+
+    const assistantMsgs = convo.messages.filter((m) => m.role === 'assistant');
+    const lastAssistant = assistantMsgs[assistantMsgs.length - 1];
+    // History holds ONLY what was actually sent — never the model's full
+    // generated text (which included the $149 amount the caller never heard).
+    expect(lastAssistant.content).toEqual([{ type: 'text', text: 'Sure thing.' }]);
+    // A plain barge-in never ends the session — the call stays open.
+    expect(endSession).not.toHaveBeenCalled();
+  });
+
+  // P2-f: a genuine mid-stream failure (not a barge-in) must preserve
+  // whatever was already sent in the model's OWN history, so the next round
+  // doesn't repeat it or lose track of what the caller already heard.
+  test('a mid-stream failure preserves the sent prefix in the model conversation history', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-p2f', from: '+19415551234', send });
+
+    const promptPromise = convo.handlePrompt('what areas do you cover');
+    await flush();
+    const round = captured[0];
+    round.textCb('We cover Manatee and Sarasota. ');
+    await flush();
+    round.reject(new Error('stream disconnected')); // NOT an abort — a genuine failure
+    await promptPromise;
+
+    const assistantMsgs = convo.messages.filter((m) => m.role === 'assistant');
+    expect(assistantMsgs).toHaveLength(1);
+    expect(assistantMsgs[0].content).toEqual([{ type: 'text', text: 'We cover Manatee and Sarasota.' }]);
+
+    // The next turn is still valid role alternation (assistant → user) and
+    // the model round itself runs fine on top of it — driven to completion
+    // so no round is left hanging (a real 20s STREAM_TIMEOUT_MS timer would
+    // otherwise leak past this test).
+    const secondPrompt = convo.handlePrompt('what about Charlotte county');
+    await flush();
+    expect(convo.messages[convo.messages.length - 1]).toMatchObject({ role: 'user' });
+    const round2 = captured[1];
+    expect(round2).toBeTruthy();
+    round2.resolve({ content: [{ type: 'text', text: 'Yes, we cover Charlotte too.' }], stop_reason: 'end_turn' });
+    await secondPrompt;
   });
 });

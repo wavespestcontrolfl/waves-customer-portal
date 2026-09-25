@@ -1087,11 +1087,34 @@ class RelayConversation {
     target.played = extend(target);
     target.playedSource = 'twilio_event';
     this._syncPlayedEntry(target);
-    if (norm(target.played) === norm(target.planned)) {
-      target.done = true;
-      this._retiredPlanned = target.planned;
-      this._playing.shift();
-    }
+    this._retireIfPlayedCaughtUp(target);
+  }
+
+  /**
+   * Retire (mark done, drop from `_playing`) an utterance whose played text
+   * has caught up to its planned text — UNLESS it is a streaming entry still
+   * open for more chunks (`entry.streamOpen`, PR C): a played snapshot that
+   * matches the CURRENT planned text mid-stream does not mean the utterance
+   * is over, only that playback has caught up to what has been sent so far.
+   * Retiring it here would drop it from `_playing` while `_flushStreamChunk`
+   * keeps extending `planned` — later played events would then never find
+   * it, and a barge-in during the later portion couldn't truncate it either
+   * (P1-a). Called both from a live played event (`_appendPlayed`, above)
+   * and the moment a streaming entry closes (`_flushStreamChunk` /
+   * `_closeStreamEntry`), so a played event that arrived WHILE the entry was
+   * still open and already matched is retired the instant it finally closes.
+   * A no-op (never retires) for an entry with no played evidence at all —
+   * unchanged from the original behavior.
+   */
+  _retireIfPlayedCaughtUp(entry) {
+    if (!entry || entry.streamOpen) return false;
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (norm(entry.played) !== norm(entry.planned)) return false;
+    entry.done = true;
+    this._retiredPlanned = entry.planned;
+    const idx = this._playing.indexOf(entry);
+    if (idx >= 0) this._playing.splice(idx, 1);
+    return true;
   }
 
   /** Relay notifications the `events` attribute adds (speaker / tokens-played). */
@@ -1351,12 +1374,15 @@ class RelayConversation {
    * header). `signal` is that round's own AbortController.signal, captured
    * once: the generation guard every send below checks.
    *
-   * `gate` / `gateQueue` / `gateOpen` / `withheld` back the late-supersession
-   * recheck (`_gateFirstFlush`): the block renderer re-proves the session's
-   * claim IMMEDIATELY BEFORE SPEAKING (a reconnect can take the CallSid claim
-   * mid-round); streaming's first flushable sentence starts that SAME check
-   * once per round, queues anything ready to flush while it is in flight,
-   * and either releases the queue (in order) or withholds the whole round.
+   * `flushChain` / `withheld` back the late-supersession recheck (P1-d, see
+   * `_queueOrFlush`): the block renderer re-proves the session's claim
+   * IMMEDIATELY BEFORE SPEAKING (a reconnect can take the CallSid claim
+   * mid-round), and streaming re-proves it before EVERY progressive send,
+   * not just the round's first — there is no synchronous cross-socket
+   * takeover signal to short-circuit this with (relay-server.js keeps no
+   * in-process registry of a call's owning socket; ownership lives only in
+   * the `call_log` claim row `_sessionSuperseded()` reads), so each check is
+   * a real await, serialized through `flushChain` to keep sends in order.
    */
   _newStreamState(signal) {
     // The hold policy's date/negation/commitment regexes are English-only, so
@@ -1366,7 +1392,7 @@ class RelayConversation {
     const holding = require('./relay-language').isSpanish(this.language);
     return {
       signal, buffer: '', holding, entry: null, closed: false,
-      gate: null, gateQueue: [], gateOpen: false, withheld: false,
+      flushChain: Promise.resolve(), withheld: false,
     };
   }
 
@@ -1390,6 +1416,12 @@ class RelayConversation {
       const entry = {
         role: 'agent', text: piece, planned: piece, played: null,
         playedSource: 'assumed', interrupted: false, notPlayed: false, done: false, turn: stat.turn,
+        // ⭐ streamOpen: more chunks may still extend `planned` — _appendPlayed
+        // must never retire this entry early just because a played event
+        // caught up to the SNAPSHOT of `planned` at that instant (P1-a).
+        // False from creation when this very call IS the last piece
+        // (a single-shot send, e.g. the finalize-time tail).
+        streamOpen: !isLast,
       };
       this._transcript.push(entry);
       stat.agentEntries.push(entry);
@@ -1401,7 +1433,14 @@ class RelayConversation {
       state.entry.text = state.entry.planned;
     }
     this._send(piece, isLast === true);
-    if (isLast) state.closed = true;
+    if (isLast) {
+      // Closing: no more growth coming. Re-evaluate retirement now in case a
+      // played event arrived earlier and matched but was deferred by the
+      // streamOpen guard above (P1-a).
+      state.entry.streamOpen = false;
+      this._retireIfPlayedCaughtUp(state.entry);
+      state.closed = true;
+    }
   }
 
   /**
@@ -1417,6 +1456,8 @@ class RelayConversation {
     this._send('', true);
     state.entry.planned = state.entry.planned.replace(/\s+$/, '');
     state.entry.text = state.entry.planned;
+    state.entry.streamOpen = false; // P1-a — see _flushStreamChunk's isLast branch
+    this._retireIfPlayedCaughtUp(state.entry);
     state.closed = true;
   }
 
@@ -1447,52 +1488,33 @@ class RelayConversation {
   }
 
   /**
-   * The gate in front of a round's FIRST progressive flush: the same
+   * Every progressive flush candidate passes through here — NEVER straight
+   * to `_flushStreamChunk` (P1-d). Each one re-runs the SAME
    * late-supersession recheck the block renderer runs immediately before
-   * `say()` ("a reconnect can take the claim mid-round, and this socket
-   * would then speak from cached account context"). Started at most ONCE
-   * per round (idempotent — a call while `state.gate` is already set just
-   * returns it) and cached on `state.gate` so `_finalizeStreamedRound` can
-   * await the same check if `finalMessage()` resolves before it settles.
-   * `.catch(() => false)` matches the block path's exact semantics: a check
-   * that itself errors is treated as NOT superseded, never as a reason to
-   * withhold speech on its own.
+   * `say()`, serialized through `state.flushChain` so the checks (and the
+   * sends they gate) stay strictly in send order even though each is a real
+   * await: this step doesn't start until the previous one's check-and-send
+   * has fully settled. `.catch(() => false)` matches the block path's exact
+   * semantics — a check that itself errors is treated as NOT superseded.
+   * Once ANY check finds the session superseded, `state.withheld` makes
+   * every later step (already chained or still to come) a no-op — the rest
+   * of the round speaks nothing, not just the one sentence that caught it.
+   * A round that has since closed or aborted while a check was in flight is
+   * also a no-op: never flush a stale generation's late text.
    */
-  _gateFirstFlush(state, stat) {
-    if (state.gate) return state.gate;
-    state.gate = this._sessionSuperseded().catch(() => false).then((superseded) => {
-      // A barge-in or a round that already closed while this check was in
-      // flight — the queue belongs to a stale generation; drop it silently,
-      // never flush late text that arrives after abort/close.
-      if (state.closed || state.signal.aborted) return;
+  _queueOrFlush(state, sentence, stat, isLast) {
+    state.flushChain = state.flushChain.then(async () => {
+      if (state.withheld || state.closed || state.signal.aborted) return;
+      const superseded = await this._sessionSuperseded().catch(() => false);
+      if (state.closed || state.signal.aborted) return; // stale by the time the check settled
       if (superseded) {
         logger.warn(`[voice-relay] stream renderer speech withheld — session superseded mid-round callSid=${this.callSid}`);
         state.withheld = true;
-        state.gateQueue = [];
         return;
       }
-      state.gateOpen = true;
-      const queued = state.gateQueue;
-      state.gateQueue = [];
-      for (const item of queued) this._flushStreamChunk(state, item.sentence, stat, item.isLast);
+      this._flushStreamChunk(state, sentence, stat, isLast);
     });
-    return state.gate;
-  }
-
-  /**
-   * Every progressive flush candidate passes through here rather than going
-   * straight to `_flushStreamChunk`, so the FIRST one in a round always
-   * clears the supersession gate first (see `_gateFirstFlush`) — once the
-   * gate has opened (`state.gateOpen`), later sentences in the same round
-   * flush immediately, exactly one check per round, not one per sentence.
-   * `state.withheld` (gate resolved superseded) is a permanent no-op for
-   * the rest of the round.
-   */
-  _queueOrFlush(state, sentence, stat, isLast) {
-    if (state.withheld) return;
-    if (state.gateOpen) { this._flushStreamChunk(state, sentence, stat, isLast); return; }
-    state.gateQueue.push({ sentence, isLast });
-    this._gateFirstFlush(state, stat);
+    return state.flushChain;
   }
 
   /**
@@ -1510,15 +1532,19 @@ class RelayConversation {
    * further speech (the round loop's own `return` path), else
    * `{ assistantMessage }` — already pushed onto `this.messages` and, when
    * something was said, wired as `entry.historyMessage` for the barge-in
-   * history rewrite (`_noteInterruptForModel`) to find. If the round's own
-   * progressive-flush gate (`_gateFirstFlush`) is still settling when
-   * `finalMessage()` resolves, it is awaited here first — the gate's own
-   * callback is what flushes any queued sentences, so finalize must never
-   * read `streamState.entry` before that has had its chance to run.
+   * history rewrite (`_noteInterruptForModel`) to find. Or `{ aborted: true }`
+   * (P1-c) when a barge-in lands WHILE the tail's own supersession check
+   * below is in flight — the round loop returns with no further action,
+   * same as a barge-in caught earlier in the model stream itself. If the
+   * round's own progressive-flush chain (`_queueOrFlush`) is still settling
+   * when `finalMessage()` resolves, it is awaited here first — the chain's
+   * own steps are what flush any queued sentences, so finalize must never
+   * read `streamState.entry` before every one of them has had its chance to
+   * run.
    */
   async _finalizeStreamedRound(streamState, msg, text, hasPendingWrite, stat) {
-    if (streamState.gate) await streamState.gate;
-    if (streamState.withheld) return { withheld: true }; // the progressive gate already found this superseded
+    await streamState.flushChain;
+    if (streamState.withheld) return { withheld: true }; // the progressive chain already found this superseded
     const sent = streamState.entry ? streamState.entry.planned : '';
     const reconciled = !sent || text.startsWith(sent);
     if (!reconciled) {
@@ -1542,6 +1568,43 @@ class RelayConversation {
     // ⭐ RE-PROVEN IMMEDIATELY BEFORE SPEAKING the held tail — same
     // late-supersession recheck the block renderer runs before `say()`.
     if (tail.trim() && await this._sessionSuperseded().catch(() => false)) return { withheld: true };
+    // P1-c: a barge-in can land WHILE the await just above is in flight.
+    // `_flushStreamChunk` below would already no-op the tail on its own
+    // abort guard, so nothing extra is ever SPOKEN — but falling through to
+    // the normal path would still push the FULL `msg.content` (the whole
+    // reply the model produced, not just what actually reached the air)
+    // into the model's own history, letting it believe the caller heard the
+    // rest. Close the round here instead, with history holding ONLY the
+    // sent prefix, and — mirroring how the tool-result loop already ends a
+    // stopped round — pair any tool_use block with a synthetic "not run"
+    // result rather than leave it unpaired for the next model call.
+    if (streamState.signal.aborted) {
+      // interrupt() is the ONLY thing that can have set this signal once
+      // we're here (the round's own model-stream timeout is already
+      // cleared by this point) — it already fully closed out the
+      // transcript entry itself (interrupted flag, played-text sync,
+      // dropped from `_playing`). Do NOT touch the entry again (re-closing
+      // it would CLOBBER the played-text record interrupt() just computed)
+      // and do NOT send another frame (Twilio already knows the utterance
+      // was cut) — only fix up the MODEL's history, which interrupt() has
+      // no way to reach.
+      streamState.closed = true;
+      const toolUseBlocks = msg.content.filter((b) => b.type === 'tool_use');
+      const sentText = sent.trim();
+      const assistantMessage = {
+        role: 'assistant',
+        content: sentText ? [{ type: 'text', text: sentText }, ...toolUseBlocks] : toolUseBlocks,
+      };
+      this.messages.push(assistantMessage);
+      if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
+      if (toolUseBlocks.length) {
+        this.messages.push({
+          role: 'user',
+          content: toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current turn was interrupted.' })),
+        });
+      }
+      return { aborted: true };
+    }
     if (tail) this._flushStreamChunk(streamState, tail, stat, true);
     else this._closeStreamEntry(streamState);
     const assistantMessage = { role: 'assistant', content: msg.content };
@@ -2564,7 +2627,26 @@ class RelayConversation {
         // last:true empty token so playback finalizes, WITHOUT resending
         // anything already sent. The fallback copy below is a separate, new
         // utterance, exactly as it is for the block renderer.
-        if (streamState) this._closeStreamEntry(streamState);
+        if (streamState) {
+          this._closeStreamEntry(streamState);
+          // P2-f: the model's own conversation history otherwise has NO
+          // record this round ever spoke — same as the block path, which
+          // never sends anything until finalMessage() resolves, so a failed
+          // round there truly has nothing to record. Here, though, some
+          // chunks may already be on the air; push exactly that sent prefix
+          // as its own assistant message so the model's next round knows
+          // what it already told the caller (role alternation stays valid —
+          // the very next thing pushed is either the caller's next `user`
+          // turn or this same round's tool_result user turn, never another
+          // assistant message back to back). The failure copy below is
+          // spoken but, like every `say()` call, never enters `this.messages`
+          // — unchanged, existing behavior for both renderers.
+          if (streamState.entry && streamState.entry.planned.trim()) {
+            const assistantMessage = { role: 'assistant', content: [{ type: 'text', text: streamState.entry.planned }] };
+            this.messages.push(assistantMessage);
+            streamState.entry.historyMessage = assistantMessage;
+          }
+        }
         if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy(failure.copy, this.language));
         return;
       } finally {
@@ -2604,6 +2686,12 @@ class RelayConversation {
         try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
         return;
       }
+      // P1-c: a barge-in landed mid-finalize — _finalizeStreamedRound has
+      // already closed the round correctly (sent-prefix-only history, any
+      // tool_use paired with a synthetic result). Same bare `return` the
+      // model-stream catch block uses for an ordinary barge-in: no ending,
+      // no endSession — the session stays open for the caller's next turn.
+      if (result.aborted) return;
 
       if (msg.stop_reason === 'tool_use') {
         const results = [];

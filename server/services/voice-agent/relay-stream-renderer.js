@@ -12,25 +12,35 @@
  *   1. Flush at a completed sentence boundary — '.', '!' or '?', optionally
  *      followed by one closing quote/paren, followed by whitespace. A
  *      trailing fragment with no boundary yet is held by the caller for the
- *      next delta; a missed boundary (an abbreviation like "Dr.") just holds
- *      a little longer than strictly necessary — the safe direction always.
+ *      next delta. A '.' is deliberately NOT treated as a boundary when the
+ *      token right before it is a common abbreviation (Mr/Mrs/Ms/Dr/St/Ave/
+ *      Blvd/Rd/Ln/Ct/Hwy/Jr/Sr/vs/etc/approx/No/Mt/Ft/Pt/Apt/Ste/e.g/i.e/
+ *      a.m/p.m/U.S — see ABBREVIATIONS) or a single-letter initial ("J.
+ *      Smith") — holding a little longer than strictly necessary is always
+ *      the safe direction.
  *   2. A completed sentence is HELD (never sent as a progressive chunk) when
  *      it contains a dollar amount (reusing eval/voice-relay-spoken-checks's
  *      amountMentions — the one regex bank this repo already trusts to
  *      recognize digit and spelled-out amounts, EN + ES), ANY digit or a date/time
- *      expression, a negation, or a COMMITMENT-OR-SUCCESS CLAIM: an explicit
+ *      expression, a negation, a COMMITMENT-OR-SUCCESS CLAIM: an explicit
  *      commitment verb (booked / scheduled / sent / charged / refunded /
  *      confirmed / ...) OR a success phrase that asserts the same thing
  *      without one ("you're all set", "taken care of", "got you booked",
  *      "on the calendar", "I've sent that over", ...) — see
- *      COMMITMENT_OR_SUCCESS_RE below for the full list. Once a sentence is
- *      held, every sentence after it in the SAME model round is held too —
- *      never reordered, never partially released mid-round. Independently,
+ *      COMMITMENT_OR_SUCCESS_RE below for the full list — OR a FUTURE/MODAL
+ *      WRITE COMMITMENT: "I'll book that", "I'm going to reschedule that",
+ *      "let me submit that", or a bare -ing form of a write verb ("Booking
+ *      that now.") — see WRITE_COMMITMENT_RE. Read-only verbs (check, look,
+ *      pull up, see, find) are never in that verb list, so "Let me check on
+ *      that for you." still streams. Once a sentence is held, every
+ *      sentence after it in the SAME model round is held too — never
+ *      reordered, never partially released mid-round. Independently,
  *      relay-conversation.js's round loop also stops flushing the moment any
  *      tool_use content block starts streaming (belt-and-braces for text
  *      that might follow a tool call, though in practice a tool call's own
- *      preceding text has usually already streamed by then — the hold list
- *      above is what actually keeps a false "you're all set" off the air).
+ *      preceding text has usually already streamed by then — the hold lists
+ *      above are what actually keep a false "you're all set" or "I'll book
+ *      that" off the air).
  *   3. The held tail is only ever spoken once the round's finalMessage() is
  *      known AND the write-tool suppression check the block renderer already
  *      runs (WRITE_TOOLS / hasPendingWrite in relay-conversation.js) has
@@ -43,10 +53,13 @@
  *      voice-relay-spoken-checks is an offline eval grader, not a live
  *      gate), so PR C reuses that exact check rather than inventing a
  *      second, parallel one.
- *   4. Every progressive send is also gated, ONCE per round, on the same
- *      late-supersession recheck the block renderer runs immediately before
- *      speaking (a reconnect can take the CallSid claim mid-round) — see
- *      relay-conversation.js's `_gateFirstFlush`.
+ *   4. EVERY progressive send — not just the round's first — revalidates the
+ *      same late-supersession recheck the block renderer runs immediately
+ *      before speaking (a reconnect can take the CallSid claim mid-round;
+ *      there is no synchronous cross-socket takeover signal to shortcut
+ *      this with, so each send re-reads the DB claim), serialized in order
+ *      through a per-round promise chain — see relay-conversation.js's
+ *      `_queueOrFlush`.
  */
 
 let _amountMentions = null;
@@ -70,8 +83,35 @@ function amountMentions(text) {
 const NON_ENGLISH_HINT_RE = /[áéíóúñü¿¡]|\b(?:el|la|los|las|le|les|un|una|en|que|de|del|por|con|muy|pero|y|es|son|hay|aqu[ií]|ahora|momento|mensaje|servicio|listo|lista|ya|est[aá]|qued[oó]|cita|usted|su|sus|para|gracias|agendad[oa]s?|reservad[oa]s?|confirmad[oa]s?|programad[oa]s?|enviad[oa]s?|hoy|mañana|nunca|tampoco|ningun[oa]?)\b/i;
 
 // Sentence boundary: '.', '!' or '?', one optional closing quote/paren, then
-// whitespace. Deliberately simple — see policy note 1 above.
+// whitespace — see policy note 1 above. '!'/'?' are always real boundaries;
+// a '.' additionally needs to clear the abbreviation check below.
 const BOUNDARY_RE = /[.!?]["'’)\]]?\s+/g;
+
+// A '.' right after one of these (case-insensitive) is not a sentence
+// boundary. Multi-period abbreviations (e.g., i.e., a.m., p.m., U.S.) are
+// listed with their internal dots — WORD_BEFORE_PERIOD_RE below scans
+// letters AND dots backward, so it captures "a.m" whole. A bare single
+// letter ("J." as an initial) is handled separately, not listed here.
+const ABBREVIATIONS = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'st', 'ave', 'blvd', 'rd', 'ln', 'ct', 'hwy', 'jr', 'sr',
+  'vs', 'etc', 'approx', 'no', 'mt', 'ft', 'pt', 'apt', 'ste',
+  'e.g', 'i.e', 'a.m', 'p.m', 'u.s',
+]);
+const WORD_BEFORE_PERIOD_RE = /[A-Za-z.]+$/;
+
+/** The letters+dots token immediately before `periodIndex` in `text`. */
+function wordBeforePeriod(text, periodIndex) {
+  const m = WORD_BEFORE_PERIOD_RE.exec(text.slice(0, periodIndex));
+  return m ? m[0] : '';
+}
+
+/** Is the '.' at `periodIndex` an abbreviation's period, not a sentence end? */
+function isAbbreviationPeriod(text, periodIndex) {
+  const word = wordBeforePeriod(text, periodIndex);
+  if (!word) return false;
+  if (word.length === 1) return true; // a single-letter initial ("J.")
+  return ABBREVIATIONS.has(word.toLowerCase());
+}
 
 const NEGATION_RE = /\b(no|not|never|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|don['’]t|doesn['’]t|didn['’]t|won['’]t|wouldn['’]t|can['’]t|cannot|couldn['’]t|shouldn['’]t|nobody|nothing|none|without|no longer|not yet)\b/i;
 
@@ -128,6 +168,22 @@ const COMMITMENT_OR_SUCCESS_RE = new RegExp(
   'i',
 );
 
+// A FUTURE/MODAL WRITE COMMITMENT — "I'll book that", "I'm going to
+// reschedule that", "let me submit that" — claims the same outcome
+// COMMITMENT_OR_SUCCESS_RE catches for a COMPLETED action, just phrased as
+// about-to-happen. A bare -ing form of a write verb ("Booking that now.")
+// holds on its own, modal or not. Read-only verbs (check, look, pull up,
+// see, find) are never in WRITE_VERBS_*, so "Let me check on that for you."
+// / "One moment while I pull that up." still stream (P1-b).
+const WRITE_COMMITMENT_MODAL_SOURCE = "i['’]ll|i will|i['’]m going to|i am going to|we['’]ll|we will|let me|i can|i['’]m|i am|going to";
+const WRITE_VERBS_BASE_SOURCE = 'book|schedule|reschedule|refund|cancel|submit|send|text|email|charge|transfer|file|reserve|set up|put you down|add|confirm|note|pass|log|save|create|process';
+const WRITE_VERBS_ING_SOURCE = 'booking|scheduling|rescheduling|refunding|cancelling|canceling|submitting|sending|texting|emailing|charging|transferring|filing|reserving|setting up|putting you down|adding|confirming|noting|passing|logging|saving|creating|processing';
+const WRITE_COMMITMENT_RE = new RegExp(
+  `\\b(?:${WRITE_COMMITMENT_MODAL_SOURCE})\\s+(?:to\\s+)?(?:${WRITE_VERBS_BASE_SOURCE}|${WRITE_VERBS_ING_SOURCE})\\b`
+  + `|\\b(?:${WRITE_VERBS_ING_SOURCE})\\b`,
+  'i',
+);
+
 /**
  * Split a growing buffer into complete sentences (each carrying its own
  * trailing boundary whitespace, exactly as found) plus whatever incomplete
@@ -141,6 +197,13 @@ function splitSentences(buffer) {
   const re = new RegExp(BOUNDARY_RE.source, 'g');
   let m;
   while ((m = re.exec(text))) {
+    // A '.' right after a common abbreviation or a single-letter initial is
+    // not a sentence boundary (P2-e) — keep scanning past it rather than
+    // splitting here. '!' and '?' never need this check.
+    if (m[0][0] === '.' && isAbbreviationPeriod(text, m.index)) {
+      re.lastIndex = m.index + 1;
+      continue;
+    }
     const end = m.index + m[0].length;
     sentences.push(text.slice(start, end));
     start = end;
@@ -157,7 +220,11 @@ function needsHold(sentence) {
   if (DATE_TIME_RE.test(t)) return true;
   if (NEGATION_RE.test(t)) return true;
   if (COMMITMENT_OR_SUCCESS_RE.test(t)) return true;
+  if (WRITE_COMMITMENT_RE.test(t)) return true;
   return false;
 }
 
-module.exports = { splitSentences, needsHold, NON_ENGLISH_HINT_RE, BOUNDARY_RE, NEGATION_RE, DATE_TIME_RE, COMMITMENT_OR_SUCCESS_RE };
+module.exports = {
+  splitSentences, needsHold, NON_ENGLISH_HINT_RE, BOUNDARY_RE, NEGATION_RE, DATE_TIME_RE,
+  COMMITMENT_OR_SUCCESS_RE, WRITE_COMMITMENT_RE, ABBREVIATIONS, isAbbreviationPeriod,
+};

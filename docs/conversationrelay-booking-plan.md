@@ -230,32 +230,41 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
 
 1. **Flush at a completed sentence boundary** — `.`/`!`/`?` (+ an optional
    closing quote/paren) followed by whitespace. An incomplete trailing
-   fragment is held for the next delta; a missed boundary (an abbreviation)
-   just holds a little longer — never a guess.
+   fragment is held for the next delta. A `.` is NOT a boundary when the
+   token right before it is a common abbreviation (Mr/Mrs/Ms/Dr/St/Ave/
+   Blvd/Rd/Ln/Ct/Hwy/Jr/Sr/vs/etc/approx/No/Mt/Ft/Pt/Apt/Ste/e.g/i.e/a.m/
+   p.m/U.S — `ABBREVIATIONS`) or a single-letter initial ("J. Smith") —
+   "We service St. Petersburg." and "Please ask Dr. Smith." hold past the
+   abbreviation's own period, not just to it.
 2. **Hold a sentence** — never send it progressively — when it contains a
    dollar amount (reusing `eval/voice-relay-spoken-checks`'s
    `amountMentions`), ANY digit, a date/time expression (weekday/month
    names, relative days and parts of day, week/month, spoken clock times like
    "at nine" or "two o'clock", ordinals like "the fifteenth" — `DATE_TIME_RE`),
-   a negation, or a
+   a negation, a
    **commitment-or-success claim**: an explicit commitment verb
    (booked/scheduled/sent/charged/refunded/confirmed/reserved/created/
    completed/done/processed/…) OR a success phrase that asserts the same
    outcome without one — "you're all set", "taken care of", "got you
    booked", "on the calendar", "locked in", "I've sent that over", "someone
-   will call you" (`COMMITMENT_OR_SUCCESS_RE`, full list in
-   `relay-stream-renderer.js`). These date/negation/commitment patterns are
-   English-only, so a **Spanish session never flushes progressively** (its
-   stream state starts holding — block timing, released at finalize under the
-   write-tool check), and in any session a sentence with Spanish orthography
-   or a common Spanish function/success word ("listo", "ya quedó",
-   "agendada", "reservado", …; `NON_ENGLISH_HINT_RE`) is held too. Once one sentence in a round needs holding,
-   every sentence after it in that same round is held too — never
-   reordered, never partially released. Independently, the round loop also
-   stops flushing the instant ANY `tool_use` content block starts streaming
-   (belt-and-braces — text ahead of a tool call has usually already
-   streamed by the time that event fires, so the hold list above is the
-   real guard against a false "you're all set" before a booking tool runs).
+   will call you" (`COMMITMENT_OR_SUCCESS_RE`) — OR a **future/modal write
+   commitment**: "I'll book that", "I'm going to reschedule that", "let me
+   submit that", or a bare `-ing` form of a write verb ("Booking that now.")
+   (`WRITE_COMMITMENT_RE`; read-only verbs — check, look, pull up, see,
+   find — are never in that list, so "Let me check on that for you." still
+   streams). These date/negation/commitment patterns are English-only, so a
+   **Spanish session never flushes progressively** (its stream state starts
+   holding — block timing, released at finalize under the write-tool
+   check), and in any session a sentence with Spanish orthography or a
+   common Spanish function/success word ("listo", "ya quedó", "agendada",
+   "reservado", …; `NON_ENGLISH_HINT_RE`) is held too. Once one sentence in
+   a round needs holding, every sentence after it in that same round is
+   held too — never reordered, never partially released. Independently, the
+   round loop also stops flushing the instant ANY `tool_use` content block
+   starts streaming (belt-and-braces — text ahead of a tool call has
+   usually already streamed by the time that event fires, so the hold lists
+   above are the real guard against a false "you're all set" or "I'll book
+   that" before a booking tool runs).
 3. **Release the held tail only at `finalMessage()`**, under the exact same
    write-tool suppression check the block renderer already runs
    (`hasPendingWrite` / `WRITE_TOOLS` in `relay-conversation.js`): if the
@@ -263,18 +272,28 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    air and the assistant history (never spoken, never stored) — anything
    already flushed before the hold point stays spoken and stays in history,
    so the transcript agrees with what the caller actually heard. If not, the
-   held tail is sent as the closing chunk.
-4. **Every progressive flush is gated, once per round**, on the SAME
-   late-supersession recheck the block renderer runs immediately before
-   `say()` (a reconnect can take the CallSid claim mid-round, and the old
-   socket must not speak from cached account context). The round's first
-   flushable sentence starts `_sessionSuperseded()` once and queues
-   whatever else arrives while it is in flight (`_gateFirstFlush` /
-   `_queueOrFlush` in `relay-conversation.js`); once it resolves, the queue
-   releases in order and later sentences in the same round flush
-   immediately (no further checks) — or, if the check finds the session
-   superseded, the round speaks nothing at all and ends through the same
-   superseded end-session path the block renderer's own recheck uses.
+   held tail is sent as the closing chunk. If a barge-in lands WHILE that
+   release's own late-supersession recheck (next bullet) is in flight, the
+   tail is dropped exactly the same way, and the round's history is closed
+   with ONLY the sent prefix — never the model's full generated text — with
+   any `tool_use` block paired to a synthetic "not run" result so the next
+   model call's history never carries an unpaired tool call (mirrors how
+   the tool-result loop already ends a round the caller interrupted mid-way).
+4. **EVERY progressive flush — not just the round's first — revalidates
+   session ownership**, the SAME late-supersession recheck the block
+   renderer runs immediately before `say()` (a reconnect can take the
+   CallSid claim mid-round, and the old socket must not speak from cached
+   account context). There is no synchronous cross-socket takeover signal
+   to shortcut this with — relay-server.js keeps no in-process registry of
+   a call's owning socket, only the `call_log` claim row
+   `_sessionSuperseded()` reads — so each queued sentence's check-then-send
+   step is serialized through a per-round promise chain (`_queueOrFlush` in
+   `relay-conversation.js`): order is preserved, a stale/aborted/closed
+   round no-ops, and the moment any check finds the session superseded, the
+   REST of the round is withheld (not just that one sentence) and ends
+   through the same superseded end-session path the block renderer's own
+   recheck uses. `_finalizeStreamedRound` awaits the whole chain before
+   reading what was actually sent.
 
 Interruption: a barge-in aborts the round's own `AbortController` (unchanged
 mechanism); every send call in the streaming path checks that controller's
@@ -282,12 +301,19 @@ mechanism); every send call in the streaming path checks that controller's
 after it is dropped rather than resurfacing. A round's streaming state is
 local to that round and is never read by a later round, a reconnect, or a
 transfer. A mid-stream timeout/error closes the open utterance with an empty
-`last:true` frame (no replay of anything already sent) before the existing
-failure copy speaks as its own, separate utterance. The
+`last:true` frame (no replay of anything already sent), pushes exactly the
+sent prefix as its own assistant history message (so the model's next round
+knows what it already told the caller — the block renderer's own failures
+never have partial text to preserve, so this only applies to streaming),
+before the existing failure copy speaks as its own, separate utterance. The
 `played`/`tokens-played` mapping (`_appendPlayed`, `interrupt()`) is
-unchanged — it already matches against an utterance's growing `planned`
-text, which is exactly what the stream renderer's single growing transcript
-entry per turn provides.
+unchanged in its matching logic, but a streaming entry that is still
+OPEN (more chunks may still extend it) is never retired early just because
+a played event happens to match its CURRENT planned text mid-stream —
+retirement is deferred until the entry closes, so a barge-in later in the
+same utterance can still find and correctly truncate it; the retirement
+check reruns the instant the entry closes in case a played event caught up
+while it was deferred.
 
 ## Roadmap (not in this PR)
 
