@@ -119,6 +119,16 @@ function googleMailboxIdentity(normalized) {
   return mailbox ? `${mailbox}@gmail.com` : null;
 }
 
+// The SQL form of the same identity, for a stored column — lowercase,
+// Google domain only, mailbox name before '+', dots stripped. Shared by the
+// bounce recovery's gmailMailboxOwnedByOther and the operator email
+// conflict check (customer-email-write.js findCrossAccountEmailConflict).
+// Column names come from hardcoded caller lists — never user input.
+const GOOGLE_MAILBOX_SQL = {
+  isGoogle: (f) => `SPLIT_PART(LOWER(${f}), '@', 2) IN ('gmail.com', 'googlemail.com')`,
+  mailbox: (f) => `REPLACE(SPLIT_PART(SPLIT_PART(LOWER(${f}), '@', 1), '+', 1), '.', '')`,
+};
+
 // The keys one address takes: its exact key and, for a Google address, its
 // mailbox-identity key. Every taker acquires keys in one global order
 // (sorted: all `customer-email:` keys before all `customer-mailbox:` keys),
@@ -161,4 +171,4 @@ async function lockAssignedCustomerEmails(trx, updates = {}) {
 }
 
 module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail,
-  lockAssignedCustomerEmails, customerEmailLockKeys, CUSTOMER_EMAIL_COLUMNS };
+  lockAssignedCustomerEmails, customerEmailLockKeys, CUSTOMER_EMAIL_COLUMNS, googleMailboxIdentity, GOOGLE_MAILBOX_SQL };

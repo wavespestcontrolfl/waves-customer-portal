@@ -136,6 +136,33 @@ describe('hasWorkableLeadSignal anonymous-caller (no phone) path', () => {
       voicemail: true,
     })).toBe(true);
   });
+
+  // V1/V2 email disagreement (owner ruling 2026-09-25): adoptV2PrimaryFields
+  // nulls extracted.email and stamps extracted.email_candidates = [v1, v2]
+  // when the two extractors captured different spellings (extraction-compat.js).
+  // A blocked/anonymous-caller voicemail whose only reachback is a disputed
+  // spelling must still count as workable, or it terminal-skips as
+  // non-workable BEFORE the read-back card logic ever runs — losing a real
+  // service voicemail silently (codex P1).
+  test('a phone-less voicemail with a V1/V2 email DISAGREEMENT is still workable — null email, two held candidates', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: {
+        matched_service: 'pest control',
+        email: null,
+        email_candidates: ['patt@example.com', 'pat@example.com'],
+      },
+      phone: null,
+      voicemail: true,
+    })).toBe(true);
+  });
+
+  test('a single email_candidates entry (not a real disagreement) does NOT count as reachback', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', email: null, email_candidates: ['pat@example.com'] },
+      phone: null,
+      voicemail: true,
+    })).toBe(false);
+  });
 });
 
 describe('findReusableCallLead identity keys', () => {

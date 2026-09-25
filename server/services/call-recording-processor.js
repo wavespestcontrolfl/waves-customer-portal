@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -1541,6 +1541,102 @@ async function recordFirstTouchHoldOwned(args, procToken) {
   return null;
 }
 
+const EMAIL_CARD_REASON_CODES = ['email_unverified', 'email_invalid'];
+
+function safeParseJsonPayload(payload) {
+  try { return typeof payload === 'string' ? JSON.parse(payload) : (payload || {}); } catch (_e) { return {}; }
+}
+
+// A stable comparison key for "is this the same email review question"
+// (Codex P1 round 3, finding #2): mintEmailReviewCardsFenced compares EVERY
+// live card against this, not a `.first()` pick that could grab the wrong
+// sibling when both email_unverified and email_invalid are live at once.
+// Two payloads with the same signature describe the identical question —
+// same candidates, same disagreement flag, same release target; anything
+// else means the office needs to see fresh evidence.
+function emailCardSignature(reasonCode, payload) {
+  const candidates = Array.isArray(payload?.email_candidates)
+    ? payload.email_candidates.map((c) => String(c?.value || '').trim().toLowerCase()).filter(Boolean).sort()
+    : [];
+  const hasTarget = !!payload && Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
+  const target = hasTarget ? (payload.email_release_target || null) : 'no-opinion';
+  return JSON.stringify([reasonCode || null, !!payload?.email_disagreement, candidates, target]);
+}
+
+// The single address (or blank) a card's evidence supports holding a
+// first-touch send to — a PURE function of the current evidence, never a
+// database read (Codex P1 round 3, findings #1 and #6):
+//   - An operator's mid-run correction always wins — a hold row whose
+//     corrected_at is set keeps its OWN held_email, never re-derived from
+//     fresh evidence (customer-email-fanout is the only writer of
+//     corrected_at, and it already retargeted the hold itself).
+//   - An explicit `email_release_target: null` means the dictation itself
+//     is ambiguous — never fall back to guessing a candidate to fill the
+//     gap. A disagreement flag, or more than one candidate with no
+//     explicit target, is the same "no single confirmed address" shape:
+//     all three hold blank rather than pick.
+//   - Otherwise the one address the evidence names — an explicit target
+//     when the payload sets one, else the sole candidate.
+function deriveEmailHoldTarget(evidencePayload, existingHoldRow) {
+  if (existingHoldRow?.corrected_at && String(existingHoldRow.held_email || '').trim()) {
+    return {
+      held_email: existingHoldRow.held_email,
+      email_release_target: String(existingHoldRow.held_email).trim().toLowerCase(),
+    };
+  }
+  const payload = evidencePayload || {};
+  const candidates = Array.isArray(payload.email_candidates) ? payload.email_candidates : [];
+  const hasExplicitTarget = Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
+  const explicitTarget = hasExplicitTarget ? payload.email_release_target : undefined;
+  const ambiguous = !!payload.email_disagreement
+    || (hasExplicitTarget && explicitTarget === null)
+    || (candidates.length > 1 && !explicitTarget);
+  if (ambiguous) return { held_email: '', email_release_target: null };
+  const raw = (typeof explicitTarget === 'string' && explicitTarget)
+    ? explicitTarget
+    : (candidates.length === 1 ? candidates[0]?.value : null);
+  const normalized = raw ? String(raw).trim().toLowerCase() : null;
+  return { held_email: normalized || '', email_release_target: normalized };
+}
+
+// The single evidence payload THIS PASS stands behind, whether or not it
+// minted a card — full agreement with no card at all is still evidence (a
+// single confirmed address, or none when the call has no email), and more
+// than one live email concern in the same pass is never auto-resolved
+// (same "no single confirmed address" shape deriveEmailHoldTarget's
+// ambiguous branch already covers).
+function emailPassEvidence(cards, resolvedEmail) {
+  if (cards.length === 1) return safeParseJsonPayload(cards[0].payload);
+  if (cards.length > 1) return { email_disagreement: true };
+  return { email_release_target: resolvedEmail === undefined ? null : resolvedEmail };
+}
+
+// Cheap, unlocked relevance check (Codex P2 round 3): the mint now runs on
+// EVERY processed call (finding #3 — a full-agreement reprocess must reach
+// it too), and most calls have nothing for it to do. Only worth the fenced
+// transaction when a live email card exists to supersede or a hold row
+// exists whose target this pass could change; the transaction re-reads
+// both under FOR UPDATE regardless, so a false positive (or the fail-open
+// on a lookup error) only costs an extra no-op transaction, never a missed
+// supersede.
+async function emailMintMayBeRelevant(callLogId) {
+  try {
+    const liveCard = await db('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('status', ['open', 'in_progress'])
+      .whereIn('reason_code', EMAIL_CARD_REASON_CODES)
+      .first('id');
+    if (liveCard) return true;
+    if (await db.schema.hasTable('first_touch_holds')) {
+      const holdRow = await db('first_touch_holds').where({ call_log_id: callLogId }).first('id');
+      if (holdRow) return true;
+    }
+    return false;
+  } catch (_e) {
+    return true;
+  }
+}
+
 // Mint email read-back cards ATOMICALLY with the release-claim invalidation
 // (Codex #3084 r54): an autocommit card insert followed by a separate repen
 // left a window where a release — its one card question already answered
@@ -1555,8 +1651,35 @@ async function recordFirstTouchHoldOwned(args, procToken) {
 // claims still valid) cannot exist; a failed mint leaves no card, which the
 // token-fenced end-of-run recovery covers. repen's r44 durable-state error
 // still propagates (the caller fails the run retryably).
-async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid, invalidateClaims = true }) {
-  if (!cards.length) return;
+//
+// SUPERSEDE, never refresh in place (Codex P1 rounds 2/3 — findings #1–#3,
+// #6): a prior design rewrote a live card's payload in place, which left
+// three open holes — the office could load a card, have its evidence
+// silently swapped under the same id, and still submit a Resolve/Accept
+// against stale evidence with no version conflict; a `.first()` pick over
+// live cards could grab the wrong sibling when both email_unverified and
+// email_invalid were live; and a full-agreement reprocess that minted no
+// card at all had no path back to a stale open card at all. Every call now
+// closes the gap the same way: load every live email card, compare each to
+// this pass's desired evidence by signature, close (never edit) anything
+// that differs with a terminal 'resolved'/'auto' status the office sees on
+// the Resolved tab's Auto-closed filter, insert this pass's fresh evidence
+// where nothing already matches it, and derive the hold's target from a
+// pure function of that evidence. A stale click against a closed card's id
+// now hits transitionCore's existing `!OPEN_STATES.includes(status)` 409
+// before anything else runs.
+//
+// `resolvedEmail` (Codex P1 round 3): the single address (or null) THIS
+// pass stands behind when it mints no email card — undefined means the
+// caller has nothing to report this pass (skip entirely, same as the
+// `cards.length` short-circuit below). Every real call site now always
+// supplies it, so a full-agreement reprocess (which mints no card) still
+// reconciles a stale open card down to "resolved, nothing to hold".
+async function mintEmailReviewCardsFenced({
+  callLogId, procToken, cards, callSid, invalidateClaims = true, resolvedEmail = undefined,
+}) {
+  if (!cards.length && resolvedEmail === undefined) return;
+  if (!cards.length && !(await emailMintMayBeRelevant(callLogId))) return;
   try {
     const minted = await db.transaction(async (trx) => {
       // Advisory lock FIRST (Codex #3084 r55): with no hold rows yet — the
@@ -1567,11 +1690,9 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
       // shared per-call advisory lock serializes this mint against every
       // card writer regardless of what rows exist.
       await lockTriageCall(trx, callLogId);
-      if (await trx.schema.hasTable('first_touch_holds')) {
-        await trx('first_touch_holds')
-          .where({ call_log_id: callLogId })
-          .forUpdate()
-          .select('id');
+      const holdsTable = await trx.schema.hasTable('first_touch_holds');
+      if (holdsTable) {
+        await trx('first_touch_holds').where({ call_log_id: callLogId }).forUpdate().select('id');
       }
       const owned = await trx('call_log')
         .where({ id: callLogId })
@@ -1579,13 +1700,133 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
         .forUpdate()
         .first('id');
       if (!owned) return false;
+
+      // Every live email card, both reason codes, loaded together — not
+      // picked one at a time — so nothing is missed (finding #2).
+      const liveCards = await trx('triage_items')
+        .where({ call_log_id: callLogId })
+        .whereIn('reason_code', EMAIL_CARD_REASON_CODES)
+        .whereIn('status', ['open', 'in_progress'])
+        .forUpdate()
+        .select('id', 'reason_code', 'payload');
+      const satisfiedReasonCodes = new Set();
+      for (const live of liveCards) {
+        const desired = cards.find((c) => c.reason_code === live.reason_code);
+        const same = !!desired
+          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload))
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload));
+        if (same) {
+          satisfiedReasonCodes.add(desired.reason_code);
+          continue; // identical evidence — no-op, card untouched
+        }
+        // Pre-generate the replacement's id (if any) so the closed row can
+        // reference it — the partial unique index requires closing this row
+        // BEFORE the fresh one can be inserted, so the new id doesn't exist
+        // as a row yet when it's stamped here.
+        if (desired && !desired.id) desired.id = crypto.randomUUID();
+        await trx('triage_items').where({ id: live.id }).update({
+          status: 'resolved',
+          resolution_source: 'auto',
+          resolution_note: 'Superseded — a reprocess found different email evidence.',
+          resolved_at: new Date(),
+          updated_at: new Date(),
+          payload: JSON.stringify({
+            ...safeParseJsonPayload(live.payload),
+            superseded_at: new Date().toISOString(),
+            superseded_by: desired?.id || null,
+            superseded_reason: 'stale_email_evidence',
+          }),
+        });
+      }
+      // A disagreement an operator already confirmed by read-back (Codex
+      // round-9 P2): a force-reprocess that yields the SAME evidence must not
+      // reopen it. liveCards above only sees open/in_progress rows, so without
+      // this the pass re-inserted an identical open card and staff had to
+      // repeat the confirmation after every reprocess — and for a
+      // customer-less lead the earlier email_confirmed_at predates the new
+      // card, so emailDisagreementConfirmed rejected it outright. Only a
+      // human read-back confirmation (payload.confirmed_email) counts; an
+      // auto-superseded card never does. The hold itself already keeps the
+      // confirmed address (retargetConfirmedHold stamps corrected_at, which
+      // deriveEmailHoldTarget honors).
+      const pendingCards = cards.filter((c) => !satisfiedReasonCodes.has(c.reason_code));
+      const confirmedReasonCodes = new Set();
+      if (pendingCards.length) {
+        const confirmedCards = await trx('triage_items')
+          .where({ call_log_id: callLogId, status: 'resolved', resolution_source: 'human' })
+          .whereIn('reason_code', pendingCards.map((c) => c.reason_code))
+          .select('reason_code', 'payload');
+        for (const done of confirmedCards) {
+          const donePayload = safeParseJsonPayload(done.payload);
+          if (!String(donePayload?.confirmed_email || '').trim()) continue;
+          const desired = pendingCards.find((c) => c.reason_code === done.reason_code);
+          if (desired && emailCardSignature(done.reason_code, donePayload)
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload))) {
+            satisfiedReasonCodes.add(desired.reason_code);
+            confirmedReasonCodes.add(desired.reason_code);
+          }
+        }
+      }
       for (const card of cards) {
+        if (satisfiedReasonCodes.has(card.reason_code)) continue;
         await trx('triage_items')
           .insert(card)
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore();
       }
-      if (invalidateClaims) {
+
+      if (holdsTable) {
+        const holdRow = await trx('first_touch_holds').where({ call_log_id: callLogId }).first('held_email', 'corrected_at');
+        const target = deriveEmailHoldTarget(emailPassEvidence(cards, resolvedEmail), holdRow);
+        // A PENDING row's retarget bumps updated_at; a RELEASING row's never
+        // does here (pre-push audit P1 on 77294c72e2, same rule as
+        // customer-email-fanout's releasing retarget and admin-triage's
+        // retargetConfirmedHold): its updated_at is the claimant's lease
+        // stamp, and resumeHeldFirstTouch settles only while the stamp still
+        // equals its claim. A full-agreement reconcile (invalidateClaims
+        // false) must leave that claim alone; when the pass DOES invalidate
+        // claims, repenHoldsForFreshEmailReview below does it deliberately.
+        await trx('first_touch_holds')
+          .where({ call_log_id: callLogId, status: 'pending' })
+          .update({ held_email: target.held_email, updated_at: new Date() });
+        await trx('first_touch_holds')
+          .where({ call_log_id: callLogId, status: 'releasing' })
+          .update({ held_email: target.held_email });
+      }
+      // Mirror admin-triage transitionCore's / triage-auto-resolve's
+      // review_status sync (Codex round-4 P1, finding #4): superseding the
+      // call's LAST live card with no replacement (full agreement on
+      // reprocess) previously left call_log.review_status stuck 'open'
+      // forever — the finalizer only writes 'open' when the pass itself
+      // has confirmation reasons, so a pass with none never re-closes it,
+      // and call-intelligence keeps telling staff to clear a card that no
+      // longer exists. A call with any open/in_progress card remaining
+      // (including a fresh replacement this same pass just inserted) stays
+      // 'open'; otherwise it closes to 'resolved' — the same terminal
+      // status the superseded row itself took.
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: callLogId })
+        .whereIn('status', ['open', 'in_progress'])
+        .count({ n: '*' })
+        .first();
+      await trx('call_log')
+        .where({ id: callLogId })
+        .update({ review_status: Number(stillOpen?.n || 0) > 0 ? 'open' : 'resolved', updated_at: new Date() });
+      // Invalidate release claims only when THIS transaction leaves a live
+      // email review question behind (Codex round-10 P1): the caller's
+      // invalidateClaims says the pass HAS email reasons, but when every
+      // desired card is satisfied by an operator's read-back confirmation
+      // (above) nothing is retained or inserted — there is no fresh question
+      // to wait on, and repenHoldsForFreshEmailReview would turn a
+      // 'releasing' confirmation release into a forced-resend marker, so a
+      // send that already succeeded could go again. Decided from this
+      // transaction's own card decisions, never the caller's reason list:
+      // every desired card is either retained (an identical live card), or
+      // inserted (any non-matching live card of its reason code was closed
+      // above, under the per-call advisory lock every card writer takes, so
+      // the insert cannot be ignored), or satisfied by a confirmation.
+      const leavesLiveEmailCard = cards.some((c) => !confirmedReasonCodes.has(c.reason_code));
+      if (invalidateClaims && leavesLiveEmailCard) {
         const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
         await repenHoldsForFreshEmailReview(callLogId, trx);
       }
@@ -1602,8 +1843,10 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
     // card, the ledger sweep can read that historical disposition as
     // approval and release the fresh extraction before the end-of-run
     // recovery ever files its card. Retryable, same path as the r44
-    // durable-state failures.
-    logger.error(`[call-proc] fenced email card mint failed for ${maskSid(callSid)}: ${mintErr.message} — failing the run (retryable)`);
+    // durable-state failures. Code/name only (Codex P1 round 3, finding
+    // #8): a knex error's .message embeds the bound payload, which can
+    // carry candidate emails.
+    logger.error(`[call-proc] fenced email card mint failed for ${maskSid(callSid)}: ${mintErr.code || mintErr.name || 'error'} — failing the run (retryable)`);
     const stateErr = new Error('email_review_state_unavailable');
     stateErr.emailReviewStateUnavailable = true;
     throw stateErr;
@@ -8759,6 +9002,23 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
     }
 
+    // ── V1/V2 email disagreement hold (owner ruling, 2026-09-25) ─────────
+    // adoptV2PrimaryFields already nulled extracted.email and stamped both
+    // raw candidates onto extracted.email_candidates when the legs disagreed
+    // (see extraction-compat.js). Runs LAST — after the dictation decoder and
+    // its quarantine arbiter above, which read a NULL extracted.email and may
+    // have confidently adopted one of the two candidates from transcript
+    // evidence alone. Neither gets final say here: re-null and fold both
+    // candidates into dictationEmailPayload so the standard decoder-only
+    // forced-card path below files ONE card with both spellings for the
+    // office to read back, instead of either extractor's guess winning.
+    if (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2) {
+      const held = applyEmailDisagreementHold(extracted, dictationEmailPayload);
+      extracted = held.extracted;
+      dictationEmailPayload = held.dictationEmailPayload;
+      logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+    }
+
     // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
     // Runs before the routing gate: in enforce mode a recovered street must
     // reach canAutoRoute as the validated verdict it is, or the very garble
@@ -9450,29 +9710,51 @@ const CallRecordingProcessor = {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
           }
-          // Card mint + claim invalidation ride ONE token-fenced
-          // transaction (Codex #3084 r54 — see mintEmailReviewCardsFenced;
-          // r43's invalidation and r44's durable-state error semantics
-          // both preserved, now atomic with the card writes).
-          await mintEmailReviewCardsFenced({
-            callLogId: call.id,
-            procToken,
-            callSid,
-            cards: needsConfirmation.slice(0, 10)
-              .filter((flag) => flag === 'email_unverified' || flag === 'email_invalid')
-              .map((flag) => buildTriageItem({
-                callLogId: call.id,
-                flag,
-                onFileAddress,
-                extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
-                severity: 'advisory',
-                // + the address the run adopted at filing time (the release
-                // target the evidence sweep may verify); null when the
-                // dictation demoted it — then only a human can settle it.
-                extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
-              })),
-          });
         }
+        // Card mint + claim invalidation ride ONE token-fenced transaction
+        // (Codex #3084 r54 — see mintEmailReviewCardsFenced; r43's
+        // invalidation and r44's durable-state error semantics both
+        // preserved, now atomic with the card writes). Called even with NO
+        // email flags in needsConfirmation (Codex P1 round 3, finding #3):
+        // this whole bridge block used to run the mint only when
+        // needsConfirmation was non-empty, so a full-agreement reprocess
+        // (e.g. after an enforce→shadow demotion) never reached it and a
+        // stale open disagreement card from an earlier cycle was never
+        // superseded. Hoisted out of the `if` above so it always runs once
+        // per pass; the mint's own relevance pre-check keeps the common
+        // case (nothing live, nothing held) cheap.
+        await mintEmailReviewCardsFenced({
+          callLogId: call.id,
+          procToken,
+          callSid,
+          // Codex round-6 P1: this call site never set invalidateClaims,
+          // silently defaulting to true — a full-agreement reconcile
+          // (cards: [], nothing live minted this pass) still ran
+          // repenHoldsForFreshEmailReview, converting an unmarked
+          // 'releasing' row and letting a provider call that ALREADY
+          // succeeded this pass be force-sent again. Same predicate as the
+          // enforce branch below: only invalidate when this pass actually
+          // mints a live email card.
+          invalidateClaims: needsConfirmation.includes('email_unverified') || needsConfirmation.includes('email_invalid'),
+          cards: needsConfirmation.slice(0, 10)
+            .filter((flag) => flag === 'email_unverified' || flag === 'email_invalid')
+            .map((flag) => buildTriageItem({
+              callLogId: call.id,
+              flag,
+              onFileAddress,
+              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+              severity: 'advisory',
+              // + the address the run adopted at filing time (the release
+              // target the evidence sweep may verify); null when the
+              // dictation demoted it — then only a human can settle it.
+              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+            })),
+          // Codex P1 (round 3): this cycle's single agreed address (or
+          // null) — lets the mint reconcile a STALE open disagreement card
+          // even when this pass's own needsConfirmation carries no email
+          // flag at all (full agreement on reprocess).
+          resolvedEmail: String(extracted.email || '').trim().toLowerCase() || null,
+        });
       } catch (bridgeErr) {
         // The bridge is advisory EXCEPT for the r44 invalidation: with the
         // card durably inserted and the hold claims NOT invalidated, an
@@ -9529,30 +9811,38 @@ const CallRecordingProcessor = {
         }
         if (emailReasons.length) {
           bridgeNeedsConfirmation.push(...emailReasons);
-          // Same Needs Review surfacing as the shadow branch: the inbox is
-          // driven by triage_items rows, so without these an auto-routed call
-          // in enforce/V2-off mode would never show the read-back prompt.
-          // Same fenced mint as the shadow branch (Codex #3084 r54): the
-          // card writes and the r43 claim invalidation ride one
-          // token-fenced transaction; r44's durable-state error still
-          // throws into the extraction_failed retry. Decoder evidence
-          // (candidates + the exact read-back question) rides each card.
-          await mintEmailReviewCardsFenced({
-            callLogId: call.id,
-            procToken,
-            callSid,
-            invalidateClaims: emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid'),
-            cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
-              callLogId: call.id,
-              flag,
-              onFileAddress,
-              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
-              severity: 'advisory',
-              // Same filing-time release-target snapshot as the shadow branch.
-              extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
-            })),
-          });
         }
+        // Same Needs Review surfacing as the shadow branch: the inbox is
+        // driven by triage_items rows, so without these an auto-routed call
+        // in enforce/V2-off mode would never show the read-back prompt.
+        // Same fenced mint as the shadow branch (Codex #3084 r54): the
+        // card writes and the r43 claim invalidation ride one
+        // token-fenced transaction; r44's durable-state error still
+        // throws into the extraction_failed retry. Decoder evidence
+        // (candidates + the exact read-back question) rides each card.
+        // Called even with NO email reasons (Codex P1 round 3): a
+        // full-agreement reprocess mints no email card at all, but a STALE
+        // open disagreement card from an earlier cycle still needs
+        // reconciling down to this cycle's single agreed address —
+        // `resolvedEmail` carries it, and the mint's own guard skips the
+        // fenced transaction entirely when there is nothing open to
+        // reconcile.
+        await mintEmailReviewCardsFenced({
+          callLogId: call.id,
+          procToken,
+          callSid,
+          invalidateClaims: emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid'),
+          cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
+            callLogId: call.id,
+            flag,
+            onFileAddress,
+            extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+            severity: 'advisory',
+            // Same filing-time release-target snapshot as the shadow branch.
+            extraPayload: { ...(dictationEmailPayload || {}), email_release_target: String(extracted.email || '').trim().toLowerCase() || null },
+          })),
+          resolvedEmail: String(extracted.email || '').trim().toLowerCase() || null,
+        });
       } catch (emailErr) {
         // Advisory EXCEPT the r44 invalidation — see the shadow branch.
         if (emailErr.emailReviewStateUnavailable) throw emailErr;
@@ -17104,7 +17394,9 @@ const CallRecordingProcessor = {
         { callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt },
         procToken,
       );
-    } else if (customerId && !extracted.email && extracted.email_raw && !v2EmailBlocked
+    } else if (customerId && !extracted.email
+        && (extracted.email_raw || (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2))
+        && !v2EmailBlocked
         && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
       // A DEMOTED address (dictation policy moved the unconfirmed guess to
       // email_raw) still owes this customer the first-touch drip once the
@@ -17113,7 +17405,10 @@ const CallRecordingProcessor = {
       // newsletter hold Step 8 records. The EMPTY held address is inert to
       // every automated release — the invalid-address guard blocks sends
       // and the sweep skips empty-address rows — so only the correction's
-      // explicit address releases it.
+      // explicit address releases it. A V1/V2 email DISAGREEMENT (owner
+      // ruling 2026-09-25) is the same "owed drip, no address to send to"
+      // shape — extracted.email_candidates carries the evidence instead of
+      // email_raw, so it takes the same branch.
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email was demoted to read-back review`);
       beehiivResult = { skipped: 'email_under_review' };
       // Token-fenced through the merge (r44/r45) — see the primary
@@ -18925,6 +19220,9 @@ CallRecordingProcessor._test = {
   voicemailCallbackAlertPlan,
   shouldHoldLeadEmailEnrollment,
   mintEmailReviewCardsFenced,
+  emailCardSignature,
+  deriveEmailHoldTarget,
+  emailPassEvidence,
   transcribeRecording,
   extractCallDataV2,
   CALL_EXTRACTION_ROUTE,
