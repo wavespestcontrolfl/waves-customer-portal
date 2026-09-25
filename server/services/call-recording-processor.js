@@ -14920,6 +14920,14 @@ const CallRecordingProcessor = {
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
                     attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                    // Codex round-4 P1 (PR #4807): this row's source_call_log_id
+                    // linkage may itself be durable from an earlier pass (a
+                    // reprocess landing here via the `linked` lookup in
+                    // findExistingCallAppointment) rather than freshly attached
+                    // in THIS pass — either way the hold must be present before
+                    // this trx commits. Idempotent (whereNull-guarded, keyed on
+                    // source_call_log_id), so a no-op when it already stuck.
+                    await stampCallbackNumberHoldForCall();
                   } else if (!primaryRowSkipped && !reuseHeldForAddress) {
                     // After the backfill so the child inherits the assigned tech.
                     followUpCreated = await ensureCallFollowUpVisit(primaryRow);
@@ -15142,6 +15150,16 @@ const CallRecordingProcessor = {
                   reusedExistingSchedule = true;
                   attachedManualBookingId = attachable.row.id;
                   attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  // Codex round-4 P1 (PR #4807): the update just above stamped
+                  // source_call_log_id onto this human-created booking — the
+                  // ONLY linkage the hold stamp keys on — but this attach path
+                  // deliberately never calls ensureCallFollowUpVisit (see the
+                  // "Deliberately NO ensureCallFollowUpVisit" note below), which
+                  // was round 3's only call site for the stamp. Without this
+                  // call the row's existing confirmation/reminder send goes out
+                  // unheld to a caller who just disclaimed their ANI. Same trx
+                  // as the attach update, so it commits or rolls back with it.
+                  await stampCallbackNumberHoldForCall();
                   const primaryRow = stamped;
                   // The deal still closed — same idempotent, ownership-guarded
                   // conversion as the reuse path above, same re-service

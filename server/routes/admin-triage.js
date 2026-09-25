@@ -59,6 +59,29 @@ function sanitizeWrongFields(input) {
   return [...new Set(input.filter((f) => WRONG_FIELDS.includes(f)))];
 }
 
+// Codex round-4 P2 (PR #4807): the ONE place that lifts a
+// callback_number_needed hold — shared by the single-card /resolve
+// transition (transitionCore) and the bulk call-verdict route below, so the
+// two writers can never drift on the update itself the way the two
+// customer-facing clearance writers (admin-triage's own resolve path and
+// customer-contact-fanout.js's phone-edit fanout) once drifted on their
+// status filter (round-3 P2, same PR). NONTERMINAL, not just
+// pending/confirmed: a visit already en_route/on_site is still live.
+async function clearCallbackNumberHold(trx, callLogId) {
+  const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
+  return trx('scheduled_services')
+    .where({ source_call_log_id: callLogId })
+    .whereIn('status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .whereNotNull('callback_number_hold_at')
+    .update({
+      // call_sms_cleared_at >= callback_number_hold_at by construction
+      // (GREATEST), matching the timestamp rule the hold predicate reads
+      // (appointment-reminders.js's callbackNumberHoldFromRow).
+      call_sms_cleared_at: trx.raw('GREATEST(callback_number_hold_at, now())'),
+      updated_at: new Date(),
+    });
+}
+
 // Upsert the single current verdict for a call (re-review overwrites). Links to
 // the enforce-mode route_decision when one exists so calibration can attribute
 // the verdict to the flags that drove the gate.
@@ -310,22 +333,12 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // this call created, in the SAME transaction as the resolve (codex
       // round-2 finding #2, PR #4807). Dismiss does NOT clear: it means
       // "leave the note, no verified number" — the hold (and its email
-      // fallback, callbackNumberHoldActiveForVisit) must stand.
-      // call_sms_cleared_at >= callback_number_hold_at by construction
-      // (GREATEST), matching the timestamp rule the hold predicate reads
-      // (appointment-reminders.js's callbackNumberHoldFromRow).
-      // NONTERMINAL, not just pending/confirmed (codex round-3 P2): a visit
-      // already en_route/on_site is still live and its arrival text must
-      // not stay withheld after the office verifies the number.
-      const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
-      await trx('scheduled_services')
-        .where({ source_call_log_id: item.call_log_id })
-        .whereIn('status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
-        .whereNotNull('callback_number_hold_at')
-        .update({
-          call_sms_cleared_at: trx.raw('GREATEST(callback_number_hold_at, now())'),
-          updated_at: new Date(),
-        });
+      // fallback, callbackNumberHoldActiveForVisit) must stand. This
+      // single-card action IS the office's deliberate confirmation (unlike
+      // the bulk call-verdict route below, which gates its own clearing
+      // attempt on an actual phone-on-file check — codex round-4 P2), so it
+      // clears unconditionally on Resolve, unchanged from round 2/3.
+      await clearCallbackNumberHold(trx, item.call_log_id);
     }
     if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
       // A promise exception is not closed by generic bookkeeping alone: the
@@ -1065,6 +1078,17 @@ router.post('/:id/verdict', async (req, res) => {
     let conflictCardSettled = false;
     let staleConflictVersion = false;
     let relinkedRecoveryTask = false;
+    let callbackNumberUnverified = false;
+    // Codex round-4 P2 (PR #4807): TriageInboxTabV2 renders callback_number_
+    // needed as a generic call-verdict card (Accept / Deny), not through the
+    // dedicated single-card actions on_file_house_number_conflict etc. use —
+    // so unlike /resolve (a deliberate, one-card confirmation), Accept here
+    // is a whole-call routing judgment that says nothing on its own about
+    // whether anyone actually got a working number. A Deny that names no
+    // field is the same blanket rejection denyRejectsUnitEvidence treats as
+    // "nothing here is confirmed" for a different card, so it doesn't
+    // attempt to clear either — only Dismiss-equivalent, the hold stands.
+    const attemptsCallbackNumberClear = verdict === 'accept' || (verdict === 'deny' && wrongFields.length > 0);
     await db.transaction(async (trx) => {
       // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
       // first_touch_holds rows → triage_items. The advisory lock is the
@@ -1074,6 +1098,37 @@ router.post('/:id/verdict', async (req, res) => {
       // r33 discipline against the email-correction fanout, which settles
       // holds and cards in one transaction using the same order.
       await lockTriageCall(trx, item.call_log_id);
+      // Codex round-4 P2 (PR #4807): refuse the WHOLE verdict — nothing
+      // resolves, same "refuse-until-corrected" shape as ADDRESS_UNVERIFIED
+      // (booking.js / admin-estimates.js) — when this verdict would clear an
+      // open callback_number_needed card with no actual evidence a working
+      // number exists. The card carries no verified-replacement field of its
+      // own (nothing in this pipeline stamps one), so the only evidence that
+      // counts is a customer phone that has since moved OFF the disclaimed
+      // ANI the call recorded — a human correction, not the AI's own guess.
+      // Checked under the call lock, before the bulk resolve below touches
+      // anything, so a refusal leaves every card on the call exactly as it
+      // was for a retry once the number is actually fixed.
+      if (attemptsCallbackNumberClear) {
+        const openCallbackCard = await trx('triage_items')
+          .where({ call_log_id: item.call_log_id, reason_code: 'callback_number_needed' })
+          .whereIn('status', OPEN_STATES)
+          .first('id');
+        if (openCallbackCard) {
+          const callRow = await trx('call_log').where({ id: item.call_log_id }).first('from_phone', 'customer_id');
+          const customerRow = callRow?.customer_id
+            ? await trx('customers').where({ id: callRow.customer_id }).first('phone')
+            : null;
+          const { phoneKey } = require('../services/customer-contact-fanout');
+          const aniDigits = phoneKey(callRow?.from_phone);
+          const customerDigits = phoneKey(customerRow?.phone);
+          const verifiedReplacementNumber = !!customerDigits && customerDigits !== aniDigits;
+          if (!verifiedReplacementNumber) {
+            callbackNumberUnverified = true;
+            return;
+          }
+        }
+      }
       // A house-number conflict card is version-bound like the property-
       // role and promise cards: a force-reprocess merges refreshed evidence
       // into the same open row, so a verdict judged on what the inbox
@@ -1167,6 +1222,16 @@ router.post('/:id/verdict', async (req, res) => {
       emailCardResolved = resolvedRows
         .some((r) => ['email_unverified', 'email_invalid'].includes(r?.reason_code));
       if (resolved === 0) return;
+      // Codex round-4 P2 (PR #4807): only reached when the pre-check above
+      // already confirmed a verified replacement number (or there was no
+      // open callback_number_needed card to clear in the first place) — a
+      // blanket, no-fields-named Deny never reached this far attempting to
+      // clear (attemptsCallbackNumberClear false), matching Dismiss's
+      // "leave the note, no verified number" semantics on the single-card
+      // path. Same shared helper transitionCore's /resolve uses.
+      if (attemptsCallbackNumberClear && resolvedRows.some((r) => r?.reason_code === 'callback_number_needed')) {
+        await clearCallbackNumberHold(trx, item.call_log_id);
+      }
       if (verdict === 'deny' && denyRejectsUnitEvidence(wrongFields) && resolvedRows.some((r) => r?.reason_code === 'missing_unit_number')) {
         // The call-level Deny is the same human verdict the card's Dismiss
         // is (transitionCore above): the texted unit is rejected, so the
@@ -1257,6 +1322,9 @@ router.post('/:id/verdict', async (req, res) => {
     }
     if (relinkedRecoveryTask) {
       return res.status(409).json({ error: 'This call was relinked to another customer since the task was filed — reprocess the call to refresh it, then review it.', code: 'CONFLICT_CUSTOMER_RELINKED' });
+    }
+    if (callbackNumberUnverified) {
+      return res.status(409).json({ error: 'The customer phone on file still matches the number the caller disclaimed — enter a verified callback number before accepting this card.', code: 'CALLBACK_NUMBER_UNVERIFIED' });
     }
     if (resolved === 0) {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
@@ -1416,4 +1484,4 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
 module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
-  heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS };
+  heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS, clearCallbackNumberHold };

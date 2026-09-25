@@ -43,11 +43,13 @@ function makeFakeDb(seed = {}) {
     const whereInClauses = [];
     const whereNotInClauses = [];
     const orPredicates = [];
+    const rawPredicates = [];
     const applyEq = (a, b) => { if (a && typeof a === 'object') Object.assign(eq, a); else eq[a] = b; };
     const matches = (row) => Object.entries(eq).every(([k, v]) => row[k] === v)
       && notNullCols.every((col) => row[col] != null)
       && whereInClauses.every(({ col, vals }) => vals.includes(row[col]))
       && whereNotInClauses.every(({ col, vals }) => !vals.includes(row[col]))
+      && rawPredicates.every((fn) => fn(row))
       && (orPredicates.length === 0 || orPredicates.some((fn) => fn(row)));
     const filtered = () => rows.filter(matches);
     const api = {
@@ -62,6 +64,14 @@ function makeFakeDb(seed = {}) {
       },
       whereIn(col, vals) { whereInClauses.push({ col, vals }); return api; },
       whereNotIn(col, vals) { whereNotInClauses.push({ col, vals }); return api; },
+      // Only the /verdict route's own reschedule-proposal exclusion uses
+      // whereRaw against this table (same shape as
+      // admin-triage-reschedule-promise.test.js's builder).
+      whereRaw(sql) {
+        if (sql !== "payload->'reschedule_proposal' IS NULL") throw new Error(`Unsupported test query: ${sql}`);
+        rawPredicates.push((row) => row.payload?.reschedule_proposal == null);
+        return api;
+      },
       whereNull(col) { eq[col] = null; return api; },
       whereNotNull(col) { notNullCols.push(col); return api; },
       forUpdate() { return api; },
@@ -132,12 +142,23 @@ function put(baseUrl, path, body = {}) {
   });
 }
 
+function post(baseUrl, path, body = {}) {
+  return fetch(`${baseUrl}/admin/triage${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+}
+
 const CALL_ID = 'call-1';
 const CARD_ID = 'card-1';
 const HELD_VISIT_ID = 'svc-held';
 const OTHER_CALL_VISIT_ID = 'svc-other-call';
 const CANCELLED_VISIT_ID = 'svc-cancelled';
 const EN_ROUTE_VISIT_ID = 'svc-en-route';
+const CUSTOMER_ID = 'cust-1';
+// The number the caller disclaimed (call_log.from_phone) — the /verdict
+// route's phone-verification gate (codex round-4 P2) compares the
+// customer's on-file phone against this ANI.
+const DISCLAIMED_ANI = '9415551234';
 
 function fixture(extra = {}) {
   return makeFakeDb({
@@ -145,7 +166,11 @@ function fixture(extra = {}) {
       id: CARD_ID, call_log_id: CALL_ID, reason_code: 'callback_number_needed', status: 'open',
       updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory', payload: {},
     }],
-    call_log: [{ id: CALL_ID, review_status: 'open' }],
+    // customer phone defaults to the disclaimed ANI itself (the pre-#4807
+    // state — no correction on file yet); /verdict tests override this via
+    // the `customers` key in `extra`.
+    call_log: [{ id: CALL_ID, review_status: 'open', from_phone: DISCLAIMED_ANI, customer_id: CUSTOMER_ID }],
+    customers: [{ id: CUSTOMER_ID, phone: DISCLAIMED_ANI }],
     scheduled_services: [
       // The visit this call created — held, live.
       { id: HELD_VISIT_ID, source_call_log_id: CALL_ID, status: 'confirmed', callback_number_hold_at: new Date('2030-01-07T10:00:00Z'), call_sms_cleared_at: null },
@@ -219,5 +244,61 @@ describe('PUT /admin/triage/:id/dismiss on a callback_number_needed card', () =>
     expect(tables.triage_items[0].status).toBe('dismissed');
     const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
     expect(held.call_sms_cleared_at).toBeNull();
+  });
+});
+
+/**
+ * Codex round-4 P2, PR #4807: TriageInboxTabV2 renders callback_number_needed
+ * as a generic call-verdict card (Accept/Deny → POST /:id/verdict), not
+ * through the single-card /resolve action above. Accept there is a
+ * whole-call routing judgment, not a deliberate "I confirmed this number"
+ * click, so the route must independently verify a corrected number is
+ * actually on file before it clears the hold — refusing 409
+ * CALLBACK_NUMBER_UNVERIFIED instead of trusting the verdict alone.
+ */
+describe('POST /admin/triage/:id/verdict on a callback_number_needed card', () => {
+  test('Accept with a corrected customer phone clears the hold on every live visit', async () => {
+    const { conn, tables } = fixture({
+      customers: [{ id: CUSTOMER_ID, phone: '9415559999' }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items[0].status).toBe('resolved');
+    const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
+    expect(held.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
+    const enRoute = tables.scheduled_services.find((s) => s.id === EN_ROUTE_VISIT_ID);
+    expect(enRoute.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
+  });
+
+  test('Accept with the customer phone still == the disclaimed ANI refuses 409 CALLBACK_NUMBER_UNVERIFIED — nothing resolves, nothing clears', async () => {
+    // Default fixture: customers.phone === DISCLAIMED_ANI (no correction).
+    const { conn, tables } = fixture();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('CALLBACK_NUMBER_UNVERIFIED');
+    });
+    // The whole verdict is refused, not just the clearing: the card stays
+    // open for a retry once the number is actually fixed.
+    expect(tables.triage_items[0].status).toBe('open');
+    const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
+    expect(held.call_sms_cleared_at).toBeNull();
+  });
+
+  test('a differently-formatted but equal ANI (dashes, leading 1) still counts as unverified — digits compare, not string compare', async () => {
+    const { conn, tables } = fixture({
+      customers: [{ id: CUSTOMER_ID, phone: '1-941-555-1234' }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(409);
+    });
+    expect(tables.triage_items[0].status).toBe('open');
   });
 });

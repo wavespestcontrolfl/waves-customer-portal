@@ -129,3 +129,43 @@ describe('round-3 P2 — the disclaimed-caller crm_notes write is gated on promo
     expect(windowSrc).toMatch(/disclaimedNote\s*=\s*callExtractionV2PrimaryEnabled\(\)/);
   });
 });
+
+/**
+ * Codex round-4 on PR #4807 (1 P1 + 1 P2). The P1 below is covered here as a
+ * source-shape assertion for the same reason as every other stamp-call-site
+ * check in this file: the attach paths are inline inside the giant booking
+ * transaction, not independently mockable helpers.
+ */
+describe('round-4 P1 — an ATTACHED human booking is covered by the hold stamp too', () => {
+  test('there are now 5 stampCallbackNumberHoldForCall call sites: the 3 ensureCallFollowUpVisit sites (round 3) plus both attach paths (round 4)', () => {
+    const callSites = src.match(/await stampCallbackNumberHoldForCall\(\);/g) || [];
+    expect(callSites.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test('the fresh-attach path (the UPDATE that first sets source_call_log_id on a human-created booking) stamps the hold right after, in the same trx', () => {
+    // findAttachableCallAppointment's own attach UPDATE stamps
+    // source_call_log_id — the only linkage the hold stamp keys on. The
+    // stamp call must appear between that UPDATE and the next attach-path
+    // milestone (attachSkippedFollowUpPlan), which this path always sets.
+    const updateIdx = src.indexOf("source_call_log_id: call.id,\n                      // JobDrawer-only");
+    expect(updateIdx).toBeGreaterThan(-1);
+    const nextMilestoneIdx = src.indexOf('attachSkippedFollowUpPlan = !!callFollowUpPlan;', updateIdx);
+    expect(nextMilestoneIdx).toBeGreaterThan(updateIdx);
+    const stampIdx = src.indexOf('await stampCallbackNumberHoldForCall();', updateIdx);
+    expect(stampIdx).toBeGreaterThan(updateIdx);
+    // The stamp is deliberately placed before the "Deliberately NO
+    // ensureCallFollowUpVisit" comment/return that closes this branch —
+    // it is the ONLY hold call site on this path (no follow-up call here).
+    const branchReturnIdx = src.indexOf('Deliberately NO ensureCallFollowUpVisit on an attached', updateIdx);
+    expect(branchReturnIdx).toBeGreaterThan(stampIdx);
+  });
+
+  test('the reprocess/reuse path (isAttachedManualBooking, a row already durably linked from an earlier pass) also stamps — idempotent, so a no-op once the fresh-attach path above already stuck', () => {
+    const branchIdx = src.indexOf('if (isAttachedManualBooking) {');
+    expect(branchIdx).toBeGreaterThan(-1);
+    const branchEnd = src.indexOf('} else if (!primaryRowSkipped && !reuseHeldForAddress)', branchIdx);
+    expect(branchEnd).toBeGreaterThan(branchIdx);
+    const body = src.slice(branchIdx, branchEnd);
+    expect(body).toMatch(/await stampCallbackNumberHoldForCall\(\);/);
+  });
+});
