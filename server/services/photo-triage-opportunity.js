@@ -179,12 +179,6 @@ function outcomeFor(type, analysis) {
 // conversation ("Reply if you'd like a quote"), not an engine quote.
 const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care' };
 
-function applicationsPerYearFrom(option) {
-  const m = /(\d+)/.exec(String(option?.cadence || ''));
-  const n = m ? Number(m[1]) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
 // Compute-only pricing for one service — NEVER inserts an estimates row,
 // NEVER sends anything. Existing customers go through buildOfferForFamily
 // (the portal-offer core with the family fixed to what the photo shows):
@@ -217,7 +211,6 @@ async function priceForCustomer(type, customer) {
       service: serviceKey,
       label: offer.option.label || null,
       option_id: offer.option.id || null,
-      applications_per_year: applicationsPerYearFrom(offer.option),
       per_visit: perApplication,
     },
   };
@@ -234,7 +227,7 @@ function needsOnsite({ lead, actionable, scopeIsLarge, treatmentFailed }) {
 // ── The gauge ────────────────────────────────────────────────────────────
 
 /**
- * @returns {Promise<{ mode: 'advise'|'quote'|'onsite', reasons: string[], quote: null | { service, label, option_id, applications_per_year, per_visit } }>}
+ * @returns {Promise<{ mode: 'advise'|'quote'|'onsite', reasons: string[], quote: null | { service, label, option_id, per_visit } }>}
  */
 async function gaugeOpportunity({ type, analysis, customer, body, /* images reserved for a future visual-scope signal */ images: _images }) {
   const reasons = [];

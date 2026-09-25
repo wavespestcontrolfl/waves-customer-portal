@@ -258,10 +258,11 @@ function composeBody({ label, advice, opportunity }) {
     // total ($X/mo, $X/yr). quote.per_visit is the engine's per-application
     // amount (photo-triage-opportunity.js#perApplicationFrom).
     const serviceLabel = QUOTE_SERVICE_LABEL[opportunity.quote.service] || 'service';
+    // Per-application amount only — no cadence count (the offer payload
+    // carries cadence as display text, not a number; pre-push audit), no
+    // totals. The estimate the owner sends after "yes" states the program.
     const perApplication = Math.round(Number(opportunity.quote.per_visit) || 0);
-    const perYear = Number(opportunity.quote.applications_per_year);
-    const cadence = Number.isFinite(perYear) && perYear > 0 ? `, ${perYear} applications a year` : '';
-    const quoteLine = `Our ${serviceLabel} program is about $${perApplication} per application${cadence}. Want me to add it?`;
+    const quoteLine = `Our ${serviceLabel} program is about $${perApplication} per application. Want me to add it?`;
     return joinSentences([lead, advice, quoteLine]);
   }
 

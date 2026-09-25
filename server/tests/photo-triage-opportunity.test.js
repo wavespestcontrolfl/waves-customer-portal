@@ -160,7 +160,7 @@ describe('gaugeOpportunity', () => {
     // Per-application is the ONLY price the quote carries — no monthly/
     // annual/plan totals ever reach the draft (AGENTS.md P1).
     expect(result.quote).toEqual({
-      service: 'tree_shrub', label: 'Standard program', option_id: 'tree_shrub-opt', applications_per_year: 6, per_visit: 83,
+      service: 'tree_shrub', label: 'Standard program', option_id: 'tree_shrub-opt', per_visit: 83,
     });
     expect(result.quote).not.toHaveProperty('monthly');
     expect(result.quote).not.toHaveProperty('annual');
