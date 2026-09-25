@@ -19,6 +19,13 @@ jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons:
 jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 
 jest.mock('../services/schedule-integrity-watchdog', () => ({ runScheduleIntegrityWatchdog: jest.fn() }));
+jest.mock('../services/sms-auto-send', () => ({
+  processGratitudeAutoSendCandidates: jest.fn().mockResolvedValue({ sent: 0 }),
+  reconcileAutoSendClaims: jest.fn().mockResolvedValue({ failed: 0 }),
+}));
+jest.mock('../services/sms-suggest-mode', () => ({
+  recoverSuggestionHoldingStates: jest.fn().mockResolvedValue({ recovered: 0 }),
+}));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
@@ -46,4 +53,37 @@ test.each([
   await registration[1]();
   expect(runScheduleIntegrityWatchdog).toHaveBeenCalledTimes(1);
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(message));
+});
+
+test('gratitude runs on its own locked cron, not inside the scheduled-SMS sweep', async () => {
+  const { processGratitudeAutoSendCandidates } = require('../services/sms-auto-send');
+  initScheduledJobs();
+  const scheduledSms = cron.schedule.mock.calls.filter(([expression, callback]) =>
+    expression === '*/5 * * * *' && callback.toString().includes('recoverStaleScheduledSmsClaims'));
+  expect(scheduledSms).toHaveLength(1);
+  expect(scheduledSms[0][1].toString()).not.toContain('processGratitudeAutoSendCandidates');
+
+  const registration = cron.schedule.mock.calls.find(([, callback]) =>
+    callback.toString().includes('processGratitudeAutoSendCandidates'));
+  expect(registration[0]).toBe('1-59/5 * * * *');
+  expect(registration[2]).toEqual({ timezone: 'America/New_York' });
+
+  isEnabled.mockImplementation(() => false);
+  await registration[1]();
+  expect(processGratitudeAutoSendCandidates).not.toHaveBeenCalled();
+
+  // No cron lease (it would pin a pool connection under every send); an
+  // in-process guard skips only an overlapping tick.
+  const { runExclusive } = require('../utils/cron-lock');
+  isEnabled.mockImplementation(name => name === 'smsGratitudeReplies');
+  let finish;
+  processGratitudeAutoSendCandidates.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const first = registration[1]();
+  await registration[1]();
+  expect(processGratitudeAutoSendCandidates).toHaveBeenCalledTimes(1);
+  finish({ sent: 0 });
+  await first;
+  await registration[1]();
+  expect(processGratitudeAutoSendCandidates).toHaveBeenCalledTimes(2);
+  expect(runExclusive).not.toHaveBeenCalledWith('sms-gratitude-replies', expect.anything());
 });

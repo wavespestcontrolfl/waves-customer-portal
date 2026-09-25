@@ -52,7 +52,7 @@ function readContextDb({
   });
   const inbound = {
     id: 'sms-1', customer_id: 'customer-1', direction: 'inbound',
-    from_phone: inboundFrom, to_phone: '+19413529161',
+    from_phone: inboundFrom, to_phone: '+19413187612',
     message_body: 'Thank you!', metadata: { media: [] }, created_at: inboundCreatedAt,
   };
   const rows = [
@@ -123,6 +123,7 @@ test('pending-work SQL covers every customer and same-thread operational queue',
   const { dbh, queries } = compilingDb();
   await expect(pendingGratitudeWork(dbh, {
     customerId: '00000000-0000-4000-8000-000000000003', threadKey: '9415550100',
+    excludeDecisionId: '00000000-0000-4000-8000-000000000004',
   })).resolves.toBe(false);
   expect(queries.map((q) => q.table)).toEqual([
     'service_requests', 'call_commitments as cc', 'call_commitments as cc_sms',
@@ -137,7 +138,9 @@ test('pending-work SQL covers every customer and same-thread operational queue',
   const decision = queries.find((q) => q.table === 'agent_decisions as ad');
   expect(decision.bindings).toEqual(expect.arrayContaining([
     'pending_review', 'pending', 'scheduled', 'sending', 'initiated', 'active',
+    '00000000-0000-4000-8000-000000000004',
   ]));
+  expect(decision.sql).toContain('not "ad"."id" = ?');
   const sql = queries.map((q) => q.sql).join('\n');
   expect(sql).toContain('"ti"."sms_log_id" = "ti_sms"."id"');
   expect(sql).toContain('"oi"."customer_id"');
@@ -147,11 +150,54 @@ test('pending-work SQL covers every customer and same-thread operational queue',
   expect(queries.flatMap((q) => q.bindings)).toContain('9415550100');
 });
 
+function pendingDecisionDb(decisionIds) {
+  const dbh = jest.fn((table) => {
+    const query = {};
+    let excludedDecisionId = null;
+    for (const method of [
+      'whereNotIn', 'whereIn', 'whereRaw', 'orWhereRaw', 'orWhere', 'join', 'leftJoin',
+    ]) query[method] = jest.fn(() => query);
+    query.where = jest.fn((...args) => {
+      if (typeof args[0] === 'function') args[0].call(query);
+      return query;
+    });
+    query.whereNot = jest.fn((column, value) => {
+      if (column === 'ad.id') excludedDecisionId = value;
+      return query;
+    });
+    query.first = jest.fn(async () => {
+      if (table !== 'agent_decisions as ad') return null;
+      const id = decisionIds.find((candidateId) => candidateId !== excludedDecisionId);
+      return id ? { id } : null;
+    });
+    return query;
+  });
+  dbh.raw = knex.raw.bind(knex);
+  return dbh;
+}
+
+test('provider-boundary pending-work check excludes only its own decision claim', async () => {
+  const ownDecisionId = '00000000-0000-4000-8000-000000000004';
+  await expect(pendingGratitudeWork(pendingDecisionDb([ownDecisionId]), {
+    customerId: '00000000-0000-4000-8000-000000000003',
+    threadKey: '9415550100',
+    excludeDecisionId: ownDecisionId,
+  })).resolves.toBe(false);
+  await expect(pendingGratitudeWork(pendingDecisionDb([
+    ownDecisionId,
+    '00000000-0000-4000-8000-000000000005',
+  ]), {
+    customerId: '00000000-0000-4000-8000-000000000003',
+    threadKey: '9415550100',
+    excludeDecisionId: ownDecisionId,
+  })).resolves.toBe(true);
+});
+
 test('thread advancement normalizes formatted endpoints and excludes only anchor and owned reservation', async () => {
   const { dbh, queries } = compilingDb();
   await expect(gratitudeThreadAdvanced(dbh, {
     inboundId: '00000000-0000-4000-8000-000000000002',
-    fromPhone: '+19415550100', toPhone: '+19413529161',
+    fromPhone: '+19415550100', toPhone: '+19413187612',
     skipReservationId: '00000000-0000-4000-8000-000000000099',
   })).resolves.toBe(false);
   expect(queries).toHaveLength(1);
@@ -167,9 +213,9 @@ test('thread advancement normalizes formatted endpoints and excludes only anchor
     '00000000-0000-4000-8000-000000000002',
     '00000000-0000-4000-8000-000000000099',
     '9415550100',
-    '9413529161',
+    '9413187612',
   ]));
-  expect(queries[0].bindings.filter((value) => value === '9413529161')).toHaveLength(3);
+  expect(queries[0].bindings.filter((value) => value === '9413187612')).toHaveLength(3);
 });
 
 test('read context rejects when authoritative queues contain pending work', async () => {

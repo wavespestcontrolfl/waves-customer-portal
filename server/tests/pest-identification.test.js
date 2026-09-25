@@ -22,6 +22,33 @@ describe('resolveLibraryMatch', () => {
     expect(resolveLibraryMatch('eastern subterranean termite swarmer').slug).toBe('subterranean-termite');
   });
 
+  test.each([
+    'walkingstick',
+    'Southern two-striped walkingstick',
+    'walking stick',
+    'antenna',
+    'assassin bug',
+    'mantisfly',
+    'silverfishlike insect',
+  ])('does not match an alias embedded in an unrelated name: %s', (name) => {
+    expect(resolveLibraryMatch(name)).toBeNull();
+  });
+
+  test.each([
+    ['brown dog tick nymph', 'tick'],
+    ['tick-like arachnid', 'tick'],
+    ['a (German cockroach) nymph', 'german-roach'],
+    ['immature big-headed ant worker', 'bigheaded-ant'],
+    ['eastern drywood termite worker', 'drywood-termite'],
+    ['eastern drywood termites', 'drywood-termite'],
+    ['southern black widows', 'black-widow'],
+    ['large American cockroaches', 'american-roach'],
+    ['white beetle larvae', 'white-grub'],
+    ['ticks', 'tick'],
+  ])('preserves whole-word alias matches: %s', (name, slug) => {
+    expect(resolveLibraryMatch(name)?.slug).toBe(slug);
+  });
+
   test('unknown species returns null (never invents a label)', () => {
     expect(resolveLibraryMatch('eastern lubber grasshopper')).toBeNull();
     expect(resolveLibraryMatch('')).toBeNull();
@@ -58,6 +85,27 @@ describe('mergeModelResults', () => {
     expect(merged.entry.slug).toBe('ghost-ant');
     expect(merged.confidence).toBe('moderate');
     expect(merged.agreement).toBe('single_model');
+  });
+
+  test('walkingstick stays generic through public egress without tick flags or pricing', () => {
+    const merged = mergeModelResults(null, claude({
+      best_match: 'Southern two-striped walkingstick',
+      alternates: ['walkingstick', 'assassin bug'],
+    }));
+    const contract = buildPestReportContract({
+      ...merged,
+      identification: _test.aggregateIdentification([merged]),
+    });
+    expect(contract.identification.slug).toBeNull();
+    expect(contract.alternate_slugs).toEqual([]);
+    expect(contract.safety.disease_vector).toBe(false);
+    expect(contract.service.key).toBeNull();
+    expect(publicIdentificationLabel(contract).label).toBe('an insect');
+    expect(buildPestTeaser(contract)).toMatchObject({
+      identified_teaser: 'We identified an insect.',
+      identified_specific: false,
+      safety_flag: false,
+    });
   });
 
   test('no models → null', () => {

@@ -453,6 +453,7 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
 }
 
 module.exports = {
+  emitAlert,
   createAlert,
   createAlertOnce,
   resolveAlert,

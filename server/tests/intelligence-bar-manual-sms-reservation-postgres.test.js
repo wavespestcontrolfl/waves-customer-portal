@@ -14,7 +14,7 @@ jest.mock('../models/db', () => {
   db.raw = (...args) => db.connection.raw(...args);
   return db;
 });
-jest.mock('../config/feature-gates', () => ({
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null,
   isEnabled: jest.fn((name) => name === 'smsGratitudeReplies'),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({

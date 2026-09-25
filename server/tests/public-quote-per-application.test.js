@@ -309,6 +309,87 @@ describe('publicQuoteTreeShrubTierRejection — Light (4x/quarterly) refused on 
   });
 });
 
+describe('persisted engineResult.lineItems keeps T&S palm evidence (Codex round 5 P0 on #4789)', () => {
+  // The /calculate handler persists a SLIM projection of each engine line
+  // item into estimateDataObj.engineResult.lineItems (draft.estimate_data) —
+  // most raw engine fields (costs, warnings, provenance…) are deliberately
+  // dropped. Before this fix, palmCount/palmCountSource/palmReserveActive/
+  // pricingKnobs were dropped too, so a persisted wizard draft could never
+  // prove its T&S line priced its palms: treeShrubPalmCountForEstData's raw-
+  // lineItems fallback (no mapped envelope on this shape) had nothing to
+  // read, and pricedTreeShrubPalmCount fails closed with no evidence — the
+  // palm-care bullet silently never showed on a real wizard quote that HAD
+  // priced palms.
+  const fs = require('fs');
+  const path = require('path');
+  const routeSource = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+  const { treeShrubPalmCountForEstData } = require('../routes/estimate-public');
+
+  test('the lineItems mapping keeps palmCount, palmCountSource, palmReserveActive, and pricingKnobs for tree_shrub rows', () => {
+    expect(routeSource).toMatch(
+      /item\.service === 'tree_shrub' && item\.palmCount !== undefined/,
+    );
+    expect(routeSource).toContain('palmCountSource: item.palmCountSource');
+    expect(routeSource).toContain('palmReserveActive: item.palmReserveActive');
+    expect(routeSource).toContain('pricingKnobs: item.pricingKnobs');
+  });
+
+  // Mirrors exactly what that mapping produces for a REAL priceTreeShrub()
+  // line item (field names/shape) — not a hand-picked subset.
+  function persistedTsLineItem(overrides = {}) {
+    return {
+      service: 'tree_shrub',
+      name: 'Tree & Shrub',
+      annual: 801,
+      monthly: 66.75,
+      ...overrides,
+    };
+  }
+  function persistedEstimateData(tsLineItem) {
+    // engineResult sits at the TOP level of the persisted estimate_data for
+    // a quote-wizard draft — no `result` envelope, no mapped tsMeta/ts rows
+    // at all (this shape only exists for a wizard draft, never an
+    // admin-mapped save), so treeShrubPalmCountForEstData's raw-lineItems
+    // fallback is the ONLY evidence source reachable here.
+    return { engineResult: { summary: {}, lineItems: [tsLineItem] } };
+  }
+
+  test('treeShrubPalmCountForEstData resolves a priced (service-line) count from the persisted shape', () => {
+    const estData = persistedEstimateData(persistedTsLineItem({
+      palmCount: 4,
+      palmCountSource: 'service_line',
+      palmReserveActive: false,
+      pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 },
+    }));
+    expect(treeShrubPalmCountForEstData(estData)).toBe(4);
+  });
+
+  test('treeShrubPalmCountForEstData resolves a priced (armed property) count from the persisted shape', () => {
+    const estData = persistedEstimateData(persistedTsLineItem({
+      palmCount: 6,
+      palmCountSource: 'property',
+      palmReserveActive: true,
+      pricingKnobs: { perPalmAnnual: 16, minutesPerPalmVisit: 1.5 },
+    }));
+    expect(treeShrubPalmCountForEstData(estData)).toBe(6);
+  });
+
+  test('treeShrubPalmCountForEstData fails closed for an unpriced (unarmed property) count from the persisted shape', () => {
+    const estData = persistedEstimateData(persistedTsLineItem({
+      palmCount: 4,
+      palmCountSource: 'property',
+      palmReserveActive: false,
+      pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 },
+    }));
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+
+  test('a quote with no palms at all (fields omitted, per the mapping\'s own ?. guard) resolves to null', () => {
+    const estData = persistedEstimateData(persistedTsLineItem());
+    expect(treeShrubPalmCountForEstData(estData)).toBeNull();
+  });
+});
+
 describe('lawnPestControl — one-time turf-pest knockdown (owner decision 2026-07-05)', () => {
   test('services.lawnPestControl produces a priced one-time pest line', () => {
     const estimate = generateEstimate({

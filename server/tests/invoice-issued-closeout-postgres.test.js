@@ -35,7 +35,7 @@ jest.mock('../services/service-completion-profiles', () => {
 // The gate table is built at module load from process.env; the test flips
 // the gate through a mock instead of racing the require.
 const mockGate = { on: true };
-jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => gate === 'invoiceIssuedClosesVisit' && mockGate.on }));
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: (gate) => gate === 'invoiceIssuedClosesVisit' && mockGate.on }));
 const { randomUUID } = require('node:crypto');
 const {
   resolveVisitForIssuedInvoice,

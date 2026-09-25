@@ -116,7 +116,9 @@ function normalizeRow(row, lineNumber) {
     body: requireString(row, 'body', lineNumber, { allowEmpty: true }),
     status: typeof row.status === 'string' ? row.status : null,
     mediaCount,
-    messageType: null,
+    // Optional export column; the live loader reads the same persisted type.
+    messageType: typeof (row.messageType ?? row.message_type) === 'string'
+      ? (row.messageType ?? row.message_type) : null,
     threadKey: [from, to].sort().join('\u0000'),
   };
 }

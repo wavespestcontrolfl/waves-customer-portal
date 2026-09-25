@@ -288,6 +288,24 @@ function formatRawWindow(start, end) {
   return s || e;
 }
 
+// payload.auto_attempt.reason (PR B, GATE_TECH_OUT_AUTO_MOVE) — the auto-move
+// chokepoint's own refusal reasons (services/tech-out-auto-move.js), in
+// plain words for the dispatcher. Only ever set when auto-move actually
+// tried and left the card open; a bare 'move_failed: <mover message>' falls
+// back to the generic line rather than surfacing the mover's raw error text.
+function autoAttemptReasonLabel(reason) {
+  if (!reason) return null;
+  if (reason === 'grouped_visit_manual') return 'Part of a grouped visit — needs a manual decision';
+  if (reason === 'office_review_pending') return 'Booking still awaiting office review — needs a manual decision';
+  if (reason === 'live_status') return 'Stop is already in progress — needs a manual decision';
+  if (reason === 'no_eligible_candidate') return 'No eligible technician was free to take it automatically';
+  if (reason === 'completion_in_progress') return 'Visit is being completed right now — no reassignment needed';
+  if (reason === 'auto_move_error') return 'Automatic move hit an error — try again or decide manually';
+  if (reason === 'window_occupied') return 'Another stop already holds that window — needs a manual decision';
+  if (reason === 'no_job_reference') return "Couldn't identify the stop to move automatically";
+  return 'Automatic move was refused — needs a manual decision';
+}
+
 function TechOutOverflowBody({ alert }) {
   const payload = alert.payload || {};
   const techName = alert.tech_name || payload.absent_tech_name;
@@ -316,6 +334,9 @@ function TechOutOverflowBody({ alert }) {
       {detailLine && <div className="text-ink-secondary">{detailLine}</div>}
       {payload.bump_reason && (
         <p className="text-ink-secondary">{payload.bump_reason}</p>
+      )}
+      {payload.auto_attempt?.reason && (
+        <p className="text-ink-secondary italic">{autoAttemptReasonLabel(payload.auto_attempt.reason)}</p>
       )}
     </div>
   );

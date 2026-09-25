@@ -322,8 +322,8 @@ for (const item of PEST_LIBRARY) {
 
 /**
  * Resolve a model-supplied free-text name to a library entry, or null.
- * Exact alias match first, then a contained-alias scan (longest alias wins) so
- * "eastern lubber grasshopper" doesn't false-match on a stray substring.
+ * Exact alias match first, then a whole-word alias scan (longest alias wins).
+ * Qualifiers still match, but "walkingstick" must never resolve as "tick".
  */
 function resolveLibraryMatch(name) {
   const normalized = normalizeName(name);
@@ -339,7 +339,11 @@ function resolveLibraryMatch(name) {
   let bestLen = 0;
   for (const [alias, slug] of ALIAS_INDEX.entries()) {
     if (alias.length < 4) continue;
-    if (normalized.includes(alias) && alias.length > bestLen) {
+    // normalizeName limits aliases to letters, spaces, and hyphens, so they
+    // contain no regex metacharacters. Preserve plural suffixes before requiring
+    // a boundary, including the library's larva → larvae aliases.
+    const pluralSuffix = alias.endsWith('larva') ? 'e?' : '(?:s|es)?';
+    if (alias.length > bestLen && new RegExp(`\\b${alias}${pluralSuffix}\\b`).test(normalized)) {
       best = slug;
       bestLen = alias.length;
     }

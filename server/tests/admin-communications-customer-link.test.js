@@ -65,6 +65,7 @@ jest.mock('../services/sms-auto-send', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: () => true,
+  gateEnvTimestamp: () => null,
   gates: {},
   logGateStatus: jest.fn(),
 }));

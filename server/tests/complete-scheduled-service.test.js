@@ -219,6 +219,72 @@ test('a saved packet blocks the individual replay/resume claim', async () => {
   expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });
 
+describe('assignment is re-checked under the stop lock before the claim (#4759 r12 P1)', () => {
+  const OTHER_TECH = '00000000-0000-4000-8000-000000000106';
+  // The unlocked `svc` read sees the original tech; the locked member read
+  // (the only `scheduled_services as member` query) sees a reassignment
+  // that committed in between.
+  const reassignUnderLock = () => {
+    const memberBuilder = { ...builder, first: jest.fn(async () => ({ ...service, technician_id: OTHER_TECH })) };
+    for (const method of ['where', 'leftJoin', 'forUpdate']) memberBuilder[method] = jest.fn(() => memberBuilder);
+    db.mockImplementation((table) => (table === 'scheduled_services as member' ? memberBuilder : builder));
+    return memberBuilder;
+  };
+
+  test('the former technician is refused with 403 and nothing is claimed', async () => {
+    const memberBuilder = reassignUnderLock();
+    const result = await complete();
+    expect(memberBuilder.first).toHaveBeenCalledWith('member.visit_id', 'visit.behavior_version', 'member.technician_id');
+    // No row lock on the early exit: a concurrent duplicate completion must
+    // see the pending claim and 409 at once, not queue behind the other
+    // request's record transaction (application-qa journey).
+    expect(memberBuilder.forUpdate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: 403, body: { code: 'service_not_assigned' } });
+    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+  });
+
+  test('an admin completing on the stale view gets a 409 and nothing is claimed', async () => {
+    reassignUnderLock();
+    const result = await complete({}, { actor: { techRole: 'admin', technicianId: null } });
+    expect(result).toMatchObject({ status: 409, body: { code: 'service_reassigned' } });
+    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+  });
+
+  test('control: an unchanged assignment proceeds to the claim', async () => {
+    const payload = { success: true, serviceRecordId: 'record-test' };
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+    await expect(complete()).resolves.toEqual({ status: 200, body: payload });
+    expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+  });
+});
+
+describe('assignment drift is re-checked on the record transaction\'s locked row (#4759 r13 P1)', () => {
+  // Writers such as assignDispatchJob never take the stop lock the claim-time
+  // re-check holds; the row lock in the record transaction is the one every
+  // technician_id UPDATE serializes against.
+  const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+  const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+  const throwAt = source.indexOf("code: 'service_reassigned', assignedTechnicianId: lockedSvcRow.technician_id || null,");
+
+  test('the check follows the FOR UPDATE read directly and compares against the pre-lock snapshot', () => {
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(throwAt).toBeGreaterThan(lockAt);
+    const between = source.slice(lockAt, throwAt);
+    expect(between).toContain("String(lockedSvcRow.technician_id ?? '') !== String(svc.technician_id ?? '')");
+    // Nothing else is awaited between the lock and the check.
+    expect(between.split('await ').length - 1).toBe(1);
+  });
+
+  test('the record transaction\'s catch releases the claim and answers 403 to the former tech, 409 otherwise', () => {
+    const catchAt = source.indexOf("if (err && err.code === 'service_reassigned') {");
+    expect(catchAt).toBeGreaterThan(throwAt);
+    const handler = source.slice(catchAt, source.indexOf("if (err && err.code === 'issued_invoice_not_reusable') {", catchAt));
+    expect(handler).toContain('markCompletionAttemptFailed(completionAttempt, err, db)');
+    expect(handler).toContain('assignedTechnicianId: err.assignedTechnicianId');
+    expect(handler).toContain("code: 'service_reassigned'");
+  });
+});
+
 test('packet fields in the submitted form cannot grant packet ownership', async () => {
   service.visit_id = '00000000-0000-4000-8000-000000000105';
   const result = await complete({ packetRecord: { itemId: SERVICE_ID }, visitPacketId: SERVICE_ID });

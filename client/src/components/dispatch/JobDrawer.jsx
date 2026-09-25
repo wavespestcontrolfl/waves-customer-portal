@@ -8,8 +8,13 @@
  *   GET /api/admin/dispatch/jobs/:id on open. Cached per id only via
  *   the parent's selectedJobId state — re-opens fetch fresh because
  *   broadcasts may have moved the world while the drawer was closed.
- *   Active-tech list (GET /api/admin/dispatch/technicians) fetched
- *   once on first open and cached across opens.
+ *   Active-tech list (GET /api/admin/dispatch/technicians?date=) is
+ *   date-aware: it's keyed on the OPEN JOB'S scheduled_date (not fetched
+ *   until the job itself has loaded) and excludes a technician marked out
+ *   for that date, same as the server's own commit-time refusal
+ *   (assertAssignableTechnician) on the PUT below — the picker no longer
+ *   offers a tech the save would 409 on (tech-out audit P2). Cached per
+ *   date so two jobs on the same day share one fetch.
  *
  *   refetchSignal prop: parent bumps a monotonic counter when an
  *   external action (drag-to-reassign on the map, etc.) changes the
@@ -44,6 +49,7 @@ import {
   cn,
 } from '../ui';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import { TECH_ABSENCE_EVENT } from '../../hooks/useDispatchBoard';
 import VisualNotesReviewSection from './VisualNotesReviewSection';
 // Pure display helpers shared with the tech Visit Brief (style-free by
 // design) — the drawer renders the same estimate-source lines and brief
@@ -205,12 +211,15 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
   const [busyAction, setBusyAction] = useState(null);
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
 
-  // Active-tech list for the assignment dropdown. Fetched once on
-  // mount; same list applies regardless of which job the drawer
-  // shows. Cached in state to avoid refetching on every open. Empty
-  // on the first render — the dropdown gracefully shows just the
-  // current assignment until the list lands.
+  // Active-tech list for the assignment dropdown, keyed on the open job's
+  // scheduled_date (see header). Empty until the job (and so its date) has
+  // loaded — the dropdown gracefully shows just the current assignment
+  // until the list lands.
   const [availableTechs, setAvailableTechs] = useState([]);
+  const fetchedTechsForDateRef = useRef(null);
+  // Bumped when an absence changes for the open job's date so the
+  // date-keyed roster refetches (a tech marked out / back on that date).
+  const [rosterEpoch, setRosterEpoch] = useState(0);
   // Pending-but-unsaved assignment selection. null means "Unassigned",
   // a UUID string means a specific tech. We track this separately so
   // the user can change the dropdown and click Save (rather than
@@ -333,28 +342,63 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     return () => { cancelled = true; };
   }, [jobId]);
 
-  // Fetch active techs once on first open. The list rarely changes
-  // mid-session, so caching it across opens is fine. The current
-  // assignment dropdown gracefully falls back to "(Unassigned)" +
-  // the saved tech_full_name if this hasn't loaded yet.
+  // Fetch active techs for the OPEN JOB'S date (see header) — waits for
+  // `job` to load (scheduled_date isn't known from jobId alone), then keyed
+  // on that date so two jobs on the same day reuse one fetch. The current
+  // assignment dropdown gracefully falls back to "(Unassigned)" + the saved
+  // tech_full_name if this hasn't loaded yet.
   useEffect(() => {
-    if (!jobId || availableTechs.length > 0) return;
+    const date = job?.scheduled_date ? String(job.scheduled_date).slice(0, 10) : null;
+    // Drawer closed (no job): drop the cache key — absence events are not
+    // tracked while closed, so a reopen on the same date must refetch.
+    if (!date) {
+      fetchedTechsForDateRef.current = null;
+      setAvailableTechs([]);
+      return;
+    }
+    if (fetchedTechsForDateRef.current === date) return;
+    // A list fetched for ANOTHER date is wrong for this job (a tech marked
+    // out today may be free tomorrow and vice versa): drop it now, so a slow
+    // or failed fetch falls back to the current assignment, never a stale roster.
+    if (fetchedTechsForDateRef.current !== null) {
+      fetchedTechsForDateRef.current = null;
+      setAvailableTechs([]);
+    }
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/admin/dispatch/technicians`, {
+        const res = await fetch(`${API_BASE}/admin/dispatch/technicians?date=${encodeURIComponent(date)}`, {
           headers: adminAuthHeaders(),
         });
         if (!res.ok) return; // best-effort; dropdown still shows current assignment
         const data = await res.json();
         if (cancelled) return;
+        fetchedTechsForDateRef.current = date;
         setAvailableTechs(Array.isArray(data.technicians) ? data.technicians : []);
       } catch {
         /* swallow — dropdown degrades gracefully */
       }
     })();
     return () => { cancelled = true; };
-  }, [jobId, availableTechs.length]);
+  }, [job?.scheduled_date, rosterEpoch]);
+
+  // useDispatchBoard relays every dispatch:tech_absence broadcast (this tab's
+  // own mark-out included) as TECH_ABSENCE_EVENT. An absence on the open
+  // job's date invalidates the cached roster; the effect above refetches.
+  useEffect(() => {
+    const jobDate = job?.scheduled_date ? String(job.scheduled_date).slice(0, 10) : null;
+    function onAbsenceChange(event) {
+      const changedDate = event?.detail?.date ? String(event.detail.date).slice(0, 10) : null;
+      if (!jobDate || (changedDate && changedDate !== jobDate)) return;
+      // Drop the old roster now: a pending or failed refetch must fall back
+      // to the current assignment, never keep offering a tech now out.
+      fetchedTechsForDateRef.current = null;
+      setAvailableTechs([]);
+      setRosterEpoch((n) => n + 1);
+    }
+    window.addEventListener(TECH_ABSENCE_EVENT, onAbsenceChange);
+    return () => window.removeEventListener(TECH_ABSENCE_EVENT, onAbsenceChange);
+  }, [job?.scheduled_date]);
 
   const handleAssign = useCallback(async () => {
     if (!job || pendingTechId === undefined || savingAssign) return;

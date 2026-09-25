@@ -38,6 +38,45 @@ describe('out_today (Codex P2 on PR #4678)', () => {
     expect(screen.getByText('—')).toBeInTheDocument();
   });
 
+  it('an out tech who is on_site still shows their current job address (tech-out audit P2)', () => {
+    const jobs = new Map([[job.id, job]]);
+    const tech = {
+      id: 'tech-1',
+      name: 'Tech One',
+      status: 'on_site',
+      current_job_id: job.id,
+      eta_minutes: null,
+      out_today: true,
+      today_completed: 1,
+      today_total: 3,
+      location_updated_at: new Date().toISOString(),
+    };
+    render(<TechCard tech={tech} jobs={jobs} selected={false} onSelect={vi.fn()} isDropTarget={false} />);
+
+    // Still reads "Out" (the roster status), but the address is live, not "—".
+    expect(screen.getAllByText('Out')).toHaveLength(2);
+    expect(screen.getByText(/123 Main St/)).toBeInTheDocument();
+    expect(screen.queryByText('—')).toBeNull();
+  });
+
+  it('an out tech who is idle (not on_site) still shows "—" for the address, even with a stale current_job_id', () => {
+    const jobs = new Map([[job.id, job]]);
+    const tech = {
+      id: 'tech-1',
+      name: 'Tech One',
+      status: 'idle',
+      current_job_id: job.id,
+      out_today: true,
+      today_completed: 1,
+      today_total: 3,
+      location_updated_at: new Date().toISOString(),
+    };
+    render(<TechCard tech={tech} jobs={jobs} selected={false} onSelect={vi.fn()} isDropTarget={false} />);
+
+    expect(screen.queryByText(/123 Main St/)).toBeNull();
+    expect(screen.getByText('—')).toBeInTheDocument();
+  });
+
   it('renders normal status, ETA, and address when not out today', () => {
     const jobs = new Map([[job.id, job]]);
     const tech = {

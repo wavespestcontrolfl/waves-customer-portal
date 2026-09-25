@@ -25,7 +25,7 @@ const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, t
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 
-const { etDateString, addETDays, parseETDateTime, validScheduleDate } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -5975,11 +5975,29 @@ router.post('/alerts/resolve-all', requireAdmin, async (req, res, next) => {
 // last 24h" so unassigned techs don't clutter the map. For
 // assignment we want EVERY active tech, including ones who haven't
 // pinged today.
+// ?date=YYYY-MM-DD (optional): also excludes a technician marked out
+// (uncleared technician_absences) for that date — JobDrawer's assignment
+// picker passes the job's own scheduled_date so the dropdown never OFFERS a
+// tech the server's own commit-time check (assertAssignableTechnician with
+// that date) would refuse anyway (tech-out audit P2: the server already
+// refused it, the picker just didn't say so). Omitted, behavior is
+// byte-identical to before this param existed — every other caller of this
+// list is unaffected.
 router.get('/technicians', requireAdmin, async (req, res, next) => {
   try {
+    const date = req.query.date && validCalendarDate(req.query.date);
     // Assignment target list: assignable techs only (prospective placeholders
     // and office-only accounts never appear as drop targets).
     const techs = await applyAssignable(db('technicians'))
+      .modify((q) => {
+        if (!date) return;
+        q.whereNotExists(function excludeAbsent() {
+          this.select(1).from('technician_absences as ta')
+            .whereRaw('ta.technician_id = technicians.id')
+            .andWhere('ta.absence_date', date)
+            .whereNull('ta.cleared_at');
+        });
+      })
       .select('technicians.id', 'technicians.name', 'technicians.role')
       .orderBy('name', 'asc');
     res.json({ technicians: techs });
