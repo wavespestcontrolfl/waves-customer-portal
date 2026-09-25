@@ -72,6 +72,7 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     "our lawn guy came out and couldn't fix it",
     'our lawn company tried treating it and it did not work',
     "the spray we put down didn't work",
+    'our lawn company failed to fix it twice',
   ])('%p reads as prior treatment failed', (body) => expect(priorTreatmentFailed(body)).toBe(true));
 
   // codex review 2026-09-25: "tried"/"treated" ALONE (no failure/recurrence
@@ -84,6 +85,7 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     "I couldn't get a better photo, sorry",
     'the nest is still there, should I knock it down?',
     "my sprinkler didn't work and this shrub has spots",
+    'my lawn company failed to show up; what is this bug?',
   ])('%p is not a prior failure', (body) => expect(priorTreatmentFailed(body)).toBe(false));
 });
 
@@ -435,7 +437,7 @@ describe('recheckDraftOffer', () => {
     mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'lawn_care', mode: 'unavailable', option: null });
     const advise = FLAGS({ assessment_type: 'lawn', opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'no_offer'], quote: null });
     expect(await recheckDraftOffer({ customerId: 'c1', flags: advise })).toEqual({ blocked: 'unavailable', family: 'lawn_care' });
-    expect(mockBuildOffer).toHaveBeenLastCalledWith('c1', mockDb, 'lawn_care');
+    expect(mockBuildOffer).toHaveBeenLastCalledWith('c1', mockDb, 'lawn_care', { throwOnError: true });
   });
 
   test('quote draft: same figure → ok; drifted figure → repriced; no longer priced → blocked', async () => {
@@ -445,6 +447,17 @@ describe('recheckDraftOffer', () => {
     expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).toEqual({ repriced: 91.5, family: 'tree_shrub' });
     mockBuildOffer.mockResolvedValueOnce(CTA_OFFER('tree_shrub'));
     expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS() })).toEqual({ blocked: 'no_longer_priced', family: 'tree_shrub' });
+  });
+
+  test('quote language in the OUTGOING text forces the check even when the stored verdict says no-pitch (owner revision)', async () => {
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
+    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Looks like thin foliage. Want a quote for our tree & shrub program?' }))
+      .toEqual({ blocked: 'owned', family: 'tree_shrub' });
+    expect(mockBuildOffer).toHaveBeenCalledWith('c1', mockDb, 'tree_shrub', { throwOnError: true });
+    mockBuildOffer.mockClear();
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Looks like thin foliage. Reply if you have questions.' })).toEqual({ ok: true });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
   });
 
   test('an advise draft that still pitches a quote is fine when the offer core simply has nothing (manual quote conversation)', async () => {

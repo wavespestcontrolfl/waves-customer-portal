@@ -531,13 +531,17 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
 // whose figure moved → flags.quote refreshed, 409 so the owner re-reads it;
 // lookup failure → 503 fail closed. Narrowly scoped to flags.origin ===
 // 'photo_triage'; the text itself never carries a price.
-async function guardPhotoTriageSend(draft, res, releaseFields = {}) {
+// customerId: the RESOLVED recipient's customer (sms_log linkage included —
+// a draft linked through its SMS row after creation must recheck against
+// that customer, codex #4810 r7); outgoingText: the body that will be sent
+// (a revision can add a quote ask the stored verdict never saw).
+async function guardPhotoTriageSend(draft, res, releaseFields = {}, { customerId = draft.customer_id, outgoingText = null } = {}) {
   const flags = parseFlags(draft.flags);
   if (flags.origin !== 'photo_triage') return { blocked: false };
   let verdict;
   const { recheckDraftOffer, stripQuotePitch, priceContextSentence, replacePriceContext } = require('../services/photo-triage-opportunity');
   try {
-    verdict = await recheckDraftOffer({ customerId: draft.customer_id, flags });
+    verdict = await recheckDraftOffer({ customerId: customerId || draft.customer_id, flags, outgoingText });
   } catch (err) {
     logger.warn(`[admin-drafts] photo-triage offer recheck failed for draft ${draft.id} (code=${err?.code || 'none'})`);
     await releaseDraftClaim(draft.id, releaseFields);
@@ -922,7 +926,9 @@ router.put('/:id/approve', async (req, res, next) => {
     // remove.
     const clarifyGuard = await guardClarifySend(draft, res);
     if (clarifyGuard.blocked) return;
-    const photoTriageGuard = await guardPhotoTriageSend(draft, res);
+    const photoTriageGuard = await guardPhotoTriageSend(draft, res, {}, {
+      customerId: recipient.customerId || draft.customer_id, outgoingText: draft.draft_response,
+    });
     if (photoTriageGuard.blocked) return;
     let smsResult;
     try {
@@ -1087,7 +1093,9 @@ router.put('/:id/revise', async (req, res, next) => {
 
     const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
     if (clarifyGuard.blocked) return;
-    const photoTriageGuard = await guardPhotoTriageSend(draft, res, { revised_response: null, final_response: null });
+    const photoTriageGuard = await guardPhotoTriageSend(draft, res, { revised_response: null, final_response: null }, {
+      customerId: recipient.customerId || draft.customer_id, outgoingText: revisedResponse,
+    });
     if (photoTriageGuard.blocked) return;
     let smsResult;
     try {

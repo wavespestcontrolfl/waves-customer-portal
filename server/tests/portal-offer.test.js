@@ -219,6 +219,8 @@ describe('buildOfferForFamily', () => {
     }, { schema: db.schema });
     const offer = await buildOfferForFamily('cust-1', broken, 'tree_shrub', { propertyLookup: missLookup });
     expect(offer).toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
+    // Dispatch-time callers ask for the error instead (codex #4810 r7).
+    await expect(buildOfferForFamily('cust-1', broken, 'tree_shrub', { propertyLookup: missLookup, throwOnError: true })).rejects.toThrow();
   });
 
   test('a verified correction on file demotes to the quote CTA, same as the card', async () => {

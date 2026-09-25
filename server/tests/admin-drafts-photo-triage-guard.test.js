@@ -170,7 +170,9 @@ describe('approve — photo-triage offer recheck wiring', () => {
       const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
       expect(res.status).toBe(200);
     });
-    expect(mockRecheck).toHaveBeenCalledWith({ customerId: 'cust-1', flags: expect.objectContaining({ origin: 'photo_triage' }) });
+    expect(mockRecheck).toHaveBeenCalledWith({
+      customerId: 'cust-1', flags: expect.objectContaining({ origin: 'photo_triage' }), outgoingText: photoDraft().draft_response,
+    });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -257,6 +259,22 @@ describe('approve — photo-triage offer recheck wiring', () => {
   });
 });
 
+describe('approve — recipient resolution', () => {
+  test('a draft linked only through its sms_log row rechecks against THAT customer', async () => {
+    enqueue('message_drafts', { returning: [photoDraft({ customer_id: null, sms_log_id: 'sms-5', flags: JSON.stringify({ ...PHOTO_FLAGS, toPhone: undefined }) })] });
+    enqueue('sms_log', { first: { id: 'sms-5', customer_id: 'cust-linked', from_phone: '+19415550142', to_phone: '+19415550100' } });
+    enqueue('message_drafts', { update: 1 });
+    mockRecheck.mockResolvedValue({ blocked: 'owned', family: 'tree_shrub' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
+      expect(res.status).toBe(409);
+    });
+    expect(mockRecheck).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-linked' }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe('revise — photo-triage offer recheck wiring', () => {
   test('owned → 409 with the revision cleared on the released row, nothing sent', async () => {
     enqueue('message_drafts', { returning: [photoDraft()] });
@@ -286,7 +304,9 @@ describe('revise — photo-triage offer recheck wiring', () => {
     enqueue('message_drafts', { update: 1 });
     // The real recheck short-circuits on a no-pitch reason; here the mock
     // pins that the route hands it the downgraded flags.
-    mockRecheck.mockImplementation(async ({ flags }) => (flags.opportunity_reasons.includes('already_owned') ? { ok: true } : { blocked: 'owned', family: 'tree_shrub' }));
+    mockRecheck.mockImplementation(async ({ flags, outgoingText }) => (
+      flags.opportunity_reasons.includes('already_owned') && !/quote/i.test(outgoingText) ? { ok: true } : { blocked: 'owned', family: 'tree_shrub' }
+    ));
     sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM3' });
 
     await withServer(async (baseUrl) => {
@@ -297,5 +317,25 @@ describe('revise — photo-triage offer recheck wiring', () => {
       expect(res.status).toBe(200);
     });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('revise — a revision that ADDS a quote ask is rechecked against the outgoing body', () => {
+  test('held flags + revised text with a quote ask → the guard receives the revised body and holds', async () => {
+    const heldFlags = { ...PHOTO_FLAGS, opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null };
+    enqueue('message_drafts', { returning: [photoDraft({ flags: JSON.stringify(heldFlags) })] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
+    enqueue('message_drafts', { update: 1 });
+    mockRecheck.mockImplementation(async ({ outgoingText }) => (/quote/i.test(outgoingText) ? { blocked: 'owned', family: 'tree_shrub' } : { ok: true }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/revise`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revisedResponse: 'Thanks! Want a quote for our tree & shrub program?' }),
+      });
+      expect(res.status).toBe(409);
+    });
+    expect(mockRecheck).toHaveBeenCalledWith(expect.objectContaining({ outgoingText: 'Thanks! Want a quote for our tree & shrub program?' }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });

@@ -1222,11 +1222,17 @@ function unavailableBasis(targetKey, customer = null, ownedKeys = [], primaryStr
 // caller must not pitch it); or null (nothing to offer: no recurring plan,
 // inactive row, commercial, unprovable premises — a manual-quote
 // conversation is fine).
-async function buildOfferForFamily(customerId, database, targetKey, opts = {}) {
+// opts.throwOnError (dispatch-time callers, codex #4810 r7): a transient
+// lookup failure must reach the caller as an ERROR so it can leave the
+// draft pending for retry — converting it to 'unavailable' would read an
+// outage as confirmed staleness. Creation-time callers keep the
+// fail-closed 'unavailable' answer.
+async function buildOfferForFamily(customerId, database, targetKey, { throwOnError = false, ...opts } = {}) {
   try {
     const basis = await composePortalOffer(customerId, database, { ...opts, targetKey });
     return basis ? basis.payload : null;
   } catch (err) {
+    if (throwOnError) throw err;
     logger.warn(`[family-offer] fail closed (code=${err?.code || 'none'})`);
     return OFFER_PROMPTS[targetKey] ? unavailableBasis(targetKey).payload : null;
   }

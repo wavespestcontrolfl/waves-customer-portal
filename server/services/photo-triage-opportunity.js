@@ -111,7 +111,9 @@ const PRIOR_TREATMENT_RE = new RegExp(`\\b(?:${TREATMENT_SUBJECT}\\b[^.!?]{0,40}
 // "our lawn guy/company ... failed [to fix it]" — a wider gap between the
 // subject and the verdict, and the one failure word (failed) the plain list
 // above doesn't already cover on its own.
-const LAWN_COMPANY_FAILED_RE = /\blawn (guy|company)\b[^.!?]{0,40}\bfailed\b/i;
+// "failed" must govern a treatment outcome — "my lawn company failed to
+// show up" attempted nothing (codex #4810 r7).
+const LAWN_COMPANY_FAILED_RE = /\blawn (guy|company)\b[^.!?]{0,40}\bfailed (?:to )?(?:fix|treat|control|stop|kill|clear|get rid)/i;
 
 function largeScope(body) {
   return LARGE_SCOPE_RE.test(body);
@@ -352,15 +354,21 @@ const NO_PITCH_REASONS = new Set(['harmless', 'already_owned', 'offer_unavailabl
 //   { blocked: 'owned'|'unavailable'|'no_longer_priced', family }
 //   { repriced: <per_visit>, family }             — owner-only figure drifted
 // Throws on a lookup failure — the caller fails closed (draft left pending).
-async function recheckDraftOffer({ customerId, flags }) {
+// outgoingText (codex #4810 r7): the body that will actually be sent — an
+// owner revision can ADD a quote ask to a draft whose stored verdict says
+// no-pitch, so any quote language in the outgoing text forces the check.
+async function recheckDraftOffer({ customerId, flags, outgoingText = null }) {
   if (!flags || flags.origin !== 'photo_triage') return { ok: true };
   const mode = flags.opportunity_mode;
   const reasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
-  const pitches = mode === 'quote' || (mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
+  const textPitches = typeof outgoingText === 'string' && /\bquot(?:e|ing)\b/i.test(outgoingText);
+  const pitches = textPitches || mode === 'quote' || (mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
   if (!pitches || !customerId) return { ok: true };
   const family = flags.quote?.service || SERVICE_KEY[flags.assessment_type] || null;
   if (!family) return { ok: true };
-  const offer = await buildOfferForFamily(customerId, db, family);
+  // throwOnError: an outage here must surface as a 503 (draft left pending
+  // for retry), never as confirmed staleness.
+  const offer = await buildOfferForFamily(customerId, db, family, { throwOnError: true });
   if (offer?.mode === 'owned') return { blocked: 'owned', family };
   if (offer?.mode === 'unavailable') return { blocked: 'unavailable', family };
   if (mode === 'quote') {
