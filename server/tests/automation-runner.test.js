@@ -248,12 +248,16 @@ describe('automation runner suppression guardrails', () => {
     }));
   });
 
-  test('a queued payment-failed step honors an Email deselection made after enrollment', async () => {
+  test.each([
+    { payment_issue_channels: ['sms', 'push'] },
+    { payment_issue_channels: ['email', 'sms'], email_enabled: false },
+    { payment_issue_channels: ['email'], email_enabled: false },
+  ])('a queued payment-failed step honors the current Email choice and opt-out: %j', async (prefs) => {
     const enrollment = {
       id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
       current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
     };
-    const prefsRead = chain({ first: { payment_issue_channels: ['sms', 'push'] } });
+    const prefsRead = chain({ first: prefs });
     const sendUpdate = chain();
     const enrollmentUpdate = chain();
     setDbQueues({
