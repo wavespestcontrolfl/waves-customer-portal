@@ -318,7 +318,8 @@ describe('gaugeOpportunity', () => {
     expect(result.reasons).toContain('no_offer');
   });
 
-  test('pest photos are never engine-quoted through this lane (no offer call at all)', async () => {
+  test('an active pest customer\'s bug photo runs the ownership check → owned → advise with no pitch', async () => {
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'pest_control', label: 'x', mode: 'owned', relationship: 'owned', option: null });
     const result = await gaugeOpportunity({
       type: 'pest',
       analysis: { report_contract: JSON.stringify({ identification: { category: 'insect' } }) },
@@ -326,9 +327,32 @@ describe('gaugeOpportunity', () => {
       body: 'found this on the patio',
       images: [],
     });
-    expect(mockBuildOffer).not.toHaveBeenCalled();
+    expect(mockBuildOffer).toHaveBeenCalledWith('existing-1', mockDb, 'pest_control');
     expect(result.mode).toBe('advise');
-    expect(result.reasons).toContain('no_offer');
+    expect(result.reasons).toContain('already_owned');
+  });
+
+  test('a watch-level finding never becomes a quote even when the offer core priced it, but still learns ownership', async () => {
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub'));
+    const watch = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('foliage_fullness', 65),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
+      body: 'is my shrub ok',
+      images: [],
+    });
+    expect(watch.mode).toBe('advise');
+    expect(watch.reasons).toContain('quote_withheld');
+    expect(watch.quote).toBeNull();
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', label: 'x', mode: 'owned', relationship: 'owned', option: null });
+    const owned = await gaugeOpportunity({
+      type: 'tree_shrub',
+      analysis: TREE_ANALYSIS('foliage_fullness', 65),
+      customer: { id: 'existing-1', pipeline_stage: 'active_customer', active: true },
+      body: 'is my shrub ok',
+      images: [],
+    });
+    expect(owned.reasons).toContain('already_owned');
   });
 
   test('new lead, whole-property finding, already tried and failed → onsite', async () => {

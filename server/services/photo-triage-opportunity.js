@@ -200,11 +200,12 @@ function outcomeFor(type, analysis) {
 
 // ── Compute-only pricing ────────────────────────────────────────────────
 
-// Offer family per assessment type. No pest entry: the only sanctioned
-// existing-customer pricer is the offer machinery, and pest control is its
-// anchor family — a pest-photo customer with no plan is a lead-shaped
-// conversation ("Reply if you'd like a quote"), not an engine quote.
-const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care' };
+// Offer family per assessment type. pest → pest_control so an active pest
+// customer's bug photo runs the SAME ownership check (owned → no pitch)
+// instead of closing with "Reply if you'd like a quote" for the plan they
+// already have (pre-push audit r4); a customer with no plan gets null from
+// the offer core → the manual-quote ask, never an engine quote.
+const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care', pest: 'pest_control' };
 
 // Palms are their own assessment-first family (injections), never the
 // standard tree & shrub program — same palm-first veto the offer ladder
@@ -307,18 +308,25 @@ async function gaugeOpportunity({ type, analysis, customer, body, /* images rese
     return { mode: 'onsite', reasons, quote: null };
   }
 
-  if (actionable || outcome.cultural) {
-    let priced;
-    try {
-      priced = await priceForCustomer(type, customer, text);
-    } catch (err) {
-      logger.error(`[photo-triage-opportunity] pricing failed for customer ${customer?.id || 'none'}: ${err.message}`);
-      priced = { reason: 'no_offer' };
-    }
-    if (priced.quote) {
+  // The ownership/offer check runs for EVERY non-harmless outcome (watch
+  // and uncertain included, pre-push audit r4): the advise close must know
+  // whether the customer already owns this family before it asks "Reply if
+  // you'd like a quote". Only an actionable/cultural finding may promote a
+  // priced offer to quote mode; a watch-level finding keeps advice.
+  let priced;
+  try {
+    priced = await priceForCustomer(type, customer, text);
+  } catch (err) {
+    logger.error(`[photo-triage-opportunity] pricing failed for customer ${customer?.id || 'none'}: ${err.message}`);
+    priced = { reason: 'no_offer' };
+  }
+  if (priced.quote) {
+    if (actionable || outcome.cultural) {
       reasons.push('quoted');
       return { mode: 'quote', reasons, quote: priced.quote };
     }
+    reasons.push('quote_withheld');
+  } else {
     reasons.push(priced.reason || 'no_offer');
   }
 
