@@ -50,10 +50,11 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
   test('the non-eligible branch (gate off / agreed price / spam) still logs the specific reason and reconciles draft links', () => {
     const elseAt = source.indexOf('} else {\n      // Reconcile-only pass');
     expect(elseAt).toBeGreaterThan(-1);
-    const elseBody = source.slice(elseAt, elseAt + 3300);
+    const elseEndAt = source.indexOf('reconcileOnlyDraftLinksPending = true;\n    }', elseAt);
+    expect(elseEndAt).toBeGreaterThan(elseAt);
+    const elseBody = source.slice(elseAt, elseEndAt);
     expect(elseBody).toContain("skipped:'price_agreed_on_call'");
     expect(elseBody).toContain('if (callAgreedPrice != null)');
-    expect(elseBody).toContain('reconcileOnlyDraftLinksPending = true;');
   });
 
   // codex #4815 r1 P1: reconcileDraftLinksForCall alone only re-links a
@@ -67,19 +68,48 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
   // belt-and-braces sweep for anything that raced in between) — the exact
   // two-pass shape the spam/voicemail terminal branch uses higher up in
   // this same file.
-  test('an agreed price synchronously invalidates any existing draft AND stamps the call-level block, fenced to this pass\'s claim', () => {
+  function priceAgreedSyncBlock() {
     const elseAt = source.indexOf('} else {\n      // Reconcile-only pass');
     const ifAgreedAt = source.indexOf('if (callAgreedPrice != null) {', elseAt);
     expect(ifAgreedAt).toBeGreaterThan(elseAt);
-    const block = source.slice(ifAgreedAt, ifAgreedAt + 1300);
+    const endAt = source.indexOf('agreedPriceDraftSweepPending = true;', ifAgreedAt);
+    expect(endAt).toBeGreaterThan(ifAgreedAt);
+    return source.slice(ifAgreedAt, endAt + 'agreedPriceDraftSweepPending = true;'.length);
+  }
+
+  test('an agreed price synchronously invalidates any existing draft AND stamps the call-level block, fenced to this pass\'s claim', () => {
+    const block = priceAgreedSyncBlock();
     expect(block).toContain("require('./estimator-engine');");
     expect(block).toContain('invalidateDraftForCall(call.id, {');
     expect(block).toContain("reason: 'price_agreed_on_call',");
+    // codex #4815 r2 P0: never an accepted/declined/expired row.
+    expect(block).toContain("scope: 'nonterminal_drafts',");
     expect(block).toContain('ownershipFence: { callLogId: call.id, procToken, procGeneration }');
     expect(block).toContain('agreedPriceDraftSweepPending = true;');
   });
 
-  test('a second, post-finalization sweep re-runs the same invalidation, fenced the same way as the reconcile-only pass', () => {
+  test('a failed pre-write invalidation queues a durable retry (codex #4815 r2 P1)', () => {
+    const block = priceAgreedSyncBlock();
+    const notOkAt = block.indexOf('if (!invalidation.ok) {');
+    expect(notOkAt).toBeGreaterThan(-1);
+    const notOkBody = block.slice(notOkAt, block.indexOf('} else {', notOkAt));
+    expect(notOkBody).toContain("markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });");
+  });
+
+  test('a successful pre-write invalidation retires the prior estimator bell in place, never manufacturing a new one (codex #4815 r2 P2)', () => {
+    const block = priceAgreedSyncBlock();
+    const elseAt = block.indexOf('} else {');
+    expect(elseAt).toBeGreaterThan(-1);
+    const notifyBlock = block.slice(elseAt, block.indexOf('} catch (invalidateErr)', elseAt));
+    expect(notifyBlock).toContain("notify: notifyEstimator } = require('./estimator-engine');");
+    expect(notifyBlock).toContain("title: 'Price agreed on call — draft retired',");
+    expect(notifyBlock).toContain('estimateId: null,');
+    expect(notifyBlock).toContain('quotePromised: false,');
+    expect(notifyBlock).toContain('forceUpdate: true,');
+    expect(notifyBlock).toContain('updateOnly: true,');
+  });
+
+  function priceAgreedSweepBlock() {
     const sweepAt = source.indexOf('if (finalized > 0 && agreedPriceDraftSweepPending) {');
     expect(sweepAt).toBeGreaterThan(-1);
     // Must run alongside (guarded the same way as) the existing
@@ -87,10 +117,53 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     const reconcileAt = source.indexOf('if (finalized > 0 && reconcileOnlyDraftLinksPending) {');
     expect(reconcileAt).toBeGreaterThan(-1);
     expect(sweepAt).toBeGreaterThan(reconcileAt);
-    const block = source.slice(sweepAt, sweepAt + 1300);
+    const endAt = source.indexOf('\n    // The pass did not complete', sweepAt);
+    expect(endAt).toBeGreaterThan(sweepAt);
+    return source.slice(sweepAt, endAt);
+  }
+
+  test('a second, post-finalization sweep re-runs the same invalidation, fenced and scoped the same way as the pre-write pass', () => {
+    const block = priceAgreedSweepBlock();
     expect(block).toContain("invalidateDraftForCall: invalidateAgreedPriceAgain } = require('./estimator-engine');");
     expect(block).toContain("reason: 'price_agreed_on_call',");
+    expect(block).toContain("scope: 'nonterminal_drafts',");
     expect(block).toContain('ownershipFence: { callLogId: call.id, procToken, procGeneration }');
+  });
+
+  test('the sweep queues a durable retry on failure and retires the bell on success, same as the pre-write pass (codex #4815 r2 P1/P2)', () => {
+    const block = priceAgreedSweepBlock();
+    expect(block).toContain("markQuarantinePending(call.id, 'price_agreed_on_call', { procGeneration });");
+    expect(block).toContain("notify: notifyEstimatorSweep } = require('./estimator-engine');");
+    expect(block).toContain('updateOnly: true,');
+  });
+
+  // codex #4815 r2 P2: the booking pre-draft hook (quotePromised:true, the
+  // documented assessment exception) can clear this call's same-generation
+  // estimator_draft_block while composing — the sweep must never race it.
+  test('the sweep chains onto the SAME tracked booking-predraft promise (via bookingPreDraftAssessmentDrafted) and stands down when it drafted', () => {
+    const block = priceAgreedSweepBlock();
+    expect(block).toContain('const assessmentExceptionDrafted = await bookingPreDraftAssessmentDrafted(bookingPreDraftPromise);');
+    expect(block).toContain('if (assessmentExceptionDrafted) {');
+    // The invalidation call must be INSIDE the else (stood-down) branch —
+    // never reached when the exception drafted.
+    const standDownAt = block.indexOf('if (assessmentExceptionDrafted) {');
+    const invalidateAt = block.indexOf('invalidateAgreedPriceAgain(call.id', standDownAt);
+    const elseAt = block.indexOf('} else {', standDownAt);
+    expect(elseAt).toBeGreaterThan(standDownAt);
+    expect(invalidateAt).toBeGreaterThan(elseAt);
+  });
+
+  test('the booking pre-draft hook tracks its chain in bookingPreDraftPromise instead of discarding it (void)', () => {
+    const hookAt = source.indexOf('const { bookingPreDraftsEnabled, maybePreDraftForBooking } = require');
+    expect(hookAt).toBeGreaterThan(-1);
+    const hookEndAt = source.indexOf('\n        }\n      } catch (predraftErr)', hookAt);
+    expect(hookEndAt).toBeGreaterThan(hookAt);
+    const hookBlock = source.slice(hookAt, hookEndAt);
+    expect(hookBlock).toContain('bookingPreDraftPromise = (estimatorEnginePromise || Promise.resolve())');
+    expect(hookBlock).not.toContain('void (estimatorEnginePromise');
+    // The resolved outcome must survive the .then chain (not discarded) —
+    // the sweep reads outcome.drafted off exactly this settled value.
+    expect(hookBlock).toContain('return outcome;');
   });
 
   test('resolveCallAgreedPrice is exported for reuse/testing (contract with the engine-entry backstop)', () => {

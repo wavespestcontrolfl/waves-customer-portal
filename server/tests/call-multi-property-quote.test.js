@@ -24,6 +24,7 @@ const {
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   resolveCallAgreedPrice,
+  bookingPreDraftAssessmentDrafted,
   normalizeCallExtraction,
 } = _test;
 const { flatView, mapAdditionalPropertiesToLegacy } = require('../utils/extraction-compat');
@@ -318,5 +319,51 @@ describe('convertCallLeadOnPhoneBooking — keepOpenForQuote', () => {
     expect(converted).toBe(true);
     const wonWrite = inner._writes.updates.find((w) => w.table === 'leads' && w.payload.status === 'won');
     expect(wonWrite).toBeTruthy();
+  });
+});
+
+// ─── codex #4815 r2 P2: sweep/pre-draft ordering ───────────────────────────
+// The booking pre-draft hook (quotePromised:true, the documented assessment
+// exception) can clear this call's same-generation estimator_draft_block
+// while composing an assessment draft; the post-finalization price-agreed
+// sweep must wait for that SAME promise to settle before deciding whether
+// to re-stamp the block, rather than racing it. bookingPreDraftAssessmentDrafted
+// is the isolated, unit-testable decision the sweep chains onto.
+describe('bookingPreDraftAssessmentDrafted', () => {
+  test('no tracked promise (gate off / no booking) never blocks the sweep', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(null)).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(undefined)).toBe(false);
+  });
+
+  test('a genuinely SLOW pre-draft promise is awaited to completion — the ordering, not just the value, is real', async () => {
+    // A fake promise ordering: resolves on a later microtask/macrotask tick
+    // with { drafted: true }, proving the helper actually AWAITS the
+    // settlement rather than reading a value that happened to be ready
+    // synchronously.
+    let resolved = false;
+    const slowPromise = new Promise((resolve) => {
+      setTimeout(() => {
+        resolved = true;
+        resolve({ drafted: true, estimateId: 'est-assess-1' });
+      }, 20);
+    });
+
+    const resultPromise = bookingPreDraftAssessmentDrafted(slowPromise);
+    // The helper must not have decided yet — the tracked promise has not
+    // settled (this assertion would fail if the helper raced ahead).
+    expect(resolved).toBe(false);
+
+    const result = await resultPromise;
+    expect(resolved).toBe(true);
+    expect(result).toBe(true);
+  });
+
+  test('a settled promise that did NOT draft (gate off, not an assessment, already drafted) lets the sweep proceed', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve({ drafted: false, skipped: 'not_assessment' }))).toBe(false);
+    expect(await bookingPreDraftAssessmentDrafted(Promise.resolve(null))).toBe(false);
+  });
+
+  test('a rejected promise (belt-and-braces — the tracked promise never actually rejects) never blocks the sweep', async () => {
+    expect(await bookingPreDraftAssessmentDrafted(Promise.reject(new Error('unexpected')))).toBe(false);
   });
 });

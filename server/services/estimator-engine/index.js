@@ -568,7 +568,7 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   // Callers may pass a specific link (the proposal builder deep-link);
   // otherwise derive the historical default from what the bell references.
@@ -663,6 +663,13 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         }
       }
     }
+    // updateOnly (codex #4815 r2 P2): retiring a stale bell in place must
+    // never manufacture a FRESH one where none existed to update — every
+    // path above that would otherwise fall through to a new insert (no
+    // dedupe match, or a dedupe match that decided to insertFresh) is
+    // refused here instead. false, not the durable-bell truthy sentinel:
+    // nothing to retire is not the same as a failed retirement.
+    if (updateOnly) return false;
     // notifyAdmin catches insert failures and returns null — that is NOT a
     // durable bell, and callers gating detached work on durability (the SMS
     // handoff) must hear about it. Intentional suppression returns a truthy
@@ -728,7 +735,19 @@ const CALL_ORIGIN = {
 // 409, send claims, duplicate exclusion) applies; the audit reason and the
 // lead unlink ride along. Money-bearing terminals get the marker only.
 // Never throws — the caller's review bell is the durable signal.
-async function invalidateDraftForCall(callLogId, { reason, identityConflict = false, ownershipFence = null }) {
+//
+// scope: 'nonterminal_drafts' (codex #4815 r2 P0) — a THIRD caller class,
+// distinct from the two above: an agreed-price cleanup is not a verdict on
+// the call's identity or workability, so it must never touch a row the
+// customer (or the office, on their behalf) already accepted, declined, or
+// let expire — estimateOffCustomerSurface reads linkage_invalidated_at
+// before the accepted/declined early-allow, so stamping ANY terminal row
+// would revoke a customer's permanent access to an estimate they already
+// acted on. Terminal rows are excluded from the scan itself, and re-checked
+// under the per-row lock in case a status changed between the two (a
+// concurrent accept). Omitted (default), every row is in scope — the
+// identity-conflict and spam/voicemail callers are unaffected.
+async function invalidateDraftForCall(callLogId, { reason, identityConflict = false, ownershipFence = null, scope = null }) {
   // EXPLICIT result, never a swallowed failure (codex P0, PR #3304 GH
   // r8c): callers finalized spam/voicemail processing — or reported an
   // identity-conflict draft as invalidated — while no marker or archive
@@ -753,10 +772,20 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
     // (codex P0, PR #3304 GH r8d): concurrent composers and historical
     // duplicates both exist, and leaving an older row unmarked keeps a
     // PERMANENT public token sendable.
-    const conflictedRows = await strictExistingDraftForCall(callLogId);
+    const conflictedRows = await strictExistingDraftForCall(callLogId, { excludeTerminal: scope === 'nonterminal_drafts' });
     let invalidatedAny = false;
     for (const conflicted of conflictedRows) {
-       
+      // Set INSIDE the transaction, only once real work happens (codex
+      // #4815 r2 P0 test fallout — a latent bug this scope option exposed):
+      // every early `return` below (row gone, already invalidated, wrong
+      // status, or scope-excluded terminal) left this row completely
+      // untouched, but the code after `await db.transaction(...)` used to
+      // log "invalidated" and set the aggregate flag unconditionally
+      // regardless of which branch the callback took. Nothing currently
+      // reads `.invalidated` outside tests, so this was silent, but the
+      // scope's own contract ("an accepted row is left COMPLETELY
+      // untouched") needs the return value to be honest.
+      let touchedThisRow = false;
       await db.transaction(async (trx) => {
         const fresh = await trx('estimates')
           .where({ id: conflicted.id })
@@ -778,7 +807,13 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         // quarantine below — the permanent public token must die on
         // an identity conflict too.
         const freshQStatus = String(fresh.status || '').toLowerCase();
-        const terminalQRow = ['accepted', 'declined', 'expired'].includes(freshQStatus);
+        const terminalQRow = TERMINAL_ESTIMATE_STATUSES.includes(freshQStatus);
+        // scope re-check under the lock (codex #4815 r2 P0): the initial
+        // scan already excluded terminal rows for this scope, but a
+        // concurrent accept/decline between that scan and this lock must
+        // not be raced past — bail out with NOTHING touched, same as a row
+        // the scan never returned.
+        if (scope === 'nonterminal_drafts' && terminalQRow) return;
         if (!terminalQRow && !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
         // And the same delivery-claim fence (codex P0 r22): never
         // commit an archive inside a live send's verdict-to-handoff
@@ -868,6 +903,7 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
             }
           }
           logger.info(`[estimator-engine] invalidation of draft ${conflicted.id} DEFERRED behind a live delivery claim (${reason}) — pending marker recorded`);
+          touchedThisRow = true;
           return;
         }
         delete data.lead_id;
@@ -884,6 +920,7 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
           ...(midSend || terminalQRow ? {} : { status: 'draft', scheduled_at: null }),
           updated_at: new Date(),
         });
+        touchedThisRow = true;
         if (quarantinedLeadId) {
           // Only if the lead still points at this draft — a lead
           // relinked elsewhere is not ours to touch.
@@ -932,8 +969,10 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
           }
         }
       });
-      logger.info(`[estimator-engine] invalidated draft ${conflicted.id} (${reason})`);
-      invalidatedAny = true;
+      if (touchedThisRow) {
+        logger.info(`[estimator-engine] invalidated draft ${conflicted.id} (${reason})`);
+        invalidatedAny = true;
+      }
     }
     return { ok: true, invalidated: invalidatedAny };
   } catch (qErr) {
@@ -1239,7 +1278,30 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
       if (callReprocessInFlight(live)) continue;
     }
     const identityConflict = String(pending.reason).startsWith('email_');
-    if (!identityConflict) {
+    // codex #4815 r2 P1: a queued price_agreed_on_call marker has NO
+    // vocabulary in callRejectedForDrafting (it only understands
+    // spam/voicemail/no_attribution/identity-conflict verdicts) — falling
+    // into the rejection branch below read every such marker as
+    // "re-qualified" on the very next sweep and dropped the block WITHOUT
+    // re-invalidating, leaving the stale draft sendable again. Revalidate
+    // with the SAME signal the engine entry itself checks
+    // (resolveAgreedPriceForCall) instead: the call still carries an agreed
+    // price ⇒ the verdict stands and replays below; a later pass corrected
+    // the extraction (no agreed price anymore) ⇒ genuinely re-qualified,
+    // same cleanup as the rejection branch.
+    const isAgreedPrice = pending.reason === 'price_agreed_on_call';
+    if (isAgreedPrice) {
+      const stillAgreedPrice = await resolveAgreedPriceForCall(row.id);
+      if (stillAgreedPrice == null) {
+        await clearDraftBlockOnCall(row.id, {
+          notNewerThan: String(pending.at || new Date().toISOString()),
+          generation: live.processing_generation != null ? Number(live.processing_generation) : null,
+        });
+        await clearQuarantineMarker(row.id, pending);
+        logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — no agreed price on the current extraction`);
+        continue;
+      }
+    } else if (!identityConflict) {
       const { callRejectedForDrafting } = require('../admin-estimate-persistence');
       // The LIVE pipeline verdict only (codex P1, PR #3304 GH r9): the
       // queued markers are this sweep's own artifacts, so counting them
@@ -1301,6 +1363,9 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     const outcome = await invalidateDraftForCall(row.id, {
       reason: pending.reason,
       identityConflict,
+      // Never touch an accepted/declined/expired row for this reason
+      // (codex #4815 r2 P0) — see invalidateDraftForCall's own scope doc.
+      scope: isAgreedPrice ? 'nonterminal_drafts' : null,
       // Fence the REPLAY to the generation this sweep OBSERVED settled
       // (codex P1, GH round on a6c3a5c5c): between the settled read /
       // re-observation above and this write, a force-reprocess can claim
@@ -1342,11 +1407,28 @@ async function invalidateDraftForCallWithRetry(callLogId, options, attempts = 3)
   return last;
 }
 
+// Terminal, money-bearing estimate statuses — a customer has already
+// accepted or declined, or the row expired. estimateOffCustomerSurface
+// (utils/estimate-claim-sql.js) reads estimatorEngine.linkage_invalidated_at
+// BEFORE the accepted/declined early-allow in isEstimateCustomerViewable, so
+// stamping it on one of these rows revokes the customer's PERMANENT access
+// to an estimate they already acted on — correct for an identity-conflict
+// or rejected-call verdict (the whole call's identity is in question, so an
+// acceptance built on it is too), never correct for a mere agreed-price
+// cleanup (codex #4815 r2 P0): the estimate itself, and whoever accepted or
+// declined it, are unaffected by a price also being agreed on the call.
+const TERMINAL_ESTIMATE_STATUSES = ['accepted', 'declined', 'expired'];
+
 // existingDraftForCall's error-tolerant sibling for the paths where a
 // lookup failure must NOT read as "no draft" (codex P0, PR #3304 GH r8c).
 // Same predicate: this call's draft, not archived, not already invalidated.
-async function strictExistingDraftForCall(callLogId) {
-  return db('estimates')
+// excludeTerminal (codex #4815 r2 P0): scopes the SCAN itself to
+// non-terminal rows for callers that must never touch an accepted/declined/
+// expired draft — see invalidateDraftForCall's `scope` option below. The
+// identity-conflict and spam/voicemail callers pass nothing and keep
+// touching every row, unchanged.
+async function strictExistingDraftForCall(callLogId, { excludeTerminal = false } = {}) {
+  let q = db('estimates')
     .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(callLogId)])
     // ARCHIVED rows included (codex P0, PR #3304 GH r8c): an
     // operator-archived draft keeps a PERMANENT public token, and
@@ -1354,11 +1436,11 @@ async function strictExistingDraftForCall(callLogId) {
     // or rejected-call draft could be revived and served again. The
     // invalidation preserves whatever archive state it finds
     // (`fresh.archived_at || new Date()`), so marking one is safe.
-    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
-    // EVERY row, oldest first — a deterministic order for the per-row
-    // locks taken below.
-    .orderBy('created_at', 'asc')
-    .select('id', 'status', 'estimate_data');
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''");
+  if (excludeTerminal) q = q.whereNotIn('status', TERMINAL_ESTIMATE_STATUSES);
+  // EVERY row, oldest first — a deterministic order for the per-row
+  // locks taken below.
+  return q.orderBy('created_at', 'asc').select('id', 'status', 'estimate_data');
 }
 
 // Same rule as resolveCallAgreedPrice in call-recording-processor.js

@@ -1115,10 +1115,13 @@ describe('completePendingInvalidation — forced verdicts vs a newer generation'
     expect(source.indexOf('{ procGeneration = null } = {}', fnAt)).toBeGreaterThan(fnAt);
     const stampAt = source.indexOf('generation: Number(procGeneration)', fnAt);
     expect(stampAt).toBeGreaterThan(fnAt);
-    // Both processor call sites forward the pass generation.
+    // Every processor call site forwards the pass generation (2 original
+    // spam/voicemail sites + 2 added by codex #4815 r2 P1 for the
+    // price_agreed_on_call durable retry — pre-write pass and the
+    // post-finalization sweep).
     const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const sites = proc.split('markQuarantinePending(call.id').slice(1);
-    expect(sites.length).toBe(2);
+    expect(sites.length).toBe(4);
     for (const site of sites) expect(site.slice(0, 160)).toMatch(/procGeneration/);
   });
 
