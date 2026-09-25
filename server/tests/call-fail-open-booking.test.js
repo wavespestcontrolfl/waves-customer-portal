@@ -785,6 +785,38 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  // Round-2 local-audit finding: a DECLARATIVE naming an unmet
+  // authorization requirement carries no "if"/"unless"/"subject to" trigger
+  // word, so it must poison unconditionally (sentenceReferencesAuthorizationPartyOrAct),
+  // not only when phrased as a conditional.
+  test('a DECLARATIVE naming an unmet authorization requirement (no conditional wording) still poisons the pinned commitment', () => {
+    const turn = "That still needs the homeowner's sign-off. But yeah, we'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "But yeah, we'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // The scheduling half of the old combined term list stays
+  // conditional-gated only: an adjacent sentence that merely MENTIONS a
+  // weekday or time in passing — not conditional ON it, and naming no
+  // authorization party — must not poison just for naming one.
+  test('an adjacent sentence merely mentioning an unrelated topic (invoice email) does not poison the pinned commitment', () => {
+    const turn = "I'll email you the invoice. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('an adjacent sentence merely mentioning the SAME weekday (not conditional on it) does not poison the pinned commitment', () => {
+    const turn = "Adam works Sundays. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   // Live miss 2026-09-24, call 17ed9362: a lender arranging a WDO inspection
   // for the homeowner (the point of contact) on behalf of the caller. The
   // model pinned the closing agent sentence — a third-party "see him", a
