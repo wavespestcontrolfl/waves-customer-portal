@@ -1,6 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/heic-to-jpeg', () => ({ convertHeicToJpeg: jest.fn(), MAX_HEIC_BYTES: 5 * 1024 * 1024 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -33,6 +34,7 @@ const db = require('../models/db');
 db.raw = jest.fn((sql) => ({ sql }));
 const AccountMembershipEmail = require('../services/account-membership-email');
 const requestsRouter = require('../routes/admin-requests');
+const { convertHeicToJpeg, MAX_HEIC_BYTES } = require('../services/heic-to-jpeg');
 
 function makeChain(result = {}) {
   const chain = {};
@@ -114,6 +116,49 @@ describe('admin requests routes', () => {
       expect(res.headers.get('cache-control')).toBe('private, no-store');
       expect(await res.json()).toEqual({ photos, unavailableCount: 1 });
     });
+  });
+
+  test('returns JPEG derivatives for HEIC/HEIF while retaining original stored evidence', async () => {
+    const photos = ['data:image/heic;base64,YQ==', 'data:image/HEIF;base64,Yg=='];
+    const row = { id: requestId, photos };
+    const chain = makeChain({ first: row });
+    setDb({ service_requests: [chain] });
+    convertHeicToJpeg.mockResolvedValue(Buffer.from('jpeg'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer tech' } });
+      expect(await res.json()).toEqual({ photos: ['data:image/jpeg;base64,anBlZw==', 'data:image/jpeg;base64,anBlZw=='], unavailableCount: 0 });
+    });
+    expect(convertHeicToJpeg.mock.calls.map(([bytes]) => bytes.toString())).toEqual(['a', 'b']);
+    expect(row.photos).toEqual(photos);
+    expect(chain.update).not.toHaveBeenCalled();
+  });
+
+  test('serves a real HEIC attachment as a browser-decodable JPEG', async () => {
+    const original = require('fs').readFileSync(require('path').join(__dirname, 'fixtures/heic/synthetic-96x64.heic'));
+    setDb({ service_requests: [makeChain({ first: { id: requestId, photos: [`data:image/heic;base64,${original.toString('base64')}`] } })] });
+    convertHeicToJpeg.mockImplementationOnce(jest.requireActual('../services/heic-to-jpeg').convertHeicToJpeg);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer tech' } });
+      const body = await res.json();
+      expect(body.unavailableCount).toBe(0);
+      expect(body.photos[0]).toMatch(/^data:image\/jpeg;base64,/);
+      const jpeg = Buffer.from(body.photos[0].split(',')[1], 'base64');
+      await expect(require('sharp')(jpeg).metadata()).resolves.toMatchObject({ format: 'jpeg', width: 96, height: 64 });
+    });
+  });
+
+  test('reports failed and oversized HEIC conversions without hiding usable photos', async () => {
+    const jpeg = 'data:image/jpeg;base64,Yw==';
+    setDb({ service_requests: [makeChain({ first: { id: requestId, photos: [
+      'data:image/heic;base64,YQ==', jpeg,
+      `data:image/heic;base64,${'A'.repeat(Math.ceil(MAX_HEIC_BYTES / 3) * 4 + 4)}`,
+    ] } })] });
+    convertHeicToJpeg.mockRejectedValue(new Error('decode failed'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer tech' } });
+      expect(await res.json()).toEqual({ photos: [jpeg], unavailableCount: 2 });
+    });
+    expect(convertHeicToJpeg).toHaveBeenCalledTimes(1);
   });
 
   test('lists service requests for a technician', async () => {

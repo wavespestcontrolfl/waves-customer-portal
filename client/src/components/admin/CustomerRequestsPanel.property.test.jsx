@@ -93,6 +93,11 @@ describe('CustomerRequestsPanel property line', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Check photos' }));
     expect(await screen.findByText('Some attached photos are unavailable.')).toBeInTheDocument();
     expect(screen.getByText('No request photos are available.')).toBeInTheDocument();
+    requestPhotos.unavailableCount = 0;
+    requestPhotos.value = ['data:image/jpeg;base64,YQ=='];
+    fireEvent.click(screen.getByRole('button', { name: 'Retry unavailable photos' }));
+    expect(await screen.findByAltText('Photo 1 for HEIC evidence')).toBeInTheDocument();
+    expect(screen.queryByText('Some attached photos are unavailable.')).not.toBeInTheDocument();
   });
 
   it('offers a retry after a request photo read fails', async () => {

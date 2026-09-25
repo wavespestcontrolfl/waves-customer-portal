@@ -42,7 +42,12 @@ function RequestPhotos({ request, detail, onLoad }) {
   const unavailableCount = Math.max(0, Number(detail.unavailableCount) || 0);
   return (
     <>
-      {unavailableCount > 0 && <div className="text-12 text-ink-tertiary mt-2">Some attached photos are unavailable.</div>}
+      {unavailableCount > 0 && (
+        <div className="mt-2">
+          <div className="text-12 text-ink-tertiary">Some attached photos are unavailable.</div>
+          <Button className="mt-1.5" variant="secondary" size="sm" onClick={() => onLoad(request.id)}>Retry unavailable photos</Button>
+        </div>
+      )}
       {!detail.photos?.length && <div className="text-12 text-ink-tertiary mt-2">No request photos are available.</div>}
       {selectedPhoto && (
         <div className="mt-2">
