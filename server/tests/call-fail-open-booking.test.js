@@ -1623,6 +1623,74 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(quoteBindsConfirmedSlot(ns, startAt, '2026-07-30T15:50:00-04:00')).toBe(expected);
   });
 
+  // Codex round 14 (review of c0f0cd2a59): three P1s.
+  // P1 (:1413) — a conditional's consequent is guilty unless it is a known-
+  // benign anchored shape; present-tense and comma-less forms included.
+  test.each([
+    "If the email goes to you, then we are all set. We'll see you Sunday at noon.",
+    "If the email goes to you, you're all booked. We'll see you Sunday at noon.",
+    "If the email goes to you, it's all good. We'll see you Sunday at noon.",
+    "If the email goes to you you're all set. We'll see you Sunday at noon.",
+    "If the email goes to you then we are all set. We'll see you Sunday at noon.",
+    "We are all set if the email goes to you. We'll see you Sunday at noon.",
+  ])('Codex round-15 regression: any non-exempt conditional consequent poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "Yep, it should go to him, the notification. If it goes to you, I'll make sure that gets figured out. We'll see you Sunday at noon.",
+    "Yep, it should go to him, the notification. It's autonomously done, so if it goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
+    "If the confirmation text goes to the wrong number, let me know. We'll see you Sunday at noon.",
+  ])('Codex round-15: the anchored benign consequents still ground — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  // P1 (:1037) — a delegated decision poisons.
+  test.each([
+    "It's up to him. We'll see you Sunday at noon.",
+    "That's on the owner. We'll see you Sunday at noon.",
+    "It's all up to you guys. We'll see you Sunday at noon.",
+    "Up to you. We'll see you Sunday at noon.",
+    "He makes the call. We'll see you Sunday at noon.",
+    "My boss has the final say. We'll see you Sunday at noon.",
+  ])('Codex round-15 regression: a delegated decision poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // P1 (:1476) — modal uncertainty poisons; the month and the benign
+  // notification-routing modals do not.
+  test.each([
+    "We'll see you Sunday at noon. We may get you in.",
+    "We'll see you Sunday at noon. We might get you in.",
+    "We'll see you Sunday at noon. I should be able to get you in.",
+    "We'll see you Sunday at noon. You may be all set.",
+    "We'll see you Sunday at noon. It may be all set.",
+  ])('Codex round-15 regression: modal uncertainty poisons — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "Yep, it may go to him, the notification. We'll see you Sunday at noon.",
+    "You may get a text. We'll see you Sunday at noon.",
+  ])('Codex round-15: benign notification-routing "may" still grounds — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
   // history). Round 3 reworded this test from "Adam works Sundays." (out-
   // of-vocabulary words) to "We come out Sunday afternoon." on the theory

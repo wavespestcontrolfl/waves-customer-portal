@@ -1086,8 +1086,14 @@ const UNAVAILABILITY_TERMS = [
 // One shared alternative for every approval-noun shape below (possessive,
 // request, non-possessive), so a noun added once poisons in all three.
 // ("go-ahead"/"sign-off" normalize to "go ahead"/"sign off".)
+// The OBJECT-form approval PARTY shared by every anchored approval shape
+// below (third parties and the caller themself; normalized text strips
+// apostrophes, so "y all"). Codex round 14, P1 (:1037): hoisted into one
+// alternative so the delegated-decision shape reuses exactly this set, with
+// "my boss"/"the boss" added (only ever widens what poisons).
+const APPROVAL_PARTY_ALT = '(?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all|my boss|the boss|his boss|her boss)';
 const AUTHORIZATION_NOUN_ALT = '(?:okay|ok|yes|approval|confirmation|go ahead|green light|sign off|permission|authorization|blessing)';
-const AUTHORIZATION_NEED_RE = new RegExp(`\\b(?:(?:need|needs|going to need) (?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all) to (?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) ${AUTHORIZATION_NOUN_ALT})\\b`);
+const AUTHORIZATION_NEED_RE = new RegExp(`\\b(?:(?:need|needs|going to need) ${APPROVAL_PARTY_ALT} to (?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) ${AUTHORIZATION_NOUN_ALT})\\b`);
 // codex round 7, P1(b): AUTHORIZATION_NEED_RE covers "need"/"waiting on"
 // TRIGGERS; this covers the ACT of chasing that authorization down —
 // "should get your okay.", "have to get his sign off.", "once we have your
@@ -1117,7 +1123,7 @@ const NON_POSSESSIVE_APPROVAL_RE = new RegExp(`\\b(?:need|needs|needed|require|r
 // approve it", "have him sign off on it". "to" is optional because the
 // causative forms ("have"/"get") read naturally without it ("have him sign
 // off"); being lenient here only widens what poisons, never what grounds.
-const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = /\b(?:tell|ask|have|get) (?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all) (?:to )?(?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?\b/;
+const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = new RegExp(`\\b(?:tell|ask|have|get) ${APPROVAL_PARTY_ALT} (?:to )?(?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?\\b`);
 // Codex round 9, P1 (:1048): AUTHORIZATION_NEED_RE's shape (a) only covers
 // "need(s) <PARTY> to <verb>" where the party needing to act is the OBJECT
 // of "need" — it never matches a SUBJECT-LED phrasing where the party
@@ -1164,6 +1170,27 @@ const SUBJECT_LED_APPROVAL_NEED_RE = /\b(?:i|we|you|he|she|they|someone|the owne
 // already fails turnHasAffirmativeCommitmentForm's slot-word-only tail
 // today, but that's an accident of the form check, not a guarantee — this
 // check makes the safety property explicit rather than incidental.
+// Codex round 14, P1 (:1037): a DELEGATED decision — "It's up to him." —
+// names no approval verb or noun at all, and every word (it/s/up/to/him) is
+// ordinary COMMITMENT_TURN_VOCAB. Anchored shape: (it's/that's) + optional
+// "all" + (up to/on) + APPROVAL_PARTY_ALT ("It's up to him", "That's on the
+// owner"), a bare "up to <PARTY>" fragment ("Up to you."), or a SUBJECT
+// party that decides ("He decides", "The owner has the final say", "You
+// make the call").
+const DELEGATED_DECISION_RE = new RegExp(`\\b(?:(?:(?:it s|it is|its|that s|that is|thats) (?:all )?)?up to ${APPROVAL_PARTY_ALT}|(?:it s|it is|its|that s|that is|thats) (?:all )?on ${APPROVAL_PARTY_ALT}|(?:he|she|they|someone|the owner|the homeowner|the client|you|y all|you guys|my boss|the boss|his boss|her boss) (?:decides|decide|makes the call|make the call|has the final say|have the final say|has to decide|have to decide|gets to decide|get to decide))\\b`);
+// Codex round 14, P1 (:1476): agent/caller-side MODAL uncertainty — "We may
+// get you in." — stayed clean because "may" is vocabulary (the month). A
+// subject + (may/might/could possibly/should be able to/may|might|could be
+// able to) poisons. The month use never has a subject directly before it
+// followed by a word ("see you May 3rd"/"May the 3rd" are excluded by the
+// lookahead; "in May" has no subject), and the benign notification-routing
+// modals ("it may go to him", "you may get a text") are removed first by
+// BENIGN_MODAL_ROUTING_RE, an anchored phrase, before the test.
+const MODAL_UNCERTAINTY_RE = /\b(?:we|i|you|it|that|this|he|she|they) (?:may(?= [a-z])(?! the \d)|might|could possibly|should be able to|may be able to|might be able to|could be able to)\b/;
+const BENIGN_MODAL_ROUTING_RE = /\b(?:you may (?:get|receive) (?:a|an|the) (?:text message|text|email|notification|confirmation text|confirmation email)|(?:it|that) may (?:go|be sent|be going) to (?:him|her|them|you))\b/g;
+function sentenceHasModalUncertainty(ns) {
+  return MODAL_UNCERTAINTY_RE.test(ns.replace(BENIGN_MODAL_ROUTING_RE, ' '));
+}
 function sentenceHasDeclarativePoisonVocabulary(ns) {
   const padded = ` ${ns} `;
   return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
@@ -1172,7 +1199,9 @@ function sentenceHasDeclarativePoisonVocabulary(ns) {
     || APPROVAL_REQUEST_RE.test(ns)
     || NON_POSSESSIVE_APPROVAL_RE.test(ns)
     || THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(ns)
-    || SUBJECT_LED_APPROVAL_NEED_RE.test(ns);
+    || SUBJECT_LED_APPROVAL_NEED_RE.test(ns)
+    || DELEGATED_DECISION_RE.test(ns)
+    || sentenceHasModalUncertainty(ns);
 }
 // These two lists (and the regex above) ALSO do their work inside
 // clauseIsBenign, below, where they matter for a different reason: a
@@ -1222,29 +1251,48 @@ const CONSEQUENT_HEAD_RE = /\b(i'?ll|we'?ll|i will|we will)\b/i;
 // consequent head, the next trigger word, or the end of the sentence —
 // whichever comes first, so one clause never eats into the next or into
 // its own consequent.
-function extractConditionalClauses(rawSentence) {
+// Codex round 14, P1 (:1413): a clause also ends where a NEW SUBJECT head
+// begins after its first word — "If the email goes to you then we are all
+// set" / "…goes to you you're all set" has no comma and no I'll/we'll head,
+// so the present-tense consequent rode inside the (benign-topic) antecedent
+// clause and was never inspected as a consequent. Cutting there moves it
+// into the consequent, where splitConditionalSentence's caller judges it.
+// Only ever SHORTENS an antecedent (fail-closed direction).
+const CLAUSE_SUBJECT_BOUNDARY_RE = /\S[\s,]+((?:then|we|i|you['\u2019]?re|you are|you['\u2019]?ll|you will|it['\u2019]?s|it is|that['\u2019]?s|that is|everything)\b)/i;
+function conditionalClauseCut(segment) {
+  const cuts = [segment.length];
+  const commaIdx = segment.indexOf(',');
+  if (commaIdx !== -1) cuts.push(commaIdx);
+  const headMatch = CONSEQUENT_HEAD_RE.exec(segment);
+  if (headMatch) cuts.push(headMatch.index);
+  const subjectMatch = CLAUSE_SUBJECT_BOUNDARY_RE.exec(segment);
+  if (subjectMatch) cuts.push(subjectMatch.index + subjectMatch[0].length - subjectMatch[1].length);
+  return Math.min(...cuts);
+}
+// Splits a raw conditional sentence into its condition CLAUSES and every
+// piece of text that is NOT a condition clause — the CONSEQUENTS (codex
+// round 14: the text before the first trigger, e.g. "We'll put you down"
+// in "We'll put you down if…", and the remainder of each trigger segment
+// after its clause is cut). Both are returned normalized; empty pieces are
+// dropped.
+function splitConditionalSentence(rawSentence) {
   const s = String(rawSentence || '');
   const re = new RegExp(CONDITION_TRIGGER_RE.source, 'gi');
-  const triggers = [];
-  let m = re.exec(s);
-  while (m !== null) {
-    triggers.push({ start: m.index, end: m.index + m[0].length });
-    m = re.exec(s);
-  }
+  const triggers = [...s.matchAll(re)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
   const clauses = [];
-  for (let i = 0; i < triggers.length; i += 1) {
-    const segStart = triggers[i].end;
+  const consequents = triggers.length ? [normalizeCommitmentText(s.slice(0, triggers[0].start))] : [];
+  triggers.forEach((trigger, i) => {
     const segEnd = i + 1 < triggers.length ? triggers[i + 1].start : s.length;
-    const segment = s.slice(segStart, segEnd);
-    let cut = segment.length;
-    const commaIdx = segment.indexOf(',');
-    if (commaIdx !== -1) cut = Math.min(cut, commaIdx);
-    const headMatch = CONSEQUENT_HEAD_RE.exec(segment);
-    if (headMatch) cut = Math.min(cut, headMatch.index);
-    const ns = normalizeCommitmentText(segment.slice(0, cut));
-    if (ns) clauses.push(ns);
-  }
-  return clauses;
+    const segment = s.slice(trigger.end, segEnd);
+    const cut = conditionalClauseCut(segment);
+    const clause = normalizeCommitmentText(segment.slice(0, cut));
+    if (clause) clauses.push(clause);
+    consequents.push(normalizeCommitmentText(segment.slice(cut)));
+  });
+  return { clauses, consequents: consequents.filter(Boolean) };
+}
+function extractConditionalClauses(rawSentence) {
+  return splitConditionalSentence(rawSentence).clauses;
 }
 const CONDITION_CLAUSE_GLUE_WORDS = new Set([
   'it', 'that', 'this', 'they', 'he', 'she', 'is', 'are', 'was', 'were',
@@ -1396,25 +1444,40 @@ function sentenceContainsCommitmentHead(strippedNs) {
   const padded = ` ${strippedNs} `;
   return COMMITMENT_HEADS.some((head) => padded.includes(` ${head.endsWith(' ') ? head : `${head} `}`));
 }
-// Codex round 13, P1 (:1397): the COMMITMENT_HEADS reuse above only
-// catches a consequent phrased as one of the pinned-sentence templates —
-// "If the email goes to you, we'll put you down." names none of them ("put
-// you down" is neither a head nor a SCHEDULING_PREDICATE_TERMS phrase), so
-// the conditional booking read as a benign aside. The consequent is now
-// inspected on its own, independent of any verb list: in a CONDITIONAL
-// sentence, an agent-side subject in future/commitment form followed by any
-// verb (we'll/we will/I'll/I will/we're going to/I'm going to/we can/I can
-// + a word) is a conditional commitment and poisons — whatever that verb
-// is. The ONE exemption is an anchored whole-consequent shape: the agent
-// promising to fix a notification-routing mixup ("I'll make sure that's
-// rectified" / "I'll make sure that gets figured out" — the live 17ed9362
-// turn), running from the head to the END of the sentence, so nothing can
-// ride along after it ("…rectified and we'll have you down" still poisons).
-const AGENT_FUTURE_CONSEQUENT_RE = /(?:^| )(?:we ll|we will|i ll|i will|we re going to|we are going to|i m going to|i am going to|we re gonna|i m gonna|we can|i can) [a-z0-9]/g;
-const BENIGN_REMEDIATION_CONSEQUENT_RE = /^(?:i|we) (?:ll|will) make sure (?:that|it) (?:s|is|gets) (?:rectified|figured out|done)$/;
-function conditionalConsequentCommitsAgent(ns) {
-  return [...ns.matchAll(AGENT_FUTURE_CONSEQUENT_RE)]
-    .some((m) => !BENIGN_REMEDIATION_CONSEQUENT_RE.test(ns.slice(m.index).trim()));
+// Codex round 13, P1 (:1397) / round 14, P1 (:1413): a conditional
+// sentence's CONSEQUENT is judged on its own, and it is GUILTY UNLESS it is
+// one of the known-benign shapes below. Round 13 poisoned only an agent
+// future/ability head (we'll/I can + verb); "If the email goes to you, then
+// we are all set." is a present-tense commitment that named no such head,
+// no scheduling term, and only vocabulary words, so it read as a benign
+// aside. Inverting the rule closes the class: every consequent piece (text
+// before the first trigger, and each trigger segment's remainder after its
+// clause — see splitConditionalSentence) must, after dropping edge
+// discourse fillers, match one ANCHORED whole-piece exemption:
+//   - the notification-remediation promise ("I'll make sure that's
+//     rectified" / "…that gets figured out" — the live 17ed9362 turn),
+//   - "let me/us know" (the benign-routing test's consequent),
+//   - "it's autonomously done" (the live 17ed9362 turn's preface before
+//     "so if it goes to you").
+// Anything riding along after an exemption ("…rectified and we'll have you
+// down") breaks the anchor and poisons.
+const BENIGN_CONDITIONAL_CONSEQUENT_RES = [
+  /^(?:i|we) (?:ll|will) make sure (?:that|it) (?:s|is|gets) (?:rectified|figured out|done)$/,
+  /^let (?:me|us) know$/,
+  /^(?:it s|it is) autonomously done$/,
+];
+const CONSEQUENT_LEADING_FILLERS = new Set(['so', 'then', 'and', 'yep', 'yes', 'yeah', 'ok', 'okay', 'alright']);
+const CONSEQUENT_TRAILING_FILLERS = new Set(['so', 'then', 'and']);
+function trimConsequentFillers(consequentNs) {
+  const toks = consequentNs.split(' ').filter(Boolean);
+  while (toks.length && CONSEQUENT_LEADING_FILLERS.has(toks[0])) toks.shift();
+  while (toks.length && CONSEQUENT_TRAILING_FILLERS.has(toks[toks.length - 1])) toks.pop();
+  return toks.join(' ');
+}
+function conditionalConsequentIsUnexempted(rawSentence) {
+  return splitConditionalSentence(rawSentence).consequents
+    .map(trimConsequentFillers)
+    .some((c) => c && !BENIGN_CONDITIONAL_CONSEQUENT_RES.some((re) => re.test(c)));
 }
 function sentenceHasSchedulingPredicate(strippedNs) {
   const padded = ` ${strippedNs} `;
@@ -1457,8 +1520,9 @@ function sentenceHasSchedulingPredicate(strippedNs) {
 //      runs the authorization/unavailability/scheduling-staffing poison-term
 //      checks against each clause's own raw text, still requires a benign
 //      topic, still falls back to the previous sentence only for a
-//      bare-pronoun clause), AND no agent-side future consequent may commit
-//      the agent (conditionalConsequentCommitsAgent — codex round 13). A
+//      bare-pronoun clause), AND every consequent piece must match an
+//      anchored benign exemption (conditionalConsequentIsUnexempted — codex
+//      rounds 13-14: guilty unless known-benign). A
 //      conditional sentence can only pass through
 //      this carve-out — vocabulary-only clearance is never enough for it,
 //      unlike a non-conditional declarative.
@@ -1482,7 +1546,7 @@ function otherSentenceIsClean(other, prevNs) {
   if (turnHasUnresolvedConditional(other.ns)) {
     const clauses = extractConditionalClauses(other.raw);
     if (!clauses.length || !clauses.every((clause) => clauseIsBenign(clause, prevNs))) return false;
-    if (conditionalConsequentCommitsAgent(other.ns)) return false;
+    if (conditionalConsequentIsUnexempted(other.raw)) return false;
     extraSets = [BENIGN_CONDITIONAL_GLUE_WORDS];
   }
   return stripped.split(' ').every((tok) => turnVocabularyTokenOk(tok, extraSets));
