@@ -1359,8 +1359,13 @@ class RelayConversation {
    * and either releases the queue (in order) or withholds the whole round.
    */
   _newStreamState(signal) {
+    // The hold policy's date/negation/commitment regexes are English-only, so
+    // a Spanish session never flushes progressively: it starts holding, and
+    // the whole reply is released at finalize under the write-tool check —
+    // block timing, on the stream renderer's single-utterance bookkeeping.
+    const holding = require('./relay-language').isSpanish(this.language);
     return {
-      signal, buffer: '', holding: false, entry: null, closed: false,
+      signal, buffer: '', holding, entry: null, closed: false,
       gate: null, gateQueue: [], gateOpen: false, withheld: false,
     };
   }

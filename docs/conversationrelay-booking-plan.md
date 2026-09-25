@@ -241,7 +241,12 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    outcome without one — "you're all set", "taken care of", "got you
    booked", "on the calendar", "locked in", "I've sent that over", "someone
    will call you" (`COMMITMENT_OR_SUCCESS_RE`, full list in
-   `relay-stream-renderer.js`). Once one sentence in a round needs holding,
+   `relay-stream-renderer.js`). These date/negation/commitment patterns are
+   English-only, so a **Spanish session never flushes progressively** (its
+   stream state starts holding — block timing, released at finalize under the
+   write-tool check), and in any session a sentence with Spanish orthography
+   or a common Spanish function/success word ("listo", "ya quedó",
+   "agendada", "reservado", …; `NON_ENGLISH_HINT_RE`) is held too. Once one sentence in a round needs holding,
    every sentence after it in that same round is held too — never
    reordered, never partially released. Independently, the round loop also
    stops flushing the instant ANY `tool_use` content block starts streaming

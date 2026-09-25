@@ -60,6 +60,15 @@ function amountMentions(text) {
   return _amountMentions(text);
 }
 
+// The date/negation/commitment regexes below are ENGLISH-ONLY. A Spanish
+// session never flushes progressively at all (RelayConversation starts its
+// stream state already holding — block timing), and this is the belt for an
+// English session whose model answers in Spanish anyway: any sentence with
+// Spanish orthography or a common Spanish function/success word is held to
+// finalize, where the write-tool check applies. A false hold only costs
+// latency, never correctness.
+const NON_ENGLISH_HINT_RE = /[áéíóúñü¿¡]|\b(?:el|la|los|las|le|les|un|una|en|que|de|del|por|con|muy|pero|y|es|son|hay|aqu[ií]|ahora|momento|mensaje|servicio|listo|lista|ya|est[aá]|qued[oó]|cita|usted|su|sus|para|gracias|agendad[oa]s?|reservad[oa]s?|confirmad[oa]s?|programad[oa]s?|enviad[oa]s?|hoy|mañana|nunca|tampoco|ningun[oa]?)\b/i;
+
 // Sentence boundary: '.', '!' or '?', one optional closing quote/paren, then
 // whitespace. Deliberately simple — see policy note 1 above.
 const BOUNDARY_RE = /[.!?]["'’)\]]?\s+/g;
@@ -125,6 +134,7 @@ function splitSentences(buffer) {
 function needsHold(sentence) {
   const t = String(sentence || '');
   if (!t.trim()) return false;
+  if (NON_ENGLISH_HINT_RE.test(t)) return true;
   if (amountMentions(t).length) return true;
   if (DATE_TIME_RE.test(t)) return true;
   if (NEGATION_RE.test(t)) return true;
@@ -132,4 +142,4 @@ function needsHold(sentence) {
   return false;
 }
 
-module.exports = { splitSentences, needsHold, BOUNDARY_RE, NEGATION_RE, DATE_TIME_RE, COMMITMENT_OR_SUCCESS_RE };
+module.exports = { splitSentences, needsHold, NON_ENGLISH_HINT_RE, BOUNDARY_RE, NEGATION_RE, DATE_TIME_RE, COMMITMENT_OR_SUCCESS_RE };

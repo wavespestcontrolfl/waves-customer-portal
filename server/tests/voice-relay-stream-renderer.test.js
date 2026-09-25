@@ -93,6 +93,21 @@ describe('relay-stream-renderer — pure chunking + hold policy', () => {
     expect(rest).toBe('Let me check that for you');
   });
 
+  test.each([
+    'Listo, ya quedó agendada su cita.',
+    'Ya está reservado.',
+    'Perfecto, le confirmo el servicio.',
+    'Le enviamos un mensaje en un momento.',
+    '¿Algo más en que le pueda ayudar?',
+  ])('a Spanish sentence is held (English-only hold regexes): %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(true);
+  });
+
+  test('plain English filler is not caught by the Spanish hint', () => {
+    expect(needsHold('Sure, let me check that for you. ')).toBe(false);
+    expect(needsHold('One moment please. ')).toBe(false);
+  });
+
   test('an amount sentence (digits or spelled out) needs holding', () => {
     expect(needsHold('That will be $149 for the visit.')).toBe(true);
     expect(needsHold('It runs one hundred and forty nine dollars per treatment.')).toBe(true);
@@ -216,6 +231,40 @@ describe('stream renderer — full round loop', () => {
     expect(agentEntries).toHaveLength(1); // ONE growing utterance per turn, not one per chunk
     expect(agentEntries[0].planned).toBe(finalText);
     expect(agentEntries[0].text).toBe(finalText);
+  });
+
+  test('a Spanish session never flushes progressively; a write round speaks nothing before the tool', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-es1', from: '+19415551234', language: 'es-US', send });
+    const promptPromise = convo.handlePrompt('quiero agendar para el martes');
+    await flush();
+    const round1 = captured[0];
+    round1.textCb('Perfecto. ');
+    round1.textCb('Un momento, por favor. ');
+    await flush();
+    expect(send).not.toHaveBeenCalled(); // nothing on the air before finalMessage
+    round1.resolve({
+      content: [
+        { type: 'text', text: 'Perfecto. Un momento, por favor.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await flush();
+    expect(send).not.toHaveBeenCalled(); // write-tool round: held text dropped, never spoken
+    const hist = convo.messages.find((m) => m.role === 'assistant');
+    expect(hist.content.some((b) => b.type === 'text')).toBe(false);
+
+    // Round 2 (after the tool result) streams too — still held, then spoken whole.
+    const round2 = captured[1];
+    round2.textCb('Listo, ya quedó agendada su cita. ');
+    await flush();
+    expect(send).not.toHaveBeenCalled();
+    round2.resolve({ content: [{ type: 'text', text: 'Listo, ya quedó agendada su cita.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+    expect(send.mock.calls).toEqual([['Listo, ya quedó agendada su cita.', true]]);
   });
 
   test('an amount sentence is held until finalMessage, then checked and released (no pending write)', async () => {
