@@ -153,7 +153,7 @@ const OPENAI_REPORT_WRITER = process.env.MODEL_OPENAI_REPORT_WRITER || DEFAULTS.
 // the premium rate is paid only on that lane's fallback leg and a Q&A or
 // report model change never moves it.
 const OPENAI_FRONTIER      = process.env.MODEL_OPENAI_FRONTIER || DEFAULTS.OPENAI_FRONTIER;
-// Generated-image screen (owner ruling 2026-09-25: "just sol"). In the
+// Generated-image screen (owner ruling 2026-09-25: Sol first). In the
 // 2026-09-25 lab GPT-5.6 Sol judged the uniform badge's chest side 12 of 12
 // from badge/placket positions; Claude Opus got it wrong in both directions.
 const OPENAI_IMAGE_SCREEN  = process.env.MODEL_OPENAI_IMAGE_SCREEN || DEFAULTS.OPENAI_IMAGE_SCREEN;
@@ -353,11 +353,13 @@ const TEXT_POLICIES = Object.freeze({
   imageScreen: Object.freeze({
     name: 'imageScreen',
     // The blog image text/logo/uniform/van screen (content/hero-alt-vision.js
-    // screenGeneratedImage). Sol only, by owner ruling 2026-09-25 — no Claude
-    // leg: the screen is fail-open by contract, so an OpenAI miss ships the
-    // image unchecked (and flagged as such) rather than judged by the model
-    // that misread the badge side. The alt-text pass stays on visionAnalysis.
+    // screenGeneratedImage). Sol first, by owner ruling 2026-09-25; Claude
+    // VISION answers only when the OpenAI leg misses (owner, same day: "add
+    // claude as backup") — it misreads the chest side more often, but a
+    // checked image beats one shipped unchecked during an OpenAI outage.
+    // The alt-text pass stays on visionAnalysis.
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_IMAGE_SCREEN }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
   }),
   voiceJudge: Object.freeze({
     name: 'voiceJudge',

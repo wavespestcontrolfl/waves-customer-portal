@@ -326,7 +326,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/IGNORE THE WAVES VAN/);
   });
 
-  test('both screen questions run on the Sol-only imageScreen policy at medium reasoning, above the reasoning floor (owner ruling 2026-09-25)', async () => {
+  test('both screen questions run on the Sol-first imageScreen policy (Claude backup) at medium reasoning, above the reasoning floor (owner ruling 2026-09-25)', async () => {
     mockAnswers();
     await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true, allowVanWrap: true });
     expect(mockDispatch).toHaveBeenCalledTimes(2);
@@ -336,7 +336,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
       expect(req.maxTokens).toBeGreaterThan(1024);
     }
     expect(MODELS.TEXT_POLICIES.imageScreen.primary.provider).toBe('openai');
-    expect(MODELS.TEXT_POLICIES.imageScreen.fallback).toBeUndefined();
+    expect(MODELS.TEXT_POLICIES.imageScreen.fallback).toEqual({ provider: 'anthropic', model: MODELS.VISION });
   });
 
   test('the wrap on the van, nothing off it, its own phone number and web address → clean', async () => {

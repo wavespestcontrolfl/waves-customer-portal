@@ -106,9 +106,9 @@ a provider issue never causes a gap:
   `property_v2_vision`, and `turf_ocr` remain intentional consensus fan-outs,
   and `visionAnalysis` lanes (vision-delta, lawn quality gate, hero alt,
   WDO brief) stay Anthropic-first — don't remove those without a new ruling.
-  The generated-image SCREEN is the ruled exception (owner 2026-09-25, "just
-  sol"): `TEXT_POLICIES.imageScreen` is GPT-5.6 Sol only, no Claude leg — the
-  screen fails open on a miss; hero alt text stays on `visionAnalysis`.
+  The generated-image SCREEN is the ruled exception (owner 2026-09-25):
+  `TEXT_POLICIES.imageScreen` is GPT-5.6 Sol first with Claude VISION as the
+  backup; hero alt text stays on `visionAnalysis`.
   `lawn-assessment.js#analyzePhoto` (lawn scoring, changed first that day),
   `pest-identification.js#analyzePhoto`/`identifyPest`, and
   `tree-shrub-assessment.js#analyzePhoto` all call Gemini only; Claude runs
