@@ -8608,6 +8608,11 @@ const CallRecordingProcessor = {
     let v2RoutingBlocked = false;
     let v2SmsBlocked = false;
     let v2SmsConsentExplicit = false;
+    // P1-C (callback_number_needed reminder hold): set true the moment the
+    // disclaimed-caller-ID hold blocks the confirmation SMS; stamped onto
+    // scheduled_services.callback_number_hold_at once the visit is booked so
+    // the reminder cron can honor the same hold days later.
+    let callbackNumberNeededHoldActive = false;
     // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
     // inbound consent (no explicit sms_consent_given). The non-ANI recipient
     // hold at the send site keys off this — a send cleared by explicit consent
@@ -9021,6 +9026,12 @@ const CallRecordingProcessor = {
           if (callbackNumberNeededBlocksSms(finalFlags)) {
             v2SmsBlocked = true;
             v2SmsClearedByImpliedConsent = false;
+            // P1-C: this hold must outlive the confirmation send — the
+            // 72h/24h reminder cron (appointment-reminders.js) runs on its
+            // own schedule with no notion of a call-level SMS hold, and
+            // would otherwise text the disclaimed ANI days later. Stamped
+            // onto the visit once scheduledServiceId is known (below).
+            callbackNumberNeededHoldActive = true;
           }
 
           const routeDecision = buildRouteDecision({
@@ -9948,7 +9959,7 @@ const CallRecordingProcessor = {
           // same posture as the line-type check just above: never blocks or
           // delays creation, which has already committed.
           try {
-            const disclaimedNote = callerIdDisclaimedNoteText(v2CanonicalExtraction?.caller);
+            const disclaimedNote = callerIdDisclaimedNoteText(v2CanonicalExtraction?.caller, { ani: contactPhone });
             if (disclaimedNote) {
               await db('customers').where({ id: customerId }).update({
                 crm_notes: db.raw(
@@ -9958,7 +9969,13 @@ const CallRecordingProcessor = {
               });
             }
           } catch (e) {
-            logger.warn(`[call-proc] caller-id-disclaimed note stamp failed for ${customerId}: ${e.message}`);
+            // e.message on a Knex query-builder failure can render the SQL
+            // (incl. bindings — the caller's free-text phone_note/crm_notes)
+            // straight into the log (P1: never log the failed CRM-note
+            // binding). Same non-payload code/name convention as this
+            // file's other DB-failure handlers (e.g. the recovery-marker
+            // and address-evidence reconcile catches above).
+            logger.warn(`[call-proc] caller-id-disclaimed note stamp failed for ${customerId}: ${e.code || e.name || 'db_error'}`);
           }
 
           // Auto-create Stripe customer (non-blocking, but log failures so a
@@ -16210,6 +16227,27 @@ const CallRecordingProcessor = {
               .ignore()
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
+          // P1-C: persist the callback_number_needed hold onto the visit so
+          // the 72h/24h reminder cron (appointment-reminders.js) — which
+          // runs independently of this pass and has no notion of a
+          // call-level SMS hold — does not text the disclaimed ANI days
+          // later. Lifted by the SAME durable clearance signal the
+          // card-request backstop already honors: once anything stamps
+          // call_sms_cleared_at for this visit (the confirm-leg clearance
+          // just above, or the office-confirm hook in
+          // outbound-review-confirm.js), checkAndSendReminders treats the
+          // hold as resolved and resumes sending. whereNull guards against
+          // stomping a hold a concurrent pass already recorded.
+          if (scheduledServiceId && callbackNumberNeededHoldActive) {
+            try {
+              await db('scheduled_services')
+                .where({ id: scheduledServiceId })
+                .whereNull('callback_number_hold_at')
+                .update({ callback_number_hold_at: new Date() });
+            } catch (holdErr) {
+              logger.warn(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId}: ${holdErr.code || holdErr.name || 'db_error'}`);
+            }
+          }
           // Card-on-file spec §3 Phase 5.3, REORDERED by owner ruling
           // 2026-08-06: the card/Auto Pay link goes out FIRST, before the
           // confirmation text — right after the call, when the appointment
@@ -16270,6 +16308,17 @@ const CallRecordingProcessor = {
             // call_sms_cleared_at stamp and NO call-recipient override:
             // call-level clearance was not given, so the stamp the pre-visit
             // backstop keys on must not assert it.
+            // SCOPED OUT of the callback_number_needed email-fallback ruling
+            // (2026-09-25): requestCardForAppointment has no email-only
+            // delivery mode today — its invitation email is a companion
+            // that only fires AFTER a CONFIRMED SMS dispatch (see
+            // startInvitationEmailLeg in appointment-card-request.js), so
+            // there is no clean way to reach an email-only recipient here
+            // without a real change to that (payment-adjacent, bearer-token)
+            // funnel. Staying 'none' is the SAFE default: no card link goes
+            // anywhere rather than risk one on the disclaimed ANI. Follow-up:
+            // build an email-only delivery mode there if the office wants
+            // the card ask to go out automatically for this case.
             try {
               const { requestCardForAppointment } = require('./appointment-card-request');
               await requestCardForAppointment({ scheduledServiceId, trigger: 'ai_call_pipeline', delivery: 'none' });
@@ -17400,6 +17449,7 @@ const CallRecordingProcessor = {
         // (codex r1 P2a). Same enforce-mode test used elsewhere in this file.
         v2Promoted: CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED,
         maskedCallSid: maskSid(callSid),
+        contactPhone, // → callbackNumberCoachingNote's ANI-comparison (call-triage-flags.js P1)
         // Checked inside, immediately before the score row is written: the
         // provider await between here and there is minutes long.
         stillOwnsClaim,

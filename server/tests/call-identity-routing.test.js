@@ -216,4 +216,42 @@ describe('callback_number_needed — disclaimed caller ID with no spoken callbac
     expect(callbackNumberNeededBlocksSms(null)).toBe(false);
     expect(callbackNumberNeededBlocksSms(undefined)).toBe(false);
   });
+
+  // Codex round-1 P1 (regression coverage at the actual call site
+  // computeDeterministicTriageFlags/opts.contactPhone use): a schema-valid
+  // model response can set phone_source:'caller_id' and copy the ANI
+  // straight into phone_e164 — that used to silently clear the flag (and
+  // the confirmation/reminder SMS hold) because the old predicate only
+  // checked phone_e164 presence.
+  test('caller_id source + phone_e164 equal to the call ANI still raises the flag', () => {
+    const flags = computeDeterministicTriageFlags(
+      v2({ caller: { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: ANI } }),
+      { contactPhone: ANI },
+    );
+    expect(flags).toContain('callback_number_needed');
+  });
+
+  test('spoken source with a distinct number does not raise the flag', () => {
+    const flags = computeDeterministicTriageFlags(
+      v2({ caller: { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+19415551234' } }),
+      { contactPhone: ANI },
+    );
+    expect(flags).not.toContain('callback_number_needed');
+  });
+
+  test('caller_id source but phone_e164 provably different from the ANI does not raise the flag', () => {
+    const flags = computeDeterministicTriageFlags(
+      v2({ caller: { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+19415551234' } }),
+      { contactPhone: ANI },
+    );
+    expect(flags).not.toContain('callback_number_needed');
+  });
+
+  test('missing phone raises the flag regardless of ANI', () => {
+    const flags = computeDeterministicTriageFlags(
+      v2({ caller: { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: null } }),
+      { contactPhone: ANI },
+    );
+    expect(flags).toContain('callback_number_needed');
+  });
 });

@@ -1160,13 +1160,17 @@ describe('extraction compat adapter', () => {
 
   // callerIdDisclaimedNeedsCallback (schema 1.14.0, single source of truth
   // for callback_number_needed / the crm_notes stamp / the CSR coaching
-  // addendum): keyed on phone_e164 presence, not phone_source — a
-  // pre-push review P1 (phone_source alone can lag a garbled "spoken"
-  // number that normalized to a null phone_e164).
+  // addendum). Codex round-1 P1: a bare phone_e164-presence check let a
+  // schema-valid model response set caller_id_disclaimed:true,
+  // phone_source:'caller_id', and copy the disclaimed ANI straight back
+  // into phone_e164 — that is the model recording caller ID, not a spoken
+  // callback, and the old check silently cleared the flag (and the SMS
+  // hold) on exactly the number the caller said isn't theirs. The fix
+  // requires EVIDENCE a callback was spoken: phone_source 'spoken'/'both',
+  // OR phone_e164 provably different from the call's own ANI (opts.ani).
   describe('callerIdDisclaimedNeedsCallback', () => {
-    test('true only when disclaimed AND no phone_e164', () => {
+    test('true only when disclaimed AND no dialable phone_e164 (missing phone → needed)', () => {
       expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_e164: null })).toBe(true);
-      expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_e164: '+19415551234' })).toBe(false);
       expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: false, phone_e164: null })).toBe(false);
       expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: null, phone_e164: null })).toBe(false);
       expect(callerIdDisclaimedNeedsCallback(null)).toBe(false);
@@ -1178,6 +1182,47 @@ describe('extraction compat adapter', () => {
     test('a stale phone_source=spoken claim does not suppress the predicate when phone_e164 is null', () => {
       expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: null })).toBe(true);
       expect(callerIdDisclaimedNeedsCallback({ caller_id_disclaimed: true, phone_source: 'both', phone_e164: null })).toBe(true);
+    });
+
+    // Codex round-1 P1 — the model echoed the ANI back as phone_e164 under
+    // phone_source: 'caller_id'. That is NOT a spoken callback: with no ANI
+    // to compare against, or an ANI that matches, the disclaimer stays
+    // unresolved (this is the exact regression test for the finding —
+    // previously this returned false because phone_e164 was merely present).
+    test('caller_id source + phone_e164 same as ANI → still needed', () => {
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+19415550100' },
+        { ani: '+19415550100' },
+      )).toBe(true);
+      // No ANI available to compare against at all — fails closed the same way.
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+19415550100' },
+      )).toBe(true);
+    });
+
+    // Direct evidence: the MODEL heard the caller speak a number themselves,
+    // independent of the ANI — clears regardless of what the ANI is.
+    test('spoken source + a distinct number → not needed', () => {
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'spoken', phone_e164: '+19415551234' },
+        { ani: '+19415550100' },
+      )).toBe(false);
+    });
+
+    // caller_id-sourced, but the number doesn't even match the ANI — can't
+    // be the model echoing caller ID back, so it clears.
+    test('caller_id source but phone_e164 != ANI → not needed', () => {
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: '+19415551234' },
+        { ani: '+19415550100' },
+      )).toBe(false);
+    });
+
+    test('missing phone → needed, regardless of ANI', () => {
+      expect(callerIdDisclaimedNeedsCallback(
+        { caller_id_disclaimed: true, phone_source: 'caller_id', phone_e164: null },
+        { ani: '+19415550100' },
+      )).toBe(true);
     });
   });
 

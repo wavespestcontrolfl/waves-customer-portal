@@ -351,6 +351,31 @@ async function moveHoldActive(scheduledServiceId) {
   }
 }
 
+// callback_number_needed hold (P1-C + owner ruling 2026-09-25): true while
+// scheduled_services.callback_number_hold_at is set for this visit and has
+// not since been cleared by call_sms_cleared_at (the same durable
+// clearance signal the card-request backstop honors). Shared by the
+// 72h/24h reminder cron (checkAndSendReminders reads the columns inline
+// alongside its own status query) and the en-route/arrival senders
+// (twilio.js, which have no other reason to read this row) so every
+// customer-facing SMS leg for a disclaimed-ANI visit honors the same hold
+// — the caller told us the ANI reaches someone who isn't them, so texting
+// it is never safe until the hold clears. Fail-open (false) on a read
+// error: a transient DB hiccup must not silently mute every en-route/
+// arrival text for every visit.
+async function callbackNumberHoldActiveForVisit(scheduledServiceId) {
+  if (!scheduledServiceId) return false;
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('callback_number_hold_at', 'call_sms_cleared_at');
+    return !!(svc?.callback_number_hold_at && !svc?.call_sms_cleared_at);
+  } catch (err) {
+    logger.warn(`[appt-remind] callback-number hold read failed for visit ${scheduledServiceId} — treating as not held: ${err.message}`);
+    return false;
+  }
+}
+
 // Send the email version of an appointment notice. Returns the raw send result
 // ({ ok, skipped, blocked, reason, ... }). Idempotent via AppointmentEmail's
 // per-occurrence keys, so calling it as both a fallback and a primary send for
@@ -3054,11 +3079,25 @@ const AppointmentReminders = {
         // additional queries (gate on or off — lifecycle seams are
         // gate-independent).
         let svcVisitId = null;
+        // callback_number_needed reminder hold (P1-C + owner ruling
+        // 2026-09-25): the caller disclaimed the inbound ANI as not their
+        // own with no spoken callback — call-recording-processor.js
+        // stamps callback_number_hold_at on the visit rather than let this
+        // cron (which has no notion of a call-level hold) text that
+        // number days later. While active, the reminder's SMS leg is
+        // treated as unreachable and the existing SMS→email fallback in
+        // deliverAppointmentNotice reaches the customer by email instead
+        // (owner ruling: hold ONLY when there is no email either). Lifted
+        // by the SAME clearance signal the card-request backstop honors:
+        // once call_sms_cleared_at is stamped for this visit (by any
+        // existing clearance flow), normal SMS sending resumes.
+        let callbackNumberHoldActive = false;
         if (r.scheduled_service_id) {
           const svc = await db('scheduled_services')
             .where({ id: r.scheduled_service_id })
-            .first('status', 'visit_id');
+            .first('status', 'visit_id', 'callback_number_hold_at', 'call_sms_cleared_at');
           svcVisitId = svc?.visit_id || null;
+          callbackNumberHoldActive = !!(svc?.callback_number_hold_at && !svc?.call_sms_cleared_at);
           const svcStatus = String(svc?.status || '').toLowerCase();
           if (REMINDER_BLOCKING_STATUSES.has(svcStatus)) {
             if (SELF_HEAL_TERMINAL_STATUSES.has(svcStatus)) {
@@ -3244,14 +3283,29 @@ const AppointmentReminders = {
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsOutcome: smsOutcome72,
-              smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
-                const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-                return renderTemplate(
-                  'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
-                  { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
-                );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
+              // callback_number_needed hold (P1-C + owner ruling
+              // 2026-09-25): never attempt the SMS leg while the visit's
+              // disclaimed-ANI hold is active — return a plain
+              // (non-"held") false so deliverAppointmentNotice's normal
+              // "SMS unreachable → email fallback" path runs (same as any
+              // other undeliverable-text case), reaching the customer by
+              // email instead of the disclaimed ANI. Only when the email
+              // leg ALSO fails (no address on file) does this genuinely go
+              // unreached — deliverAppointmentEmailFallback's own
+              // alertNoReachableChannel covers that, alongside the
+              // crm_notes stamp written when the customer record was
+              // created (extraction-compat.js's callerIdDisclaimedNoteText).
+              smsAttempt: () => {
+                if (callbackNumberHoldActive) return false;
+                return safeSendAppointment(customer, prefs.raw, async (contact) => {
+                  const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
+                  return renderTemplate(
+                    'reminder_72h',
+                    { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
+                    { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
+                  );
+                }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined }, { sendOutcome: smsOutcome72, expectedChannel: channel72 });
+              },
             }));
             if (reached72 === null) smsOutcome72.blockedCode = 'MOVE_HOLD';
 
@@ -3528,24 +3582,30 @@ const AppointmentReminders = {
               emailIdempotencyKey: ownsVisit24 ? visitReminderEmailKey('24h', claim24.dedupeKey) : null,
               serviceLabel,
               rescheduleUrl: reschedule.url,
-              smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
-                const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-                return renderAppointmentPageTemplate(
-                  'reminder_24h',
-                  // v2: the page carries the detail — body keeps the arrival
-                  // window + fee disclosure and hands off to the link.
-                  // BOTH var sets carry {window} AND {time}: getTemplate
-                  // suppresses the whole SMS on an unresolved placeholder,
-                  // and this render must survive either body shape (v2 or
-                  // legacy) plus an admin edit that reintroduces {time}.
-                  async () => {
-                    const appointment24 = await buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id });
-                    return { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 };
-                  },
-                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
-                  { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
-                );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }, { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
+              // callback_number_needed hold (P1-C + owner ruling
+              // 2026-09-25) — see the 72h twin above: a plain false lets
+              // the normal email fallback run instead of deferring.
+              smsAttempt: () => {
+                if (callbackNumberHoldActive) return false;
+                return safeSendAppointment(customer, prefs.raw, async (contact) => {
+                  const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
+                  return renderAppointmentPageTemplate(
+                    'reminder_24h',
+                    // v2: the page carries the detail — body keeps the arrival
+                    // window + fee disclosure and hands off to the link.
+                    // BOTH var sets carry {window} AND {time}: getTemplate
+                    // suppresses the whole SMS on an unresolved placeholder,
+                    // and this render must survive either body shape (v2 or
+                    // legacy) plus an admin edit that reintroduces {time}.
+                    async () => {
+                      const appointment24 = await buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id });
+                      return { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 };
+                    },
+                    { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
+                    { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
+                  );
+                }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }, { sendOutcome: smsOutcome24, expectedChannel: channel24 });
+              },
               smsOutcome: smsOutcome24,
             }));
             if (reached24 === null) smsOutcome24.blockedCode = 'MOVE_HOLD';
@@ -5572,6 +5632,7 @@ AppointmentReminders._test = {
   liveReminderServiceLabel,
   buildMergedServiceLabel,
   appendHeldEstimateAcceptLine,
+  callbackNumberHoldActiveForVisit,
 };
 
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).
@@ -5599,5 +5660,9 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 // The visit-aware prefs row for the call-booking confirmation email and the
 // deferred-replay recheck (app property scope, PR 3).
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
+
+// Shared with twilio.js's en-route/arrival senders (owner ruling
+// 2026-09-25) — see the function's own comment.
+AppointmentReminders.callbackNumberHoldActiveForVisit = callbackNumberHoldActiveForVisit;
 
 module.exports = AppointmentReminders;

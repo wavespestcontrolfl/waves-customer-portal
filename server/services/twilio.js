@@ -1529,6 +1529,18 @@ const TwilioService = {
     // unrecognized (or a lookup failure) normalizes to 'sms' so legacy
     // customers see no behavior change.
     const AppointmentReminders = require("./appointment-reminders");
+    // callback_number_needed hold (owner ruling 2026-09-25): the caller
+    // disclaimed the inbound ANI as not their own with no spoken callback
+    // (call-triage-flags.js's callerIdDisclaimedNeedsCallback) — texting
+    // the en-route notice to that number would repeat the exact mistake
+    // the hold exists to prevent. `attemptSms` below skips every contact
+    // while held, so this naturally falls through to the email fallback.
+    const callbackNumberHoldActive = typeof AppointmentReminders.callbackNumberHoldActiveForVisit === 'function'
+      ? await AppointmentReminders.callbackNumberHoldActiveForVisit(scheduledServiceId)
+      // Defensive only: every real caller gets the function from the actual
+      // module — this covers a test double that mocks appointment-reminders.js
+      // without it, where "not held" is exactly today's pre-existing behavior.
+      : false;
     let channel = "sms";
     try {
       const channelRow = await AppointmentReminders.resolveChannelPrefsRow(customerId, prefs, customer);
@@ -1599,6 +1611,10 @@ const TwilioService = {
     let landlineSkipped = false;
     const attemptSms = async () => {
       for (const contact of contacts) {
+        // callback_number_needed hold — never text the disclaimed ANI (or
+        // any other contact) on this visit; the email fallback below
+        // carries the notice instead.
+        if (callbackNumberHoldActive) continue;
         if (channel !== 'push' && cachedPrimaryLandline && digitsOnly(contact.phone) === primaryDigits) {
           landlineSkipped = true;
           continue;
@@ -1716,7 +1732,7 @@ const TwilioService = {
     // blocked), or there were no phone contacts at all — send the en-route notice
     // by email instead so the customer still knows the tech is on the way.
     let emailFallbackAccepted = false;
-    if (!delivered && (attemptedSms || landlineSkipped || contacts.length === 0)) {
+    if (!delivered && (attemptedSms || landlineSkipped || contacts.length === 0 || callbackNumberHoldActive)) {
       const emailRes = await sendEnRouteEmail();
       emailFallbackAccepted = emailRes?.ok === true;
       // Unlike confirmation/reminders, a locally-skipped en-route SMS (cached
@@ -1761,6 +1777,18 @@ const TwilioService = {
     // (same rule as the reminder promotion, appointment-reminders.js).
     const emailAllowed = prefs?.email_enabled !== false;
     if (channel === "sms" && !smsAllowed) return { success: false, suppressed: true, reason: "sms_disabled" };
+
+    // callback_number_needed hold (owner ruling 2026-09-25) — see the
+    // en-route twin above. Folded into heldAllSms/smsLegAvailable below so
+    // ARRIVAL_DELIVERY's existing email-fallback branches carry the notice
+    // instead of texting the disclaimed ANI.
+    const AppointmentReminders = require("./appointment-reminders");
+    const callbackNumberHoldActive = typeof AppointmentReminders.callbackNumberHoldActiveForVisit === 'function'
+      ? await AppointmentReminders.callbackNumberHoldActiveForVisit(scheduledServiceId)
+      // Defensive only: every real caller gets the function from the actual
+      // module — this covers a test double that mocks appointment-reminders.js
+      // without it, where "not held" is exactly today's pre-existing behavior.
+      : false;
 
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
     // Same recipient double opt-in hold as the en-route path above. When
@@ -1832,12 +1860,17 @@ const TwilioService = {
       // The SMS leg exists when texting is enabled and there is someone to
       // text. For email/both this decides whether an SMS miss is retryable
       // ("the leg existed and transiently failed") or deterministic.
-      smsLegAvailable: (smsAllowed || channel === "push") && contacts.length > 0,
+      // callback_number_needed hold: no real SMS leg — 'both' would
+      // otherwise text the disclaimed ANI directly (it doesn't gate on
+      // heldAllSms the way the 'sms'/'email' branches do).
+      smsLegAvailable: (smsAllowed || channel === "push") && contacts.length > 0 && !callbackNumberHoldActive,
       // The opt-in hold emptied a NON-empty list: no SMS leg right now, but
       // the hold is TRANSIENT (the recipient may still reply YES). Only while
       // texting is enabled — a disabled SMS leg is permanent, and must not
-      // turn a delivered email into a retryable miss.
-      heldAllSms: smsAllowed && !contacts.length && unfilteredContacts.length > 0,
+      // turn a delivered email into a retryable miss. The callback_number_needed
+      // hold is folded in the same way (also transient — lifted once the
+      // visit's call-level SMS clearance is recorded).
+      heldAllSms: (smsAllowed && !contacts.length && unfilteredContacts.length > 0) || callbackNumberHoldActive,
       attemptSmsLegs,
       results,
     });

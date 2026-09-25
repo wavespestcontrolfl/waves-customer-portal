@@ -13,6 +13,13 @@ function isDialablePhone(value) {
   return String(value).replace(/\D/g, '').length >= 10;
 }
 
+// last-10-digit comparator — same convention used throughout
+// call-recording-processor.js (its several inline `last10` helpers) for
+// comparing two phone strings regardless of formatting/country-code prefix.
+function last10Digits(value) {
+  return String(value || '').replace(/\D/g, '').slice(-10);
+}
+
 // Pure predicate: did THIS caller disclaim the ANI as not their own with no
 // spoken callback number backing it up? Single source of truth (schema
 // 1.14.0) — computeDeterministicTriageFlags derives callback_number_needed
@@ -21,21 +28,30 @@ function isDialablePhone(value) {
 // csr-coach.js) calls this instead of re-deriving the condition, so a
 // future refinement here can't silently desync from the flag.
 //
-// Keyed on caller.phone_e164 presence, NOT phone_source (pre-push review
-// P1): phone_source is the MODEL's claim that the caller uttered SOME
-// number, independent of whether it parsed to a real E.164 — the prompt's
-// own fallback rule ("If no number is spoken, set phone_e164 to null,
-// server will fall back to ANI") means a garbled "spoken" number normalizes
-// phone_e164 to null (normalizeCaller/normalizePhone reject anything that
-// doesn't validate) while phone_source can still read 'spoken'. Trusting
-// phone_source alone would then leave the caller on the very ANI they just
-// disclaimed with no flag, no SMS hold, and no crm_notes stamp — the exact
-// failure this feature exists to catch. A present phone_e164 is real,
-// already-validated evidence of a usable callback number; its absence
-// means there isn't one, whatever phone_source claims.
-function callerIdDisclaimedNeedsCallback(caller) {
+// Requires EVIDENCE that a callback was actually spoken (Codex round-1 P1):
+// a schema-valid model response can set caller_id_disclaimed:true,
+// phone_source:'caller_id', and copy the disclaimed ANI straight into
+// phone_e164 — that is the model faithfully recording caller ID, not a
+// callback the caller spoke. A bare "phone_e164 present" check let that
+// shape silently clear the flag and send the confirmation/reminder SMS to
+// the exact number the caller just said isn't theirs. The disclaimer is now
+// unresolved (returns true) unless phone_e164 is a real, dialable number
+// AND either:
+//   (a) phone_source is 'spoken' or 'both' — the MODEL heard the caller say
+//       a number themselves, independent of the ANI, or
+//   (b) phone_e164 is PROVABLY DIFFERENT from the call's own ANI (opts.ani)
+//       — a caller_id-sourced number that doesn't even match the ANI can't
+//       be the model echoing caller ID back; it's some other number on the
+//       extraction (e.g. adopted from a prior call/customer record).
+// With no ANI available to compare against, (b) can never clear the hold —
+// fails closed to "still needed", same posture as a missing phone_e164.
+function callerIdDisclaimedNeedsCallback(caller, opts = {}) {
   if (!caller || caller.caller_id_disclaimed !== true) return false;
-  return !caller.phone_e164;
+  if (!isDialablePhone(caller.phone_e164)) return true;
+  if (caller.phone_source === 'spoken' || caller.phone_source === 'both') return false;
+  const ani = opts.ani;
+  if (isDialablePhone(ani) && last10Digits(caller.phone_e164) !== last10Digits(ani)) return false;
+  return true;
 }
 
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
@@ -308,7 +324,7 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // callerIdDisclaimedNeedsCallback (single source of truth — pre-push
   // review P1: the crm_notes stamp and CSR-coaching addendum call it too,
   // rather than re-deriving the condition).
-  if (callerIdDisclaimedNeedsCallback(caller)) {
+  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone })) {
     flags.push('callback_number_needed');
   }
 

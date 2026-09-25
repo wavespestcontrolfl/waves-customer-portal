@@ -45,6 +45,10 @@ jest.mock("../services/appointment-reminders", () => ({
   // en_route_channel / tech_arrived_channel directly on that row.
   resolveChannelPrefsRow: jest.fn(async (customerId, prefs) => prefs),
   apptChannel: (value) => (value === "email" || value === "both" ? value : "sms"),
+  // callback_number_needed hold (owner ruling 2026-09-25) — false by
+  // default so every pre-existing test below is unaffected; the dedicated
+  // describe block overrides it per test.
+  callbackNumberHoldActiveForVisit: jest.fn(async () => false),
 }));
 
 const db = require("../models/db");
@@ -694,6 +698,50 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(AppointmentEmail.sendTechArrivedEmail).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(result).toMatchObject({ success: false, suppressed: true, reason: "sms_disabled" });
+  });
+
+  // callback_number_needed hold (owner ruling 2026-09-25): a caller who
+  // disclaimed the inbound ANI as not their own, with no spoken callback,
+  // must never receive the en-route/arrival text on that number — reach
+  // them by email instead when one is on file.
+  describe("callback_number_needed hold (disclaimed caller ID)", () => {
+    test("en-route: SMS is never attempted while the visit is held; the email fallback carries the notice", async () => {
+      AppointmentReminders.callbackNumberHoldActiveForVisit.mockResolvedValueOnce(true);
+      db.mockReturnValueOnce(
+        firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551110000", email: "sam@example.com" }),
+      ).mockReturnValueOnce(
+        firstQuery({ tech_en_route: true, sms_enabled: true }),
+      );
+      getAppointmentContacts.mockReturnValue([
+        { phone: "+15551110000", name: "Sam", role: "primary" },
+      ]);
+
+      const result = await TwilioService.sendTechEnRoute("cust-1", "Bryan", null, "track-token", { scheduledServiceId: "svc-held" });
+
+      expect(AppointmentReminders.callbackNumberHoldActiveForVisit).toHaveBeenCalledWith("svc-held");
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentEmail.sendTechEnRouteEmail).toHaveBeenCalledTimes(1);
+      expect(result.emailSent).toBe(true);
+    });
+
+    test("arrival: SMS is never attempted while the visit is held; the email fallback carries the notice", async () => {
+      AppointmentReminders.callbackNumberHoldActiveForVisit.mockResolvedValueOnce(true);
+      db.mockReturnValueOnce(
+        firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551110000", email: "sam@example.com" }),
+      ).mockReturnValueOnce(
+        firstQuery({ tech_arrived: true, sms_enabled: true, tech_arrived_channel: "sms" }),
+      );
+      getAppointmentContacts.mockReturnValue([
+        { phone: "+15551110000", name: "Sam", role: "primary" },
+      ]);
+
+      const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-held" });
+
+      expect(AppointmentReminders.callbackNumberHoldActiveForVisit).toHaveBeenCalledWith("job-held");
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentEmail.sendTechArrivedEmail).toHaveBeenCalledTimes(1);
+      expect(result.emailSent).toBe(true);
+    });
   });
 });
 

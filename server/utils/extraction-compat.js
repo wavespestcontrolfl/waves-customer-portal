@@ -634,9 +634,9 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
 // can never silently disagree with the flag. The date is the server's own
 // ET calendar day (AGENTS.md America/New_York discipline) — Railway runs
 // UTC, so a raw toISOString() date would misdate every call after ~7pm ET.
-function callerIdDisclaimedNoteText(caller, { now = new Date() } = {}) {
+function callerIdDisclaimedNoteText(caller, { now = new Date(), ani = null } = {}) {
   const { callerIdDisclaimedNeedsCallback } = require('../services/call-triage-flags');
-  if (!callerIdDisclaimedNeedsCallback(caller)) return null;
+  if (!callerIdDisclaimedNeedsCallback(caller, { ani })) return null;
   const said = typeof caller.phone_note === 'string' && caller.phone_note.trim()
     ? caller.phone_note.trim()
     : null;
