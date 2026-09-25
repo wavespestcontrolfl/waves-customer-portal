@@ -3012,22 +3012,22 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
   }
 }
 
-async function ensureAcceptedSmsStamp(invoiceId, claimToken) {
+const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
+
+async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
   if (!claimToken) return false;
   try {
-    const current = await whereSendClaimOwned(
+    const marked = await whereSendClaimOwned(
       db("invoices").where({ id: invoiceId }),
       claimToken,
-    ).first("sms_sent_at");
-    if (!current) return false;
-    if (current.sms_sent_at) return true;
-    const stamped = await whereSendClaimOwned(
-      db("invoices").where({ id: invoiceId }),
-      claimToken,
-    ).whereNull("sms_sent_at").update({ sms_sent_at: new Date(), updated_at: new Date() });
-    return stamped !== 0;
+    ).update({
+      sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [new Date()]),
+      scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+      updated_at: new Date(),
+    });
+    return marked !== 0;
   } catch (err) {
-    logger.error(`[invoice] Accepted Text/App leg could not be stamped for ${invoiceId}: ${err.message}`);
+    logger.error(`[invoice] Accepted Text/App leg could not be marked for Email retry for ${invoiceId}: ${err.message}`);
     return false;
   }
 }
@@ -5522,10 +5522,13 @@ const InvoiceService = {
     if (claim.invoice?.payer_id) {
       sms.error = "Suppressed — invoice billed to a third-party payer";
       sms.code = "payer_billed";
-    } else if (!operatorInitiated && claim.invoice.sms_sent_at) {
+    } else if (!operatorInitiated
+      && claim.invoice.sms_sent_at
+      && String(claim.invoice.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)) {
       // A prior automated attempt delivered Text/App but could not start its
-      // selected Email leg. Retry only that missing leg; the channel event is
-      // already durably represented by sms_sent_at.
+      // selected Email leg. The dedicated marker ties sms_sent_at to this
+      // schedule episode; a historical stamp alone must not suppress a new
+      // delivery after unvoid + explicit reschedule.
       sms.ok = true;
       sms.deduped = true;
     } else {
@@ -5790,8 +5793,8 @@ const InvoiceService = {
 
     const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
     if (emailMustRetry && sms.ok
-      && !await ensureAcceptedSmsStamp(invoiceId, claim.invoice.send_claim_token)) {
-      logger.error(`[invoice] Email retry for ${invoiceId} parked because its accepted Text/App leg has no durable timestamp`);
+      && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token)) {
+      logger.error(`[invoice] Email retry for ${invoiceId} parked because its accepted Text/App leg has no durable retry marker`);
       return {
         ok: false,
         code: "INVOICE_ACCEPTED_LEG_UNSTAMPED",
@@ -6262,6 +6265,8 @@ const InvoiceService = {
         "customer_id",
         "scheduled_service_id",
         "service_record_id",
+        "sms_sent_at",
+        "scheduled_send_error",
         // A combined-visit invoice re-resolves live Bill-To under held rows
         // before its queue claim.
         "visit_completion_packet_id",
@@ -6380,7 +6385,9 @@ const InvoiceService = {
         // and send at their requested time. Fail toward deferral on a
         // lookup error: worst case an email waits for 8:00 AM, never a
         // night text.
-        let hasSmsLeg = !inv.payer_id;
+        const acceptedChannelPendingEmail = Boolean(inv.sms_sent_at)
+          && String(inv.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+        let hasSmsLeg = !inv.payer_id && !acceptedChannelPendingEmail;
         if (hasSmsLeg) {
           try {
             const cust = await db("customers")
@@ -6560,13 +6567,16 @@ const InvoiceService = {
       // overnight cron passes must not permanently fail the send.
       const smsHeld =
         ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
+      const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
+        ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
+        : error;
       let restored = 0;
       if (smsHeld) {
         deferred += 1;
         restored = await restoreClaimedInvoice({
           status: "scheduled",
           scheduled_send_at: new Date(result.sms.nextAllowedAt),
-          scheduled_send_error: error,
+          scheduled_send_error: durableSendError,
           updated_at: new Date(),
         });
       } else {
@@ -6582,7 +6592,7 @@ const InvoiceService = {
           status: "scheduled",
           scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
           ...(nativeRetryMs ? { scheduled_send_at: new Date(Date.now() + nativeRetryMs) } : {}),
-          scheduled_send_error: error,
+          scheduled_send_error: durableSendError,
           updated_at: new Date(),
         });
       }

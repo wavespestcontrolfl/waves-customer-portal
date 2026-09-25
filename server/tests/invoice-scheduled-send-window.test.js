@@ -58,6 +58,7 @@ const {
 const InvoiceService = require('../services/invoice');
 
 const WINDOW_OPEN = new Date('2026-08-07T12:00:00.000Z'); // 8:00 AM ET
+const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
 
 function chain({ rows, returning, first, updateCount = 1 } = {}) {
   const q = {};
@@ -200,6 +201,23 @@ describe('processScheduledSends send-window handling', () => {
 
     expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-1' }));
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
+  });
+
+  test('outside the window: a marked Email retry does not defer its already delivered Text leg', async () => {
+    isWithinSendWindowET.mockReturnValue(false);
+    const retry = {
+      ...dueRow,
+      sms_sent_at: new Date('2026-09-25T02:45:00.000Z'),
+      scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+    };
+    db.mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [retry] }))
+      .mockReturnValueOnce(chain({ returning: [claimedRow(retry)] }));
+    sendSpy.mockResolvedValue({ ok: true, sms: { ok: true, deduped: true }, email: { ok: true }, creditApplied: 0 });
+
+    expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 1, failed: 0, deferred: 0 });
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(db).toHaveBeenCalledTimes(3);
   });
 
   test('outside the window: an email-only invoice (third-party payer) sends at its requested time', async () => {
@@ -460,11 +478,12 @@ describe('processScheduledSends send-window handling', () => {
       status: 'sending',
       send_claim_token: 'claim-1',
     };
+    const markerUpdate = chain();
     queueMocks(db, [
       chain({ first: { payer_statement_id: null } }),
       chain({ first: sendingInvoice }),
       adoptionNoOp(),
-      chain({ first: { sms_sent_at: new Date('2026-09-25T02:45:00.000Z') } }),
+      markerUpdate,
       chain({ first: { id: 'inv-1' } }),
     ]);
     try {
@@ -480,12 +499,16 @@ describe('processScheduledSends send-window handling', () => {
         creditApplied: 0,
       });
       expect(smsSpy).toHaveBeenCalledTimes(1);
+      expect(markerUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+        scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+        sms_sent_at: 'COALESCE(sms_sent_at, ?)',
+      }));
     } finally {
       smsSpy.mockRestore();
     }
   });
 
-  test('parks an automated Email retry when both accepted-leg stamp attempts failed', async () => {
+  test('parks an automated Email retry when its accepted-leg retry marker cannot be written', async () => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockResolvedValue({
       sent: true,
@@ -501,14 +524,13 @@ describe('processScheduledSends send-window handling', () => {
       status: 'sending',
       send_claim_token: 'claim-1',
     };
-    const failedRepair = chain();
-    failedRepair.update.mockRejectedValueOnce(new Error('timestamp database unavailable'));
+    const failedMarker = chain();
+    failedMarker.update.mockRejectedValueOnce(new Error('retry marker database unavailable'));
     queueMocks(db, [
       chain({ first: { payer_statement_id: null } }),
       chain({ first: sendingInvoice }),
       adoptionNoOp(),
-      chain({ first: { sms_sent_at: null } }),
-      failedRepair,
+      failedMarker,
     ]);
     try {
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
@@ -538,6 +560,7 @@ describe('processScheduledSends send-window handling', () => {
       status: 'sending',
       send_claim_token: 'claim-1',
       sms_sent_at: new Date('2026-09-25T02:45:00.000Z'),
+      scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
     };
     queueMocks(db, [
       chain({ first: { payer_statement_id: null } }),
@@ -557,6 +580,34 @@ describe('processScheduledSends send-window handling', () => {
         email: { ok: true, messageId: 'email-retry' },
       });
       expect(smsSpy).not.toHaveBeenCalled();
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
+  test('a historical Text stamp without the current retry marker does not suppress a newly scheduled send', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockResolvedValue({ sent: true });
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: true, messageId: 'new-episode-email' });
+    const sendingInvoice = {
+      ...dueRow,
+      status: 'sending',
+      send_claim_token: 'claim-1',
+      sms_sent_at: new Date('2026-08-01T12:00:00.000Z'),
+      scheduled_send_error: null,
+    };
+    queueMocks(db, [
+      chain({ first: { payer_statement_id: null } }),
+      chain({ first: sendingInvoice }),
+      adoptionNoOp(),
+      chain(),
+    ]);
+    try {
+      await expect(InvoiceService.sendViaSMSAndEmail('inv-1', {
+        allowClaimed: true,
+        claimToken: 'claim-1',
+      })).resolves.toMatchObject({ ok: true, sms: { ok: true }, email: { ok: true } });
+      expect(smsSpy).toHaveBeenCalledTimes(1);
     } finally {
       smsSpy.mockRestore();
     }
@@ -801,6 +852,27 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
     const updateArgs = failUpdate.update.mock.calls[0][0];
     expect(updateArgs.scheduled_send_attempts).toBe(3);
+  });
+
+  test('a delivered Text leg keeps its dedicated Email-retry marker when the worker restores the claim', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const restore = chain();
+    db.mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [dueRow] }))
+      .mockReturnValueOnce(chain({ returning: [claimedRow()] }))
+      .mockReturnValueOnce(restore);
+    sendSpy.mockResolvedValue({
+      ok: false,
+      sms: { ok: true },
+      email: { ok: false, code: 'billing_prefs_unavailable', error: 'Invoice delivery preferences unavailable' },
+      creditApplied: 0,
+    });
+
+    expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    expect(restore.update).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+      scheduled_send_attempts: 3,
+    }));
   });
 
   test('scheduled terminal refusal neither restores the queue nor spends an attempt', async () => {
