@@ -3731,20 +3731,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // would otherwise invoice and message the customer independently.
           const member = await lockTrx('scheduled_services as member')
             .leftJoin('service_visits as visit', 'visit.id', 'member.visit_id')
-            .where('member.id', svc.id).forUpdate('member')
-            .first('member.visit_id', 'visit.behavior_version', 'member.technician_id');
-          // Ownership was checked on the unlocked `svc` snapshot, and nothing
-          // after the claim re-reads technician_id. A reassignment (dispatch
-          // drag, tech-out auto-assign) that committed in that gap would
-          // otherwise complete and attribute the visit under the old tech
-          // (#4759 r12 P1). Re-checked HERE, before the claim: the former
-          // tech gets the same 403 as the unlocked check; anyone else a 409
-          // on the stale view. The read is a ROW lock (FOR UPDATE OF member,
-          // held until the claim commits), not just the stop advisory lock:
-          // assignDispatchJob and the Intelligence Bar schedule tools update
-          // technician_id without taking the stop lock (r13 P1), and a row
-          // lock is the one thing every such writer's UPDATE must wait on.
-          // Order stays stop lock → row lock, the same as every mover.
+            .where('member.id', svc.id).first('member.visit_id', 'visit.behavior_version', 'member.technician_id');
+          // Ownership was checked on the unlocked `svc` snapshot. A
+          // reassignment (dispatch drag, tech-out auto-assign) that committed
+          // since is refused HERE, before the claim: the former tech gets the
+          // same 403 as the unlocked check; anyone else a 409 on the stale
+          // view (#4759 r12 P1). This is the early exit only — writers such as
+          // assignDispatchJob never take the stop lock, so one can still land
+          // after this read. The authoritative check is the FOR UPDATE row
+          // read in the record transaction (the service_reassigned throw
+          // after lockedSvcRow below), which every technician_id writer's UPDATE serializes against
+          // (r13 P1). No row lock here: a concurrent duplicate completion
+          // must see the pending claim and 409 at once, not wait out the
+          // other request's whole record transaction.
           if (member && String(member.technician_id ?? '') !== String(svc.technician_id ?? '')) {
             const lockedOwnershipError = completionOwnershipError({
               role: completionInput.actor.techRole,
@@ -5257,6 +5256,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
           }
           const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+          // Assignment drift, re-checked on the LOCKED row for every
+          // completion (#4759 r13 P1): the record, attribution and ownership
+          // below all come from the pre-lock svc, and assignDispatchJob / the
+          // Intelligence Bar schedule tools write technician_id without the
+          // stop lock the claim-time re-check holds. Every such writer's
+          // UPDATE takes this row lock, so a reassignment either committed
+          // first (seen here, the whole record rolls back) or waits for this
+          // transaction. The issued-invoice closeout checks the same field in
+          // its identity-drift set just below, under its own code.
+          if (!issuedInvoiceCloseout && lockedSvcRow
+            && String(lockedSvcRow.technician_id ?? '') !== String(svc.technician_id ?? '')) {
+            throw Object.assign(new Error('visit reassigned during completion'), {
+              code: 'service_reassigned', assignedTechnicianId: lockedSvcRow.technician_id || null,
+            });
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -7272,6 +7286,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 409, body: {
             error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+          } });
+        }
+        if (err && err.code === 'service_reassigned') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          const lockedOwnershipError = completionOwnershipError({
+            role: completionInput.actor.techRole,
+            actorTechnicianId: completionInput.actor.technicianId,
+            assignedTechnicianId: err.assignedTechnicianId,
+          });
+          if (lockedOwnershipError) return ({ status: lockedOwnershipError.status, body: lockedOwnershipError.payload });
+          return ({ status: 409, body: {
+            error: 'This visit was reassigned to another technician while it was being completed. Reload and try again.',
+            code: 'service_reassigned',
           } });
         }
         if (err && err.code === 'issued_invoice_not_reusable') {
