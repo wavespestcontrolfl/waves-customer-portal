@@ -143,8 +143,11 @@ const VAN_WEB_ADDRESS = 'gowavesfl.com';
 // The only acceptable `van.body` verdicts (Codex r2 P2 on #4785).
 // A wrong body must be NAMED: a vague "other" was the checker's easy way out
 // on a stylized Transit (3 of 4 flat-illustration vans in the 2026-09-25 lab,
-// all of them correct Transits).
-const WRONG_VAN_BODIES = new Set(['mercedes_sprinter', 'ram_promaster', 'high_roof_van', 'box_truck', 'pickup_or_car']);
+// all of them correct Transits). A clearly identified van of any other make
+// (a Chevrolet Express, a Nissan NV) is "other_make" and must come with that
+// make in `other_make`; without a name the answer is unusable, so the
+// catch-all is never a free "not sure" (Codex r3 P2 on #4822).
+const WRONG_VAN_BODIES = new Set(['mercedes_sprinter', 'ram_promaster', 'high_roof_van', 'box_truck', 'pickup_or_car', 'other_make']);
 const VAN_BODY_VALUES = new Set(['ford_transit_medium_roof', 'unsure', ...WRONG_VAN_BODIES]);
 function buildScreenPrompt({ allowedText = [], avoidDepicting = [], allowUniformLogo = false, allowVanWrap = false } = {}) {
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
@@ -187,10 +190,11 @@ ${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t
 // FULL: other lettering is not checked (owner, 2026-09-25: slight variances
 // on the van don't matter; a wrong phone number or web address does).
 function buildVanScreenPrompt() {
-  return `Inspect ONLY the van in this generated blog image and answer as strict JSON only, shape {"van_count": number, "van": {"body": "ford_transit_medium_roof" | "mercedes_sprinter" | "ram_promaster" | "high_roof_van" | "box_truck" | "pickup_or_car" | "unsure", "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string[], "web_addresses": string[]} | null}.
+  return `Inspect ONLY the van in this generated blog image and answer as strict JSON only, shape {"van_count": number, "van": {"body": "ford_transit_medium_roof" | "mercedes_sprinter" | "ram_promaster" | "high_roof_van" | "box_truck" | "pickup_or_car" | "other_make" | "unsure", "other_make": string, "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string[], "web_addresses": string[]} | null}.
 - van_count: how many vans of ANY kind appear in the frame — plain, wrapped, partial, mirrored, reflected or cut off at the edge each count (0 if none).
 - van: null if there is NO van of any kind in the frame; otherwise an object describing the van that carries ${VAN_WRAP_DESCRIPTION} (or, if none does, the largest van), with these fields:
-  - body: which vehicle the van is. "ford_transit_medium_roof": a short sloped hood, a black hexagon-mesh grille (with a Ford oval), and a MEDIUM roof (taller than a car, shorter than a walk-in van). Name a DIFFERENT body only when you can clearly see it: "mercedes_sprinter" (a long pointed nose, no Ford grille), "ram_promaster" (a blunt, nearly vertical flat nose), "high_roof_van" (a roof clearly taller than a medium roof), "box_truck", or "pickup_or_car". "unsure" when the van is too small, distant, angled, obscured or stylized to tell — in a cartoon or flat illustration, a boxy van with a short sloped hood and a medium roof is the Transit.
+  - body: which vehicle the van is. "ford_transit_medium_roof": a short sloped hood, a black hexagon-mesh grille (with a Ford oval), and a MEDIUM roof (taller than a car, shorter than a walk-in van). Name a DIFFERENT body only when you can clearly see it: "mercedes_sprinter" (a long pointed nose, no Ford grille), "ram_promaster" (a blunt, nearly vertical flat nose), "high_roof_van" (a roof clearly taller than a medium roof), "box_truck", "pickup_or_car", or "other_make" (a van you can clearly identify as another make or model, such as a Chevrolet Express or a Nissan NV — only when its own grille, badge or nose shape shows it). "unsure" when the van is too small, distant, angled, obscured or stylized to tell — in a cartoon or flat illustration, a boxy van with a short sloped hood and a medium roof is the Transit.
+  - other_make: only when body is "other_make", the make and model you identified (e.g. "Chevrolet Express"); otherwise leave it out.
   - wrapped: true only if the van visibly carries that graphic wrap rather than a plain, unmarked body — false if the van is there but plain.
   - wrap_mascot: true only if the wave mascot character (a round blue wave with big eyes, a red cap and red overalls) appears on the van.
   - phone_numbers: every phone number on the van that you can read IN FULL, copied digit for digit exactly as painted. Leave out one that is cut off, blurred, or too small to read every digit. Empty array if none.
@@ -214,8 +218,12 @@ function parseVanScreen(text) {
     if ((v === null) !== (obj.van_count === 0)) return null;
     if (v === null) return { van: null };
     if (!(v && typeof v === 'object' && VAN_BODY_VALUES.has(v.body) && typeof v.wrapped === 'boolean' && typeof v.wrap_mascot === 'boolean' && Array.isArray(v.phone_numbers) && Array.isArray(v.web_addresses))) return null;
+    // "other_make" must name the make it saw — a nameless or Transit-named
+    // catch-all is an unusable answer, never a wrong-body verdict.
+    const otherMake = v.body === 'other_make' ? String(v.other_make || '').trim() : '';
+    if (v.body === 'other_make' && (!otherMake || /transit/i.test(otherMake))) return null;
     const strings = (list) => list.map((t) => String(t || '').trim()).filter(Boolean);
-    return { van: { count: obj.van_count, body: v.body, wrapped: v.wrapped, wrapMascot: v.wrap_mascot, phones: strings(v.phone_numbers), webAddresses: strings(v.web_addresses) } };
+    return { van: { count: obj.van_count, body: v.body, ...(otherMake ? { otherMake } : {}), wrapped: v.wrapped, wrapMascot: v.wrap_mascot, phones: strings(v.phone_numbers), webAddresses: strings(v.web_addresses) } };
   } catch {
     return null;
   }
@@ -420,7 +428,7 @@ function vanWrapReasons(van) {
   // Exactly one van (Codex r1 P2 on #4822): a second — even a plain,
   // partial or mirrored duplicate — carries no mark the main screen sees.
   if (van.count > 1) fail(`${van.count} vans in the frame, not one`);
-  if (WRONG_VAN_BODIES.has(van.body)) fail('van body is not a Ford Transit medium-roof cargo van');
+  if (WRONG_VAN_BODIES.has(van.body)) fail(van.otherMake ? `van body is a ${van.otherMake}, not a Ford Transit medium-roof cargo van` : 'van body is not a Ford Transit medium-roof cargo van');
   if (!van.wrapped) {
     fail('van present without the wrap');
     return { reasons, flagged };

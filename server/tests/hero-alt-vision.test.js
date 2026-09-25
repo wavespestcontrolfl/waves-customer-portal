@@ -299,7 +299,7 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     expect(main).toMatch(/if two or more vans carry the wrap, list them all/);
     expect(main).not.toMatch(/"van":|van_wrap_elsewhere/);
     const q = _internals.buildVanScreenPrompt();
-    expect(q).toMatch(/shape \{"van_count": number, "van": \{"body": "ford_transit_medium_roof" \| "mercedes_sprinter" \| "ram_promaster" \| "high_roof_van" \| "box_truck" \| "pickup_or_car" \| "unsure", "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string\[\], "web_addresses": string\[\]\} \| null\}/);
+    expect(q).toMatch(/shape \{"van_count": number, "van": \{"body": "ford_transit_medium_roof" \| "mercedes_sprinter" \| "ram_promaster" \| "high_roof_van" \| "box_truck" \| "pickup_or_car" \| "other_make" \| "unsure", "other_make": string, "wrapped": boolean, "wrap_mascot": boolean, "phone_numbers": string\[\], "web_addresses": string\[\]\} \| null\}/);
     expect(q).toMatch(/a short sloped hood, a black hexagon-mesh grille \(with a Ford oval\), and a MEDIUM roof/);
     expect(q).toMatch(/"mercedes_sprinter" \(a long pointed nose, no Ford grille\)/);
     expect(q).toMatch(/phone number on the van that you can read IN FULL/);
@@ -373,6 +373,16 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     // "other" is no longer a valid body value (Codex r2 P2 on #4785 named the
     // wrong bodies instead) — an unusable value fails the screen open, unchecked.
     expect(await withVan({ body: 'other' })).toMatchObject({ ok: true, checked: false });
+  });
+
+  test('a clearly identified van of another make fails, named; a nameless or Transit-named "other_make" is unusable (Codex r3 P2 on #4822)', async () => {
+    expect(_internals.buildVanScreenPrompt()).toMatch(/"other_make" \(a van you can clearly identify as another make or model, such as a Chevrolet Express or a Nissan NV/);
+    const express = await withVan({ body: 'other_make', other_make: 'Chevrolet Express' });
+    expect(express.reasons).toEqual(['van body is a Chevrolet Express, not a Ford Transit medium-roof cargo van']);
+    expect(express.ok).toBe(false);
+    for (const name of [undefined, '', '  ', 'Ford Transit']) {
+      expect(await withVan({ body: 'other_make', other_make: name })).toMatchObject({ ok: true, checked: false });
+    }
   });
 
   test('a second van of any kind fails — a plain, partial or mirrored duplicate carries no mark the main screen would see (Codex r1 P2 on #4822)', async () => {
