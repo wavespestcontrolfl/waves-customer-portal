@@ -34,6 +34,10 @@ const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../../utils/
 // codex #4815 r2 P0, and why its call marker is row-scoped, r6 P0).
 const {
   TERMINAL_ESTIMATE_STATUSES, isRowScopedDraftBlockReason, ROW_SCOPED_DRAFT_BLOCK_REASONS,
+  // The multi-entry quarantine queue (codex #4815 r8 P1) and the assessment
+  // exception's durable provenance (r8 P2) — one definition each.
+  quarantineQueueEntries, QUARANTINE_QUEUE_APPEND_SQL, QUARANTINE_QUEUE_MAP_SQL, QUARANTINE_QUEUE_KEY,
+  LEGACY_QUARANTINE_KEY, estimateEarnsAssessmentException, ASSESSMENT_EXCEPTION_ABSENT_SQL,
 } = require('../../utils/estimate-claim-sql');
 
 // A wrong-premise lookup poisons the RECORD leg too, not just the enriched
@@ -690,6 +694,43 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   }
 }
 
+// The call's live engine bell, when it still advertises a draft that a
+// verdict (`reason`) ALREADY retired (codex #4815 r8 P2). Bell retirement
+// used to fire only when THIS invocation newly invalidated a draft — so a
+// retirement whose notification update failed transiently was never retried:
+// every later reprocess saw the draft already stamped (invalidated:false)
+// and left the stale "draft ready" bell, amount and link standing forever.
+// This reads the bell's OWN state instead: the SAME bell notify() would
+// upgrade (same selection and order), referencing an estimate whose own
+// stamps say this verdict retired it. A bell already retired (estimateId
+// cleared) or pointing at a live draft returns null, so the retirement is
+// idempotent and never tells staff a live draft was retired. Never throws.
+async function staleDraftBellForCall(callSid, { reason }) {
+  if (!callSid || !reason) return null;
+  try {
+    const bell = await db('notifications')
+      .whereRaw("metadata->>'callSid' = ?", [String(callSid)])
+      .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
+      .orderBy('created_at', 'desc')
+      .first('id', 'metadata');
+    if (!bell) return null;
+    let meta = {};
+    try { meta = typeof bell.metadata === 'string' ? JSON.parse(bell.metadata) : (bell.metadata || {}); } catch { meta = {}; }
+    if (meta?.estimator_engine !== true || !meta.estimateId) return null;
+    const est = await db('estimates').where({ id: String(meta.estimateId) }).first('estimate_data');
+    if (!est) return null;
+    let data = est.estimate_data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+    const eng = data?.estimatorEngine || {};
+    const retiredByVerdict = (!!eng.linkage_invalidated_at && eng.invalidation_reason === reason)
+      || (!!eng.invalidation_pending_at && eng.invalidation_pending_reason === reason);
+    return retiredByVerdict ? String(meta.estimateId) : null;
+  } catch (err) {
+    logger.warn(`[estimator-engine] stale-bell lookup failed for ${callSid}: ${err.message}`);
+    return null;
+  }
+}
+
 function callerLabel(intent, context) {
   return intent?.customer_name
     || [context?.lead?.first_name, context?.lead?.last_name].filter(Boolean).join(' ')
@@ -844,7 +885,10 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         // and this lock (the assessment composer runs concurrently with
         // this same-call invalidation) — bail out untouched rather than
         // archive the exception the moment it lands.
-        if (scope === 'nonterminal_drafts' && data.scheduled_service_id != null) return;
+        // Either exception stamp counts (codex #4815 r8 P2): the durable
+        // assessment_exception provenance survives a visit that went
+        // terminal before the linkage could land.
+        if (scope === 'nonterminal_drafts' && estimateEarnsAssessmentException(data)) return;
         if (!terminalQRow && !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
         // And the same delivery-claim fence (codex P0 r22): never
         // commit an archive inside a live send's verdict-to-handoff
@@ -1138,14 +1182,35 @@ const SCOPED_REASON_SQL_LIST = ROW_SCOPED_DRAFT_BLOCK_REASONS.map((r) => `'${r.r
 // column, or generation-less maintenance) only when it was stamped no later
 // than the instant this pass started. A pass with no generation can never
 // retire a generation-stamped marker (fail closed).
-function markerRetirableSql(key, generation) {
+function markerRetirableExprSql(expr, generation) {
   return `(
-    CASE WHEN (metadata->'${key}'->>'generation') ~ '^[0-9]+$'
-         THEN ${generation != null ? `(metadata->'${key}'->>'generation')::int <= ?` : 'FALSE'}
-         ELSE COALESCE(metadata->'${key}'->>'at', '') <= ?
+    CASE WHEN (${expr}->>'generation') ~ '^[0-9]+$'
+         THEN ${generation != null ? `(${expr}->>'generation')::int <= ?` : 'FALSE'}
+         ELSE COALESCE(${expr}->>'at', '') <= ?
     END
   )`;
 }
+
+function markerRetirableSql(key, generation) {
+  return markerRetirableExprSql(`metadata->'${key}'`, generation);
+}
+
+// The multi-entry queue's retirement predicates (codex #4815 r8 P1): EVERY
+// entry must be retirable by this pass, and — for a call-wide-only clear —
+// none may be row-scoped. The same all-or-nothing contract the single-key
+// marker had: a clear that cannot retire everything retires nothing.
+const QUEUE_ALL_RETIRABLE_SQL = (generation) => `NOT EXISTS (
+  SELECT 1 FROM jsonb_each(${QUARANTINE_QUEUE_MAP_SQL}) AS qe
+  WHERE NOT ${markerRetirableExprSql('qe.value', generation)})`;
+const QUEUE_NO_SCOPED_ENTRY_SQL = () => `NOT EXISTS (
+  SELECT 1 FROM jsonb_each(${QUARANTINE_QUEUE_MAP_SQL}) AS qe
+  WHERE COALESCE(qe.value->>'reason', '') IN (${SCOPED_REASON_SQL_LIST}))`;
+// Removes ONE reason's queue entry (dropping the map once it is empty).
+// Bindings: [reason, reason, reason].
+const QUEUE_ENTRY_REMOVED_SQL = `(COALESCE(metadata, '{}'::jsonb) #- ARRAY['${QUARANTINE_QUEUE_KEY}', ?::text])`;
+const QUARANTINE_QUEUE_REMOVE_SQL = `(CASE WHEN ${QUEUE_ENTRY_REMOVED_SQL}->'${QUARANTINE_QUEUE_KEY}' = '{}'::jsonb
+  THEN ${QUEUE_ENTRY_REMOVED_SQL} - '${QUARANTINE_QUEUE_KEY}'
+  ELSE ${QUEUE_ENTRY_REMOVED_SQL} END)`;
 
 function markerRetirableBindings(generation, fenceAt) {
   return generation != null ? [generation, fenceAt] : [fenceAt];
@@ -1222,16 +1287,22 @@ async function clearDraftBlockOnCall(callLogId, { notNewerThan, generation = nul
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const q = db('call_log').where({ id: callLogId });
-      if (callWideOnly) q.whereRaw(scopedAbsent('estimator_draft_block')).whereRaw(scopedAbsent('estimator_quarantine_pending'));
+      if (callWideOnly) {
+        q.whereRaw(scopedAbsent('estimator_draft_block')).whereRaw(scopedAbsent('estimator_quarantine_pending'))
+          .whereRaw(QUEUE_NO_SCOPED_ENTRY_SQL());
+      }
       await q
         .where(function anyMarker() {
           this.whereRaw("COALESCE(metadata->'estimator_draft_block'->>'reason', '') <> ''")
-            .orWhereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''");
+            .orWhereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''")
+            .orWhereRaw(`${QUARANTINE_QUEUE_MAP_SQL} <> '{}'::jsonb`);
         })
         .whereRaw(markerClearable('estimator_draft_block'), markerBindings)
         .whereRaw(markerClearable('estimator_quarantine_pending'), markerBindings)
+        // EVERY queued verdict (codex #4815 r8 P1) — same fence, per entry.
+        .whereRaw(QUEUE_ALL_RETIRABLE_SQL(generation), markerBindings)
         .update({
-          metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'estimator_draft_block') - 'estimator_quarantine_pending'"),
+          metadata: db.raw(`((COALESCE(metadata, '{}'::jsonb) - 'estimator_draft_block') - 'estimator_quarantine_pending') - '${QUARANTINE_QUEUE_KEY}'`),
           updated_at: new Date(),
         });
       return;
@@ -1284,10 +1355,14 @@ async function markQuarantinePending(callLogId, reason, { procGeneration = null,
   try {
     const q = (trx || db)('call_log').where({ id: callLogId });
     if (procGeneration != null) q.where('processing_generation', Number(procGeneration));
+    // ONE reason's entry in the multi-entry queue (codex #4815 r8 P1): a
+    // later verdict adds its own entry beside an earlier one instead of
+    // overwriting it, so an agreed-price retry can never erase a queued
+    // identity-conflict (or rejection) verdict that was never disproved.
     const wrote = await q.update({
       metadata: db.raw(
-        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_quarantine_pending}', ?::jsonb, true)",
-        [JSON.stringify({
+        QUARANTINE_QUEUE_APPEND_SQL,
+        [String(reason), JSON.stringify({
           reason,
           at: new Date().toISOString(),
           ...(procGeneration != null ? { generation: Number(procGeneration) } : {}),
@@ -1324,13 +1399,24 @@ async function markQuarantinePending(callLogId, reason, { procGeneration = null,
 async function clearOwnQuarantinePending(callLogId, { reason, generation }) {
   if (generation == null) return 0;
   try {
-    return await db('call_log').where({ id: callLogId })
+    // Multi-entry queue (codex #4815 r8 P1): ONLY this reason's entry, and
+    // only while it is still this generation's — every other reason's entry
+    // (an identity conflict queued beside it) is left exactly as it was.
+    const fromQueue = await db('call_log').where({ id: callLogId })
+      .whereRaw(`COALESCE(${QUARANTINE_QUEUE_MAP_SQL}->(?::text)->>'generation', '') = ?`, [String(reason), String(Number(generation))])
+      .update({
+        metadata: db.raw(QUARANTINE_QUEUE_REMOVE_SQL, [String(reason), String(reason), String(reason)]),
+        updated_at: new Date(),
+      });
+    // A legacy single-entry row, same reason + generation match.
+    const fromLegacy = await db('call_log').where({ id: callLogId })
       .whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') = ?", [String(reason)])
       .whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'generation', '') = ?", [String(Number(generation))])
       .update({
         metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_quarantine_pending'"),
         updated_at: new Date(),
       });
+    return (Number(fromQueue) || 0) + (Number(fromLegacy) || 0);
   } catch (err) {
     logger.warn(`[estimator-engine] could not retire the landed quarantine retry for call ${callLogId}: ${err.message} — the drainer retires it`);
     return 0;
@@ -1416,7 +1502,19 @@ async function sweepPendingReconciles({ limit = 50 } = {}) {
 // peer can replace it between the scan and the clear, and dropping the
 // NEWER request would lose the only durable backstop for a concurrently
 // created wrong-identity or rejected-call draft.
+// Per ENTRY (codex #4815 r8 P1): a queue-map entry is removed alone, by its
+// own reason key, CAS'd on its own stamped instant; a legacy single-key
+// entry keeps the original whole-key CAS.
 async function clearQuarantineMarker(callLogId, pending) {
+  if (pending?.slot && pending.slot !== 'legacy') {
+    const slot = String(pending.slot);
+    return db('call_log').where({ id: callLogId })
+      .whereRaw(`${QUARANTINE_QUEUE_MAP_SQL}->(?::text)->>'at' = ?`, [slot, String(pending?.at || '')])
+      .update({
+        metadata: db.raw(QUARANTINE_QUEUE_REMOVE_SQL, [slot, slot, slot]),
+        updated_at: new Date(),
+      });
+  }
   return db('call_log').where({ id: callLogId })
     .whereRaw("metadata->'estimator_quarantine_pending'->>'at' = ?", [String(pending?.at || '')])
     .update({
@@ -1450,6 +1548,11 @@ const QUARANTINE_REVALIDATORS = [
   {
     type: 'price_agreed',
     matches: (reason) => reason === 'price_agreed_on_call',
+    // SQL twin of `matches`, over a reason column expression (codex #4815
+    // r8 P1): a re-qualified entry retires a LANDED draft block only when
+    // that block belongs to the SAME verdict family its revalidation just
+    // disproved.
+    reasonSql: (col) => [`${col} = ?`, ['price_agreed_on_call']],
     // codex #4815 r2 P1 / r3 P1: a queued price_agreed_on_call marker has
     // NO vocabulary in callRejectedForDrafting (it only understands
     // spam/voicemail/no_attribution/identity-conflict verdicts) — falling
@@ -1473,6 +1576,7 @@ const QUARANTINE_REVALIDATORS = [
   {
     type: 'identity_conflict',
     matches: (reason) => String(reason).startsWith('email_'),
+    reasonSql: (col) => [`${col} LIKE ?`, ['email\\_%']],
     // CONCLUSIVE clean only (codex P0, PR #3304 GH r8f): buildCallContext
     // RETURNS error objects for lookup failures rather than throwing, so a
     // transient one (customer_lookup_unavailable, no_usable_transcript)
@@ -1495,6 +1599,7 @@ const QUARANTINE_REVALIDATORS = [
   {
     type: 'rejection',
     matches: () => true, // every remaining reason: spam/voicemail/no_attribution
+    reasonSql: (col) => [`(${col} <> ? AND ${col} NOT LIKE ?)`, ['price_agreed_on_call', 'email\\_%']],
     // The LIVE pipeline verdict only (codex P1, PR #3304 GH r9): the queued
     // markers are this sweep's own artifacts, so counting them as proof
     // made the re-qualification cleanup unreachable — the sweep would
@@ -1514,11 +1619,45 @@ function quarantineRevalidatorFor(reason) {
   return QUARANTINE_REVALIDATORS.find((entry) => entry.matches(reason));
 }
 
+// A RE-QUALIFIED queue entry retires the landed estimator_draft_block only
+// when that block belongs to the SAME verdict family (codex #4815 r8 P1):
+// the entry's revalidation disproved its own family (a clean context
+// disproves an identity conflict; a live non-rejection disproves
+// spam / voicemail / no-attribution; no agreed price on the current
+// extraction disproves the agreed price) — never another family's block
+// that nothing re-checked. Generation-fenced to the call's LIVE generation
+// exactly like the whole-marker clear (marker generations never exceed it;
+// the timestamp still fences a generation-less legacy block). Retried,
+// then THROWS like clearDraftBlockOnCall.
+async function retireRequalifiedDraftBlock(callLogId, revalidator, { notNewerThan, generation = null }) {
+  const fenceAt = notNewerThan || new Date().toISOString();
+  const [familySql, familyBindings] = revalidator.reasonSql("COALESCE(metadata->'estimator_draft_block'->>'reason', '')");
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await db('call_log').where({ id: callLogId })
+        .whereRaw("COALESCE(metadata->'estimator_draft_block'->>'reason', '') <> ''")
+        .whereRaw(familySql, familyBindings)
+        .whereRaw(markerRetirableSql('estimator_draft_block', generation), markerRetirableBindings(generation, fenceAt))
+        .update({
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_draft_block'"),
+          updated_at: new Date(),
+        });
+    } catch (err) { lastErr = err; }
+  }
+  const blocked = new Error(`draft-block retire failed for call ${callLogId}: ${lastErr?.message || 'unknown'}`);
+  blocked.draftBlockClearFailed = true;
+  throw blocked;
+}
+
 async function sweepPendingQuarantines({ limit = 50 } = {}) {
   let rows = [];
   try {
     rows = await db('call_log')
-      .whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''")
+      .where(function anyQueuedVerdict() {
+        this.whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''")
+          .orWhereRaw(`${QUARANTINE_QUEUE_MAP_SQL} <> '{}'::jsonb`);
+      })
       .orderBy('updated_at', 'asc')
       .limit(limit)
       .select('id', 'metadata');
@@ -1528,13 +1667,16 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
   }
   let cleared = 0;
   for (const row of rows) {
-    const pending = (() => {
+    // EVERY queued verdict on the call (codex #4815 r8 P1), call-wide
+    // entries first — each is revalidated, replayed, or retired on its OWN
+    // evidence; one entry's re-qualification never drops another's.
+    const entries = (() => {
       try {
         const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-        return md?.estimator_quarantine_pending || null;
-      } catch { return null; }
+        return quarantineQueueEntries(md);
+      } catch { return []; }
     })();
-    if (!pending?.reason) continue;
+    if (!entries.length) continue;
     // A queued retry is only valid while its VERDICT still stands (codex
     // P0, PR #3304 GH r8e): a later reprocessing pass can legitimately
     // re-qualify the call, and replaying the stale reason would archive
@@ -1548,63 +1690,83 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     // path deliberately queues the quarantine and THEN enters
     // extraction_failed, so a narrow check let this sweep immediately
     // decide the call was no longer rejected and drop its own queue entry.
+    // An EXHAUSTED (or aged-out) retry lane is settled, so its queued
+    // verdict is revalidated here (codex #4815 r8 P1 — the entry, not the
+    // retry lane, is what keeps the call's estimates fail-closed).
     {
       const { callReprocessInFlight } = require('../admin-estimate-persistence');
       if (callReprocessInFlight(live)) continue;
     }
-    const revalidator = quarantineRevalidatorFor(pending.reason);
-    const identityConflict = revalidator.type === 'identity_conflict';
-    const isAgreedPrice = revalidator.type === 'price_agreed';
-    const { verdict, note } = await revalidator.revalidate(row, pending);
-    if (verdict === 'defer') continue;
-    if (verdict === 'requalified') {
-      // The re-qualified call must lose BOTH markers (pre-push P1, PR
-      // #3304): the verdict's invalidateDraftForCall also stamped
-      // estimator_draft_block, which every draft creator and public-
-      // estimate guard honors — clearing only the queue left a now-valid
-      // estimate suppressed forever. Clearing with the call's LIVE
-      // generation retires every marker (marker generations never exceed
-      // the call's), while the timestamp still fences any generation-less
-      // legacy marker.
-      await clearDraftBlockOnCall(row.id, {
-        notNewerThan: String(pending.at || new Date().toISOString()),
-        generation: live.processing_generation != null ? Number(live.processing_generation) : null,
-      });
-      await clearQuarantineMarker(row.id, pending);
-      logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — ${note}`);
-      continue;
-    }
-    // verdict === 'stands': the original verdict still holds — replay it.
-    const outcome = await invalidateDraftForCall(row.id, {
-      reason: pending.reason,
-      identityConflict,
-      // Never touch an accepted/declined/expired row for this reason
-      // (codex #4815 r2 P0) — see invalidateDraftForCall's own scope doc.
-      scope: isAgreedPrice ? 'nonterminal_drafts' : null,
-      // Fence the REPLAY to the generation this sweep OBSERVED settled
-      // (codex P1, GH round on a6c3a5c5c): between the settled read /
-      // re-observation above and this write, a force-reprocess can claim
-      // generation N+1 and re-qualify the call — an unfenced replay would
-      // stamp the obsolete verdict and archive the newer pass's
-      // replacement drafts. A fence miss reports ownershipLost and the
-      // queue entry is KEPT: the next sweep re-verifies against the new
-      // generation (and its in-flight check defers while N+1 runs).
-      ownershipFence: live.processing_generation != null
-        ? { callLogId: row.id, procGeneration: Number(live.processing_generation) }
-        : null,
-    });
-    if (!outcome.ok) continue;
-    if (outcome.ownershipLost) continue;
-    try {
-      const clearedRows = await clearQuarantineMarker(row.id, pending);
-      if (!clearedRows) continue;
-      cleared += 1;
-      logger.info(`[estimator-engine] drained a queued quarantine for call ${row.id} (${pending.reason})`);
-    } catch (clearErr) {
-      logger.warn(`[estimator-engine] quarantine marker clear failed for call ${row.id}: ${clearErr.message}`);
+    for (const pending of entries) {
+      try {
+        const outcome = await drainQueuedVerdict(row, live, pending);
+        if (outcome === 'drained') cleared += 1;
+        // A reclaim since observation: the next sweep re-verifies every
+        // remaining entry against the new generation.
+        if (outcome === 'ownership_lost') break;
+      } catch (entryErr) {
+        logger.warn(`[estimator-engine] queued quarantine (${pending.reason}) failed for call ${row.id}: ${entryErr.message}`);
+      }
     }
   }
   return cleared;
+}
+
+// One queued verdict: revalidate, then replay (stands) or retire
+// (re-qualified). Returns 'drained' | 'requalified' | 'deferred' |
+// 'failed' | 'ownership_lost'.
+async function drainQueuedVerdict(row, live, pending) {
+  const revalidator = quarantineRevalidatorFor(pending.reason);
+  const identityConflict = revalidator.type === 'identity_conflict';
+  const isAgreedPrice = revalidator.type === 'price_agreed';
+  const { verdict, note } = await revalidator.revalidate(row, pending);
+  if (verdict === 'defer') return 'deferred';
+  if (verdict === 'requalified') {
+    // The re-qualified verdict must lose BOTH its markers (pre-push P1, PR
+    // #3304): the verdict's invalidateDraftForCall also stamped
+    // estimator_draft_block, which every draft creator and public-estimate
+    // guard honors — clearing only the queue left a now-valid estimate
+    // suppressed forever. Scoped to THIS verdict's family (codex #4815 r8
+    // P1) and to this one queue entry: a different verdict queued beside it
+    // was not re-checked and stays.
+    await retireRequalifiedDraftBlock(row.id, revalidator, {
+      notNewerThan: String(pending.at || new Date().toISOString()),
+      generation: live.processing_generation != null ? Number(live.processing_generation) : null,
+    });
+    await clearQuarantineMarker(row.id, pending);
+    logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — ${note}`);
+    return 'requalified';
+  }
+  // verdict === 'stands': the original verdict still holds — replay it.
+  const outcome = await invalidateDraftForCall(row.id, {
+    reason: pending.reason,
+    identityConflict,
+    // Never touch an accepted/declined/expired row for this reason
+    // (codex #4815 r2 P0) — see invalidateDraftForCall's own scope doc.
+    scope: isAgreedPrice ? 'nonterminal_drafts' : null,
+    // Fence the REPLAY to the generation this sweep OBSERVED settled
+    // (codex P1, GH round on a6c3a5c5c): between the settled read /
+    // re-observation above and this write, a force-reprocess can claim
+    // generation N+1 and re-qualify the call — an unfenced replay would
+    // stamp the obsolete verdict and archive the newer pass's
+    // replacement drafts. A fence miss reports ownershipLost and the
+    // queue entry is KEPT: the next sweep re-verifies against the new
+    // generation (and its in-flight check defers while N+1 runs).
+    ownershipFence: live.processing_generation != null
+      ? { callLogId: row.id, procGeneration: Number(live.processing_generation) }
+      : null,
+  });
+  if (!outcome.ok) return 'failed';
+  if (outcome.ownershipLost) return 'ownership_lost';
+  try {
+    const clearedRows = await clearQuarantineMarker(row.id, pending);
+    if (!clearedRows) return 'failed';
+    logger.info(`[estimator-engine] drained a queued quarantine for call ${row.id} (${pending.reason})`);
+    return 'drained';
+  } catch (clearErr) {
+    logger.warn(`[estimator-engine] quarantine marker clear failed for call ${row.id}: ${clearErr.message}`);
+    return 'failed';
+  }
 }
 
 // Bounded retry around the forced invalidation (codex P0, PR #3304 GH
@@ -1648,7 +1810,7 @@ async function strictExistingDraftForCall(callLogId, { excludeTerminal = false, 
     // (`fresh.archived_at || new Date()`), so marking one is safe.
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''");
   if (excludeTerminal) q = q.whereNotIn('status', TERMINAL_ESTIMATE_STATUSES);
-  if (excludeBookingLinked) q = q.whereRaw("estimate_data ->> 'scheduled_service_id' IS NULL");
+  if (excludeBookingLinked) q = q.whereRaw(ASSESSMENT_EXCEPTION_ABSENT_SQL);
   // EVERY row, oldest first — a deterministic order for the per-row
   // locks taken below.
   return q.orderBy('created_at', 'asc').select('id', 'status', 'estimate_data');
@@ -3117,6 +3279,7 @@ module.exports = {
   invalidateDraftForCall: invalidateDraftForCallWithRetry,
   markQuarantinePending,
   clearOwnQuarantinePending,
+  staleDraftBellForCall,
   sweepPendingQuarantines,
   markReconcilePending,
   sweepPendingReconciles,
@@ -3127,5 +3290,6 @@ module.exports = {
   _private: {
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
     parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, supersedeRowScopedDraftBlock,
+    clearDraftBlockOnCall,
   },
 };

@@ -100,6 +100,46 @@ async function linkEstimateToBooking(estimateId, scheduledServiceId) {
   }
 }
 
+// DURABLE provenance for the assessment exception (codex #4815 r8 P2),
+// written whether or not linkEstimateToBooking can land. That linkage
+// deliberately skips a visit that went terminal during the composition, yet
+// the fresh draft is still returned as the exception's estimate — so the
+// post-finalization price-agreed sweep stands down for it — and the quote
+// was promised on the CALL, so the draft stands. Without this stamp, a later
+// force-reprocess's agreed-price invalidation (which excluded only rows
+// carrying scheduled_service_id) archived that intentionally surviving
+// draft with no replacement. estimate_data.assessment_exception is what the
+// invalidation's exclusion (ASSESSMENT_EXCEPTION_ABSENT_SQL /
+// estimateEarnsAssessmentException) honors alongside the linkage. One atomic
+// jsonb_set guarded by a missing-key predicate — never a whole-blob rewrite,
+// and the FIRST exception's provenance is never overwritten. Retried; a
+// persistent failure is logged (fail-soft like the linkage merge).
+async function stampAssessmentException(estimateId, { callLogId, generation = null, scheduledServiceId }) {
+  const provenance = {
+    call_log_id: String(callLogId),
+    ...(generation != null ? { generation: Number(generation) } : {}),
+    scheduled_service_id: String(scheduledServiceId),
+    at: new Date().toISOString(),
+  };
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await db('estimates')
+        .where({ id: estimateId })
+        .whereRaw("(estimate_data -> 'assessment_exception') is null")
+        .update({
+          estimate_data: db.raw(
+            "jsonb_set(coalesce(estimate_data, '{}'::jsonb), '{assessment_exception}', ?::jsonb)",
+            [JSON.stringify(provenance)],
+          ),
+        });
+      return true;
+    } catch (err) { lastErr = err; }
+  }
+  logger.warn(`[booking-predraft] assessment-exception provenance failed for estimate ${estimateId}: ${lastErr?.message || 'unknown'}`);
+  return false;
+}
+
 async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = null, ownerProcGeneration = null } = {}) {
   try {
     if (!bookingPreDraftsEnabled()) return { drafted: false, skipped: 'gate_off' };
@@ -200,6 +240,15 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
         // linked. The draft deliberately stands either way — the quote was
         // promised on the CALL, and cancelling the visit does not cancel
         // the caller's pricing request.
+        // Provenance FIRST, unconditionally (codex #4815 r8 P2): the
+        // linkage below may skip a visit that died mid-composition, but
+        // this estimate is still the exception's own and must stay out of
+        // any later agreed-price cleanup.
+        await stampAssessmentException(exceptionEstimateId, {
+          callLogId: delegatedCallLogId,
+          generation: passGeneration ?? null,
+          scheduledServiceId: booking.id,
+        });
         await linkEstimateToBooking(exceptionEstimateId, booking.id);
       }
       return {
@@ -358,6 +407,7 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
 }
 
 module.exports = {
+  stampAssessmentException,
   bookingPreDraftsEnabled,
   maybePreDraftForBooking,
   _private: { isAssessmentBooking, TERMINAL_BOOKING_STATUSES },

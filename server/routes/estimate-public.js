@@ -10558,7 +10558,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // against a linkage correction. One order everywhere:
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status');
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -10608,7 +10608,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (freshLinkData?.lead_id && ['sid', 'stamp'].includes(freshLinkData?.lead_linkage)) {
           await trx('leads').where({ id: String(freshLinkData.lead_id) }).forUpdate().first('id');
         }
-        if (freshLinkData && await staleCallLinkageReason(trx, freshLinkData, { lockCallRow: true })) {
+        if (freshLinkData && await staleCallLinkageReason(trx, freshLinkData, { lockCallRow: true, estimateStatus: freshLinkRow?.status })) {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
           throw err;
@@ -16579,7 +16579,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       // → call_log), or a decline racing a linkage reconcile (which locks
       // the estimate then updates the lead) can deadlock (codex P1, PR
       // #3304 GH r7b).
-      const declineLocked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      const declineLocked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'status');
       if (!declineLocked) return { staleLinkage: false, declinedCount: 0 };
       let declineLinkData = null;
       try {
@@ -16589,7 +16589,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       if (declineLinkData?.lead_id && ['sid', 'stamp'].includes(declineLinkData?.lead_linkage)) {
         await trx('leads').where({ id: String(declineLinkData.lead_id) }).forUpdate().first('id');
       }
-      if (declineLinkData && await staleCallLinkageReason(trx, declineLinkData, { lockCallRow: true })) {
+      if (declineLinkData && await staleCallLinkageReason(trx, declineLinkData, { lockCallRow: true, estimateStatus: declineLocked.status })) {
         return { staleLinkage: true, declinedCount: 0 };
       }
       const declinedCount = await trx('estimates')

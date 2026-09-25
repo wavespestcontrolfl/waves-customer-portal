@@ -179,13 +179,18 @@ jest.setTimeout(60000);
 
       await expect(engine.markQuarantinePending(callId, 'price_agreed_on_call', { procGeneration: 5 })).resolves.toBe('ownership_lost');
       expect((await metadataOf(callId)).estimator_quarantine_pending).toBeUndefined();
+      expect((await metadataOf(callId)).estimator_quarantine_queue).toBeUndefined();
       await expect(newDraftGuard(callId)).resolves.toBeNull();
     });
 
     test('the owning generation still queues (and its creators are then refused until drained)', async () => {
       const callId = await callRow({}, { generation: 6 });
       await expect(engine.markQuarantinePending(callId, 'price_agreed_on_call', { procGeneration: 6 })).resolves.toBe(true);
-      expect((await metadataOf(callId)).estimator_quarantine_pending).toMatchObject({ reason: 'price_agreed_on_call', generation: 6 });
+      // codex #4815 r8 P1: the entry now lives in the multi-entry queue,
+      // keyed by its reason (the legacy single key is read-only).
+      expect((await metadataOf(callId)).estimator_quarantine_queue).toMatchObject({
+        price_agreed_on_call: { reason: 'price_agreed_on_call', generation: 6 },
+      });
       await expect(newDraftGuard(callId)).resolves.toBe('price_agreed_on_call');
     });
 
@@ -196,6 +201,7 @@ jest.setTimeout(60000);
       ));
       expect(result).toBe('ownership_lost');
       expect((await metadataOf(callId)).estimator_quarantine_pending).toBeUndefined();
+      expect((await metadataOf(callId)).estimator_quarantine_queue).toBeUndefined();
     });
   });
 

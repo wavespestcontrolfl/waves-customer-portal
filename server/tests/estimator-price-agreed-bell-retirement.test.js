@@ -31,7 +31,13 @@ jest.mock('../config/twilio-numbers', () => ({
 }));
 
 const mockNotify = jest.fn(async () => true);
-jest.mock('../services/estimator-engine', () => ({ notify: (...args) => mockNotify(...args) }));
+// codex #4815 r8 P2: the bell's own state — null (no stale bell) unless a
+// test says otherwise, so every pre-r8 test sees exactly the old behavior.
+const mockStaleDraftBell = jest.fn(async () => null);
+jest.mock('../services/estimator-engine', () => ({
+  notify: (...args) => mockNotify(...args),
+  staleDraftBellForCall: (...args) => mockStaleDraftBell(...args),
+}));
 
 const { _test } = require('../services/call-recording-processor');
 const { retirePriceAgreedEstimatorBell } = _test;
@@ -55,6 +61,7 @@ function args(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockNotify.mockResolvedValue(true);
+  mockStaleDraftBell.mockResolvedValue(null);
 });
 
 describe('retirePriceAgreedEstimatorBell', () => {
@@ -113,5 +120,46 @@ describe('retirePriceAgreedEstimatorBell', () => {
   test('a notify failure is caught and logged, never thrown', async () => {
     mockNotify.mockRejectedValueOnce(new Error('boom'));
     await expect(retirePriceAgreedEstimatorBell(args())).resolves.toBeUndefined();
+  });
+
+  // codex #4815 r8 P2: a retirement whose notification update failed
+  // transiently was never retried — later reprocesses see the draft already
+  // stamped (invalidated:false) and returned early, leaving the stale
+  // "draft ready" bell, amount and link forever. The retry keys on the
+  // BELL's own state instead.
+  describe('retry from the bell\'s own state (codex #4815 r8 P2)', () => {
+    test('invalidated:false BUT the live bell still points at a draft the agreed price retired → the bell is retired', async () => {
+      mockStaleDraftBell.mockResolvedValue('est-stale');
+      await retirePriceAgreedEstimatorBell(args({ invalidated: false }));
+      expect(mockStaleDraftBell).toHaveBeenCalledWith('CA-price-agreed-1', { reason: 'price_agreed_on_call' });
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      const call = mockNotify.mock.calls[0][0];
+      expect(call.estimateId).toBeNull();
+      expect(call.forceUpdate).toBe(true);
+      expect(call.updateOnly).toBe(true);
+    });
+
+    test('a failed first retirement is retried on the next pass, then stops once the bell no longer references the draft', async () => {
+      mockNotify.mockResolvedValueOnce(false); // the transient update failure
+      await retirePriceAgreedEstimatorBell(args({ invalidated: true }));
+      mockStaleDraftBell.mockResolvedValueOnce('est-stale'); // still stale on the reprocess
+      await retirePriceAgreedEstimatorBell(args({ invalidated: false }));
+      expect(mockNotify).toHaveBeenCalledTimes(2);
+      mockStaleDraftBell.mockResolvedValueOnce(null); // retired now — idempotent
+      await retirePriceAgreedEstimatorBell(args({ invalidated: false }));
+      expect(mockNotify).toHaveBeenCalledTimes(2);
+    });
+
+    test('a stale-bell lookup failure never retires anything and never throws', async () => {
+      mockStaleDraftBell.mockRejectedValueOnce(new Error('db down'));
+      await expect(retirePriceAgreedEstimatorBell(args({ invalidated: false }))).resolves.toBeUndefined();
+      expect(mockNotify).not.toHaveBeenCalled();
+    });
+
+    test('a NEWLY invalidating pass never needs the lookup', async () => {
+      await retirePriceAgreedEstimatorBell(args({ invalidated: true }));
+      expect(mockStaleDraftBell).not.toHaveBeenCalled();
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+    });
   });
 });

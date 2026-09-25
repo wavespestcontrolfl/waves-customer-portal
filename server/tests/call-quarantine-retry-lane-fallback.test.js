@@ -94,6 +94,24 @@ describe('pushCallToRetryLaneAfterQuarantineFailure', () => {
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('pushed to the bounded retry lane'));
   });
 
+  // codex #4815 r8 P1: an exhausted (or aged-out) retry lane reads as
+  // SETTLED, so a verdict that rode the lane alone stopped blocking. The
+  // verdict itself rides the same statement into the quarantine queue —
+  // either both land or neither does. (Real-jsonb coverage:
+  // estimator-quarantine-multi-entry-postgres.test.js.)
+  test('the SAME statement queues the verdict in the multi-entry quarantine queue', async () => {
+    await pushCallToRetryLaneAfterQuarantineFailure({
+      call: CALL, callSid: CALL.twilio_call_sid, procGeneration: 7, reason: 'price_agreed_on_call',
+    });
+
+    expect(mockCalls).toHaveLength(1);
+    expect(mockCalls[0].row.metadata.__raw).toContain('estimator_quarantine_queue');
+    const dbMock = require('../models/db');
+    const rawCall = dbMock.raw.mock.calls.find(([sql]) => String(sql).includes('estimator_quarantine_queue'));
+    expect(rawCall[1][0]).toBe('price_agreed_on_call');
+    expect(JSON.parse(rawCall[1][1])).toMatchObject({ reason: 'price_agreed_on_call', generation: 7 });
+  });
+
   test('with no generation, the write is NOT generation-fenced (legacy shape)', async () => {
     await pushCallToRetryLaneAfterQuarantineFailure({
       call: CALL, callSid: CALL.twilio_call_sid, procGeneration: null, reason: 'price_agreed_on_call',

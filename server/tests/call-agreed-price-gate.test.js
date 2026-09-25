@@ -278,3 +278,38 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(typeof CallRecordingProcessor._test.retirePriceAgreedEstimatorBell).toBe('function');
   });
 });
+
+// codex #4815 r8 P1: a verdict that lands ONLY as retry-lane state stops
+// blocking once the retry budget is spent (or the call ages out) —
+// callReprocessInFlight then reads the call as settled. Every path that
+// routes a failed quarantine into extraction_failed therefore writes the
+// verdict into the multi-entry quarantine queue in the SAME statement.
+describe('processRecording — failed quarantines never ride the retry lane alone (codex #4815 r8 P1)', () => {
+  test('pendingQuarantineMarker is pass-scoped: declared before the outer guard so its catch can see it', () => {
+    const declAt = source.indexOf('let pendingQuarantineMarker = null;');
+    expect(declAt).toBeGreaterThan(-1);
+    expect(source.indexOf('let pendingQuarantineMarker = null;', declAt + 1)).toBe(-1);
+    const guardAt = source.indexOf('    // Outer guard: any unhandled throw between the claim above and the');
+    expect(guardAt).toBeGreaterThan(declAt);
+  });
+
+  test('the outer guard\'s extraction_failed release writes the pending verdict atomically with the retry-lane transition', () => {
+    const catchAt = source.indexOf('    } catch (procErr) {\n      logger.error(`[call-proc] Unhandled error processing');
+    expect(catchAt).toBeGreaterThan(-1);
+    const body = source.slice(catchAt, source.indexOf('throw procErr;', catchAt));
+    const updateAt = body.indexOf(".where('processing_token', procToken)");
+    expect(updateAt).toBeGreaterThan(-1);
+    const update = body.slice(updateAt, body.indexOf(".returning(['extraction_attempts'])", updateAt));
+    expect(update).toContain("processing_status: 'extraction_failed',");
+    expect(update).toContain('...(pendingQuarantineMarker ? {');
+    expect(update).toContain('metadata: db.raw(QUARANTINE_QUEUE_APPEND_SQL, [');
+  });
+
+  test('the spam/voicemail verdict hands a failed queue write to that same release', () => {
+    const at = source.indexOf("const rejectionReason = extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail';");
+    expect(at).toBeGreaterThan(-1);
+    const block = source.slice(at, source.indexOf('throw new Error(`draft invalidation failed on the', at));
+    expect(block).toContain('const queued = await markQuarantinePending(call.id, rejectionReason, { procGeneration });');
+    expect(block).toContain('if (!queued) pendingQuarantineMarker = { reason: rejectionReason, procGeneration };');
+  });
+});

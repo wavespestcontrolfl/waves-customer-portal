@@ -1799,10 +1799,29 @@ async function bookingPreDraftAssessmentDrafted(bookingPreDraftPromise) {
 // write: a bare write never advanced the retry budget, so processAllPending
 // retried the call every 10 minutes forever instead of stopping at
 // CALL_EXTRACTION_MAX_ATTEMPTS, with no card ever filed once exhausted.
+//
+// The VERDICT rides the SAME statement (codex #4815 r8 P1 — the fail-closed
+// state that survives retry exhaustion): the retry lane alone kept the
+// call's estimates blocked only while callReprocessInFlight read it as
+// in-flight. Once extraction_attempts hit CALL_EXTRACTION_MAX_ATTEMPTS (or
+// the call aged past the 7-day window) the call read as SETTLED, and with
+// no quarantine marker the stale draft became viewable, sendable and
+// acceptable again while only a triage card remained. The entry this
+// statement adds to the multi-entry quarantine queue is judged by
+// callDraftVerdict regardless of retry state, so the call fails closed from
+// this write until the verdict is RESOLVED — never merely because retries
+// ran out: the drainer (sweepPendingQuarantines) revalidates it as soon as
+// the call settles — exhausted and aged-out included — and either replays
+// the invalidation (then retires the entry) or drops it on a genuine
+// re-qualification. The human path is the exhausted-retry triage card this
+// function files: fix the cause and Reprocess the recording; the settled
+// pass is then drained the same way. Atomic: either the retry-lane
+// transition AND the verdict land, or neither does.
 async function pushCallToRetryLaneAfterQuarantineFailure({
   call, callSid, procGeneration, reason,
 }) {
   try {
+    const { QUARANTINE_QUEUE_APPEND_SQL, quarantineQueueEntry } = require('../utils/estimate-claim-sql');
     let lastResortQ = db('call_log').where({ id: call.id }).whereNull('processing_token');
     if (procGeneration != null) {
       lastResortQ = lastResortQ.where('processing_generation', procGeneration);
@@ -1810,6 +1829,7 @@ async function pushCallToRetryLaneAfterQuarantineFailure({
     const pushedRows = await lastResortQ.update({
       processing_status: 'extraction_failed',
       extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
+      metadata: db.raw(QUARANTINE_QUEUE_APPEND_SQL, [String(reason), JSON.stringify(quarantineQueueEntry(reason, procGeneration))]),
       updated_at: new Date(),
     }).returning(['extraction_attempts']);
     if (pushedRows.length) {
@@ -1841,10 +1861,27 @@ async function pushCallToRetryLaneAfterQuarantineFailure({
 //     promised, the bell instead drops the estimate link/amount and keeps
 //     both quote_promised:true and the send-it instruction.
 // Shared by both invalidation call sites so this decision lives once.
+//
+// Retried from the BELL's own state (codex #4815 r8 P2): when this
+// invocation invalidated nothing new (a later reprocess sees the draft
+// already stamped), the retirement still runs if the call's live engine bell
+// references a draft this verdict ALREADY retired — the case where an
+// earlier retirement's notification update failed transiently and nothing
+// would otherwise ever retry it. A bell already retired, or pointing at a
+// live draft, is left alone.
 async function retirePriceAgreedEstimatorBell({
   call, callSid, callerName, callAgreedPrice, callQuotePromised, invalidated, customerId, logPrefix,
 }) {
-  if (!invalidated) return;
+  if (!invalidated) {
+    let staleEstimateId = null;
+    try {
+      const { staleDraftBellForCall } = require('./estimator-engine');
+      staleEstimateId = typeof staleDraftBellForCall === 'function'
+        ? await staleDraftBellForCall(call?.twilio_call_sid || callSid, { reason: 'price_agreed_on_call' })
+        : null;
+    } catch { staleEstimateId = null; }
+    if (!staleEstimateId) return;
+  }
   try {
     const { notify: notifyEstimator } = require('./estimator-engine');
     const link = customerId ? `/admin/customers/${customerId}` : '/admin/communications';
@@ -7226,6 +7263,12 @@ const CallRecordingProcessor = {
     // instead (PR #3304 — replaces the token-NULL predicates).
     let procGeneration = null;
     let claimBlocked = false;
+    // A forced-quarantine verdict whose invalidation AND durable queue write
+    // did not land this pass (codex #4815 r5 P1 / r8 P1). Declared here, at
+    // pass scope, so the outer guard's extraction_failed release can write
+    // it ATOMICALLY with the retry-lane transition: a verdict that rides only
+    // the retry lane stops blocking the moment retries are exhausted.
+    let pendingQuarantineMarker = null;
     // Claim + contact CAS baseline in ONE transaction (codex #3413 r27):
     // a separate post-claim read left a window where an admin edit landing
     // between the claim commit and the snapshot read became the baseline —
@@ -8540,7 +8583,12 @@ const CallRecordingProcessor = {
           // and the queue covers the case where that budget is already
           // spent (codex P0, PR #3304 GH r8d).
           const { markQuarantinePending } = require('./estimator-engine');
-          await markQuarantinePending(call.id, extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail', { procGeneration });
+          const rejectionReason = extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail';
+          const queued = await markQuarantinePending(call.id, rejectionReason, { procGeneration });
+          // Neither landed (codex #4815 r8 P1): the outer guard's
+          // extraction_failed release writes the verdict atomically with
+          // the retry-lane transition, so retry exhaustion never unblocks.
+          if (!queued) pendingQuarantineMarker = { reason: rejectionReason, procGeneration };
           throw new Error(`draft invalidation failed on the ${extracted.is_spam ? 'spam' : 'voicemail'} verdict: ${invalidation.error || 'unknown'}`);
         }
       }
@@ -13821,13 +13869,13 @@ const CallRecordingProcessor = {
     // draft AFTER this pass's pre-write block stamp but before its own
     // token clears.
     let agreedPriceDraftSweepPending = false;
-    // Set below when the pre-finalization price-agreed invalidation did not
-    // land (codex #4815 r5 P1): the durable retry-queue write for it is
-    // deferred into the finalization transaction itself (the db.transaction
-    // a few thousand lines down that clears processing_token) rather than
-    // attempted here, non-transactionally, with its own cascade of
-    // fallbacks — see that transaction for why.
-    let pendingQuarantineMarker = null;
+    // pendingQuarantineMarker (declared before the outer guard, codex #4815
+    // r8 P1) is set below when the pre-finalization price-agreed
+    // invalidation did not land (codex #4815 r5 P1): the durable retry-queue
+    // write for it is deferred into the finalization transaction itself (the
+    // db.transaction a few thousand lines down that clears processing_token)
+    // rather than attempted here, non-transactionally, with its own cascade
+    // of fallbacks — see that transaction for why.
     // Set below, by the booking-triggered pre-draft hook, ONLY when
     // GATE_ESTIMATOR_BOOKING_PREDRAFTS is on for THIS call (codex #4815 r2
     // P2): the price-agreed sweep chains onto this SAME settled promise
@@ -18549,6 +18597,16 @@ const CallRecordingProcessor = {
         // same blocking card at the cap. (Re-running after partial side
         // effects is bounded-safe: the idempotency keys, won-status skips,
         // and same-date dup holds make reprocessing a supported operation.)
+        //
+        // A forced-quarantine verdict this pass could not persist
+        // (pendingQuarantineMarker — its invalidation AND queue write, or
+        // the finalization transaction carrying the queue write, failed)
+        // rides THIS same statement into the multi-entry quarantine queue
+        // (codex #4815 r8 P1): the retry lane alone stops blocking once
+        // the budget is spent or the call ages out, while the queued entry
+        // keeps every estimate guard fail-closed until the drainer resolves
+        // the verdict. Atomic with the release — both land or neither does.
+        const { QUARANTINE_QUEUE_APPEND_SQL, quarantineQueueEntry } = require('../utils/estimate-claim-sql');
         const releasedRows = await db('call_log')
           .where({ id: call.id })
           .where('processing_token', procToken)
@@ -18556,6 +18614,12 @@ const CallRecordingProcessor = {
             processing_status: 'extraction_failed',
             extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
             processing_token: null,
+            ...(pendingQuarantineMarker ? {
+              metadata: db.raw(QUARANTINE_QUEUE_APPEND_SQL, [
+                String(pendingQuarantineMarker.reason),
+                JSON.stringify(quarantineQueueEntry(pendingQuarantineMarker.reason, pendingQuarantineMarker.procGeneration)),
+              ]),
+            } : {}),
             updated_at: new Date(),
           }).returning(['extraction_attempts']);
         if (!releasedRows.length) {
