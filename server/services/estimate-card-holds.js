@@ -2371,7 +2371,8 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
       });
       if (emailResult?.ok) {
         emailDelivered = true;
-      } else if (wantsRoutedMessage === false && emailResult?.reason === 'billing_email_not_selected') {
+      } else if (wantsRoutedMessage === false
+        && ['billing_email_not_selected', 'receipt_handoff_aborted'].includes(emailResult?.code)) {
         // The choice changed after our first read. Let the durable receipt
         // owner reload it instead of losing this one-shot fee receipt.
         await require('./receipt-delivery-queue').enqueueReceiptDelivery({

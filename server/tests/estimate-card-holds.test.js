@@ -1629,9 +1629,9 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'receipt_email_auto:inv1' }));
   });
 
-  it('queues an Email-only fee receipt when the handoff sees a changed selection', async () => {
+  it.each(['billing_email_not_selected', 'receipt_handoff_aborted'])('queues an Email-only fee receipt after the sender returns %s', async (code) => {
     stubDb([null, { payment_receipt_channels: ['email'], email_enabled: true }, { first_name: 'Sam' }]);
-    mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
+    mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: code, code });
     expect(await settleNoShowFee(pi())).toMatchObject({ settled: true });
     expect(mockEnqueueReceiptDelivery).toHaveBeenCalledWith({
       invoiceId: 'inv1', source: 'no_show_fee_preference_change',
