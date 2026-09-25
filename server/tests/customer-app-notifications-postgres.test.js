@@ -649,6 +649,31 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await put({ paymentIssueChannels: ['sms', 'push'] })).status).toBe(409);
   });
 
+  test('billing channel edits cannot leave only unavailable selections', async () => {
+    await device();
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      payment_receipt_channels: ['sms', 'push'], payment_confirmation_sms: false,
+      invoice_channels: ['email', 'sms'], email_enabled: false,
+    });
+    expect((await put({ paymentConfirmationChannels: ['sms'] })).status).toBe(409);
+    expect((await put({ invoiceChannels: ['email'] })).status).toBe(409);
+    expect((await put({ paymentConfirmationChannels: ['sms'], paymentConfirmationSms: true })).status).toBe(200);
+  });
+
+  test.each([
+    ['emailEnabled', 'invoice_channels', 'invoiceChannels', 'email'],
+    ['smsEnabled', 'invoice_channels', 'invoiceChannels', 'sms'],
+    ['paymentConfirmationSms', 'payment_receipt_channels', 'paymentConfirmationChannels', 'sms'],
+    ['pushEnabled', 'invoice_channels', 'invoiceChannels', 'push'],
+  ])('billing channel guard checks a standalone %s change and allows an explicit replacement', async (flag, column, key, channel) => {
+    await device();
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ [column]: [channel] });
+    expect((await put({ [flag]: false })).status).toBe(409);
+    const replacement = channel === 'email' ? 'sms' : 'email';
+    expect((await put({ [flag]: false, [key]: [replacement] })).status).toBe(200);
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first())[column]).toEqual([replacement]);
+  });
+
   test('both reminder choices persist on the primary and survive legacy saves and rollback', async () => {
     const choices = { serviceReminder72hChannel: 'push', serviceReminder24hChannel: 'push' };
     expect((await put(choices)).status).toBe(409);
