@@ -44,6 +44,16 @@ const RENTAL_TEMPLATE_KEY = 'service_agreement.termite_bait_program_rental';
 // picks purchase/rental/annual off the estimate's OWN termite line, so
 // adding the annual key here cannot change what the quarterly prep picks.
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
+// customer_contracts.service_name / bell wording per program shape — the
+// annual plan keeps the stations Waves-owned, so it must never read as the
+// outright-purchase program in generated records.
+const QUARTERLY_SERVICE_NAME = 'Termite Bait Station Program';
+const ANNUAL_SERVICE_NAME = 'Waves Subterranean Termite Protection — Annual';
+const OWNERSHIP_BELL_LABELS = {
+  rent: 'rented-stations',
+  own: 'purchased-stations',
+  annual_protection: 'annual protection (Waves-owned stations)',
+};
 const PROGRAM_TEMPLATE_KEYS = [PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY, ANNUAL_TEMPLATE_KEY];
 
 // The delivery workflow's real status vocabulary: signed/cancelled/voided
@@ -283,21 +293,63 @@ function estimateMayDiscount(estimate = {}, estData = null) {
   return !!(data.manualDiscount || data.manual_discount || data.result?.manualDiscount);
 }
 
+// The Annual Protection plan's sold figures, read from whichever persisted
+// shape the estimate carries. The mapped results.tmBait envelope wins when
+// present (same precedence as estimate-termite-program-rows); a published
+// website quote may persist only the raw engine lineItems (+ the one-time
+// setup item), so those are read directly when no envelope exists.
+function annualPlanFigures(data) {
+  const mapped = authoritativeMappedTermiteEnvelope(data);
+  if (mapped) {
+    return {
+      setupFee: mapped.setupFee,
+      annualFee: mapped.annualFee,
+      system: mapped.selectedSystem || mapped.system,
+    };
+  }
+  const rows = selectedTermiteAnnualPlanRows(data);
+  const line = rows.find((row) => String(row?.service || '').toLowerCase() === 'termite_bait') || null;
+  const setupItem = rows.find((row) => String(row?.kind || '').toLowerCase() === 'setup') || null;
+  if (!line && !setupItem) return null;
+  return {
+    setupFee: line?.setup?.price ?? line?.installation?.price ?? setupItem?.price ?? null,
+    annualFee: line?.annualFee ?? line?.annual ?? null,
+    system: line?.selectedSystem || line?.system || setupItem?.system || null,
+  };
+}
+
 // Build the Annual Protection plan's template values (setup fee, annual fee,
 // 12-month coverage window), or null when the figures can't be resolved.
 // Same fail-closed posture as the quarterly builder below: an unresolvable
-// price parks for manual prep rather than signing a wrong number. A missing
-// RAW start date (no visit booked yet at accept time — the common case) does
-// NOT fail closed — like the quarterly agreement's start_date, both dates
-// fall back to the honest "confirmed at installation" text; the template has
-// no active version yet regardless (draft, seeded 20260924030002), so
-// nothing can be sent on either value until the owner activates it.
+// price parks for manual prep rather than signing a wrong number.
+//
+// Annual fee = what the customer ACCEPTED. The mapped/raw `annualFee` is the
+// gross list figure (v1-legacy-mapper copies the pre-discount value); a
+// WaveGuard or manual discount lands on the line as annualAfterDiscount /
+// manualFinalAnnual, which collectTermiteFacts already reads as the NET
+// per-application price (visitsPerYear = 1 on this plan, so per-app = the
+// annual fee). When no net figure is stored and the estimate may carry a
+// discount, fail closed exactly like the quarterly builder.
+//
+// A missing RAW start date (no visit booked yet at accept time — the common
+// case) does NOT fail closed — like the quarterly agreement's start_date,
+// both dates fall back to the honest "confirmed at installation" text.
 function buildAnnualProgramAgreementValues(estimate = {}, data = null, { startDateLabel = null, startDateRaw = null } = {}) {
-  const mapped = authoritativeMappedTermiteEnvelope(data);
-  if (!mapped) return null;
+  const figures = annualPlanFigures(data);
+  if (!figures) return null;
 
-  const setupPrice = money(mapped.setupFee);
-  const annualPrice = money(mapped.annualFee);
+  const facts = collectTermiteFacts(data);
+  let annualFeeValue = null;
+  if (facts.perAppIsNet) {
+    annualFeeValue = facts.perApp;
+  } else if (estimateMayDiscount(estimate, data)) {
+    return null;
+  } else {
+    annualFeeValue = figures.annualFee;
+  }
+
+  const setupPrice = money(figures.setupFee);
+  const annualPrice = money(annualFeeValue);
   if (!setupPrice || !annualPrice) return null;
 
   const rawStart = dateOnlyString(startDateRaw);
@@ -310,11 +362,11 @@ function buildAnnualProgramAgreementValues(estimate = {}, data = null, { startDa
     ownership: 'annual_protection',
     values: {
       program: {
-        system: systemLabelFor(mapped.selectedSystem || mapped.system),
+        system: systemLabelFor(figures.system),
         setup_price: setupPrice,
         annual_price: annualPrice,
       },
-      service: { name: 'Waves Subterranean Termite Protection — Annual' },
+      service: { name: ANNUAL_SERVICE_NAME },
       agreement: {
         start_date: startDateLabel || START_DATE_FALLBACK,
         end_date: endDateLabel || START_DATE_FALLBACK,
@@ -359,7 +411,7 @@ function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { sta
       system: systemLabelFor(facts.system),
       per_application: perApplication,
     },
-    service: { name: 'Termite Bait Station Program' },
+    service: { name: QUARTERLY_SERVICE_NAME },
     agreement: { start_date: startDateLabel || START_DATE_FALLBACK },
     estimate: { id: estimate.id || null, address: estimate.address || null },
   };
@@ -764,7 +816,7 @@ async function ringAdminBellDeduped(NotificationService, { lockKey, titleLike, m
   return true;
 }
 
-async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null, signedBlockScope = 'estimate', reissueSourceContractId = null, signedAfter = null }) {
+async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null, startDateRaw: startDateRawOverride = null, signedBlockScope = 'estimate', reissueSourceContractId = null, signedAfter = null }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
     // One-time acceptances keep their termite snapshots but did NOT accept
@@ -855,15 +907,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     // to the estimate (linkCreatedRowsToEstimate runs after acceptance), so
     // it passes the booked termite date explicitly — the DB lookup would
     // race the linking and permanently snapshot the fallback label.
-    // The raw scheduled date (for the annual plan's end_date = start + 12
-    // months) is only available from the DB lookup — an admin-supplied
-    // startDateLabelOverride is display text only, so startDateRaw stays
-    // null on that path (the annual builder falls back to the honest
-    // "confirmed at installation" text for both dates, same as today).
-    const resolvedStartDate = (!startDateLabelOverride && estimate.id)
-      ? await scheduledStartDate(estimate.id)
-      : { raw: null, label: null };
-    const startDateLabel = startDateLabelOverride || resolvedStartDate.label;
+    // The raw scheduled date feeds the annual plan's end_date (start + 12
+    // months). Manual acceptance passes both the display label and the raw
+    // booked date (startDateRaw); the public accept route leaves both to the
+    // DB lookup. An override label WITHOUT a raw date keeps end_date on the
+    // honest "confirmed at installation" text rather than parsing display
+    // text back into a calendar day.
+    const resolvedStartDate = startDateLabelOverride
+      ? { raw: dateOnlyString(startDateRawOverride), label: startDateLabelOverride }
+      : (estimate.id ? await scheduledStartDate(estimate.id) : { raw: null, label: null });
+    const startDateLabel = resolvedStartDate.label;
     const prepared = buildTermiteProgramAgreementValues(estimate, estData, {
       startDateLabel,
       startDateRaw: resolvedStartDate.raw,
@@ -1090,7 +1143,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         recipient_name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || estimate.customer_name || null,
         recipient_email: customer.email || null,
         recipient_phone: customer.phone || null,
-        service_name: 'Termite Bait Station Program',
+        service_name: prepared.values?.service?.name || QUARTERLY_SERVICE_NAME,
         esign_disclosure_snapshot: version.signer_disclosure || ESIGN_DISCLOSURE,
         contract_text_snapshot: rendered.body,
         document_template_id: template.id,
@@ -1145,7 +1198,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     const bellArgs = [
       'estimate',
       autosent ? 'Termite agreement sent for signature' : 'Termite agreement drafted',
-      `${estimate.customer_name || 'Customer'} accepted the ${prepared.ownership === 'rent' ? 'rented-stations' : 'purchased-stations'} termite program — the agreement is ${autosent ? 'on its way for e-signature' : 'prefilled and ready to send from the document library'}.`,
+      `${estimate.customer_name || 'Customer'} accepted the ${OWNERSHIP_BELL_LABELS[prepared.ownership] || OWNERSHIP_BELL_LABELS.own} termite program — the agreement is ${autosent ? 'on its way for e-signature' : 'prefilled and ready to send from the document library'}.`,
       { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, contractId: contract.id } },
     ];
     await ringAdminBell(NotificationService, bellArgs, `drafted bell for contract ${contract.id} (estimate ${estimate.id}) — draft remains in the open document-requests queue`);
@@ -1763,6 +1816,7 @@ module.exports = {
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   ANNUAL_TEMPLATE_KEY,
+  ANNUAL_SERVICE_NAME,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,

@@ -8,6 +8,7 @@ const {
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   ANNUAL_TEMPLATE_KEY,
+  ANNUAL_SERVICE_NAME,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,
@@ -567,6 +568,60 @@ describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)'
   test('quarterly estimates are unaffected by the annual addition — still resolve to purchase/rental only', () => {
     expect(buildTermiteProgramAgreementValues({}, ownedEstData()).templateKey).toBe(PURCHASE_TEMPLATE_KEY);
     expect(buildTermiteProgramAgreementValues({}, rentedEstData()).templateKey).toBe(RENTAL_TEMPLATE_KEY);
+  });
+
+  test('a discounted annual plan states the accepted NET annual fee, not the gross list fee (Codex #4811 r1 P1)', () => {
+    const data = annualEstData();
+    // v1-legacy-mapper: the recurring row carries the accepted net annual
+    // (manualFinalAnnual after a manual discount, annualAfterDiscount after
+    // WaveGuard) while tmBait.annualFee stays the pre-discount list figure.
+    data.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 40, perTreatment: 480, visitsPerYear: 1, annualAfterDiscount: 432, manualFinalAnnual: 400 }] };
+    const prepared = buildTermiteProgramAgreementValues({ waveguard_tier: 'gold' }, data);
+    expect(prepared.values.program.annual_price).toBe('$400');
+    expect(prepared.values.program.setup_price).toBe('$900');
+  });
+
+  test('WaveGuard-only discount uses annualAfterDiscount when no manual discount landed', () => {
+    const data = annualEstData();
+    data.recurring = { services: [{ name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 1, annualAfterDiscount: 432 }] };
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'silver' }, data).values.program.annual_price).toBe('$432');
+  });
+
+  test('fail-closed: an estimate that may carry a discount but stores no net annual figure builds nothing', () => {
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'gold' }, annualEstData())).toBeNull();
+    expect(buildTermiteProgramAgreementValues({ estimate_data: JSON.stringify({ manualDiscount: { amount: 50 } }) }, { ...annualEstData(), manualDiscount: { amount: 50 } })).toBeNull();
+    // Bronze / no discount: the gross list fee IS the accepted fee.
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'bronze' }, annualEstData()).values.program.annual_price).toBe('$480');
+  });
+
+  test('raw engine lineItems (no mapped envelope — published website quote) still resolve setup, annual fee and system (Codex #4811 r1 P2)', () => {
+    const raw = {
+      result: {
+        lineItems: [{
+          service: 'termite_bait', plan: 'annual_protection', selectedSystem: 'advance', system: 'advance',
+          annual: 520, annualFee: 520, annualAfterDiscount: 520, visitsPerYear: 1,
+          setup: { price: 810, perStation: 45, stations: 18 },
+          installation: { kind: 'setup', price: 810 },
+        }],
+        oneTime: { items: [{ service: 'termite_bait_installation', kind: 'setup', price: 810 }] },
+      },
+    };
+    const prepared = buildTermiteProgramAgreementValues({}, raw, { startDateLabel: 'October 1, 2026', startDateRaw: '2026-10-01' });
+    expect(prepared).not.toBeNull();
+    expect(prepared.templateKey).toBe(ANNUAL_TEMPLATE_KEY);
+    expect(prepared.values.program.setup_price).toBe('$810');
+    expect(prepared.values.program.annual_price).toBe('$520');
+    expect(prepared.values.program.system).toMatch(/advance/i);
+    expect(prepared.values.agreement.end_date).toBe('October 1, 2027');
+  });
+
+  test('annual plan records name the Waves-owned annual plan, never the purchase program (Codex #4811 r1 P2)', () => {
+    const prepared = buildTermiteProgramAgreementValues({}, annualEstData());
+    expect(prepared.ownership).toBe('annual_protection');
+    expect(prepared.values.service.name).toBe(ANNUAL_SERVICE_NAME);
+    expect(prepared.values.service.name).not.toBe('Termite Bait Station Program');
+    // Quarterly keeps its established service name.
+    expect(buildTermiteProgramAgreementValues({}, ownedEstData()).values.service.name).toBe('Termite Bait Station Program');
   });
 
   test('PROGRAM_TEMPLATE_KEYS includes the annual key for customer-scoped lookups (existing-agreement checks span all three)', () => {
