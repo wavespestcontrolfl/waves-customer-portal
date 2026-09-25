@@ -24140,12 +24140,47 @@ function pricingBundleHasStaleTermiteRow(bundle = {}) {
   return combos.some((c) => rowStale(c?.perServiceTreatments));
 }
 
+// The count a frozen snapshot / cached bundle already carries. Only
+// stampTreeShrubPalmCount ever writes palmCount into a bundle, and it writes
+// only a resolved PRICED count — so a stamped value is trusted evidence. The
+// fast paths fall back to it when stored estData alone cannot resolve one
+// (an engine-inputs-only estimate: the build stamped from the fresh engine
+// run, which stored evidence can't replay; Codex r7 on #4789). Read from the
+// PRE-finalize bundle — finalize rebuilds services[] and drops it.
+function stampedTreeShrubPalmCountInBundle(bundle) {
+  if (!bundle || typeof bundle !== 'object') return null;
+  const valid = (n) => (Number.isInteger(n) && n > 0 ? n : null);
+  const fromRows = (rows) => {
+    if (!Array.isArray(rows)) return null;
+    for (const row of rows) {
+      if (row && recurringServiceKey(row) === 'tree_shrub' && valid(row.palmCount)) return row.palmCount;
+    }
+    return null;
+  };
+  const fromFrequencies = (freqs) => {
+    if (!Array.isArray(freqs)) return null;
+    for (const f of freqs) {
+      if (!f || typeof f !== 'object') continue;
+      const hit = fromRows(f.perServiceTreatments) ?? valid(f.palmCount);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const fromServices = Array.isArray(bundle.services)
+    ? bundle.services.reduce((hit, svc) => hit ?? fromFrequencies(svc?.frequencies), null)
+    : null;
+  const fromCombos = Array.isArray(bundle.serviceCadenceCombos)
+    ? bundle.serviceCadenceCombos.reduce((hit, c) => hit ?? fromRows(c?.perServiceTreatments), null)
+    : null;
+  return fromFrequencies(bundle.frequencies) ?? fromServices ?? fromCombos;
+}
+
 // The ONE stamping function for the T&S palm-care bullet (owner 2026-09-24
 // routine palm-care reserve). Four Codex rounds on #4789 each found a
 // per-builder carry that leaked a raw or stale palmCount somewhere
 // (shapeFrequencyEntry, recurringServicesWithSupplements, v1-legacy-mapper's
 // svcAdd, shapeFromV1, one-tap-purchase.js's raw recurring row, …) — no
-// builder carries palmCount any more (see their own NOTE comments). This is
+// builder carries palmCount any more. This is
 // the ONLY place a tree_shrub row or frequency's palmCount is ever set,
 // applied to the FINAL bundle on every buildPricingBundleInner return path
 // (the snapshot fast path, the pricing-cache fast path, and both fresh-build
@@ -24681,7 +24716,7 @@ async function buildPricingBundleInner(estimate) {
       ...snapshotBundle,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
-    })), estimate, estData), treeShrubPalmCountForEstData(estData));
+    })), estimate, estData), treeShrubPalmCountForEstData(estData) ?? stampedTreeShrubPalmCountInBundle(snapshotBundle));
   }
 
   const cached = getEstimatePricingCache(estimate);
@@ -24694,7 +24729,7 @@ async function buildPricingBundleInner(estimate) {
     // cache entry written before this deploy must never serve a stale count.
     return stampTreeShrubPalmCount(
       finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({ ...cached, cacheHit: true })), estimate, estData),
-      treeShrubPalmCountForEstData(estData),
+      treeShrubPalmCountForEstData(estData) ?? stampedTreeShrubPalmCountInBundle(cached),
     );
   }
 
@@ -27221,4 +27256,5 @@ module.exports.treeShrubFrequenciesFromResultStats = treeShrubFrequenciesFromRes
 module.exports.treeShrubPalmCountForEstData = treeShrubPalmCountForEstData;
 module.exports.shapeFromV1 = shapeFromV1;
 module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
+module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;

@@ -1353,9 +1353,19 @@ positive-integer, clamped ≤200 by the pricing engine; omitted entirely (not
 `0`, not `null`) whenever the estimate has no palms OR the palms it has
 weren't priced, so existing clients that don't know the field see no
 change. A ROWLESS single-service T&S card (an engine-backed multi-service
-split, no `perServiceTreatments` on that card) instead carries
-`pricing.frequencies[].palmCount` directly on the frequency, same
-priced-only validation, omission, and chokepoint-stamping rule. Display-only:
+split, no `perServiceTreatments` on that card) instead carries the count
+directly on the frequency. The full set of paths the stamper writes, all
+under the same priced-only validation, omission, and chokepoint rule:
+`pricing.frequencies[].perServiceTreatments[].palmCount`,
+`pricing.frequencies[].palmCount` (rowless solo-T&S ladder),
+`pricing.services[].frequencies[].perServiceTreatments[].palmCount`,
+`pricing.services[].frequencies[].palmCount` (rowless split T&S card), and
+`pricing.serviceCadenceCombos[].perServiceTreatments[].palmCount`. On the
+`sendSnapshot` and pricing-cache fast paths, when stored evidence alone
+cannot resolve a count (an engine-inputs-only estimate, whose build stamped
+from the fresh engine run), the count already stamped in the frozen/cached
+bundle is reused — only the stamper writes this field, so a stamped value
+is trusted. Display-only:
 drives one extra customer-facing inclusion bullet ("Includes care for your
 N palms — seasonal palm nutrition and root-zone treatment when needed", singular
 for 1) and has no effect on any price, fee, line item, or booking/acceptance

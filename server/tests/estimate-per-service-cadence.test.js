@@ -682,6 +682,25 @@ describe('palm-care bullet survives the fast-path split (Codex round 5 P0 on #47
       const ts = bundle.services.find((s) => s.key === 'tree_shrub');
       expect(ts.frequencies[0].palmCount).toBe(6);
     });
+
+    // Codex round 7 on #4789: an estimate whose stored data carries no
+    // palm evidence (engine-inputs-only — its build stamped from the fresh
+    // engine run) keeps the count already stamped into its frozen snapshot
+    // instead of deleting it on every fast-path read.
+    test('no stored evidence: the count already stamped in the snapshot survives', async () => {
+      const estimate = snapshotEstimate({}, 'stamped-only');
+      estimate.estimate_data.sendSnapshot.pricingBundle.frequencies[0].perServiceTreatments[1].palmCount = 4;
+      const bundle = await buildPricingBundle(estimate);
+      expect(bundle.snapshotHit).toBe(true);
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      expect(ts.frequencies[0].palmCount).toBe(4);
+    });
+
+    test('no stored evidence and nothing stamped: no palmCount', async () => {
+      const bundle = await buildPricingBundle(snapshotEstimate({}, 'none'));
+      const ts = bundle.services.find((s) => s.key === 'tree_shrub');
+      expect(ts.frequencies[0].palmCount).toBeUndefined();
+    });
   });
 
   describe('pricing-cache fast path', () => {

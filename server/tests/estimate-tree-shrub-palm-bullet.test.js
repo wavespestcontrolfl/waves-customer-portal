@@ -649,3 +649,31 @@ describe('treeShrubPalmCountForEstData — quote-required mirror row does not sh
     expect(treeShrubPalmCountForEstData(estData)).toBeNull();
   });
 });
+
+describe('stampedTreeShrubPalmCountInBundle — fast-path fallback to an already-stamped count (Codex round 7)', () => {
+  const { stampedTreeShrubPalmCountInBundle } = require('../routes/estimate-public');
+
+  test('reads a stamped count off a top-level T&S treatment row', () => {
+    const bundle = { frequencies: [{ perServiceTreatments: [{ service: 'tree_shrub', palmCount: 4 }] }] };
+    expect(stampedTreeShrubPalmCountInBundle(bundle)).toBe(4);
+  });
+
+  test('reads a stamped count off a rowless split T&S card in services[]', () => {
+    const bundle = { services: [{ key: 'tree_shrub', frequencies: [{ key: 'standard', palmCount: 3 }] }] };
+    expect(stampedTreeShrubPalmCountInBundle(bundle)).toBe(3);
+  });
+
+  test('reads a stamped count off serviceCadenceCombos rows', () => {
+    const bundle = { serviceCadenceCombos: [{ perServiceTreatments: [{ service: 'tree_shrub', palmCount: 2 }] }] };
+    expect(stampedTreeShrubPalmCountInBundle(bundle)).toBe(2);
+  });
+
+  test('ignores non-T&S rows and invalid counts', () => {
+    const bundle = { frequencies: [{ perServiceTreatments: [
+      { service: 'pest_control', palmCount: 9 },
+      { service: 'tree_shrub', palmCount: 0 },
+    ] }] };
+    expect(stampedTreeShrubPalmCountInBundle(bundle)).toBeNull();
+    expect(stampedTreeShrubPalmCountInBundle(null)).toBeNull();
+  });
+});
