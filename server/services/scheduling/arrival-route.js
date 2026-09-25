@@ -11,7 +11,7 @@ const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 
@@ -207,7 +207,7 @@ function storedOrderStale(rows) {
  *  Genuinely unconstrained rows (no promise at all) still sort last, tied by
  *  created_at/id like the board. */
 function clockOrder(rows) {
-  return [...rows].sort((a, b) => {
+  const sorted = [...rows].sort((a, b) => {
     const sa = (a.arrivalRange || effectiveWindowRange(a))?.startMin ?? Infinity;
     const sb = (b.arrivalRange || effectiveWindowRange(b))?.startMin ?? Infinity;
     if (sa !== sb) return sa - sb;
@@ -216,6 +216,24 @@ function clockOrder(rows) {
     if (ca !== cb) return ca - cb;
     return String(a.id) < String(b.id) ? -1 : 1;
   });
+  // The simulation merges a same-customer co-visit only when the two rows
+  // are consecutive, so a sibling pulled apart by another customer's row
+  // on the created_at tiebreak would be driven to twice (Codex #4829 r4
+  // P1). Pull each sibling up to sit right after its chain.
+  const rangeFor = row => row.arrivalRange || effectiveWindowRange(row);
+  const ordered = [];
+  const remaining = [...sorted];
+  while (remaining.length) {
+    let last = remaining.shift();
+    ordered.push(last);
+    let i = remaining.findIndex(row => isCoVisitPair(rangeFor, last, row));
+    while (i >= 0) {
+      last = remaining.splice(i, 1)[0];
+      ordered.push(last);
+      i = remaining.findIndex(row => isCoVisitPair(rangeFor, last, row));
+    }
+  }
+  return ordered;
 }
 
 function routeDriveMinutes(stops, origin) {
@@ -641,4 +659,5 @@ module.exports = {
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
+  _internals: { clockOrder },
 };

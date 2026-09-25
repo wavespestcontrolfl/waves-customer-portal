@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { plannedWorkMinutes } = require('../services/scheduling/planning-minutes');
 const { workDuration } = require('../services/route-reorder-window-fit');
-const { evaluateArrivalPlacement } = require('../services/scheduling/arrival-route');
+const { evaluateArrivalPlacement, _internals: { clockOrder } } = require('../services/scheduling/arrival-route');
 const { ROUTE_WRITE_GUARD_COLUMNS } = require('../services/route-reorder');
 
 const date = '2027-01-15';
@@ -120,6 +120,19 @@ describe('stale stored order', () => {
     ];
     expect(evaluateArrivalPlacement(context(rows), options(16 * 60, 30)).routeOrder)
       .toEqual(['morning', 'afternoon', '__candidate__']);
+  });
+
+  test('clock order keeps a same-customer co-visit adjacent when another customer sorts between them', () => {
+    const at = (id, customer, created, lat, address) => ({ ...stop(id, 9 * 60, 60), customer_id: customer, visit_id: null,
+      created_at: created, lat, lng: -82.4, service_address_line1: address });
+    const rows = [
+      at('a-pest', 'cust-a', '2026-01-01T00:00:00Z', 27.44, '1 Main St'),
+      at('b', 'cust-b', '2026-01-02T00:00:00Z', 27.5, '2 Oak Ave'),
+      at('a-lawn', 'cust-a', '2026-01-03T00:00:00Z', 27.44, '1 Main St'),
+    ];
+    expect(clockOrder(rows).map(row => row.id)).toEqual(['a-pest', 'a-lawn', 'b']);
+    // A different customer at the same time is not pulled.
+    expect(clockOrder([rows[0], rows[1]]).map(row => row.id)).toEqual(['a-pest', 'b']);
   });
 
   test('a legacy time_window-only row is rescued into its REAL promised order, not left last by the board tiebreak', () => {
