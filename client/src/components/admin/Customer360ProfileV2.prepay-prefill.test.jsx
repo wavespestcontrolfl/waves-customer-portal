@@ -63,6 +63,30 @@ describe('AnnualPrepayServiceFields catalog load', () => {
   });
 });
 
+describe('AnnualPrepayServiceFields local options', () => {
+  const catalogFetch = (rows) => vi.fn(async (url) => new Response(JSON.stringify(
+    String(url).includes('/services/dropdown?') ? rows : {},
+  ), { status: 200 }));
+  const historyCustomer = { ...BASE_CUSTOMER, serviceTypes: 'Quarterly Tree & Shrub Care, Pest Control' };
+
+  it('drops a retired plan a non-holder only has in history, so the selector offers nothing the save refuses (codex r30 on #4786)', async () => {
+    vi.stubGlobal('fetch', catalogFetch([{ id: 'svc-pest', name: 'Pest Control', base_price: 999 }]));
+    renderModal({ customer: historyCustomer });
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/services/dropdown?'))).toBe(true));
+    await waitFor(() => expect(screen.getAllByRole('option').some((o) => o.textContent === 'Pest Control')).toBe(true));
+    expect(screen.queryAllByRole('option').some((o) => o.textContent === 'Quarterly Tree & Shrub Care')).toBe(false);
+  });
+
+  it('keeps the retired plan for the customer the sellable catalog says holds it', async () => {
+    vi.stubGlobal('fetch', catalogFetch([
+      { id: 'svc-pest', name: 'Pest Control', base_price: 999 },
+      { id: 'svc-tsq', service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care', retired_for_sale: true },
+    ]));
+    renderModal({ customer: historyCustomer });
+    await waitFor(() => expect(screen.queryAllByRole('option').some((o) => o.textContent === 'Quarterly Tree & Shrub Care')).toBe(true));
+  });
+});
+
 describe('estimateSuggestionMatchesService', () => {
   it('requires cadence-neutral label identity plus cadence and visit-count agreement', () => {
     expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control', 'quarterly', 4)).toBe(true);

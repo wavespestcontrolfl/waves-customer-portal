@@ -125,15 +125,20 @@ describe('service library list — new-appointment picker (codex r11)', () => {
         return this;
       },
     };
+    const rows = [
+      { id: '11111111-2222-4333-8444-555555555555', service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care' },
+      { id: 'live', service_key: 'tree_shrub_program', name: 'Bi-Monthly Tree & Shrub Care' },
+    ];
     const builder = {
       select() { return this; },
       orderBy() { return this; },
       where(arg) { if (typeof arg === 'function') { calls.whereFn += 1; arg.call(sub); } return this; },
+      then(resolve, reject) { return Promise.resolve(rows.map((r) => ({ ...r }))).then(resolve, reject); },
     };
     db.mockImplementation(() => builder);
     db.raw = (sql) => sql;
     const { getDropdown } = require('../services/service-library');
-    await getDropdown(opts);
+    calls.rows = await getDropdown(opts);
     return calls;
   };
 
@@ -181,6 +186,10 @@ describe('service library list — new-appointment picker (codex r11)', () => {
     expect(sellable.notIn).toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
     expect(sellable.exists).toContainEqual(['scheduled_services.customer_id', CUSTOMER]);
     expect(sellable.exists).toContain('scheduled_service_addons');
+    // Sellable results flag the retired row (a holder's grandfathered exception)
+    // so a selector can tell it apart; unfiltered results carry no flag (codex r30).
+    expect(sellable.rows.map((r) => [r.service_key, r.retired_for_sale])).toEqual([['tree_shrub_quarterly', true], ['tree_shrub_program', undefined]]);
+    expect(plain.rows.every((r) => r.retired_for_sale === undefined)).toBe(true);
     // The route hands the query flags through.
     const source = require('fs').readFileSync(require.resolve('../routes/admin-services'), 'utf8');
     expect(source).toMatch(/const \{ sellable, sellable_customer_id: sellableCustomerId \} = req\.query;\s*const rows = await serviceLibrary\.getDropdown\(\{ sellable, sellableCustomerId \}\);/);
@@ -306,6 +315,20 @@ describe('new-appointment write boundary (codex r12)', () => {
     expect(await ids([{ label: 'Tree & Shrub Care', recurrence: { pattern: 'bimonthly', intervalDays: null } }], { pattern: 'quarterly' })).toEqual([]);
     // A blank or malformed entry is ignored.
     expect(await ids([{ label: '', recurrence: { pattern: 'quarterly' } }, { label: null }, null], { pattern: 'quarterly' })).toEqual([]);
+  });
+
+  test('a pattern the scheduler cannot place reads as its ~quarterly fallback gap (codex r30)', async () => {
+    const ids = async (serviceTypes, recurrence) => (await run({ customerId: OTHER, serviceTypes, recurrence })).map((r) => r.id);
+    // nextRecurringDate schedules an unknown pattern, or custom with no
+    // interval, every 91 days — the retired cadence by another name.
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'foo' })).toEqual([RETIRED_ID]);
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'custom', intervalDays: null })).toEqual([RETIRED_ID]);
+    // Patterns the scheduler places keep their own meaning.
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'custom', intervalDays: 60 })).toEqual([]);
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'monthly_nth_weekday' })).toEqual([]);
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'seasonal_feb_oct' })).toEqual([]);
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'one_time' })).toEqual([]);
+    expect(await ids(['Quarterly Pest Control'], { pattern: 'foo' })).toEqual([]);
   });
 
   test('an ID-less legacy row still grandfathers by key snapshot or label, and an open reschedule counts (codex r24)', async () => {

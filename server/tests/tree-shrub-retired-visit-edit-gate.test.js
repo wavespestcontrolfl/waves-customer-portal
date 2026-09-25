@@ -73,7 +73,8 @@ describe('retiredGateInputsForVisitEdit', () => {
       current: { ...current, service_id: RETIRED_ID }, currentAddons: [], postedServiceId: LIVE_ID,
       postedAddons: [{ serviceId: RETIRED_ID, serviceName: 'Quarterly T&S' }, { serviceId: RETIRED_ID, serviceName: 'Quarterly T&S' }],
       serviceType: 'Quarterly Pest Control',
-    })).toEqual({ serviceIds: [LIVE_ID, RETIRED_ID], serviceTypes: [{ label: 'Quarterly T&S', recurrence: null }] });
+    // The newly added primary id carries the (unchanged) primary label too (codex r30).
+    })).toEqual({ serviceIds: [LIVE_ID, RETIRED_ID], serviceTypes: ['Quarterly Pest Control', { label: 'Quarterly T&S', recurrence: null }] });
     // A same-id posted primary takes the primary occurrence first, so the
     // stored add-on occurrence still covers the reposted add-on.
     expect(retiredGateInputsForVisitEdit({
@@ -129,6 +130,24 @@ describe('retiredGateInputsForVisitEdit', () => {
       postedServiceId: LIVE_ID, serviceType: 'Quarterly Pest Control',
       postedAddons: [{ submittedAddonId: 'a1', serviceId: RETIRED_ID, serviceName: 'Quarterly T&S', recurringPattern: null }],
     })).toEqual({ serviceIds: [RETIRED_ID], serviceTypes: [{ label: 'Quarterly T&S', recurrence: null }] });
+  });
+
+  test('a newly added primary id carries the primary label, renamed or not (codex r30)', () => {
+    // The live 6x row swapped in under an unchanged generic label with a
+    // quarterly cadence: the label goes through so the route's own cadence
+    // words make it the retired plan.
+    const generic = { ...current, service_id: RETIRED_ID, service_type: 'Tree & Shrub', is_recurring: true, recurring_pattern: 'quarterly' };
+    expect(retiredGateInputsForVisitEdit({
+      current: generic, currentAddons: [], postedServiceId: LIVE_ID, postedAddons: null, serviceType: 'Tree & Shrub',
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: ['Tree & Shrub'] });
+    // No label posted: the stored one rides along.
+    expect(retiredGateInputsForVisitEdit({
+      current: generic, currentAddons: [], postedServiceId: LIVE_ID, postedAddons: null, serviceType: undefined,
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: ['Tree & Shrub'] });
+    // Renamed AND added: the label goes through once.
+    expect(retiredGateInputsForVisitEdit({
+      current: generic, currentAddons: [], postedServiceId: LIVE_ID, postedAddons: null, serviceType: 'Quarterly Trees & Shrubs',
+    })).toEqual({ serviceIds: [LIVE_ID], serviceTypes: ['Quarterly Trees & Shrubs'] });
   });
 
   test('an added catalog-backed add-on reaches the gate by name + its own cadence too (codex r29)', () => {

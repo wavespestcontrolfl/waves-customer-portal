@@ -24,6 +24,12 @@ const MONTH_RECURRENCE_INTERVALS = {
 
 // Day-gap patterns (month patterns above walk calendar months instead).
 const DAY_RECURRENCE_INTERVALS = { daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42 };
+// The gap nextRecurringDate falls back to for a pattern it cannot place —
+// an unknown value, or 'custom' with no interval. Roughly quarterly, so a
+// retired-plan gate must read that fallback as quarterly evidence (codex r30
+// on #4786) rather than let an unrecognized pattern schedule the retired
+// four-visit cadence unnoticed.
+const FALLBACK_RECURRENCE_GAP_DAYS = 91;
 
 const DEFAULT_WEEKEND_SHIFT = 'forward';
 
@@ -305,20 +311,30 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
 
-  const gap = pattern === 'custom' && intNum ? Math.max(1, intNum) : (DAY_RECURRENCE_INTERVALS[pattern] || 91);
+  const gap = pattern === 'custom' && intNum ? Math.max(1, intNum) : (DAY_RECURRENCE_INTERVALS[pattern] || FALLBACK_RECURRENCE_GAP_DAYS);
   return etDateString(addETDays(base, gap * i));
+}
+
+// Does nextRecurringDate place this stored pattern on its own terms (a month
+// walk, a day gap, the nth-weekday walk, the season, or a custom interval)?
+// Anything else schedules at FALLBACK_RECURRENCE_GAP_DAYS.
+function schedulerPlacesPattern(pattern) {
+  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT || pattern === 'custom'
+    || !!MONTH_RECURRENCE_INTERVALS[pattern] || Object.prototype.hasOwnProperty.call(DAY_RECURRENCE_INTERVALS, pattern);
 }
 
 // The nominal day gap of a stored series' recurrence, for cadence math that
 // reads a series (the overdue scan) — never for scheduling, which walks
-// calendar months above. A custom or bare interval is its own gap; a month
-// pattern is months × 30 (bimonthly 60, quarterly 90, semiannual 180); a
-// day-gap pattern reads the table; anything else (seasonal, unknown) is null
-// so the caller falls back to its own default.
+// calendar months above. A 'custom' interval is its own gap (a bare interval
+// under a null pattern is NOT: lineDueOnRecurringDate rides every parent
+// occurrence when no pattern is stored, whatever the interval column says —
+// codex r30 on #4786); a month pattern is months × 30 (bimonthly 60,
+// quarterly 90, semiannual 180); a day-gap pattern reads the table; anything
+// else (seasonal, unknown, null) is null so the caller falls back to its own
+// default.
 function intervalDaysForPattern(pattern, intervalDays = null) {
   const interval = Number.parseInt(intervalDays, 10);
-  const hasInterval = Number.isInteger(interval) && interval > 0;
-  if ((!pattern || pattern === 'custom') && hasInterval) return interval;
+  if (pattern === 'custom' && Number.isInteger(interval) && interval > 0) return interval;
   if (MONTH_RECURRENCE_INTERVALS[pattern]) return MONTH_RECURRENCE_INTERVALS[pattern] * 30;
   return DAY_RECURRENCE_INTERVALS[pattern] || null;
 }
@@ -1472,6 +1488,8 @@ module.exports = {
   seriesCreateLockKeys,
   inferRecurringPattern,
   intervalDaysForPattern,
+  schedulerPlacesPattern,
+  FALLBACK_RECURRENCE_GAP_DAYS,
   SEASONAL_FEB_OCT,
   seasonalFebOctDate,
   clampDateToSeason,

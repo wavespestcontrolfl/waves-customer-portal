@@ -11807,6 +11807,7 @@ function retiredGateInputsForVisitEdit({
   const named = (l) => typeof l.serviceName === 'string' && !!l.serviceName.trim();
   const labelOf = (l) => ({ label: l.serviceName.trim(), recurrence: addonLineRecurrence(l) });
   const renamed = typeof serviceType === 'string' && !!serviceType.trim() && norm(serviceType) !== norm(current.service_type);
+  const primaryLabel = typeof serviceType === 'string' && serviceType.trim() ? serviceType : (current.service_type || null);
   const pairs = (l, a) => (l.serviceId
     ? String(a?.service_id || '') === String(l.serviceId)
     : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName)));
@@ -11897,7 +11898,11 @@ function retiredGateInputsForVisitEdit({
       ...repatterned.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
     ])],
     serviceTypes: [
-      ...(renamed ? [serviceType] : []),
+      // A renamed primary, or a primary whose catalog id is newly added
+      // (codex r30: the live 6x row swapped in under an unchanged generic
+      // "Tree & Shrub" label with a quarterly cadence), goes through by
+      // label — the route appends the visit's own cadence to plain labels.
+      ...(renamed || primaryAddedIds.length ? [primaryLabel].filter(Boolean) : []),
       // Every added line's label rides with its own cadence, catalog-backed
       // or not (codex r29): a live 6x T&S row added with a quarterly
       // pattern is the retired plan by name + cadence while its id is live —

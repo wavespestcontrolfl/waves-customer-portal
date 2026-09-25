@@ -548,7 +548,7 @@ async function findOverdueCustomers(input) {
     pest: 90,        // quarterly
     lawn: 30,        // monthly
     mosquito: 21,    // every 3 weeks
-    tree_shrub: 42,  // SQL prefilter = shortest live cadence; per customer below
+    tree_shrub: 42,  // catalog-key floor only; the SQL prefilter uses the shortest cadence a plan line can run at (below)
     termite: 365,    // annual
   };
   // T&S runs at the customer's own cadence (6x default, 9x upsell,
@@ -611,7 +611,11 @@ async function findOverdueCustomers(input) {
     // The prefilter boundary on the same Eastern calendar the per-customer
     // filter below uses, INCLUSIVE: a customer served exactly
     // baseFreq + overdue_days days ago is due today (codex r23 on #4786).
-    const cutoffEt = etDateString(addETDays(new Date(), -(baseFreq + overdue_days)));
+    // T&S plan lines run at any supported recurrence (daily is the shortest —
+    // codex r30 on #4786), so the prefilter must not drop a row the
+    // per-customer cadence check below can mark overdue.
+    const prefilterDays = cat === 'tree_shrub' ? intervalDaysForPattern('daily') : baseFreq;
+    const cutoffEt = etDateString(addETDays(new Date(), -(prefilterDays + overdue_days)));
 
     let customersQuery = db('customers')
       .select(
@@ -636,11 +640,12 @@ async function findOverdueCustomers(input) {
           -- Plan carried as an add-on line of a combined recurring visit (a
           -- one_time add-on line is not a plan — service-library's
           -- ADDON_LINE_IS_PLAN_SQL, codex r18 on #4786). A line with no
-          -- cadence of its own rides the parent's.
+          -- pattern of its own rides the parent's, whatever its interval
+          -- column says (lineDueOnRecurringDate — codex r30).
           SELECT services.service_key, scheduled_services.scheduled_date,
-              CASE WHEN scheduled_service_addons.recurring_pattern IS NULL AND scheduled_service_addons.recurring_interval_days IS NULL
+              CASE WHEN scheduled_service_addons.recurring_pattern IS NULL
                 THEN scheduled_services.recurring_pattern ELSE scheduled_service_addons.recurring_pattern END AS recurring_pattern,
-              CASE WHEN scheduled_service_addons.recurring_pattern IS NULL AND scheduled_service_addons.recurring_interval_days IS NULL
+              CASE WHEN scheduled_service_addons.recurring_pattern IS NULL
                 THEN scheduled_services.recurring_interval_days ELSE scheduled_service_addons.recurring_interval_days END AS recurring_interval_days
             FROM scheduled_service_addons
             JOIN scheduled_services ON scheduled_services.id = scheduled_service_addons.scheduled_service_id

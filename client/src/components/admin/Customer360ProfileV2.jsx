@@ -147,6 +147,7 @@ import {
   CONSENT_VERSION,
 } from "../../lib/paymentMethodConsentText";
 import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
+import { labelNamesRetiredSale } from "../../constants/retiredSaleLabels";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
@@ -3779,7 +3780,12 @@ function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange, cust
     return () => { cancelled = true; };
   }, [customerId]);
 
-  const options = [...serviceOptions];
+  // Locally derived options (history, prior plans, old terms) can still name
+  // the retired plan for a customer who no longer holds it; the sellable
+  // catalog carries the retired row only for a holder (retired_for_sale), so
+  // drop those labels unless it does (codex r30 on #4786).
+  const holdsRetired = catalog.some((service) => service?.retired_for_sale === true);
+  const options = serviceOptions.filter((option) => holdsRetired || !labelNamesRetiredSale(option.value));
   for (const service of catalog) {
     if (service.name && !options.some((option) => option.value === service.name)) {
       options.push({ value: service.name, label: service.name });

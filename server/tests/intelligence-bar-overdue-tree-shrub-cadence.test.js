@@ -108,7 +108,9 @@ test('the plan line\'s own recurrence outranks its catalog default (codex r28)',
   db.__state.rows = [
     // tree_shrub_program customized to every 42 days: due at 42, not the row's 60.
     { ...row('custom-42', 'Tree & Shrub', 45), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'custom', recurring_interval_days: 42 } },
-    // A bare interval with no pattern reads the same way.
+    // A bare interval under a null pattern is NOT a cadence: the line rides
+    // every parent occurrence (lineDueOnRecurringDate), so the catalog
+    // default stands (codex r30).
     { ...row('bare-42', 'Tree & Shrub', 45), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: null, recurring_interval_days: 42 } },
     // A stored pattern wins over a stale interval and over the catalog key.
     { ...row('pattern-quarterly', 'Tree & Shrub', 70), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'quarterly', recurring_interval_days: 42 } },
@@ -117,7 +119,7 @@ test('the plan line\'s own recurrence outranks its catalog default (codex r28)',
     { ...row('catalog-60', 'Tree & Shrub', 45), active_plan: JSON.stringify({ service_key: 'tree_shrub_program', recurring_pattern: null, recurring_interval_days: null }) },
   ];
   const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
-  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['bare-42', 42], ['custom-42', 42]]);
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['custom-42', 42]]);
 });
 
 test('every supported recurrence resolves through the seeder\'s own table (codex r29)', async () => {
@@ -134,7 +136,7 @@ test('every supported recurrence resolves through the seeder\'s own table (codex
   expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['biweekly-due', 14], ['seasonal-catalog', 42], ['semiannual-due', 180]]);
   const { intervalDaysForPattern } = require('../services/recurring-appointment-seeder');
   expect([['custom', 45], [null, 42], ['quarterly', 42], ['bimonthly', null], ['every_6_weeks', null], ['weekly', null], ['annual', null], ['seasonal_feb_oct', null], ['custom', null]]
-    .map(([pattern, interval]) => intervalDaysForPattern(pattern, interval))).toEqual([45, 42, 90, 60, 42, 7, 360, null, null]);
+    .map(([pattern, interval]) => intervalDaysForPattern(pattern, interval))).toEqual([45, null, 90, 60, 42, 7, 360, null, null]);
 });
 
 test('other categories keep their fixed interval', async () => {
@@ -168,7 +170,9 @@ test('a one_time T&S add-on line is not the customer\'s active plan (codex r18)'
   // The plan row carries its own recurrence; an add-on line without one rides the parent's (codex r28).
   expect(planSql).toContain('row_to_json(plan)');
   expect(planSql).toContain('scheduled_services.recurring_pattern, scheduled_services.recurring_interval_days');
-  expect(planSql).toMatch(/CASE WHEN scheduled_service_addons\.recurring_pattern IS NULL AND scheduled_service_addons\.recurring_interval_days IS NULL\s+THEN scheduled_services\.recurring_pattern ELSE scheduled_service_addons\.recurring_pattern END AS recurring_pattern/);
+  // An add-on with no pattern rides the parent whatever its interval column says (codex r30).
+  expect(planSql).toMatch(/CASE WHEN scheduled_service_addons\.recurring_pattern IS NULL\s+THEN scheduled_services\.recurring_pattern ELSE scheduled_service_addons\.recurring_pattern END AS recurring_pattern/);
+  expect(planSql).not.toMatch(/recurring_pattern IS NULL AND scheduled_service_addons\.recurring_interval_days IS NULL/);
   expect(planSql).not.toMatch(/JOIN services ON services\.id = scheduled_service/);
 });
 
@@ -236,15 +240,29 @@ test('the paged T&S read orders by a unique tie-breaker after the last-service d
   expect(db.__state.orderBy).toMatch(/\) ASC, customers\.id ASC$/);
 });
 
-test('the SQL prefilter admits a customer due exactly at the cadence cutoff, on the Eastern calendar (codex r23)', async () => {
-  // 16:00Z on Sept 25 is Sept 25 ET; 42 days before is Aug 14 — inclusive.
+test('the SQL prefilter admits a customer due exactly at the shortest supported cadence, on the Eastern calendar (codex r23/r30)', async () => {
+  // A T&S plan line can run daily (the seeder's shortest gap), so the
+  // prefilter keeps every row the per-customer cadence check can mark
+  // overdue: 16:00Z on Sept 25 is Sept 25 ET; one day before is Sept 24 — inclusive.
   db.__state.rows = [];
   db.__state.having = null;
   await executeTool('find_overdue_customers', { service_category: 'tree_shrub', overdue_days: 0 });
   expect(db.__state.having[0]).toMatch(/\) <= \?$/);
-  expect(db.__state.having[1][1]).toBe('2026-08-14');
+  expect(db.__state.having[1][1]).toBe('2026-09-24');
   // 21:00 ET on Sept 25 (Sept 26 UTC): still Sept 25 on the Eastern calendar.
   jest.setSystemTime(new Date('2026-09-26T01:00:00Z'));
   await executeTool('find_overdue_customers', { service_category: 'tree_shrub', overdue_days: 3 });
-  expect(db.__state.having[1][1]).toBe('2026-08-11');
+  expect(db.__state.having[1][1]).toBe('2026-09-21');
+  // Other categories keep their own cadence as the prefilter.
+  jest.setSystemTime(NOW);
+  await executeTool('find_overdue_customers', { service_category: 'pest', overdue_days: 0 });
+  expect(db.__state.having[1][1]).toBe('2026-06-27');
+});
+
+test('a weekly T&S plan is reported at its own cadence, not held back to 42 days (codex r30)', async () => {
+  db.__state.rows = [
+    { ...row('weekly-due', 'Tree & Shrub', 8), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'weekly', recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days, c.days_overdue])).toEqual([['weekly-due', 7, 1]]);
 });

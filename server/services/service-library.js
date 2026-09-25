@@ -439,9 +439,21 @@ function whereCustomerHoldsService(qb, customerId) {
 // "Quarterly Tree & Shrub Care" does. Null when nothing structured was posted.
 function recurrenceWords(recurrence) {
   if (!recurrence || typeof recurrence !== 'object') return '';
-  const pattern = typeof recurrence.pattern === 'string' ? recurrence.pattern.trim().replace(/_/g, ' ') : '';
+  const rawPattern = typeof recurrence.pattern === 'string' ? recurrence.pattern.trim() : '';
   const days = Number.parseInt(recurrence.intervalDays, 10);
-  return [pattern, Number.isInteger(days) && days > 0 ? `every ${days} days` : ''].filter(Boolean).join(' ');
+  const hasDays = Number.isInteger(days) && days > 0;
+  // A pattern the scheduler cannot place — an unknown value, or 'custom'
+  // with no interval — runs at nextRecurringDate's fallback gap (~quarterly),
+  // so it reads as that gap here: a generic Tree & Shrub label under pattern
+  // 'foo' is the retired four-visit plan by another name (codex r30 on
+  // #4786). one_time is not a series and carries no cadence.
+  const { schedulerPlacesPattern, FALLBACK_RECURRENCE_GAP_DAYS } = require('./recurring-appointment-seeder');
+  const fallsBack = rawPattern && rawPattern !== 'one_time'
+    && (!schedulerPlacesPattern(rawPattern) || (rawPattern === 'custom' && !hasDays));
+  return [
+    rawPattern.replace(/_/g, ' '),
+    hasDays ? `every ${days} days` : (fallsBack ? `every ${FALLBACK_RECURRENCE_GAP_DAYS} days` : ''),
+  ].filter(Boolean).join(' ');
 }
 
 /**
@@ -798,10 +810,16 @@ async function getDropdown({ sellable = false, sellableCustomerId = null } = {})
     .where({ is_active: true, is_archived: false });
   // A plan selector (annual prepay) offers only what its save accepts: the
   // same sellable, customer-scoped filter the booking pickers read.
-  if (sellable === true || sellable === 'true') query = applySellableFilter(query, sellableCustomerId);
-  return query
+  const filtered = sellable === true || sellable === 'true';
+  if (filtered) query = applySellableFilter(query, sellableCustomerId);
+  const rows = await query
     .orderBy('sort_order', 'asc')
     .orderBy('name', 'asc');
+  if (!filtered) return rows;
+  // Flag the grandfathered exception rows, as getServices does, so a selector
+  // can tell "this customer holds the retired plan" from "it is not offered".
+  const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
+  return rows.map((s) => (RETIRED_SALE_SERVICE_KEYS.has(s.service_key) ? { ...s, retired_for_sale: true } : s));
 }
 
 /**

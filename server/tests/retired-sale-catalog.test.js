@@ -103,3 +103,18 @@ describe('retiredSaleKeyForLabel — free-text labels', () => {
     }
   });
 });
+
+describe('client mirror of the label matcher (codex r30)', () => {
+  test('client/src/constants/retiredSaleLabels.js carries the same three regexes', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const read = (file) => fs.readFileSync(path.join(__dirname, '..', '..', file), 'utf8');
+    const literal = (source, name) => source.match(new RegExp(`const ${name} = (/.*/i);`))?.[1];
+    const server = read('server/services/pricing-engine/retired-sale-catalog.js');
+    const client = read('client/src/constants/retiredSaleLabels.js');
+    for (const name of ['TREE_SHRUB_LABEL_RE', 'QUARTERLY_CADENCE_RE', 'LIGHT_TIER_RE']) {
+      expect(literal(server, name)).toBeTruthy();
+      expect(literal(client, name)).toBe(literal(server, name));
+    }
+  });
+});
