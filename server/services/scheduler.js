@@ -96,6 +96,14 @@ async function resolveScheduledRecipient(msg, claimMeta) {
   }
 }
 
+function canReplayBillingWithoutPhone(msg, claimMeta) {
+  return Boolean(msg.customer_id
+    && (!String(msg.to_phone || '').trim() || (claimMeta?.refresh_customer_phone === true
+      && claimMeta.recipient_identity_unverified !== true && claimMeta.explicit_recipient !== true))
+    && ['invoice', 'payment_issue', 'billing', 'payment_receipt']
+      .includes(claimMeta?.billingDeliveryCategory));
+}
+
 // Deposit-receipt replays re-check payment_receipt_channel at send time —
 // the immediate send honors the channel choice, and a customer who switches
 // to email-only between the hold and scheduled_for must not be texted by the
@@ -3848,7 +3856,7 @@ function initScheduledJobs() {
           }
 
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
-          if (!toPhone) {
+          if (!toPhone && !canReplayBillingWithoutPhone(msg, claimMeta)) {
             // Refresh-required row whose current customer phone can't be
             // verified right now — retry on the bounded attempt rail rather
             // than sending to the frozen snapshot under customer trust.
@@ -7078,6 +7086,7 @@ module.exports = {
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,
+  canReplayBillingWithoutPhone,
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
   holdFinalReviewUncertainty,

@@ -266,6 +266,7 @@ class PaymentExpiry {
         const { daysUntil, expired } = require('../autopay-notifications')
           .cardExpiryOutlook(card.exp_year, card.exp_month, now);
         const reminderStage = expired ? 'expired' : (daysUntil <= 7 ? '7_day' : (daysUntil <= 30 ? '30_day' : '60_day'));
+        const notificationEventKey = `payment-expiry:${card.id}:${card.exp_month}:${card.exp_year}:${reminderStage}`;
 
         const emailPromise = reminderStage === '60_day' ? Promise.resolve() : PaymentLifecycleEmail.sendPaymentMethodExpiring({
           customerId: card.customer_id,
@@ -282,11 +283,13 @@ class PaymentExpiry {
           if (!routesEmail && billingChannelAllowed(prefs || {}, 'billing', 'push') !== true) { await emailPromise; continue; }
         }
 
-        // Keep each escalation reachable: a 30-day notice must not suppress
-        // the distinct 7-day stage roughly three weeks later.
+        // Only an accepted Text for this method and stage starts its cooldown.
+        // App and Email retain their provider event-key deduplication.
         const cooldownDays = reminderStage === '7_day' ? 7 : 30;
         const recentNotice = await db('sms_log')
           .where({ customer_id: card.customer_id, message_type: 'payment_expiry' })
+          .whereIn('status', ['sent', 'delivered'])
+          .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
           .where('created_at', '>', db.raw("NOW() - (? * INTERVAL '1 day')", [cooldownDays]))
           .first();
 
@@ -318,7 +321,7 @@ class PaymentExpiry {
           metadata: {
             original_message_type: 'payment_expiry',
             billingDeliveryCategory: 'billing',
-            notificationEventKey: `payment-expiry:${card.id}:${card.exp_month}:${card.exp_year}:${reminderStage}`,
+            notificationEventKey,
             billing_mode_at_send: require('../billing-lane').resolveBillingLane(customer).mode,
             customerLocationId: customer.location_id,
           },

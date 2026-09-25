@@ -809,6 +809,7 @@ const TwilioService = {
 
       const providerSmsMetadata = () => ({
         pre_handoff_stamp: true,
+        ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
         ...(isKnownOwnerPhone(to) ? { to_owner_phone_at_send: true } : {}),
         ...(options.media ? { media: options.media } : {}),
         ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
@@ -1258,6 +1259,7 @@ const TwilioService = {
           // the carrier verdict).
           metadata: JSON.stringify({
             pre_handoff_stamp: true,
+            ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
             ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
             ...(options.media ? { media: options.media } : {}),
             ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),

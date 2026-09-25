@@ -38,6 +38,9 @@ jest.mock('../services/workflows/balance-reminder', () => ({
 jest.mock('../services/stripe', () => ({
   isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false),
 }));
+jest.mock('../services/collections/contact-policy', () => ({
+  evaluate: jest.fn(async () => ({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-1'] })),
+}));
 jest.mock('../services/microdeposit-verification-email', () => ({
   sendMicrodepositVerificationEmail: jest.fn(async () => ({ ok: true })),
 }));
@@ -47,6 +50,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const BalanceReminder = require('../services/workflows/balance-reminder');
 const StripeService = require('../services/stripe');
+const ContactPolicy = require('../services/collections/contact-policy');
 const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
 const ContactLedger = require('../services/collections/contact-ledger');
 const LatePaymentChecker = require('../services/late-payment-checker');
@@ -112,6 +116,40 @@ describe('late-payment micro-deposit diversion', () => {
     ContactLedger.claimAttempt.mockReset().mockResolvedValue({ allowed: true });
   });
   afterEach(() => jest.useRealTimers());
+
+  test.each([
+    { channels: ['push'], phone: null, expectedPolicies: ['push'] },
+    { channels: ['push', 'sms'], phone: '+19415550101', expectedPolicies: ['push', 'sms'] },
+  ])('selected App re-nudge survives do_not_text for $channels', async ({ channels, phone, expectedPolicies }) => {
+    const savedGate = process.env.GATE_COLLECTIONS_POLICY;
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    try {
+      StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+      ContactPolicy.evaluate.mockImplementation(async (_customerId, { channel }) => channel === 'sms'
+        ? { allowed: false, denialReasons: ['flag_do_not_text'], eligibleInvoiceIds: ['inv-1'] }
+        : { allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-1'] });
+      ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+      setDbQueues({
+        invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+        activity_log: [chain({ first: null }), chain()],
+        customers: [chain({ first: { ...customer, phone } })],
+        notification_prefs: [chain({ first: { payment_issue_channels: channels } })],
+      });
+
+      expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
+      expect(ContactPolicy.evaluate.mock.calls.map(([, args]) => args.channel)).toEqual(expectedPolicies);
+      expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['push']);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
+        to: phone,
+        metadata: { billingDeliveryLeg: 'push', billingDeliveryCategory: 'payment_issue' },
+      });
+      expect(sendMicrodepositVerificationEmail).not.toHaveBeenCalled();
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_COLLECTIONS_POLICY;
+      else process.env.GATE_COLLECTIONS_POLICY = savedGate;
+    }
+  });
 
   test('sends the verification re-nudge (not the overdue dunning) for a micro-deposit-blocked invoice', async () => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
@@ -213,7 +251,7 @@ describe('late-payment micro-deposit diversion', () => {
     expect(activityInsert.insert).not.toHaveBeenCalled();
   });
 
-  test('retries only the pending verification Email after accepted Text', async () => {
+  test.each(['sms', 'push'])('retries only pending verification Email after accepted %s', async (channel) => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
     sendMicrodepositVerificationEmail
       .mockResolvedValueOnce({ ok: false, skipped: true, reason: 'template_unavailable', deliveryOutcome: 'uncertain' })
@@ -223,11 +261,12 @@ describe('late-payment micro-deposit diversion', () => {
       invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: null }), activityInsert],
       customers: [chain({ first: customer })],
-      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', channel] } })],
     });
     expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
     const pending = JSON.parse(activityInsert.insert.mock.calls[0][0].metadata);
-    expect(pending).toMatchObject({ pendingEmail: true, channel: 'sms', tierDays: 14 });
+    expect(pending).toMatchObject({ pendingEmail: true, channel: channel === 'push' ? 'app' : 'sms', tierDays: 14 });
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.billingDeliveryLeg).toBe(channel);
 
     jest.setSystemTime(new Date('2026-06-15T14:00:00.000Z'));
     const completion = chain();
@@ -235,7 +274,7 @@ describe('late-payment micro-deposit diversion', () => {
       invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: { id: 'activity-1', metadata: pending } }), completion],
       customers: [chain({ first: customer })],
-      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', channel] } })],
     });
     expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -244,6 +283,7 @@ describe('late-payment micro-deposit diversion', () => {
       expect.objectContaining({ touchKey: '14d' }),
     );
     expect(completion.update).toHaveBeenCalled();
+    expect(completion.update.mock.calls[0][0].metadata.bindings).toEqual([`${pending.channel}+email`]);
   });
 
   test('a failed verification ledger read holds the reminder instead of opening a new tier', async () => {
@@ -262,7 +302,7 @@ describe('late-payment micro-deposit diversion', () => {
     expect(ContactLedger.recordContact).not.toHaveBeenCalled();
   });
 
-  test('recovers a failed 14-day verification Email from ledger at 30 days without repeating Text', async () => {
+  test.each(['sms', 'push'])('recovers 14-day verification Email from accepted %s ledger', async (channel) => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
     sendMicrodepositVerificationEmail
       .mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable' })
@@ -273,7 +313,7 @@ describe('late-payment micro-deposit diversion', () => {
       invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: null }), failedInsert],
       customers: [chain({ first: customer })],
-      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', channel] } })],
     });
     await LatePaymentChecker.checkAndNotify();
 
@@ -285,11 +325,11 @@ describe('late-payment micro-deposit diversion', () => {
       invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: null })],
       collections_contact_ledger: [chain({ result: [
-        { id: 'sms-14', channel: 'sms', idempotency_key: 'late_payment_checker:microdeposit:inv-1:14:sms', metadata: { delivered: true } },
+        { id: `${channel}-14`, channel, idempotency_key: `late_payment_checker:microdeposit:inv-1:14:${channel}`, metadata: { delivered: true } },
         { id: 'email-14', channel: 'email', idempotency_key: 'late_payment_checker:microdeposit:inv-1:14:email', metadata: { send_failed: true } },
       ] })],
       customers: [chain({ first: customer })],
-      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', channel] } })],
     });
     expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);

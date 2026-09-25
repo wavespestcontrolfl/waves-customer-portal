@@ -120,6 +120,7 @@ describe('PaymentExpiry.checkExpiringCards routing outcome', () => {
 
   test.each(['email', 'push'])('7-day %s delivery records its actual channel and uses the stage cooldown', async (channel) => {
     const interactionInsert = jest.fn(async () => [1]);
+    const cooldownQuery = query([], { first: null });
     paymentExpiry.resolveAlertsForExemptCustomers = jest.fn(async () => {});
     require('../services/messaging/send-customer-message').sendCustomerMessage
       .mockResolvedValueOnce({ sent: true, channel, deliveryOutcome: 'accepted' });
@@ -132,7 +133,7 @@ describe('PaymentExpiry.checkExpiringCards routing outcome', () => {
       if (table === 'customers') return query([], { first: {
         id: 'cust-1', first_name: 'Pat', last_name: 'Customer', phone: '+19415550100', billing_mode: null,
       } });
-      if (table === 'sms_log') return query([], { first: null });
+      if (table === 'sms_log') return cooldownQuery;
       if (table === 'inventory_alerts') return query();
       if (table === 'customer_interactions') return query([], { insert: interactionInsert });
       throw new Error(`Unexpected table ${table}`);
@@ -140,6 +141,8 @@ describe('PaymentExpiry.checkExpiringCards routing outcome', () => {
 
     await expect(paymentExpiry.checkExpiringCards()).resolves.toMatchObject({ notified: 1 });
     expect(db.raw).toHaveBeenCalledWith("NOW() - (? * INTERVAL '1 day')", [7]);
+    expect(cooldownQuery.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered']);
+    expect(cooldownQuery.whereRaw).toHaveBeenCalledWith("metadata->>'notificationEventKey' = ?", ['payment-expiry:pm-1:9:2026:7_day']);
     expect(interactionInsert).toHaveBeenCalledWith(expect.objectContaining({
       interaction_type: `${channel}_outbound`, channel,
     }));

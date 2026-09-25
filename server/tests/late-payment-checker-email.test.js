@@ -337,7 +337,7 @@ describe('late-payment checker email sidecar', () => {
     expect(result.skipped).toBe(1);
   });
 
-  test('retries only a pending selected Email after accepted Text, preserving the original tier', async () => {
+  test.each(['sms', 'push'])('retries only pending selected Email after accepted %s, preserving the tier', async (channel) => {
     const invoice = {
       id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
       status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
@@ -352,11 +352,12 @@ describe('late-payment checker email sidecar', () => {
       invoices: [chain({ result: [invoice] }), ...Array(3).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
       activity_log: [chain({ first: null }), chain({ result: [] }), activityInsert],
       customers: [chain({ first: customer })],
-      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', channel] } })],
     });
     expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
     const pending = JSON.parse(activityInsert.insert.mock.calls[0][0].metadata);
-    expect(pending).toMatchObject({ pendingEmail: true, channel: 'sms', tierDays: 14 });
+    expect(pending).toMatchObject({ pendingEmail: true, channel: channel === 'push' ? 'app' : 'sms', tierDays: 14 });
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.billingDeliveryLeg).toBe(channel);
 
     jest.setSystemTime(new Date('2026-06-15T14:00:00.000Z'));
     const completion = chain();
@@ -364,7 +365,7 @@ describe('late-payment checker email sidecar', () => {
       invoices: [chain({ result: [invoice] }), ...Array(3).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
       activity_log: [chain({ first: { id: 'activity-1', metadata: pending } }), completion],
       customers: [chain({ first: customer })],
-      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', channel] } })],
     });
     expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -373,6 +374,7 @@ describe('late-payment checker email sidecar', () => {
       expect.objectContaining({ smsTemplateKey: 'late_payment_14d' }),
     );
     expect(completion.update).toHaveBeenCalled();
+    expect(completion.update.mock.calls[0][0].metadata.bindings).toEqual([`${pending.channel}+email`]);
   });
 
   test('holds a pending Email whose prior provider outcome was not stamped as failed', async () => {
@@ -398,7 +400,7 @@ describe('late-payment checker email sidecar', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('recovers the 14-day Email from ledger after its activity write fails, without a 30-day Text', async () => {
+  test.each(['sms', 'push'])('recovers 14-day Email from accepted %s ledger after activity write fails', async (channel) => {
     const invoice = {
       id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
       status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
@@ -414,7 +416,7 @@ describe('late-payment checker email sidecar', () => {
       invoices: [chain({ result: [invoice] }), ...Array(3).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
       activity_log: [chain({ first: null }), chain({ result: [] }), failedInsert],
       customers: [chain({ first: customer })],
-      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', channel] } })],
     });
     await LatePaymentChecker.checkAndNotify();
 
@@ -426,11 +428,11 @@ describe('late-payment checker email sidecar', () => {
       invoices: [chain({ result: [invoice] }), ...Array(3).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
       activity_log: [chain({ first: null }), chain({ result: [] })],
       collections_contact_ledger: [chain({ result: [
-        { id: 'sms-14', channel: 'sms', idempotency_key: 'late_payment_checker:inv-1:14:sms', metadata: { delivered: true } },
+        { id: `${channel}-14`, channel, idempotency_key: `late_payment_checker:inv-1:14:${channel}`, metadata: { delivered: true } },
         { id: 'email-14', channel: 'email', idempotency_key: 'late_payment_checker:inv-1:14:email', metadata: { send_failed: true } },
       ] })],
       customers: [chain({ first: customer })],
-      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', channel] } })],
     });
     expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 1 });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
