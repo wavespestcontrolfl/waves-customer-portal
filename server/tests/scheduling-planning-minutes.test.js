@@ -107,6 +107,24 @@ describe('stale stored order', () => {
     expect(evaluateArrivalPlacement(context(rows), options(16 * 60, 30)).routeOrder)
       .toEqual(['morning', 'afternoon', '__candidate__']);
   });
+
+  test('a legacy time_window-only row is rescued into its REAL promised order, not left last by the board tiebreak', () => {
+    // Both rows carry time_window only (no window_start), the pattern the
+    // dispatch-board sort (currentOrder) always reads as unconstrained and
+    // sorts last — so nulling route_order and re-running currentOrder (the
+    // old clockOrder) reproduced the exact same inverted order it was
+    // rescuing (Codex r1 P1). afternoon (route_order 1) before morning
+    // (route_order 2) misses morning's own 08:00-12:00 promise once
+    // afternoon's 60-minute job runs first; only sorting the fallback by the
+    // REAL resolved window (effectiveWindowRange) rescues it.
+    const legacy = (id, timeWindow, routeOrder) => ({ id, technician_id: 'tech', scheduled_date: date,
+      lat: 27.44, lng: -82.4, status: 'confirmed', time_window: timeWindow, estimated_duration_minutes: 60,
+      service_type: 'Mosquito', route_order: routeOrder, created_at: '2020-01-01T00:00:00Z' });
+    const rows = [legacy('afternoon', 'afternoon', 1), legacy('morning', 'morning', 2)];
+    const fit = evaluateArrivalPlacement(context(rows), options(16 * 60, 30));
+    expect(fit.feasible).toBe(true);
+    expect(fit.routeOrder).toEqual(['morning', 'afternoon', '__candidate__']);
+  });
 });
 
 describe('day_overcommitted', () => {
@@ -126,5 +144,36 @@ describe('day_overcommitted', () => {
     const rows = [stop('long', 9 * 60, 60, { route_order: 1, estimated_duration_minutes: 200 })];
     const fit = evaluateArrivalPlacement(context(rows), options(10 * 60, 120));
     expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
+  });
+});
+
+describe('preserveCapacity (a version-2 hold accepted after a gate rollback)', () => {
+  test('plannedWorkMinutes/workDuration honor a stamped preserveCapacity row even with the live gate off', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const pest = { service_type: 'Quarterly Pest Control Service', window_start: '09:00', window_end: '10:00',
+      estimated_duration_minutes: 60 };
+    // The live gate alone still means legacy minutes...
+    expect(plannedWorkMinutes(pest)).toBeNull();
+    expect(workDuration(pest)).toBe(60);
+    // ...but a row arrival-route.js stamped for a persisted preserveCapacity
+    // path (a reservation_policy_version===2 hold committing while
+    // GATE_SCHEDULING_CAPACITY is rolled back) keeps its owner minutes.
+    expect(plannedWorkMinutes({ ...pest, preserveCapacity: true })).toBe(25);
+    expect(workDuration({ ...pest, preserveCapacity: true })).toBe(25);
+  });
+
+  test('evaluateArrivalPlacement threads context.preserveCapacity onto every row, not just capacityEnabled()', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    // Identical shape to "existing recurring stops open room a 60-minute
+    // charge would not" above (six recurring-pest promises at 09/09/10/10/
+    // 11/11), reached through context.preserveCapacity instead of the live
+    // gate. Charged the legacy 60 minutes apiece — what plannedWorkMinutes
+    // returned before it also honored preserveCapacity, even though
+    // `capacity` (arrival-route.js) was already true via preserveCapacity —
+    // the day cannot keep noon; planned at owner minutes (25 each) it can.
+    const day = [9, 9, 10, 10, 11, 11].map((h, i) => stop(`s${i}`, h * 60, 60,
+      { route_order: i + 1, service_type: 'Quarterly Pest Control Service' }));
+    const fit = evaluateArrivalPlacement({ ...context(day), preserveCapacity: true }, options(12 * 60, 60));
+    expect(fit.feasible).toBe(true);
   });
 });

@@ -174,6 +174,12 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
         'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
         'scheduled_services.status', 'scheduled_services.reservation_expires_at',
         'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',
+        // Planning-minute inputs (scheduling/planning-minutes.js) — without
+        // them workDuration's plannedWorkMinutes always reads an unnamed
+        // service and falls back to the legacy window/estimate rule, so
+        // these quality totals silently disagreed with the picker's real
+        // planned minutes under GATE_SCHEDULING_CAPACITY (Codex r1 P2).
+        'scheduled_services.service_type', 'scheduled_services.is_recurring', 'scheduled_services.is_callback',
         ...guardedCoordSelects(conn)],
     }).whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())');
     const unallocated = stops.filter(stop => !techs.some(tech => tech.id === stop.technician_id));

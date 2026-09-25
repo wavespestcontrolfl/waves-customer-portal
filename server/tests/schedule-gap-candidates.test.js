@@ -76,3 +76,34 @@ test('first-occurrence anchors and due-date bounds are retained', () => {
   const due = { ...candidate, service: { ...service, is_recurring: true, recurring_parent_id: 'root', recurring_dispatch_due_date: '2040-10-01' } };
   expect(analyzeGapCandidate(due, [], options).reason).toBe('outside_recurring_due_range');
 });
+
+describe('GATE_SCHEDULING_CAPACITY: the candidate keeps the legacy rule; surrounding stops plan owner minutes', () => {
+  afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
+
+  test('the candidate itself is exempt from owner planning minutes, matching arrival-route.js\'s own target', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    // "Quarterly Pest Control Service" plans at 25 owner minutes for a stop
+    // ALREADY on a route. Unmarked, workDuration(service) applied that to
+    // the candidate itself (the visit BEING analyzed for a different gap) —
+    // its window offer shrank to 25 minutes instead of its own stored
+    // 60-minute estimate (Codex r1 P2).
+    const pestCandidate = { ...candidate, service: { ...service, service_type: 'Quarterly Pest Control Service', estimated_duration_minutes: 60 } };
+    const result = analyzeGapCandidate(pestCandidate, [], options);
+    const fit = result.routeFits.find(f => f.windowStart === '08:00');
+    expect(fit).toBeDefined();
+    expect(fit.windowEnd).toBe('09:00');
+  });
+
+  test('surrounding existing stops still plan owner minutes, opening room a 60-minute charge would not', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const pestStop = (id, start) => stop(id, start, { service_type: 'Quarterly Pest Control Service', estimated_duration_minutes: 60 });
+    // Six recurring-pest promises at 09/09/10/10/11/11 — 60 minutes apiece
+    // leaves no room before noon; planned at owner minutes (25 each) it
+    // does, same as the existing-route picker.
+    const rows = [9, 9, 10, 10, 11, 11].map((h, i) => pestStop(`s${i}`, `${String(h).padStart(2, '0')}:00`));
+    const pestCandidate = { ...candidate, service: { ...service, service_type: 'Quarterly Pest Control Service', estimated_duration_minutes: 60 } };
+    const extended = { ...options, targetReturnMinutes: 1200, breakMinutes: 0 };
+    const result = analyzeGapCandidate(pestCandidate, rows, extended);
+    expect(result.routeFits.some(fit => fit.windowStart === '12:00')).toBe(true);
+  });
+});

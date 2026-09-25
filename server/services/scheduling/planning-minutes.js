@@ -13,6 +13,14 @@
  * It plans the stops ALREADY on a route. The visit being placed keeps the
  * allowance its caller resolved (booking funnel, estimate profile, re-service
  * catalog) — arrival-route.js marks it `planning_exempt`.
+ *
+ * Live on the persisted `preserveCapacity` path too, not just the live gate:
+ * a reservation_policy_version===2 hold accepted while GATE_SCHEDULING_CAPACITY
+ * is rolled back still commits through prepareReservationCommit's
+ * preserveCapacity option (slot-reservation.js), and must keep the SAME
+ * planning minutes it was offered under — arrival-route.js stamps
+ * `preserveCapacity` onto every row it hands to workDuration for exactly
+ * this (Codex r1 P0).
  */
 const { capacityEnabled } = require('./policy');
 
@@ -66,7 +74,8 @@ function deliberateEstimate(stop) {
  *  every stop, grouped or alone) already carries the sum of its members'
  *  planned minutes; its window span must not inflate that back to an hour. */
 function plannedWorkMinutes(stop) {
-  if (!stop || stop.planning_exempt || !capacityEnabled()) return null;
+  if (!stop || stop.planning_exempt) return null;
+  if (!capacityEnabled() && !stop.preserveCapacity) return null;
   if (stop.memberIds) return Number(stop.estimated_duration_minutes) || null;
   const planned = tableMinutes(stop);
   return planned == null ? null : Math.max(planned, deliberateEstimate(stop));
