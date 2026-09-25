@@ -19,6 +19,7 @@ import {
   glassTierDisplay,
   setCommercialGlass,
   setGlassDefault,
+  treeShrubPalmBulletText,
   withTreeShrubPalmBullet,
   GLASS_COPY,
   GLASS_DAY_LINES,
@@ -388,6 +389,19 @@ describe('commercial glass release', () => {
     expect(withTreeShrubPalmBullet(base, -1)).toEqual(base);
     expect(withTreeShrubPalmBullet(base, 2.5)).toEqual(base);
     expect(withTreeShrubPalmBullet(null, 4)).toBeNull();
+  });
+
+  it('treeShrubPalmBulletText — pure text builder used by both the row-list appender and the rowless T&S card (Codex #3)', () => {
+    expect(treeShrubPalmBulletText(4)).toBe(
+      'Includes care for your 4 palms — seasonal palm nutrition and root-zone treatment when needed',
+    );
+    expect(treeShrubPalmBulletText(1)).toBe(
+      'Includes care for your 1 palm — seasonal palm nutrition and root-zone treatment when needed',
+    );
+    expect(treeShrubPalmBulletText(0)).toBeNull();
+    expect(treeShrubPalmBulletText(undefined)).toBeNull();
+    expect(treeShrubPalmBulletText(-1)).toBeNull();
+    expect(treeShrubPalmBulletText(2.5)).toBeNull();
   });
 
   it('gives commercial rows their own inclusions with no residential guarantee claims', () => {

@@ -19907,15 +19907,35 @@ function treeShrubTierKey(row = {}) {
 // estData.result.lineItems then estData.engineResult.lineItems. Positive
 // integer only (owner 2026-09-24: palms priced inside T&S via routine
 // palm-care reserve, no separate line item).
+//
+// A solo T&S estimate saved in the MAPPED v1 shape (admin-estimate-
+// persistence#resolveServerAuthoritativePricing) carries NO raw lineItems at
+// all when it never ran the server-authoritative recompute (quote-required
+// estimates skip it outright; an ENGINE_ERROR fallback keeps whatever
+// client-preview shape was already stored) — engineResult is only stamped
+// on a recompute that actually ran. Fall back to the mapped shape's own
+// palm carriers: the tree_shrub row v1-legacy-mapper's svcAdd('Tree & Shrub',
+// tsLI, …) attaches to result.recurring.services[], then result.tsMeta.palmCount
+// (v1-legacy-mapper ~L607, stamped for every mapped T&S line — the replay
+// knob signal reads the same tsMeta object for its own palm/knob inputs).
 function treeShrubPalmCountForEstData(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const positiveInt = (value) => {
+    const n = Number(value);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
   const lineItems = [
     ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
     ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
   ];
   const tsLine = lineItems.find((li) => (li?.service || '') === 'tree_shrub');
-  const n = Number(tsLine?.palmCount);
-  return Number.isInteger(n) && n > 0 ? n : null;
+  const fromLineItem = positiveInt(tsLine?.palmCount);
+  if (fromLineItem != null) return fromLineItem;
+  const mappedServices = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
+  const mappedTsRow = mappedServices.find((s) => (s?.service || '') === 'tree_shrub');
+  const fromMappedRow = positiveInt(mappedTsRow?.palmCount);
+  if (fromMappedRow != null) return fromMappedRow;
+  return positiveInt(result?.tsMeta?.palmCount);
 }
 
 function treeShrubFrequenciesFromResultStats(estData = {}) {
@@ -21623,6 +21643,19 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     included: includedRowsForServiceFrequency(baseFrequency, key, recurringService),
     addOns: allowAddOns && Array.isArray(baseFrequency.addOns) ? baseFrequency.addOns : [],
     quoteRequired: false,
+    // Split single-service T&S card (buildPricingServices): this frequency
+    // is ROWLESS by construction (no perServiceTreatments), so the client's
+    // row-level palm bullet can't fire for it. Carry the count on the
+    // frequency itself instead — lower risk than synthesizing a treatment
+    // row here, which would flip PriceCard's isRowless/price-display and
+    // booking-math branches (perApplicationNetForFrequency, slot-profile
+    // sizing) for a card whose price/behavior must stay unchanged (owner
+    // 2026-09-24: palm bullet is additive display only). `row` here IS the
+    // same perServiceTreatments entry the T&S builders already stamp with
+    // palmCount (treatmentRowForServiceFrequency reads it straight off
+    // baseFrequency.perServiceTreatments).
+    ...(key === 'tree_shrub' && Number.isInteger(row.palmCount) && row.palmCount > 0
+      ? { palmCount: row.palmCount } : {}),
   };
 }
 
@@ -21656,6 +21689,12 @@ function frequencyFromRecurringService(recurringService = {}, key, recurringDisc
     included: includedRowsForServiceFrequency({}, key, recurringService),
     addOns: [],
     quoteRequired: false,
+    // Same rowless palm-count carry as frequencyFromTreatmentRow (this is
+    // the no-matching-row fallback path) — recurringService is the mapped
+    // v1.services / raw-supplement row, already carrying palmCount for
+    // tree_shrub when positive.
+    ...(key === 'tree_shrub' && Number.isInteger(recurringService.palmCount) && recurringService.palmCount > 0
+      ? { palmCount: recurringService.palmCount } : {}),
   };
 }
 
@@ -24079,6 +24118,69 @@ function pricingBundleHasStaleTermiteRow(bundle = {}) {
   return combos.some((c) => rowStale(c?.perServiceTreatments));
 }
 
+// Palm-care bullet lane (2026-09-24): a sendSnapshot bundle frozen BEFORE
+// this lane never got palmCount attached to its T&S row, and
+// pricingBundleMatchesEstimateTotals only checks price/total agreement — a
+// byte-for-byte pre-lane snapshot passes every fast-path guard above and
+// would otherwise fast-path forever with no palm bullet, even though the
+// underlying estimate always had the palm count. Unlike the guards above,
+// this is NOT a fast-path bypass (a frozen sent quote must never re-price):
+// it enriches the ALREADY-CHOSEN snapshot at read time with one additive
+// display field, read straight off the same stored evidence
+// treeShrubPalmCountForEstData resolves for the fresh builders. Never
+// touches a price field, never writes back to estData/the DB. Traversal
+// mirrors pricingBundleHasStaleTermiteRow (frequencies[],
+// services[].frequencies[], serviceCadenceCombos[]).
+function enrichPricingBundleTreeShrubPalmCount(bundle, estData) {
+  if (!bundle || typeof bundle !== 'object') return bundle;
+  const palmCount = treeShrubPalmCountForEstData(estData);
+  if (!palmCount) return bundle;
+  const rowNeedsPalmCount = (row) => row && typeof row === 'object'
+    && recurringServiceKey(row) === 'tree_shrub'
+    && !(Number.isInteger(row.palmCount) && row.palmCount > 0);
+  const enrichRows = (rows) => {
+    if (!Array.isArray(rows) || !rows.some(rowNeedsPalmCount)) return rows;
+    return rows.map((row) => (rowNeedsPalmCount(row) ? { ...row, palmCount } : row));
+  };
+  const enrichFrequency = (freq) => {
+    if (!freq || typeof freq !== 'object' || !Array.isArray(freq.perServiceTreatments)) return freq;
+    const enriched = enrichRows(freq.perServiceTreatments);
+    return enriched === freq.perServiceTreatments ? freq : { ...freq, perServiceTreatments: enriched };
+  };
+  let touched = false;
+  const frequencies = Array.isArray(bundle.frequencies)
+    ? bundle.frequencies.map((f) => {
+        const next = enrichFrequency(f);
+        if (next !== f) touched = true;
+        return next;
+      })
+    : bundle.frequencies;
+  const services = Array.isArray(bundle.services)
+    ? bundle.services.map((s) => {
+        if (!s || !Array.isArray(s.frequencies)) return s;
+        const nextFreqs = s.frequencies.map((f) => {
+          const next = enrichFrequency(f);
+          if (next !== f) touched = true;
+          return next;
+        });
+        return nextFreqs === s.frequencies ? s : { ...s, frequencies: nextFreqs };
+      })
+    : bundle.services;
+  const serviceCadenceCombos = Array.isArray(bundle.serviceCadenceCombos)
+    ? bundle.serviceCadenceCombos.map((c) => {
+        if (!c || !Array.isArray(c.perServiceTreatments)) return c;
+        const enriched = enrichRows(c.perServiceTreatments);
+        if (enriched === c.perServiceTreatments) return c;
+        touched = true;
+        return { ...c, perServiceTreatments: enriched };
+      })
+    : bundle.serviceCadenceCombos;
+  // Byte-identical passthrough when nothing needed enrichment (already
+  // carries palmCount, or no T&S row present at all).
+  if (!touched) return bundle;
+  return { ...bundle, frequencies, services, serviceCadenceCombos };
+}
+
 function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
   const minMonthly = threadedProgramMinMonthly(programMinMonthly);
   const belowFloor = (monthly) => minMonthly > 0
@@ -24507,8 +24609,12 @@ async function buildPricingBundleInner(estimate) {
     // discounted quote displayed. Already-netted legacy snapshots pass.
     && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
   ) {
+    // Additive display-only enrichment (never a price field, never written
+    // back) — a snapshot frozen before the palm-care bullet lane otherwise
+    // fast-paths forever with no palmCount on its T&S row.
+    const enrichedSnapshotBundle = enrichPricingBundleTreeShrubPalmCount(snapshotBundle, estData);
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
-      ...snapshotBundle,
+      ...enrichedSnapshotBundle,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
     })), estimate, estData);
@@ -27043,3 +27149,5 @@ module.exports.shapeFrequencyEntry = shapeFrequencyEntry;
 module.exports.treeShrubFrequenciesFromResultStats = treeShrubFrequenciesFromResultStats;
 module.exports.treeShrubPalmCountForEstData = treeShrubPalmCountForEstData;
 module.exports.shapeFromV1 = shapeFromV1;
+module.exports.enrichPricingBundleTreeShrubPalmCount = enrichPricingBundleTreeShrubPalmCount;
+module.exports.frequencyFromRecurringService = frequencyFromRecurringService;

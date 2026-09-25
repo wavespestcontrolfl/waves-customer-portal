@@ -10,6 +10,9 @@ const {
   treeShrubPalmCountForEstData,
   shapeFromV1,
   recurringServicesWithSupplements,
+  enrichPricingBundleTreeShrubPalmCount,
+  frequencyFromTreatmentRow,
+  frequencyFromRecurringService,
 } = require('../routes/estimate-public');
 
 const QUARTERLY = { key: 'quarterly', label: 'Quarterly (4 visits/year)', engineFrequency: 'quarterly' };
@@ -190,5 +193,193 @@ describe('shapeFromV1 — bundled T&S + pest row (server/routes/estimate-public.
     const row = entry.perServiceTreatments.find((r) => r.service === 'tree_shrub');
     expect(row.palmCount).toBeUndefined();
     expect(row.visitsPerYear).toBe(6);
+  });
+});
+
+// ── Codex round 1 fixes (2026-09-24) ────────────────────────────────────────
+
+describe('treeShrubPalmCountForEstData — mapped-v1-shape fallbacks (Codex #1)', () => {
+  // A solo T&S estimate saved in the MAPPED shape (quote-required, or an
+  // ENGINE_ERROR fallback) carries no raw lineItems/engineResult at all —
+  // the count lives on result.recurring.services[] and/or result.tsMeta.
+  test('falls back to result.recurring.services[] tree_shrub row when no raw lineItems exist', () => {
+    const estData = {
+      result: {
+        recurring: { services: [{ service: 'tree_shrub', mo: 66.75, palmCount: 6 }] },
+      },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(6);
+  });
+
+  test('falls back to result.tsMeta.palmCount when neither lineItems nor a mapped services row carry it', () => {
+    const estData = { result: { tsMeta: { palmCount: 9, palmCountSource: 'service_line' } } };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(9);
+  });
+
+  test('raw lineItems win over the mapped-shape fallbacks when both are present', () => {
+    const estData = {
+      result: {
+        lineItems: [tsLineItem({ palmCount: 4 })],
+        recurring: { services: [{ service: 'tree_shrub', palmCount: 11 }] },
+        tsMeta: { palmCount: 12 },
+      },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(4);
+  });
+
+  test('the mapped services row wins over tsMeta when both are present (no raw lineItems)', () => {
+    const estData = {
+      result: {
+        recurring: { services: [{ service: 'tree_shrub', palmCount: 5 }] },
+        tsMeta: { palmCount: 12 },
+      },
+    };
+    expect(treeShrubPalmCountForEstData(estData)).toBe(5);
+  });
+
+  test.each([
+    ['zero on both fallbacks', { recurring: { services: [{ service: 'tree_shrub', palmCount: 0 }] }, tsMeta: { palmCount: 0 } }],
+    ['no tree_shrub row in recurring.services, no tsMeta', { recurring: { services: [{ service: 'pest_control', palmCount: 4 }] } }],
+    ['non-integer tsMeta.palmCount', { tsMeta: { palmCount: 2.5 } }],
+  ])('returns null for %s', (_label, result) => {
+    expect(treeShrubPalmCountForEstData({ result })).toBeNull();
+  });
+});
+
+describe('enrichPricingBundleTreeShrubPalmCount — sendSnapshot read-time enrichment (Codex #2)', () => {
+  const estDataWithPalms = (palmCount) => ({ result: { lineItems: [tsLineItem({ palmCount })] } });
+
+  test('adds palmCount to a top-level frequency row that lacks it, leaving prices byte-identical', () => {
+    const bundle = {
+      frequencies: [{
+        key: 'quarterly',
+        monthly: 66.75,
+        annual: 801,
+        perServiceTreatments: [{ service: 'tree_shrub', label: 'Tree & Shrub', perTreatment: 133.5, displayPrice: 133.5, visitsPerYear: 6 }],
+      }],
+    };
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, estDataWithPalms(4));
+    const row = enriched.frequencies[0].perServiceTreatments[0];
+    expect(row.palmCount).toBe(4);
+    // Every price-bearing field is untouched.
+    expect(row.perTreatment).toBe(133.5);
+    expect(row.displayPrice).toBe(133.5);
+    expect(enriched.frequencies[0].monthly).toBe(66.75);
+    expect(enriched.frequencies[0].annual).toBe(801);
+  });
+
+  test('reaches a nested services[].frequencies[].perServiceTreatments row', () => {
+    const bundle = {
+      services: [{
+        key: 'tree_shrub',
+        frequencies: [{
+          key: 'recurring',
+          monthly: 66.75,
+          perServiceTreatments: [{ service: 'tree_shrub', perTreatment: 133.5 }],
+        }],
+      }],
+    };
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, estDataWithPalms(2));
+    expect(enriched.services[0].frequencies[0].perServiceTreatments[0].palmCount).toBe(2);
+  });
+
+  test('reaches a serviceCadenceCombos[].perServiceTreatments row', () => {
+    const bundle = {
+      serviceCadenceCombos: [{
+        selection: { tree_shrub: 'standard' },
+        perServiceTreatments: [{ service: 'tree_shrub', perTreatment: 133.5 }],
+      }],
+    };
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, estDataWithPalms(7));
+    expect(enriched.serviceCadenceCombos[0].perServiceTreatments[0].palmCount).toBe(7);
+  });
+
+  test('a row that already carries a positive palmCount is left untouched', () => {
+    const bundle = {
+      frequencies: [{ perServiceTreatments: [{ service: 'tree_shrub', perTreatment: 100, palmCount: 3 }] }],
+    };
+    // Stored evidence disagrees (4) — the already-stamped row still wins;
+    // this function only BACK-FILLS a missing count, never overwrites one.
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, estDataWithPalms(4));
+    expect(enriched.frequencies[0].perServiceTreatments[0].palmCount).toBe(3);
+  });
+
+  test('a non-T&S row is never touched even though the estimate has palms', () => {
+    const bundle = {
+      frequencies: [{ perServiceTreatments: [{ service: 'pest_control', perTreatment: 60 }] }],
+    };
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, estDataWithPalms(4));
+    expect(enriched.frequencies[0].perServiceTreatments[0].palmCount).toBeUndefined();
+  });
+
+  test('returns the SAME bundle reference (byte-identical) when there is no palm count to add', () => {
+    const bundle = {
+      frequencies: [{ perServiceTreatments: [{ service: 'tree_shrub', perTreatment: 133.5 }] }],
+    };
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, { result: { lineItems: [tsLineItem({ palmCount: 0 })] } });
+    expect(enriched).toBe(bundle);
+  });
+
+  test('returns the SAME bundle reference when every T&S row already carries its palmCount', () => {
+    const bundle = {
+      frequencies: [{ perServiceTreatments: [{ service: 'tree_shrub', perTreatment: 133.5, palmCount: 4 }] }],
+    };
+    const enriched = enrichPricingBundleTreeShrubPalmCount(bundle, estDataWithPalms(4));
+    expect(enriched).toBe(bundle);
+  });
+
+  test('handles a null/non-object bundle without throwing', () => {
+    expect(enrichPricingBundleTreeShrubPalmCount(null, estDataWithPalms(4))).toBeNull();
+    expect(enrichPricingBundleTreeShrubPalmCount(undefined, estDataWithPalms(4))).toBeUndefined();
+  });
+});
+
+describe('frequencyFromTreatmentRow — rowless split T&S card carries frequency.palmCount (Codex #3)', () => {
+  const baseFrequency = { key: 'quarterly', label: 'Quarterly (4 visits/year)' };
+
+  test('attaches frequency.palmCount for a tree_shrub row with a positive palm count, WITHOUT adding perServiceTreatments', () => {
+    const row = { service: 'tree_shrub', displayPrice: 133.5, perTreatment: 133.5, visitsPerYear: 6, palmCount: 4 };
+    const frequency = frequencyFromTreatmentRow(baseFrequency, 'tree_shrub', row, {}, {});
+    expect(frequency.palmCount).toBe(4);
+    // Still rowless by construction — the lower-risk carry never adds a
+    // synthetic perServiceTreatments array (that would flip PriceCard's
+    // isRowless / price-display / booking-math branches for this card).
+    expect(frequency.perServiceTreatments).toBeUndefined();
+    // Prices are untouched by the palm-count wiring.
+    expect(frequency.monthly).toBeCloseTo(66.75, 2);
+    expect(frequency.perTreatment).toBe(133.5);
+  });
+
+  test.each([0, undefined, -1, 2.5])('omits frequency.palmCount for a tree_shrub row with palmCount %s', (palmCount) => {
+    const row = {
+      service: 'tree_shrub', displayPrice: 133.5, perTreatment: 133.5, visitsPerYear: 6,
+      ...(palmCount === undefined ? {} : { palmCount }),
+    };
+    const frequency = frequencyFromTreatmentRow(baseFrequency, 'tree_shrub', row, {}, {});
+    expect(frequency.palmCount).toBeUndefined();
+  });
+
+  test('a non-T&S row never gets frequency.palmCount even if the row carries one', () => {
+    const row = { service: 'pest_control', displayPrice: 60, perTreatment: 60, visitsPerYear: 4, palmCount: 4 };
+    const frequency = frequencyFromTreatmentRow(baseFrequency, 'pest_control', row, {}, {});
+    expect(frequency.palmCount).toBeUndefined();
+  });
+});
+
+describe('frequencyFromRecurringService — no-matching-row fallback carries palmCount too (Codex #3)', () => {
+  test('attaches frequency.palmCount from a positive-integer recurringService.palmCount', () => {
+    const recurringService = { service: 'tree_shrub', monthly: 66.75, visitsPerYear: 6, palmCount: 5 };
+    const frequency = frequencyFromRecurringService(recurringService, 'tree_shrub', 0);
+    expect(frequency.palmCount).toBe(5);
+    expect(frequency.perServiceTreatments).toBeUndefined();
+  });
+
+  test.each([0, undefined])('omits frequency.palmCount for %s', (palmCount) => {
+    const recurringService = {
+      service: 'tree_shrub', monthly: 66.75, visitsPerYear: 6,
+      ...(palmCount === undefined ? {} : { palmCount }),
+    };
+    const frequency = frequencyFromRecurringService(recurringService, 'tree_shrub', 0);
+    expect(frequency.palmCount).toBeUndefined();
   });
 });

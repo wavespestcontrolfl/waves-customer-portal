@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
+import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, treeShrubPalmBulletText, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
 import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
@@ -377,6 +377,14 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
   // per-row counts — there the split is the information (and visitsPerYear
   // resolves null for differing counts anyway).
   const isRowless = !Array.isArray(frequency.perServiceTreatments) || frequency.perServiceTreatments.length === 0;
+  // Engine-backed split T&S card (buildPricingServices → frequencyFromTreatmentRow):
+  // rowless by construction (no perServiceTreatments), so the row-level
+  // palm bullet below never fires for it. It carries its palm count on the
+  // frequency itself instead (server-side, lower risk than giving the split
+  // card a synthetic row — see frequencyFromTreatmentRow). Only rendered
+  // when rowless: a rows-based card already gets the bullet appended to its
+  // row's own inclusion list.
+  const rowlessPalmBullet = isRowless ? treeShrubPalmBulletText(frequency.palmCount) : null;
   const showCadenceLine = perAppNet != null
     && Number.isFinite(visitsPerYear) && visitsPerYear > 0
     && (isRowless || (glass && treatmentRows.length === 1));
@@ -666,6 +674,12 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
             || wording?.dayLine
             || DEFAULT_WORDING.dayLine
           ).replace('{amount}', fmtMoney(dayPrice))}
+        </div>
+      ) : null}
+
+      {rowlessPalmBullet ? (
+        <div data-testid="rowless-palm-bullet" style={{ marginTop: 12, fontSize: 14, fontWeight: 600, color: W.textBody, lineHeight: 1.35 }}>
+          {rowlessPalmBullet}
         </div>
       ) : null}
 

@@ -811,3 +811,61 @@ describe('PriceCard — Tree & Shrub palm-care inclusion bullet (owner 2026-09-2
     expect(screen.getByText('Seasonal plant-health treatment support')).toBeInTheDocument();
   });
 });
+
+describe('PriceCard — ROWLESS split T&S card renders frequency.palmCount (Codex round-1 finding #3)', () => {
+  // An engine-backed multi-service split builds this card with NO
+  // perServiceTreatments at all (frequencyFromTreatmentRow) — the palm
+  // count rides frequency.palmCount instead, and PriceCard renders it as a
+  // standalone line rather than through the row-list RowInclusions path.
+  const rowlessTsFrequency = (palmCount) => ({
+    key: 'quarterly',
+    label: 'Quarterly Tree & Shrub',
+    monthly: 66.75,
+    annual: 801,
+    perTreatment: 133.5,
+    visitsPerYear: 6,
+    ...(palmCount !== undefined ? { palmCount } : {}),
+    // Deliberately no perServiceTreatments — this is what makes the card
+    // rowless in the first place.
+  });
+
+  it('shows the palm bullet for a positive palmCount with no perServiceTreatments on the card', () => {
+    render(<PriceCard frequency={rowlessTsFrequency(4)} />);
+    expect(screen.getByTestId('rowless-palm-bullet')).toHaveTextContent(
+      'Includes care for your 4 palms — seasonal palm nutrition and root-zone treatment when needed',
+    );
+  });
+
+  it('singularizes "palm" for a palmCount of exactly 1', () => {
+    render(<PriceCard frequency={rowlessTsFrequency(1)} />);
+    expect(screen.getByTestId('rowless-palm-bullet')).toHaveTextContent(
+      'Includes care for your 1 palm — seasonal palm nutrition and root-zone treatment when needed',
+    );
+  });
+
+  it.each([0, undefined, -1, 2.5])('renders nothing for an invalid palmCount (%s)', (palmCount) => {
+    render(<PriceCard frequency={rowlessTsFrequency(palmCount)} />);
+    expect(screen.queryByTestId('rowless-palm-bullet')).toBeNull();
+  });
+
+  it('never renders the rowless bullet when the card has its own treatment rows (avoids a duplicate)', () => {
+    // palmCount present at the top level AND a normal rows-based card —
+    // the rows path (RowInclusions) owns the bullet here, not the rowless
+    // standalone line, so there is exactly one copy of the bullet text.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'quarterly',
+          monthly: 66.75,
+          annual: 801,
+          palmCount: 4,
+          perServiceTreatments: [{
+            service: 'tree_shrub', label: 'Tree & Shrub', perTreatment: 133.5, displayPrice: 133.5, visitsPerYear: 6, palmCount: 4,
+          }],
+        }}
+      />,
+    );
+    expect(screen.queryByTestId('rowless-palm-bullet')).toBeNull();
+    expect(screen.getAllByText(/Includes care for your 4 palms/)).toHaveLength(1);
+  });
+});

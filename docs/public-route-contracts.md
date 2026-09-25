@@ -1317,6 +1317,26 @@ estimate documents retain the strict framing policy. Query markers do not
 grant draft access or change token, payment, consent, or booking eligibility.
 The iframe exchanges only height/step messages with its parent, which checks
 the sender window and exact origin; no customer details or tokens are posted.
+`pricing.frequencies[].perServiceTreatments[].palmCount` (palm-care bullet
+lane, owner 2026-09-24): a positive integer riding a Tree & Shrub treatment
+row when the estimate's T&S line carries a service-line palm count — sourced
+from the engine's `tree_shrub` line item's own `palmCount` (fresh builds and
+raw/agent-draft shapes) or, for a mapped/admin-saved estimate with no raw
+line items, the mapped `result.recurring.services[]` tree_shrub row or
+`result.tsMeta.palmCount` (same evidence `estimateTreeShrubKnobSignal`
+reads for its own palm/knob replay). Validated positive-integer, clamped
+≤200 by the pricing engine; omitted entirely (not `0`, not `null`) whenever
+the estimate has no palms, so existing clients that don't know the field see
+no change. A ROWLESS single-service T&S card (an engine-backed multi-service
+split, no `perServiceTreatments` on that card) instead carries
+`pricing.frequencies[].palmCount` directly on the frequency, same validation
+and omission rule. Display-only: drives one extra customer-facing inclusion
+bullet ("Includes care for your N palms — seasonal palm nutrition and
+root-zone treatment when needed") and has no effect on any price, fee, line
+item, or booking/acceptance math anywhere in the contract. A `sendSnapshot`
+bundle frozen before this field existed is enriched with it at GET time from
+the same stored evidence (never written back to `estimate_data`, never
+changes a price field on the frozen snapshot).
 `/accept` fails CLOSED when the accepted plan's money cannot be resolved
 (#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
 — `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application
