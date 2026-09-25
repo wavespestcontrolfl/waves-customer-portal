@@ -3,9 +3,9 @@
  * the 2026-08-14 codex round).
  *
  * Pins:
- *   - GATE_COLLECTIONS_POLICY unset/off ⇒ BYTE-IDENTICAL send behavior on
- *     both rails: the policy module is never consulted and the send args are
- *     exactly the pre-lane shape (asserted with toEqual, not objectContaining).
+ *   - GATE_COLLECTIONS_POLICY unset/off ⇒ the policy module is never
+ *     consulted. Exact send arguments preserve legacy content and include
+ *     the billing category/event and Email-owner routing metadata.
  *   - Gate on ⇒ each channel is evaluated INDEPENDENTLY at its leg (sms
  *     denied must not silence the email leg and vice versa), and the target
  *     invoice must be IN the verdict's eligible set (an allowed verdict
@@ -143,8 +143,8 @@ const LP_INVOICE = {
 };
 const LP_CUSTOMER = { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' };
 
-// The EXACT send shape this rail produced before the collections lane — the
-// gate-off byte-identical pin asserts full equality against it.
+// Exact legacy delivery content plus billing routing metadata, independent
+// of whether the collections policy gate is enabled.
 const LP_EXPECTED_SEND = {
   to: '+19415550101',
   body: 'sms body for late_payment_14d',
@@ -154,7 +154,9 @@ const LP_EXPECTED_SEND = {
   customerId: 'cust-1',
   invoiceId: 'inv-1',
   entryPoint: 'late_payment_checker',
-  metadata: { original_message_type: 'late_payment' },
+  metadata: { original_message_type: 'late_payment', billingDeliveryCategory: 'billing',
+    notificationEventKey: 'late-payment:inv-1:14' },
+  hasEmailLeg: true,
   // The last ownership check, run by the canonical sender immediately before
   // provider preparation — a Bill-To change during the render/ledger awaits
   // must not reach the homeowner.
@@ -178,7 +180,7 @@ function armLatePaymentHappyPath() {
 }
 
 describe('late-payment-checker rail', () => {
-  test('gate UNSET: policy never consulted, send args byte-identical to the pre-lane shape', async () => {
+  test('gate UNSET: policy never consulted, legacy content and billing routing metadata are preserved', async () => {
     armLatePaymentHappyPath();
     const result = await LatePaymentChecker.checkAndNotify();
     expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
@@ -366,7 +368,7 @@ const FU_INVOICE = {
   token: 'token-1',
 };
 
-// The EXACT touch-send shape this rail produced before the collections lane.
+// Exact follow-up content plus billing routing metadata.
 const FU_EXPECTED_SEND = {
   to: '+19415550101',
   body: 'invoice follow-up sms',
@@ -376,7 +378,9 @@ const FU_EXPECTED_SEND = {
   customerId: 'cust-1',
   invoiceId: 'inv-1',
   entryPoint: 'invoice_followup_sequence',
-  metadata: { original_message_type: 'invoice_followup', notificationEventKey: 'invoice-followup:seq-1:d3_friendly' },
+  metadata: { original_message_type: 'invoice_followup', notificationEventKey: 'invoice-followup:seq-1:d3_friendly',
+    billingDeliveryCategory: 'invoice' },
+  hasEmailLeg: true,
   // The last ownership check, run by the canonical sender immediately before
   // provider preparation — the short-link round-trip and the ledger writes
   // are awaited after this rail's own re-read.
@@ -412,7 +416,7 @@ function armFollowupHappyPath({ sequenceUpdate = chain() } = {}) {
 }
 
 describe('invoice-followups rail', () => {
-  test('gate UNSET: policy never consulted, touch-send args byte-identical to the pre-lane shape', async () => {
+  test('gate UNSET: policy never consulted, follow-up content and billing routing metadata are preserved', async () => {
     armFollowupHappyPath();
     const result = await InvoiceFollowUps.runPending();
     expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
@@ -527,16 +531,21 @@ describe('invoice-followups rail', () => {
   });
 });
 
-// prb-r18: the email sidecar's consult EXCLUDES the same-run SMS row — the
-// any-channel 24h window must not fence a sidecar with its own sibling.
-test('the late-payment email sidecar consult carries excludeLedgerIds with the same-run SMS row', async () => {
+// The any-channel 24h window must not fence a sidecar with its own sibling.
+// Both decisions now precede the same-run ledger rows, so neither needs an
+// exclusion for a row that has not been reserved yet.
+test('late-payment channel decisions precede ledger reservations so both legs can deliver', async () => {
   process.env.GATE_COLLECTIONS_POLICY = 'true';
   try {
     armLatePaymentHappyPath();
     await LatePaymentChecker.checkAndNotify();
     const emailEval = ContactPolicy.evaluate.mock.calls.find((c) => c[1]?.channel === 'email');
     expect(emailEval).toBeTruthy();
-    expect(emailEval[1].excludeLedgerIds).toEqual(['led-1']);
+    expect(emailEval[1].excludeLedgerIds).toEqual([]);
+    expect(Math.max(...ContactPolicy.evaluate.mock.invocationCallOrder))
+      .toBeLessThan(Math.min(...ContactLedger.recordContact.mock.invocationCallOrder));
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalledTimes(1);
   } finally {
     delete process.env.GATE_COLLECTIONS_POLICY;
   }
