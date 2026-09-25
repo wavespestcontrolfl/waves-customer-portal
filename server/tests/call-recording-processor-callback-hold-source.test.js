@@ -235,14 +235,16 @@ describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the
   test('stampCallbackNumberHoldForCall records the disclaimed number on the booking trx (uncaught — a failure aborts the booking)', () => {
     const idx = src.indexOf('const stampCallbackNumberHoldForCall');
     const body = src.slice(idx, src.indexOf("await trx('scheduled_services')", idx));
-    expect(body).toMatch(/recordDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId, callLogId: call\.id, conn: trx,\s*\}\)/);
+    // Round 7 P1: the later in-pass writes are ensure-only (never re-arm).
+    expect(body).toMatch(/ensureDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId, callLogId: call\.id, conn: trx,\s*\}\)/);
     expect(body).not.toMatch(/catch/);
   });
 
   test('registerScheduleSideEffects records it inside the same try whose failure refuses to arm messaging', () => {
     const idx = src.indexOf('async function registerScheduleSideEffects');
     const body = src.slice(idx, src.indexOf('if (!holdStampFailed)', idx));
-    const rec = body.indexOf('recordDisclaimedNumberHold');
+    // Round 7 P1: ensure-only in the fallback too.
+    const rec = body.indexOf('ensureDisclaimedNumberHold');
     expect(rec).toBeGreaterThan(-1);
     expect(body.indexOf('holdStampFailed = true')).toBeGreaterThan(rec);
     expect(body).toMatch(/disclaimedPhone = null, callLogId = null/);
@@ -278,5 +280,78 @@ describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the
     expect(block.slice(catchAt)).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
     // The pass's own catch is what turns that throw into the capped retry.
     expect(src).toMatch(/catch \(procErr\) \{[\s\S]{0,1600}processing_status: 'extraction_failed'/);
+  });
+});
+
+/**
+ * Codex round 7 P1 (PR #4807): the hold is PERSISTED at the decision point —
+ * the same statement that flips callbackNumberNeededHoldActive — before the
+ * card is published and before any further awaited work; that write is the
+ * only one in the pass that may re-arm (serialized with /resolve under the
+ * per-call triage lock, inside armDisclaimedNumberHold), and every later
+ * in-pass write is ensure-only so a Resolve landing between the writes is
+ * never undone. Source-shape for the same reason as the rest of this file
+ * (the decision points live inline in processRecording).
+ */
+describe('round-7 P1 — the number hold is persisted when the flag is decided', () => {
+  const ARM = 'await armCallbackNumberHoldAtDecision();';
+
+  test('the decision-point helper arms through armDisclaimedNumberHold and fails the pass closed', () => {
+    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async () => {');
+    expect(idx).toBeGreaterThan(-1);
+    const body = src.slice(idx, src.indexOf('\n    };', idx));
+    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*\}\)/);
+    expect(body).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
+    expect(body).toMatch(/throw failClosed;/);
+    expect(body).not.toMatch(/holdErr\.message/);
+  });
+
+  test('enforce: armed right where the flag is raised — before the route decision insert and before any card insert', () => {
+    const gate = src.indexOf('if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {');
+    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(finalFlags)) {', gate);
+    const decideEnd = src.indexOf('\n          }\n', decide);
+    const block = src.slice(decide, decideEnd);
+    const flip = block.indexOf('callbackNumberNeededHoldActive = true;');
+    expect(flip).toBeGreaterThan(-1);
+    expect(block.indexOf(ARM)).toBeGreaterThan(flip);
+    // Nothing awaited between the decision and the write.
+    expect(block.slice(0, block.indexOf(ARM)).match(/await /g)).toBeNull();
+    const armAt = decide + block.indexOf(ARM);
+    expect(armAt).toBeLessThan(src.indexOf("await db('route_decisions').insert(routeDecision)", decide));
+    expect(armAt).toBeLessThan(src.indexOf("db('triage_items')", decide));
+  });
+
+  test('shadow: armed where the bridge raises the flag — before deriveCallReviewBridge and the card inserts', () => {
+    const gate = src.indexOf('if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {');
+    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {', gate);
+    const decideEnd = src.indexOf('\n        }\n', decide);
+    const block = src.slice(decide, decideEnd);
+    expect(block.indexOf(ARM)).toBeGreaterThan(block.indexOf('callbackNumberNeededHoldActive = true;'));
+    expect(block.slice(0, block.indexOf(ARM)).match(/await /g)).toBeNull();
+    const armAt = decide + block.indexOf(ARM);
+    expect(armAt).toBeLessThan(src.indexOf('deriveCallReviewBridge({', decide));
+    expect(armAt).toBeLessThan(src.indexOf("db('triage_items')", decide));
+  });
+
+  test('neither branch\'s soft catch swallows a failed decision-point write', () => {
+    expect(src).toMatch(/\} catch \(err\) \{\s*\/\/[^\n]*\n[^\n]*\n\s*if \(err\?\.code === 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'\) throw err;/);
+    expect(src).toMatch(/if \(bridgeErr\?\.code === 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'\) throw bridgeErr;/);
+  });
+
+  test('every LATER in-pass write is ensure-only: the processor never calls the re-arming writer directly', () => {
+    expect(src).not.toMatch(/recordDisclaimedNumberHold\(/);
+    const write = src.indexOf('callback_number_needed — NUMBER-keyed hold (codex round 6');
+    const block = src.slice(write, src.indexOf('// Secondary-contact persistence', write));
+    expect(block).toMatch(/ensureDisclaimedNumberHold\(\{/);
+  });
+
+  test('a Resolve that landed after the decision also keeps the visit-level stamp from being re-applied (booking trx + fallback)', () => {
+    const idx = src.indexOf('const stampCallbackNumberHoldForCall');
+    const body = src.slice(idx, src.indexOf("await trx('scheduled_services')", idx));
+    expect(body).toMatch(/if \(numberHold\.recorded && numberHold\.active === false\) return;/);
+    const fb = src.indexOf('async function registerScheduleSideEffects');
+    const fbBody = src.slice(fb, src.indexOf('if (!holdStampFailed)', fb));
+    expect(fbBody.indexOf('ensureDisclaimedNumberHold')).toBeLessThan(fbBody.indexOf("db('scheduled_services')"));
+    expect(fbBody).toMatch(/if \(!\(numberHold\.recorded && numberHold\.active === false\)\) await db\('scheduled_services'\)/);
   });
 });

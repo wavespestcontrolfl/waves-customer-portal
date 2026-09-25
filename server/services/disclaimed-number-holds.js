@@ -43,14 +43,16 @@ function isMissingTable(err) {
 
 /**
  * Record (or re-arm) the hold for one disclaimed number from one call.
- * Idempotent per (number, call): a second write in the same processing
- * pass is a no-op on an active row (it only fills customer_id when the
- * earlier write didn't know it). A write against a CLEARED row re-arms it —
- * the processor only writes when THIS pass raised callback_number_needed
- * again (a force-reprocess), and a stale clearance must never satisfy a
- * freshly raised flag (the round-5 P1 re-arm rule, now on the number row).
- * Throws on DB error — the caller decides whether that aborts (the booking
- * transaction) or is logged (the non-booking write).
+ * Idempotent per (number, call) on an active row (it only fills
+ * customer_id when the earlier write didn't know it). A write against a
+ * CLEARED row re-arms it — a stale clearance must never satisfy a freshly
+ * raised flag (the round-5 P1 re-arm rule, now on the number row).
+ *
+ * Round 7 P1: this re-arming write is for the DECISION POINT only, and the
+ * processor reaches it through armDisclaimedNumberHold below (serialized
+ * with the card resolve under the per-call triage lock). Every LATER write
+ * in the same pass uses ensureDisclaimedNumberHold, which never re-arms.
+ * Throws on DB error.
  */
 async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId, conn = db }) {
   const phoneE164 = holdPhoneKey(phone);
@@ -71,10 +73,68 @@ async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId,
 }
 
 /**
- * Lift every active hold a call placed. The office resolving the
- * callback_number_needed card is the ONE clearance (a verified number);
- * a customer phone edit clears nothing — the old number was never
- * verified, and the new number simply has no row.
+ * The processor's DECISION-POINT write (codex round 7 P1, PR #4807): the
+ * moment a pass raises callback_number_needed, before it publishes the
+ * card and before any further awaited work — so no sender (an invoice or
+ * estimate follow-up mid-flight) ever sees a window with the flag decided
+ * but no row. Runs in its own short transaction under lockTriageCall, the
+ * same per-call lock the card's /resolve takes, so a re-arm and a human
+ * clearance on this call serialize instead of interleaving. This is the
+ * ONE write in a pass that re-arms a cleared row (a genuine reprocess
+ * raising the flag again); a later clearance wins over every later write
+ * in the pass (ensureDisclaimedNumberHold). Throws on DB error — the
+ * processor fails the pass closed.
+ */
+async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, conn = db }) {
+  if (!holdPhoneKey(phone) || !callLogId) return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
+  const { lockTriageCall } = require('../utils/triage-locks');
+  return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn: trx });
+  });
+}
+
+/**
+ * Every write AFTER the decision point in the same processing pass (the
+ * post-customer-resolution write, the booking transaction, the post-commit
+ * fallback — codex round 7 P1). Never re-arms: the decision-point write
+ * already left this pass's row ACTIVE, so a cleared_at seen here can only
+ * be a human clearance that landed after this pass decided, and it must
+ * stand (re-arming it would block the number with no open card left to
+ * lift it). Inserts when no row exists (defensive — the decision write
+ * normally created it) and fills customer_id when this write knows it.
+ * Atomic per row (ON CONFLICT takes the row lock the clearance UPDATE
+ * takes), so it serializes with a concurrent resolve without needing the
+ * advisory lock — which matters inside the booking transaction, where
+ * taking the triage lock after row locks could deadlock against /resolve.
+ *
+ * Returns { recorded, phoneE164, active } — active=false means a human
+ * cleared this call's hold after the decision; callers skip re-stamping
+ * the visit-level hold for the same reason.
+ */
+async function ensureDisclaimedNumberHold({ phone, customerId = null, callLogId, conn = db }) {
+  const phoneE164 = holdPhoneKey(phone);
+  if (!phoneE164 || !callLogId) return { recorded: false, reason: phoneE164 ? 'no_call' : 'no_phone' };
+  const result = await conn.raw(
+    `INSERT INTO ${TABLE} (phone_e164, customer_id, source_call_log_id, held_at)
+     VALUES (?, ?, ?, now())
+     ON CONFLICT (phone_e164, source_call_log_id) DO UPDATE SET
+       customer_id = COALESCE(EXCLUDED.customer_id, ${TABLE}.customer_id),
+       updated_at = now()
+     RETURNING cleared_at`,
+    [phoneE164, customerId || null, callLogId],
+  );
+  const row = result?.rows?.[0];
+  return { recorded: true, phoneE164, active: !row || row.cleared_at == null };
+}
+
+/**
+ * Lift every active hold a call placed. Called ONLY for the single-card
+ * /resolve (admin-triage.js, clear_reason 'verified_same_number' — the
+ * office's explicit word that this same number is safe to text). Closing
+ * the card after a REPLACEMENT number (the bulk /verdict) does not come
+ * here: that verified the replacement, not this number (round 7 P1). A
+ * customer phone edit clears nothing either.
  */
 async function clearDisclaimedNumberHoldsForCall({ callLogId, clearedBy = null, reason, conn = db }) {
   if (!callLogId) return 0;
@@ -177,6 +237,8 @@ async function disclaimedNumberHeldForVisit(idsOrScheduledServiceId, conn = db) 
 module.exports = {
   holdPhoneKey,
   recordDisclaimedNumberHold,
+  armDisclaimedNumberHold,
+  ensureDisclaimedNumberHold,
   clearDisclaimedNumberHoldsForCall,
   disclaimedNumberHeld,
   disclaimedNumberBlocksSend,

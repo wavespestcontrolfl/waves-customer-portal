@@ -2587,7 +2587,17 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   let holdStampFailed = false;
   if (scheduledServiceId && callbackNumberHoldActive) {
     try {
-      await db('scheduled_services')
+      // Codex round 6 (structural): the number-keyed hold every SMS is
+      // actually checked against (disclaimed-number-holds.js). Idempotent
+      // with the in-transaction write for the main booking paths; this is
+      // the fallback for paths that never ran that transaction.
+      // Round 7 P1: ensure-only (the pass's decision point armed it) —
+      // never re-arms; a clearance the office made after this pass decided
+      // stands, and the visit stamp below is skipped over it.
+      const numberHold = await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
+        phone: disclaimedPhone, customerId, callLogId,
+      });
+      if (!(numberHold.recorded && numberHold.active === false)) await db('scheduled_services')
         .where({ id: scheduledServiceId })
         .where((qb) => {
           qb.whereNull('callback_number_hold_at')
@@ -2598,13 +2608,6 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
           call_sms_cleared_at: null,
           call_sms_cleared_recipient: null,
         });
-      // Codex round 6 (structural): the number-keyed hold every SMS is
-      // actually checked against (disclaimed-number-holds.js). Idempotent
-      // with the in-transaction write for the main booking paths; this is
-      // the fallback for paths that never ran that transaction.
-      await require('./disclaimed-number-holds').recordDisclaimedNumberHold({
-        phone: disclaimedPhone, customerId, callLogId,
-      });
     } catch (holdErr) {
       holdStampFailed = true;
       logger.error(`[call-proc] callback-number hold stamp failed for visit ${scheduledServiceId} — refusing to arm messaging: ${holdErr.code || holdErr.name || 'db_error'}`);
@@ -8676,6 +8679,34 @@ const CallRecordingProcessor = {
     // scheduled_services.callback_number_hold_at once the visit is booked so
     // the reminder cron can honor the same hold days later.
     let callbackNumberNeededHoldActive = false;
+    // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
+    // the decision point — the same statement that flips the boolean above
+    // — before the card is published and before any further awaited work,
+    // so no sender (an invoice/estimate follow-up mid-flight, even at its
+    // provider check) sees the flag decided with no row. armDisclaimedNumber
+    // Hold serializes with the card's /resolve under the per-call triage
+    // lock and is the ONE write in this pass that may re-arm a cleared row
+    // (a genuine reprocess raising the flag again); every later write in
+    // the pass is ensure-only and cannot undo a clearance that lands after
+    // this decision. A failure fails the pass closed (the capped
+    // extraction_failed retry) — code/name only in the log (a Knex message
+    // can render the bound phone number).
+    let callbackNumberHoldArmed = false;
+    const armCallbackNumberHoldAtDecision = async () => {
+      if (callbackNumberHoldArmed) return;
+      try {
+        await require('./disclaimed-number-holds').armDisclaimedNumberHold({
+          phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
+        });
+        callbackNumberHoldArmed = true;
+      } catch (holdErr) {
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] disclaimed-number hold write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
+      }
+    };
     // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
     // inbound consent (no explicit sms_consent_given). The non-ANI recipient
     // hold at the send site keys off this — a send cleared by explicit consent
@@ -9095,6 +9126,9 @@ const CallRecordingProcessor = {
             // would otherwise text the disclaimed ANI days later. Stamped
             // onto the visit once scheduledServiceId is known (below).
             callbackNumberNeededHoldActive = true;
+            // Round 7 P1: persisted NOW — before the route decision, the
+            // advisory card below, and anything else this pass awaits.
+            await armCallbackNumberHoldAtDecision();
           }
 
           const routeDecision = buildRouteDecision({
@@ -9314,6 +9348,9 @@ const CallRecordingProcessor = {
           }
         }
       } catch (err) {
+        // A failed decision-point hold write is NOT a routing-gate error to
+        // soften: the pass must fail closed (round 7 P1).
+        if (err?.code === 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED') throw err;
         // Fail closed (soft): hold only the appointment for triage. No TCPA/DNC
         // decision was made here, so do NOT suppress SMS/email follow-up — the
         // call may be a real lead and email/newsletter should still proceed.
@@ -9393,6 +9430,9 @@ const CallRecordingProcessor = {
           v2SmsBlocked = true;
           v2SmsClearedByImpliedConsent = false;
           callbackNumberNeededHoldActive = true;
+          // Round 7 P1: persisted NOW — before the bridge files the card
+          // below and before any further awaited work.
+          await armCallbackNumberHoldAtDecision();
         }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the
@@ -9587,6 +9627,8 @@ const CallRecordingProcessor = {
         // in-flight release can send the unreviewed address — that state
         // must fail the run, not be skipped.
         if (bridgeErr.emailReviewStateUnavailable) throw bridgeErr;
+        // …and a failed decision-point hold write (round 7 P1).
+        if (bridgeErr?.code === 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED') throw bridgeErr;
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
       }
     } else {
@@ -11481,7 +11523,13 @@ const CallRecordingProcessor = {
     // this row, so the hold no longer depends on a booking existing.
     // customerId may still be null (shared-phone ambiguity, explicit
     // unlink) — the hold is number-scoped either way. The booking
-    // transaction writes the same row again (idempotent). A failure HERE
+    // transaction writes the same row again (idempotent).
+    //
+    // Round 7 P1: the row was already PERSISTED at the decision point
+    // (armCallbackNumberHoldAtDecision); this later write is ensure-only —
+    // it fills customer_id now that the customer is resolved and never
+    // re-arms, so an office Resolve that landed after this pass decided
+    // stands. A failure HERE
     // aborts the pass (fail closed) rather than continue unheld: a call
     // that books nothing has no later write to fall back on, and the
     // pass's own catch already turns a throw into the capped
@@ -11490,7 +11538,7 @@ const CallRecordingProcessor = {
     // message can render the bound phone number into the log.
     if (callbackNumberNeededHoldActive) {
       try {
-        await require('./disclaimed-number-holds').recordDisclaimedNumberHold({
+        await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
           phone: contactPhone, customerId: customerId || call.customer_id || null, callLogId: call.id,
         });
       } catch (holdErr) {
@@ -14896,9 +14944,15 @@ const CallRecordingProcessor = {
                   // SMS is checked against, in this same transaction — a
                   // failure aborts the booking exactly like the visit stamp
                   // below. Idempotent per (number, call).
-                  await require('./disclaimed-number-holds').recordDisclaimedNumberHold({
+                  // Round 7 P1: ensure-only — the decision point already
+                  // armed it; this write never re-arms. active=false means
+                  // the office resolved the card (verified the number)
+                  // after this pass decided: that clearance stands, and the
+                  // visit-level hold is not re-stamped over it either.
+                  const numberHold = await require('./disclaimed-number-holds').ensureDisclaimedNumberHold({
                     phone: contactPhone, customerId, callLogId: call.id, conn: trx,
                   });
+                  if (numberHold.recorded && numberHold.active === false) return;
                   await trx('scheduled_services')
                     .where({ source_call_log_id: call.id })
                     .where((qb) => {

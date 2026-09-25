@@ -1704,6 +1704,14 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // unreadable result suppresses the SMS leg like a real hold, never
   // clears it — every caller already has (or degrades gracefully without)
   // an email fallback for the true-held case.
+  // Codex round 7 P2: an App-push reminder (expectedChannel 'push') never
+  // dials the number — the hold is about TEXTING it. Returning here before
+  // safeSend routes through wantsAppFirst suppressed the app notification
+  // and pushed the notice to email (or lost it). For push the pre-check
+  // only narrows the fan-out to the account holder's app leg (below); that
+  // leg's SMS fallback still hits disclaimedNumberBlocksSend at
+  // sendCustomerMessage 6.45 / the provider boundary / twilio.js dispatch().
+  let callbackHeldAppLegOnly = false;
   if (metaExtra?.scheduled_service_id || metaExtra?.visit_id) {
     const callbackHeld = await callbackNumberHoldActiveForVisit({
       scheduledServiceId: metaExtra.scheduled_service_id,
@@ -1716,7 +1724,10 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       // (finding #4) instead of reading a plain `undefined` as "no group".
       ...(metaExtra.visit_id !== undefined ? { visitId: metaExtra.visit_id } : {}),
     });
-    if (callbackHeld) {
+    if (callbackHeld && sendOptions.expectedChannel === 'push') {
+      callbackHeldAppLegOnly = true;
+      logger.info(`[appt-remind] ${metaExtra.scheduled_service_id || metaExtra.visit_id} (${messageType}) is under a callback-number hold — App leg only; any SMS fallback stays blocked at the send boundary`);
+    } else if (callbackHeld) {
       if (sendOptions.sendOutcome && typeof sendOptions.sendOutcome === 'object') {
         // RETRYABLE, not a deterministic block (same posture as
         // PREFERENCES_UNAVAILABLE above): the hold can clear later, and a
@@ -1759,6 +1770,20 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     if (primary.phone) {
       logger.info(`[appt-remind] All recipients held by opt-in for customer ${customer.id} — falling back to primary for ${messageType}`);
       allowedContacts = [{ ...primary, role: 'primary' }];
+    }
+  }
+  // Round 7 P2: under a callback-number hold only the account holder's App
+  // leg proceeds (no other contact is texted on this visit while held —
+  // the pre-check's standing rule for the SMS path).
+  if (callbackHeldAppLegOnly) {
+    const holderPhone = lastTenDigits(customer.phone);
+    allowedContacts = allowedContacts.filter((c) => lastTenDigits(c.phone) === holderPhone);
+    if (!allowedContacts.length) {
+      if (sendOptions.sendOutcome && typeof sendOptions.sendOutcome === 'object') {
+        sendOptions.sendOutcome.retryable = true;
+        sendOptions.sendOutcome.lastCode = 'CALLBACK_NUMBER_HOLD';
+      }
+      return false;
     }
   }
   // Callers that need outcome classification pass their own object; a local

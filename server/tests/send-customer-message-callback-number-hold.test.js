@@ -163,3 +163,42 @@ describe('round-6 P1 #2 — re-checked at the provider boundary (providerPrepara
     expect(disclaimedNumberBlocksSend).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * Codex round 7 P2: App-push appointment notices (reminders, en-route,
+ * arrival) no longer stop at the visit pre-check under a callback-number
+ * hold — so the canonical sender is what must guarantee the push leg can
+ * never become an SMS to the held number. The App leg proceeds (push never
+ * dials the number); when the App is unavailable, the fallback re-enters
+ * this pipeline as SMS and 6.45 refuses it.
+ */
+describe('round-7 P2 — App-push leg under a hold: push goes out, SMS fallback is refused', () => {
+  const PushRouting = require('../services/messaging/push-channel-routing');
+  let appFirst;
+  beforeEach(() => {
+    // App-first exactly like the real router: never again once a fallback
+    // reason is stamped (that is how the fallback re-entry becomes SMS).
+    appFirst = jest.spyOn(PushRouting, 'wantsAppFirst').mockImplementation(async (input) => !input.metadata?.appFallbackReason);
+    disclaimedNumberBlocksSend.mockResolvedValue(true);
+  });
+  afterEach(() => { appFirst.mockRestore(); });
+
+  test('the App push is delivered while the number is held — the hold is never consulted for the push leg', async () => {
+    // (No appointmentId: the move-hold read is not what this pins.)
+    const result = await sendCustomerMessage({ ...BASE_INPUT, metadata: { useCustomerChannel: true } });
+    expect(result.sent).toBe(true);
+    expect(sendViaTwilio).toHaveBeenCalledTimes(1);
+    expect(sendViaTwilio.mock.calls[0][0]).toMatchObject({ channel: 'push' });
+    expect(disclaimedNumberBlocksSend).not.toHaveBeenCalled();
+  });
+
+  test('App unavailable → the SMS fallback to the held number is refused (CALLBACK_NUMBER_HOLD), never dialed', async () => {
+    sendViaTwilio.mockResolvedValueOnce({ sent: false, appUnavailable: true, error: 'no_active_device', deliveryOutcome: 'not_sent' });
+    const result = await sendCustomerMessage({ ...BASE_INPUT, metadata: { useCustomerChannel: true } });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'CALLBACK_NUMBER_HOLD', retryable: true, requestedChannel: 'push' });
+    // Only the push attempt reached the provider.
+    expect(sendViaTwilio).toHaveBeenCalledTimes(1);
+    expect(sendViaTwilio.mock.calls[0][0]).toMatchObject({ channel: 'push' });
+    expect(disclaimedNumberBlocksSend).toHaveBeenCalledWith({ to: '+19415550142' });
+  });
+});

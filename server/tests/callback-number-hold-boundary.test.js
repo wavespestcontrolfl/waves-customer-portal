@@ -171,6 +171,59 @@ describe('recordDisclaimedNumberHold', () => {
   });
 });
 
+/**
+ * Codex round 7 P1: the decision-point write (armDisclaimedNumberHold) is
+ * the only re-arming write in a pass and serializes with /resolve under the
+ * per-call triage lock; every later in-pass write (ensureDisclaimedNumberHold)
+ * never re-arms, so a Resolve landing between the writes stands.
+ */
+describe('armDisclaimedNumberHold / ensureDisclaimedNumberHold (round 7)', () => {
+  function recordingConn({ clearedAt = null } = {}) {
+    const calls = [];
+    const trx = { raw: jest.fn(async (sql, bindings) => { calls.push({ on: 'trx', sql, bindings }); return { rows: [{ cleared_at: clearedAt }] }; }) };
+    const conn = {
+      raw: jest.fn(async (sql, bindings) => { calls.push({ on: 'conn', sql, bindings }); return { rows: [{ cleared_at: clearedAt }] }; }),
+      transaction: jest.fn(async (fn) => fn(trx)),
+    };
+    return { conn, trx, calls };
+  }
+
+  test('arm: takes the per-call triage lock FIRST, then the re-arming upsert, in one transaction', async () => {
+    const { conn, calls } = recordingConn();
+    const res = await Holds.armDisclaimedNumberHold({ phone: '(941) 555-1234', customerId: null, callLogId: 'call-1', conn });
+    expect(res).toEqual({ recorded: true, phoneE164: HELD });
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    expect(calls.map((c) => c.on)).toEqual(['trx', 'trx']);
+    expect(calls[0].sql).toMatch(/pg_advisory_xact_lock/);
+    expect(calls[0].bindings).toEqual(['triage-call-review', 'call-1']);
+    expect(calls[1].sql).toMatch(/cleared_at = NULL/);
+  });
+
+  test('ensure: never re-arms — the upsert only fills customer_id; a cleared row comes back active:false', async () => {
+    const cleared = recordingConn({ clearedAt: new Date() });
+    const res = await Holds.ensureDisclaimedNumberHold({ phone: HELD, customerId: 'cust-1', callLogId: 'call-1', conn: cleared.conn });
+    expect(res).toEqual({ recorded: true, phoneE164: HELD, active: false });
+    const { sql, bindings } = cleared.calls[0];
+    expect(bindings).toEqual([HELD, 'cust-1', 'call-1']);
+    expect(sql).toMatch(/ON CONFLICT \(phone_e164, source_call_log_id\) DO UPDATE SET/);
+    expect(sql).toMatch(/customer_id = COALESCE\(EXCLUDED\.customer_id, disclaimed_number_holds\.customer_id\)/);
+    expect(sql).not.toMatch(/cleared_at\s*=/);
+    expect(sql).not.toMatch(/held_at\s*=/);
+    expect(sql).toMatch(/RETURNING cleared_at/);
+    const active = recordingConn({ clearedAt: null });
+    expect(await Holds.ensureDisclaimedNumberHold({ phone: HELD, callLogId: 'call-1', conn: active.conn }))
+      .toEqual({ recorded: true, phoneE164: HELD, active: true });
+  });
+
+  test('neither writes without a dialable number and a call', async () => {
+    const { conn } = recordingConn();
+    expect(await Holds.ensureDisclaimedNumberHold({ phone: null, callLogId: 'call-1', conn })).toEqual({ recorded: false, reason: 'no_phone' });
+    expect(await Holds.armDisclaimedNumberHold({ phone: HELD, callLogId: null, conn })).toEqual({ recorded: false, reason: 'no_call' });
+    expect(conn.raw).not.toHaveBeenCalled();
+    expect(conn.transaction).not.toHaveBeenCalled();
+  });
+});
+
 describe('visit-level pre-check (callbackNumberHoldActiveForVisit / ConfirmedForVisit)', () => {
   const holdRow = (overrides = {}) => ({ id: 'h1', phone_e164: HELD, source_call_log_id: 'call-1', cleared_at: null, ...overrides });
 
@@ -314,6 +367,46 @@ describe('safeSendAppointment — the email-fallback pre-check boundary', () => 
     );
     expect(sent).toBe(true);
     expect(fake.reads).not.toContain('disclaimed_number_holds');
+  });
+
+  /**
+   * Codex round 7 P2: an App-push reminder never dials the number — the
+   * pre-check must not suppress it. Only the account holder's App leg
+   * proceeds (no other contact is texted on a held visit); its SMS fallback
+   * is refused at sendCustomerMessage's boundary (covered in
+   * send-customer-message-callback-number-hold.test.js).
+   */
+  test('round 7 P2: held + expectedChannel push → the holder\'s App leg is sent (not suppressed); no other contact is texted', async () => {
+    wire(visitFixture());
+    const { getAppointmentContacts } = require('../services/customer-contact');
+    getAppointmentContacts.mockReturnValueOnce([
+      { phone: HELD, name: 'Ada', role: 'primary' },
+      { phone: CLEAN, name: 'Bo', role: 'service_contact' },
+    ]);
+    const sendOutcome = {};
+    const sent = await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, 'BODY', 'reminder_24h', 'appointment_reminder_24h',
+      { scheduled_service_id: 'svc-1' }, { sendOutcome, expectedChannel: 'push' },
+    );
+    expect(sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
+      to: HELD, channel: 'sms', metadata: expect.objectContaining({ requestedChannel: 'push', useCustomerChannel: true }),
+    });
+    expect(sendOutcome.lastCode).not.toBe('CALLBACK_NUMBER_HOLD');
+  });
+
+  test('round 7 P2: held + push, App unavailable → the SMS fallback refused at the boundary surfaces as CALLBACK_NUMBER_HOLD (retryable → caller\'s email fallback)', async () => {
+    wire(visitFixture());
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'CALLBACK_NUMBER_HOLD', retryable: true, requestedChannel: 'push' });
+    const sendOutcome = {};
+    const sent = await AppointmentReminders.safeSendAppointment(
+      CUSTOMER, {}, 'BODY', 'reminder_24h', 'appointment_reminder_24h',
+      { scheduled_service_id: 'svc-1' }, { sendOutcome, expectedChannel: 'push' },
+    );
+    expect(sent).toBe(false);
+    expect(sendOutcome.lastCode).toBe('CALLBACK_NUMBER_HOLD');
+    expect(sendOutcome.retryable).toBe(true);
   });
 
   test('a read error while pre-checking FAILS CLOSED — the boundary refuses to text on an unknown consent state', async () => {

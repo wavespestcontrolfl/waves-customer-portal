@@ -249,8 +249,23 @@ describe('PUT /admin/triage/:id/resolve on a callback_number_needed card', () =>
     });
     expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
     expect(numberHold(tables).cleared_by).toBe('tech-1');
-    expect(numberHold(tables).clear_reason).toBe('callback_card_resolved');
+    // Round 7 P1: the single-card Resolve is the explicit "this SAME number
+    // is actually fine" verification — named as such on the row.
+    expect(numberHold(tables).clear_reason).toBe('verified_same_number');
     expect(numberHold(tables, 'hold-other').cleared_at).toBeNull();
+  });
+
+  test('round 7 P1: the reply names the verified-same-number meaning — the disclaimed number is cleared', async () => {
+    const { conn } = fixture();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Called back — this IS her number.' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.callback_number).toMatchObject({
+        verdict: 'verified_same_number', disclaimed_number_hold: 'cleared', number_holds_cleared: 1,
+      });
+    });
   });
 
   test('codex round-3 P2: an en_route visit (tech already rolling) still clears — nonterminal, not just pending/confirmed', async () => {
@@ -329,10 +344,52 @@ describe('POST /admin/triage/:id/verdict on a callback_number_needed card', () =
     expect(held.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
     const enRoute = tables.scheduled_services.find((s) => s.id === EN_ROUTE_VISIT_ID);
     expect(enRoute.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
-    // Round 6: the card is the one human clearance path for the number hold
-    // too — leaving it held after the card is gone would strand it.
-    expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
+    // Round 7 P1 (supersedes round 6's "the verdict clears the number
+    // too"): this verdict's prerequisite only proved the customer's phone
+    // MOVED to a replacement — the OLD disclaimed number was never verified,
+    // and the send predicate checks its row globally (duplicate customers,
+    // leads, queued messages to that shared/office line). It stays held.
+    expect(numberHold(tables).cleared_at).toBeNull();
     expect(numberHold(tables, 'hold-other').cleared_at).toBeNull();
+  });
+
+  test('round 7 P1: bulk verdict after a replacement keeps the OLD ANI blocked and says so; a later sender to that ANI is still refused', async () => {
+    const { conn, tables } = fixture({
+      customers: [{ id: CUSTOMER_ID, phone: '9415559999' }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.callback_number).toMatchObject({
+        verdict: 'replacement_number', disclaimed_number_hold: 'kept', number_holds_cleared: 0,
+      });
+      expect(body.callback_number.message).toMatch(/stays blocked/);
+    });
+    expect(tables.triage_items[0].status).toBe('resolved');
+    const row = numberHold(tables);
+    expect(row.cleared_at).toBeNull();
+    expect(row.clear_reason == null).toBe(true);
+    // The global send predicate, reading the same table: the old ANI (any
+    // formatting) is still refused, the replacement is not held.
+    const Holds = require('../services/disclaimed-number-holds');
+    expect(await Holds.disclaimedNumberBlocksSend({ to: DISCLAIMED_ANI, conn })).toBe(true);
+    expect(await Holds.disclaimedNumberBlocksSend({ to: '(941) 555-1234', conn })).toBe(true);
+    expect(await Holds.disclaimedNumberBlocksSend({ to: '9415559999', conn })).toBe(false);
+  });
+
+  test('round 7 P1: single-card Resolve after the same replacement DOES clear the old ANI (explicit same-number verification)', async () => {
+    const { conn, tables } = fixture({
+      customers: [{ id: CUSTOMER_ID, phone: '9415559999' }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Confirmed the office line is fine too.' });
+      expect(res.status).toBe(200);
+    });
+    expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
+    expect(numberHold(tables).clear_reason).toBe('verified_same_number');
   });
 
   test('Accept with the customer phone still == the disclaimed ANI refuses 409 CALLBACK_NUMBER_UNVERIFIED — nothing resolves, nothing clears', async () => {

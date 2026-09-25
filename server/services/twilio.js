@@ -418,6 +418,15 @@ const ARRIVAL_DELIVERY = {
     // once the hold cleared. Checked before heldAllSms so the two holds'
     // different retry semantics can never collide.
     if (ctx.callbackNumberHoldActive) {
+      // Codex round 7 P2: an App-push arrival is not a text to the held
+      // number — deliver it to the holder's app first; only a miss (its
+      // SMS fallback refused at the boundary) falls to email. A push still
+      // in flight defers like any push-channel miss instead of doubling up
+      // with an email.
+      if (ctx.appLegUnderHold) {
+        if (await ctx.attemptSmsLegs({ primaryAppOnly: true })) return { success: true, results: ctx.results };
+        if (ctx.results.some((r) => r?.deferred)) return { success: false, results: ctx.results };
+      }
       const emailRes = await sendArrivalEmailLeg(ctx);
       if (emailRes?.ok) return { success: true, results: ctx.results, emailSent: true };
       return settleArrivalMiss(ctx, emailRes);
@@ -1665,8 +1674,12 @@ const TwilioService = {
       for (const contact of contacts) {
         // callback_number_needed hold — never text the disclaimed ANI (or
         // any other contact) on this visit; the email fallback below
-        // carries the notice instead.
-        if (callbackNumberHoldActive) continue;
+        // carries the notice instead. Codex round 7 P2: an App-push
+        // en-route never dials the number, so the account holder's App leg
+        // still proceeds; if it falls back to SMS, sendCustomerMessage's
+        // 6.45 / provider-boundary check and twilio.js dispatch() refuse it
+        // (CALLBACK_NUMBER_HOLD) and the email fallback below runs.
+        if (callbackNumberHoldActive && (channel !== 'push' || digitsOnly(contact.phone) !== primaryDigits)) continue;
         if (channel !== 'push' && cachedPrimaryLandline && digitsOnly(contact.phone) === primaryDigits) {
           landlineSkipped = true;
           continue;
@@ -1866,8 +1879,15 @@ const TwilioService = {
     const { sendCustomerMessage } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
     const serviceType = await arrivedServiceLabel(scheduledServiceId);
-    const attemptSmsLegs = async () => {
+    const arrivalDigits = (v) => String(v || "").replace(/\D/g, "").slice(-10);
+    const arrivalHolderDigits = arrivalDigits(customer.phone);
+    // Codex round 7 P2: under a callback-number hold the App-push arrival
+    // still goes to the account holder's app (push never dials the number);
+    // primaryAppOnly narrows the legs to that one contact. Its SMS fallback
+    // is refused at the send boundary (CALLBACK_NUMBER_HOLD).
+    const attemptSmsLegs = async ({ primaryAppOnly = false } = {}) => {
       for (const contact of contacts) {
+        if (primaryAppOnly && (!arrivalHolderDigits || arrivalDigits(contact.phone) !== arrivalHolderDigits)) continue;
         // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
         // {first_name} template slot wants only the first token, so strip the rest.
         const firstName = firstNameFrom(contact.name) || customer.first_name || "";
@@ -1936,6 +1956,9 @@ const TwilioService = {
       // callbackNumberHoldActive on ctx and ARRIVAL_DELIVERY.sms below.
       heldAllSms: smsAllowed && !contacts.length && unfilteredContacts.length > 0,
       callbackNumberHoldActive,
+      // Round 7 P2: the App leg a callback-number hold must NOT suppress.
+      appLegUnderHold: callbackNumberHoldActive && channel === "push" && !!arrivalHolderDigits
+        && contacts.some((c) => arrivalDigits(c.phone) === arrivalHolderDigits),
       attemptSmsLegs,
       results,
     });
