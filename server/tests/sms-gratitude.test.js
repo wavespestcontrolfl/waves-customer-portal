@@ -86,6 +86,9 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
     'Let me adjust, give a minute',
     'Give me a minute and I will resend it',
     'Have it to you in 15 minutes',
+    'Have it to you in 1 minute',
+    'In a min',
+    'Should be done in an hour',
     'On the way, 15-20 min',
     'On my way now',
     'Leaving now',
@@ -98,6 +101,15 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
   test('a hand-typed reply answers an earlier operational text', () => {
     expect(evaluateGratitudeContext({ ...context, history: [earlierRequest,
       manual('Yes, you can download the Waves app and reschedule appts there.')] }).eligible).toBe(true);
+  });
+  test.each([
+    { body: 'Can you also check the garage?', mediaCount: 0 },
+    { body: 'Here is the photo', mediaCount: 1 },
+  ])('a customer text sent after the hand-typed reply still vetoes: %p', later => {
+    expect(evaluateGratitudeContext({ ...context, history: [
+      manual('Yes, you can download the Waves app and reschedule appts there.'),
+      { ...inbound, id: 'later', createdAt: '2030-01-10T14:59:30Z', ...later },
+    ] }).reason).toBe('operational_context');
   });
   test('a template after an earlier operational text still abstains', () => {
     expect(evaluateGratitudeContext({ ...context, history: [earlierRequest,

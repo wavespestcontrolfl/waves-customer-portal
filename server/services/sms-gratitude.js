@@ -74,7 +74,7 @@ const MANUAL_MESSAGE_TYPE = 'manual';
 // there by 3". The visit or estimate is still ahead, so thanks in reply is not
 // a closure. Manual texts only: our en-route template says "on the way" and is
 // a closure by type.
-const MANUAL_PROMISE_RE = /\b(?:give (?:me )?a (?:minute|min|sec|second|moment)|in \d+(?:-\d+)? ?(?:minutes|mins|min)|leaving now|on (?:the|my) way|swinging by|heading (?:over|your way)|be there (?:by|at|around|after))\b/i;
+const MANUAL_PROMISE_RE = /\b(?:give (?:me )?a (?:minute|min|sec|second|moment)|in (?:a|an|\d+(?:-\d+)?) ?(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|moment)|leaving now|on (?:the|my) way|swinging by|heading (?:over|your way)|be there (?:by|at|around|after))\b/i;
 const outboundPending = (text, row) => outboundAsksForReply(text) || PENDING_OUTBOUND_RE.test(text)
   || (row.messageType === MANUAL_MESSAGE_TYPE && MANUAL_PROMISE_RE.test(text));
 const CLOSED_OUTBOUND_RE = /\b(?:your|the)\b[^\n.!?]*\b(?:report|receipt)\b[^\n]*\b(?:https?:\/\/|portal\.)|\b(?:report|receipt):\s*(?:https?:\/\/|portal\.)|\b(?:we(?:'ve| have)? (?:completed|finished)|(?:service|control|treatment) is (?:done|complete))\b|\bpayment received\b/i;
@@ -123,8 +123,10 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
   // A later template cannot erase an earlier unanswered operational message.
   // This deliberately gives up some valid thanks instead of inferring that a
   // report/reminder satisfied a separate request or a promised follow-up. A
-  // hand-typed staff reply IS that answer, so the guard does not apply to it.
-  if (!manualReply && recent.some(row => row.direction === 'inbound'
+  // hand-typed staff reply IS that answer for the customer texts BEFORE it;
+  // anything the customer sent after it is still unanswered.
+  const answeredByManualReply = row => manualReply && timestamp(row.createdAt) <= timestamp(previous.createdAt);
+  if (recent.some(row => row.direction === 'inbound' && !answeredByManualReply(row)
       && (row.mediaCount !== 0 || !(isCourtesyOnly(row.body, { awaitingAnswer: false })
         || isGratitudeOnly(row.body))))) return deny('operational_context');
   if (outgoing.slice(0, -1).some(row => {
