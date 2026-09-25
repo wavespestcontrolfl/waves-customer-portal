@@ -6,6 +6,7 @@ const rows = {
 
 const defaultDbImplementation = (table) => ({
   where: jest.fn().mockReturnThis(),
+  forUpdate: jest.fn().mockReturnThis(),
   first: jest.fn(async () => rows[table] || null),
 });
 const mockDb = jest.fn(defaultDbImplementation);
@@ -157,6 +158,7 @@ describe('billing channel email adapter', () => {
     let reads = 0;
     mockDb.mockImplementation((table) => ({
       where: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
       first: jest.fn(async () => {
         if (table === 'notification_prefs') {
           reads += 1;
@@ -178,6 +180,7 @@ describe('billing channel email adapter', () => {
     let reads = 0;
     mockDb.mockImplementation((table) => ({
       where: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
       first: jest.fn(async () => {
         if (table === 'notification_prefs') {
           reads += 1;
@@ -220,7 +223,17 @@ describe('billing channel email adapter', () => {
   test('rechecks invoice ownership while both handoff locks cover provider dispatch', async () => {
     let commsLocked = false;
     let invoiceLocked = false;
-    const lockedTrx = jest.fn(defaultDbImplementation);
+    const recipientLocks = [];
+    const lockedTrx = jest.fn((table) => {
+      const query = defaultDbImplementation(table);
+      query.forUpdate.mockImplementation(() => {
+        expect(commsLocked).toBe(true);
+        expect(invoiceLocked).toBe(true);
+        recipientLocks.push(table);
+        return query;
+      });
+      return query;
+    });
     mockWithCustomerCommsLock.mockImplementationOnce(async (database, customerId, callback) => {
       expect(database).toBe(mockDb);
       expect(customerId).toBe('cust-1');
@@ -246,6 +259,7 @@ describe('billing channel email adapter', () => {
       sent: true, providerMessageId: 'provider-locked', deliveryOutcome: 'accepted',
     });
     expect(selfPayAtDispatch).toHaveBeenNthCalledWith(2, 'inv-1', lockedTrx);
+    expect(recipientLocks).toEqual(['customers', 'notification_prefs']);
     expect(commsLocked).toBe(false);
     expect(invoiceLocked).toBe(false);
   });
@@ -282,6 +296,7 @@ describe('billing channel email adapter', () => {
     let customerReads = 0;
     mockDb.mockImplementation((table) => ({
       where: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
       first: jest.fn(async () => {
         if (table === 'customers') {
           customerReads += 1;
