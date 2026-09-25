@@ -1520,6 +1520,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           priceMax: s.price_range_max ?? s.base_price,
           base_price: s.base_price,
           default_duration_minutes: s.default_duration_minutes,
+          retiredForSale: s.retired_for_sale === true,
         })));
       } catch {
         setServiceResults([]);
@@ -1529,6 +1530,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }, 200);
     return () => clearTimeout(handle);
   }, [serviceSearch, selectedCustomer?.id]);
+
+  // A retired-for-sale line (quarterly T&S) is only offered because the
+  // selected customer is already on that plan — it must not carry over to a
+  // different customer. The server refuses it too (RETIRED_SERVICE_NOT_SELLABLE).
+  const retiredLinesCustomerRef = useRef(selectedCustomer?.id || null);
+  useEffect(() => {
+    const customerId = selectedCustomer?.id || null;
+    if (retiredLinesCustomerRef.current === customerId) return;
+    retiredLinesCustomerRef.current = customerId;
+    setServices((arr) => (arr.some((line) => line.retiredForSale) ? arr.filter((line) => !line.retiredForSale) : arr));
+  }, [selectedCustomer?.id]);
 
   useEffect(() => {
     const customerId = selectedCustomer?.id;

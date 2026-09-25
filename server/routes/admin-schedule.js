@@ -7089,6 +7089,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
+    // Retired-for-sale catalog rows (quarterly T&S, retired 2026-09-24) book
+    // only for a customer already on that plan — the same exception the
+    // new-appointment picker applies (service-library getServices sellable).
+    const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
+      customerId,
+      serviceIds: [serviceId, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.serviceId) : [])],
+    });
+    if (notHeldRetired.length) {
+      return res.status(409).json({
+        error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+        code: 'RETIRED_SERVICE_NOT_SELLABLE',
+      });
+    }
+
     // Duplicate-series guard: a second ACTIVE recurring series of the same
     // service family for one customer is almost always a booking mistake —
     // the verified cause of customers holding two live quarterly series

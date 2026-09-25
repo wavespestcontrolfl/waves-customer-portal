@@ -583,7 +583,7 @@ async function findOverdueCustomers(input) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - baseFreq - overdue_days);
 
-    const customers = await db('customers')
+    let customersQuery = db('customers')
       .select(
         'customers.id', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.city', 'customers.waveguard_tier',
@@ -600,8 +600,13 @@ async function findOverdueCustomers(input) {
           .whereRaw('service_type ~* ?', [patterns[cat]]);
       })
       .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) < ?", [patterns[cat], cutoff.toISOString().split('T')[0]])
-      .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC", [patterns[cat]])
-      .limit(limit);
+      .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC", [patterns[cat]]);
+    // T&S: the 42-day prefilter admits not-yet-due 60/90-day customers, and
+    // they sort oldest-first — a SQL limit would let them crowd out a truly
+    // overdue 6-week customer. Filter per customer first; the final slice
+    // below applies the limit.
+    if (cat !== 'tree_shrub') customersQuery = customersQuery.limit(limit);
+    const customers = await customersQuery;
 
     for (const c of customers) {
       const daysSince = c.last_service_date

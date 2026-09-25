@@ -367,7 +367,40 @@ async function getServices({ category, billingType, isActive, isArchived, includ
     countQuery,
   ]);
 
-  return { services: rows.map(withSchedulingDuration), total: parseInt(countResult.total, 10), limit: safeLimit, offset: safeOffset };
+  let services = rows.map(withSchedulingDuration);
+  if (sellable === true || sellable === 'true') {
+    // Flag the grandfathered exception rows so the picker can drop them when
+    // the operator switches to a customer who is not on the plan.
+    const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
+    services = services.map((s) => (RETIRED_SALE_SERVICE_KEYS.has(s.service_key) ? { ...s, retired_for_sale: true } : s));
+  }
+  return { services, total: parseInt(countResult.total, 10), limit: safeLimit, offset: safeOffset };
+}
+
+/**
+ * Write-boundary twin of getServices' sellable exception: of the given
+ * service ids, the retired-for-sale rows this customer has NO non-cancelled
+ * visits on (i.e. would be a new sale). Empty array = booking allowed.
+ */
+async function retiredServicesNotHeldBy({ customerId, serviceIds } = {}) {
+  const ids = [...new Set((serviceIds || []).filter((id) => UUID_RE.test(String(id || ''))).map(String))];
+  if (!ids.length) return [];
+  const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
+  const retired = await db('services')
+    .whereIn('id', ids)
+    .whereIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
+    .select('id', 'service_key', 'name');
+  if (!retired.length) return [];
+  const held = customerId && UUID_RE.test(String(customerId))
+    ? await db('scheduled_services')
+      .whereIn('service_id', retired.map((r) => r.id))
+      .where('customer_id', String(customerId))
+      .whereNot('status', 'cancelled')
+      .distinct('service_id')
+      .pluck('service_id')
+    : [];
+  const heldSet = new Set(held.map(String));
+  return retired.filter((r) => !heldSet.has(String(r.id)));
 }
 
 /**
@@ -804,6 +837,7 @@ module.exports = {
   withSchedulingDuration,
   serviceDurationMinutes,
   getServices,
+  retiredServicesNotHeldBy,
   getServiceById,
   getServiceByKey,
   createService,

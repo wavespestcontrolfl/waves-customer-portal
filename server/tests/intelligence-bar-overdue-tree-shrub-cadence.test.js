@@ -12,10 +12,14 @@ jest.mock('../models/db', () => {
   const state = { rows: [] };
   const dbFn = () => {
     const builder = {};
-    for (const m of ['select', 'where', 'whereNull', 'whereExists', 'havingRaw', 'orderByRaw', 'limit']) {
+    let limitN = null;
+    for (const m of ['select', 'where', 'whereNull', 'whereExists', 'havingRaw', 'orderByRaw']) {
       builder[m] = () => builder;
     }
-    builder.then = (resolve, reject) => Promise.resolve(state.rows.map((r) => ({ ...r }))).then(resolve, reject);
+    builder.limit = (n) => { limitN = n; return builder; };
+    builder.then = (resolve, reject) => Promise.resolve(
+      state.rows.slice(0, limitN ?? state.rows.length).map((r) => ({ ...r })),
+    ).then(resolve, reject);
     return builder;
   };
   dbFn.raw = (sql) => ({ toString: () => sql });
@@ -47,6 +51,17 @@ test('each T&S customer is judged against their own cadence', async () => {
   expect(byId['six-week-due'].expected_frequency_days).toBe(42);
   expect(byId['quarterly-due'].expected_frequency_days).toBe(90);
   expect(byId['quarterly-due'].days_overdue).toBe(5);
+});
+
+test('not-yet-due longer-cadence rows cannot crowd an overdue 6-week customer out of the limit', async () => {
+  // Rows arrive oldest-first, as the SQL orders them (codex P2 r12 on #4786).
+  db.__state.rows = [
+    row('quarterly-a', 'Quarterly Tree & Shrub Care Service', 80),
+    row('quarterly-b', 'Quarterly Tree & Shrub Care Service', 79),
+    row('six-week-due', 'Every 6 Weeks Tree & Shrub Care Service', 45),
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub', limit: 2 });
+  expect(result.overdue_customers.map((c) => c.id)).toEqual(['six-week-due']);
 });
 
 test('other categories keep their fixed interval', async () => {
