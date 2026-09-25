@@ -235,3 +235,157 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(r.logos).toEqual(['Waves logo on left chest']);
   });
 });
+
+describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks/text allowed ON the van only)', () => {
+  const { screenGeneratedImage, buildScreenPrompt, _internals } = require('../services/content/hero-alt-vision');
+  const answer = (obj) => ({ ok: true, text: JSON.stringify(obj) });
+  const WRAP_TEXT = ['WAVES', 'Lawn & Pest', 'Wave Goodbye to Pests!', '941-241-2459', 'GoWavesFL.com'];
+  const van = (extra = {}) => ({ body: 'unsure', wrapped: true, wrap_text: WRAP_TEXT, wrap_mascot: true, ...extra });
+  const CLEAN_MAIN = { readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' };
+  const isVanQuestion = (req) => req.text.startsWith('Inspect ONLY the van');
+  // The main screen and the van's own question are two dispatches; answer
+  // each by its prompt.
+  const mockAnswers = ({ main = CLEAN_MAIN, vanAnswer = { van: van() } } = {}) => {
+    mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer(vanAnswer) : answer(main)));
+  };
+  const screen = ({ main, vanAnswer, ...opts } = {}) => {
+    mockAnswers({ main, vanAnswer });
+    return screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true, ...opts });
+  };
+  const withVan = (extra) => screen({ vanAnswer: { van: van(extra) } });
+  beforeEach(() => mockDispatch.mockReset());
+
+  test('the van is asked about in its own question; the main screen is told to leave that one van out of every field', () => {
+    expect(buildScreenPrompt({})).not.toMatch(/VAN EXCEPTION/);
+    expect(buildScreenPrompt({ allowUniformLogo: true })).not.toMatch(/VAN EXCEPTION/);
+    const main = buildScreenPrompt({ allowVanWrap: true });
+    expect(main).toMatch(/VAN EXCEPTION \(overrides every field above\): when exactly ONE van in the frame carries the Waves van wrap/);
+    expect(main).toMatch(/including its maker's badge, out of every field/);
+    expect(main).toMatch(/if two or more vans carry the wrap, list them all/);
+    expect(main).not.toMatch(/"van":|van_wrap_elsewhere/);
+    const q = _internals.buildVanScreenPrompt();
+    expect(q).toMatch(/shape \{"van": \{"body": "ford_transit_medium_roof" \| "other" \| "unsure", "wrapped": boolean, "wrap_text": string\[\], "wrap_mascot": boolean\} \| null\}/);
+    expect(q).toMatch(/Transit cues: a short hood, a black hexagon-mesh grille with a Ford oval badge/);
+    expect(q).toMatch(/Mercedes Sprinter's long sloped nose/);
+    expect(q).toMatch(/not the maker's badge/);
+  });
+
+  test('two dispatches in parallel, each with its own budget and the same deadline; without the allowance only the main one', async () => {
+    mockAnswers();
+    await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true, timeoutMs: 5000 });
+    expect(mockDispatch).toHaveBeenCalledTimes(2);
+    const [mainReq, vanReq] = [mockDispatch.mock.calls.find((c) => !isVanQuestion(c[1]))[1], mockDispatch.mock.calls.find((c) => isVanQuestion(c[1]))[1]];
+    expect(mainReq).toMatchObject({ maxTokens: _internals.SCREEN_MAX_TOKENS, timeoutMs: 5000, jsonMode: true });
+    expect(vanReq).toMatchObject({ maxTokens: _internals.VAN_SCREEN_MAX_TOKENS, timeoutMs: 5000, jsonMode: true });
+
+    mockDispatch.mockReset();
+    mockAnswers();
+    await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true, allowVanWrap: true });
+    expect(mockDispatch.mock.calls.find((c) => !isVanQuestion(c[1]))[1].maxTokens).toBe(_internals.SCREEN_MAX_TOKENS_WITH_LOGO);
+
+    mockDispatch.mockReset();
+    mockAnswers();
+    expect(await screenGeneratedImage({ buffer: PNG_BUFFER })).toMatchObject({ ok: true, checked: true });
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/VAN EXCEPTION/);
+  });
+
+  test('the wrap on the van, nothing off it, exact wrap strings → clean', async () => {
+    expect(await screen()).toMatchObject({ ok: true, checked: true, reasons: [], violations: 0, logos: [] });
+  });
+
+  test('garbled or TRUNCATED wrap text on the van fails as gibberish lettering (Codex r1 P2 on #4784)', async () => {
+    const garbled = await withVan({ wrap_text: ['WAVES', '941-XX9-ZZ59'] });
+    expect(garbled.reasons).toEqual(['garbled van wrap text: 941-XX9-ZZ59']);
+    expect(garbled.logos).toEqual(['garbled van wrap text: 941-XX9-ZZ59']);
+    const phone = await withVan({ wrap_text: ['WAVES', '941-241'] });
+    expect(phone.reasons).toEqual(['garbled van wrap text: 941-241']);
+    expect(phone.violations).toBe(1);
+    expect((await withVan({ wrap_text: ['GoWavesFL'] })).reasons).toEqual(['garbled van wrap text: GoWavesFL']);
+  });
+
+  test('PUNCTUATION-SENSITIVE: the right words with the wrong punctuation fail (Codex r2 P2 on #4785)', async () => {
+    for (const bad of ['Lawn Pest', 'Lawn-Pest', 'GoWavesFL-com']) {
+      expect((await withVan({ wrap_text: [bad] })).reasons).toEqual([`garbled van wrap text: ${bad}`]);
+    }
+    expect(await withVan({ wrap_text: ['Lawn & Pest', 'Wave Goodbye to Pests!'] })).toMatchObject({ ok: true });
+  });
+
+  test('a split is legitimate ONLY at a canonical whitespace boundary (Codex r3 P2 on #4785)', async () => {
+    expect((await withVan({ wrap_text: ['941-241', '2459'] })).reasons).toEqual(['garbled van wrap text: 941-241, 2459']);
+    expect((await withVan({ wrap_text: ['941', '241', '2459'] })).ok).toBe(false);
+    expect((await withVan({ wrap_text: ['GoWavesFL', 'com'] })).ok).toBe(false);
+    expect(await withVan({ wrap_text: ['Lawn &', 'Pest'] })).toMatchObject({ ok: true });
+    expect(await withVan({ wrap_text: ['Lawn', '& Pest'] })).toMatchObject({ ok: true });
+    expect((await withVan({ wrap_text: ['Lawn', 'Pest'] })).reasons).toEqual(['garbled van wrap text: Lawn & Pest']);
+    expect(await withVan({ wrap_text: ['Wave Goodbye', 'to Pests!'] })).toMatchObject({ ok: true });
+  });
+
+  test('one entry grouping adjacent wrap strings is valid, with the side panel\'s "Lawn & Pest!" anywhere in it (Codex r8, r9, r12 P2s on #4785)', async () => {
+    for (const ok of [['Lawn & Pest!'], ['Lawn &', 'Pest!'], ['WAVES Lawn & Pest'], ['WAVES Lawn & Pest! Wave Goodbye to Pests!']]) {
+      expect(await withVan({ wrap_text: ok })).toMatchObject({ ok: true, reasons: [] });
+    }
+    expect((await withVan({ wrap_text: ['WAVES Lawn Pest'] })).reasons).toEqual(['garbled van wrap text: WAVES Lawn Pest']);
+    // The tagline's own "!" belongs to "Pests!" — "Pest!" there is not the wrap.
+    expect((await withVan({ wrap_text: ['Wave Goodbye to Pest!'] })).ok).toBe(false);
+  });
+
+  test('van body: a Sprinter/other body fails even when correctly wrapped; "unsure" and the Transit pass (Codex r2 P2 on #4785)', async () => {
+    const other = await withVan({ body: 'other' });
+    expect(other.reasons).toEqual(['van body is not a Ford Transit medium-roof cargo van']);
+    expect(other.logos).toEqual(['van body is not a Ford Transit medium-roof cargo van']);
+    expect(await withVan({ body: 'unsure' })).toMatchObject({ ok: true, reasons: [] });
+    expect(await withVan({ body: 'ford_transit_medium_roof' })).toMatchObject({ ok: true, reasons: [] });
+    expect((await withVan({ body: 'other', wrap_mascot: false })).reasons).toEqual(['van body is not a Ford Transit medium-roof cargo van', 'van wrap missing the mascot']);
+  });
+
+  test('a van present WITHOUT the wrap fails; no van at all is clean (Codex r1 P2 on #4784)', async () => {
+    const plain = await withVan({ body: 'ford_transit_medium_roof', wrapped: false, wrap_text: [], wrap_mascot: false });
+    expect(plain.reasons).toEqual(['van present without the wrap']);
+    expect(plain.logos).toEqual(['van present without the wrap']);
+    expect(await screen({ vanAnswer: { van: null } })).toMatchObject({ ok: true, checked: true, reasons: [] });
+  });
+
+  test('a PARTIALLY applied wrap — no mascot — fails whatever text rendered (Codex r1 P2 on #4785)', async () => {
+    expect((await withVan({ wrap_mascot: false, wrap_text: [] })).reasons).toEqual(['van wrap missing the mascot']);
+    const both = await withVan({ wrap_mascot: false, wrap_text: ['941-XX9-ZZ59'] });
+    expect(both.reasons).toEqual(['van wrap missing the mascot', 'garbled van wrap text: 941-XX9-ZZ59']);
+    expect(both.violations).toBe(2);
+  });
+
+  test('a clearly visible Transit must carry the WAVES lettering; a distant "unsure" van is not held to it (Codex r10 P2 on #4785)', async () => {
+    expect((await withVan({ body: 'ford_transit_medium_roof', wrap_text: [] })).reasons).toEqual(['van wrap missing the WAVES lettering']);
+    expect(await withVan({ body: 'ford_transit_medium_roof', wrap_text: ['WAVES Lawn & Pest'] })).toMatchObject({ ok: true, reasons: [] });
+    expect(await withVan({ body: 'unsure', wrap_text: [] })).toMatchObject({ ok: true, reasons: [] });
+  });
+
+  test('the wrap\'s marks OFF the van are ordinary violations to the main screen — no attribution exemption for "Ford", wrap text or Waves marks (Codex r11/r12 P2s on #4785)', async () => {
+    const ford = await screen({ main: { ...CLEAN_MAIN, readable_text: ['Ford'] } });
+    expect(ford.reasons).toEqual(['readable text: Ford']);
+    const url = await screen({ main: { ...CLEAN_MAIN, readable_text: ['GoWavesFL.com'] } });
+    expect(url.reasons).toEqual(['readable text: GoWavesFL.com']);
+    const second = await screen({ main: { ...CLEAN_MAIN, logos_or_brand_marks: ['Waves wrap on a second van'] } });
+    expect(second.reasons).toEqual(['logo or brand mark: Waves wrap on a second van']);
+  });
+
+  test('with the uniform logo too: a correctly branded technician beside the wrapped van is clean — the uniform rules are unchanged (Codex r12 P2 on #4785)', async () => {
+    const tech = { cap_front_visible: true, chest_visible: true, logo_on: ['cap', 'right chest'] };
+    const r = await screen({ allowUniformLogo: true, main: { ...CLEAN_MAIN, technicians: [tech], waves_logo_elsewhere: [], uniform_logo_lettering: [] } });
+    expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
+    const elsewhere = await screen({ allowUniformLogo: true, main: { ...CLEAN_MAIN, technicians: [tech], waves_logo_elsewhere: ['a sign on the fence'], uniform_logo_lettering: [] } });
+    expect(elsewhere.reasons).toEqual(['logo or brand mark: Waves logo elsewhere: a sign on the fence']);
+  });
+
+  test('an unusable van answer — omitted key, malformed or contradictory van — fails the screen OPEN, never clean (Codex r1, r4 P2s on #4785)', async () => {
+    for (const vanAnswer of [{}, { van: { wrapped: true } }, { van: van({ body: 'sprinter' }) }, { van: van({ body: undefined }) }, { van: van({ wrap_text: 'WAVES' }) }, { van: 'none' }]) {
+      expect(await screen({ vanAnswer })).toMatchObject({ ok: true, checked: false });
+    }
+  });
+
+  test('either dispatch failing fails the screen open', async () => {
+    mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? { ok: false, reason: 'timeout' } : answer(CLEAN_MAIN)));
+    expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
+    mockDispatch.mockImplementation((_policy, req) => Promise.resolve(isVanQuestion(req) ? answer({ van: van() }) : { ok: false, reason: 'timeout' }));
+    expect(await screenGeneratedImage({ buffer: PNG_BUFFER, allowVanWrap: true })).toMatchObject({ ok: true, checked: false });
+  });
+});
