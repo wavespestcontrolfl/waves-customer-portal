@@ -1009,22 +1009,89 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  // Codex round-3 whitelist inversion (otherSentenceIsClean): a non-
-  // conditional declarative now has to be BUILT from the closed vocabulary,
-  // not merely free of blacklisted words — "Adam works Sundays." (this
-  // test's pre-round-3 wording) used "Adam"/"works", neither of which is
-  // ordinary commitment-turn filler, so it would now conservatively poison
-  // (fail closed to triage) under the new design; that tightening is
-  // intended (see PR history for the false-positive shapes it closes).
-  // Reworded here to keep testing the same thing — a same-weekday mention
-  // that ISN'T conditional on it — using only vocabulary the closed set
-  // already carries.
-  test('an adjacent sentence merely mentioning the SAME weekday (not conditional on it) does not poison the pinned commitment', () => {
+  // Codex round 5: rounds 3-4 still leaned on vocabulary MEMBERSHIP as the
+  // primary gate, and growing that shared vocabulary for one shape ("should"
+  // in round 3, the "confirmation text" topic tokens merged into the base
+  // set) quietly opened a hole for another — every word in "We should
+  // confirm the appointment." happened to be vocabulary, so the whole
+  // sentence passed. otherSentenceIsClean now screens for
+  // SCHEDULING_PREDICATE_TERMS directly (after benign topic phrases are
+  // stripped), independent of vocabulary membership or conditional
+  // structure, so none of the three fixes below needed a new word on any
+  // list.
+  test('Codex round-5 regression: "We should confirm the appointment." still poisons', () => {
+    const turn = "We should confirm the appointment. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-5 regression: "We need your confirmation of the appointment." still poisons', () => {
+    const turn = "We need your confirmation of the appointment. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('Codex round-5 regression: "If you need it, we will book the appointment." still poisons', () => {
+    const turn = "If you need it, we will book the appointment. We'll see you Sunday at noon.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // Positive control (codex round 5): the SAME small-talk + benign-topic-
+  // aside shape as the live 17ed9362 turn below, in a different real call —
+  // small talk ("Awesome, we made it. Yep.") plus a benign non-scheduling
+  // aside ("I'll send you a confirmation text momentarily.") ahead of a
+  // clean pinned commitment must still ground. Adapted from the coordinator's
+  // exact wording ("...momentarily, and then we'll see you Sunday at 4.")
+  // by splitting "momentarily" and the commitment into two sentences with a
+  // period instead of a comma — sentence boundaries in this file are
+  // period/question/exclamation/semicolon only (splitSentences), so a
+  // comma-joined "and then" keeps the commitment fused into the SAME
+  // sentence as "I'll send you...", and that fused sentence fails the
+  // PRE-EXISTING, unrelated turnHasAffirmativeCommitmentForm check (it must
+  // START with a recognized opener + commitment head, and "i ll send you a
+  // confirmation text momentarily and then we ll see you" does not) — a
+  // structural fact of this file since long before round 3, not something
+  // round 5 introduced. The split preserves the exact intent (does small
+  // talk plus a benign topic aside poison the turn?) without touching what
+  // round 5 actually fixed.
+  test('Codex round-5 positive control: small talk + a benign confirmation-text aside does not poison the pinned commitment', () => {
+    const turn = "Awesome, we made it. Yep. I'll send you a confirmation text momentarily. So we'll see you Sunday at 4.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: "So we'll see you Sunday at 4." });
+    ex.scheduling.confirmed_start_at = '2026-08-02T16:00:00-04:00'; // Sunday 4 PM
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  // SUPERSEDED by codex round 5 (reported, not silently reworded — see PR
+  // history). Round 3 reworded this test from "Adam works Sundays." (out-
+  // of-vocabulary words) to "We come out Sunday afternoon." on the theory
+  // that a non-conditional sentence merely MENTIONING the same weekday,
+  // built entirely from ordinary vocabulary, should stay clean. Round 5
+  // converged the whole design onto a single rule instead — OTHER sentences
+  // may not talk about scheduling AT ALL, checked via SCHEDULING_PREDICATE_TERMS
+  // (weekday names included) rather than vocabulary membership — so ANY
+  // weekday mention in a non-pinned sentence now conservatively poisons,
+  // regardless of how innocuous the rest of the sentence is. This is a
+  // GENUINELY DIFFERENT intent from what round 3 was testing (that test
+  // asserted the mention was SAFE; this one asserts the opposite, on
+  // purpose), not a reword-to-pass — the round-3 test's premise (a benign
+  // weekday mention can be told apart from a conditional one by vocabulary
+  // alone) no longer holds under the round-5 design.
+  test('Codex round-5: an adjacent sentence merely mentioning a weekday now poisons — scheduling talk is never allowed in an OTHER sentence', () => {
     const turn = "We come out Sunday afternoon. We'll see you Sunday at noon.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   // Live miss 2026-09-24, call 17ed9362: a lender arranging a WDO inspection

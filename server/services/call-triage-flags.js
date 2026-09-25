@@ -675,36 +675,43 @@ const COMMITMENT_TURN_VOCAB = new Set([
   // inversion — otherSentenceIsClean, below, requires every OTHER sentence
   // in the turn to be built from this same closed vocabulary, so a handful
   // of plain declarative words a non-conditional benign aside actually uses
-  // had to join it): "should"/"go" (ordinary modal + movement verb — "it
-  // should go to him", NOT the inverted "should the technician be
-  // unavailable" conditional, which is caught by CONDITIONAL_TOKENS/
-  // CONDITION_TRIGGER_RE's "should the" instead); "made"/"send"/
-  // "momentarily" (small-talk / "I'll send you a text momentarily" filler).
-  // (BENIGN_NON_BOOKING_TOPIC_TOKENS — notification/email/text/invoice/
-  // report/… — is merged in below, once that list exists.)
-  'should', 'go', 'made', 'send', 'momentarily',
+  // had to join it): "go" (ordinary movement verb — "it should go to him");
+  // "made"/"send"/"momentarily" (small-talk / "I'll send you a text
+  // momentarily" filler). "should" is deliberately NOT here (codex round 5
+  // — see BENIGN_CONDITIONAL_GLUE_WORDS below): a modal by itself is safe,
+  // but round 5 converged on keeping the BASE vocabulary as small as
+  // possible now that otherSentenceIsClean's real defense is the
+  // SCHEDULING_PREDICATE_TERMS screen, not vocabulary membership; "should"
+  // only needs the narrower notification-routing filler path.
+  'go', 'made', 'send', 'momentarily',
 ]);
-// A tiny closed set of CONNECTOR words for a benign CONDITIONAL sentence
-// only (codex round-3 whitelist inversion) — never available to a plain
-// declarative sentence or the pinned commitment sentence itself. Unlocked
-// ONLY inside otherSentenceIsClean's carve-out, and only once the sentence
-// has already cleared BOTH gates: it has a conditional trigger, AND every
-// extracted clause is benign (clauseIsBenign). At that point the sentence's
-// remaining tokens are just how the agent phrases resolving a benign
-// routing mixup ("let me know", "goes to the wrong person/number", "I'll
-// make sure that gets figured out") — words too specific/generic to trust
-// unconditionally everywhere else in the turn, so they stay out of the
-// base COMMITMENT_TURN_VOCAB and only unlock here.
-// codex round 4, finding 2 (live miss 17ed9362's actual single Agent: turn,
-// never split across turns as an earlier regression test wrongly did):
-// "It's autonomously done, so if it goes to you, I'll make sure that's
-// rectified." needs "autonomously"/"done"/"rectified" once its one clause
-// ("it goes to you") clears clauseIsBenign against the PREVIOUS sentence's
-// "notification". Glue-scoped, not base vocabulary, same as the rest of
-// this set.
+// A tiny closed set of CONNECTOR/filler words for TWO narrow uses — never
+// the base COMMITMENT_TURN_VOCAB, never the pinned commitment sentence:
+//   (1) a benign CONDITIONAL sentence's carve-out (codex round-3 whitelist
+//       inversion), unlocked only once the sentence has already cleared
+//       BOTH gates: it has a conditional trigger, AND every extracted
+//       clause is benign (clauseIsBenign). At that point the sentence's
+//       remaining tokens are just how the agent phrases resolving a benign
+//       routing mixup ("let me know", "goes to the wrong person/number",
+//       "I'll make sure that gets figured out") — words too specific/
+//       generic to trust unconditionally everywhere else in the turn.
+//       Codex round 4, finding 2 (live miss 17ed9362's actual single
+//       Agent: turn): "It's autonomously done, so if it goes to you, I'll
+//       make sure that's rectified." needs "autonomously"/"done"/
+//       "rectified" once its one clause ("it goes to you") clears
+//       clauseIsBenign against the PREVIOUS sentence's "notification".
+//   (2) a non-conditional declarative's OWN vocabulary check in
+//       otherSentenceIsClean (codex round 5) — "should" for "Yep, it
+//       should go to him, the notification." Round 3 put "should" in the
+//       BASE vocabulary, which round 5 flagged as one of the "words added
+//       to the shared vocabulary open new holes" — a base-vocabulary word
+//       is available to EVERY other sentence unconditionally, while this
+//       set is only reached after a sentence has already cleared the
+//       declarative-poison and scheduling-predicate screens, so it carries
+//       far less risk sitting here than in the base set.
 const BENIGN_CONDITIONAL_GLUE_WORDS = new Set([
   'me', 'tell', 'goes', 'wrong', 'person', 'number', 'make', 'sure', 'gets', 'figured',
-  'autonomously', 'done', 'rectified',
+  'autonomously', 'done', 'rectified', 'should',
 ]);
 function turnVocabularyTokenOk(tok, extraSets) {
   if (!tok) return true;
@@ -830,24 +837,39 @@ function normalizeCommitmentText(s) {
 // condition) all read as clean turns. A whitelist needs no such list: those
 // words simply aren't IN the closed vocabulary either.
 //
-// otherSentenceIsClean now requires, for every other sentence: not a
-// question, no negation/hedge (turnHasNegationOrHedge — still defense in
-// depth), and every token built from the closed COMMITMENT_TURN_VOCAB —
-// with ONE carve-out. A sentence that (a) has a conditional trigger AND
-// (b) every extracted clause is benign (clauseIsBenign — unchanged: still
-// runs the authorization/unavailability/scheduling-staffing poison-term
-// checks against the clause's own text, still requires a benign topic,
-// still falls back to the previous sentence only for a bare-pronoun clause)
-// may additionally draw from BENIGN_NON_BOOKING_TOPIC_TOKENS and the tiny
-// BENIGN_CONDITIONAL_GLUE_WORDS set for its remaining tokens. This is what
-// still lets "Yep, it should go to him, the notification. If it goes to
-// you, I'll make sure that gets figured out." ground (a non-conditional
-// declarative naming a benign topic, plus a bare-pronoun conditional that
-// resolves against it) while "If the homeowner approves. We will see you
-// Sunday at noon." and "If the technician is available, I'll email you."
-// still fail — "homeowner"/"approves"/"technician"/"available" are in
-// neither the base vocabulary nor the expanded carve-out set, so they fail
-// whether or not clauseIsBenign even runs.
+// otherSentenceIsClean (codex round 5 converged this further): OTHER
+// sentences may not talk about scheduling AT ALL — only the pinned
+// commitment sentence is allowed scheduling/booking vocabulary. Rounds 3-4
+// still relied on vocabulary MEMBERSHIP (a growing word list) as the
+// primary gate, and round 5 found that growing the shared vocabulary for
+// one shape ("should", "confirmation") quietly opened new holes for
+// another ("We should confirm the appointment." passed because every word,
+// including "should", happened to be vocab). The real invariant is
+// SCHEDULING CONTENT, not word membership: after the interrogative,
+// negation/hedge, and declarative-poison screens, every benign topic
+// PHRASE (who a notification/email/text/invoice/report goes to) is
+// stripped out of the sentence's text first (stripBenignTopicPhrases —
+// phrase-scoped only; the individual words are never added to any
+// vocabulary Set), and if any SCHEDULING_PREDICATE_TERM remains in what's
+// left, the sentence poisons — zero new words needed for
+// "confirm"/"appointment"/"book" shapes ever again. A conditional sentence
+// gets ONE further requirement on top, never a substitute: every extracted
+// clause must still be benign (clauseIsBenign — unchanged: still runs the
+// authorization/unavailability/scheduling-staffing poison-term checks
+// against the clause's own raw text, still requires a benign topic, still
+// falls back to the previous sentence only for a bare-pronoun clause).
+// Only after both the predicate screen (and, for a conditional, the clause
+// check) pass does the STRIPPED text still have to be built from the base
+// vocabulary plus the small BENIGN_CONDITIONAL_GLUE_WORDS filler set. This
+// is what still lets "Yep, it should go to him, the notification." (no
+// scheduling term once "notification" is phrase-stripped) and "It's
+// autonomously done, so if it goes to you, I'll make sure that's
+// rectified." (a bare-pronoun clause resolving against the previous
+// sentence's benign topic) ground, while "We should confirm the
+// appointment.", "We need your confirmation of the appointment.", and "If
+// you need it, we will book the appointment." all fail on "confirm"/
+// "confirmation"/"book"+"appointment" — present in the SCHEDULING_PREDICATE_TERMS
+// screen regardless of conditional structure or vocabulary membership.
 // Splits one speaker turn into its sentences. Sentence chunks KEEP their
 // terminator (codex P0, round 7n): splitting on [.!?;]+ discarded the "?"
 // that makes "So we will confirm it for noon on Sunday?" a QUESTION — an
@@ -929,26 +951,39 @@ const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'ju
 // unlike an allowlist of bad topics (homeowner/approval/schedule/…), a
 // denylist of GOOD topics never needs to anticipate every way a booking can
 // still be conditional.
+// codex round 5: also covers "confirmation email"/"confirmation sms"/"text
+// message"/"email notification" — the SAME communication-channel-routing
+// topic, phrased with a different pair of words agents actually use.
 const BENIGN_NON_BOOKING_TOPICS = [
   ' notification ', ' notifications ', ' notify ', ' email ', ' e mail ',
   ' text ', ' texts ', ' invoice ', ' invoices ', ' report ', ' reports ',
-  ' inbox ', ' confirmation text ',
+  ' inbox ', ' confirmation text ', ' confirmation email ', ' confirmation sms ',
+  ' text message ', ' email notification ',
 ];
-// Per-TOKEN form of the same curated list (codex round-3 whitelist
-// inversion): the token-by-token vocabulary check below needs individual
-// words, not the padded-substring phrases above. Derived, not duplicated,
-// so the two never drift. Naming a benign topic (who a notification/email/
-// text/invoice/report goes to) is never itself a scheduling risk — the risk
-// words are the ones NOT in this set: technician/available/schedule/
-// homeowner/approval/unavailable/cancel/… — so these tokens are safe to
-// merge into the BASE closed vocabulary (commitmentTurnVocabularyOk),
-// usable by a plain non-conditional declarative aside ("I'll email you the
-// invoice. We'll see you Sunday at noon.") too, not only by a conditional
-// sentence that also clears clauseIsBenign.
-const BENIGN_NON_BOOKING_TOPIC_TOKENS = new Set(
-  BENIGN_NON_BOOKING_TOPICS.flatMap((phrase) => phrase.trim().split(' ')).filter(Boolean)
-);
-BENIGN_NON_BOOKING_TOPIC_TOKENS.forEach((tok) => COMMITMENT_TURN_VOCAB.add(tok));
+// Longest-phrase-first ordering for stripBenignTopicPhrases, below: " text "
+// is itself a listed phrase, so stripping in list order would remove "text"
+// out of "confirmation text" BEFORE the two-word phrase ever gets a chance
+// to match, stranding a bare "confirmation" in the sentence — and
+// "confirmation" is deliberately a SCHEDULING_PREDICATE_TERM (codex round
+// 5, instruction 3: "confirmation" exists ONLY inside this phrase list, so
+// it must always be consumed as part of a whole multi-word phrase, never
+// left as a stray token). Sorting longest-first guarantees a multi-word
+// phrase is always tried before any of its component single words.
+const BENIGN_NON_BOOKING_TOPICS_BY_LENGTH_DESC = [...BENIGN_NON_BOOKING_TOPICS]
+  .sort((a, b) => b.length - a.length);
+// Removes every benign topic PHRASE from a normalized sentence, leaving
+// everything else untouched (codex round 5: reverts round 3's merge of
+// these phrases' individual words into COMMITMENT_TURN_VOCAB — a token
+// like "confirmation" must never sit in ANY vocabulary Set; the topic is
+// handled by deleting it from the TEXT before either the
+// SCHEDULING_PREDICATE_TERMS screen or the vocabulary check ever sees it).
+function stripBenignTopicPhrases(ns) {
+  let stripped = ` ${ns} `;
+  for (const phrase of BENIGN_NON_BOOKING_TOPICS_BY_LENGTH_DESC) {
+    stripped = stripped.split(phrase).join(' ');
+  }
+  return stripped.replace(/\s+/g, ' ').trim();
+}
 // Declarative poison vocabulary (codex P1, rounds 1-2 of this PR's local+
 // Codex audit): a sentence naming who has to sign off, the act of
 // approving/authorizing, an unmet-approval DECLARATIVE ("Homeowner approval
@@ -1121,53 +1156,88 @@ function clauseIsBenign(clauseNs, prevNs) {
   }
   return false;
 }
+// Codex round 5: the vocabulary-membership approach itself was the
+// recurring hole — growing COMMITMENT_TURN_VOCAB for one shape ("should")
+// silently widened what EVERY other sentence could say, and a merged
+// benign-topic token ("confirmation") turned out to double as an ordinary
+// scheduling word. The converged invariant instead: OTHER sentences may
+// not talk about scheduling AT ALL. SCHEDULING_PREDICATE_TERMS is checked
+// on the sentence's text directly (after benign topic PHRASES are
+// stripped, so a genuine "confirmation text"/"email notification" aside
+// never trips it) — one list, whole-token/phrase matched, that needs no
+// growth for a "confirm"/"appointment"/"book"/"schedule" shape ever again,
+// regardless of what other vocabulary exists.
+const SCHEDULING_PREDICATE_TERMS = [
+  ' confirm ', ' confirms ', ' confirmed ', ' confirmation ',
+  ' appointment ', ' appointments ',
+  ' book ', ' booked ', ' booking ',
+  ' schedule ', ' scheduled ', ' scheduling ', ' reschedule ', ' rescheduled ',
+  ' visit ', ' visits ',
+  ' see you ', ' see him ', ' see her ', ' see them ',
+  ' be there ', ' be out ', ' come out ',
+  ' sunday ', ' monday ', ' tuesday ', ' wednesday ', ' thursday ', ' friday ', ' saturday ',
+  ' january ', ' february ', ' march ', ' april ', ' may ', ' june ', ' july ',
+  ' august ', ' september ', ' october ', ' november ', ' december ',
+  ' tomorrow ', ' today ', ' tonight ', ' next week ',
+  ' am ', ' pm ', ' clock ', ' noon ', ' midnight ',
+  ' technician ', ' tech ', ' crew ', ' route ', ' slot ', ' calendar ',
+  ' available ', ' availability ', ' unavailable ',
+  ' quote ', ' estimate ', ' price ',
+];
+// True when a normalized sentence (already run through
+// stripBenignTopicPhrases) still talks about scheduling — either a term
+// from the phrase list above, or a bare 1-2 digit "time-looking" token
+// (an hour, a bare date number). Deliberately broad on the digit check:
+// fails closed to triage on any short number (an address, a price without
+// cents) rather than risk missing a real time mention — the safe direction
+// for an OTHER sentence, which is never the one that needs to state a time.
+function sentenceHasSchedulingPredicate(strippedNs) {
+  const padded = ` ${strippedNs} `;
+  if (SCHEDULING_PREDICATE_TERMS.some((t) => padded.includes(t))) return true;
+  return strippedNs.split(' ').some((tok) => /^\d{1,2}$/.test(tok));
+}
 // Top-level CLEARANCE test for ONE sentence OTHER than the pinned
 // commitment sentence (agentCommitmentSentenceVerified calls this for every
-// sentence in the turn). Codex round 3 converged this from a blacklist
-// ("poison on these words/shapes") to a WHITELIST, the same inversion the
-// pinned sentence already used: every other sentence must be POSITIVELY
-// cleared, built entirely from the closed COMMITMENT_TURN_VOCAB, with the
-// same interrogative/negation-hedge screens as before. A prior blacklist
-// design kept missing shapes it never enumerated — "cancel", "permitting",
-// "contingent", "space", "actually" were never on any poison list, so
-// "Actually, we have to cancel.", "Weather permitting.", and "If we have
-// space I'll email you." (the consequent verb swallowing the real
-// condition — see extractConditionalClauses) all read as clean. None of
-// those words are IN the closed vocabulary either, so the whitelist fails
-// them all with no new list to maintain.
-//
-// ONE carve-out: a sentence that (a) has a conditional trigger AND (b)
-// every extracted clause is benign (clauseIsBenign — this still runs the
-// authorization/unavailability/scheduling-staffing poison-term checks
-// against each clause's own text, and still requires a benign topic,
-// falling back to the previous sentence only for a bare-pronoun clause) may
-// ADDITIONALLY draw from BENIGN_NON_BOOKING_TOPIC_TOKENS and the tiny
-// BENIGN_CONDITIONAL_GLUE_WORDS set for its remaining tokens — the ordinary
-// way an agent phrases resolving a benign routing mixup ("let me know",
-// "goes to the wrong number", "I'll make sure that gets figured out"). A
-// sentence that fails (a) or (b) gets NO expanded vocabulary and must pass
-// on the base closed vocabulary alone, like any other declarative.
-//
-// The declarative poison screen (codex round 4, finding 1) runs FIRST,
-// before the vocabulary early return — "I need him to confirm the
-// appointment." is built entirely from ordinary COMMITMENT_TURN_VOCAB
-// words (i/need/him/to/confirm/the/appointment all individually belong),
-// so commitmentTurnVocabularyOk alone would return true and never reach
-// clauseIsBenign or any authorization check at all. A closed vocabulary of
-// WORDS cannot express a SHAPE like "someone still has to sign off" when
-// every word in that shape also has an innocent use elsewhere — that is
-// exactly why sentenceHasDeclarativePoisonVocabulary (unconditional
-// phrase/regex screen) has to run before, not after, the whitelist.
+// sentence in the turn). Order matters:
+//   1. Not a question (still asking, not committing).
+//   2. No negation/hedge (turnHasNegationOrHedge — defense in depth).
+//   3. No declarative poison vocabulary (sentenceHasDeclarativePoisonVocabulary
+//      — codex round 4: an authorization/unavailability phrase or the
+//      anchored "need <party> to <authorize>" shape poisons UNCONDITIONALLY,
+//      checked before anything below ever runs, because a closed vocabulary
+//      of ordinary words — "him"/"need"/"confirm"/"the"/"appointment" — can
+//      never express that SHAPE on its own).
+//   4. No SCHEDULING_PREDICATE_TERM in the sentence once benign topic
+//      phrases are stripped out (codex round 5, above) — "We should confirm
+//      the appointment.", "We need your confirmation of the appointment.",
+//      and "If you need it, we will book the appointment." all poison here,
+//      on "confirm"/"confirmation"/"book"+"appointment", regardless of
+//      conditional structure or vocabulary membership.
+//   5. A CONDITIONAL sentence gets ONE further requirement ON TOP of (not
+//      instead of) the STRIPPED-text vocabulary check below: every
+//      extracted clause must be benign (clauseIsBenign — unchanged: still
+//      runs the authorization/unavailability/scheduling-staffing poison-term
+//      checks against each clause's own raw text, still requires a benign
+//      topic, still falls back to the previous sentence only for a
+//      bare-pronoun clause). A conditional sentence can only pass through
+//      this carve-out — vocabulary-only clearance is never enough for it,
+//      unlike a non-conditional declarative.
+//   6. Whatever remains of the STRIPPED text must be built from the base
+//      COMMITMENT_TURN_VOCAB plus the small BENIGN_CONDITIONAL_GLUE_WORDS
+//      filler set (never the raw, unstripped text — the benign topic words
+//      are gone by now and never need to sit in any vocabulary Set at all).
 function otherSentenceIsClean(other, prevNs) {
   if (other.interrogative) return false;
   if (turnHasNegationOrHedge(other.ns)) return false;
   if (sentenceHasDeclarativePoisonVocabulary(other.ns)) return false;
-  if (commitmentTurnVocabularyOk(other.ns)) return true;
-  if (!turnHasUnresolvedConditional(other.ns)) return false;
-  const clauses = extractConditionalClauses(other.raw);
-  if (!clauses.length || !clauses.every((clause) => clauseIsBenign(clause, prevNs))) return false;
-  return other.ns.split(' ').every((tok) => (
-    turnVocabularyTokenOk(tok, [BENIGN_NON_BOOKING_TOPIC_TOKENS, BENIGN_CONDITIONAL_GLUE_WORDS])
+  const stripped = stripBenignTopicPhrases(other.ns);
+  if (sentenceHasSchedulingPredicate(stripped)) return false;
+  if (turnHasUnresolvedConditional(other.ns)) {
+    const clauses = extractConditionalClauses(other.raw);
+    if (!clauses.length || !clauses.every((clause) => clauseIsBenign(clause, prevNs))) return false;
+  }
+  return stripped.split(' ').every((tok) => (
+    turnVocabularyTokenOk(tok, [BENIGN_CONDITIONAL_GLUE_WORDS])
   ));
 }
 

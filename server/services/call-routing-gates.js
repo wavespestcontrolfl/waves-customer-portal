@@ -139,8 +139,25 @@ function checkTcpaConsent(extraction, opts = {}) {
 // shape now stays blocked instead — again strictly MORE conservative, never
 // less — so a force-reprocess must write a fresh decision row rather than
 // onConflict-ignore into the stale auto-routed one.
-const V2_DECISION_VERSION = 'v2-1.11.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0'];
+// v2-1.12.0: otherSentenceIsClean (call-triage-flags.js) converged from
+// vocabulary-membership screening onto a single rule — OTHER sentences may
+// not talk about scheduling AT ALL. Rounds 3-4 grew COMMITMENT_TURN_VOCAB
+// to keep specific benign asides passing, and that growth itself opened
+// new holes ("should"/"confirmation" happening to be vocabulary let "We
+// should confirm the appointment." pass whole). A new SCHEDULING_PREDICATE_TERMS
+// screen (confirm/appointment/book/schedule/visit/see-you/weekday/month/
+// time-of-day/technician/available/quote/…, checked after benign topic
+// phrases are stripped) now poisons any other sentence that talks about
+// scheduling, independent of vocabulary membership or conditional
+// structure. A call whose old pass demoted caller_not_authorized or
+// commercial_requires_quote on one of these three shapes ("We should
+// confirm the appointment.", "We need your confirmation of the
+// appointment.", "If you need it, we will book the appointment.") now
+// stays blocked instead — again strictly MORE conservative, never less —
+// so a force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale auto-routed one.
+const V2_DECISION_VERSION = 'v2-1.12.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0'];
 
 function buildRouteDecision({
   callLogId,
