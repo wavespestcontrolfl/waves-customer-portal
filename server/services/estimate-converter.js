@@ -6786,9 +6786,13 @@ const EstimateConverter = {
       // annual agreement (server/services/termite-annual-activation.js runs
       // them, idempotently, right after that signature). scheduled_services
       // were already created above like any other accept; this only skips
-      // the money side of the prepay_annual branch below. Every other
-      // program (lawn/rodent/pest/mosquito/quarterly-termite prepay) is
-      // unaffected — selectedTermiteAnnualPlanRows only matches an accepted
+      // the money side of the prepay_annual branch below (see the deferral
+      // check just before the invoice mint, further down — it snapshots
+      // EXACTLY what this branch would have billed, computed with the SAME
+      // resolvers, rather than letting activation re-derive and risk
+      // drifting from the accepted figures — codex P1). Every other program
+      // (lawn/rodent/pest/mosquito/quarterly-termite prepay) is unaffected —
+      // selectedTermiteAnnualPlanRows only matches an accepted
       // plan==='annual_protection' termite line, and the gate stays off in
       // prod today.
       // TODO(3b): abandoned-signature expiry + a reconciliation sweep that
@@ -6797,17 +6801,7 @@ const EstimateConverter = {
       const isTermiteAnnualPlanAccept = billingTerm === 'prepay_annual'
         && termiteAnnualPlanSelectionEnabled()
         && selectedTermiteAnnualPlanRows(estimateData).length > 0;
-      if (isTermiteAnnualPlanAccept) {
-        try {
-          await database('estimates').where({ id: estimateId }).update({
-            annual_plan_activation_status: 'awaiting_signature',
-          });
-          annualPlanActivationStatus = 'awaiting_signature';
-        } catch (stampErr) {
-          logger.error(`[estimate-converter] annual-plan awaiting-signature stamp failed for estimate ${estimateId}: ${stampErr.message}`);
-          throw stampErr;
-        }
-      } else if (hasDraftAmount && !skipSetupInvoice && shouldCreateDraftInvoice) {
+      if (hasDraftAmount && !skipSetupInvoice && shouldCreateDraftInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
           const annualAmount = annualPrepayAmount;
@@ -6894,6 +6888,79 @@ const EstimateConverter = {
           // setup lines before dividing by visits (setup is not per-visit
           // coverage money).
           const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
+          if (isTermiteAnnualPlanAccept) {
+            // Sign-before-pay (slice 3a): every value above (annualAmount,
+            // prepayPlanPrefix/prepayLineDescription/prepayNotes,
+            // prepayTaxRate, prepayRodentSetupAmount) is EXACTLY what this
+            // branch would otherwise bill right now — snapshot it onto the
+            // estimate instead of minting the invoice/term. Activation
+            // (termite-annual-activation.js) bills this snapshot verbatim
+            // when the customer signs; it never re-derives the amount, so
+            // it can't drift from what the customer actually accepted (a
+            // later WaveGuard-discount or tax-rate change must not change
+            // what an already-accepted estimate owes). Mixed estimates
+            // (annual termite line + another prepay-annual recurring line)
+            // can't reach here — recurringUnitCount > 1 is hard-blocked for
+            // billingTerm 'prepay_annual' above — so this is always the
+            // termite annual fee alone, plus its setup line when disclosed;
+            // if that were ever relaxed, the WHOLE prepay invoice below is
+            // still deferred and billed as one unit, never split.
+            if (estimate.annual_plan_activation_status === 'activated') {
+              // Replay / retry / a manual re-run of convertEstimate on an
+              // estimate whose agreement is already signed and activated:
+              // the deferred term + invoice already exist. Never recreate
+              // them and never reset the terminal 'activated' stamp back to
+              // 'awaiting_signature' — that would let a later re-drive of
+              // activation mint a SECOND term/invoice against the same
+              // signed agreement (codex P1).
+              annualPlanActivationStatus = 'activated';
+            } else {
+              const deferredInvoiceSnapshot = {
+                amountCents: Math.round(annualAmount * 100),
+                setupFeeCents: Math.round(prepayRodentSetupAmount * 100),
+                lines: [
+                  {
+                    description: prepayManualLabel
+                      ? `${prepayLineDescription} — ${prepayManualLabel} applied`
+                      : prepayLineDescription,
+                    quantity: 1,
+                    unit_price: annualAmount,
+                  },
+                  ...(prepayRodentSetupAmount > 0 ? [{
+                    description: 'Bait Station Setup — one-time setup fee',
+                    quantity: 1,
+                    unit_price: prepayRodentSetupAmount,
+                  }] : []),
+                ],
+                title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
+                notes: prepayNotes,
+                taxRate: prepayTaxRate !== undefined ? prepayTaxRate : null,
+                monthlyRate: termMonthlyRate,
+                resolvedBy: 'estimate-converter:prepay_annual',
+                at: new Date().toISOString(),
+              };
+              try {
+                // Guarded on the write itself too (belt + braces beside the
+                // in-memory check above): never overwrite a row that
+                // reached 'activated' between the read at the top of this
+                // function and this write.
+                await database('estimates')
+                  .where({ id: estimateId })
+                  .where(function guardNotActivated() {
+                    this.whereNull('annual_plan_activation_status')
+                      .orWhereNot('annual_plan_activation_status', 'activated');
+                  })
+                  .update({
+                    annual_plan_activation_status: 'awaiting_signature',
+                    annual_plan_deferred_invoice: JSON.stringify(deferredInvoiceSnapshot),
+                  });
+                annualPlanActivationStatus = 'awaiting_signature';
+              } catch (stampErr) {
+                logger.error(`[estimate-converter] annual-plan awaiting-signature stamp failed for estimate ${estimateId}: ${stampErr.message}`);
+                throw stampErr;
+              }
+            }
+          } else {
           const inv = await database.transaction(async (invoiceTrx) => {
             await acquireConverterInvoiceDepositLocks(invoiceTrx, {
               estimateId, customerId, nonblocking: nonblockingInvoiceLocks,
@@ -7163,6 +7230,7 @@ const EstimateConverter = {
             draftInvoiceAmount = null;
             draftInvoicePayUrl = null;
             throw termErr;
+          }
           }
         } else {
           const firstApplicationAmount = standardFirstApplicationAmount;

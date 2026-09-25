@@ -9,7 +9,6 @@ describe('termite annual plan activation on sign', () => {
     jest.clearAllMocks();
     jest.dontMock('../services/logger');
     jest.dontMock('../services/notification-service');
-    jest.dontMock('../services/estimate-termite-program-rows');
     jest.dontMock('../services/estimate-deposits');
     jest.dontMock('../services/invoice');
     jest.dontMock('../services/annual-prepay-renewals');
@@ -31,11 +30,32 @@ describe('termite annual plan activation on sign', () => {
     };
   }
 
+  // Codex P1-2: activation bills exactly this snapshot — never re-derives
+  // from the estimate's raw pricing data. Mirrors what
+  // estimate-converter.js's prepay_annual branch actually writes.
+  function makeSnapshot(overrides = {}) {
+    return {
+      amountCents: 30000,
+      setupFeeCents: 0,
+      lines: [{
+        description: 'WaveGuard Bronze — 12 months prepaid', quantity: 1, unit_price: 300,
+      }],
+      title: 'WaveGuard Bronze — Annual Prepay (12 months)',
+      notes: 'test snapshot',
+      taxRate: null,
+      monthlyRate: 25,
+      resolvedBy: 'estimate-converter:prepay_annual',
+      at: '2026-09-24T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
   function makeEstimate(overrides = {}) {
     return {
       id: ESTIMATE_ID,
       customer_id: 'customer-1',
       annual_plan_activation_status: 'awaiting_signature',
+      annual_plan_deferred_invoice: makeSnapshot(),
       estimate_data: {},
       ...overrides,
     };
@@ -68,32 +88,45 @@ describe('termite annual plan activation on sign', () => {
     return { trx, estimateUpdate, termUpdate };
   }
 
-  function setup({ contract, estimate, annualPlanRows = [{ service: 'termite_bait', plan: 'annual_protection', annual: 300 }], invoiceResult = { id: 'invoice-1', total: 300 }, term = { id: 'term-1' } } = {}) {
+  function setup({
+    contract, estimate, invoiceResult = { id: 'invoice-1', total: 300 }, term = { id: 'term-1' },
+    depositCredit = null, depositLockImpl, depositReadImpl,
+  } = {}) {
     const { trx, estimateUpdate, termUpdate } = makeTrx({ contract, estimate });
     const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
     const notifyAdmin = jest.fn().mockResolvedValue(true);
     const invoiceCreate = jest.fn().mockResolvedValue(invoiceResult);
     const createTermForAnnualPrepay = jest.fn().mockResolvedValue(term);
+    const callOrder = [];
+    const acquireEstimateDepositLedgerLock = jest.fn(depositLockImpl || (async () => { callOrder.push('lock'); }));
+    const pendingDepositCredit = jest.fn(depositReadImpl || (async () => { callOrder.push('read'); return depositCredit; }));
+    const consumeDepositCredit = jest.fn().mockResolvedValue(0);
 
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
-    jest.doMock('../services/estimate-termite-program-rows', () => ({
-      selectedTermiteAnnualPlanRows: jest.fn(() => annualPlanRows),
-    }));
     jest.doMock('../services/estimate-deposits', () => ({
-      pendingDepositCredit: jest.fn().mockResolvedValue(null),
-      consumeDepositCredit: jest.fn().mockResolvedValue(0),
+      acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit,
     }));
     jest.doMock('../services/invoice', () => ({ create: invoiceCreate }));
     jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay }));
 
     const { activateTermiteAnnualPlanForSignedContract } = require('../services/termite-annual-activation');
     return {
-      activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate, termUpdate, notifyAdmin, invoiceCreate, createTermForAnnualPrepay,
+      activateTermiteAnnualPlanForSignedContract,
+      conn,
+      estimateUpdate,
+      termUpdate,
+      notifyAdmin,
+      invoiceCreate,
+      createTermForAnnualPrepay,
+      acquireEstimateDepositLedgerLock,
+      pendingDepositCredit,
+      consumeDepositCredit,
+      callOrder,
     };
   }
 
-  test('awaiting_signature: creates the invoice + term, stamps consent, and activates', async () => {
+  test('awaiting_signature: bills exactly the deferred snapshot, creates the term, stamps consent, and activates', async () => {
     const contract = makeContract();
     const estimate = makeEstimate();
     const {
@@ -105,12 +138,15 @@ describe('termite annual plan activation on sign', () => {
     expect(result).toEqual({ activated: true, termId: 'term-1', invoiceId: 'invoice-1' });
     expect(invoiceCreate).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'customer-1',
-      lineItems: [expect.objectContaining({ unit_price: 300 })],
+      title: 'WaveGuard Bronze — Annual Prepay (12 months)',
+      lineItems: estimate.annual_plan_deferred_invoice.lines,
     }));
     expect(createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'customer-1',
       sourceEstimateId: ESTIMATE_ID,
       prepayInvoiceId: 'invoice-1',
+      prepayAmount: 300, // amountCents / 100 — the snapshot's own gross annual fee
+      monthlyRate: 25, // taken from the snapshot, not recomputed
       coverageServiceType: 'Termite Bait',
       coverageVisitCount: 1,
       coverageCadence: 'annual',
@@ -122,6 +158,80 @@ describe('termite annual plan activation on sign', () => {
     expect(estimateUpdate).toHaveBeenCalledWith(expect.objectContaining({
       annual_plan_activation_status: 'activated',
     }));
+  });
+
+  test('codex P1-2: setup fee + annual line both ride the one deferred invoice, billed verbatim', async () => {
+    const contract = makeContract();
+    const snapshot = makeSnapshot({
+      amountCents: 30000,
+      setupFeeCents: 15000,
+      lines: [
+        { description: 'WaveGuard Bronze — 12 months prepaid', quantity: 1, unit_price: 300 },
+        { description: 'Bait Station Setup — one-time setup fee', quantity: 1, unit_price: 150 },
+      ],
+    });
+    const estimate = makeEstimate({ annual_plan_deferred_invoice: snapshot });
+    const { activateTermiteAnnualPlanForSignedContract, conn, invoiceCreate, createTermForAnnualPrepay } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(invoiceCreate).toHaveBeenCalledWith(expect.objectContaining({
+      lineItems: [
+        expect.objectContaining({ unit_price: 300 }),
+        expect.objectContaining({ unit_price: 150, description: expect.stringContaining('Setup') }),
+      ],
+    }));
+    // The coverage-slicing basis (prepayAmount) is the annual fee ALONE —
+    // the setup line never dilutes per-visit coverage, matching the
+    // converter's own accounting (setup money is not covered-visit money).
+    expect(createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({ prepayAmount: 300 }));
+  });
+
+  test('codex P1-2: a discounted (WaveGuard net) amount in the snapshot is preserved verbatim, not re-derived', async () => {
+    const contract = makeContract();
+    // 5% prepay discount already baked into the snapshot at accept time —
+    // activation must never recompute a different (undiscounted) figure.
+    const snapshot = makeSnapshot({ amountCents: 62700, lines: [{ description: 'discounted line', quantity: 1, unit_price: 627 }] });
+    const estimate = makeEstimate({ annual_plan_deferred_invoice: snapshot });
+    const { activateTermiteAnnualPlanForSignedContract, conn, invoiceCreate, createTermForAnnualPrepay } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(invoiceCreate).toHaveBeenCalledWith(expect.objectContaining({
+      lineItems: [expect.objectContaining({ unit_price: 627 })],
+    }));
+    expect(createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({ prepayAmount: 627 }));
+  });
+
+  test('codex P1-2: no deferred snapshot on an awaiting_signature estimate — bells and skips rather than guessing an amount', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate({ annual_plan_deferred_invoice: null });
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, invoiceCreate, createTermForAnnualPrepay, notifyAdmin, estimateUpdate,
+    } = setup({ contract, estimate });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result).toEqual({ skipped: 'no_deferred_snapshot' });
+    expect(invoiceCreate).not.toHaveBeenCalled();
+    expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+    expect(estimateUpdate).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate',
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ bell: true }),
+    );
+  });
+
+  test('codex P1-2: a malformed snapshot (no lines) is treated the same as missing', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate({ annual_plan_deferred_invoice: { amountCents: 30000, lines: [] } });
+    const { activateTermiteAnnualPlanForSignedContract, conn } = setup({ contract, estimate });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result).toEqual({ skipped: 'no_deferred_snapshot' });
   });
 
   test('honors an explicit contract annual_plan_version over the v3 default', async () => {
@@ -159,6 +269,37 @@ describe('termite annual plan activation on sign', () => {
 
     expect(result).toEqual({ skipped: 'not_annual_template' });
     expect(estimateUpdate).not.toHaveBeenCalled();
+  });
+
+  test('codex P1-3: acquires the deposit ledger lock BEFORE reading the pending credit', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const { activateTermiteAnnualPlanForSignedContract, conn, callOrder, acquireEstimateDepositLedgerLock, pendingDepositCredit } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(acquireEstimateDepositLedgerLock).toHaveBeenCalledWith(expect.anything(), ESTIMATE_ID);
+    expect(pendingDepositCredit).toHaveBeenCalledWith(ESTIMATE_ID, expect.anything());
+    expect(callOrder).toEqual(['lock', 'read']);
+  });
+
+  test('codex P1-3: a deposit-ledger read failure surfaces as skipped:error and leaves the estimate awaiting_signature (never silently swallowed)', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate();
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate, invoiceCreate, notifyAdmin,
+    } = setup({
+      contract, estimate, depositReadImpl: async () => { throw new Error('ledger read failed'); },
+    });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result).toMatchObject({ skipped: 'error', error: expect.stringContaining('ledger read failed') });
+    expect(invoiceCreate).not.toHaveBeenCalled();
+    expect(estimateUpdate).not.toHaveBeenCalled(); // never stamped 'activated'
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate', expect.any(String), expect.any(String), expect.objectContaining({ bell: true }),
+    );
   });
 
   test('failure path (term creation fails): rings the admin bell, reports the error, and never stamps activated', async () => {

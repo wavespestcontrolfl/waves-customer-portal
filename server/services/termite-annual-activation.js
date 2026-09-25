@@ -54,17 +54,23 @@ function sourceEstimateIdFromContract(contract) {
   return id ? String(id) : null;
 }
 
-// Mirrors selectedTermiteAnnualPlanRows' own precedence (mapped tmBait
-// envelope wins; otherwise the raw lineItems row) — the first row carrying a
-// positive `.annual` is the recurring annual-fee line. Setup/installation
-// rows (service: 'termite_bait_installation', kind: 'setup') don't carry an
-// `.annual` field, so they're skipped automatically rather than by name.
-function resolveAnnualFeeAmount(annualPlanRows) {
-  for (const row of annualPlanRows) {
-    const n = Number(row?.annual);
-    if (Number.isFinite(n) && n > 0) return Math.round(n * 100) / 100;
-  }
-  return null;
+// Codex P1-2: activation must bill EXACTLY what estimate-converter.js's
+// prepay_annual branch decided to bill at accept time (annualAmount post
+// WaveGuard discount, the rodent-bait setup line, the resolved tax rate,
+// the exact line-item descriptions) — never re-derive it from
+// selectedTermiteAnnualPlanRows here. Re-deriving would silently drop the
+// setup-fee line (setup rows carry no `.annual` field) and could disagree
+// with the accepted amount if pricing config, a WaveGuard tier discount, or
+// a tax rate changed between acceptance and signature — the estimate
+// converter is the ONLY place that ever prices this invoice; this module
+// only replays its decision.
+function validDeferredInvoiceSnapshot(raw) {
+  const snapshot = parseJsonish(raw);
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  if (!Array.isArray(snapshot.lines) || snapshot.lines.length === 0) return null;
+  if (!snapshot.lines.every((line) => line && Number(line.unit_price) > 0)) return null;
+  if (!(Number(snapshot.amountCents) > 0)) return null;
+  return snapshot;
 }
 
 async function ringActivationBell(NotificationService, { estimateId, contractId, reason }) {
@@ -116,32 +122,52 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         return { skipped: estimate.annual_plan_activation_status || 'not_awaiting_signature' };
       }
 
-      const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
-      let estimateData = estimate.estimate_data;
-      if (typeof estimateData === 'string') {
-        try { estimateData = JSON.parse(estimateData); } catch { estimateData = {}; }
+      // Codex P1-2: bill EXACTLY what was deferred at accept — never
+      // re-derive. A missing/malformed snapshot means the accept path
+      // failed to record what it was deferring (shouldn't happen — the
+      // converter fails the whole accept if it can't write this), so this
+      // is an error state: bell for a human, leave 'awaiting_signature' for
+      // a retry once the snapshot is fixed, never guess an amount.
+      const deferredInvoiceSnapshot = validDeferredInvoiceSnapshot(estimate.annual_plan_deferred_invoice);
+      if (!deferredInvoiceSnapshot) {
+        // Anomaly, not a routine skip: an estimate reading
+        // 'awaiting_signature' with no (or a malformed) deferred-invoice
+        // snapshot means the accept path failed to record what it deferred
+        // — bell for a human rather than silently doing nothing, since the
+        // customer signed and expects to be billed.
+        try {
+          const NotificationService = require('./notification-service');
+          await ringActivationBell(NotificationService, {
+            estimateId, contractId, reason: 'no valid annual_plan_deferred_invoice snapshot on the estimate',
+          });
+        } catch (bellErr) {
+          logger.error(`[termite-annual-activation] bell setup failed for contract ${contractId}: ${bellErr.message}`);
+        }
+        return { skipped: 'no_deferred_snapshot' };
       }
-      estimateData = estimateData || {};
-      const annualPlanRows = selectedTermiteAnnualPlanRows(estimateData);
-      if (!annualPlanRows.length) return { skipped: 'no_annual_plan_rows_on_estimate' };
-      const annualAmount = resolveAnnualFeeAmount(annualPlanRows);
-      if (!annualAmount) return { skipped: 'annual_fee_amount_underivable' };
+      const annualAmount = Number(deferredInvoiceSnapshot.amountCents) / 100;
 
-      const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
+      // Codex P1-3: take the SAME ledger lock the converter takes before
+      // reading the deposit balance — without it, a concurrent deposit
+      // refund/consumption (e.g. the accept-time flow retrying, or a manual
+      // deposit adjustment) could read a balance that changes underneath
+      // this invoice mint. Any failure here (lock or read) propagates to
+      // the outer catch below — never swallowed — so it bells and leaves
+      // the estimate 'awaiting_signature' rather than silently minting the
+      // invoice with a stale or zero deposit credit.
+      const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
       const InvoiceService = require('./invoice');
-      let requestedDepositCredit = 0;
-      const depositCredit = await pendingDepositCredit(estimateId, trx).catch(() => null);
-      requestedDepositCredit = depositCredit ? Number(depositCredit.amount) || 0 : 0;
+      await acquireEstimateDepositLedgerLock(trx, estimateId);
+      const depositCredit = await pendingDepositCredit(estimateId, trx);
+      const requestedDepositCredit = depositCredit ? Number(depositCredit.amount) || 0 : 0;
       const invoice = await InvoiceService.create({
         database: trx,
         customerId: estimate.customer_id,
-        title: 'Subterranean Termite Protection — Annual Fee',
-        lineItems: [{
-          description: 'Subterranean Termite Protection — annual fee (signed agreement)',
-          quantity: 1,
-          unit_price: annualAmount,
-        }],
-        notes: `Auto-generated on signature of the termite annual agreement (contract #${contractId}, estimate #${estimateId}). Charge was deferred at acceptance until this signature (sign-before-pay).`,
+        title: deferredInvoiceSnapshot.title || 'Subterranean Termite Protection — Annual Fee',
+        lineItems: deferredInvoiceSnapshot.lines,
+        notes: deferredInvoiceSnapshot.notes
+          || `Auto-generated on signature of the termite annual agreement (contract #${contractId}, estimate #${estimateId}). Charge was deferred at acceptance until this signature (sign-before-pay).`,
+        ...(deferredInvoiceSnapshot.taxRate != null ? { taxRate: deferredInvoiceSnapshot.taxRate } : {}),
         ...(requestedDepositCredit > 0
           ? { depositCredit: { amount: requestedDepositCredit, estimateId } }
           : {}),
@@ -155,13 +181,20 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
       if (!invoice?.id) throw new Error('Annual-fee invoice was not created');
 
       const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-      const prepayAmount = invoice.total != null ? Number(invoice.total) : annualAmount;
+      // GROSS coverage-slicing basis, matching the converter's own prepay
+      // accounting: the annual fee alone (amountCents already excludes the
+      // setup-fee line — see the converter's deferredInvoiceSnapshot
+      // comment), pre-deposit-credit, so renewals split the same figure the
+      // customer actually agreed to regardless of any deposit applied here.
+      const prepayAmount = annualAmount;
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: estimate.customer_id,
         sourceEstimateId: estimateId,
         prepayInvoiceId: invoice.id,
         planLabel: 'Termite Annual Protection',
-        monthlyRate: Math.round((annualAmount / 12) * 100) / 100,
+        monthlyRate: deferredInvoiceSnapshot.monthlyRate != null
+          ? Number(deferredInvoiceSnapshot.monthlyRate)
+          : Math.round((annualAmount / 12) * 100) / 100,
         prepayAmount,
         coverageServiceType: COVERAGE_SERVICE_TYPE,
         coverageVisitCount: COVERAGE_VISIT_COUNT,
