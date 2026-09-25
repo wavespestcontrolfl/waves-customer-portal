@@ -283,6 +283,12 @@ describe('manual reply closures (owner decision 2026-09-24, follow-up)', () => {
   ])('a hand-typed labelled report or receipt link is still a closure: %s', raw => {
     expect(evaluateGratitudeContext({ ...context, history: [manual(stripSmsUrlScheme(raw))] }).eligible).toBe(true);
   });
+  test('a scheduled typed send is judged by its provider row, not the re-stamped queued row', () => {
+    const queued = { ...manual('Yup, just texted her'), id: 'queued-1', mediaCount: null, createdAt: '2030-01-10T14:59:40Z' };
+    const delivered = { ...manual('Yup, just texted her'), id: 'provider-1', scheduledSourceId: 'queued-1' };
+    expect(evaluateGratitudeContext({ ...context, history: [delivered, queued] }).eligible).toBe(true);
+    expect(evaluateGratitudeContext({ ...context, history: [queued] }).reason).toBe('media_or_unknown');
+  });
   test('a hand-typed report link is still a closure', () => {
     expect(evaluateGratitudeContext({ ...context, history: [manual('Here is your report: https://example.invalid/report/abc')] }).eligible).toBe(true);
   });

@@ -363,6 +363,8 @@ async function readGratitudeContext({
     humanAuthored: jsonObject(row.metadata)?.human_authored === true,
     createdAt: row.created_at,
     mediaCount: mediaCountFromMetadata(row.metadata),
+    // Provider row of a /schedule-sms send; names the queued row it delivered.
+    scheduledSourceId: jsonObject(row.metadata)?.scheduled_sms_log_id ?? null,
   }));
   const pendingWork = await pendingGratitudeWork(dbh, { customerId: customer.id, threadKey });
   const policy = evaluateGratitudeContext({

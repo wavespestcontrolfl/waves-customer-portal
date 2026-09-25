@@ -162,7 +162,12 @@ function evaluateGratitudeContext({ inbound, history, firstName, contextComplete
   ].find(([invalid]) => invalid());
   if (invalidContext) return deny(invalidContext[1]);
   const received = timestamp(inbound.createdAt);
-  const rows = history.filter(row => row.id !== inbound.id);
+  // A scheduled send leaves two sent rows: the queued row (re-stamped at
+  // send time, no media evidence) and the provider row that names it in
+  // scheduledSourceId. They are one message; the provider row is the one
+  // with the send-time evidence, so the queued copy is dropped.
+  const deliveredSources = new Set(history.map(row => row.scheduledSourceId).filter(Boolean).map(String));
+  const rows = history.filter(row => row.id !== inbound.id && !deliveredSources.has(String(row.id)));
   if (rows.some(row => !Number.isFinite(timestamp(row.createdAt)) || !['inbound', 'outbound'].includes(row.direction))) return deny('invalid_context');
   if (rows.some(row => timestamp(row.createdAt) >= received)) return deny('thread_advanced');
   const recent = rows.filter(row => timestamp(row.createdAt) >= received - CONTEXT_WINDOW_MS)

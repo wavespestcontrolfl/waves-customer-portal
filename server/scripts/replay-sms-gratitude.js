@@ -121,6 +121,8 @@ function normalizeRow(row, lineNumber) {
       ? (row.messageType ?? row.message_type) : null,
     // Optional export column; absent means not hand-typed, exactly as live.
     humanAuthored: (row.humanAuthored ?? row.human_authored) === true,
+    // Optional export column; a scheduled send's provider row names its queued row.
+    scheduledSourceId: row.scheduledSourceId ?? row.scheduled_sms_log_id ?? null,
     threadKey: [from, to].sort().join('\u0000'),
   };
 }
@@ -165,6 +167,7 @@ function policyHistory(rows, candidate, evaluationTimestamp) {
       mediaCount: row.mediaCount,
       messageType: row.messageType,
       humanAuthored: row.humanAuthored,
+      scheduledSourceId: row.scheduledSourceId,
     }));
 }
 
