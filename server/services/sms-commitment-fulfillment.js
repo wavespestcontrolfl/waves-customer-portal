@@ -24,7 +24,8 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 // 4: R1–R3 witness rules (#4816) — bumped so cached invalid_witness checks re-ground.
 // 5: cancellations answer cancel asks; no no-model close; payment evidence
 // split out to its own PR (#4816 r7–r13).
-const FULFILLMENT_POLICY = 5;
+// 6: an unscoped cancel ask needs the customer's sole active property (#4816 r14).
+const FULFILLMENT_POLICY = 6;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -179,6 +180,18 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, 16000) });
     }
   });
+  // Codex #4816 r14: a cancel ask that never named a property is answered by
+  // a cancellation only when the customer has exactly one active property and
+  // the cancelled visit is at it. With two, a cancellation at property B would
+  // read as the answer to "cancel Thursday's appointment" at property A.
+  if (!commitment.sms_context?.property_id && commitment.kind === 'other'
+    && records.some((row) => row.type === 'visit' && row.status === 'cancelled')) {
+    try {
+      const active = await conn('customer_properties').where({ customer_id: customerId, active: true }).limit(2).pluck('id');
+      const sole = active.length === 1 ? active[0] : null;
+      for (const row of records) if (row.type === 'visit') row.customer_sole_property_id = sole;
+    } catch { failures.push('customer_properties'); }
+  }
   const unlinked = records.filter((row) => row.type === 'estimate' && !row.property_id);
   if (unlinked.length) {
     try {
@@ -236,9 +249,14 @@ function scopedToProperty(record, commitment) {
   const witnessProperty = record.property_id || record.address_property_id;
   if (!propertyId && record.type === 'visit' && ['other', 'callback'].includes(commitment.kind)) {
     // The request never named a property (e.g. "you still coming this
-    // morning?" with one active property, or an ambiguous property at
-    // extraction time). Any of this customer's own visits — the evidence
-    // query is already customer-scoped — can still answer it.
+    // morning?"). Field progress on any of this customer's own visits — the
+    // evidence query is already customer-scoped — can still answer it (owner
+    // ruling 2026-09-24). A cancellation needs the customer's sole active
+    // property: it is the one outcome that leaves the asked-about visit
+    // booked when it lands at the wrong property.
+    if (commitment.kind === 'other' && record.status === 'cancelled') {
+      return !!record.customer_sole_property_id && record.property_id === record.customer_sole_property_id;
+    }
     return true;
   }
   return !!propertyId && witnessProperty === propertyId;

@@ -1243,6 +1243,32 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
   });
 
+  test.each([['one active property', false], ['two active properties', true]])(
+    'Codex #4816 r14: an unscoped cancel ask admits a cancellation only at the sole active property (%s)', async (_label, secondActive) => {
+      result.facts = [];
+      result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: null,
+        quote: 'Please cancel my appointment', description: 'Please cancel my appointment' };
+      await recordMessageOperations(mockPg, message, result, context);
+      const [commitment] = await mockPg('call_commitments').select('*');
+      expect(commitment.sms_context).toMatchObject({ property_id: null });
+      if (secondActive) {
+        await mockPg('customer_properties').insert({ id: randomUUID(), customer_id: message.customer_id,
+          address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+      }
+      const after = new Date(message.created_at.getTime() + 1000);
+      const [visit] = await mockPg('scheduled_services').insert({
+        customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+        scheduled_date: etDateString(new Date(after.getTime() + 3 * 86400000)), window_start: '09:00:00', status: 'cancelled',
+        created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: after });
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
+      const record = evidence.records.find((r) => r.type === 'visit');
+      expect(record.customer_sole_property_id).toBe(secondActive ? null : context.properties[0].id);
+      expect(admissibleWitness(record, commitment, evidence.records)).toBe(!secondActive);
+    },
+  );
+
   test('R3 owner ruling 2026-09-24: a delivered staff SMS reply no longer closes an "other" ask (the split-billing ask "separate the charges")', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
