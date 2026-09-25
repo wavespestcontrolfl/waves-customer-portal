@@ -1741,32 +1741,42 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
 // ruling this codifies). Returns the agreed USD amount, or null when no
 // price was accepted on the call.
 //
-// V2: service_request.price is the schema's single canonical primary entry
-// — normalizeServiceRequestPricing (utils/normalize-extraction-v2.js) has
-// ALREADY selected the accepted prices[] entry (by caller_response
-// 'accepted') into `price` at parse time (finalizeV2Extraction normalizes
-// before persisted-schema validation), so reading `price.accepted` alone
-// here also covers the prices[] shape — there is no separate array to walk.
-// V1: quoted_price is defined by the extraction prompt itself as the total
-// the agent quoted AND THE CALLER ACCEPTED (never a bare, undecided ask —
-// see the prompt's "quoted_price" field description), so it already IS an
-// agreed price; appointment_confirmed is required alongside it as
-// corroborating evidence that a real visit was actually booked around that
-// agreement, not as the acceptance signal itself (V2 needs no such pairing
-// because `accepted` already is that signal).
-function resolveCallAgreedPrice(extracted = {}, v2Extraction = null) {
-  const v2Price = v2Extraction?.service_request?.price;
-  if (v2Price && v2Price.accepted === true
-    && typeof v2Price.amount_usd === 'number'
-    && Number.isFinite(v2Price.amount_usd)
-    && v2Price.amount_usd > 0) {
-    return v2Price.amount_usd;
+// V2 ONLY (codex #4815 r1 P1): downstream composer decisions read the V2
+// canonical extraction plus the raw transcript, never the unvalidated V1
+// blob (same contract as context-builder's "ENRICHED (V2 valid)
+// extractions only" email-identity guard) — a hallucinated V1 price must
+// never suppress a legitimate draft. With no valid V2 extraction this
+// returns null and the engine runs exactly as it did before this feature.
+//
+// Two independent V2 signals, either one enough:
+//   - service_request.quoted_price_usd: the SCHEMA'S OWN narrower
+//     "accepted-total-only" field (call-extraction-v1.js prompt: "The
+//     total price... that the agent quoted AND the caller accepted"; V2
+//     kept this exact semantic when service_request.price was added later
+//     specifically to capture prices the caller had NOT accepted —
+//     validate-extraction.js 1.12.0 note: "quoted_price_usd keeps its
+//     existing semantics and consumers unchanged"). A valid V2 extraction
+//     can carry this while leaving the broader `price` object null.
+//   - service_request.price.accepted === true: normalizeServiceRequestPricing
+//     (utils/normalize-extraction-v2.js) has ALREADY selected the accepted
+//     prices[] entry (by caller_response 'accepted') into `price` at parse
+//     time (finalizeV2Extraction normalizes before persisted-schema
+//     validation), so reading `price.accepted` alone here also covers the
+//     prices[] shape — there is no separate array to walk.
+function resolveCallAgreedPrice(v2Extraction = null) {
+  const svc = v2Extraction?.service_request;
+  if (!svc) return null;
+  if (typeof svc.quoted_price_usd === 'number'
+    && Number.isFinite(svc.quoted_price_usd)
+    && svc.quoted_price_usd > 0) {
+    return svc.quoted_price_usd;
   }
-  if (extracted.appointment_confirmed === true
-    && typeof extracted.quoted_price === 'number'
-    && Number.isFinite(extracted.quoted_price)
-    && extracted.quoted_price > 0) {
-    return extracted.quoted_price;
+  const price = svc.price;
+  if (price && price.accepted === true
+    && typeof price.amount_usd === 'number'
+    && Number.isFinite(price.amount_usd)
+    && price.amount_usd > 0) {
+    return price.amount_usd;
   }
   return null;
 }
@@ -9699,7 +9709,7 @@ const CallRecordingProcessor = {
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
-    const callAgreedPrice = resolveCallAgreedPrice(extracted, v2CanonicalExtraction);
+    const callAgreedPrice = resolveCallAgreedPrice(v2CanonicalExtraction);
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
     const callSecondaryContact = callSecondaryContacts[0] || null;
     // Capture the caller's email BEFORE the secondary-contact scrub below clears
@@ -13718,6 +13728,13 @@ const CallRecordingProcessor = {
     // the written quote by hand.
     let estimatorEnginePromise = null;
     let reconcileOnlyDraftLinksPending = false;
+    // Set only on the price_agreed_on_call skip below: a second,
+    // post-finalization invalidation sweep (mirrors the spam/voicemail
+    // terminal path's own two-pass pattern a few thousand lines up) catches
+    // a detached composer from an older overlapping pass that inserts a
+    // draft AFTER this pass's pre-write block stamp but before its own
+    // token clears.
+    let agreedPriceDraftSweepPending = false;
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)
       && callAgreedPrice == null) {
@@ -13797,8 +13814,41 @@ const CallRecordingProcessor = {
       // deliberately refuses a call with a live token, so firing now would
       // silently no-op on exactly the transient-context case it exists for.
       // See the post-finalization hook below.
+      //
+      // callAgreedPrice != null is stronger than an ordinary reconcile
+      // (codex #4815 r1 P1): reconcileDraftLinksForCall below only re-links
+      // an existing draft's lead — it does nothing when the lead itself is
+      // unchanged, so a force-reprocess that newly finds an agreed price
+      // left any existing (possibly differently-priced) draft from an
+      // earlier pass live and sendable, with nothing stopping a detached
+      // composer from that same earlier, still-overlapping pass from
+      // inserting a fresh one right behind it. Reuse the SAME forced-
+      // invalidation path the identity-conflict quarantine and the
+      // spam/voicemail terminal verdict use (invalidateDraftForCall stamps
+      // the call-level estimator_draft_block FIRST — the fence every draft
+      // creator's in-lock check (callRejectedForDrafting) and every public-
+      // estimate read (staleCallLinkageReason) honor regardless of the
+      // reason string — THEN archives every live estimator_engine draft for
+      // this call), fenced to THIS pass's own claim so a peer that reclaimed
+      // the call is never overridden. Best-effort/non-throwing: unlike the
+      // spam/voicemail terminal verdict, this pass is not disqualifying the
+      // call itself, so a failure here must not fail the whole run — the
+      // post-finalization sweep below is the second, belt-and-braces pass.
       if (callAgreedPrice != null) {
         logger.info(`[call-proc] estimator engine skipped for ${maskSid(callSid)} — price agreed on call ($${callAgreedPrice.toFixed(2)}), skipped:'price_agreed_on_call'`);
+        try {
+          const { invalidateDraftForCall } = require('./estimator-engine');
+          const invalidation = await invalidateDraftForCall(call.id, {
+            reason: 'price_agreed_on_call',
+            ownershipFence: { callLogId: call.id, procToken, procGeneration },
+          });
+          if (!invalidation.ok) {
+            logger.warn(`[call-proc] price-agreed draft invalidation did not land for ${maskSid(callSid)} — the post-finalization sweep will retry`);
+          }
+        } catch (invalidateErr) {
+          logger.warn(`[call-proc] price-agreed draft invalidation threw for ${maskSid(callSid)}: ${invalidateErr.message}`);
+        }
+        agreedPriceDraftSweepPending = true;
       }
       reconcileOnlyDraftLinksPending = true;
     }
@@ -18199,6 +18249,34 @@ const CallRecordingProcessor = {
           const { markReconcilePending } = require('./estimator-engine');
           await markReconcilePending(call.id);
         } catch { /* markReconcilePending never throws; belt-and-braces */ }
+      }
+    }
+
+    // SECOND price-agreed invalidation pass, after the terminal status
+    // committed (codex #4815 r1 P1 — same two-pass shape as the
+    // spam/voicemail terminal verdict's own post-write sweep, thousands of
+    // lines up): the pre-write pass stamps the durable call-side block
+    // first, so a detached composer that had already locked the call could
+    // still have inserted between that stamp and its scan, or the pre-write
+    // pass's own invalidation attempt could have failed. This sweeps
+    // whatever landed. Best-effort — the block marker keeps any straggler
+    // unsendable, whether or not this sweep itself succeeds.
+    if (finalized > 0 && agreedPriceDraftSweepPending) {
+      try {
+        const { invalidateDraftForCall: invalidateAgreedPriceAgain } = require('./estimator-engine');
+        await invalidateAgreedPriceAgain(call.id, {
+          reason: 'price_agreed_on_call',
+          // Generation-fenced like the reconcile-only pass above: the
+          // terminal write cleared this pass's token, so a newer
+          // force-reprocess can claim the call and start composing a
+          // valid replacement (e.g. the extraction was corrected and no
+          // price is agreed after all) — an unfenced sweep would stamp the
+          // obsolete verdict over that replacement. Same generation = still
+          // ours; a newer claim wins and this sweep no-ops (ownershipLost).
+          ownershipFence: { callLogId: call.id, procToken, procGeneration },
+        });
+      } catch (sweepErr) {
+        logger.warn(`[call-proc] post-finalization price-agreed draft sweep failed (non-blocking): ${sweepErr.message}`);
       }
     }
 

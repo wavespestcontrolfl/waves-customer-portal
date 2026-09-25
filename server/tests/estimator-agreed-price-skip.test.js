@@ -12,6 +12,11 @@
  * every other caller (booking-predraft, admin re-draft, the replay CLI)
  * gets the same refusal. Drives maybeDraftEstimateForCall directly with
  * context-builder mocked; fixtures fictitious (555-01xx numbers).
+ *
+ * codex #4815 r1 P1s: the agreed-price signal is V2 ONLY (a V1-only call
+ * never gates the engine — downstream composer decisions never read the
+ * unvalidated V1 blob), and V2's OWN narrower `quoted_price_usd` field
+ * counts on its own, independent of the broader `price` object.
  */
 
 let mockCallRow;
@@ -63,7 +68,26 @@ describe('maybeDraftEstimateForCall — agreed-price refusal (owner ruling 2026-
     expect(mockBuildCallContext).not.toHaveBeenCalled();
   });
 
-  test('quotePromised=false + V1 quoted_price/appointment_confirmed on the call ⇒ skipped', async () => {
+  test('quotePromised=false + V2 quoted_price_usd on the call (no price object at all) ⇒ skipped', async () => {
+    // The schema's own narrower "agent quoted AND caller accepted" field —
+    // codex #4815 r1 P1 — must gate the engine on its own, independent of
+    // the broader price/prices[] object.
+    mockExtractionFromCall.mockReturnValue({
+      source: 'enriched',
+      extraction: { service_request: { quoted_price_usd: 300 } },
+    });
+
+    const result = await maybeDraftEstimateForCall({ callLogId: 'call-1', quotePromised: false });
+
+    expect(result.skipped).toBe('price_agreed_on_call');
+    expect(mockBuildCallContext).not.toHaveBeenCalled();
+  });
+
+  test('quotePromised=false + V1 quoted_price/appointment_confirmed, but NO valid V2 extraction ⇒ the engine still runs', async () => {
+    // codex #4815 r1 P1: downstream composer decisions read V2 plus the
+    // raw transcript, never the unvalidated V1 blob — a V1-only call
+    // (extractionFromCall source 'v1') must never suppress a legitimate
+    // draft, however price-like its V1 fields look.
     mockExtractionFromCall.mockReturnValue({
       source: 'v1',
       extraction: { quoted_price: 387, appointment_confirmed: true },
@@ -71,8 +95,8 @@ describe('maybeDraftEstimateForCall — agreed-price refusal (owner ruling 2026-
 
     const result = await maybeDraftEstimateForCall({ callLogId: 'call-1', quotePromised: false });
 
-    expect(result.skipped).toBe('price_agreed_on_call');
-    expect(mockBuildCallContext).not.toHaveBeenCalled();
+    expect(result.skipped).not.toBe('price_agreed_on_call');
+    expect(mockBuildCallContext).toHaveBeenCalledWith('call-1');
   });
 
   test('quotePromised=false + quote-REQUESTED call with no agreed price ⇒ the engine still runs', async () => {

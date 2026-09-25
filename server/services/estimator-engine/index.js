@@ -1366,11 +1366,15 @@ async function strictExistingDraftForCall(callLogId) {
 // never be re-priced by the estimator engine), re-derived here from the
 // call row directly so the refusal below holds at THIS entry point for
 // every caller, not only the one call site that already checks first.
-// Keep the two in sync: V2 `service_request.price.accepted === true` (the
-// normalizer has already selected the accepted prices[] entry into
-// `price` at parse time) or V1 `quoted_price` + `appointment_confirmed`
-// (the extraction prompt defines quoted_price as an already-accepted
-// total, never a bare ask).
+// Keep the two in sync: V2 ONLY (codex #4815 r1 P1) — a V1-only call
+// (extractionFromCall source !== 'enriched') never gates the engine, since
+// downstream composer decisions read the validated V2 extraction plus the
+// raw transcript, never the unvalidated V1 blob. Either of two independent
+// V2 signals is enough: `service_request.quoted_price_usd` (the schema's
+// own narrower accepted-total-only field — unchanged semantics since V1,
+// per validate-extraction.js's 1.12.0 note), or
+// `service_request.price.accepted === true` (the normalizer has already
+// selected the accepted prices[] entry into `price` at parse time).
 async function resolveAgreedPriceForCall(callLogId) {
   if (!callLogId) return null;
   // A test double for context-builder (jest.mock) commonly stubs only the
@@ -1384,22 +1388,20 @@ async function resolveAgreedPriceForCall(callLogId) {
       .first('ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
     if (!call) return null;
     const { extraction, source } = extractionFromCall(call);
-    if (source === 'enriched') {
-      const price = extraction?.service_request?.price;
-      if (price && price.accepted === true
-        && typeof price.amount_usd === 'number'
-        && Number.isFinite(price.amount_usd)
-        && price.amount_usd > 0) {
-        return price.amount_usd;
-      }
-      return null;
+    if (source !== 'enriched') return null;
+    const svc = extraction?.service_request;
+    if (!svc) return null;
+    if (typeof svc.quoted_price_usd === 'number'
+      && Number.isFinite(svc.quoted_price_usd)
+      && svc.quoted_price_usd > 0) {
+      return svc.quoted_price_usd;
     }
-    if (source === 'v1' && extraction
-      && extraction.appointment_confirmed === true
-      && typeof extraction.quoted_price === 'number'
-      && Number.isFinite(extraction.quoted_price)
-      && extraction.quoted_price > 0) {
-      return extraction.quoted_price;
+    const price = svc.price;
+    if (price && price.accepted === true
+      && typeof price.amount_usd === 'number'
+      && Number.isFinite(price.amount_usd)
+      && price.amount_usd > 0) {
+      return price.amount_usd;
     }
     return null;
   } catch (err) {
