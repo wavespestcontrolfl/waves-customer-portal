@@ -236,36 +236,57 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    p.m/U.S — `ABBREVIATIONS`) or a single-letter initial ("J. Smith") —
    "We service St. Petersburg." and "Please ask Dr. Smith." hold past the
    abbreviation's own period, not just to it.
-2. **Hold a sentence** — never send it progressively — when it contains a
-   dollar amount (reusing `eval/voice-relay-spoken-checks`'s
+2. **A sentence streams ONLY if it's ALLOWLISTED-safe — an ordinary
+   statement holds by default.** The policy inverted from a commitment
+   BLOCKLIST to a safe-shape ALLOWLIST because a blocklist never converges:
+   Codex found "I'll book that" slipping the original hold-verb list; the
+   very next audit pass found "I'll take care of that", "let me put that
+   through", "I'll get that over to the team", "consider it handled" — an
+   unbounded set of ways to phrase "this is done." `isStreamSafe` (see
+   SAFE_FILLER_RE) allows exactly two shapes: (a) the whole trimmed
+   sentence is zero-or-more acknowledgments (sure/okay/great/got it/
+   thanks/…) optionally followed by ONE read-only clause — a modal (let me
+   / I'll / I'm going to / I can / give me a moment to…) plus a read-only
+   verb (check/look/look up/take a look/pull up/see/find/double-check —
+   NEVER a write verb) and an optional object, or a bare "one moment" /
+   "hang on" / "bear with me" — optional trailing "please"; or (b) the
+   sentence is a question (ends in `?`). "Let me check on that and I'll
+   take care of it." does NOT match (two clauses; the grammar allows
+   exactly one). This costs nothing real: the actual latency win was always
+   the LEADING acknowledgment/filler ahead of the model's real content, not
+   "stream everything until proven risky" — and that's exactly what the
+   allowlist covers.
+3. **`needsHold` still VETOES**, independently of `isStreamSafe` — a
+   sentence holds even if it would otherwise be allowlisted (e.g. "Is nine
+   a.m. open?" is a question but holds on the date/time veto) — when it
+   contains a dollar amount (reusing `eval/voice-relay-spoken-checks`'s
    `amountMentions`), ANY digit, a date/time expression (weekday/month
-   names, relative days and parts of day, week/month, spoken clock times like
-   "at nine" or "two o'clock", ordinals like "the fifteenth" — `DATE_TIME_RE`),
-   a negation, a
-   **commitment-or-success claim**: an explicit commitment verb
-   (booked/scheduled/sent/charged/refunded/confirmed/reserved/created/
-   completed/done/processed/…) OR a success phrase that asserts the same
-   outcome without one — "you're all set", "taken care of", "got you
-   booked", "on the calendar", "locked in", "I've sent that over", "someone
-   will call you" (`COMMITMENT_OR_SUCCESS_RE`) — OR a **future/modal write
-   commitment**: "I'll book that", "I'm going to reschedule that", "let me
-   submit that", or a bare `-ing` form of a write verb ("Booking that now.")
-   (`WRITE_COMMITMENT_RE`; read-only verbs — check, look, pull up, see,
-   find — are never in that list, so "Let me check on that for you." still
-   streams). These date/negation/commitment patterns are English-only, so a
-   **Spanish session never flushes progressively** (its stream state starts
-   holding — block timing, released at finalize under the write-tool
-   check), and in any session a sentence with Spanish orthography or a
-   common Spanish function/success word ("listo", "ya quedó", "agendada",
-   "reservado", …; `NON_ENGLISH_HINT_RE`) is held too. Once one sentence in
-   a round needs holding, every sentence after it in that same round is
-   held too — never reordered, never partially released. Independently, the
-   round loop also stops flushing the instant ANY `tool_use` content block
-   starts streaming (belt-and-braces — text ahead of a tool call has
-   usually already streamed by the time that event fires, so the hold lists
-   above are the real guard against a false "you're all set" or "I'll book
-   that" before a booking tool runs).
-3. **Release the held tail only at `finalMessage()`**, under the exact same
+   names, relative days and parts of day, week/month, spoken clock times
+   like "at nine" or "two o'clock", ordinals like "the fifteenth" —
+   `DATE_TIME_RE`), a negation, a **commitment-or-success claim**: an
+   explicit commitment verb (booked/scheduled/sent/charged/refunded/
+   confirmed/reserved/created/completed/done/processed/…) OR a success
+   phrase that asserts the same outcome without one — "you're all set",
+   "taken care of", "got you booked", "on the calendar", "locked in",
+   "I've sent that over", "someone will call you" (`COMMITMENT_OR_SUCCESS_RE`)
+   — OR a **future/modal write commitment**: "I'll book that", "I'm going
+   to reschedule that", "let me submit that", or a bare `-ing` form of a
+   write verb ("Booking that now.") (`WRITE_COMMITMENT_RE`; read-only verbs
+   — check, look, pull up, see, find — are never in that list, so "Let me
+   check on that for you." still streams). These date/negation/commitment
+   patterns are English-only, so a **Spanish session never flushes
+   progressively** (its stream state starts holding — block timing,
+   released at finalize under the write-tool check), and in any session a
+   sentence with Spanish orthography or a common Spanish function/success
+   word ("listo", "ya quedó", "agendada", "reservado", …;
+   `NON_ENGLISH_HINT_RE`) is held too. Once one sentence in a round fails
+   EITHER check (not allowlisted, or vetoed), every sentence after it in
+   that same round holds too — never reordered, never partially released.
+   Independently, the round loop also stops flushing the instant ANY
+   `tool_use` content block starts streaming (belt-and-braces — text ahead
+   of a tool call has usually already streamed by the time that event
+   fires).
+4. **Release the held tail only at `finalMessage()`**, under the exact same
    write-tool suppression check the block renderer already runs
    (`hasPendingWrite` / `WRITE_TOOLS` in `relay-conversation.js`): if the
    round ends in a write tool call, the held tail is dropped from both the
@@ -279,7 +300,7 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    any `tool_use` block paired to a synthetic "not run" result so the next
    model call's history never carries an unpaired tool call (mirrors how
    the tool-result loop already ends a round the caller interrupted mid-way).
-4. **EVERY progressive flush — not just the round's first — revalidates
+5. **EVERY progressive flush — not just the round's first — revalidates
    session ownership**, the SAME late-supersession recheck the block
    renderer runs immediately before `say()` (a reconnect can take the
    CallSid claim mid-round, and the old socket must not speak from cached
@@ -293,7 +314,17 @@ Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
    REST of the round is withheld (not just that one sentence) and ends
    through the same superseded end-session path the block renderer's own
    recheck uses. `_finalizeStreamedRound` awaits the whole chain before
-   reading what was actually sent.
+   reading what was actually sent. Every step in that chain is also
+   caught-and-logged: a throw (most plausibly `_send` itself failing) never
+   leaves the chain REJECTED — `.then(onFulfilled)` with no `onRejected` on
+   a rejected promise just passes the rejection through, which would skip
+   every later queued sentence outright, surface as an unhandled rejection
+   (`_onStreamTextDelta` never awaits its own call into the chain), and
+   abort `_finalizeStreamedRound`'s bare `await` instead of finalizing
+   cleanly — so a step that throws logs it, marks the round withheld (same
+   "stop speaking" response a superseded check gets), and returns normally,
+   keeping the chain itself fulfilled so the next sentence's own step still
+   runs (and correctly no-ops via the withheld guard).
 
 Interruption: a barge-in aborts the round's own `AbortController` (unchanged
 mechanism); every send call in the streaming path checks that controller's

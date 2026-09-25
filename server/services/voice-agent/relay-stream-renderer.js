@@ -8,7 +8,23 @@
  * relay-conversation.js's file header and docs/conversationrelay-booking-plan.md
  * for the narrative version of this policy.
  *
- * CHUNKING POLICY (keep this comment and the doc in sync with any change):
+ * CHUNKING POLICY (keep this comment and the doc in sync with any change) is
+ * ALLOWLIST-WITH-VETO, not a blocklist: a completed sentence streams
+ * progressively ONLY when it is BOTH allowlisted-safe (`isStreamSafe`) AND
+ * not vetoed (`needsHold`). Earlier drafts of this policy held a sentence
+ * only when it matched a commitment-phrase BLOCKLIST — but a blocklist for
+ * "this sentence claims something happened" never converges: Codex found
+ * "I'll book that" slipping the original hold-verb list, and the very next
+ * pass found "I'll take care of that", "let me put that through", "I'll get
+ * that over to the team", "consider it handled" — an unbounded set of ways
+ * to phrase the same claim. Inverting to an allowlist ends that chase: an
+ * ordinary declarative statement — even an innocuous one like "We treat for
+ * ants and roaches." — now holds by DEFAULT, and only a small, enumerable
+ * set of genuinely safe shapes (see `isStreamSafe` below) is allowed to
+ * flush early. This costs nothing real: the actual latency win was never
+ * "stream everything until proven risky", it was always the LEADING
+ * acknowledgment/filler ("Sure, let me check on that for you.") ahead of
+ * the model's real content — and that is exactly what the allowlist covers.
  *   1. Flush at a completed sentence boundary — '.', '!' or '?', optionally
  *      followed by one closing quote/paren, followed by whitespace. A
  *      trailing fragment with no boundary yet is held by the caller for the
@@ -18,42 +34,50 @@
  *      a.m/p.m/U.S — see ABBREVIATIONS) or a single-letter initial ("J.
  *      Smith") — holding a little longer than strictly necessary is always
  *      the safe direction.
- *   2. A completed sentence is HELD (never sent as a progressive chunk) when
- *      it contains a dollar amount (reusing eval/voice-relay-spoken-checks's
- *      amountMentions — the one regex bank this repo already trusts to
- *      recognize digit and spelled-out amounts, EN + ES), ANY digit or a date/time
- *      expression, a negation, a COMMITMENT-OR-SUCCESS CLAIM: an explicit
- *      commitment verb (booked / scheduled / sent / charged / refunded /
- *      confirmed / ...) OR a success phrase that asserts the same thing
- *      without one ("you're all set", "taken care of", "got you booked",
- *      "on the calendar", "I've sent that over", ...) — see
- *      COMMITMENT_OR_SUCCESS_RE below for the full list — OR a FUTURE/MODAL
- *      WRITE COMMITMENT: "I'll book that", "I'm going to reschedule that",
- *      "let me submit that", or a bare -ing form of a write verb ("Booking
- *      that now.") — see WRITE_COMMITMENT_RE. Read-only verbs (check, look,
- *      pull up, see, find) are never in that verb list, so "Let me check on
- *      that for you." still streams. Once a sentence is held, every
- *      sentence after it in the SAME model round is held too — never
+ *   2. A completed sentence streams ONLY if `isStreamSafe` says so — the
+ *      WHOLE trimmed sentence matches the SAFE_FILLER grammar (zero or more
+ *      acknowledgments — sure/okay/great/got it/thanks/... — optionally
+ *      followed by exactly ONE read-only clause: a modal (let me / I'll /
+ *      I'm going to / I can / give me a moment to...) plus a read-only verb
+ *      (check / look / look up / take a look / pull up / see / find /
+ *      double-check — NEVER a write verb) and an optional object, or a bare
+ *      "one moment" / "hang on" / "bear with me"; optional trailing
+ *      "please"; terminal punctuation — see SAFE_FILLER_RE for the exact
+ *      grammar) OR the sentence is a question (ends in '?'). "Let me check
+ *      on that and I'll take care of it." has TWO clauses and does NOT
+ *      match (the grammar allows exactly one, anchored end to end).
+ *   3. Independently of `isStreamSafe`, `needsHold` VETOES a sentence —
+ *      still holds it even if it would otherwise be allowlisted-safe (e.g.
+ *      "Is nine a.m. open?" is a question but holds on the date/time veto)
+ *      — when it contains a dollar amount (reusing
+ *      eval/voice-relay-spoken-checks's amountMentions — the one regex bank
+ *      this repo already trusts to recognize digit and spelled-out amounts,
+ *      EN + ES), ANY digit or a date/time expression, a negation, a
+ *      COMMITMENT-OR-SUCCESS CLAIM (an explicit commitment verb OR a
+ *      success phrase that asserts the same thing without one — see
+ *      COMMITMENT_OR_SUCCESS_RE), or a FUTURE/MODAL WRITE COMMITMENT ("I'll
+ *      book that", a bare -ing write verb — see WRITE_COMMITMENT_RE). Once
+ *      a sentence fails EITHER check (not allowlisted, or vetoed), every
+ *      sentence after it in the SAME model round holds too — never
  *      reordered, never partially released mid-round. Independently,
  *      relay-conversation.js's round loop also stops flushing the moment any
  *      tool_use content block starts streaming (belt-and-braces for text
  *      that might follow a tool call, though in practice a tool call's own
- *      preceding text has usually already streamed by then — the hold lists
- *      above are what actually keep a false "you're all set" or "I'll book
- *      that" off the air).
- *   3. The held tail is only ever spoken once the round's finalMessage() is
+ *      preceding text has usually already streamed by then).
+ *   4. The held tail is only ever spoken once the round's finalMessage() is
  *      known AND the write-tool suppression check the block renderer already
  *      runs (WRITE_TOOLS / hasPendingWrite in relay-conversation.js) has
  *      cleared it — so a caller can never hear an amount, a date, a
- *      negation, or a stated commitment/success claim before the tool call
- *      that would make it true has actually run. This is the "run the same
- *      checks the block path runs on it" step from the brief: today the
- *      block renderer's only pre-speech check IS that write-tool suppression
- *      (no per-sentence semantic grader runs in the live path —
+ *      negation, or a stated commitment/success claim (or any other
+ *      un-allowlisted statement) before the tool call that would make it
+ *      true has actually run. This is the "run the same checks the block
+ *      path runs on it" step from the brief: today the block renderer's
+ *      only pre-speech check IS that write-tool suppression (no
+ *      per-sentence semantic grader runs in the live path —
  *      voice-relay-spoken-checks is an offline eval grader, not a live
  *      gate), so PR C reuses that exact check rather than inventing a
  *      second, parallel one.
- *   4. EVERY progressive send — not just the round's first — revalidates the
+ *   5. EVERY progressive send — not just the round's first — revalidates the
  *      same late-supersession recheck the block renderer runs immediately
  *      before speaking (a reconnect can take the CallSid claim mid-round;
  *      there is no synchronous cross-socket takeover signal to shortcut
@@ -184,6 +208,63 @@ const WRITE_COMMITMENT_RE = new RegExp(
   'i',
 );
 
+// ── SAFE_FILLER grammar (allowlist) ─────────────────────────────────────────
+// A phrase BLOCKLIST for commitments does not converge: every round finds
+// another way to say "handled" ("I'll take care of that", "let me put that
+// through", "consider it handled", ...) that no finite hold-verb list will
+// ever fully enumerate. Streaming a bare sentence therefore no longer
+// defaults to safe — see `isStreamSafe` below, which `needsHold` above still
+// VETOES (an amount/date/negation/commitment sentence is held regardless of
+// how it's phrased). Acknowledgments, one read-only "let me check on that"
+// clause, and questions are the actual latency win (the leading filler
+// before the model's real content); a full declarative statement — even an
+// innocuous one like "We treat for ants and roaches." — now holds by
+// default, same as an unrecognized commitment phrasing would.
+const ACK_SOURCE = 'sure|okay|ok|all right|alright|great|perfect|absolutely|of course|got it|gotcha|'
+  + 'thank you|thanks|sounds good|happy to help|you bet|certainly|yes|yeah|yep|hi|hello';
+// One acknowledgment, or a list of them joined by , . or ! (each optionally
+// padded with whitespace) — "Sure, okay." / "Great! Perfect."
+const ACKS_SOURCE = `(?:${ACK_SOURCE})(?:\\s*[,.!]\\s*(?:${ACK_SOURCE}))*`;
+// A single read-only clause: a modal (let me / I'll / I'm going to / I can /
+// give me a moment to...) plus a read-only verb (never a write verb — see
+// WRITE_VERBS_* above, which this deliberately does not reuse any of) and an
+// optional object. "Let me check on that and I'll take care of it." has TWO
+// clauses joined by "and" and must NOT match — the grammar allows exactly
+// ONE, anchored end to end below.
+const FILLER_MODAL_SOURCE = "let me|i['’]ll|i will|i['’]m going to|i can|give me a (?:moment|sec|second)(?: (?:to|while i))?";
+const FILLER_VERB_SOURCE = 'take a look|look up|look|check|pull up|see|find|double-check';
+const FILLER_PREP_SOURCE = 'on|at|into|for|up';
+const FILLER_OBJECT_SOURCE = 'that|this|it|your (?:account|info|information|details|file|address|records?)';
+const FILLER_CLAUSE_SOURCE = `(?:${FILLER_MODAL_SOURCE}) (?:quickly )?(?:${FILLER_VERB_SOURCE})`
+  + `(?: (?:(?:${FILLER_PREP_SOURCE}) )?(?:${FILLER_OBJECT_SOURCE}))?(?: for you)?`;
+// A short hold-on phrase stands in for the read-only clause on its own.
+const FILLER_WAIT_SOURCE = 'one moment|just a moment|one sec|just a sec|hang on|bear with me';
+const FILLER_CLAUSE_OR_WAIT_SOURCE = `(?:(?:${FILLER_CLAUSE_SOURCE})|(?:${FILLER_WAIT_SOURCE}))`;
+const SAFE_FILLER_RE = new RegExp(
+  '^\\s*(?:'
+  + `${ACKS_SOURCE}(?:\\s*[,.!]\\s*${FILLER_CLAUSE_OR_WAIT_SOURCE})?` // acks, optionally + one clause
+  + `|${FILLER_CLAUSE_OR_WAIT_SOURCE}` // or just the clause, no acks
+  + `)(?: please)?\\s*[.!?]["'’)\\]]?\\s*$`,
+  'i',
+);
+// A question streams regardless of the filler grammar (its own content is
+// still held if needsHold vetoes it — "What time on Tuesday works?" holds).
+const QUESTION_RE = /\?["'’)\]]?$/;
+
+/**
+ * Is this completed sentence provably commitment-free — safe to speak
+ * before the model's full reply (and any tool call it might make) is known?
+ * The allowlist half of the policy; `needsHold` above is the veto that
+ * still wins regardless (an amount/date/negation/commitment phrase holds
+ * even inside a question, e.g. "Is nine a.m. open?").
+ */
+function isStreamSafe(sentence) {
+  const t = String(sentence || '').trim();
+  if (!t) return false;
+  if (SAFE_FILLER_RE.test(t)) return true;
+  return QUESTION_RE.test(t);
+}
+
 /**
  * Split a growing buffer into complete sentences (each carrying its own
  * trailing boundary whitespace, exactly as found) plus whatever incomplete
@@ -225,6 +306,6 @@ function needsHold(sentence) {
 }
 
 module.exports = {
-  splitSentences, needsHold, NON_ENGLISH_HINT_RE, BOUNDARY_RE, NEGATION_RE, DATE_TIME_RE,
-  COMMITMENT_OR_SUCCESS_RE, WRITE_COMMITMENT_RE, ABBREVIATIONS, isAbbreviationPeriod,
+  splitSentences, needsHold, isStreamSafe, NON_ENGLISH_HINT_RE, BOUNDARY_RE, NEGATION_RE, DATE_TIME_RE,
+  COMMITMENT_OR_SUCCESS_RE, WRITE_COMMITMENT_RE, ABBREVIATIONS, isAbbreviationPeriod, SAFE_FILLER_RE, QUESTION_RE,
 };

@@ -18,7 +18,7 @@ jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction:
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 
 const { RelayConversation } = require('../services/voice-agent/relay-conversation');
-const { splitSentences, needsHold } = require('../services/voice-agent/relay-stream-renderer');
+const { splitSentences, needsHold, isStreamSafe } = require('../services/voice-agent/relay-stream-renderer');
 
 // Let the microtask-only awaits inside handlePrompt → _runLoop (contextReady
 // is null, resumeReady is null, officeHoursReady is null, _maybeHandoffForFailure
@@ -245,6 +245,57 @@ describe('relay-stream-renderer — pure chunking + hold policy', () => {
   });
 });
 
+// ── isStreamSafe — the allowlist grammar (structural fix #1) ───────────────
+// A phrase BLOCKLIST for commitments does not converge: Codex found "I'll
+// book that" slipping COMMITMENT_OR_SUCCESS_RE; the very next audit pass
+// found "I'll take care of that", "let me put that through", "I'll get that
+// over to the team", "consider it handled" — none of which any hold-verb
+// list will ever fully enumerate. `isStreamSafe` inverts the policy: a
+// sentence streams progressively ONLY when it is a recognized safe shape
+// (an ack + one read-only clause, or a question) — an ordinary statement,
+// even an innocuous one, now holds by default.
+describe('isStreamSafe — allowlist grammar (structural fix, replaces the blocklist)', () => {
+  test.each([
+    "I'll take care of that.",
+    'let me put that through.',
+    "I'll get that over to the team.",
+    'consider it handled.',
+  ])('the four audit-discovered commitment phrasings hold (not allowlisted, no blocklist entry would ever cover them all): %s', (sentence) => {
+    expect(isStreamSafe(sentence)).toBe(false);
+    expect(needsHold(sentence)).toBe(false); // NOT caught by the veto either — this IS the point of the allowlist
+  });
+
+  test('a read-only clause followed by a second (write-commitment) clause does not match — exactly ONE clause is allowed', () => {
+    expect(isStreamSafe("Let me check on that and I'll take care of it.")).toBe(false);
+  });
+
+  test.each([
+    'We treat for ants and roaches.',
+    'Our technician will be there on the route.',
+    'That service includes the perimeter.',
+  ])('an ordinary declarative statement holds by default, even an innocuous one: %s', (sentence) => {
+    expect(isStreamSafe(sentence)).toBe(false);
+  });
+
+  test.each([
+    'Sure, let me check on that for you.',
+    'Okay, one moment please.',
+    'Got it! Let me pull up your account.',
+    'Great.',
+  ])('a recognized safe filler streams: %s', (sentence) => {
+    expect(isStreamSafe(sentence)).toBe(true);
+  });
+
+  test('a plain question streams', () => {
+    expect(isStreamSafe("What's the address there?")).toBe(true);
+  });
+
+  test('a question carrying a date/amount still holds — needsHold vetoes isStreamSafe', () => {
+    expect(isStreamSafe('What time on Tuesday works?')).toBe(true); // allowlisted as a question...
+    expect(needsHold('What time on Tuesday works?')).toBe(true); // ...but the veto still wins
+  });
+});
+
 describe('renderer selector — resolved once, pinned per session', () => {
   afterEach(() => {
     delete process.env.VOICE_RELAY_RENDERER;
@@ -358,12 +409,16 @@ describe('stream renderer — full round loop', () => {
     process.env.VOICE_RELAY_RENDERER = 'stream';
     const send = jest.fn();
     const convo = new IsolatedConvo({ callSid: 'CA-s2', from: '+19415551234', send });
-    const finalText = 'Sure thing. That runs $149 for the visit.';
+    // "Sure thing." is NOT allowlisted-safe (no recognized ack/clause) — use
+    // a genuinely safe filler so the prefix actually flushes progressively.
+    const finalText = 'One moment please. That runs $149 for the visit.';
 
     const promptPromise = convo.handlePrompt('how much is a visit');
     await flush();
     const round = captured[0];
-    round.textCb('Sure thing. '); // safe — flushes immediately
+    round.textCb('One moment please. '); // allowlisted safe — flushes immediately
+    await flush();
+    expect(send.mock.calls.length).toBeGreaterThan(0); // the safe prefix is already on the air
     round.textCb('That runs $149 for the visit.'); // HELD — must not flush yet
     // Not sent yet: the amount never reached Twilio before finalMessage.
     expect(send.mock.calls.some(([t]) => /\$149/.test(t))).toBe(false);
@@ -422,21 +477,23 @@ describe('stream renderer — full round loop', () => {
     const promptPromise = convo.handlePrompt('tell me about your services');
     await flush();
     const round = captured[0];
-    round.textCb('We handle pest control. '); // flushes
-    round.textCb('We also do lawn care. '); // flushes
-    // The first progressive flush of a round is gated on an async
-    // late-supersession recheck (_gateFirstFlush) — let it settle before
-    // the caller can have "heard" anything to barge in over.
+    // Allowlisted safe fillers (isStreamSafe) — a plain declarative
+    // statement like "We handle pest control." no longer streams at all.
+    round.textCb('Sure, one moment. '); // flushes
+    round.textCb('Great, let me double-check that. '); // flushes
+    // Every progressive flush is gated on an async late-supersession
+    // recheck (_queueOrFlush) — let it settle before the caller can have
+    // "heard" anything to barge in over.
     await flush();
 
-    convo.interrupt({ utteranceUntilInterrupt: 'We handle pest control. We also do lawn care.' });
+    convo.interrupt({ utteranceUntilInterrupt: 'Sure, one moment. Great, let me double-check that.' });
     // A chunk that arrives AFTER the abort must never reach Twilio.
     round.textCb('This must never be spoken.');
     await promptPromise; // the round rejects (AbortError) and _runLoop returns
 
     const spoken = send.mock.calls.map(([t]) => t).join('');
     expect(spoken).not.toMatch(/never be spoken/);
-    expect(spoken).toMatch(/We handle pest control\./);
+    expect(spoken).toMatch(/Sure, one moment\./);
 
     const agentEntry = convo._transcript.find((e) => e.role === 'agent');
     expect(agentEntry.interrupted).toBe(true);
@@ -452,8 +509,10 @@ describe('stream renderer — full round loop', () => {
     const promptPromise = convo.handlePrompt('what areas do you cover');
     await flush();
     const round = captured[0];
-    round.textCb('We cover Manatee and Sarasota. ');
-    await flush(); // let the progressive-flush gate settle so this actually sends
+    // Allowlisted safe filler — a plain declarative statement like "We
+    // cover Manatee and Sarasota." no longer streams at all.
+    round.textCb('Sure, one moment please. ');
+    await flush(); // let the progressive-flush chain settle so this actually sends
     round.reject(new Error('stream disconnected')); // NOT an abort — a genuine mid-stream failure
     await promptPromise;
 
@@ -464,7 +523,7 @@ describe('stream renderer — full round loop', () => {
     // The streamed prefix, sent exactly once, followed by a closing empty
     // last:true frame, followed by the (separate) failure line — nothing
     // about the first utterance is ever resent.
-    expect(calls.filter(([t]) => t.includes('Manatee'))).toHaveLength(1);
+    expect(calls.filter(([t]) => t.includes('one moment'))).toHaveLength(1);
     const closingFrames = calls.filter(([t, last]) => t === '' && last === true);
     expect(closingFrames).toHaveLength(1);
     const lastCall = calls[calls.length - 1];
@@ -478,12 +537,14 @@ describe('stream renderer — full round loop', () => {
     const send = jest.fn();
     const convo = new IsolatedConvo({ callSid: 'CA-s6', from: '+19415551234', send });
 
+    // Allowlisted safe fillers, distinguishable per round — a plain
+    // declarative "Answer to the first/second question." no longer streams.
     const firstPrompt = convo.handlePrompt('first question');
     await flush();
     const round1 = captured[0];
-    round1.textCb('Partial answer to the first question. ');
-    await flush(); // let the progressive-flush gate settle first
-    convo.interrupt({ utteranceUntilInterrupt: 'Partial answer to the first question.' });
+    round1.textCb('Sure, one moment please. ');
+    await flush(); // let the progressive-flush chain settle first
+    convo.interrupt({ utteranceUntilInterrupt: 'Sure, one moment please.' });
     await firstPrompt;
     const firstEntry = convo._transcript.find((e) => e.role === 'agent');
 
@@ -491,21 +552,21 @@ describe('stream renderer — full round loop', () => {
     await flush();
     const round2 = captured[1];
     expect(round2).toBeTruthy();
-    round2.textCb('Answer to the second question. ');
-    round2.resolve({ content: [{ type: 'text', text: 'Answer to the second question.' }], stop_reason: 'end_turn' });
+    round2.textCb('Okay, let me pull up your account. ');
+    round2.resolve({ content: [{ type: 'text', text: 'Okay, let me pull up your account.' }], stop_reason: 'end_turn' });
     await secondPrompt;
 
     // The first (interrupted) entry is untouched by the second round.
     expect(firstEntry.interrupted).toBe(true);
-    expect(firstEntry.planned).toBe('Partial answer to the first question. ');
+    expect(firstEntry.planned).toBe('Sure, one moment please. ');
 
     const agentEntries = convo._transcript.filter((e) => e.role === 'agent');
     expect(agentEntries).toHaveLength(2);
     expect(agentEntries[1]).not.toBe(firstEntry);
     // The second round's own entry never inherits or merges the first
     // round's (interrupted, unrelated) text — no resurfacing across rounds.
-    expect(agentEntries[1].planned).toBe('Answer to the second question.');
-    expect(agentEntries[1].planned).not.toMatch(/first question/);
+    expect(agentEntries[1].planned).toBe('Okay, let me pull up your account.');
+    expect(agentEntries[1].planned).not.toMatch(/one moment/);
   });
 
   test('any tool_use content block starting mid-stream stops further progressive flushes (belt-and-braces)', async () => {
@@ -647,13 +708,17 @@ describe('stream renderer — full round loop', () => {
     const promptPromise = convo.handlePrompt('what areas do you serve');
     await flush();
     const round = captured[0];
+    // Both sentences must be allowlisted-safe on their own — otherwise
+    // sentence 2 would hold via `isStreamSafe` alone (never reaching its
+    // own supersession check at all) and this would stop exercising P1-d's
+    // per-sentence revalidation.
     round.textCb('Sure. '); // sentence 1 — check finds NOT superseded → sends
-    round.textCb('We serve the whole county. '); // sentence 2 — check finds superseded → withheld
-    round.resolve({ content: [{ type: 'text', text: 'Sure. We serve the whole county.' }], stop_reason: 'end_turn' });
+    round.textCb('Let me check on that for you. '); // sentence 2 — check finds superseded → withheld
+    round.resolve({ content: [{ type: 'text', text: 'Sure. Let me check on that for you.' }], stop_reason: 'end_turn' });
     await promptPromise;
 
     expect(send.mock.calls.map(([t]) => t).join('')).toBe('Sure. '); // sentence 1 only
-    expect(send.mock.calls.some(([t]) => t.includes('whole county'))).toBe(false); // sentence 2 never spoken
+    expect(send.mock.calls.some(([t]) => t.includes('check on that'))).toBe(false); // sentence 2 never spoken
     expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
     expect(convo._sessionSuperseded).toHaveBeenCalledTimes(2);
   });
@@ -669,19 +734,21 @@ describe('stream renderer — full round loop', () => {
     const promptPromise = convo.handlePrompt('tell me about your services');
     await flush();
     const round = captured[0];
-    round.textCb('We handle pest control. '); // sentence 1 flushes
+    // Allowlisted safe filler — a plain declarative "We handle pest
+    // control." no longer streams at all.
+    round.textCb('Sure, one moment please. '); // sentence 1 flushes
     await flush();
     expect(send.mock.calls.length).toBeGreaterThan(0);
 
     // Twilio reports full playback of what's been sent SO FAR — but the
     // entry is still open (more chunks may still come this round).
-    convo._appendPlayed('We handle pest control.');
+    convo._appendPlayed('Sure, one moment please.');
     const entry = convo._transcript.find((e) => e.role === 'agent');
     expect(entry.streamOpen).toBe(true);
     expect(entry.done).toBe(false); // NOT retired — still open
     expect(convo._playing).toContain(entry); // still tracked for the next played event / a barge-in
 
-    round.resolve({ content: [{ type: 'text', text: 'We handle pest control.' }], stop_reason: 'end_turn' });
+    round.resolve({ content: [{ type: 'text', text: 'Sure, one moment please.' }], stop_reason: 'end_turn' });
     await promptPromise;
   });
 
@@ -698,14 +765,16 @@ describe('stream renderer — full round loop', () => {
     const promptPromise = convo.handlePrompt('tell me about your services');
     await flush();
     const round = captured[0];
-    round.textCb('We handle pest control. '); // sentence 1 flushes
+    // Allowlisted safe fillers — plain declarative statements no longer
+    // stream at all.
+    round.textCb('Sure, one moment please. '); // sentence 1 flushes
     await flush();
-    convo._appendPlayed('We handle pest control.'); // early catch-up — must NOT retire (still open)
+    convo._appendPlayed('Sure, one moment please.'); // early catch-up — must NOT retire (still open)
 
-    round.textCb('We also do lawn care and mosquito control too. '); // entry keeps growing
+    round.textCb('Great, let me double-check that. '); // entry keeps growing
     await flush();
 
-    convo.interrupt({ utteranceUntilInterrupt: 'We handle pest control. We also do lawn care' });
+    convo.interrupt({ utteranceUntilInterrupt: 'Sure, one moment please. Great, let me double-check that' });
     const entry = convo._transcript.find((e) => e.role === 'agent');
     expect(entry.interrupted).toBe(true); // found and truncated, not lost
     expect(entry.done).toBe(true);
@@ -727,15 +796,15 @@ describe('stream renderer — full round loop', () => {
     const endSession = jest.fn();
     const convo = new IsolatedConvo({ callSid: 'CA-p1c', from: '+19415551234', send, endSession });
     // P1-d means EVERY progressive send also calls _sessionSuperseded — the
-    // FIRST call here is that check for "Sure thing." itself (must resolve
-    // normally so it actually flushes); only the SECOND call, the held
-    // tail's own release check, is where the barge-in lands mid-await.
+    // FIRST call here is that check for the safe filler itself (must
+    // resolve normally so it actually flushes); only the SECOND call, the
+    // held tail's own release check, is where the barge-in lands mid-await.
     let calls = 0;
     convo._sessionSuperseded = jest.fn(() => new Promise((resolve) => {
       calls += 1;
       if (calls === 1) { resolve(false); return; }
       setImmediate(() => {
-        convo.interrupt({ utteranceUntilInterrupt: 'Sure thing.' });
+        convo.interrupt({ utteranceUntilInterrupt: 'One moment please.' });
         resolve(false);
       });
     }));
@@ -743,10 +812,10 @@ describe('stream renderer — full round loop', () => {
     const promptPromise = convo.handlePrompt('how much is a visit');
     await flush();
     const round = captured[0];
-    round.textCb('Sure thing. '); // safe filler — flushes
+    round.textCb('One moment please. '); // allowlisted safe filler — flushes
     await flush();
     round.textCb('That will be $149 for the visit.'); // HELD (amount) — becomes the tail
-    round.resolve({ content: [{ type: 'text', text: 'Sure thing. That will be $149 for the visit.' }], stop_reason: 'end_turn' });
+    round.resolve({ content: [{ type: 'text', text: 'One moment please. That will be $149 for the visit.' }], stop_reason: 'end_turn' });
     await promptPromise;
 
     const spoken = send.mock.calls.map(([t]) => t).join('');
@@ -756,7 +825,7 @@ describe('stream renderer — full round loop', () => {
     const lastAssistant = assistantMsgs[assistantMsgs.length - 1];
     // History holds ONLY what was actually sent — never the model's full
     // generated text (which included the $149 amount the caller never heard).
-    expect(lastAssistant.content).toEqual([{ type: 'text', text: 'Sure thing.' }]);
+    expect(lastAssistant.content).toEqual([{ type: 'text', text: 'One moment please.' }]);
     // A plain barge-in never ends the session — the call stays open.
     expect(endSession).not.toHaveBeenCalled();
   });
@@ -773,14 +842,16 @@ describe('stream renderer — full round loop', () => {
     const promptPromise = convo.handlePrompt('what areas do you cover');
     await flush();
     const round = captured[0];
-    round.textCb('We cover Manatee and Sarasota. ');
+    // Allowlisted safe filler — a plain declarative "We cover Manatee and
+    // Sarasota." no longer streams at all.
+    round.textCb('Sure, one moment please. ');
     await flush();
     round.reject(new Error('stream disconnected')); // NOT an abort — a genuine failure
     await promptPromise;
 
     const assistantMsgs = convo.messages.filter((m) => m.role === 'assistant');
     expect(assistantMsgs).toHaveLength(1);
-    expect(assistantMsgs[0].content).toEqual([{ type: 'text', text: 'We cover Manatee and Sarasota.' }]);
+    expect(assistantMsgs[0].content).toEqual([{ type: 'text', text: 'Sure, one moment please.' }]);
 
     // The next turn is still valid role alternation (assistant → user) and
     // the model round itself runs fine on top of it — driven to completion
@@ -793,5 +864,54 @@ describe('stream renderer — full round loop', () => {
     expect(round2).toBeTruthy();
     round2.resolve({ content: [{ type: 'text', text: 'Yes, we cover Charlotte too.' }], stop_reason: 'end_turn' });
     await secondPrompt;
+  });
+
+  // Structural fix #2: a throw inside a flushChain step (most plausibly
+  // _send) must never leave state.flushChain REJECTED — `.then(onFulfilled)`
+  // with no `onRejected` on a rejected promise just passes the rejection
+  // through, so every LATER queued sentence's own step would be skipped
+  // outright, this fire-and-forget call site would surface an unhandled
+  // rejection, and _finalizeStreamedRound's bare `await streamState.
+  // flushChain` would abort the whole turn instead of finalizing cleanly.
+  test('a send that throws mid-chain does not reject flushChain: no unhandled rejection, later sentences withheld, finalize completes', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    let sendCalls = 0;
+    const send = jest.fn(() => {
+      sendCalls += 1;
+      if (sendCalls === 1) throw new Error('send failed mid-chain');
+    });
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-p2', from: '+19415551234', send, endSession });
+
+    const unhandled = [];
+    const onUnhandledRejection = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+    try {
+      const promptPromise = convo.handlePrompt('sure and one moment');
+      await flush();
+      const round = captured[0];
+      round.textCb('Sure. '); // sentence 1 — its _send throws
+      round.textCb('One moment. '); // sentence 2 — must be withheld, never attempted
+      round.resolve({ content: [{ type: 'text', text: 'Sure. One moment.' }], stop_reason: 'end_turn' });
+      // Must not hang or reject — finalize completes normally despite the
+      // mid-chain throw.
+      await expect(promptPromise).resolves.toBeUndefined();
+      await flush(); // let any stray microtask (a would-be unhandled rejection) settle
+
+      expect(sendCalls).toBe(1); // only the failing call — sentence 2 never sent
+      expect(unhandled).toEqual([]); // no unhandled rejection surfaced anywhere
+      // The critical discriminator: a rejected flushChain propagates the
+      // throw all the way out of _finalizeStreamedRound/_runLoop (unwound
+      // before ever reaching the `result.withheld` branch), so the round
+      // loop's own withheld handling — including this endSession call —
+      // would NEVER run without the fix; the caller-facing `_chain.catch()`
+      // safety net masks the promise-resolves-vs-rejects difference, so
+      // this is the one assertion that actually distinguishes fixed from
+      // unfixed here.
+      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
   });
 });

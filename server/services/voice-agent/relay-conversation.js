@@ -47,15 +47,23 @@
  * 'block' (default) is byte-identical to the renderer this file has always
  * run: one whole utterance per Twilio text frame, sent only after
  * `finalMessage()` resolves. 'stream' sends sentence-complete chunks as
- * `stream.on('text', …)` deltas arrive, holding any sentence that carries an
- * amount, a date/time, a negation, or a commitment-or-success claim (an
- * explicit verb like "booked", or a phrase like "you're all set" that
- * asserts the same outcome) until the full reply is known — and, belt-and-
- * braces, stops flushing the instant any tool_use content block starts
- * streaming. Every progressive flush is also gated, once per round, on the
+ * `stream.on('text', …)` deltas arrive — but ONLY an ALLOWLISTED-SAFE
+ * sentence (an ack + one read-only clause, or a question — see
+ * relay-stream-renderer.js's `isStreamSafe`) flushes progressively; a
+ * commitment-phrase BLOCKLIST never converges (a new "I'll take care of
+ * that" phrasing always slips a finite hold-verb list), so an ordinary
+ * statement now holds by default too, same as an amount, a date/time, a
+ * negation, or a commitment-or-success claim (`needsHold`'s veto, unchanged
+ * — a hold-worthy sentence holds even if it would otherwise read as safe,
+ * e.g. inside a question). Once a sentence holds, everything after it in
+ * the round holds too. Belt-and-braces, the round loop also stops flushing
+ * the instant any tool_use content block starts streaming. EVERY
+ * progressive flush — not just the round's first — is also gated on the
  * same late-supersession recheck the block path runs immediately before
- * speaking. See relay-stream-renderer.js for the chunking/hold policy and
- * docs/conversationrelay-booking-plan.md for the narrative.
+ * speaking, serialized in order (there is no synchronous cross-socket
+ * takeover signal to shortcut this with). See relay-stream-renderer.js for
+ * the chunking/hold/safe policy and docs/conversationrelay-booking-plan.md
+ * for the narrative.
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
@@ -72,7 +80,7 @@ const { syncVoiceMessageForCall } = require('../conversations');
 const { activeTools, speakSlot } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
-const { splitSentences, needsHold: sentenceNeedsHold } = require('./relay-stream-renderer');
+const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -1463,13 +1471,18 @@ class RelayConversation {
 
   /**
    * One `stream.on('text', …)` delta. Buffers until a complete sentence is
-   * available, routes every sentence that does not need to be held through
-   * `_queueOrFlush` (see below), and — the moment one DOES need holding —
-   * stops flushing for the rest of the round: that sentence and everything
-   * streamed after it accumulate in `state.buffer` untouched, released only
-   * at finalize (see the round loop) once finalMessage() and the write-tool
-   * check have cleared it. See relay-stream-renderer.js for the
-   * chunking/hold policy itself.
+   * available, and flushes it through `_queueOrFlush` (see below) ONLY when
+   * it is BOTH not vetoed (`sentenceNeedsHold`) AND allowlisted safe
+   * (`sentenceIsStreamSafe`, relay-stream-renderer.js's SAFE_FILLER grammar
+   * or a plain question) — an allowlist, not a blocklist: a phrase
+   * blocklist for commitments never converges (a new "I'll take care of
+   * that" / "consider it handled" phrasing always slips a finite hold-verb
+   * list), so an ordinary declarative statement now holds by DEFAULT unless
+   * it's a recognized safe filler or a question. The moment one sentence
+   * fails either check, streaming stops for the rest of the round: that
+   * sentence and everything after it accumulate in `state.buffer`
+   * untouched, released only at finalize (see the round loop) once
+   * finalMessage() and the write-tool check have cleared it.
    */
   _onStreamTextDelta(state, delta, stat) {
     if (!state || state.closed || state.signal.aborted) return;
@@ -1478,7 +1491,7 @@ class RelayConversation {
     const { sentences, rest } = splitSentences(state.buffer);
     state.buffer = rest;
     for (const sentence of sentences) {
-      if (sentenceNeedsHold(sentence)) {
+      if (sentenceNeedsHold(sentence) || !sentenceIsStreamSafe(sentence)) {
         state.buffer = sentence + state.buffer; // put it back — hold it, and everything after, to finalize
         state.holding = true;
         return;
@@ -1501,6 +1514,22 @@ class RelayConversation {
    * of the round speaks nothing, not just the one sentence that caught it.
    * A round that has since closed or aborted while a check was in flight is
    * also a no-op: never flush a stale generation's late text.
+   *
+   * The trailing `.catch()` is load-bearing, not decoration: a throw inside
+   * the step (most plausibly `_flushStreamChunk` / `_send`) must never leave
+   * `state.flushChain` REJECTED. `.then(onFulfilled)` with no `onRejected`
+   * on a rejected promise just passes the rejection through — every LATER
+   * queued sentence's own step would then be skipped outright rather than
+   * running and correctly no-op'ing via the `withheld` guard, this call site
+   * never awaits its own return value (`_onStreamTextDelta` fires it and
+   * moves on), so an unhandled step would surface as a bare unhandled
+   * rejection, and `_finalizeStreamedRound`'s bare `await streamState.
+   * flushChain` would throw and abort the whole turn instead of finalizing
+   * cleanly. Catching here logs it, withholds the rest of the round (the
+   * same "something is wrong, stop speaking" response a superseded check
+   * gets), and — critically — returns normally, so `state.flushChain`
+   * itself stays a FULFILLED promise the whole way through and the next
+   * queued sentence's `.then()` still actually runs.
    */
   _queueOrFlush(state, sentence, stat, isLast) {
     state.flushChain = state.flushChain.then(async () => {
@@ -1513,6 +1542,9 @@ class RelayConversation {
         return;
       }
       this._flushStreamChunk(state, sentence, stat, isLast);
+    }).catch((err) => {
+      logger.error(`[voice-relay] stream renderer flush failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      state.withheld = true;
     });
     return state.flushChain;
   }
