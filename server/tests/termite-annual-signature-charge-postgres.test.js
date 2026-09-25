@@ -50,6 +50,7 @@ async function createScratchDb() {
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
     payer_id uuid,
+    payer_statement_id uuid,
     status text,
     payment_method text,
     subtotal numeric(10,2),
@@ -75,7 +76,7 @@ async function createScratchDb() {
     payment_method_id uuid,
     stripe_payment_method_id text NOT NULL,
     source text NOT NULL,
-    consent_text_version varchar(40) NOT NULL,
+    consent_text_version varchar(20) NOT NULL,
     consent_text_snapshot text NOT NULL,
     ip text,
     user_agent text,
@@ -222,7 +223,7 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
       stripe_payment_method_id: 'pm_saved',
       source: 'contract_signing',
       consent_text_snapshot: SIGNED_TEXT_WITH_AUTHORIZATION,
-      consent_text_version: 'termite_annual_agreement_v3',
+      consent_text_version: 'termite_annual_v3',
       evidence_contract_id: ids.contractId,
       ip: '203.0.113.9',
     });
@@ -417,6 +418,15 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     await db('invoices').where({ id: ids.invoiceId }).update({ payer_id: randomUUID() });
 
     expect(await run()).toMatchObject({ status: 'skipped', reason: 'payer_billed', deliverPayLink: true });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('statement-accrued payer invoice: settled as payer-routed — no charge, no pay link, no sweep retry', async () => {
+    const { run, chargeInvoiceWithSavedCard, db } = load();
+    await db('invoices').where({ id: ids.invoiceId }).update({ payer_id: randomUUID(), payer_statement_id: randomUUID() });
+
+    expect(await run()).toMatchObject({ status: 'payer_routed', reason: 'payer_statement', deliverPayLink: false });
+    expect(await run({ trigger: 'sweep' })).toMatchObject({ status: 'payer_routed', deliverPayLink: false });
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 

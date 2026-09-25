@@ -58,7 +58,11 @@ const logger = require('./logger');
 
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 const PAY_LINK_OUTCOMES = new Set(['declined', 'skipped']);
-const SETTLED_OUTCOMES = new Set(['paid', 'processing']);
+// payer_routed: the invoice accrued onto a third-party payer's NET-terms
+// statement at mint — it is collected through that statement, and
+// sendViaSMSAndEmail refuses to send it individually, so a pay link would
+// only ring a false delivery-failure bell every day (codex #4819 r7 P2).
+const SETTLED_OUTCOMES = new Set(['paid', 'processing', 'payer_routed']);
 
 function parseJsonish(raw) {
   if (!raw) return null;
@@ -185,6 +189,15 @@ async function signedAnnualContractFor(conn, estimateId, contractId) {
   return q.first('id', 'contract_text_snapshot', 'annual_plan_version', 'signed_at', 'signer_ip', 'signer_user_agent');
 }
 
+const CONSENT_TEXT_VERSION_MAX = 20;
+function signatureConsentVersion(annualPlanVersion) {
+  const label = `termite_annual_${annualPlanVersion || 'v3'}`;
+  if (label.length > CONSENT_TEXT_VERSION_MAX) {
+    throw new Error(`consent version label "${label}" exceeds varchar(${CONSENT_TEXT_VERSION_MAX})`);
+  }
+  return label;
+}
+
 // The agreement signature IS the authorization — record it in the consent
 // ledger once per (contract, method). Throws on failure (caller defers).
 async function recordSignatureConsent({ conn, customerId, method, contract }) {
@@ -205,7 +218,10 @@ async function recordSignatureConsent({ conn, customerId, method, contract }) {
     ip: contract.signer_ip || null,
     userAgent: contract.signer_user_agent || null,
     consentTextSnapshot: contract.contract_text_snapshot,
-    consentTextVersion: `termite_annual_agreement_${contract.annual_plan_version || 'v3'}`,
+    // payment_method_consents.consent_text_version is varchar(20) — the
+    // label must fit it (codex #4819 r7 P1: 'termite_annual_agreement_v3'
+    // is 27 chars and PG rejected every agreement-backed consent).
+    consentTextVersion: signatureConsentVersion(contract.annual_plan_version),
     evidenceContractId: contract.id,
   });
 }
@@ -240,8 +256,9 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   const RecurringCards = require('./recurring-card-on-file');
 
   const invoice = await conn('invoices').where({ id: ctx.invoiceId })
-    .first('id', 'customer_id', 'payer_id', 'status', 'subtotal', 'discount_amount', 'tax_amount', 'total');
+    .first('id', 'customer_id', 'payer_id', 'payer_statement_id', 'status', 'subtotal', 'discount_amount', 'tax_amount', 'total');
   if (!invoice) return { status: 'skipped', reason: 'invoice_missing' };
+  if (invoice.payer_statement_id) return { status: 'payer_routed', reason: 'payer_statement' };
   if (invoice.payer_id) return { status: 'skipped', reason: 'payer_billed' };
 
   let frozen;
@@ -395,5 +412,7 @@ async function chargeAnnualInvoiceAtSignature({
 
 module.exports = {
   chargeAnnualInvoiceAtSignature,
-  _private: { classifyChargeError, classifyVerifiedCharge, invoiceBaseDrift },
+  _private: {
+    classifyChargeError, classifyVerifiedCharge, invoiceBaseDrift, signatureConsentVersion,
+  },
 };
