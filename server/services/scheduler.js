@@ -824,7 +824,18 @@ function initScheduledJobs() {
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const { sweepUngeocodedCustomers } = require('./geocoder');
-      await runExclusive('geocoder-backstop', () => sweepUngeocodedCustomers());
+      await runExclusive('geocoder-backstop', async () => {
+        // Appointment pins are independent of the customer's primary address.
+        // Keep recovery in this job, ahead of the unrelated customer backlog.
+        // A service-query failure must not suppress the existing customer
+        // safety net; both sweeps still share this one exclusive lease.
+        try {
+          await require('./geocoder-service-locations').sweepUngeocodedServices({ dryRun: false });
+        } catch (err) {
+          logger.error(`[geocoder] service-location backstop failed (${err.code || 'service_sweep_error'}): ${err.message}`);
+        }
+        await sweepUngeocodedCustomers();
+      });
     } catch (err) {
       logger.error(`[geocoder] backstop sweep failed: ${err.message}`);
     }
