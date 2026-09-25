@@ -76,11 +76,19 @@ function normalizedTierKey(tier) {
   return typeof tier === 'string' ? tier.trim().toLowerCase() : '';
 }
 
+// OWN entries only: 'constructor' / '__proto__' resolve to inherited
+// properties of the plain tiers object and must never read as a tier
+// (codex P0 r8 — they reached priceTreeShrub and priced NaN).
+function ownTier(key) {
+  const tiers = TREE_SHRUB?.tiers;
+  return tiers && Object.prototype.hasOwnProperty.call(tiers, key) ? tiers[key] : null;
+}
+
 function isRetiredTreeShrubTier(tier) {
   const key = normalizedTierKey(tier);
   if (!key) return false;
   if (REMOVED_TREE_SHRUB_TIER_ALIASES.has(key)) return true;
-  return TREE_SHRUB?.tiers?.[key]?.hidden === true;
+  return ownTier(key)?.hidden === true;
 }
 
 // Positive form for a boundary that must accept ONLY a currently-sold tier
@@ -93,7 +101,8 @@ function isRetiredTreeShrubTier(tier) {
 // 'enhanced' today.
 function isSellableTreeShrubTier(tier) {
   const key = normalizedTierKey(tier);
-  return !!(key && TREE_SHRUB?.tiers?.[key] && !TREE_SHRUB.tiers[key].hidden);
+  const entry = key ? ownTier(key) : null;
+  return !!(entry && !entry.hidden);
 }
 
 module.exports = {

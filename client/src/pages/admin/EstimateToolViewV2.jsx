@@ -1698,6 +1698,11 @@ export default function EstimateToolViewV2({
     return {
           ...buildDefaultEstimateForm(),
           ...(d.inputs || {}),
+          // A saved retired T&S program (4x light) is seeded as 6x so the
+          // Program picker shows exactly what will be submitted.
+          ...(d.inputs && d.inputs.tsTier !== undefined
+            ? { tsTier: sellableTreeShrubTier(d.inputs.tsTier) }
+            : {}),
           // Live contact columns win over the stored form snapshot, and a
           // revise never re-links a lead — the row keeps its own linkage
           // server-side, so the form's leadId must stay blank here.

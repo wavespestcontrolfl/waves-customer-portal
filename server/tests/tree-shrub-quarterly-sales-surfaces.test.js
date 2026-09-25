@@ -33,3 +33,21 @@ describe('admin pricing calculators (/estimate, /quick-quote) input', () => {
     await expect(resolvePricingQuoteInput({ services: { treeShrub: { tier } } })).resolves.toBeTruthy();
   });
 });
+
+describe('knowledge index service connector (codex r8)', () => {
+  test('does not index retired-for-sale catalog rows', async () => {
+    const db = require('../models/db');
+    const notIn = [];
+    const builder = {
+      where() { return this; },
+      whereNotIn(column, values) { notIn.push([column, values]); return this; },
+      select() { return Promise.resolve([]); },
+    };
+    db.mockImplementation(() => builder);
+    const connectors = require('../services/knowledge-index/connectors');
+    const loadServices = connectors.CONNECTORS.find((c) => c.source === 'service')?.load;
+    expect(typeof loadServices).toBe('function');
+    await loadServices();
+    expect(notIn).toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
+  });
+});

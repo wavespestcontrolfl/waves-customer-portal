@@ -111,10 +111,12 @@ into `priceLawnCare`.
 
 Tree & Shrub uses a 43% direct-cost ratio target, not a 43% margin target. This usually produces roughly 50%+ service-level margin after admin before final discounts.
 
-| Tier | Freq | Material rate | Floor |
-|---|---|---|---|
-| Light | 4x | $0.075/sqft | $40 |
-| Standard | 6x | $0.110/sqft | $50 |
+| Tier (sold) | Freq | Floor (monthly, pre-discount) |
+|---|---|---|
+| Standard (default) | 6x | $35 |
+| Enhanced (upsell) | 9x | $48 |
+
+Material is a bottom-up model (`TREE_SHRUB.materialModel` in `constants.js`), not a flat $/sqft rate. Light (4x, $22 floor) remains in `constants.js` only to replay the grandfathered quarterly plan — it is not a sales tier.
 
 The 6-visit Standard program is the mandated default and the pre-selected/auto-recommended tier (matches the protocol `six_x` cadence). Light (4x/Quarterly, protocol `four_x`) is RETIRED for new sales (owner directive 2026-09-24: "remove quarterly tree and shrub care from the estimates and services") — `TREE_SHRUB.tiers.light.hidden` drops it from every offering surface, mirroring lawn's 6x/bi-monthly retirement; it stays priceable only for the one grandfathered existing quarterly customer's plan. `tier: "premium"` (12x) is likewise retired and normalizes to Standard with a warning. Enhanced (9x) is a live, customer-selectable upsell (un-retired 2026-07-23), never auto-recommended.
 

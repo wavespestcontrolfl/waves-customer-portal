@@ -79,3 +79,10 @@ describe('isSellableTreeShrubTier', () => {
     expect(isSellableTreeShrubTier({ toString: () => 'standard' })).toBe(false);
   });
 });
+
+describe('inherited object keys are never tiers (codex P0 r8)', () => {
+  test.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])('%s is neither sellable nor retired', (tier) => {
+    expect(isSellableTreeShrubTier(tier)).toBe(false);
+    expect(isRetiredTreeShrubTier(tier)).toBe(false);
+  });
+});
