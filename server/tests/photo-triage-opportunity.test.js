@@ -58,6 +58,7 @@ describe('large_scope / prior_treatment_failed regexes', () => {
     'this one patch keeps coming back every year',
     'the whole thing started last week',
     'every time it rains the spots get worse',
+    'I used all my spray on this one shrub',
     '',
   ])('%p is not large scope', (body) => expect(largeScope(body)).toBe(false));
 
@@ -197,6 +198,24 @@ describe('gaugeOpportunity', () => {
     expect(mockBuildOffer).toHaveBeenCalledWith('existing-lawn-3', mockDb, 'lawn_care');
     expect(result.mode).toBe('advise');
     expect(result.reasons).toContain('no_offer');
+    expect(result.quote).toBeNull();
+  });
+
+  test('family already on the plan (offer core says owned) → advise with already_owned, never a pitch', async () => {
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'lawn_care', label: 'x', mode: 'owned', relationship: 'owned', option: null });
+    const lawnRow = (findings, score) => ({
+      report_contract: JSON.stringify({ diagnosis: { findings } }), overall_score: score, created_at: new Date(),
+    });
+    const result = await gaugeOpportunity({
+      type: 'lawn',
+      analysis: lawnRow([{ name: 'Chinch bug pressure', confidence: 'moderate' }], 55),
+      customer: { id: 'existing-lawn-4', pipeline_stage: 'active_customer' },
+      body: 'weeds are spreading in the yard',
+      images: [],
+    });
+    expect(result.mode).toBe('advise');
+    expect(result.reasons).toContain('already_owned');
+    expect(result.reasons).not.toContain('no_offer');
     expect(result.quote).toBeNull();
   });
 

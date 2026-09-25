@@ -181,9 +181,13 @@ describe('buildOfferForFamily', () => {
     }
   });
 
-  test('a family the customer already owns is never re-priced → null', async () => {
+  test('a family the customer already owns is never re-priced → mode owned, no option, no price', async () => {
     const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
-    expect(await buildOfferForFamily('cust-1', db, 'lawn_care', { propertyLookup: missLookup })).toBeNull();
+    const offer = await buildOfferForFamily('cust-1', db, 'lawn_care', { propertyLookup: missLookup });
+    expect(offer).toMatchObject({ serviceKey: 'lawn_care', mode: 'owned', option: null });
+    expect(typeof offer.fingerprint).toBe('string');
+    // The ladder entry points never see the owned shape.
+    expect((await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).mode).not.toBe('owned');
   });
 
   test('owns NOTHING recurring → null (no engine quote for a customer with no plan)', async () => {

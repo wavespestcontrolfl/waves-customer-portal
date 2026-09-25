@@ -208,7 +208,10 @@ async function releaseVisionSlot(messageId) {
 // observational and lets the reply/quote ask do the rest (codex review
 // 2026-09-25).
 const TREE_SHRUB_ADVICE = {
-  water_heat_mechanical_stress: 'It looks like stress from water, heat, or pruning rather than a pest or disease.',
+  // No "rather than a pest or disease": worst_signal is only the LOWEST
+  // category — pest/disease can be flagged in the same assessment (codex
+  // #4810 r2).
+  water_heat_mechanical_stress: 'It looks like stress from water, heat, or pruning.',
 };
 
 // "it's {label}." — the SAME resolved label the opportunity gauge itself
@@ -268,7 +271,13 @@ function composeBody({ label, advice, opportunity }) {
 
   // advise
   const harmless = opportunity.reasons.includes('harmless');
-  return joinSentences([lead, advice, harmless ? 'No treatment is needed.' : "Reply if you'd like a quote."]);
+  // Already on the customer's plan (codex #4810 r2 P1): never pitch the
+  // service they have — no quote CTA, no promise of a visit either.
+  const owned = opportunity.reasons.includes('already_owned');
+  const close = harmless
+    ? 'No treatment is needed.'
+    : owned ? 'Your current program covers this. Reply if you have questions.' : "Reply if you'd like a quote.";
+  return joinSentences([lead, advice, close]);
 }
 
 function draftBodyText({ type, analysis, opportunity }) {

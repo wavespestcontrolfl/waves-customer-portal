@@ -79,6 +79,9 @@ describe('regex fast path', () => {
     'What is this charge on my invoice?',
     'Brown spots in the lawn, can you come out tomorrow',
     'are these termites',
+    // Lawn and tree/shrub words tied with no pest word: the subject is
+    // ambiguous, so the structured classifier decides (codex #4810 r2).
+    'what is wrong with the grass under my tree?',
   ])('not fast-pathed: %p goes to the model', async (body) => {
     mockDispatch.mockResolvedValue({ ok: true, json: { subject: 'none' } });
     await expect(classifyPhotoDiagnosisIntent(body)).resolves.toEqual({ intent: null, assessmentType: null, method: 'ai' });

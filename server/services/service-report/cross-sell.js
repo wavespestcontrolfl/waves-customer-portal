@@ -1074,8 +1074,14 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
       .filter((key) => key && key !== 'unattributed');
 
     // A requested family the customer already owns is never re-priced —
-    // same never-re-price rule the ladder enforces by construction.
-    if (requestedTargetKey && offerVocabulary(ownedKeys).has(requestedTargetKey)) return null;
+    // same never-re-price rule the ladder enforces by construction. Says so
+    // explicitly (mode 'owned', no option) rather than a bare null, so the
+    // caller can tell "already on the plan" from "cannot offer" and drop
+    // its quote CTA (codex #4810 r2 P1). Never reached by the ladder path.
+    if (requestedTargetKey && offerVocabulary(ownedKeys).has(requestedTargetKey)) {
+      const payload = { serviceKey: requestedTargetKey, label: OFFER_LABELS[requestedTargetKey], mode: 'owned', relationship: 'owned', option: null };
+      return { payload: { ...payload, fingerprint: offerFingerprint(payload) }, option: null, result: null, customer, ownedKeys, propertySeed: null, primaryStreet };
+    }
     const targetKey = requestedTargetKey || pickOfferTarget(ownedKeys);
     // Owns everything → nothing to offer (owner matrix: the referral card
     // fills the slot, which needs no offer payload).
@@ -1184,9 +1190,10 @@ async function buildPortalOffer(customerId, database, opts = {}) {
 // The photo-triage lane's entry point (owner ruling 2026-09-25): the
 // customer texted a photo of a specific thing, so the family is known and
 // the ladder does not pick. Same composePortalOffer core, same suppression
-// and demotion rules, same per-application-only payload; a family the
-// customer owns, an unprovable premises, or an ownership failure all
-// return null — the caller advises instead of quoting.
+// and demotion rules, same per-application-only payload. A family the
+// customer already owns answers mode 'owned' (never re-priced); an
+// unprovable premises or an ownership failure returns null — the caller
+// advises instead of quoting either way.
 async function buildOfferForFamily(customerId, database, targetKey, opts = {}) {
   try {
     const basis = await composePortalOffer(customerId, database, { ...opts, targetKey });

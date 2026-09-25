@@ -494,6 +494,7 @@ describe('draft text builder', () => {
   // opportunity fixtures: composeBody only reads .mode / .reasons / .quote.
   const ADVISE_ACTIONABLE = { mode: 'advise', reasons: ['actionable'], quote: null };
   const ADVISE_HARMLESS = { mode: 'advise', reasons: ['harmless'], quote: null };
+  const ADVISE_OWNED = { mode: 'advise', reasons: ['actionable', 'already_owned'], quote: null };
   const ONSITE = { mode: 'onsite', reasons: ['lead', 'actionable', 'large_scope'], quote: null };
   const QUOTE = (overrides = {}) => ({
     mode: 'quote',
@@ -516,11 +517,17 @@ describe('draft text builder', () => {
     expect(draft('Dana', 'a healthy lawn', ADVISE_HARMLESS)).not.toMatch(/quote/i);
   });
 
+  test('advise for a service already on the plan: no quote pitch, no visit promise (codex #4810 r2 P1)', () => {
+    const text = draft('Dana', 'chinch bug activity', ADVISE_OWNED);
+    expect(text).toBe("Thanks for the photo, Dana. From what we can see, it's chinch bug activity. Your current program covers this. Reply if you have questions.");
+    expect(text).not.toMatch(/quote|\$\d|visit|schedul/i);
+  });
+
   test('quote: names the service and a per-application price, never "per visit" or a combined monthly/annual total (AGENTS.md P1)', () => {
-    const text = draft('Morgan', 'water or heat stress', QUOTE(), 'It looks like stress from water, heat, or pruning rather than a pest or disease.');
+    const text = draft('Morgan', 'water or heat stress', QUOTE(), 'It looks like stress from water, heat, or pruning.');
     expect(text).toBe(
       "Thanks for the photo, Morgan. From what we can see, it's water or heat stress. "
-      + 'It looks like stress from water, heat, or pruning rather than a pest or disease. '
+      + 'It looks like stress from water, heat, or pruning. '
       + 'Our tree & shrub program is about $83 per application. Want me to add it?',
     );
     expect(text).not.toMatch(/\/mo\b|\/yr\b|per month|per year|per visit|visits a year/i);

@@ -90,7 +90,9 @@ function teaserOutcome(type, analysis) {
 // "this one patch keeps coming back every year" is one spot (codex #4810
 // r1). The quantifier has to land on a property subject.
 const SCOPE_SUBJECT = '(?:yard|lawn|property|house|home|landscape|landscaping|bed|beds|hedge|hedges|hedgerow|shrub|shrubs|bush|bushes|tree|trees|palm|palms|plant|plants|border|borders|side|sides|perimeter|fence ?line)';
-const LARGE_SCOPE_RE = new RegExp(`\\b(both sides|all (?:of )?my|around the (?:house|property)|front and back|(?:entire|whole|every) (?:\\w+ )?${SCOPE_SUBJECT})\\b`, 'i');
+// "all my" binds to a property subject too — "I used all my spray on this
+// one shrub" is one shrub (codex #4810 r2).
+const LARGE_SCOPE_RE = new RegExp(`\\b(both sides|around the (?:house|property)|front and back|(?:all (?:of )?my|entire|whole|every) (?:\\w+ )?${SCOPE_SUBJECT})\\b`, 'i');
 
 // Failure/recurrence language: the customer (or their lawn company) already
 // attempted treatment AND it did not hold. "tried"/"treated" ALONE are not
@@ -190,10 +192,12 @@ const SERVICE_KEY = { tree_shrub: 'tree_shrub', lawn: 'lawn_care' };
 //   'no_customer_record'  — a lead with no customer row has nothing to
 //                           price against (and leads never get engine
 //                           quotes anyway)
-//   'no_offer'            — the offer core declined: family already owned,
-//                           ownership unknown (fail closed), no recurring
-//                           plan, unprovable premises, commercial, or a
-//                           live plan rate on the family
+//   'already_owned'       — the family is on the customer's plan (never
+//                           re-priced; the draft carries no quote CTA)
+//   'no_offer'            — the offer core declined: ownership unknown
+//                           (fail closed), no recurring plan, unprovable
+//                           premises, commercial, or a live plan rate on
+//                           the family
 //   'quote_needs_review'  — offer composed but demoted to the unpriced CTA
 //                           (review-worthy facts, verified correction on
 //                           file, baseline mismatch, ambiguous tree count)
@@ -205,6 +209,10 @@ async function priceForCustomer(type, customer) {
   if (!customer?.id) return { reason: 'no_customer_record' };
   const offer = await buildOfferForFamily(customer.id, db, serviceKey);
   if (!offer || offer.serviceKey !== serviceKey) return { reason: 'no_offer' };
+  // The family is already on the customer's plan: the draft must not pitch
+  // it (codex #4810 r2 P1) — photo-text-triage.js drops the quote CTA on
+  // this reason.
+  if (offer.mode === 'owned') return { reason: 'already_owned' };
   if (offer.mode !== 'priced' || !offer.option) return { reason: 'quote_needs_review' };
   const perApplication = Math.round(Number(offer.option.perVisit) || 0);
   if (!(perApplication > 0)) return { reason: 'quote_needs_review' };

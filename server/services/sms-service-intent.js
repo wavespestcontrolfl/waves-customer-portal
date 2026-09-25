@@ -210,7 +210,13 @@ function photoAssessmentType(lower) {
   const pestScore = countTokens(lower, PHOTO_PEST_WORDS);
   const treeShrubScore = countTokens(lower, PHOTO_TREE_SHRUB_WORDS);
   if (lawnScore > pestScore + treeShrubScore) return 'lawn';
-  return treeShrubScore > 0 && pestScore === 0 ? TREE_SHRUB_TRIAGE_TYPE : 'pest';
+  if (treeShrubScore > 0 && pestScore === 0) {
+    // Lawn and tree/shrub words with no pest word and no clear winner
+    // ("the grass under my tree") is the structured classifier's call, not
+    // a default to the tree pipeline (codex #4810 r2).
+    return lawnScore > 0 && lawnScore >= treeShrubScore ? null : TREE_SHRUB_TRIAGE_TYPE;
+  }
+  return 'pest';
 }
 
 function regexClassifyPhoto(body) {
@@ -222,7 +228,9 @@ function regexClassifyPhoto(body) {
   ]);
   const diagnostic = PHOTO_QUESTION_RE.test(text) || (subject && PHOTO_PROBLEM_RE.test(text));
   if (!diagnostic || PHOTO_NON_DIAGNOSTIC_RE.test(text)) return null;
-  return { intent: 'photo_diagnosis', assessmentType: photoAssessmentType(lower), method: 'regex' };
+  const assessmentType = photoAssessmentType(lower);
+  if (!assessmentType) return null;
+  return { intent: 'photo_diagnosis', assessmentType, method: 'regex' };
 }
 
 const PHOTO_INTENT_SCHEMA = {
