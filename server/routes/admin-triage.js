@@ -554,6 +554,205 @@ router.put('/:id/dismiss', async (req, res) => {
   }
 });
 
+// POST /api/admin/triage/:id/confirm-email   { email, expected_updated_at }
+// Codex round-5 P1s on the V1/V2 email-disagreement hold (PR #4802): the
+// plain Resolve/Accept paths refuse an unconfirmed disagreement card
+// (emailDisagreementConfirmed), but until now there was no in-band way to
+// actually SATISFY that guard — a customer-less voicemail lead has no
+// existing-lead email editor in the portal, and even a known customer whose
+// on-file address already matches the confirmed spelling could never
+// produce a corrected_at stamp (propagateCustomerEmailChange no-ops when
+// oldEmail === newEmail). This is the one action that closes both gaps: it
+// stamps the hold directly (so confirmation never depends on a diff), then
+// separately writes the customer/lead record through the normal channels
+// when there IS a real change to make, and resolves the card in the same
+// request. `email` must be one of the card's candidates or a syntactically
+// valid typed address (recorded as `confirmed_source: 'operator_typed'`
+// either way it differs from a listed candidate) — never blindly picked by
+// the server. emailDisagreementConfirmed itself is untouched: it still
+// guards the plain Resolve/Accept paths exactly as before.
+router.post('/:id/confirm-email', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
+    const typedEmail = cleanValidEmailOrNull(req.body?.email);
+    if (!typedEmail) {
+      return res.status(400).json({ error: 'A valid email address is required.' });
+    }
+    const expectedUpdatedAt = req.body?.expected_updated_at || null;
+
+    const item = await db('triage_items').where({ id }).first();
+    if (!item) return res.status(404).json({ error: 'Triage item not found' });
+    if (!OPEN_STATES.includes(item.status)) {
+      return res.status(409).json({ error: `Item already ${item.status}` });
+    }
+    const { EMAIL_REVIEW_REASON_CODES, resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
+    if (!EMAIL_REVIEW_REASON_CODES.includes(item.reason_code)) {
+      return res.status(400).json({ error: 'This card is not an email read-back card.' });
+    }
+
+    const holdsTable = await db.schema.hasTable('first_touch_holds');
+    let outcome = null;
+    let confirmedSource = null;
+    await db.transaction(async (trx) => {
+      // Same lock order as every other card writer (owner ruling
+      // 2026-08-02): advisory call lock → first_touch_holds rows →
+      // triage_items.
+      await lockTriageCall(trx, item.call_log_id);
+      if (holdsTable) {
+        await trx('first_touch_holds').where({ call_log_id: item.call_log_id }).forUpdate().select('id');
+      }
+      // Version-bound like every other single-card action — the client
+      // already sends expected_updated_at.
+      const live = await trx('triage_items').where({ id }).first('updated_at', 'payload');
+      if (!live || !expectedUpdatedAt
+        || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
+        outcome = 'stale_version';
+        return;
+      }
+      const livePayload = typeof live.payload === 'string'
+        ? (() => { try { return JSON.parse(live.payload); } catch { return null; } })()
+        : live.payload;
+      // Applies only to a card with an actual unresolved disagreement — a
+      // plain single-candidate email card already has a working Resolve
+      // path and needs none of this.
+      if (!livePayload?.email_disagreement) {
+        outcome = 'not_applicable';
+        return;
+      }
+      const candidates = Array.isArray(livePayload.email_candidates) ? livePayload.email_candidates : [];
+      const isListedCandidate = candidates.some(
+        (c) => String(c?.value || '').trim().toLowerCase() === typedEmail,
+      );
+      confirmedSource = isListedCandidate ? 'candidate' : 'operator_typed';
+
+      // (a) The hold, unconditionally: this is what emailDisagreementConfirmed
+      // actually reads, so confirmation never depends on there ALSO being a
+      // customer/lead diff to write. Pending/releasing only — a row that
+      // already sent under an earlier cycle's address is a historical fact
+      // this must not rewrite.
+      if (holdsTable) {
+        await trx('first_touch_holds')
+          .where({ call_log_id: item.call_log_id })
+          .whereIn('status', ['pending', 'releasing'])
+          .update({ held_email: typedEmail, corrected_at: new Date(), updated_at: new Date() });
+      }
+
+      // (b)/(c) The customer or lead record, through the normal channels.
+      const call = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'twilio_call_sid', 'metadata');
+      if (call?.customer_id) {
+        const customer = await trx('customers').where({ id: call.customer_id }).first('id', 'email');
+        if (customer && String(customer.email || '').trim().toLowerCase() !== typedEmail) {
+          await trx('customers').where({ id: customer.id }).update({ email: typedEmail, updated_at: new Date() });
+          await require('../services/customer-email-fanout').propagateCustomerEmailChange(
+            { before: customer, after: { ...customer, email: typedEmail }, source: 'triage_confirm' }, trx,
+          );
+        }
+        // Same-value case: nothing to propagate — the hold write above is
+        // what confirmation reads either way.
+      } else {
+        // Customer-less voicemail lead: the processor's own authoritative
+        // stamp (call_log.metadata.lead_id) first, else a SID match that
+        // must be unambiguous — leads.twilio_call_sid is not unique.
+        const metadata = typeof call?.metadata === 'string'
+          ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+          : (call?.metadata || {});
+        const stampedLeadId = metadata?.lead_id ? String(metadata.lead_id) : null;
+        let leadId = null;
+        if (stampedLeadId) {
+          const lead = await trx('leads').where({ id: stampedLeadId }).whereNull('deleted_at').first('id');
+          if (lead) leadId = lead.id;
+        } else if (call?.twilio_call_sid) {
+          const sidLeads = await trx('leads')
+            .where({ twilio_call_sid: call.twilio_call_sid })
+            .whereNull('deleted_at')
+            .limit(2)
+            .select('id');
+          if (sidLeads.length === 1) leadId = sidLeads[0].id;
+        }
+        if (leadId) {
+          await trx('leads').where({ id: leadId }).update({
+            email: typedEmail, email_confirmed_at: new Date(), updated_at: new Date(),
+          });
+        }
+        // No resolvable lead: the hold write above (when one exists) is
+        // still the confirmation signal; nothing else to stamp.
+      }
+
+      // (d) Stamp the evidence and resolve the card in the same request.
+      const confirmedPayload = {
+        ...livePayload,
+        confirmed_email: typedEmail,
+        confirmed_by: req.technicianId || null,
+        confirmed_at: new Date().toISOString(),
+        confirmed_source: confirmedSource,
+      };
+      await trx('triage_items').where({ id }).update({ payload: JSON.stringify(confirmedPayload), updated_at: new Date() });
+      // Unconditional (not gated on affected-row count): the customer-email
+      // fanout above resolves EVERY open email review card for that
+      // customer as a side effect of the write it just made, which can
+      // already include this exact card — that is success, not a conflict,
+      // so this closes it if it is still open and is a no-op otherwise.
+      await trx('triage_items')
+        .where({ id })
+        .whereIn('status', OPEN_STATES)
+        .update({
+          status: 'resolved',
+          resolution_source: 'human',
+          resolution_note: `Email confirmed via triage read-back: ${typedEmail}`,
+          assigned_to: req.technicianId,
+          resolved_at: new Date(),
+          updated_at: new Date(),
+        });
+      // Same call_log.review_status sync as every other card writer.
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id })
+        .whereIn('status', OPEN_STATES)
+        .count({ n: '*' })
+        .first();
+      await trx('call_log')
+        .where({ id: item.call_log_id })
+        .update({ review_status: Number(stillOpen?.n || 0) > 0 ? 'open' : 'resolved', updated_at: new Date() });
+      outcome = 'ok';
+    });
+
+    if (outcome === 'stale_version') {
+      return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
+    }
+    if (outcome === 'not_applicable') {
+      return res.status(400).json({ error: 'This card has no unresolved email disagreement to confirm.' });
+    }
+
+    // Best-effort release, same discipline as transitionCore: only when no
+    // OTHER email card is still open for the call (a sibling's own address
+    // is still under separate review) and the call has a customer to
+    // release for (a customer-less lead has no first-touch hold to
+    // release).
+    try {
+      const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+      if (call?.customer_id) {
+        const siblingLive = await db('triage_items')
+          .where({ call_log_id: item.call_log_id })
+          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+          .whereIn('status', OPEN_STATES)
+          .first('id');
+        if (!siblingLive) {
+          await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_confirm_email' });
+        }
+      }
+    } catch (resumeErr) {
+      logger.warn(`[admin-triage] first-touch resume failed after email confirm for item ${id}: ${resumeErr.message}`);
+    }
+
+    return res.json({ ok: true, id, status: 'resolved', confirmed_email: typedEmail, confirmed_source: confirmedSource });
+  } catch (err) {
+    // Code/name only: a knex message embeds the bound payload, which can
+    // carry the confirmed address.
+    logger.error(`[admin-triage] confirm-email failed: ${err.code || err.name || 'error'}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to confirm email' });
+  }
+});
+
 // POST /api/admin/triage/:id/apply-property-roles   {}
 // One-click apply for a property_role_confirm card: executes the parked
 // property-role proposals (occupancy changes, a primary-residence flip with

@@ -133,6 +133,89 @@ describe('verdict version binding', () => {
   });
 });
 
+describe('email-disagreement confirm form', () => {
+  const disagreementCard = { ...ordinary, id: 'email-1', first_name: 'Email', last_name: 'Disagree',
+    feedback_verdict: null, reason_code: 'email_unverified',
+    payload: JSON.stringify({
+      flag: 'email_unverified',
+      email_candidates: [{ value: 'janedoee@example.com' }, { value: 'janedoe@example.com' }],
+      email_disagreement: { v1: 'janedoee@example.com', v2: 'janedoe@example.com' },
+    }) };
+
+  it('renders candidates as radio choices and no Accept/Deny controls are needed to confirm', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [disagreementCard], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const card = (await screen.findByText('Email Disagree')).closest('.py-4');
+    expect(within(card).getByText('janedoee@example.com')).toBeInTheDocument();
+    expect(within(card).getByText('janedoe@example.com')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: /confirm email/i })).toBeDisabled();
+  });
+
+  it('selecting a candidate and confirming posts confirm-email and reloads on success', async () => {
+    let listLoads = 0;
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url.startsWith('/admin/triage?')) {
+        listLoads += 1;
+        return { items: listLoads === 1 ? [disagreementCard] : [], counts: { open: listLoads === 1 ? 1 : 0, resolved: listLoads === 1 ? 0 : 1, dismissed: 0 } };
+      }
+      if (url === '/admin/triage/email-1/confirm-email') {
+        expect(JSON.parse(opts.body)).toEqual({ email: 'janedoe@example.com', expected_updated_at: disagreementCard.updated_at });
+        return { ok: true, id: 'email-1', status: 'resolved', confirmed_email: 'janedoe@example.com' };
+      }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 />);
+    const card = (await screen.findByText('Email Disagree')).closest('.py-4');
+    fireEvent.click(within(card).getByLabelText('janedoe@example.com'));
+    fireEvent.click(within(card).getByRole('button', { name: /confirm email/i }));
+    await waitFor(() => expect(listLoads).toBe(2));
+    expect(screen.queryByText('Email Disagree')).not.toBeInTheDocument();
+  });
+
+  it('typing an "other" address enables Confirm and sends the typed value', async () => {
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url.startsWith('/admin/triage?')) {
+        return { items: [disagreementCard], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      }
+      if (url === '/admin/triage/email-1/confirm-email') {
+        expect(JSON.parse(opts.body).email).toBe('correct@example.com');
+        return { ok: true };
+      }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 />);
+    const card = (await screen.findByText('Email Disagree')).closest('.py-4');
+    const confirmButton = within(card).getByRole('button', { name: /confirm email/i });
+    expect(confirmButton).toBeDisabled();
+    fireEvent.change(within(card).getByPlaceholderText(/type the correct address/i), { target: { value: 'correct@example.com' } });
+    expect(confirmButton).not.toBeDisabled();
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/email-1/confirm-email', expect.anything()));
+  });
+
+  it('reloads and shows an error on a stale version', async () => {
+    let listLoads = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) {
+        listLoads += 1;
+        return { items: [disagreementCard], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      }
+      if (url === '/admin/triage/email-1/confirm-email') {
+        throw Object.assign(new Error('Card changed'), { status: 409, code: 'STALE_CARD_VERSION' });
+      }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 />);
+    const card = (await screen.findByText('Email Disagree')).closest('.py-4');
+    fireEvent.click(within(card).getByLabelText('janedoe@example.com'));
+    fireEvent.click(within(card).getByRole('button', { name: /confirm email/i }));
+    await waitFor(() => expect(listLoads).toBe(2));
+    expect(screen.getByText(/review the refreshed evidence before confirming/i)).toBeInTheDocument();
+  });
+});
+
 describe('follow-up card Resolve path', () => {
   it('"Follow-up booked" sends the card version and reloads on STALE_CARD_VERSION', async () => {
     const stale = { ...ordinary, id: 'fu', first_name: 'Follow', last_name: 'Up', feedback_verdict: null,
