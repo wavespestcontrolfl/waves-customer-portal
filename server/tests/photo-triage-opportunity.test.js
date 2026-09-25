@@ -460,6 +460,17 @@ describe('recheckDraftOffer', () => {
     expect(mockBuildOffer).not.toHaveBeenCalled();
   });
 
+  test.each([
+    'Would you like pricing for this program?',
+    'We can prepare an estimate for you.',
+    'It would cost about $80 to add.',
+    'Want me to add it to your plan?',
+  ])('alternate pitch wording %p in the outgoing text forces the check (codex #4810 r8)', async (text) => {
+    mockBuildOffer.mockResolvedValueOnce({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
+    const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: text })).toEqual({ blocked: 'owned', family: 'tree_shrub' });
+  });
+
   test('an advise draft that still pitches a quote is fine when the offer core simply has nothing (manual quote conversation)', async () => {
     mockBuildOffer.mockResolvedValueOnce(null);
     const advise = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'no_offer'], quote: null });

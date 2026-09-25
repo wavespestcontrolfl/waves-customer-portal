@@ -157,10 +157,12 @@ async function classifyServiceIntent(body) {
 // photo_diagnosis runs the pest identifier.
 // Lawn-soil pests (grubs, sod webworms, armyworms, chinch) are LAWN
 // diagnostics, not pest identification — they count for the lawn
-// assessment (pre-push audit r7: "grubs in my lawn" must stay lawn).
+// assessment (pre-push audit r7: "grubs in my lawn" must stay lawn). A bare
+// "worm" is NOT lawn-specific ("worm in my kitchen") — it is no subject
+// word at all, so the caption takes the default pest path (codex #4810 r8).
 const PHOTO_LAWN_WORDS = [
   'lawn', 'grass', 'yard', 'turf', 'weed', 'weeds', 'sod',
-  'grub', 'grubs', 'worm', 'worms', 'webworm', 'webworms', 'armyworm', 'armyworms', 'chinch',
+  'grub', 'grubs', 'webworm', 'webworms', 'armyworm', 'armyworms', 'chinch',
 ];
 // Every pest class the classifier prompt names (bug, insect, spider,
 // rodent, termite) plus the common sightings customers actually type — a

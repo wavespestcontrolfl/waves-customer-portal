@@ -60,11 +60,15 @@ describe('regex fast path', () => {
   // never the pest identifier (pre-push audit r7).
   test.each([
     'grubs are eating my lawn',
-    'what are these worms in the grass',
+    'what are these webworms in the grass',
     'chinch bug damage in the yard?',
   ])('lawn-pest caption %p runs the lawn assessment', async (body) => {
     await expect(classifyPhotoDiagnosisIntent(body)).resolves.toMatchObject({ assessmentType: 'lawn', method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a bare "worm" is not a lawn word: "what is this worm in my kitchen?" runs the pest identifier', async () => {
+    await expect(classifyPhotoDiagnosisIntent('what is this worm in my kitchen?')).resolves.toMatchObject({ assessmentType: 'pest', method: 'regex' });
   });
 
   // codex #4810 r1: every pest class the classifier prompt names (spider,

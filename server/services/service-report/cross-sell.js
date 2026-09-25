@@ -1025,7 +1025,12 @@ async function buildReportCrossSell(service, database, {
 // → tree & shrub) gets the same offer discipline as the portal card, never
 // a parallel pricer. Ownership of the target itself → null: an owned
 // family is never re-priced, ladder or not.
-async function composePortalOffer(customerId, database, { propertyLookup = cacheOnlyPropertyLookup, targetKey: requestedTargetKey = null } = {}) {
+// throwOnError (dispatch-time rechecks, codex #4810 r8): the best-effort
+// inner catches below (estimate seed, verified-override probe) must NOT
+// swallow a transient failure into a demoted answer when the caller is
+// deciding whether to strip a pending draft's quote — they rethrow so the
+// route leaves the draft pending with a 503.
+async function composePortalOffer(customerId, database, { propertyLookup = cacheOnlyPropertyLookup, targetKey: requestedTargetKey = null, throwOnError = false } = {}) {
   {
     if (!customerId || !database) return null;
     if (requestedTargetKey && !OFFER_PROMPTS[requestedTargetKey]) return null;
@@ -1108,6 +1113,7 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
     try {
       propertySeed = await loadEstimateSeed(database, customerId, primaryStreet);
     } catch (err) {
+      if (throwOnError) throw err;
       logger.warn(`[portal-offer] estimate seed skipped (${err.message})`);
     }
 
@@ -1135,6 +1141,7 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
         const { hasVerifiedOverrides } = require('../property-lookup/lookup-cache');
         correctionsUnapplied = await hasVerifiedOverrides(addressForCustomer(customer));
       } catch (err) {
+        if (throwOnError) throw err;
         correctionsUnapplied = true;
         logger.warn(`[portal-offer] verified-override probe failed, demoting to CTA (${err.message})`);
       }
@@ -1229,7 +1236,7 @@ function unavailableBasis(targetKey, customer = null, ownedKeys = [], primaryStr
 // fail-closed 'unavailable' answer.
 async function buildOfferForFamily(customerId, database, targetKey, { throwOnError = false, ...opts } = {}) {
   try {
-    const basis = await composePortalOffer(customerId, database, { ...opts, targetKey });
+    const basis = await composePortalOffer(customerId, database, { ...opts, targetKey, throwOnError });
     return basis ? basis.payload : null;
   } catch (err) {
     if (throwOnError) throw err;

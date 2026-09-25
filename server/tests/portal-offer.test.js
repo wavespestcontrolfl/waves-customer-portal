@@ -223,6 +223,15 @@ describe('buildOfferForFamily', () => {
     await expect(buildOfferForFamily('cust-1', broken, 'tree_shrub', { propertyLookup: missLookup, throwOnError: true })).rejects.toThrow();
   });
 
+  test('throwOnError also surfaces the best-effort inner failures (verified-override probe) instead of demoting (codex #4810 r8)', async () => {
+    hasVerifiedOverrides.mockImplementation(async () => { throw new Error('probe down'); });
+    const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+    // Creation-time: demoted to the CTA, as the card does.
+    expect((await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup })).mode).toBe('quote_cta');
+    // Dispatch-time: the error reaches the caller.
+    await expect(buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup, throwOnError: true })).rejects.toThrow('probe down');
+  });
+
   test('a verified correction on file demotes to the quote CTA, same as the card', async () => {
     hasVerifiedOverrides.mockImplementation(async () => true);
     const db = dbFor({ serviceTypes: ['Lawn Care Program'] });

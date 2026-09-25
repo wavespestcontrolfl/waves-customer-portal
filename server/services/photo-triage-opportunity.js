@@ -357,11 +357,15 @@ const NO_PITCH_REASONS = new Set(['harmless', 'already_owned', 'offer_unavailabl
 // outgoingText (codex #4810 r7): the body that will actually be sent — an
 // owner revision can ADD a quote ask to a draft whose stored verdict says
 // no-pitch, so any quote language in the outgoing text forces the check.
+// Any price/estimate wording counts as a pitch, not just "quote" — an
+// owner revision saying "want pricing?" or "we can prepare an estimate"
+// must be rechecked too (codex #4810 r8).
+const PITCH_LANGUAGE_RE = /\b(?:quot(?:e|es|ed|ing)|pric(?:e|es|ed|ing)|estimate[sd]?|cost[s]?|rate[s]?|add it|sign(?: you)? up|\$\s?\d)\b/i;
 async function recheckDraftOffer({ customerId, flags, outgoingText = null }) {
   if (!flags || flags.origin !== 'photo_triage') return { ok: true };
   const mode = flags.opportunity_mode;
   const reasons = Array.isArray(flags.opportunity_reasons) ? flags.opportunity_reasons : [];
-  const textPitches = typeof outgoingText === 'string' && /\bquot(?:e|ing)\b/i.test(outgoingText);
+  const textPitches = typeof outgoingText === 'string' && PITCH_LANGUAGE_RE.test(outgoingText);
   const pitches = textPitches || mode === 'quote' || (mode === 'advise' && !reasons.some((r) => NO_PITCH_REASONS.has(r)));
   if (!pitches || !customerId) return { ok: true };
   const family = flags.quote?.service || SERVICE_KEY[flags.assessment_type] || null;
