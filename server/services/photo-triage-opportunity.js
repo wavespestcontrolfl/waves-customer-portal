@@ -402,12 +402,22 @@ function draftPitches(flags) {
 // finding operator wording a text parser missed; the owner rejects the
 // draft and replies from the conversation instead). Returns
 //   { ok: true }                                  — send as-is
+//   { blocked: 'recipient_changed', family }      — gauged for a different
+//                                                   customer (or none)
 //   { blocked: 'owned'|'unavailable'|'no_longer_priced', family }
 //   { repriced: <per_visit>, family }             — owner-only figure drifted
 // Throws on a lookup failure — the caller fails closed (draft left pending).
 async function recheckDraftOffer({ customerId, flags }) {
   if (!flags || flags.origin !== 'photo_triage') return { ok: true };
   const family = flags.offer_family || null;
+  // The whole stored verdict (lead vs customer, onsite vs pitch, which
+  // family could be checked) was computed for the customer the draft was
+  // gauged against. A recipient linked (or re-linked) since then makes all
+  // of it stale — onsite and uncheckable-family drafts included — so the
+  // draft is held rather than re-judged piecemeal (codex #4810 r12).
+  if (Object.hasOwn(flags, 'gauged_customer_id') && (flags.gauged_customer_id || null) !== (customerId || null)) {
+    return { blocked: 'recipient_changed', family };
+  }
   if (!family || !customerId || !draftPitches(flags)) return { ok: true };
   // throwOnError: an outage here must surface as a 503 (draft left pending
   // for retry), never as confirmed staleness.

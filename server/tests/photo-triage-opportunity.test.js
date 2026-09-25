@@ -519,6 +519,20 @@ describe('recheckDraftOffer', () => {
     expect(mockBuildOffer).toHaveBeenCalledWith('c1', mockDb, 'termite', { throwOnError: true });
   });
 
+  test('a recipient linked or re-linked since the draft was gauged holds the draft — onsite and uncheckable-family drafts too (codex #4810 r12)', async () => {
+    const onsiteLead = FLAGS({ gauged_customer_id: null, offer_family: 'tree_shrub', opportunity_mode: 'onsite', opportunity_reasons: ['lead', 'actionable', 'large_scope', 'onsite_scope'], quote: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: onsiteLead })).toEqual({ blocked: 'recipient_changed', family: 'tree_shrub' });
+    const mosquitoLead = FLAGS({ gauged_customer_id: null, assessment_type: 'pest', offer_family: null, opportunity_mode: 'advise', opportunity_reasons: ['lead', 'actionable', 'no_customer_record'], quote: null });
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: mosquitoLead })).toEqual({ blocked: 'recipient_changed', family: null });
+    expect(await recheckDraftOffer({ customerId: 'c2', flags: FLAGS({ gauged_customer_id: 'c1' }) })).toEqual({ blocked: 'recipient_changed', family: 'tree_shrub' });
+    expect(mockBuildOffer).not.toHaveBeenCalled();
+    // Same customer → the normal recheck.
+    mockBuildOffer.mockResolvedValueOnce(PRICED_OFFER('tree_shrub', { perVisit: 83.33 }));
+    expect(await recheckDraftOffer({ customerId: 'c1', flags: FLAGS({ gauged_customer_id: 'c1' }) })).toEqual({ ok: true });
+    // An unlinked draft still unlinked → nothing to recheck.
+    expect(await recheckDraftOffer({ customerId: null, flags: mosquitoLead })).toEqual({ ok: true });
+  });
+
   test('the text is never an input — the recheck reads only the stored verdict (drafts are approve-as-written)', async () => {
     const held = FLAGS({ opportunity_mode: 'advise', opportunity_reasons: ['actionable', 'already_owned'], quote: null });
     expect(await recheckDraftOffer({ customerId: 'c1', flags: held, outgoingText: 'Want a quote for pest control? $80.' })).toEqual({ ok: true });

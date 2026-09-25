@@ -356,6 +356,9 @@ async function parkDraftUnlessPending({ from, smsLogId, customer, body, text, cr
       // The family the gauge checked — the dispatch-time recheck
       // (photo-triage-opportunity.js#recheckDraftOffer) checks exactly this.
       offer_family: opportunity.family,
+      // Who the verdict was computed for — a recipient linked after
+      // creation makes the whole verdict stale (codex #4810 r12).
+      gauged_customer_id: customer?.id || null,
       quote: opportunity.quote,
     }),
   });

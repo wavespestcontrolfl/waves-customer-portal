@@ -260,6 +260,52 @@ describe('approve — photo-triage offer recheck wiring', () => {
   });
 });
 
+describe('approve — the recheck runs again at the pre-dispatch hook (codex #4810 r12)', () => {
+  test('ok at the route → the same recheck is handed to sendCustomerMessage as preDispatchCheck; a late owned answer blocks there', async () => {
+    enqueue('message_drafts', { returning: [photoDraft()] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
+    enqueue('message_drafts', { update: 1 });
+    // Route-level check passes; the customer enrolls before the handoff.
+    mockRecheck.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ blocked: 'owned', family: 'tree_shrub' });
+    let late;
+    sendCustomerMessage.mockImplementation(async (input) => {
+      late = await input.preDispatchCheck({ channel: 'sms' });
+      return { sent: false, blocked: true, code: late.code, reason: late.reason };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+    });
+    expect(late).toMatchObject({ ok: false, code: 'PHOTO_TRIAGE_OFFER_STALE' });
+    expect(mockRecheck).toHaveBeenCalledTimes(2);
+    expect(mockRecheck.mock.calls[1][0]).toMatchObject({ customerId: 'cust-1', flags: expect.objectContaining({ origin: 'photo_triage' }) });
+    // Claim handed back (failed-send path), nothing finalized as sent.
+    expect(updates.some((u) => u.table === 'message_drafts' && u.payload.status === 'pending')).toBe(true);
+    expect(updates.some((u) => u.payload.status === 'sent')).toBe(false);
+  });
+});
+
+describe('approve — recipient changed since the draft was gauged', () => {
+  test('→ 409 PHOTO_TRIAGE_RECIPIENT_CHANGED, claim released, flags and text untouched, nothing sent', async () => {
+    enqueue('message_drafts', { returning: [photoDraft()] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550142' } });
+    enqueue('message_drafts', { update: 1 });
+    mockRecheck.mockResolvedValue({ blocked: 'recipient_changed', family: 'tree_shrub' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-77/approve`, { method: 'PUT' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('PHOTO_TRIAGE_RECIPIENT_CHANGED');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const release = updates[updates.length - 1].payload;
+    expect(release.status).toBe('pending');
+    expect(release).not.toHaveProperty('flags');
+    expect(release).not.toHaveProperty('draft_response');
+  });
+});
+
 describe('approve — recipient resolution', () => {
   test('a draft linked only through its sms_log row rechecks against THAT customer', async () => {
     enqueue('message_drafts', { returning: [photoDraft({ customer_id: null, sms_log_id: 'sms-5', flags: JSON.stringify({ ...PHOTO_FLAGS, toPhone: undefined }) })] });

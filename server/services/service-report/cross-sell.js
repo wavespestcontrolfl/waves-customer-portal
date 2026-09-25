@@ -1039,8 +1039,11 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
   if (!customerId || !database) return null;
   if (requestedTargetKey && !OFFER_PROMPTS[requestedTargetKey]) return null;
 
+  // No provable single premises → ownership cannot be scoped: a requested
+  // family fails closed rather than reading as "nothing owned" (codex #4810
+  // r12 — a multi-property customer may own it at another address).
   const premises = await resolvePortalOfferPremises(database, customerId);
-  if (!premises) return null;
+  if (!premises) return requestedTargetKey ? unavailableBasis(requestedTargetKey) : null;
   const { customer, primaryStreet } = premises;
 
   const target = await resolvePortalOfferTarget(database, customerId, customer, primaryStreet, requestedTargetKey);
@@ -1051,6 +1054,12 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
     database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError,
   });
   if (!pricing) return null;
+  if (pricing.refusal) {
+    if (!requestedTargetKey) return null;
+    return pricing.refusal === 'owned'
+      ? ownedBasis(targetKey, customer, ownedKeys, primaryStreet)
+      : unavailableBasis(targetKey, customer, ownedKeys, primaryStreet);
+  }
 
   return composePricedOfferBasis({
     ...pricing, targetKey, ownedKeys, evidencedOwnedKeys, customer, primaryStreet,
@@ -1129,11 +1138,7 @@ async function resolvePortalOfferTarget(database, customerId, customer, primaryS
   // caller can tell "already on the plan" from "cannot offer" and drop
   // its quote CTA (codex #4810 r2 P1). Never reached by the ladder path.
   if (requestedTargetKey && offerVocabulary(ownedKeys).has(requestedTargetKey)) {
-    const payload = { serviceKey: requestedTargetKey, label: OFFER_LABELS[requestedTargetKey], mode: 'owned', relationship: 'owned', option: null };
-    return {
-      done: true,
-      basis: { payload: { ...payload, fingerprint: offerFingerprint(payload) }, option: null, result: null, customer, ownedKeys, propertySeed: null, primaryStreet },
-    };
+    return { done: true, basis: ownedBasis(requestedTargetKey, customer, ownedKeys, primaryStreet) };
   }
   const targetKey = requestedTargetKey || pickOfferTarget(ownedKeys);
   // Owns everything → nothing to offer (owner matrix: the referral card
@@ -1220,8 +1225,12 @@ async function resolvePortalOfferPricingResult({ database, customerId, customer,
   if (throwOnError && result?.code === 'PRICING_UNAVAILABLE') {
     throw Object.assign(new Error('pricing ownership lookup failed'), { code: 'PRICING_UNAVAILABLE' });
   }
-  if (!result || result.code === 'PRICING_UNAVAILABLE') return null;
-  if ((result.alreadyIncluded || []).length) return null;
+  // Refusals that say something about OWNERSHIP are reported as such (a
+  // requested-family caller must not read them as "nothing to offer" and
+  // pitch — codex #4810 r12): the pricer's own ownership scope found the
+  // family active (never re-priced), or its ownership reader failed.
+  if (!result || result.code === 'PRICING_UNAVAILABLE') return { refusal: 'unavailable' };
+  if ((result.alreadyIncluded || []).length) return { refusal: 'owned' };
   const { isCommercialProperty } = require('../pricing-engine/commercial-helpers');
   if (isCommercialProperty({ propertyType: result.property?.propertyType })) return null;
 
@@ -1284,6 +1293,14 @@ async function buildPortalOffer(customerId, database, opts = {}) {
     logger.warn(`[portal-offer] suppressed (code=${err?.code || 'none'})`);
     return null;
   }
+}
+
+// A REQUESTED family the customer already owns (never the ladder): never
+// re-priced, and said so explicitly (mode 'owned', no option) so the caller
+// can tell "already on the plan" from "cannot offer" (codex #4810 r2 P1).
+function ownedBasis(targetKey, customer, ownedKeys, primaryStreet) {
+  const payload = { serviceKey: targetKey, label: OFFER_LABELS[targetKey], mode: 'owned', relationship: 'owned', option: null };
+  return { payload: { ...payload, fingerprint: offerFingerprint(payload) }, option: null, result: null, customer, ownedKeys, propertySeed: null, primaryStreet };
 }
 
 // Fail-closed answer for a REQUESTED family (never the ladder): the offer

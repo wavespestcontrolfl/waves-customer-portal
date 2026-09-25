@@ -366,6 +366,8 @@ describe('inbound hook end to end (mocked S3 + vision)', () => {
       opportunity_reasons: ['lead', 'actionable', 'lead_not_priced'],
       // The family the dispatch-time recheck will check (codex #4810 r11).
       offer_family: 'lawn_care',
+      // Who the verdict was computed for (codex #4810 r12).
+      gauged_customer_id: CUSTOMER.id,
       quote: null,
     });
     expect(draft.draft_response).toBe(

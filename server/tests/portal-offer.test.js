@@ -251,6 +251,34 @@ describe('buildOfferForFamily', () => {
     expect(offer.option).toBeNull();
   });
 
+  test('no provable single premises → a requested family fails closed (unavailable); the ladder still returns null (codex #4810 r12)', async () => {
+    for (const customer of [CUSTOMER({ has_multi_home: true }), CUSTOMER({ address_line1: null, city: null, zip: null })]) {
+      const db = dbFor({ customer, serviceTypes: ['Quarterly Pest Control'] });
+      expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup }))
+        .toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
+      expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+    }
+  });
+
+  test('the pricer\'s own refusals keep their meaning for a requested family: alreadyIncluded → owned, PRICING_UNAVAILABLE → unavailable (codex #4810 r12)', async () => {
+    const pricingAi = require('../services/customer-pricing-ai');
+    const spy = jest.spyOn(pricingAi, 'buildCustomerPricingResponse');
+    try {
+      const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
+      spy.mockResolvedValueOnce({ ok: true, options: [], alreadyIncluded: ['tree_shrub'], currentServiceKeys: ['lawn_care'] });
+      expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup }))
+        .toMatchObject({ serviceKey: 'tree_shrub', mode: 'owned', option: null });
+      spy.mockResolvedValueOnce({ ok: false, code: 'PRICING_UNAVAILABLE' });
+      expect(await buildOfferForFamily('cust-1', db, 'tree_shrub', { propertyLookup: missLookup }))
+        .toMatchObject({ serviceKey: 'tree_shrub', mode: 'unavailable', option: null });
+      // The ladder entry point keeps its plain null for both.
+      spy.mockResolvedValueOnce({ ok: true, options: [], alreadyIncluded: ['pest_control'], currentServiceKeys: ['lawn_care'] });
+      expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('an unknown family → null', async () => {
     const db = dbFor({ serviceTypes: ['Lawn Care Program'] });
     expect(await buildOfferForFamily('cust-1', db, 'mosquito', { propertyLookup: missLookup })).toBeNull();
