@@ -99,7 +99,7 @@ Supports SQL-like conditions via the filters parameter.`,
   {
     name: 'find_overdue_customers',
     description: `Find customers who are overdue for service based on their expected frequency.
-service_category: "pest" (quarterly = 90 days), "lawn" (monthly = 30 days), "mosquito" (21 days), "tree_shrub" (quarterly), "termite" (annual).
+service_category: "pest" (quarterly = 90 days), "lawn" (monthly = 30 days), "mosquito" (21 days), "tree_shrub" (per customer: bi-monthly 60 days, every 6 weeks 42 days, grandfathered quarterly 90 days), "termite" (annual).
 overdue_days: how many days past their expected service date to flag (e.g. 0 = due now, 30 = a month overdue).
 Only returns active customers with prior service history in that category.`,
     input_schema: {
@@ -548,8 +548,16 @@ async function findOverdueCustomers(input) {
     pest: 90,        // quarterly
     lawn: 30,        // monthly
     mosquito: 21,    // every 3 weeks
-    tree_shrub: 90,  // quarterly
+    tree_shrub: 42,  // SQL prefilter = shortest live cadence; per customer below
     termite: 365,    // annual
+  };
+  // T&S runs at the customer's own cadence (6x default, 9x upsell,
+  // grandfathered 4x) — read from their latest T&S service_type.
+  const treeShrubIntervalDays = (serviceType) => {
+    const t = String(serviceType || '').toLowerCase();
+    if (/quarterly/.test(t)) return 90;
+    if (/6\s*weeks?|six\s*weeks?/.test(t)) return 42;
+    return 60;
   };
 
   // Service type patterns for matching. Case-insensitive POSIX regex (~*) so the
@@ -571,9 +579,9 @@ async function findOverdueCustomers(input) {
   const results = [];
 
   for (const cat of categories) {
-    const freq = frequencies[cat] || 90;
+    const baseFreq = frequencies[cat] || 90;
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - freq - overdue_days);
+    cutoff.setDate(cutoff.getDate() - baseFreq - overdue_days);
 
     const customers = await db('customers')
       .select(
@@ -581,6 +589,7 @@ async function findOverdueCustomers(input) {
         'customers.phone', 'customers.city', 'customers.waveguard_tier',
         'customers.monthly_rate', 'customers.active',
         db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) as last_service_date", [patterns[cat]]),
+        db.raw("(SELECT service_type FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ? ORDER BY service_date DESC LIMIT 1) as last_service_type", [patterns[cat]]),
         db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ~* ?) as next_scheduled", [patterns[cat]]),
       )
       .where('customers.active', true)
@@ -598,6 +607,8 @@ async function findOverdueCustomers(input) {
       const daysSince = c.last_service_date
         ? Math.floor((Date.now() - new Date(c.last_service_date)) / 86400000)
         : null;
+      const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.last_service_type) : baseFreq;
+      if (daysSince != null && daysSince < freq + overdue_days) continue;
 
       results.push({
         id: c.id,

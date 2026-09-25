@@ -593,9 +593,9 @@ const SHADE_RULES = {
 //     instead of silently pricing zero trees.
 //   - The 6-visit Standard program is the MANDATED default (matches the
 //     "10/10 SWFL Tree & Shrub Protocol" six_x cadence in
-//     server/config/protocols.json). Light (4x) maps to the protocol four_x
-//     cadence and is an available downsell for clean, low-pest-history
-//     landscapes — it is never auto-recommended. The 9x Enhanced tier was
+//     server/config/protocols.json). Light (4x, protocol four_x) was
+//     RETIRED for new sales 2026-09-24 (hidden: true below) and is priced
+//     only to replay the grandfathered quarterly plan. The 9x Enhanced tier was
 //     retired in v4.5 and UN-RETIRED as an UPSELL (owner directive
 //     2026-07-23): every-6-weeks coverage for heavy-pressure/high-value
 //     landscapes, never auto-recommended — Standard stays the default and

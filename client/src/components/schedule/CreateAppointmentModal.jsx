@@ -1500,6 +1500,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const params = new URLSearchParams();
         params.set('search', q);
         params.set('is_active', 'true');
+        // Hide retired-for-sale rows (quarterly T&S, retired 2026-09-24);
+        // grandfathered plans keep their existing visits.
+        params.set('sellable', 'true');
         params.set('limit', '50');
         const r = await adminFetch(`/admin/services?${params}`);
         setServiceResults((r.services || []).map((s) => ({

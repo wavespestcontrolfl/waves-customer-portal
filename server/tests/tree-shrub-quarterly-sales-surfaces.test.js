@@ -51,3 +51,36 @@ describe('knowledge index service connector (codex r8)', () => {
     expect(notIn).toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
   });
 });
+
+describe('service library list — new-appointment picker (codex r11)', () => {
+  const run = async (opts) => {
+    const db = require('../models/db');
+    const notIn = [];
+    const builder = {
+      select() { return this; },
+      orderBy() { return this; },
+      where() { return this; },
+      whereNotIn(column, values) { notIn.push([column, values]); return this; },
+      clone() { return this; },
+      clearSelect() { return this; },
+      clearOrder() { return this; },
+      count() { return this; },
+      first() { return Promise.resolve({ total: '0' }); },
+      limit() { return this; },
+      offset() { return Promise.resolve([]); },
+    };
+    db.mockImplementation(() => builder);
+    const { getServices } = require('../services/service-library');
+    await getServices(opts);
+    return notIn;
+  };
+
+  test('sellable=true hides retired-for-sale rows', async () => {
+    expect(await run({ isActive: 'true', sellable: 'true' }))
+      .toContainEqual(['service_key', expect.arrayContaining(['tree_shrub_quarterly'])]);
+  });
+
+  test('the Service Library page (no sellable flag) still lists them', async () => {
+    expect(await run({ isActive: 'true' })).toEqual([]);
+  });
+});

@@ -299,7 +299,7 @@ function assertOperationalConsistency(merged) {
 /**
  * Paginated list of services with filters
  */
-async function getServices({ category, billingType, isActive, isArchived, includeArchived = false, search, limit = 50, offset = 0 } = {}) {
+async function getServices({ category, billingType, isActive, isArchived, includeArchived = false, sellable = false, search, limit = 50, offset = 0 } = {}) {
   const parsedLimit = Number(limit);
   const parsedOffset = Number(offset);
   const safeLimit = Number.isInteger(parsedLimit) ? Math.min(500, Math.max(1, parsedLimit)) : 50;
@@ -311,6 +311,12 @@ async function getServices({ category, billingType, isActive, isArchived, includ
   if (typeof isActive === 'boolean') query = query.where('is_active', isActive);
   else if (isActive === 'true') query = query.where('is_active', true);
   else if (isActive === 'false') query = query.where('is_active', false);
+  // New-sale pickers only: retired-for-sale rows stay active for their
+  // grandfathered plans but must not be offered for a new appointment.
+  if (sellable === true || sellable === 'true') {
+    const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
+    query = query.whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS]);
+  }
   if (search) {
     // Token-AND across the searchable text columns. Splitting on
     // whitespace and requiring each token to match somewhere lets the
