@@ -41,6 +41,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 const mockGates = {};
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => mockGates[gate] !== false),
+  gateEnvTimestamp: jest.fn(() => null),
 }));
 const mockPreDispatchCheck = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/composer-customer-links', () => ({
