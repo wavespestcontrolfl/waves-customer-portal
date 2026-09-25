@@ -247,6 +247,16 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     expect((await readTerm(db)).installation_anchored_at).toBeNull();
   });
 
+  test('the schedule\'s "Termite Installation Setup" service anchors; a Bora-Care install does not', async () => {
+    const { sweep, db } = load();
+    await addVisit(db, { scheduled_date: '2026-10-02', service_type: 'Termite Bora-Care Install' });
+    const install = await addVisit(db, { scheduled_date: '2026-10-14', service_type: 'Termite Installation Setup' });
+
+    expect((await sweep()).anchored).toBe(1);
+    const term = await readTerm(db);
+    expect(term.installation_anchor_visit_id).toBe(install.id);
+  });
+
   test('a bait visit from before the plan was activated (an older program) never anchors it', async () => {
     const { sweep, db } = load();
     await addVisit(db, { scheduled_date: '2026-03-10' });

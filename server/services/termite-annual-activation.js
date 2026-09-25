@@ -722,10 +722,15 @@ const ANCHORABLE_TERM_STATUSES = ['payment_pending', 'active'];
 // The termite program's installation visit, by the same service-type rule
 // termite-program-agreement.js's scheduledStartDate uses to find the
 // program start: a termite service naming the bait or the stations.
+// The schedule's own installation service is "Termite Installation Setup"
+// (admin-schedule.js, key termite_installation_setup), which names neither
+// bait nor stations; "Termite Bora-Care Install" is a liquid treatment and
+// never matches.
 function whereTermiteInstallationServiceType(builder, alias) {
   return builder
     .whereRaw(`LOWER(${alias}.service_type) LIKE '%termite%'`)
-    .whereRaw(`(LOWER(${alias}.service_type) LIKE '%bait%' OR LOWER(${alias}.service_type) LIKE '%station%')`);
+    .whereRaw(`(LOWER(${alias}.service_type) LIKE '%bait%' OR LOWER(${alias}.service_type) LIKE '%station%'
+      OR LOWER(${alias}.service_type) LIKE '%installation setup%')`);
 }
 
 // An installation can't precede the plan it installs: only visits on or
