@@ -143,7 +143,7 @@ router.get('/:id/photos', async (req, res, next) => {
       try { photos = JSON.parse(photos); } catch { photos = []; }
     }
     const viewable = Array.isArray(photos)
-      ? photos.filter((photo) => typeof photo === 'string' && REQUEST_PHOTO_RE.test(photo)).slice(0, 3)
+      ? photos.filter((photo) => typeof photo === 'string' && REQUEST_PHOTO_RE.test(photo))
       : [];
     res.set('Cache-Control', 'private, no-store');
     res.json({ photos: viewable });

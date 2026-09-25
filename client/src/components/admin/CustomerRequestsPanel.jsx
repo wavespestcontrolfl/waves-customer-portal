@@ -44,6 +44,7 @@ function RequestPhotos({ request, detail, onLoad }) {
   if (!detail.photos?.length) return <div className="text-12 text-ink-tertiary mt-2">No request photos are available.</div>;
   return (
     <>
+      {detail.photos.length < count && <div className="text-12 text-ink-tertiary mt-2">Some attached photos are unavailable.</div>}
       {selectedPhoto && (
         <div className="mt-2">
           <img src={selectedPhoto} alt={`Expanded request evidence for ${request.subject}`} className="w-full max-h-[420px] object-contain bg-zinc-50 rounded-sm border-hairline border-zinc-200" />

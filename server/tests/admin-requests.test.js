@@ -103,7 +103,7 @@ describe('admin requests routes', () => {
   });
 
   test('loads request photos on demand for authenticated staff', async () => {
-    const photos = ['data:image/jpeg;base64,YQ==', 'data:image/png;base64,Yg=='];
+    const photos = ['data:image/jpeg;base64,YQ==', 'data:image/png;base64,Yg==', 'data:image/webp;base64,Yw==', 'data:image/jpeg;base64,ZA=='];
     setDb({ service_requests: [makeChain({ first: { id: requestId, photos: [...photos, 'data:text/html;base64,PHNjcmlwdD4='] } })] });
 
     await withServer(async (baseUrl) => {
