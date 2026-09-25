@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const { etDateString } = require('../utils/datetime-et');
+const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -29,14 +29,11 @@ function parseObservedOn(value) {
 
 function serializeObservedOn(value) {
   if (value == null) return null;
-  if (typeof value === 'string') {
-    const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
-    return match ? match[1] : null;
+  try {
+    return etCalendarDayOf(value);
+  } catch {
+    return null;
   }
-  if (!(value instanceof Date) || Number.isNaN(value.getTime())) return null;
-  // pg parses DATE in the process timezone. Preserve that calendar value;
-  // converting it through UTC or ET can shift it to the prior day.
-  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 }
 
 function parseIssueFields(body, { enabled, type }) {
