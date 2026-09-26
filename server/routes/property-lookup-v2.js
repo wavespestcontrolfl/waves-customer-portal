@@ -4932,7 +4932,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // grade LOW rather than MEDIUM (primary review of PR #4840 r4 P1). A
     // license_seats-sourced suite is a real state record and stays MEDIUM
     // (this stays undefined for it, same as every non-suite property).
-    footprintSizeEstimated: p.suiteSize?.source === 'suite_type_default' || undefined,
+    // Only while the priced size IS the default: an operator who typed the
+    // suite's real size has measured it, and it prices at normal confidence.
+    footprintSizeEstimated: (p.suiteSize?.source === 'suite_type_default'
+      && Number(p.suiteSize.value) === homeSqFt) || undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,

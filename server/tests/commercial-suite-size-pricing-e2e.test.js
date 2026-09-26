@@ -113,6 +113,16 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     expect(commercialLowConfidenceRange({ lineItems: result.lineItems }).hasLowConfidence).toBe(false);
   });
 
+  test('an operator-typed suite size clears the estimate flag (the default is no longer what prices)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.suiteSize.source).toBe('suite_type_default');
+    const typed = { ...profile, homeSqFt: 2200, footprint: 2200 };
+    const v1Input = translateV2CallToV1Input(typed, ['PEST'], { commercialRiskType: 'restaurant_food' });
+    expect(v1Input.footprintSizeEstimated).toBeUndefined();
+  });
+
   test('a DBPR miss (business-type default) prices LOW and trips the low-confidence delivery gate (primary review PR #4840 r4 P1)', async () => {
     resolveViaDbprLicense.mockResolvedValue(null);
 
