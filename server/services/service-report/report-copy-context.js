@@ -424,8 +424,9 @@ async function loadProductSafety(products, knex) {
       const catalog = selected?.productId
         ? rowsById.get(String(selected.productId))
         : rowsByName.get(cleanText(selected?.name).toLowerCase());
-      const category = cleanText(catalog?.category || catalog?.product_type).toLowerCase();
-      const role = DETERMINISTIC_APPLICATION_ROLES.get(category);
+      const role = [catalog?.category, catalog?.product_type]
+        .map((value) => DETERMINISTIC_APPLICATION_ROLES.get(cleanText(value).toLowerCase().replace(/[_-]+/g, ' ')))
+        .find(Boolean);
       if (!role) return [];
       const method = cleanText(redactAccessCodes(selected?.applicationMethod));
       const area = cleanText(redactAccessCodes(selected?.applicationArea));

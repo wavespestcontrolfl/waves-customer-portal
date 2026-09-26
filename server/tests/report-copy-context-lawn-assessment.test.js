@@ -202,6 +202,24 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
 });
 
 describe('buildReportCopyContext deterministic application evidence', () => {
+  test.each([
+    ['soil_amendment', 'biostimulant', 'soil-support application'],
+    ['adjuvant', 'wetting_agent', 'moisture-support application'],
+  ])('approved %s applications use their supported product type', async (category, product_type, role) => {
+    const result = await buildReportCopyContext({
+      customerId: 'c1', serviceType: 'Lawn Care', serviceDate: '2026-07-28',
+      products: [{ productId: 'support', applicationMethod: 'broadcast_spray', applicationArea: 'Front lawn' }],
+      knex: makeKnexStub({ customers: [CUSTOMER], catalogProducts: [
+        { id: 'support', name: 'Approved Support Product', category, product_type, approved_for_service_report: true },
+      ] }),
+    });
+    expect(result.deterministicApplications).toEqual([
+      { role, method: 'broadcast spray', area: 'Front lawn', areaValue: null, areaUnit: null },
+    ]);
+    expect(buildDeterministicReportCopy({ serviceType: 'Lawn Care', applicationRecords: result.deterministicApplications }))
+      .toContain(role);
+  });
+
   test('binds approved repeated applications to the provider-failure fallback', async () => {
     const catalogProducts = [
       {
