@@ -1,0 +1,542 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Bites are rare and defensive but medically significant — alpha-latrotoxin can cause serious symptoms. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "black-widow",
+    "common_name": "Southern Black Widow",
+    "aliases": [
+      "black widow",
+      "black widows",
+      "southern black widow",
+      "widow spider"
+    ],
+    "scientific_name": "Latrodectus mactans",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "widow-spiders",
+    "site_category": "Spiders",
+    "traits": [
+      "Glossy jet black body with a red hourglass mark on the underside of the abdomen",
+      "Messy, strong, low web in undisturbed corners — garages, meter boxes, woodpiles",
+      "Hides by day, hangs upside down at night",
+      "Females about 1.25 cm body length, males much smaller and rarely seen"
+    ],
+    "look_alikes": [
+      {
+        "slug": "brown-widow",
+        "difference": "Black widow is glossy black with a red hourglass; brown widow is tan-brown with an orange hourglass and a spiky, sandspur-like egg sac.",
+        "next_photo": "A close-up of the underside of the abdomen and any egg sac, from a few feet away.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Bites are rare and almost always defensive — they happen when a hand reaches blind into her hiding spot. This is the one Florida spider worth professional attention when found where kids or pets play.",
+      "fact": "Bites are rare and defensive — nearly all happen when a hand reaches blind into her hiding spot.",
+      "blurb": "The one Florida spider worth professional attention when found where kids or pets play."
+    },
+    "tech_notes": "Confirm red hourglass underside. Deweb + void treatment in undisturbed harborage; advise on clutter/storage reduction.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1000"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/black-widow/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Venom is potent but this species injects less of it and bites less readily than the black widow. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "brown-widow",
+    "common_name": "Brown Widow",
+    "aliases": [
+      "brown widow",
+      "brown widows"
+    ],
+    "scientific_name": "Latrodectus geometricus",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "widow-spiders",
+    "site_category": "Spiders",
+    "traits": [
+      "Tan to brown with an orange hourglass underneath (less bold than the black widow’s red)",
+      "Spiky, spherical egg sacs like tiny sea mines — the clearest tell",
+      "Web in furniture joints, meter boxes, and pool-cage corners",
+      "Tends to curl up rather than attack when disturbed"
+    ],
+    "look_alikes": [
+      {
+        "slug": "black-widow",
+        "difference": "Brown widow is tan-brown with an orange hourglass and a spiky egg sac; black widow is glossy black with a red hourglass and a smooth egg sac.",
+        "next_photo": "A close-up of the underside of the abdomen and any egg sac, from a few feet away.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "garage-storage"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Now more common than black widows in much of Florida, but notably shyer and less prone to bite. Respect rather than panic — gloves when moving stored patio furniture, and treatment if egg sacs multiply.",
+      "fact": "Now more common than black widows in much of Florida — but notably shyer and less prone to bite.",
+      "blurb": "Respect, don’t panic. Gloves when moving stored patio furniture; treat if egg sacs multiply."
+    },
+    "tech_notes": "Confirm orange hourglass + spiky egg sac. Deweb + void treatment; advise on clutter/storage reduction.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1000"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/brown-widow/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [
+      "Banana Spider"
+    ],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "safety_line": "Bites only if held or pinched, and feel about like a bee sting. No medical concern for most people.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "golden-silk-orbweaver",
+    "common_name": "Golden Silk Orb-weaver",
+    "aliases": [
+      "golden silk orbweaver",
+      "golden silk spider",
+      "banana spider"
+    ],
+    "scientific_name": "Trichonephila clavipes",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "orb-weavers",
+    "site_category": "Spiders",
+    "traits": [
+      "Large yellow-and-tan spider, females 24-40 mm, in a huge wheel web across paths",
+      "Web silk has a golden tint in sunlight",
+      "Brown-orange banded legs with tufts of hair on some segments",
+      "Sits head-down near the top of the web"
+    ],
+    "look_alikes": [
+      {
+        "slug": "yellow-garden-spider",
+        "difference": "Golden silk orb-weaver has banded, tufted legs and a golden web; yellow garden spider has a bold black-and-yellow abdomen and a zigzag web decoration.",
+        "next_photo": "A photo of the whole web plus a close-up of the leg pattern.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Eats mosquitoes and flies all day and rebuilds damaged sections of its web nightly. Relocate the web if it crosses a walkway; there is no need to kill the spider.",
+      "fact": "Her silk is, weight for weight, tougher than steel — and she rebuilds damaged sections of the web nightly.",
+      "blurb": "Eats mosquitoes and flies all day. Relocate the web if it’s across your walkway; don’t kill the engineer."
+    },
+    "tech_notes": "Beneficial; no treatment. If relocation is requested, move the whole web frame rather than destroying it.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN467"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/golden-silk-orbweaver/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Not dangerous to people, though a bite from handling one can be locally painful. No medical concern for most people.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "huntsman-spider",
+    "common_name": "Huntsman Spider",
+    "aliases": [
+      "huntsman spider",
+      "huntsman spiders",
+      "giant crab spider"
+    ],
+    "scientific_name": "Heteropoda venatoria",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": null,
+    "site_category": "Spiders",
+    "traits": [
+      "Very large, flat body about 1 inch long with a 3-5 inch leg span",
+      "Legs angle forward like a crab, letting it squeeze into narrow gaps",
+      "Explosively fast when startled",
+      "Tan to brown with a cream marginal band around the carapace"
+    ],
+    "look_alikes": [
+      {
+        "slug": "wolf-spider",
+        "difference": "Huntsman spiders are flatter with crab-like forward legs; wolf spiders are stouter, hairier, and their eyes reflect flashlight light distinctly.",
+        "next_photo": "A photo of the leg posture from above, plus a flashlight eye-shine check at night.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "garage-storage",
+      "living-areas",
+      "attic-walls"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Terrifying-looking and not considered dangerous, but genuinely useful — it actively hunts and eats cockroaches. One on patrol is a roach’s worst night; there is no need to treat for it.",
+      "fact": "A dedicated cockroach hunter — one huntsman on patrol is a roach’s worst night.",
+      "blurb": "Terrifying-looking, not considered dangerous, genuinely useful. The scream is optional."
+    },
+    "tech_notes": "Beneficial predator of roaches; no treatment needed. Relocate outdoors if the customer prefers it gone.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN317"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/huntsman-spider/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Venom is not dangerous to people; a bite from handling one can be locally painful, like a bee sting.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "wolf-spider",
+    "common_name": "Wolf Spider",
+    "aliases": [
+      "wolf spider",
+      "wolf spiders",
+      "hunting spider"
+    ],
+    "scientific_name": "Lycosidae",
+    "rank": "family",
+    "group": "spiders",
+    "subgroup": null,
+    "site_category": "Spiders",
+    "traits": [
+      "No web — hunts on the ground at speed",
+      "Stout, hairy, brown to tan with at least one row of dark stripes from the eyes to the abdomen",
+      "Eyeshine sparkles distinctly when scanned with a flashlight at night",
+      "Females carry an egg sac, then dozens of spiderlings, on their back"
+    ],
+    "look_alikes": [
+      {
+        "slug": "huntsman-spider",
+        "difference": "Wolf spiders are stouter and hairier with distinct flashlight eye-shine; huntsman spiders are flatter with crab-like forward-angled legs.",
+        "next_photo": "A photo of the leg posture from above, plus a flashlight eye-shine check at night.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "garage-storage",
+      "living-areas",
+      "lawn-garden"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Mothers carry their spiderlings piggyback — dozens riding along until they can hunt on their own. This is free roach and cricket control; scoop-and-release beats squishing.",
+      "fact": "Mothers carry their spiderlings piggyback, dozens riding shotgun — one of the few spiders that does this.",
+      "blurb": "Free roach and cricket control. Scoop-and-release beats squishing."
+    },
+    "tech_notes": "Beneficial predator; indicates outdoor insect activity nearby. No treatment needed; check door sweeps if found indoors repeatedly.",
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/design/gardening-with-wildlife/florida-spiders/"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/wolf-spider/",
+      "guides": []
+    }
+  }
+]
