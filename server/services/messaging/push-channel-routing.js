@@ -484,7 +484,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         return { delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'notification_ledger_failed' };
       }
     }
-    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' };
+    // A persisted in-app bell is customer-visible even when no device accepts
+    // the push; callers that must not undo a seen notice read bellPersisted.
+    const bell = appNotification ? { bellPersisted: true } : {};
+    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
@@ -504,7 +507,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           retryAfterMs: appNotification.push.retryAfterMs || 60000 };
       }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
-      return { delivered: false, deliveryOutcome: 'not_sent' };
+      return { delivered: false, deliveryOutcome: 'not_sent', ...bell };
     }
     deliveryOutcome = 'accepted';
     const acceptedAt = appNotification?.push?.deduped

@@ -5460,6 +5460,7 @@ async function sendExplicitPaymentReminderChannels({
       invoiceId: invoice.id,
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'annual_prepay_payment_reminder',
+      preDispatchCheck: invoiceStillOwedAsQuoted({ invoiceId: invoice.id, customerId: customer.id, amountDue }),
       metadata: {
         original_message_type: source,
         annual_prepay_term_id: claimedTerm.id,
@@ -5510,6 +5511,9 @@ async function sendExplicitPaymentReminderChannels({
           throw sendErr;
         }
         if (classifyDeliveryCertainty(outcome) !== 'not_sent' && outcome?.deliveryOutcome) acceptedNow = true;
+        // An App leg that persisted the in-app bell reached the customer even
+        // though no device accepted the push: the bell quotes this amount.
+        if (outcome?.bellPersisted === true) acceptedNow = true;
         return outcome;
       },
     });
@@ -5563,6 +5567,29 @@ async function sendExplicitPaymentReminderChannels({
   }
 
   return { sent: anyDelivered, termId: claimedTerm.id, complete: result.complete };
+}
+
+// Right before each explicit leg dispatches, re-read the prepay invoice: it
+// must still be this customer's, collectible, self-pay and owe exactly the
+// quoted amount. Any change holds the leg (retryable) so a paid, voided or
+// payer-assigned invoice never gets a stale pay-link reminder.
+function invoiceStillOwedAsQuoted({ invoiceId, customerId, amountDue }) {
+  const changed = (reason) => ({ ok: false, code: 'PREPAY_QUOTE_CHANGED', reason, retryable: true });
+  return async () => {
+    try {
+      const helpers = require('./invoice-helpers');
+      const live = await db('invoices').where({ id: invoiceId }).first();
+      if (!live || String(live.customer_id) !== String(customerId)
+        || !helpers.isInvoiceCollectibleStatus(live.status)
+        || live.payer_id || helpers.invoiceWithdrawnFromCustomer(live)
+        || Math.round(helpers.invoiceAmountDue(live) * 100) !== Math.round(amountDue * 100)) {
+        return changed(`prepay invoice ${invoiceId} changed before dispatch`);
+      }
+      return { ok: true };
+    } catch (err) {
+      return changed(`prepay invoice unreadable before dispatch: ${err.message}`);
+    }
+  };
 }
 
 // Explicit per-customer billing-channel selection (router core, PR #4843).
@@ -6074,6 +6101,7 @@ module.exports = {
     resetCachesForTests,
     paymentReminderEventKey,
     buildPaymentReminderMessage,
+    invoiceStillOwedAsQuoted,
     sendExplicitPaymentReminderChannels,
   },
 };

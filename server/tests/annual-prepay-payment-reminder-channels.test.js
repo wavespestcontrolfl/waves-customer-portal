@@ -433,4 +433,41 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 25 }));
     expect(result).toMatchObject({ sent: true });
   });
+
+  test('explicit legs carry a pre-dispatch recheck of the quoted prepay invoice', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+    setDbQueues(standardQueues({ prefs: { billing_channels: ['sms'] } }));
+    await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    expect(typeof sendCustomerMessage.mock.calls[0][0].preDispatchCheck).toBe('function');
+  });
+
+  test('an App leg that persisted the in-app bell keeps the credit', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'APP_UNAVAILABLE', bellPersisted: true,
+    });
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    setDbQueues(standardQueues({ prefs: { billing_channels: ['push'] } }));
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    expect(reverseAppliedCredit).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sent: true });
+  });
+});
+
+describe('invoiceStillOwedAsQuoted', () => {
+  const { invoiceStillOwedAsQuoted } = _private;
+  const live = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '392.04', payer_id: null };
+  const check = (row) => {
+    setDbQueues({ invoices: [query({ first: row })] });
+    return invoiceStillOwedAsQuoted({ invoiceId: 'inv-1', customerId: 'cust-1', amountDue: 392.04 })();
+  };
+  test('passes while the invoice owes exactly the quoted amount', async () => {
+    await expect(check(live)).resolves.toEqual({ ok: true });
+  });
+  test.each([
+    ['paid', { status: 'paid' }], ['payer-assigned', { payer_id: 'p-1' }],
+    ['re-priced', { total: '300.00' }], ['gone', null],
+  ])('holds the leg (retryable) when the invoice was %s', async (_label, patch) => {
+    await expect(check(patch === null ? undefined : { ...live, ...patch }))
+      .resolves.toMatchObject({ ok: false, code: 'PREPAY_QUOTE_CHANGED', retryable: true });
+  });
 });
