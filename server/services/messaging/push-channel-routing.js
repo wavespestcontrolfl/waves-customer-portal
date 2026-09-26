@@ -178,7 +178,7 @@ const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 
 async function hasFreshPushDevice(customerId, knex = db) {
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
-    const status = await require('../push-notifications').customerStatus(customerId);
+    const status = await require('../push-notifications').customerStatus(customerId, knex);
     return status.enabled && status.fresh;
   }
   const row = await knex('push_subscriptions')
@@ -423,13 +423,14 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     // Codex r4 P1 on #4843: reuse the caller's handoff transaction (invoice.js's
     // send-claim + deposit-settlement lock, threaded through preSendCheck by
-    // send-customer-message.js's dispatchProvider) for this billing-leg
-    // eligibility read instead of opening a second root-pool connection
+    // send-customer-message.js's dispatchProvider) for EVERY db read/write in
+    // this billing-leg path instead of opening a second root-pool connection
     // while that transaction is held (DB_POOL_MAX=2 deadlock risk). Never
-    // applied to a non-billing push — those never carry a billingDeliveryCategory.
-    const eligibilityConn = billingDeliveryCategory && preSendCheck?.handoffTrx ? preSendCheck.handoffTrx : db;
-    if (!(await pushEligibleRuntime(customerId, to, messageType, eligibilityConn, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
-    const fresh = await hasFreshPushDevice(customerId);
+    // applied to a non-billing push — those never carry a billingDeliveryCategory,
+    // so `conn` resolves to the root pool exactly as before.
+    const conn = billingDeliveryCategory && preSendCheck?.handoffTrx ? preSendCheck.handoffTrx : db;
+    if (!(await pushEligibleRuntime(customerId, to, messageType, conn, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
+    const fresh = await hasFreshPushDevice(customerId, conn);
     let appNotification = null;
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);
@@ -453,14 +454,14 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       if (billingDeliveryCategory === 'invoice' || (!billingDeliveryCategory && PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel')) {
         let invoice;
         try {
-          invoice = invoiceId && await db('invoices')
+          invoice = invoiceId && await conn('invoices')
             .where({ id: invoiceId, customer_id: customerId }).whereNull('payer_id').whereNull('payer_statement_id')
             .first('token', 'status', 'scheduled_service_id');
           if (!invoice?.token || !require('../invoice-helpers').isInvoiceCollectibleStatus(invoice.status)) {
             return { delivered: false, blocked: true, reason: 'invoice_unavailable' };
           }
           const payer = await require('../payer').resolveForInvoice({
-            customerId, scheduledServiceId: invoice.scheduled_service_id, throwOnError: true,
+            database: conn, customerId, scheduledServiceId: invoice.scheduled_service_id, throwOnError: true,
           });
           if (payer.payerId) return { delivered: false, blocked: true, reason: 'invoice_payer_billed' };
         } catch {
@@ -518,7 +519,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // best-effort afterward.
     let proofRowId = null;
     try {
-      const inserted = await db('sms_log').insert({
+      const inserted = await conn('sms_log').insert({
         customer_id: customerId,
         direction: 'outbound',
         from_phone: 'push',
@@ -556,7 +557,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // still runs the owed invoice/lead/review transitions.
       if (scheduledSmsLogId) {
         try {
-          const schedRow = await db('sms_log')
+          const schedRow = await conn('sms_log')
             .where({ id: scheduledSmsLogId })
             .first('metadata', 'created_at', 'status');
           if (schedRow && schedRow.status === 'sending') {
@@ -566,7 +567,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
             const { requiresDurableFinalize } = require('./deferred-replay-registry');
             const owesFinalize = requiresDurableFinalize(meta.entry_point);
             const settledAt = new Date();
-            await db('sms_log')
+            await conn('sms_log')
               .where({ id: scheduledSmsLogId, status: 'sending' })
               .update({
                 status: 'sent',
@@ -594,7 +595,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
     acceptedResult = { delivered: true, deliveryOutcome: 'accepted', sid, notificationId, acceptedAt };
     if (proofRowId && notificationId) {
-      await db('sms_log')
+      await conn('sms_log')
         .where({ id: proofRowId })
         .update({
           metadata: JSON.stringify({

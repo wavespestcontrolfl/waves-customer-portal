@@ -79,7 +79,13 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
       from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: customer.phone,
       message_body: body, message_type: messageType, status: 'scheduled',
       scheduled_for: new Date(sendResult.nextAllowedAt),
-      metadata: JSON.stringify({ ...metadata, entry_point: 'billing_failure_deferred',
+      metadata: JSON.stringify({ ...metadata,
+        // Structural fix (pre-push audit P1 on #4843): the authoritative
+        // fan-out key wins if it differs from this call's own up-front
+        // guess — the single source of truth for a replay's dedup identity
+        // is dispatchBillingChannels's own return, not a producer's copy.
+        ...(sendResult.notificationEventKey ? { notificationEventKey: sendResult.notificationEventKey } : {}),
+        entry_point: 'billing_failure_deferred',
         payment_id: paymentId, attempt_payment_id: attemptPaymentId, retry_count: retryCount,
         customer_id: customer.id, replay_purpose: 'payment_failure', original_block_code: sendResult.code,
         refresh_customer_phone: true, resolve_from_by_customer: true,

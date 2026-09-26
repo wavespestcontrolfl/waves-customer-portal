@@ -86,6 +86,7 @@ function resetMockState() {
     paymentsFirst: [], // queued responses for db('payments').first()
     paymentsFirstError: null,
     updates: [], // { table, wheres, patch }
+    smsLogInserts: [], // raw insert payloads for table === 'sms_log'
   });
 }
 
@@ -120,8 +121,11 @@ function mockMakeBuilder(table) {
     }
     return 1;
   };
-  b.insert = async () => {
-    if (table === 'sms_log' && mockState.failSmsLogInsert) throw new Error('insert boom');
+  b.insert = async (payload) => {
+    if (table === 'sms_log') {
+      mockState.smsLogInserts.push(payload);
+      if (mockState.failSmsLogInsert) throw new Error('insert boom');
+    }
     return [];
   };
   return b;
@@ -169,6 +173,36 @@ test('happy path: claim stamped, SMS + email sent, no release', async () => {
   expect(claimUpdates()).toHaveLength(1);
   expect(releaseUpdates()).toHaveLength(0);
   expect(PaymentLifecycleEmail.sendAchProcessing).toHaveBeenCalledTimes(1);
+});
+
+test('hasEmailLeg: true reaches the immediate send AND the window-held queued metadata (pre-push audit P1 on #4843)', async () => {
+  // ach_payment_processing maps to the payment_receipt category, which
+  // enables billing-channel-routing.js's generic Email leg — but this
+  // handler always sends its own PaymentLifecycleEmail.sendAchProcessing.
+  // Without hasEmailLeg:true, an Email-selecting customer would get BOTH:
+  // the generic billing email AND this dedicated acknowledgment.
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  await dispatchAck(WORKER_INPUT);
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ hasEmailLeg: true }));
+
+  // A held (outside-send-window) copy must persist the same flag in its
+  // queued metadata, so the 8AM scheduler replay (server/services/
+  // scheduler.js, which forwards claimMeta.hasEmailLeg === true) still
+  // suppresses the generic Email leg on retry.
+  jest.clearAllMocks();
+  resetMockState();
+  sendCustomerMessage.mockResolvedValue({
+    sent: false,
+    blocked: true,
+    code: 'QUIET_HOURS_HOLD',
+    retryable: true,
+    deferred: true,
+    nextAllowedAt: '2026-08-08T12:00:00.000Z',
+  });
+  await dispatchAck(WORKER_INPUT);
+  expect(mockState.smsLogInserts).toHaveLength(1);
+  const queuedMetadata = JSON.parse(mockState.smsLogInserts[0].metadata);
+  expect(queuedMetadata.hasEmailLeg).toBe(true);
 });
 
 test('customerInitiated provenance threads through to the send; absent by default (Codex P1, PR #3598)', async () => {

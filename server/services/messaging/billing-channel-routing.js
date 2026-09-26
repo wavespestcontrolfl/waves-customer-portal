@@ -219,12 +219,23 @@ function billingDispatchOutcome(channelResults) {
 async function dispatchBillingChannels(input, prefs, sendLeg) {
   const category = billingDeliveryCategory(input);
   const channels = selectedLegs(input, prefs, category);
+  // Structural fix (pre-push audit P1 on #4843): computed BEFORE the
+  // early return too, and stamped onto EVERY outcome this function
+  // returns. A producer that enqueues its own replay row for a billing
+  // hold (stripe-webhook.js, billing-cron.js, complete-scheduled-service.js,
+  // estimate-deposits.js, invoice.js) reads it off the result and persists
+  // it in the queued row's metadata, so the 8AM replay's own
+  // billingNotificationEventKey() call finds the SAME persisted key
+  // (checked first, before it would otherwise hash the replay row's own
+  // now-present scheduled_sms_log_id into a DIFFERENT key) and an
+  // already-accepted leg (e.g. Email) is recognized as already-sent
+  // instead of resent.
+  const notificationEventKey = billingNotificationEventKey(input);
   if (!channels.length) return {
     sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CHANNEL_EMAIL_ONLY',
-    reason: 'The selected email is delivered by this notice’s email sender', channelResults: {},
+    reason: 'The selected email is delivered by this notice’s email sender', channelResults: {}, notificationEventKey,
   };
 
-  const notificationEventKey = billingNotificationEventKey(input);
   const channelResults = {};
   // Email and App use their existing event deduplication; Text is last. A
   // deferred earlier leg holds Text as well, so the caller can replay without
@@ -236,7 +247,7 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
     });
     if (isReplayHold(channelResults[channel])) break;
   }
-  return billingDispatchOutcome(channelResults);
+  return { ...billingDispatchOutcome(channelResults), notificationEventKey };
 }
 
 module.exports = {

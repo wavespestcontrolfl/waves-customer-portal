@@ -3,9 +3,27 @@
 // operator-authored, or an unlisted template. Conversational and
 // link-critical templates must never appear in the policy table.
 
+// attemptPushFirst's billing-leg DB access: mocked only for the
+// `attemptPushFirst` describe block below (real `db` is never invoked by
+// decidePushRoute/pushEligibleRuntime, which take an explicit knex stub).
+const mockRootDb = jest.fn(() => { throw new Error('root pool must not be used on the billing leg'); });
+jest.mock('../models/db', () => mockRootDb);
+const mockCustomerStatus = jest.fn();
+jest.mock('../services/push-notifications', () => ({
+  PUSH_HEARTBEAT_HOURS: 72,
+  customerStatus: mockCustomerStatus,
+}));
+const mockNotifyCustomer = jest.fn();
+jest.mock('../services/notification-service', () => ({ notifyCustomer: mockNotifyCustomer }));
+const mockResolveForInvoice = jest.fn();
+jest.mock('../services/payer', () => ({ resolveForInvoice: mockResolveForInvoice }));
+const mockRecordTouchpoint = jest.fn(() => Promise.resolve());
+jest.mock('../services/conversations', () => ({ recordTouchpoint: mockRecordTouchpoint }));
+
 const {
   decidePushRoute,
   PUSH_ROUTING_POLICY,
+  attemptPushFirst,
   _test,
 } = require('../services/messaging/push-channel-routing');
 
@@ -209,5 +227,133 @@ describe('policy table hygiene', () => {
       expect(p.link).toBe('/?tab=documents');
       expect(p.title).toBe('Your service report is ready');
     }
+  });
+});
+
+// Pre-push audit P1 on #4843: invoice.js's withProviderHandoff transaction
+// (threaded via preSendCheck.handoffTrx — send-customer-message.js's
+// dispatchProvider) must be reused for EVERY db read/write on the billing
+// leg of attemptPushFirst, never a second root-pool connection, or two
+// concurrent App invoice sends can deadlock the DB_POOL_MAX=2 pool.
+describe('attemptPushFirst billing-leg handoff transaction reuse', () => {
+  // Minimal chainable knex query-builder stub. `config` may set `first` and/or
+  // `returning` results.
+  function makeQuery(config = {}) {
+    const q = {};
+    for (const method of ['where', 'whereIn', 'whereNull', 'whereRaw', 'forUpdate', 'insert', 'update']) {
+      q[method] = jest.fn(() => q);
+    }
+    q.first = jest.fn(async () => config.first);
+    q.returning = jest.fn(async () => config.returning || []);
+    q.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
+    q.catch = (reject) => Promise.resolve(1).catch(reject);
+    return q;
+  }
+
+  // Keyed-by-table connection stub. `responses[table]` may be a static config
+  // object or a function of the per-table call count (sms_log is hit twice:
+  // the proof-row insert, then the metadata patch).
+  function makeConnStub(responses) {
+    const callsByTable = {};
+    const conn = jest.fn((table) => {
+      callsByTable[table] = (callsByTable[table] || 0) + 1;
+      const config = typeof responses[table] === 'function'
+        ? responses[table](callsByTable[table])
+        : (responses[table] || {});
+      return makeQuery(config);
+    });
+    conn.callsByTable = callsByTable;
+    return conn;
+  }
+
+  const ORIGINAL_GATE = process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Any un-stubbed root-pool call fails loudly — the point of this suite.
+    mockRootDb.mockImplementation(() => { throw new Error('root pool must not be used on the billing leg'); });
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    mockCustomerStatus.mockResolvedValue({ enabled: true, fresh: true });
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    mockNotifyCustomer.mockResolvedValue({ id: 'notif-1', push: { accepted: 1 } });
+  });
+
+  afterAll(() => {
+    if (ORIGINAL_GATE === undefined) delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+    else process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = ORIGINAL_GATE;
+  });
+
+  it('with a handoff trx present, every billing-leg read/write uses it and the root db is never touched', async () => {
+    const conn = makeConnStub({
+      customers: { first: { phone: null, account_id: null } },
+      notification_prefs: { first: { invoice_channels: ['push'] } },
+      invoices: { first: { token: 'tok-1', status: 'sent', scheduled_service_id: 'svc-1' } },
+      sms_log: (n) => (n === 1 ? { returning: [{ id: 'row-1' }] } : {}),
+    });
+    const preSendCheck = () => true;
+    preSendCheck.handoffTrx = conn;
+
+    const result = await attemptPushFirst({
+      customerId: 'cust-1',
+      to: null,
+      body: 'Your invoice is ready.',
+      messageType: 'invoice',
+      fromNumber: '+19415550100',
+      preSendCheck,
+      explicitPushOnly: true,
+      invoiceId: 'inv-1',
+      billingDeliveryCategory: 'invoice',
+    });
+
+    expect(result).toMatchObject({ delivered: true, deliveryOutcome: 'accepted' });
+
+    // Every read/write attemptPushFirst issues on this leg went through the
+    // handoff trx, never the root pool.
+    expect(conn.callsByTable.customers).toBe(1);
+    expect(conn.callsByTable.notification_prefs).toBe(1);
+    expect(conn.callsByTable.invoices).toBe(1);
+    expect(conn.callsByTable.sms_log).toBe(2); // proof-row insert + metadata patch
+    expect(mockRootDb).not.toHaveBeenCalled();
+
+    // hasFreshPushDevice's customer-status read and the invoice's payer
+    // resolution both received the SAME handoff connection, not a default.
+    expect(mockCustomerStatus).toHaveBeenCalledWith('cust-1', conn);
+    expect(mockResolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ database: conn, customerId: 'cust-1' }));
+  });
+
+  it('non-billing push (no billingDeliveryCategory) keeps using the root pool exactly as today', async () => {
+    // No billingDeliveryCategory ⇒ `conn` resolves to the root `db`, even
+    // though a handoff trx is present on preSendCheck — the ternary in
+    // attemptPushFirst gates on billingDeliveryCategory first, so a
+    // non-billing push must never receive the fake trx.
+    const rootCallsByTable = {};
+    mockRootDb.mockImplementation((table) => {
+      rootCallsByTable[table] = (rootCallsByTable[table] || 0) + 1;
+      if (table === 'customers') return makeQuery({ first: { phone: '9415550123', account_id: null } });
+      if (table === 'notification_prefs') return makeQuery({ first: { payment_receipt_channel: 'push' } });
+      throw new Error(`unexpected root-pool table in this scenario: ${table}`);
+    });
+    const conn = makeConnStub({});
+    const preSendCheck = () => true;
+    preSendCheck.handoffTrx = conn;
+    mockCustomerStatus.mockResolvedValue({ enabled: true, fresh: false }); // no fresh device ⇒ falls back to SMS
+
+    const result = await attemptPushFirst({
+      customerId: 'cust-1',
+      to: '9415550123',
+      body: 'Here is your receipt.',
+      messageType: 'receipt',
+      fromNumber: '+19415550100',
+      preSendCheck,
+      explicitPushOnly: false,
+    });
+
+    expect(result).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(rootCallsByTable.customers).toBe(1);
+    expect(rootCallsByTable.notification_prefs).toBe(1);
+    // customerStatus received the root db, not the fake trx.
+    expect(mockCustomerStatus).toHaveBeenCalledWith('cust-1', mockRootDb);
+    // The handoff trx sitting on preSendCheck was never reached at all.
+    expect(conn).not.toHaveBeenCalled();
   });
 });

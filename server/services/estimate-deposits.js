@@ -560,7 +560,15 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
             payment_intent_id: paymentIntentId || null,
             ...(estimate.customer_id ? {
               billingDeliveryCategory: 'payment_receipt',
-              notificationEventKey: `estimate-deposit:${estimateId}:${paymentIntentId || 'receipt'}`,
+              // Structural fix (pre-push audit P1 on #4843): prefer the
+              // ACTUAL key dispatchBillingChannels used for the immediate
+              // fan-out (result.notificationEventKey, now stamped on every
+              // outcome) over re-deriving the literal here — the single
+              // source of truth stays the fan-out itself. Falls back to the
+              // same deterministic literal the immediate send seeded its
+              // own metadata with when the customer's legacy (non-explicit)
+              // preference never invoked the fan-out at all.
+              notificationEventKey: result.notificationEventKey || `estimate-deposit:${estimateId}:${paymentIntentId || 'receipt'}`,
               // The retry keeps the immediate send's own Email ownership: a
               // separate receipt email exists only when wantEmail was set.
               hasEmailLeg: hasEmailLeg === true,

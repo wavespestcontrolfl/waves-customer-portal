@@ -11677,7 +11677,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   message_type: 'payment_failed',
                   metadata: JSON.stringify({
                     entry_point: 'autopay_completion_decline_deferred',
-                    notificationEventKey: `payment-problem:service:${record.id}`,
+                    // Structural fix (pre-push audit P1 on #4843): prefer
+                    // the fan-out's own authoritative key (dispatchBillingChannels
+                    // now stamps it on every outcome) over re-deriving the
+                    // literal here, so a replay dedupes against the SAME
+                    // identity the immediate attempt actually used.
+                    notificationEventKey: failResult.notificationEventKey || `payment-problem:service:${record.id}`,
                     service_record_id: record.id,
                     invoice_id: invoice.id,
                     pay_url: payUrl,

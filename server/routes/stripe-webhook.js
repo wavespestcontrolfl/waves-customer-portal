@@ -191,7 +191,7 @@ async function isCustomerInitiatedPaymentIntent(pi) {
   }
 }
 
-async function sendBillingSms(customer, body, metadata = {}, { customerInitiated = false } = {}) {
+async function sendBillingSms(customer, body, metadata = {}, { customerInitiated = false, hasEmailLeg = false } = {}) {
   if (!customer?.phone || !customer?.id) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
   }
@@ -212,6 +212,12 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
     // the caller verified this notice follows a payment the customer
     // initiated, so the send window does not hold it.
     ...(customerInitiated ? { customerInitiated: true } : {}),
+    // Pre-push audit P1 on #4843: a caller whose SMS category maps to the
+    // generic Email leg (billing-channel-routing.js BILLING_MESSAGE_CATEGORIES)
+    // but that ALSO sends its own dedicated lifecycle email must say so, or
+    // dispatchBillingChannels fans out a second, duplicate acknowledgment
+    // email for any customer whose saved preference includes Email.
+    ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
     metadata,
   });
   // Send-window hold: a Stripe event (ACH failure, requires-action,
@@ -257,12 +263,20 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
         metadata: JSON.stringify({
           ...metadata,
           customer_initiated: customerInitiated,
+          ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
           ...(resolvedInvoiceId ? { invoice_id: resolvedInvoiceId } : {}),
           entry_point: 'stripe_webhook_billing_deferred',
           original_block_code: result.code,
           replay_purpose: 'payment_failure',
           refresh_customer_phone: true,
           resolve_from_by_customer: true,
+          // Structural fix (pre-push audit P1 on #4843): persist the SAME
+          // key dispatchBillingChannels used for this fan-out. Without it,
+          // scheduler.js's 8AM replay recomputes billingNotificationEventKey
+          // from this row's own (now-present) scheduled_sms_log_id — a
+          // DIFFERENT key from the original attempt — and an already-
+          // accepted leg (e.g. Email) reads as unsent and resends.
+          ...(result.notificationEventKey ? { notificationEventKey: result.notificationEventKey } : {}),
         }),
       });
       logger.info(`[stripe-webhook] Billing SMS for customer ${customer.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt} (${metadata.original_message_type || 'billing'})`);
@@ -6255,7 +6269,17 @@ async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, ev
         original_message_type: 'ach_payment_processing',
         stripe_payment_intent_id: piId,
         invoice_id: freshInvoice.id,
-      }, { customerInitiated });
+      }, {
+        customerInitiated,
+        // ach_payment_processing maps to the payment_receipt category
+        // (BILLING_MESSAGE_CATEGORIES), which enables the generic Email
+        // leg — but this handler always sends its own dedicated
+        // PaymentLifecycleEmail.sendAchProcessing below (unless smsOnly).
+        // Without this, an Email-selecting customer gets that AND the
+        // generic billing-channel-routing email: two acknowledgments for
+        // one ACH payment going into processing.
+        hasEmailLeg: true,
+      });
       if (!smsResult.sent) {
         logger.warn(`[stripe-webhook] ACH processing SMS blocked/failed for invoice ${freshInvoice.invoice_number}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }

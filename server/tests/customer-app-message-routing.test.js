@@ -494,6 +494,10 @@ describe('explicit billing channel combinations', () => {
       const result = await sendCustomerMessage({ ...input, purpose,
         metadata: { original_message_type: type, notificationEventKey: 'qa:billing:combination' } });
       expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+      // sendCustomerMessage returns dispatchBillingChannels's outcome
+      // directly (pre-push audit P1 on #4843) — the persisted key survives
+      // the whole fan-out unchanged, ready for a producer to re-persist.
+      expect(result.notificationEventKey).toBe('qa:billing:combination');
       expect(Object.keys(result.channelResults).sort()).toEqual([...channels].sort());
       expect(sendBillingChannelEmail).toHaveBeenCalledTimes(channels.includes('email') ? 1 : 0);
       const calls = Twilio.sendSMS.mock.calls;
@@ -736,6 +740,50 @@ describe('explicit billing channel combinations', () => {
     expect(billingNotificationEventKey(explicitKey)).toBe('stable-key');
   });
 
+  test('a producer that persists the fan-out key on its queued replay row dedupes against the SAME identity on replay; one that does not gets a DIFFERENT (resend-causing) key (pre-push audit P1 on #4843)', () => {
+    const { dispatchBillingChannels, billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
+    // No eventId (stripe_event_id / attempt_payment_id / payment_id) on the
+    // original attempt — the identity falls back to invoiceId + ET day +
+    // body (e.g. ach_payment_processing, which sendBillingSms deliberately
+    // sends with no upfront notificationEventKey).
+    const originalInput = { ...input, purpose: 'payment_failure',
+      metadata: { original_message_type: 'ach_payment_processing' } };
+
+    // 1. The immediate attempt's own fan-out generates and returns a key —
+    //    this is what a producer (stripe-webhook.js et al.) must persist in
+    //    its queued sms_log row's metadata when the fan-out defers.
+    const originalKey = billingNotificationEventKey(originalInput);
+    expect(originalKey).toEqual(expect.any(String));
+
+    // 2. FIXED producer: persists notificationEventKey in the queued row.
+    //    scheduler.js's replay carries it forward as
+    //    metadata.notificationEventKey alongside the row's own
+    //    scheduled_sms_log_id (server/services/scheduler.js ~4077) — the
+    //    persisted key wins (checked first), so the replay's identity is
+    //    UNCHANGED from the original attempt: an already-accepted Email leg
+    //    is recognized as already-sent, not resent.
+    const replayWithPersistedKey = { ...originalInput, metadata: { ...originalInput.metadata,
+      scheduled_sms_log_id: 'sms-log-row-99', notificationEventKey: originalKey } };
+    expect(billingNotificationEventKey(replayWithPersistedKey)).toBe(originalKey);
+
+    // 3. BUGGY producer (pre-fix): never persisted the key. The replay's
+    //    metadata carries scheduled_sms_log_id but no notificationEventKey,
+    //    so billingNotificationEventKey hashes the row id instead — a
+    //    DIFFERENT key from the original attempt, which would read an
+    //    already-accepted leg as a brand-new, unsent notification.
+    const replayWithoutPersistedKey = { ...originalInput, metadata: { ...originalInput.metadata,
+      scheduled_sms_log_id: 'sms-log-row-99' } };
+    expect(billingNotificationEventKey(replayWithoutPersistedKey)).not.toBe(originalKey);
+
+    // 4. dispatchBillingChannels itself stamps this exact key on its
+    //    outcome for every leg configuration, so a producer never has to
+    //    re-derive it by hand.
+    return dispatchBillingChannels(originalInput, { payment_receipt_channels: ['sms', 'email'] },
+      async () => ({ sent: true, deliveryOutcome: 'accepted' })).then((result) => {
+      expect(result.notificationEventKey).toBe(originalKey);
+    });
+  });
+
   test('unlisted receipt types forward their saved billing category to the App provider', async () => {
     prefs.payment_receipt_channels = ['push'];
     expect(await sendCustomerMessage({ ...input, metadata: { original_message_type: 'autopay_charge_success' } }))
@@ -749,9 +797,19 @@ describe('explicit billing channel combinations', () => {
 
   test('a real email sidecar owns Email and does not get a generic duplicate', async () => {
     prefs.payment_receipt_channels = ['email'];
-    expect(await sendCustomerMessage({ ...input, hasEmailLeg: true })).toMatchObject({ sent: false, code: 'CHANNEL_EMAIL_ONLY' });
+    const withHasEmailLeg = { ...input, hasEmailLeg: true };
+    const result = await sendCustomerMessage(withHasEmailLeg);
+    expect(result).toMatchObject({ sent: false, code: 'CHANNEL_EMAIL_ONLY' });
     expect(sendBillingChannelEmail).not.toHaveBeenCalled();
     expect(Twilio.sendSMS).not.toHaveBeenCalled();
+    // Structural fix (pre-push audit P1 on #4843): notificationEventKey
+    // rides along on EVERY outcome dispatchBillingChannels returns,
+    // including this zero-selected-legs refusal — a producer that enqueues
+    // its own replay row off this outcome must be able to read the key
+    // even when no leg actually ran.
+    const { billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
+    expect(result.notificationEventKey).toBe(billingNotificationEventKey(withHasEmailLeg));
+    expect(result.notificationEventKey).toEqual(expect.any(String));
   });
 
   test('an invoice App leg retains the invoice lock around its provider handoff', async () => {

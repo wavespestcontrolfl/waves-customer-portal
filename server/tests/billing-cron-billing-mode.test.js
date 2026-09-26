@@ -105,6 +105,28 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1);
   });
 
+  // Structural fix (pre-push audit P1 on #4843): the queued row must persist
+  // dispatchBillingChannels's OWN returned key, not just this producer's
+  // up-front guess — the fan-out's key is the single source of truth a
+  // replay's billingNotificationEventKey() checks first.
+  test('the queued retry prefers sendResult.notificationEventKey over this producer\'s own up-front key when the fan-out returns a different one', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-MM', billing_mode: 'monthly_membership' }];
+    StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('declined'), {
+      paymentRecord: { id: 'attempt-1', amount: 55.3 },
+    }));
+    const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;
+    sender.mockResolvedValueOnce({
+      sent: false, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: '2026-09-09T12:00:00Z',
+      // The fan-out's authoritative key, distinct from what this producer
+      // would have derived on its own from attemptPaymentId + messageType.
+      notificationEventKey: 'fanout-authoritative-key',
+    });
+    await BillingCron.processMonthlyBilling();
+    expect(mockScheduledNotices).toHaveLength(1);
+    const meta = JSON.parse(mockScheduledNotices[0].metadata);
+    expect(meta.notificationEventKey).toBe('fanout-authoritative-key');
+  });
+
   test('per_application customer is skipped and never reaches the charge path', async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-PA', billing_mode: 'per_application' }];
 

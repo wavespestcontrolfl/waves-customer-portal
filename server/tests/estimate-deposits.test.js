@@ -389,6 +389,40 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
+  // Structural fix (pre-push audit P1 on #4843): the requeue must persist
+  // the fan-out's own authoritative notificationEventKey when the send
+  // result carries one, rather than always re-deriving the local
+  // estimate-deposit:<id>:<pi> literal — the fan-out's key is the single
+  // source of truth an 8AM scheduler.js replay checks first.
+  it('the requeue persists sendResult.notificationEventKey over its own derived literal when the fan-out returns one', async () => {
+    forceRecordableViaFailOpen();
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
+    sendCustomerMessage.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    const nextAllowedAt = '2026-07-07T12:00:00.000Z';
+    sendCustomerMessage.mockResolvedValue({
+      sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt,
+      notificationEventKey: 'fanout-authoritative-key',
+    });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+    const { handler, state } = statefulWebhookDb({
+      estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1' },
+      customerRow: { id: 'cust-1', phone: '', first_name: 'Sam' },
+      prefsRow: { payment_receipt_channels: ['push'] },
+    });
+    mockDbHandler = handler;
+
+    await handleDepositIntentSucceeded(succeededPi);
+
+    expect(state.smsLogInserts).toHaveLength(1);
+    const meta = JSON.parse(state.smsLogInserts[0].metadata);
+    expect(meta.notificationEventKey).toBe('fanout-authoritative-key');
+    renderSmsTemplate.mockResolvedValue(null);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+  });
+
   it('a phone-bearing requeue of the same entry point never stamps requires_registered_dispatch', async () => {
     forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');

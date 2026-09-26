@@ -5246,6 +5246,10 @@ const InvoiceService = {
         if (sendResult.deferred) err.deferred = true;
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
+        // Structural fix (pre-push audit P1 on #4843): carry the fan-out's
+        // own key forward so the outer wrapper's requeue below (~5698) can
+        // persist the SAME identity the immediate attempt actually used.
+        if (sendResult.notificationEventKey) err.notificationEventKey = sendResult.notificationEventKey;
         err.smsBody = body;
         err.toPhone = customer.phone;
         throw err;
@@ -5682,6 +5686,7 @@ const InvoiceService = {
         if (err.deferred) sms.deferred = true;
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
+        if (err.notificationEventKey) sms.notificationEventKey = err.notificationEventKey;
         if (err.smsBody) sms.heldBody = err.smsBody;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
@@ -5729,7 +5734,11 @@ const InvoiceService = {
               entry_point: "invoice_send_deferred",
               invoice_id: invoiceId,
               billingDeliveryCategory: "invoice",
-              notificationEventKey: `invoice:${invoiceId}:sent`,
+              // Structural fix (pre-push audit P1 on #4843): prefer the
+              // fan-out's own key (threaded up through sms.notificationEventKey
+              // above) over re-deriving the literal here — falls back to it
+              // only when the nested send never reached the fan-out at all.
+              notificationEventKey: sms.notificationEventKey || `invoice:${invoiceId}:sent`,
               hasEmailLeg: true,
               original_block_code: sms.code,
               replay_purpose: "payment_link",

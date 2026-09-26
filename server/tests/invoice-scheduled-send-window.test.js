@@ -805,6 +805,58 @@ describe('processScheduledSends send-window handling', () => {
     }
   });
 
+  // Structural fix (pre-push audit P1 on #4843): the nested sendViaSMS call's
+  // own fan-out generates the authoritative notificationEventKey; this outer
+  // wrapper's requeue must persist THAT key, not just its own hardcoded
+  // `invoice:${id}:sent` guess, so an 8AM scheduler.js replay dedupes an
+  // already-accepted leg (e.g. Email) against the SAME identity instead of
+  // resending it.
+  test('direct delivery held by a hold code persists the fan-out\'s own notificationEventKey when present', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
+      const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
+      err.code = 'QUIET_HOURS_HOLD';
+      err.deferred = true;
+      err.nextAllowedAt = WINDOW_OPEN.toISOString();
+      err.smsBody = 'Hi Pat, your invoice is ready: https://pay.example/abc';
+      err.toPhone = '+19415550123';
+      err.notificationEventKey = 'fanout-authoritative-key';
+      throw err;
+    });
+    try {
+      const draftInvoice = {
+        id: 'inv-1',
+        status: 'draft',
+        customer_id: 'cust-1',
+        payer_id: null,
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
+      };
+      const requeueInsert = chain();
+      queueMocks(db, [
+        chain({ first: { payer_statement_id: null } }), // accrual pre-check
+        chain({ first: draftInvoice }), // claim read
+        preClaimQueueCheck(),
+        chain({ returning: [{ ...draftInvoice, status: 'sending' }] }), // claim update
+        adoptionNoOp(),
+        chain({ first: undefined }), // requeue idempotency check (no prior row)
+        requeueInsert, // held-SMS scheduled-rail insert
+        chain(), // finalize update
+        chain({ first: null }), // lead-conversion read (permissive)
+      ]);
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+      expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
+      expect(result.sms.scheduled).toBe(true);
+      const queuedRow = requeueInsert.insert.mock.calls[0][0];
+      const meta = JSON.parse(queuedRow.metadata);
+      expect(meta.notificationEventKey).toBe('fanout-authoritative-key');
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
   test('sendViaSMSAndEmail (direct caller): a FAILED held-SMS requeue skips the email leg so the claim stays retryable (r16)', async () => {
     // If the scheduled rail never took ownership of the held text, an
     // email-alone success would finalize the invoice and clear the send
