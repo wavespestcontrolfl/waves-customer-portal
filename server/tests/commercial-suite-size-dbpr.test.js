@@ -172,3 +172,20 @@ describe('resolveViaDbprLicense', () => {
     expect(result).toBeNull();
   });
 });
+
+describe('DBPR fetch failure backoff', () => {
+  const { loadDistrictRows, _resetCacheForTests } = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => _resetCacheForTests());
+
+  test('a failed download is not retried on every lookup inside the backoff window', async () => {
+    let t = 1_000_000;
+    const fetchText = jest.fn().mockRejectedValue(new Error('timeout'));
+    await expect(loadDistrictRows(7, { fetchText, now: () => t })).resolves.toEqual([]);
+    t += 60 * 1000;
+    await expect(loadDistrictRows(7, { fetchText, now: () => t })).resolves.toEqual([]);
+    expect(fetchText).toHaveBeenCalledTimes(1);
+    t += 11 * 60 * 1000;
+    await loadDistrictRows(7, { fetchText, now: () => t });
+    expect(fetchText).toHaveBeenCalledTimes(2);
+  });
+});

@@ -233,9 +233,15 @@ function matchDbprRow(rows, { street, unit, zip, phone, businessNameHint } = {})
 
 const _cache = new Map(); // district -> { rows, fetchedAt }
 const _inflight = new Map(); // district -> Promise
+const _failedAt = new Map(); // district -> ms of last failed fetch
+
+// A hung state server must never hang a property lookup: bound the download,
+// and after a failure back off instead of re-downloading on every lookup.
+const DBPR_FETCH_TIMEOUT_MS = 15000;
+const DBPR_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
 
 async function defaultFetchText(url) {
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(DBPR_FETCH_TIMEOUT_MS) });
   if (!res || !res.ok) throw new Error(`HTTP ${res && res.status}`);
   const buf = await res.arrayBuffer();
   return new TextDecoder('latin1').decode(buf);
@@ -245,13 +251,17 @@ async function loadDistrictRows(district, { fetchText = defaultFetchText, now = 
   const cached = _cache.get(district);
   if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
   if (_inflight.has(district)) return _inflight.get(district);
+  const failedAt = _failedAt.get(district);
+  if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return cached ? cached.rows : [];
   const promise = (async () => {
     try {
       const text = await fetchText(dbprExtractUrl(district));
       const rows = parseDbprCsv(text);
       _cache.set(district, { rows, fetchedAt: now() });
+      _failedAt.delete(district);
       return rows;
     } catch (err) {
+      _failedAt.set(district, now());
       logger.warn(`[commercial-suite-size] DBPR extract fetch failed for district ${district}: ${err.message}`);
       return cached ? cached.rows : [];
     } finally {
@@ -266,6 +276,7 @@ async function loadDistrictRows(district, { fetchText = defaultFetchText, now = 
 function _resetCacheForTests() {
   _cache.clear();
   _inflight.clear();
+  _failedAt.clear();
 }
 
 /**
