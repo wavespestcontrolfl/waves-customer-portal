@@ -151,4 +151,42 @@ describe('resolveKnownCallerCustomer — the audit context mirrors production\'s
     db.mockImplementation(() => { throw new Error('must not query the DB with nothing to look up'); });
     expect(await resolveKnownCallerCustomer(call, null)).toBeNull();
   });
+
+  // Codex #4933 r3 P1 (found by the local pre-push audit on this same
+  // round's push): the offline audit scripts read a DIFFERENT database than
+  // this module's own internal `db` when run outside Railway's private
+  // network (their own dbConn() prefers DATABASE_PUBLIC_URL) — querying the
+  // wrong one would silently null out or diverge every customer lookup, and
+  // leave a second, never-destroyed connection pool open past the script's
+  // own cleanup. opts.db lets a caller supply its OWN connection for both
+  // the override lookup and the findCustomerForCallContact delegation.
+  test('opts.db routes BOTH the override lookup and the findCustomerForCallContact delegation through a caller-supplied connection, never the module-level db', async () => {
+    db.mockImplementation(() => { throw new Error('must not use the module-level db when opts.db is supplied'); });
+
+    const auditDb = jest.fn((table) => {
+      const builder = {
+        where: () => builder,
+        whereNull: () => builder,
+        whereRaw: () => builder,
+        orWhereRaw: () => builder,
+        orderBy: () => builder,
+        limit: () => builder,
+        first: () => Promise.resolve(table === 'customers' ? { id: 'override-cust-via-audit-db' } : null),
+        then: (resolve) => Promise.resolve([{ id: 'phone-cust-via-audit-db', phone: '+19415550100' }]).then(resolve),
+      };
+      return builder;
+    });
+
+    // Override branch.
+    const overrideCall = { direction: 'inbound', metadata: { customer_link_override: { customer_id: 'override-cust' } } };
+    const overrideResult = await resolveKnownCallerCustomer(overrideCall, '+19415550100', { db: auditDb });
+    expect(overrideResult).toMatchObject({ id: 'override-cust-via-audit-db' });
+
+    // No-override branch (delegates to findCustomerForCallContact with the same opts.db).
+    const phoneCall = { direction: 'inbound', from_phone: '+19415550100', metadata: {} };
+    const phoneResult = await resolveKnownCallerCustomer(phoneCall, '+19415550100', { db: auditDb });
+    expect(phoneResult).toMatchObject({ id: 'phone-cust-via-audit-db' });
+
+    expect(auditDb).toHaveBeenCalled();
+  });
 });

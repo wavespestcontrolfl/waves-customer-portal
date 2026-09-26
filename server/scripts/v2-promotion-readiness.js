@@ -322,7 +322,12 @@ async function main() {
     // resolveCallContactPhone(r) too (Codex #4933 r1 P2) — same value as
     // `contactPhone` above (r2 P1 fix), computed independently since
     // neither side has a genuine extractedPhone signal to pass.
-    const linkedCustomer = await resolveKnownCallerCustomer(r, contactPhone).catch(() => null);
+    // { db } (Codex #4933 r3 P1): this script's own connection
+    // (DATABASE_PUBLIC_URL-aware dbConn()) — never the processor's internal
+    // ../models/db, which can point at a different or unreachable host when
+    // this runs outside Railway's private network, and would otherwise
+    // leave a second pool undestroyed.
+    const linkedCustomer = await resolveKnownCallerCustomer(r, contactPhone, { db }).catch(() => null);
     const { knownCaller, options: failOpenOptions } = buildFailOpenRoutingContext({
       call: r,
       customer: linkedCustomer,

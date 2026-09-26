@@ -59,7 +59,12 @@ async function main() {
     const KNOWN_CUSTOMER_FIELDS = ['pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
     for (const row of rows) {
       const contactPhone = CRP.resolveCallContactPhone(row);
-      const resolved = await CRP.resolveKnownCallerCustomer(row, contactPhone).catch(() => null);
+      // { db } (Codex #4933 r3 P1): this script's own Phase A connection
+      // (DATABASE_PUBLIC_URL-aware dbConn(), destroyed below) — never the
+      // processor's internal ../models/db, which can point at a different
+      // or unreachable host when this runs outside Railway's private
+      // network, and would otherwise leave a second pool undestroyed.
+      const resolved = await CRP.resolveKnownCallerCustomer(row, contactPhone, { db }).catch(() => null);
       row.linked_customer = resolved
         ? Object.fromEntries(KNOWN_CUSTOMER_FIELDS.map((k) => [k, resolved[k] ?? null]))
         : null;

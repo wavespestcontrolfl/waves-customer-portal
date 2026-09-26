@@ -1288,7 +1288,12 @@ async function replayCall(call, context) {
   // came back null from broken metadata: production has NO knownCaller and
   // holds; the old call.customer_id shortcut kept using the stale link and
   // reported an auto-route).
-  const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone).catch(() => null);
+  // { db } (Codex #4933 r3 P1): this script's own connection is already
+  // production's shared ../models/db singleton (the default `db` above), so
+  // this is a no-op in practice — passed explicitly for defensiveness and
+  // consistency with the other two scripts, whose connection genuinely
+  // differs.
+  const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone, { db }).catch(() => null);
   // buildFailOpenRoutingContext resolves its OWN identity internally via
   // resolveCallContactPhone(call) too (Codex #4933 r1 P2) — same value as
   // `contactPhone` above (r2 P1 fix), computed independently since neither
