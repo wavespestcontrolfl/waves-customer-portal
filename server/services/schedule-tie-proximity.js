@@ -125,8 +125,32 @@ function orderStopsByTieProximity(stops, { origin = HQ } = {}) {
   return [...picked, ...untimed].map((e, i) => ({ ...e.stop, displayOrder: i }));
 }
 
+// Stamps a per-technician `displayOrder` (schedule-tie-proximity) onto each
+// payload in place. `rows` optionally supplies coordinates by id (the week
+// feed's raw visit_lat/visit_lng) when the payloads don't carry lat/lng.
+function stampTieProximityDisplayOrder(payloads, rows = null) {
+  const rowById = rows ? new Map(rows.map((r) => [r.id, r])) : null;
+  const byTech = new Map();
+  payloads.forEach((p) => {
+    if (!p.technicianId) return;
+    if (!byTech.has(p.technicianId)) byTech.set(p.technicianId, []);
+    const row = rowById && rowById.get(p.id);
+    byTech.get(p.technicianId).push(row
+      ? { id: p.id, windowStart: p.windowStart, lat: row.visit_lat, lng: row.visit_lng }
+      : p);
+  });
+  const orderById = new Map();
+  byTech.forEach((stops) => {
+    orderStopsByTieProximity(stops).forEach((o) => orderById.set(o.id, o.displayOrder));
+  });
+  payloads.forEach((p) => {
+    if (orderById.has(p.id)) p.displayOrder = orderById.get(p.id);
+  });
+}
+
 module.exports = {
   orderStopsByTieProximity,
+  stampTieProximityDisplayOrder,
   parseWindowStartMinutes,
   TIE_WINDOW_MINUTES,
 };

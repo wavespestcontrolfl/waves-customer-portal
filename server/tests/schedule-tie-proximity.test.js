@@ -16,7 +16,9 @@ jest.mock('../services/route-optimizer', () => ({
   milesToDriveMinutes: (miles) => miles,
 }));
 
-const { orderStopsByTieProximity, parseWindowStartMinutes, TIE_WINDOW_MINUTES } = require('../services/schedule-tie-proximity');
+const {
+  orderStopsByTieProximity, stampTieProximityDisplayOrder, parseWindowStartMinutes, TIE_WINDOW_MINUTES,
+} = require('../services/schedule-tie-proximity');
 
 function stop(id, { windowStart = null, lat = null, lng = null } = {}) {
   return { id, windowStart, lat, lng };
@@ -144,5 +146,50 @@ describe('schedule-tie-proximity', () => {
     it('returns an empty array for no stops', () => {
       expect(orderStopsByTieProximity([])).toEqual([]);
     });
+  });
+});
+
+describe('stampTieProximityDisplayOrder (day + week feed wiring)', () => {
+  // Synthetic points: prev at the same spot, near ~5 mi east, far ~20 mi
+  // east (HQ-independent: prev is picked first on start time alone).
+  const prevPt = { lat: 27.40, lng: -82.60 };
+  const nearPt = { lat: 27.40, lng: -82.52 };
+  const farPt = { lat: 27.40, lng: -82.28 };
+
+  test('week shape: coords from raw rows, displayOrder per tech, booking order ignored', () => {
+    const payloads = [
+      { id: 'a-prev', technicianId: 't1', windowStart: '11:00' },
+      { id: 'a-far', technicianId: 't1', windowStart: '12:00' },
+      { id: 'b-only', technicianId: 't2', windowStart: '12:00' },
+      { id: 'a-near', technicianId: 't1', windowStart: '12:00' },
+      { id: 'unassigned', technicianId: null, windowStart: '12:00' },
+    ];
+    const rows = [
+      { id: 'a-prev', visit_lat: prevPt.lat, visit_lng: prevPt.lng },
+      { id: 'a-far', visit_lat: farPt.lat, visit_lng: farPt.lng },
+      { id: 'b-only', visit_lat: farPt.lat, visit_lng: farPt.lng },
+      { id: 'a-near', visit_lat: nearPt.lat, visit_lng: nearPt.lng },
+      { id: 'unassigned', visit_lat: nearPt.lat, visit_lng: nearPt.lng },
+    ];
+    stampTieProximityDisplayOrder(payloads, rows);
+    const byId = Object.fromEntries(payloads.map((p) => [p.id, p]));
+    expect(byId['a-prev'].displayOrder).toBe(0);
+    expect(byId['a-near'].displayOrder).toBe(1);
+    expect(byId['a-far'].displayOrder).toBe(2);
+    expect(byId['b-only'].displayOrder).toBe(0);
+    expect('displayOrder' in byId.unassigned).toBe(false);
+    // Payloads keep their shape: no coordinates leak into the week response.
+    expect('lat' in byId['a-near']).toBe(false);
+    expect(payloads.map((p) => p.id)).toEqual(['a-prev', 'a-far', 'b-only', 'a-near', 'unassigned']);
+  });
+
+  test('day shape: payloads carry lat/lng themselves', () => {
+    const payloads = [
+      { id: 'prev', technicianId: 't1', windowStart: '11:00', ...prevPt },
+      { id: 'far', technicianId: 't1', windowStart: '12:00', ...farPt },
+      { id: 'near', technicianId: 't1', windowStart: '12:00', ...nearPt },
+    ];
+    stampTieProximityDisplayOrder(payloads);
+    expect(payloads.map((p) => [p.id, p.displayOrder])).toEqual([['prev', 0], ['far', 2], ['near', 1]]);
   });
 });
