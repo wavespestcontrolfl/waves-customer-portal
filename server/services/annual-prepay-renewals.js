@@ -6284,7 +6284,7 @@ async function ringDeclineRetrievalFollowupBell(termId, retrieval) {
       `A customer who declined renewal online now has installed stations. ${sentence}`,
       {
         icon: '🪵',
-        link: `/admin/customers/${retrieval.customerId}`,
+        link: `/admin/customers?customerId=${retrieval.customerId}`,
         bell: true,
         dedupeKey: `termite-annual-decline-retrieval:${termId}:${retrieval.reason}`,
         metadata: {
@@ -6410,7 +6410,7 @@ async function ringTermiteAnnualDeclineBell(result, customerId, conn, retrieval 
       ].filter(Boolean).join(' '),
       {
         icon: '📋',
-        link: `/admin/customers/${customerId}`,
+        link: `/admin/customers?customerId=${customerId}`,
         bell: true,
         dedupeKey: `termite-annual-renewal-decline:${result.termId}`,
         metadata: {
