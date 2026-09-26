@@ -1905,6 +1905,7 @@ function completionStructuredObservationAllowlist({
   reportServiceLine,
   typedFindingsType = null,
   resolvedSpecialtyServiceKey = null,
+  completionProfile = null,
 }) {
   const legacyObservations = reportServiceLine === 'lawn' && !typedFindingsType
     ? LAWN_STRUCTURED_OBSERVATIONS
@@ -1917,7 +1918,10 @@ function completionStructuredObservationAllowlist({
       routineFamily = 'tree_shrub';
     } else if (!typedFindingsType && reportServiceLine === 'lawn') {
       routineFamily = 'lawn';
-    } else if (!typedFindingsType && reportServiceLine === 'pest') {
+    } else if (!typedFindingsType && reportServiceLine === 'pest'
+      && (!completionProfile?.completionMode || completionProfile.completionMode === 'service_report')
+      && completionProfile?.billingType !== 'one_time'
+      && completionProfile?.category !== 'inspection') {
       routineFamily = 'recurring_pest';
     }
   }
@@ -3638,6 +3642,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       reportServiceLine,
       typedFindingsType,
       resolvedSpecialtyServiceKey,
+      completionProfile,
     });
     // New clients separate controlled dropdown values from free text. For an
     // older specialty client that lacks that field, recover only exact values

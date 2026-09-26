@@ -93,6 +93,17 @@ describe('customer-safe routine completion observations', () => {
     }).has(completionObservationCatalog.recurring_pest[0][1])).toBe(false);
   });
 
+  test.each([
+    { billingType: 'one_time', completionMode: 'service_report' },
+    { category: 'inspection', completionMode: 'service_report' },
+    { completionMode: 'internal_only' },
+  ])('does not classify unsupported pest profiles as recurring: %j', (completionProfile) => {
+    expect(completionStructuredObservationAllowlist({
+      reportServiceLine: 'pest',
+      completionProfile,
+    }).has(completionObservationCatalog.recurring_pest[0][1])).toBe(false);
+  });
+
   test('the completion path rejects arbitrary text submitted as a routine structured observation', async () => {
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
 
@@ -120,6 +131,20 @@ describe('customer-safe routine completion observations', () => {
     resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'mud_dauber_removal' });
     const specialtyResult = await complete({ structuredObservations: [routineObservation] });
     expect(specialtyResult).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
+  });
+
+  test.each([
+    ['one-time pest', { serviceKey: 'one_time_pest_control', billingType: 'one_time', completionMode: 'service_report' }],
+    ['assessment', { serviceKey: 'waves_assessment', category: 'inspection', completionMode: 'internal_only' }],
+  ])('the completion path rejects recurring observations on an untyped %s profile', async (_label, profile) => {
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce(profile);
+
+    const result = await complete({
+      structuredObservations: [completionObservationCatalog.recurring_pest[0][1]],
+    });
+
+    expect(result).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
   });
 
   test('the real typed tree-and-shrub completion profile accepts its routine observation vocabulary', async () => {
