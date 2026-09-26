@@ -248,12 +248,12 @@ Use for: "I ordered the Bifen", "the SiteOne order arrived", "cancel that Prodia
   },
   {
     name: 'list_unlogged_purchases',
-    description: `List Amazon deliveries the auto-restock lane could NOT log automatically: no confident product match, a title/catalog size conflict, or a product with no parseable container size. Read-only — never writes stock. Use to catch a delivery that needs a manual restock or a catalog fix (e.g. a missing container_size).
+    description: `List Amazon deliveries the auto-restock lane did NOT log automatically: no confident product match, a title size or pack count that doesn't match the catalog, a product with no parseable container size, an email that names no item, or a possible duplicate of a manual restock or count. Read-only — never writes stock. Use to catch a delivery that needs a manual restock or a catalog fix (e.g. a missing container_size).
 Use for: "what Amazon deliveries need a look?", "why didn't the Taurus SC order log itself?"`,
     input_schema: {
       type: 'object',
       properties: {
-        status: { type: 'string', enum: ['unmatched', 'size_mismatch', 'needs_size', 'no_items', 'all'], description: 'Filter by why it was not logged (default: all non-logged statuses)' },
+        status: { type: 'string', enum: ['unmatched', 'size_mismatch', 'needs_size', 'no_items', 'possible_duplicate', 'all'], description: 'Filter by why it was not logged (default: all non-logged statuses)' },
         limit: { type: 'integer', minimum: 1, maximum: 200 },
       },
     },
@@ -1166,7 +1166,7 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-const UNLOGGED_PURCHASE_STATUSES = ['unmatched', 'size_mismatch', 'needs_size', 'no_items'];
+const UNLOGGED_PURCHASE_STATUSES = ['unmatched', 'size_mismatch', 'needs_size', 'no_items', 'possible_duplicate'];
 
 // Read-only visibility into the Amazon delivery auto-restock lane
 // (server/services/purchase-receipts) for whatever it declined to log
@@ -1176,21 +1176,23 @@ async function listUnloggedPurchases(input) {
   const status = input?.status || 'all';
   const limit = Math.min(input?.limit || 50, 200);
   try {
-    let query = db('purchase_receipt_lines as prl')
+    const rows = await db('purchase_receipt_lines as prl')
       .leftJoin('products_catalog as pc', 'pc.id', 'prl.product_id')
       .whereIn('prl.status', status === 'all' ? UNLOGGED_PURCHASE_STATUSES : [status])
-      .select('prl.id', 'prl.vendor', 'prl.order_number', 'prl.raw_title', 'prl.quantity', 'prl.status', 'prl.created_at', 'pc.name as matched_product_name')
+      .select('prl.id', 'prl.vendor', 'prl.order_number', 'prl.raw_title', 'prl.quantity', 'prl.received_qty', 'prl.received_unit',
+        'prl.status', 'prl.created_at', 'pc.name as matched_product_name')
       .orderBy('prl.created_at', 'desc')
       .limit(limit);
-    const rows = await query;
     return {
       lines: rows.map((r) => ({
         id: r.id, vendor: r.vendor, order_number: r.order_number, title: r.raw_title,
         quantity: toNumber(r.quantity), status: r.status, matched_product: r.matched_product_name || null,
+        // Set only on a possible_duplicate hold: what would have been added.
+        held_amount: r.received_qty == null ? null : `${toNumber(r.received_qty)} ${r.received_unit}`,
         created_at: r.created_at,
       })),
       total: rows.length,
-      note: 'unmatched = no confident product match (non-chemical items land here too); size_mismatch = the title\'s own pack size disagreed with the product\'s container_size; needs_size = the matched product has no parseable container_size; no_items = the delivery email (and any sibling order/shipment email found) had no parseable item at all — title is "Amazon delivery, order X, items unknown".',
+      note: 'unmatched = no confident product match (personal items land here too); size_mismatch = the title\'s size or pack count could not be squared with the product\'s container_size; needs_size = the matched product has no parseable container_size; no_items = the Delivered email named no item (title is the email subject); possible_duplicate = matched and sized, but a manual restock or count was already logged around the delivery, so nothing was added.',
     };
   } catch (err) {
     logger.warn(`[intelligence-bar:procurement] list_unlogged_purchases failed: ${err.message}`);

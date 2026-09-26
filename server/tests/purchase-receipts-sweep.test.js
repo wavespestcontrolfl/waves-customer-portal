@@ -1,15 +1,13 @@
 /**
  * purchase-receipts/sweep.js — the two gates (GATE_PURCHASE_RECEIPT_RESTOCK
- * + PURCHASE_RECEIPT_SINCE), sender authentication (P0: from/subject are
- * spoofable — only an aligned SPF/DKIM pass earns any processing), the
- * per-email hook path, the bell for a 'logged' line, and the ~15-min
- * sweep's aggregation across emails.
+ * + a strict PURCHASE_RECEIPT_SINCE), sender authentication (P0: from/subject
+ * are spoofable — only an aligned SPF/DKIM pass earns any processing), the
+ * per-email hook path, the bells, and the ~15-min sweep's aggregation.
  *
  * receipt-processor's own matching/sizing/idempotency logic is covered in
  * purchase-receipts-processor.test.js — here it is mocked so this suite
  * tests only sweep.js's own orchestration. hasAlignedAuth/domainFromAddress
- * are the REAL (unmocked) functions from inbox-hygiene.js/spam-blocker.js —
- * this suite is exactly what proves the integration actually authenticates.
+ * and gateEnvTimestamp are the REAL functions.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -28,69 +26,85 @@ jest.mock('../models/db', () => {
 
 const { processReceiptEmail, runPurchaseReceiptRestockSweep } = require('../services/purchase-receipts/sweep');
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
+const logger = require('../services/logger');
 
-// A real "dkim=pass header.i=@amazon.com" clause — the shape a genuine
-// Amazon delivery email carries (prod check: every order-update@amazon.com
-// email since 2026-08-05 has this). hasAlignedAuth/domainFromAddress are
-// real, unmocked code — this is what makes every other test in this file
-// (which all use this fixture) an actual proof the auth gate passes real
-// deliveries, not just a mock that ignores it.
+// The shape a genuine Amazon delivery email carries (every
+// order-update@amazon.com email since 2026-08-05 has an aligned DKIM pass).
 const ALIGNED_AMAZON_AUTH = 'dkim=pass header.i=@amazon.com; spf=pass smtp.mailfrom=amazon.com';
 
 const deliveredEmail = {
-  id: 'e1', from_address: 'order-update@amazon.com', subject: 'Delivered: 2 "Atticus Talak..."',
-  body_text: 'Order # 114-9578837-7732259\n\n* Taurus SC Termiticide 78 oz Quantity: 2\n* Chromebook Quantity: 1\n',
-  received_at: new Date(), authentication_results: ALIGNED_AMAZON_AUTH,
+  id: 'e1', from_address: 'order-update@amazon.com', subject: 'Delivered: 2 "Taurus SC..."',
+  body_text: 'Order # 900-1000001-1000001\n\n* Taurus SC Termiticide 78 oz Quantity: 2\n* Chromebook Quantity: 1\n',
+  received_at: new Date('2026-09-27T15:00:00Z'), authentication_results: ALIGNED_AMAZON_AUTH,
 };
+const taurus = { id: 'p1', name: 'Taurus SC' };
+const loggedTaurus = (extra = {}) => ({ status: 'logged', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz', hasOpenRestockRequest: false, ...extra });
+const unmatched = { status: 'unmatched', inserted: true, product: null };
+
+function openGates() {
+  process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
+  process.env.PURCHASE_RECEIPT_SINCE = '2026-09-26T05:49:45Z';
+}
 
 beforeEach(() => {
   mockState.outcomes = [];
   mockState.emails = [];
   processReceiptLine.mockClear();
+  logger.warn.mockClear();
   delete process.env.GATE_PURCHASE_RECEIPT_RESTOCK;
   delete process.env.PURCHASE_RECEIPT_SINCE;
 });
 
 describe('gating', () => {
   test('gate off -> skipped before anything else, for both entry points', async () => {
-    process.env.PURCHASE_RECEIPT_SINCE = '2026-01-01T00:00:00Z';
+    process.env.PURCHASE_RECEIPT_SINCE = '2026-09-26T05:49:45Z';
     expect(await processReceiptEmail(deliveredEmail)).toEqual({ skipped: 'gated' });
     expect(await runPurchaseReceiptRestockSweep()).toEqual({ skipped: 'gated' });
     expect(processReceiptLine).not.toHaveBeenCalled();
   });
 
-  test('gate on but PURCHASE_RECEIPT_SINCE unset -> skipped, no read/write at all', async () => {
+  test.each([
+    [undefined],
+    ['2026-09-26T05:49:45'], // no offset: Railway would read it as UTC, hours off
+    ['2026-09-26'], // bare date
+    ['Sat Sep 26 2026 01:49:45 GMT-0400'], // locale string
+    ['2026-02-30T05:49:45Z'], // impossible date
+  ])('gate on but PURCHASE_RECEIPT_SINCE=%s is no cutoff at all -> skipped, nothing read or written', async (since) => {
     process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
+    if (since !== undefined) process.env.PURCHASE_RECEIPT_SINCE = since;
     expect(await processReceiptEmail(deliveredEmail)).toEqual({ skipped: 'no_since' });
     expect(await runPurchaseReceiptRestockSweep()).toEqual({ skipped: 'no_since' });
     expect(processReceiptLine).not.toHaveBeenCalled();
   });
 
-  test('an email received before PURCHASE_RECEIPT_SINCE is skipped (never replays pre-activation history)', async () => {
+  test('an explicit non-UTC offset is honored: 01:49:45-04:00 is the same instant as 05:49:45Z', async () => {
     process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
-    process.env.PURCHASE_RECEIPT_SINCE = '2026-09-26T00:00:00Z';
-    const old = { ...deliveredEmail, received_at: new Date('2026-09-01T00:00:00Z') };
-    expect(await processReceiptEmail(old)).toEqual({ skipped: 'before_since' });
+    process.env.PURCHASE_RECEIPT_SINCE = '2026-09-26T01:49:45-04:00';
+    const justBefore = { ...deliveredEmail, received_at: new Date('2026-09-26T05:49:44Z') };
+    expect(await processReceiptEmail(justBefore)).toEqual({ skipped: 'before_since' });
+  });
+
+  test.each([
+    [new Date('2026-09-01T00:00:00Z')],
+    [null],
+    ['not a date'],
+  ])('an email received before PURCHASE_RECEIPT_SINCE (or with no readable time: %s) is skipped', async (receivedAt) => {
+    openGates();
+    expect(await processReceiptEmail({ ...deliveredEmail, received_at: receivedAt })).toEqual({ skipped: 'before_since' });
     expect(processReceiptLine).not.toHaveBeenCalled();
   });
 
   test('a non-delivery email from the same sender is skipped', async () => {
-    process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
-    process.env.PURCHASE_RECEIPT_SINCE = '2026-01-01T00:00:00Z';
-    const shipped = { ...deliveredEmail, subject: 'Shipped: your order' };
-    expect(await processReceiptEmail(shipped)).toEqual({ skipped: 'not_a_delivery_email' });
+    openGates();
+    expect(await processReceiptEmail({ ...deliveredEmail, subject: 'Shipped: your order' })).toEqual({ skipped: 'not_a_delivery_email' });
   });
 });
 
 describe('sender authentication (P0: from/subject are spoofable)', () => {
-  beforeEach(() => {
-    process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
-    process.env.PURCHASE_RECEIPT_SINCE = '2026-01-01T00:00:00Z';
-  });
+  beforeEach(openGates);
 
   test('no Authentication-Results at all -> refused, no processing, no DB write', async () => {
-    const spoofed = { ...deliveredEmail, authentication_results: null };
-    expect(await processReceiptEmail(spoofed)).toEqual({ skipped: 'unauthenticated' });
+    expect(await processReceiptEmail({ ...deliveredEmail, authentication_results: null })).toEqual({ skipped: 'unauthenticated' });
     expect(processReceiptLine).not.toHaveBeenCalled();
   });
 
@@ -101,7 +115,7 @@ describe('sender authentication (P0: from/subject are spoofable)', () => {
   });
 
   test('an aligned DKIM pass for amazon.com is accepted and processing proceeds', async () => {
-    mockState.outcomes = [{ status: 'logged', product: { id: 'p1', name: 'Taurus SC' }, receivedQty: 156, receivedUnit: 'fl_oz' }, { status: 'unmatched', inserted: true }];
+    mockState.outcomes = [loggedTaurus(), unmatched];
     const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn(async () => ({})) });
     expect(result.skipped).toBeUndefined();
     expect(processReceiptLine).toHaveBeenCalledTimes(2);
@@ -109,85 +123,79 @@ describe('sender authentication (P0: from/subject are spoofable)', () => {
 });
 
 describe('processReceiptEmail', () => {
-  beforeEach(() => {
-    process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
-    process.env.PURCHASE_RECEIPT_SINCE = '2026-01-01T00:00:00Z';
-  });
+  beforeEach(openGates);
 
   test('a logged line rings one bell; an unmatched line rings none', async () => {
-    mockState.outcomes = [
-      { status: 'logged', product: { id: 'p1', name: 'Taurus SC' }, receivedQty: 156, receivedUnit: 'fl_oz' },
-      { status: 'unmatched', inserted: true },
-    ];
+    mockState.outcomes = [loggedTaurus(), unmatched];
     const notify = jest.fn(async () => ({}));
     const result = await processReceiptEmail(deliveredEmail, { notify });
 
-    expect(processReceiptLine).toHaveBeenCalledTimes(2);
-    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ orderNumber: '114-9578837-7732259', shipmentKey: 'e1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 });
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ orderNumber: '900-1000001-1000001', shipmentKey: 'e1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 });
     expect(processReceiptLine.mock.calls[1][0]).toMatchObject({ shipmentKey: 'e1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 2 });
-
-    expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', receivedQty: 156, receivedUnit: 'fl_oz', productId: 'p1' }]);
-    expect(result.unmatched).toEqual([{ title: 'Chromebook' }]);
+    expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', productId: 'p1', receivedQty: 156, receivedUnit: 'fl_oz' }]);
+    expect(result.unmatched).toEqual([{ title: 'Chromebook', productId: null, receivedQty: null, receivedUnit: null }]);
 
     expect(notify).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = notify.mock.calls[0];
     expect(category).toBe('inventory');
-    expect(title).toMatch(/Amazon delivery logged/i);
-    expect(body).toContain('Taurus SC');
-    expect(body).toContain('+156 fl oz');
-    expect(body).toContain('2 × 78 fl oz');
-    expect(opts.bell).toBe(true);
-    expect(opts.link).toBe('/admin/inventory?tab=products');
-    expect(opts.dedupeKey).toBe('amazon-delivery:e1:Taurus SC Termiticide 78 oz');
+    expect(title).toBe('Amazon delivery logged');
+    expect(body).toBe('Amazon delivery logged: Taurus SC +156 fl oz (2 × 78 fl oz)');
+    expect(opts).toMatchObject({ bell: true, link: '/admin/inventory?tab=products', dedupeKey: 'amazon-delivery:e1:Taurus SC Termiticide 78 oz' });
   });
 
-  test('a logged line whose stock was adjusted around a non-qualifying live request names it in the bell', async () => {
-    mockState.outcomes = [
-      { status: 'logged', product: { id: 'p1', name: 'Taurus SC' }, receivedQty: 78, receivedUnit: 'fl_oz', leftoverRequest: { vendor: 'SiteOne', status: 'ordered' } },
-      { status: 'unmatched', inserted: true },
-    ];
+  test('a live restock request adds a read-only note to the logged bell', async () => {
+    mockState.outcomes = [loggedTaurus({ hasOpenRestockRequest: true }), unmatched];
     const notify = jest.fn(async () => ({}));
     await processReceiptEmail(deliveredEmail, { notify });
-    const body = notify.mock.calls[0][2];
-    expect(body).toContain('A SiteOne order for it is still marked ordered — close it if this covers it.');
+    expect(notify.mock.calls[0][2]).toContain('A restock request for Taurus SC is still open. Close it in the Intelligence Bar if this delivery covers it.');
   });
 
-  test('a logged line received via a restock request (no leftover) carries no extra note in the bell', async () => {
-    mockState.outcomes = [
-      { status: 'logged', product: { id: 'p1', name: 'Taurus SC' }, receivedQty: 156, receivedUnit: 'fl_oz', leftoverRequest: null },
-      { status: 'unmatched', inserted: true },
-    ];
-    const notify = jest.fn(async () => ({}));
-    await processReceiptEmail(deliveredEmail, { notify });
-    const body = notify.mock.calls[0][2];
-    expect(body).not.toContain('still marked');
-  });
-
-  test('size_mismatch and needs_size lines never ring a bell', async () => {
-    mockState.outcomes = [{ status: 'size_mismatch', inserted: true }, { status: 'needs_size', inserted: true }];
+  test.each([
+    ['possible_duplicate', 'possibleDuplicate', 'A manual restock or count was logged around the same time, so check the count.'],
+    ['size_mismatch', 'sizeMismatch', "The listing's size or pack count doesn't match the catalog container size, so log it by hand."],
+    ['needs_size', 'needsSize', 'The product has no container size in the catalog, so log it by hand.'],
+  ])('a %s line is held with one bell saying why', async (status, bucket, reason) => {
+    mockState.outcomes = [{ status, product: taurus, inserted: true }, unmatched];
     const notify = jest.fn(async () => ({}));
     const result = await processReceiptEmail(deliveredEmail, { notify });
-    expect(result.sizeMismatch).toEqual([{ title: 'Taurus SC Termiticide 78 oz' }]);
-    expect(result.needsSize).toEqual([{ title: 'Chromebook' }]);
-    expect(notify).not.toHaveBeenCalled();
+    expect(result[bucket]).toEqual([{ title: 'Taurus SC Termiticide 78 oz', productId: 'p1', receivedQty: null, receivedUnit: null }]);
+    expect(result.logged).toEqual([]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [, title, body, opts] = notify.mock.calls[0];
+    expect(title).toBe('Amazon delivery not added');
+    expect(body).toBe(`Amazon delivery of Taurus SC ×2 wasn't added. ${reason}`);
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'amazon-delivery-held:e1:Taurus SC Termiticide 78 oz', metadata: { emailId: 'e1', productId: 'p1', status } });
+  });
+
+  test('a failed bell is logged, never recorded as a failed line', async () => {
+    mockState.outcomes = [loggedTaurus(), unmatched];
+    const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn(async () => { throw new Error('bell down'); }) });
+    expect(result.logged).toHaveLength(1);
+    expect(result.errors).toEqual([]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('bell down'));
   });
 
   test('a per-item failure is recorded and does not stop the other items on the same email', async () => {
-    // mockImplementationOnce (not a stateful mockImplementation) so this
-    // test's override cannot leak into later tests/describes that expect
-    // the default mockState.outcomes.shift() behavior.
     processReceiptLine.mockImplementationOnce(async () => { throw new Error('inventory-operations boom'); });
-    processReceiptLine.mockImplementationOnce(async () => ({ status: 'unmatched', inserted: true }));
+    processReceiptLine.mockImplementationOnce(async () => unmatched);
     const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn() });
     expect(result.errors).toEqual([{ title: 'Taurus SC Termiticide 78 oz', message: 'inventory-operations boom' }]);
-    expect(result.unmatched).toEqual([{ title: 'Chromebook' }]);
+    expect(result.unmatched).toHaveLength(1);
   });
 
-  test('an itemless Delivered email ("N Lawn & Garden item(s)") records exactly one no_items placeholder line (no sibling recovery)', async () => {
+  test('an already-processed line lands in alreadyProcessed with no bell', async () => {
+    mockState.outcomes = [{ skipped: true, reason: 'already_processed' }, unmatched];
+    const notify = jest.fn(async () => ({}));
+    const result = await processReceiptEmail(deliveredEmail, { notify });
+    expect(result.alreadyProcessed).toEqual([{ title: 'Taurus SC Termiticide 78 oz', reason: 'already_processed' }]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('an itemless Delivered email ("N Lawn & Garden item(s)") records one no_items line and rings a bell to check it', async () => {
     const itemless = {
       id: 'e4', from_address: 'order-update@amazon.com', subject: 'Delivered: 2 Lawn & Garden items',
-      body_text: 'Order # 100-1111111-1111111\n\nTrack your package: https://www.amazon.com/x\n',
-      received_at: new Date(), authentication_results: ALIGNED_AMAZON_AUTH,
+      body_text: 'Order # 900-7000007-7000007\n\nTrack your package: https://www.amazon.com/x\n',
+      received_at: new Date('2026-09-27T15:00:00Z'), authentication_results: ALIGNED_AMAZON_AUTH,
     };
     mockState.outcomes = [{ status: 'no_items', inserted: true, product: null }];
     const notify = jest.fn(async () => ({}));
@@ -195,32 +203,23 @@ describe('processReceiptEmail', () => {
 
     expect(processReceiptLine).toHaveBeenCalledTimes(1);
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({
-      orderNumber: '100-1111111-1111111', item: { title: 'Delivered: 2 Lawn & Garden items', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
+      orderNumber: '900-7000007-7000007', item: { title: 'Delivered: 2 Lawn & Garden items', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
     });
-    expect(result.noItems).toEqual([{ title: 'Delivered: 2 Lawn & Garden items', orderNumber: '100-1111111-1111111' }]);
-    expect(result.logged).toEqual([]);
-    expect(notify).not.toHaveBeenCalled(); // no_items never bells
+    expect(result.noItems).toEqual([{ title: 'Delivered: 2 Lawn & Garden items', productId: null, receivedQty: null, receivedUnit: null }]);
+    expect(notify.mock.calls[0][2]).toBe('Amazon delivery of "2 Lawn & Garden items" wasn\'t added. The email doesn\'t name the item. If it\'s stock, log it by hand.');
   });
 });
 
 describe('runPurchaseReceiptRestockSweep', () => {
-  beforeEach(() => {
-    process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
-    process.env.PURCHASE_RECEIPT_SINCE = '2026-01-01T00:00:00Z';
-  });
+  beforeEach(openGates);
 
-  test('aggregates outcomes across every scanned email', async () => {
-    mockState.emails = [deliveredEmail, { ...deliveredEmail, id: 'e2', body_text: 'Order # 200-0000000-0000000\n\n* Southern Ag Thuricide BT Concentrate\n' }];
-    mockState.outcomes = [
-      { status: 'logged', product: { id: 'p1', name: 'Taurus SC' }, receivedQty: 156, receivedUnit: 'fl_oz' },
-      { status: 'unmatched', inserted: true },
-      { status: 'unmatched', inserted: true },
-    ];
+  test('aggregates outcomes across every scanned email, tagged with the email id', async () => {
+    mockState.emails = [deliveredEmail, { ...deliveredEmail, id: 'e2', body_text: 'Order # 900-8000008-8000008\n\n* Southern Ag Thuricide BT Concentrate\n' }];
+    mockState.outcomes = [loggedTaurus(), unmatched, unmatched];
     const result = await runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
     expect(result.emailsScanned).toBe(2);
-    expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', receivedQty: 156, receivedUnit: 'fl_oz', productId: 'p1', emailId: 'e1' }]);
-    expect(result.unmatched).toHaveLength(2);
-    expect(result.unmatched[1].emailId).toBe('e2');
+    expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', productId: 'p1', receivedQty: 156, receivedUnit: 'fl_oz', emailId: 'e1' }]);
+    expect(result.unmatched.map((row) => row.emailId)).toEqual(['e1', 'e2']);
   });
 
   test('an unauthenticated candidate email in the same sweep is skipped and never touches processReceiptLine', async () => {

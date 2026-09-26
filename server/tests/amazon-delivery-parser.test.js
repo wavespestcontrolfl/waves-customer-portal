@@ -25,14 +25,14 @@ describe('parseAmazonDeliveredEmail — item blocks', () => {
     const email = {
       from_address: 'order-update@amazon.com',
       subject: 'Delivered: 4 "Atticus Talak 7.9 F..."',
-      body_text: 'Order #\n114-9791349-7329852\n\n'
+      body_text: 'Order #\n900-2000002-2000002\n\n'
         + '* Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96 oz) – Indoor and Outdoor Insect Control\n'
         + '  Quantity: 4\n\n'
-        + 'Track your package: https://www.amazon.com/gp/your-account/order-details?orderId=111-4379234-9209869\n',
+        + 'Track your package: https://www.amazon.com/gp/your-account/order-details?orderId=900-3000003-3000003\n',
     };
     const parsed = parseAmazonDeliveredEmail(email);
     // The Order # LINE wins even though the Track URL's orderId is a different number.
-    expect(parsed.orderNumber).toBe('114-9791349-7329852');
+    expect(parsed.orderNumber).toBe('900-2000002-2000002');
     expect(parsed.items).toEqual([{ title: 'Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96 oz) – Indoor and Outdoor Insect Control', quantity: 4 }]);
   });
 
@@ -40,14 +40,14 @@ describe('parseAmazonDeliveredEmail — item blocks', () => {
     const email = {
       from_address: 'order-update@amazon.com',
       subject: 'Delivered: "JoyTube..." and 1 more item',
-      body_text: 'Order # 113-3148685-4885834\n\n'
+      body_text: 'Order # 900-4000004-4000004\n\n'
         + '* JoyTube Plastic Hose Barb Fittings Assortment Kit (pack of 6)\n'
         + '  Quantity: 1\n\n\n'
         + '* Southern Ag Thuricide BT Caterpillar Control, 16oz - Pint\n'
         + '  Quantity: 1\n',
     };
     const parsed = parseAmazonDeliveredEmail(email);
-    expect(parsed.orderNumber).toBe('113-3148685-4885834');
+    expect(parsed.orderNumber).toBe('900-4000004-4000004');
     expect(parsed.items).toEqual([
       { title: 'JoyTube Plastic Hose Barb Fittings Assortment Kit (pack of 6)', quantity: 1 },
       { title: 'Southern Ag Thuricide BT Caterpillar Control, 16oz - Pint', quantity: 1 },
@@ -72,7 +72,7 @@ describe('parseAmazonDeliveredEmail — item blocks', () => {
     const email = {
       from_address: 'order-update@amazon.com',
       subject: 'Delivered: 2 "Atticus Talak 7.9 F..."',
-      body_text: 'Order # 114-9578837-7732259\n\n'
+      body_text: 'Order # 900-1000001-1000001\n\n'
         + '* Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96oz) Quantity: 2\n',
     };
     expect(parseAmazonDeliveredEmail(email).items).toEqual([{ title: 'Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96oz)', quantity: 2 }]);
@@ -92,11 +92,11 @@ describe('parseAmazonDeliveredEmail — item blocks', () => {
       from_address: 'order-update@amazon.com',
       subject: 'Delivered: 2 "Atticus Talak 7.9 F..."',
       body_text: '',
-      body_html: '<html><body><p>Your package was delivered.</p><p>Order # 114-9578837-7732259</p>'
+      body_html: '<html><body><p>Your package was delivered.</p><p>Order # 900-1000001-1000001</p>'
         + '<ul><li>* Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96oz) Quantity: 2</li></ul></body></html>',
     };
     const parsed = parseAmazonDeliveredEmail(email);
-    expect(parsed.orderNumber).toBe('114-9578837-7732259');
+    expect(parsed.orderNumber).toBe('900-1000001-1000001');
     expect(parsed.items).toEqual([{ title: 'Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96oz)', quantity: 2 }]);
   });
 
@@ -125,39 +125,39 @@ describe('parseAmazonDeliveredEmail — item blocks', () => {
 
 describe('parseAmazonDeliveredEmail — Order # and shipmentId extraction', () => {
   test('Order # on the SAME line', () => {
-    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: 'Order # 114-9578837-7732259\n\n* Thing\n  Quantity: 1\n' };
-    expect(parseAmazonDeliveredEmail(email).orderNumber).toBe('114-9578837-7732259');
+    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: 'Order # 900-1000001-1000001\n\n* Thing\n  Quantity: 1\n' };
+    expect(parseAmazonDeliveredEmail(email).orderNumber).toBe('900-1000001-1000001');
   });
 
   test('Order # alone on its own line, the number on the line right after', () => {
-    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: 'Order #\n114-9791349-7329852\n\n* Thing\n  Quantity: 1\n' };
-    expect(parseAmazonDeliveredEmail(email).orderNumber).toBe('114-9791349-7329852');
+    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: 'Order #\n900-2000002-2000002\n\n* Thing\n  Quantity: 1\n' };
+    expect(parseAmazonDeliveredEmail(email).orderNumber).toBe('900-2000002-2000002');
   });
 
   test('the Track package URL orderId, when it differs, is NEVER used as the order number', () => {
     const email = {
       from_address: 'order-update@amazon.com', subject: 'Delivered: your order',
-      body_text: 'Order # 114-9791349-7329852\n\n* Thing\n  Quantity: 1\n\n'
-        + 'Track package: https://www.amazon.com/gp/css/order-details?orderId=111-4379234-9209869&shipmentId=Ab12Cd34\n',
+      body_text: 'Order # 900-2000002-2000002\n\n* Thing\n  Quantity: 1\n\n'
+        + 'Track package: https://www.amazon.com/gp/css/order-details?orderId=900-3000003-3000003&shipmentId=Ab12Cd34\n',
     };
     const parsed = parseAmazonDeliveredEmail(email);
-    expect(parsed.orderNumber).toBe('114-9791349-7329852');
-    expect(parsed.orderNumber).not.toBe('111-4379234-9209869');
+    expect(parsed.orderNumber).toBe('900-2000002-2000002');
+    expect(parsed.orderNumber).not.toBe('900-3000003-3000003');
   });
 
   test('shipmentId is pulled from the Track package URL and used as shipmentKey', () => {
     const email = {
       from_address: 'order-update@amazon.com', subject: 'Delivered: your order',
-      body_text: 'Order # 113-3148685-4885834\n\n* Thing\n  Quantity: 1\n\n'
-        + 'Track package: https://www.amazon.com/gp/css/order-details?orderId=113-3148685-4885834&shipmentId=owFYr7fBJ\n',
+      body_text: 'Order # 900-4000004-4000004\n\n* Thing\n  Quantity: 1\n\n'
+        + 'Track package: https://www.amazon.com/gp/css/order-details?orderId=900-4000004-4000004&shipmentId=SHIPTEST01\n',
     };
     const parsed = parseAmazonDeliveredEmail(email);
-    expect(parsed.shipmentId).toBe('owFYr7fBJ');
-    expect(parsed.shipmentKey).toBe('owFYr7fBJ');
+    expect(parsed.shipmentId).toBe('SHIPTEST01');
+    expect(parsed.shipmentKey).toBe('SHIPTEST01');
   });
 
   test('two Delivered emails for the SAME order but different shipmentId get different shipmentKeys (split shipment)', () => {
-    const base = 'Order # 113-3148685-4885834\n\n* Thing\n  Quantity: 1\n\nTrack package: https://www.amazon.com/x?orderId=113-3148685-4885834&shipmentId=';
+    const base = 'Order # 900-4000004-4000004\n\n* Thing\n  Quantity: 1\n\nTrack package: https://www.amazon.com/x?orderId=900-4000004-4000004&shipmentId=';
     const first = parseAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: `${base}SHIP-ONE\n` });
     const second = parseAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: `${base}SHIP-TWO\n` });
     expect(first.orderNumber).toBe(second.orderNumber);

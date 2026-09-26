@@ -4,19 +4,18 @@
  * Product locks serialize adjustments/creation. Request actions retain the
  * dispatcher's ledger -> request -> product lock order.
  *
- * options.extraMetadata (adjustStock, updateRestockRequest): merged onto the
- * written product_inventory_movements.metadata, after the fields this module
- * always sets — an automated writer's own provenance (e.g. the Amazon
- * delivery auto-restock lane's { source: 'amazon_delivery', orderNumber,
- * emailId, rawTitle }) without inventing a second movement-writing path.
+ * options.extraMetadata (adjustStock only): merged onto the written
+ * product_inventory_movements.metadata, after the fields this module always
+ * sets — an automated writer's own provenance (e.g. the Amazon delivery
+ * auto-restock lane's { source: 'amazon_delivery', orderNumber, emailId,
+ * rawTitle }) without inventing a second movement-writing path.
  *
- * options.trx (adjustStock, updateRestockRequest): an already-open knex
- * transaction to run on, instead of opening a new one — lets a caller that
- * itself needs to be atomic with the movement (e.g. the Amazon delivery
- * lane's claim-insert -> movement -> claim-update) wrap all three in ONE
- * db.transaction rather than compensating by hand after the fact. Omitted
- * (every existing caller), behavior is byte-for-byte unchanged: a fresh
- * db.transaction is opened here exactly as before.
+ * options.trx (adjustStock only): an already-open knex transaction to run
+ * on, instead of opening a new one — lets a caller that itself needs to be
+ * atomic with the movement (e.g. the Amazon delivery lane's claim-insert ->
+ * movement -> claim-update) wrap both in ONE db.transaction. Omitted (every
+ * other caller), behavior is byte-for-byte unchanged: a fresh db.transaction
+ * is opened here exactly as before.
  */
 const crypto = require('crypto');
 const Joi = require('joi');
@@ -289,7 +288,7 @@ async function previewRestockAction(requestId, raw) {
 
 async function updateRestockRequest(requestId, raw, options = {}) {
   const input = validated(actionSchema, raw);
-  const run = async (trx) => {
+  return db.transaction(async trx => {
     await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
     const request = await loadRequest(requestId, trx, true);
     const dispatch = require('./procurement/order-dispatch');
@@ -306,8 +305,7 @@ async function updateRestockRequest(requestId, raw, options = {}) {
         metadata: { source: options.source || 'restock_request_receive', restockRequestId: requestId,
           adjustedBy: options.actorId || null, note: input.note || null, enteredQuantity: plan.quantity,
           enteredUnit: plan.enteredUnit, conversionConfidence: plan.conversionConfidence,
-          ...(plan.secondReceive ? { secondReceive: true } : {}),
-          ...(options.extraMetadata || {}) },
+          ...(plan.secondReceive ? { secondReceive: true } : {}) },
       }).returning('*');
       const saved = await trx('products_catalog').where({ id: product.id }).first();
       if (!movement?.id || numberOrNull(saved?.inventory_on_hand) !== plan.stockAfter || saved.inventory_unit !== plan.inventoryUnit) {
@@ -327,8 +325,7 @@ async function updateRestockRequest(requestId, raw, options = {}) {
     return { success: true, request: updated, ...(movement ? { movement } : {}),
       verification: { persisted: true, request_id: requestId, product_id: product.id, status_match: true,
         ...(movement ? { movement_id: movement.id, stock_match: true } : {}) }, href: `/admin/inventory?tab=restock&requestId=${requestId}` };
-  };
-  return options.trx ? run(options.trx) : db.transaction(run);
+  });
 }
 
 module.exports = { previewStockAdjustment, adjustStock, previewRestockRequest, createRestockRequest,

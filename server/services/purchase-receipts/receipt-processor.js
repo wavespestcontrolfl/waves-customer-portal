@@ -1,28 +1,40 @@
 /**
  * purchase-receipts/receipt-processor.js — turns one parsed Amazon delivery
- * item into a purchase_receipt_lines row, and, when it resolves cleanly, an
- * actual stock movement through the EXISTING restock/adjust paths
- * (inventory-operations.js's adjustStock / updateRestockRequest) rather than
- * raw SQL.
+ * item into a purchase_receipt_lines row and, when it resolves cleanly, a
+ * stock movement through the EXISTING adjustStock path
+ * (inventory-operations.js), never raw SQL.
  *
- * Idempotency: purchase_receipt_lines has a UNIQUE (vendor, order_number,
- * shipment_key, line_no) — shipment_key because ONE order can arrive as
- * several separate Delivered emails (split shipments), each with the SAME
- * order_number: keying on (vendor, order_number, line_no) alone would make
- * the second shipment's line collide with, and be dropped as a duplicate
- * of, the first (see the migration's header and sweep.js/parser for where
- * shipmentKey comes from). Every call first checks for an existing row
- * (cheap, covers the ordinary re-run case, but not itself the guard) and
- * then, for the 'logged' path, runs the claim insert, the restock/adjust
- * write (via adjustStock/updateRestockRequest's options.trx — the SAME
- * transaction, not a nested one of their own) and the claim's movement_id
- * update all inside ONE db.transaction (performLoggedMovement). A failure
- * anywhere in that transaction rolls back everything, including the claim
- * insert — the next sweep simply sees no row and retries the line cleanly,
- * no manual delete-on-failure compensation needed. The claim insert's own
- * ON CONFLICT ... IGNORE (inside the transaction) is the at-most-once guard
- * against a concurrent second run claiming the same line; it returning no
- * row is a normal "already claimed" outcome, not a failure.
+ * Stock only. This lane never closes, receives or otherwise writes a
+ * product_restock_requests row: three audit rounds each found a new way an
+ * automatic close could pick the wrong request (vendor guess, then order
+ * number, then a lock race with a manual receipt), so it was removed. When
+ * the product has a live (open|ordered) request, the logged bell says so
+ * and a person decides.
+ *
+ * Title sizing is exception-based. A line auto-logs only when its title
+ * makes no size claim, or exactly one size claim that agrees with the
+ * catalog container, plus at most one recognized pack marker ("2 x 78 oz",
+ * "(Pack of 2)", "2-Pack", "Case of 2", "Set of 2"). Any other pack or count
+ * wording, two different sizes, or a size that disagrees with the container
+ * is 'size_mismatch' — held for a person (sweep.js rings a bell), never a
+ * guessed amount.
+ *
+ * Idempotency: purchase_receipt_lines is UNIQUE (vendor, order_number,
+ * shipment_key, line_no) — shipment_key because one order can arrive as
+ * several Delivered emails with the same Order #. For a 'logged' line the
+ * claim insert, the product-row lock, the duplicate check, adjustStock (on
+ * the same transaction via options.trx) and the movement_id update run in
+ * ONE transaction: a failure anywhere rolls the claim back and the next
+ * sweep retries the line cleanly. The claim's ON CONFLICT DO NOTHING is the
+ * at-most-once guard against a concurrent run.
+ *
+ * Duplicate-receipt guard: the claim only catches the SAME email twice. If
+ * staff already put the box on the shelf by hand, the line is held as
+ * 'possible_duplicate' (no movement) when the product has a 'restock'
+ * movement from any other source since 48h before the email's received_at,
+ * or a 'correction' at or after received_at (a count taken once the box had
+ * landed already includes it). A correction BEFORE received_at never holds:
+ * routine morning counts precede that day's deliveries.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -30,263 +42,213 @@ const { matchAmazonTitleToProduct } = require('./product-matcher');
 const { parsePackSize } = require('../product-costing');
 const { convertInventoryQuantity } = require('../inventory-units');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
-const { adjustStock, updateRestockRequest } = require('../inventory-operations');
+const { adjustStock } = require('../inventory-operations');
 
 const VENDOR = 'amazon';
 const SOURCE = 'amazon_delivery';
-// A converted title size within 1% of the container size (min 0.01 unit)
-// counts as agreement — the same rounding slack the label/rate-render side
-// of this codebase already tolerates for pack-size text.
-function sizesAgree(convertedAmount, containerAmount) {
-  const tolerance = Math.max(0.01, Math.abs(containerAmount) * 0.01);
-  return Math.abs(convertedAmount - containerAmount) <= tolerance;
+const DUPLICATE_RESTOCK_LOOKBACK_MS = 48 * 60 * 60 * 1000;
+const ALREADY_PROCESSED = Object.freeze({ skipped: true, reason: 'already_processed' });
+
+// Within 1% (min 0.01 unit) counts as agreement — the rounding slack the
+// pack-size text elsewhere in this codebase already tolerates.
+function sizesAgree(amount, reference) {
+  return Math.abs(amount - reference) <= Math.max(0.01, Math.abs(reference) * 0.01);
 }
 
 function round4(value) {
   return Math.round(value * 10000) / 10000;
 }
 
-// Multipack markers, scanned ANYWHERE in the title — deliberately a SEPARATE,
-// local parse, not a change to parsePackSize (product-costing.js): that
-// function only ever reads a leading "N x " multiplier at the very start of
-// the string, because its other callers (vendor pricing display) hand it
-// just the pack-size text with the product name already stripped off. An
-// Amazon item title puts the product name FIRST ("Taurus SC 2 x 78 oz",
-// "Taurus SC 78 oz (Pack of 2)"), so parsePackSize's own multiplier check
-// never fires there and it silently reads only the per-unit size — this is
-// what under-logs a multipack delivery by the pack factor. "count" (e.g.
-// "Summit Mosquito Dunk Tablets 20 count") is deliberately NOT a multipack
-// marker — that is the product's own each-count sizing, not a pack of packs.
-//
-// A LEADING "N x SIZE" ("2 x 78 oz Taurus SC") is the one form parsePackSize
-// DOES already multiply on its own (its own multiplier check is anchored to
-// the very start of the string) — sizing the ORIGINAL title there would
-// apply the multiplier TWICE (once inside parsePackSize, once here). The fix
-// is the same for every form and every position: strip the matched marker
-// text out of the title BEFORE handing it to parsePackSize, so parsePackSize
-// only ever sees the bare per-unit size and parseMultipack's own count is
-// applied exactly once, regardless of where the marker sat.
+// The pack markers this lane counts, found anywhere in the title.
+// parsePackSize (product-costing.js) reads a multiplier only at the very
+// START of its input, because its callers pass bare pack-size text; an
+// Amazon title leads with the product name. The matched marker is stripped
+// before sizing, so its count is applied exactly once.
 const MULTIPACK_PATTERNS = [
-  /(\d+)\s*[x×]\s*(?=\d)/i, // "2 x 78 oz", "2×78 oz" — multiplier immediately before a size number (lookahead: leaves the size digits in place for the strip)
-  /pack\s+of\s+(\d+)/i, // "(Pack of 2)", "Pack of 2"
+  /(\d+)\s*[x×]\s*(?=\d)/i, // "2 x 78 oz", "2×78 oz"
+  /pack\s+of\s+(\d+)/i, // "(Pack of 2)"
   /(\d+)\s*-?\s*pack\b/i, // "2-Pack", "2 Pack"
   /case\s+of\s+(\d+)/i, // "Case of 12"
   /set\s+of\s+(\d+)/i, // "Set of 4"
 ];
 
-// Returns { count, sanitizedTitle } for the first marker found, or null.
-// sanitizedTitle is ONLY for re-parsing the per-unit size — item.title
-// itself (matching, raw_title, the bell) is never touched.
+// Pack or count wording left over once a recognized marker (if any) is
+// stripped: "Twin Pack", "Pack of Two", "2 Count", "2ct", "78 oz x 2",
+// "(2) jugs", a second marker. The title claims a unit count this lane
+// can't read, so the line goes to a person.
+const PACK_CLAIM_RE = /(?:\b|(?<=\d))(?:packs?|pks?|count|ct|qty|twin|bundle|cases?|sets?)\b|(?:^|[^a-z])[x×]\s*\d|\d\s*[x×](?![a-z])|\(\s*\d+\s*\)/i;
+
+// Plural containers with no recognized marker ("2 Bottles", "4 tubes / 30
+// g"): more than one unit, in a form this lane doesn't count.
+const PLURAL_CONTAINER_RE = /(?:\b|(?<=\d))(?:bottles|jugs|tubes|bags|cans|pails|pouches|cartridges|pcs|pieces)\b/i;
+
+// One "<number> <unit>" size claim: mixed number (1 1/2), fraction (1/2),
+// decimal or integer, with the unit adjacent ("96oz"), spaced ("96 oz") or
+// hyphenated ("2.5-Gallon"); an optional second word covers "fl oz". A
+// number glued to a word on its left ("EC3") is part of a name, not a size.
+const TITLE_SIZE_RE = /(?<![a-z\d./])(\d+\s+\d+\/\d+|\d+\/\d+|\d*\.\d+|\d+)[\s-]*([a-z]+)\.?(?:[\s.]*([a-z]+)\.?)?/gi;
+
+// Title unit spellings -> inventory-units.js units.
+const SIZE_UNITS = [
+  [/^(?:fl ?oz|fluid ?ounces?)$/, 'fl_oz'],
+  [/^(?:oz|ounces?)$/, 'oz'],
+  [/^(?:gal|gallons?)$/, 'gal'],
+  [/^(?:qt|quarts?)$/, 'qt'],
+  [/^(?:pt|pints?)$/, 'pt'],
+  [/^(?:lbs?|pounds?)$/, 'lb'],
+  [/^(?:g|grams?)$/, 'g'],
+  [/^(?:kg|kilograms?)$/, 'kg'],
+  [/^(?:ml|millilit(?:er|re)s?)$/, 'ml'],
+  [/^(?:l|lit(?:er|re)s?)$/, 'l'],
+];
+
+function sizeUnit(words) {
+  const text = words.toLowerCase();
+  return SIZE_UNITS.find(([pattern]) => pattern.test(text))?.[1] || null;
+}
+
+// "1 1/2" -> 1.5, "1/2" -> 0.5, "2.5" -> 2.5. A zero denominator yields a
+// non-finite number, which convertInventoryQuantity rejects.
+function parseSizeNumber(text) {
+  const parts = text.trim().split(/\s+/);
+  const [numerator, denominator] = parts.pop().split('/');
+  const value = denominator === undefined ? Number(numerator) : Number(numerator) / Number(denominator);
+  return parts.length ? Number(parts[0]) + value : value;
+}
+
+// Every size claim in `text`, converted to the container's unit and
+// de-duplicated ("1 Gallon (128 fl oz)" is one size). null when a claim
+// can't be converted to that unit, so it can't be checked at all.
+function titleSizes(text, containerUnit) {
+  const sizes = [];
+  for (const [, number, first, second] of text.matchAll(TITLE_SIZE_RE)) {
+    const unit = (second && sizeUnit(`${first} ${second}`)) || sizeUnit(first);
+    if (!unit) continue;
+    const amount = convertInventoryQuantity(parseSizeNumber(number), unit, containerUnit);
+    if (amount == null) return null;
+    if (!sizes.some((size) => sizesAgree(amount, size))) sizes.push(amount);
+  }
+  return sizes;
+}
+
 function parseMultipack(title) {
-  const text = String(title || '');
   for (const pattern of MULTIPACK_PATTERNS) {
-    const m = text.match(pattern);
-    if (!m) continue;
-    const n = Number.parseInt(m[1], 10);
-    if (!Number.isFinite(n) || n <= 0) continue;
-    return { count: n, sanitizedTitle: text.replace(pattern, ' ') };
+    const match = title.match(pattern);
+    if (match && Number(match[1]) > 0) return { count: Number(match[1]), rest: title.replace(pattern, ' ') };
   }
   return null;
 }
 
-// Pure classification: match + parse + compare, no DB writes. Exported for
-// direct unit testing of the size/mismatch rules without touching the DB.
+// How much product one ordered item carries, in the container's unit, or
+// null when the title's own size/pack wording can't be squared with the
+// catalog container.
+function amountPerItem(title, container) {
+  const multipack = parseMultipack(title);
+  const rest = multipack ? multipack.rest : title;
+  if (PACK_CLAIM_RE.test(rest) || (!multipack && PLURAL_CONTAINER_RE.test(rest))) return null;
+  const sizes = titleSizes(rest, container.unit);
+  if (!sizes || sizes.length > 1) return null;
+  const [size] = sizes;
+  if (!multipack) return size === undefined || sizesAgree(size, container.amount) ? container.amount : null;
+  if (size === undefined) return null;
+  // The title's per-unit size is one catalog container: the pack multiplies containers.
+  if (sizesAgree(size, container.amount)) return multipack.count * container.amount;
+  // The catalog container is already the whole pack.
+  return sizesAgree(size * multipack.count, container.amount) ? container.amount : null;
+}
+
+// Pure classification (match + sizing, no writes). Exported for unit tests.
 async function classifyItem(item, conn = db) {
   const match = await matchAmazonTitleToProduct(item.title, conn);
   if (!match.matched) return { status: 'unmatched', productId: null };
-
-  const product = match.product;
-  const containerParsed = parsePackSize(product.container_size);
-  if (!containerParsed) return { status: 'needs_size', productId: product.id, product };
-
-  const multipack = parseMultipack(item.title);
-  if (multipack) {
-    // Sized from the SANITIZED title (marker stripped) so a leading "N x "
-    // — which parsePackSize would otherwise already have multiplied on its
-    // own — is never multiplied a second time here. A multipack marker with
-    // no parseable per-unit size is never assumed — straight to
-    // size_mismatch, same as any other unresolvable size claim.
-    const titleParsed = parsePackSize(multipack.sanitizedTitle);
-    const perUnitConverted = titleParsed ? convertInventoryQuantity(titleParsed.amount, titleParsed.unit, containerParsed.unit) : null;
-    if (perUnitConverted == null) return { status: 'size_mismatch', productId: product.id, product };
-
-    let perItemAmount;
-    if (sizesAgree(perUnitConverted, containerParsed.amount)) {
-      // The title's per-unit size IS the catalog container size: the pack
-      // multiplies the container count, not its size.
-      perItemAmount = multipack.count * containerParsed.amount;
-    } else if (sizesAgree(perUnitConverted * multipack.count, containerParsed.amount)) {
-      // The catalog container already represents the WHOLE pack (e.g. a
-      // case-sized catalog row) — the pack math is already baked in.
-      perItemAmount = containerParsed.amount;
-    } else {
-      return { status: 'size_mismatch', productId: product.id, product };
-    }
-    return { status: 'logged', productId: product.id, product, receivedQty: round4(item.quantity * perItemAmount), receivedUnit: containerParsed.unit };
-  }
-
-  const titleParsed = parsePackSize(item.title);
-  if (titleParsed) {
-    const converted = convertInventoryQuantity(titleParsed.amount, titleParsed.unit, containerParsed.unit);
-    if (converted == null || !sizesAgree(converted, containerParsed.amount)) {
-      return { status: 'size_mismatch', productId: product.id, product };
-    }
-  }
-
-  const receivedQty = round4(item.quantity * containerParsed.amount);
-  const receivedUnit = containerParsed.unit;
-  return { status: 'logged', productId: product.id, product, receivedQty, receivedUnit };
+  const { product } = match;
+  const container = parsePackSize(product.container_size);
+  if (!container) return { status: 'needs_size', productId: product.id, product };
+  const perItem = amountPerItem(String(item.title), container);
+  if (perItem == null) return { status: 'size_mismatch', productId: product.id, product };
+  return { status: 'logged', productId: product.id, product, receivedQty: round4(item.quantity * perItem), receivedUnit: container.unit };
 }
 
-async function existingLine(vendor, orderNumber, shipmentKey, lineNo, conn = db) {
-  return conn('purchase_receipt_lines').where({ vendor, order_number: orderNumber, shipment_key: shipmentKey, line_no: lineNo }).first();
-}
-
-const ON_CONFLICT_KEYS = ['vendor', 'order_number', 'shipment_key', 'line_no'];
-
-// Insert-and-claim, shared by every terminal (non-'logged'-in-progress) row
-// shape below: returns the saved row, or null when a concurrent run already
-// claimed this exact (vendor, order_number, shipment_key, line_no).
+// Insert-and-claim: the saved row, or null when a concurrent run already
+// claimed this (vendor, order_number, shipment_key, line_no).
 async function claimLine(conn, row) {
-  const inserted = await conn('purchase_receipt_lines').insert(row).onConflict(ON_CONFLICT_KEYS).ignore().returning('*');
+  const inserted = await conn('purchase_receipt_lines').insert(row)
+    .onConflict(['vendor', 'order_number', 'shipment_key', 'line_no']).ignore().returning('*');
   return inserted?.length ? inserted[0] : null;
 }
 
 /**
  * @param {{email, orderNumber, shipmentKey, item, lineNo, forcedStatus}} params
- *   forcedStatus: set to 'no_items' for the one placeholder row an itemless
- *   Delivered email gets (see sweep.js) — skips matching/classification
- *   entirely; `item` is then just `{ title: <subject>, quantity: 1 }`.
+ *   shipmentKey: the parser's (shipmentId, else the email's gmail_id / id).
+ *   forcedStatus: 'no_items' for the one placeholder line an itemless
+ *   Delivered email gets (sweep.js) — no matching or sizing at all.
  * @returns one of:
- *   { skipped: true }                                             — already processed
- *   { status: 'unmatched'|'size_mismatch'|'needs_size'|'no_items', inserted: true }
- *   { status: 'logged', product, receivedQty, receivedUnit, movement, viaRequest, leftoverRequest }
- *   leftoverRequest (non-null only when viaRequest is false and exactly one
- *   OTHER live request exists): { vendor, status } — a request this delivery
- *   did NOT qualify to close, for the bell to name explicitly.
+ *   { skipped: true, reason }                                    — nothing written
+ *   { status: 'unmatched'|'size_mismatch'|'needs_size'|'no_items', inserted: true, product }
+ *   { status: 'possible_duplicate', product, receivedQty, receivedUnit }  — held, no movement
+ *   { status: 'logged', product, receivedQty, receivedUnit, movement, hasOpenRestockRequest }
  */
 async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus }, conn = db) {
-  const vendor = VENDOR;
-  if (!orderNumber) {
-    logger.warn(`[purchase-receipts] email ${email?.id} has no Order # — skipping line ${lineNo}`);
-    return { skipped: true, reason: 'no_order_number' };
+  if (!orderNumber || !shipmentKey) {
+    const reason = orderNumber ? 'no_shipment_key' : 'no_order_number';
+    logger.warn(`[purchase-receipts] email ${email.id} line ${lineNo}: ${reason}, skipped`);
+    return { skipped: true, reason };
   }
-  // Falls back the same way the parser does: an email with no discoverable
-  // shipmentId still gets its own claim rather than colliding with another
-  // shipment on the same order.
-  const resolvedShipmentKey = shipmentKey || email?.gmail_id || email?.id || null;
-  if (!resolvedShipmentKey) {
-    logger.warn(`[purchase-receipts] email ${email?.id} has no shipment key at all — skipping line ${lineNo}`);
-    return { skipped: true, reason: 'no_shipment_key' };
-  }
-  if (await existingLine(vendor, orderNumber, resolvedShipmentKey, lineNo, conn)) return { skipped: true, reason: 'already_processed' };
+  const key = { vendor: VENDOR, order_number: orderNumber, shipment_key: shipmentKey, line_no: lineNo };
+  if (await conn('purchase_receipt_lines').where(key).first('id')) return { ...ALREADY_PROCESSED };
 
-  if (forcedStatus) {
-    const saved = await claimLine(conn, {
-      email_id: email?.id || null, vendor, order_number: orderNumber, shipment_key: resolvedShipmentKey, line_no: lineNo,
-      raw_title: item.title, quantity: item.quantity, product_id: null, received_qty: null, received_unit: null, status: forcedStatus,
-    });
-    if (!saved) return { skipped: true, reason: 'already_processed' };
-    return { status: forcedStatus, inserted: true, product: null };
-  }
-
-  const classified = await classifyItem(item, conn);
-  const baseRow = {
-    email_id: email?.id || null, vendor, order_number: orderNumber, shipment_key: resolvedShipmentKey, line_no: lineNo,
-    raw_title: item.title, quantity: item.quantity, product_id: classified.productId || null,
+  const classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyItem(item, conn);
+  const row = {
+    ...key, email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: classified.productId,
+    received_qty: classified.receivedQty ?? null, received_unit: classified.receivedUnit ?? null, status: classified.status,
   };
-
   if (classified.status !== 'logged') {
-    const saved = await claimLine(conn, { ...baseRow, received_qty: null, received_unit: null, status: classified.status });
-    if (!saved) return { skipped: true, reason: 'already_processed' };
-    return { status: classified.status, inserted: true, product: classified.product || null };
+    const saved = await claimLine(conn, row);
+    return saved ? { status: classified.status, inserted: true, product: classified.product || null } : { ...ALREADY_PROCESSED };
+  }
+  return conn.transaction(async (trx) => {
+    const claim = await claimLine(trx, row);
+    return claim ? performLoggedMovement(trx, { claim, classified, orderNumber, email, item }) : { ...ALREADY_PROCESSED };
+  });
+}
+
+// A movement already on the ledger that may be this same box: a restock
+// from any other source since 48h before the email, or a count/correction
+// at or after it (see the header).
+function findPossibleDuplicateMovement(trx, productId, receivedAt) {
+  const received = new Date(receivedAt);
+  return trx('product_inventory_movements')
+    .where({ product_id: productId })
+    .where((either) => either
+      .where((restock) => restock
+        .where('movement_type', 'restock')
+        .whereRaw("(metadata ->> 'source') IS DISTINCT FROM ?", [SOURCE])
+        .where('created_at', '>=', new Date(received.getTime() - DUPLICATE_RESTOCK_LOOKBACK_MS)))
+      .orWhere((correction) => correction
+        .where('movement_type', 'correction')
+        .where('created_at', '>=', received)))
+    .first('id');
+}
+
+// The claimed 'logged' line's write, on the claim's own transaction.
+async function performLoggedMovement(trx, { claim, classified, orderNumber, email, item }) {
+  // Lock the product row before reading the ledger, so no manual adjustment
+  // commits between the duplicate check and the movement. adjustStock locks
+  // the same row again in this transaction, which Postgres treats as a no-op.
+  await trx('products_catalog').where({ id: classified.productId }).forUpdate().first('id');
+  const { product, receivedQty, receivedUnit } = classified;
+  if (await findPossibleDuplicateMovement(trx, classified.productId, email.received_at)) {
+    await trx('purchase_receipt_lines').where({ id: claim.id }).update({ status: 'possible_duplicate' });
+    return { status: 'possible_duplicate', product, receivedQty, receivedUnit };
   }
 
-  // Claim + movement + claim-update all inside ONE transaction: a throw
-  // anywhere (the claim insert racing a concurrent claimant aside — that's
-  // a normal no-row outcome, not a throw) rolls back the whole thing, so
-  // there is never a claim row left behind with no movement to show for it.
-  return conn.transaction(async (trx) => {
-    const claim = await claimLine(trx, { ...baseRow, received_qty: classified.receivedQty, received_unit: classified.receivedUnit, status: 'logged' });
-    if (!claim) return { skipped: true, reason: 'already_processed' };
-    return performLoggedMovement(trx, { claim, classified, orderNumber, email, item });
-  });
-}
-
-function normalizeOrderNumber(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-// True only when this 'ordered' request's OWN linked vendor order (vendor_orders,
-// UNIQUE on restock_request_id — see its migration header, "one row per
-// automatic order attempt") carries the SAME external_order_number as the
-// order this email delivered. Order identity, not a vendor guess: two
-// different vendors can both be "Amazon" in casual text, and a request's
-// plain `vendor` column is never authoritative for which physical order it
-// tracks. No linked vendor order, no recorded number, or a different number
-// -> false (this delivery must not close a DIFFERENT order placed with
-// Amazon, e.g. a prior restock still in transit).
-async function orderedRequestMatchesDelivery(conn, request, normalizedOrderNumber) {
-  if (!normalizedOrderNumber) return false;
-  const vendorOrder = await conn('vendor_orders').where({ restock_request_id: request.id }).first('external_order_number');
-  return Boolean(vendorOrder?.external_order_number) && normalizeOrderNumber(vendorOrder.external_order_number) === normalizedOrderNumber;
-}
-
-/**
- * Which live (open/ordered) restock request, if any, THIS delivery should
- * mark received — never just the oldest one (the earlier behavior, and
- * wrong: a delivery must not close an unrelated order).
- *   - 'open' (a need, no order placed with anyone yet) qualifies whatever
- *     vendor it names — the need is real regardless of who fills it.
- *   - 'ordered' qualifies ONLY when its OWN linked vendor order's
- *     external_order_number matches the order THIS email delivered —
- *     order identity, never a vendor-name guess (see
- *     orderedRequestMatchesDelivery above).
- * Exactly one qualifying request -> receive it. Zero or 2+ (ambiguous) ->
- * receive none, adjust stock directly; when exactly one OTHER live request
- * is left dangling in that case, it is returned as `leftover` so the bell
- * can name it instead of silently leaving it open with no explanation.
- */
-async function selectRestockRequestOutcome(trx, productId, orderNumber) {
-  const liveRequests = await trx('product_restock_requests').where({ product_id: productId }).whereIn('status', LIVE_RESTOCK_STATUSES);
-  if (!liveRequests.length) return { toReceive: null, leftover: null };
-  const normalizedOrderNumber = normalizeOrderNumber(orderNumber);
-  const qualifiesFlags = await Promise.all(liveRequests.map((r) => (
-    r.status === 'open' ? Promise.resolve(true) : orderedRequestMatchesDelivery(trx, r, normalizedOrderNumber)
-  )));
-  const qualifying = liveRequests.filter((_, i) => qualifiesFlags[i]);
-  if (qualifying.length === 1) return { toReceive: qualifying[0], leftover: null };
-  const nonQualifying = liveRequests.filter((_, i) => !qualifiesFlags[i]);
-  // Only named when it is the SOLE live request and unambiguous — two or
-  // more leftover requests get no specific call-out (nothing to disambiguate).
-  const leftover = liveRequests.length === 1 && nonQualifying.length === 1 ? nonQualifying[0] : null;
-  return { toReceive: null, leftover };
-}
-
-// The actual restock write for an already-claimed 'logged' line, through the
-// shared adjustStock / updateRestockRequest path — on the SAME transaction
-// (options.trx) the claim was inserted on, so a failure here rolls back the
-// claim too. Split out of processReceiptLine purely to keep that function's
-// own branching flat.
-async function performLoggedMovement(trx, { claim, classified, orderNumber, email, item }) {
-  const extraMetadata = { source: SOURCE, orderNumber, emailId: email?.id || null, rawTitle: item.title };
-  const { toReceive: liveRequest, leftover } = await selectRestockRequestOutcome(trx, classified.productId, orderNumber);
-  const result = liveRequest
-    ? await updateRestockRequest(liveRequest.id, {
-      action: 'receive', quantity: classified.receivedQty, unit: classified.receivedUnit,
-    }, { source: SOURCE, extraMetadata, trx })
-    : await adjustStock(classified.productId, {
-      movementType: 'restock', quantity: classified.receivedQty, unit: classified.receivedUnit,
-    }, { source: SOURCE, extraMetadata, trx });
-
-  await trx('purchase_receipt_lines').where({ id: claim.id }).update({
-    movement_id: result.movement.id, restock_request_id: liveRequest ? liveRequest.id : null,
-  });
-  return {
-    status: 'logged', product: classified.product, receivedQty: classified.receivedQty,
-    receivedUnit: classified.receivedUnit, movement: result.movement, viaRequest: Boolean(liveRequest),
-    leftoverRequest: leftover ? { vendor: leftover.vendor || null, status: leftover.status } : null,
-  };
+  const result = await adjustStock(classified.productId, { movementType: 'restock', quantity: receivedQty, unit: receivedUnit },
+    { source: SOURCE, extraMetadata: { orderNumber, emailId: email.id, rawTitle: item.title }, trx });
+  await trx('purchase_receipt_lines').where({ id: claim.id }).update({ movement_id: result.movement.id });
+  // Read-only: the bell mentions a live request; this lane never writes one.
+  const liveRequest = await trx('product_restock_requests')
+    .where({ product_id: classified.productId }).whereIn('status', LIVE_RESTOCK_STATUSES).first('id');
+  return { status: 'logged', product, receivedQty, receivedUnit, movement: result.movement, hasOpenRestockRequest: Boolean(liveRequest) };
 }
 
 module.exports = { classifyItem, processReceiptLine, VENDOR, SOURCE };

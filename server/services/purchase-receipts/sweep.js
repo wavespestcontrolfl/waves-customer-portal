@@ -4,21 +4,25 @@
  * Gate: GATE_PURCHASE_RECEIPT_RESTOCK, read at call time (gateEnvValue) —
  * unset or any non-truthy value is the live kill switch.
  *
- * PURCHASE_RECEIPT_SINCE (env, ISO timestamp) is a second, independent
- * kill: with it unset, both entry points below do nothing at all, even with
- * the gate on — this is what stops a first activation from replaying every
- * Amazon delivery ever synced (which a physical shelf count already
- * accounts for) as a fresh restock the moment the gate flips.
+ * PURCHASE_RECEIPT_SINCE is a second, independent kill: an ISO-8601
+ * timestamp WITH an explicit offset (`2026-09-26T05:49:45Z`), read by the
+ * strict gateEnvTimestamp parser. Unset, offset-less (Railway would read it
+ * as UTC), a bare date or unparseable all count as unset, and both entry
+ * points do nothing. Set it to the last physical count so no delivery that
+ * count already includes is replayed as a fresh restock.
  *
- * Authentication is a THIRD, non-optional gate, checked for every candidate
- * before anything is processed: from_address and subject are attacker-typed
- * text, so a Delivered email is only ever acted on when Gmail's own
- * Authentication-Results header shows it actually authenticated as
- * amazon.com (hasAlignedAuth, the same DKIM/SPF-alignment check
- * auto-unsubscribe.js and email-sync.js's customer bell already gate
- * spoofable sender action on — see inbox-hygiene.js). A spoofed or
- * unauthenticated "delivery" is refused before any purchase_receipt_lines
- * row is written and before any stock ever moves.
+ * Authentication is a third, non-optional gate: from_address and subject
+ * are attacker-typed text, so a Delivered email is only acted on when
+ * Gmail's Authentication-Results show it authenticated as amazon.com
+ * (hasAlignedAuth — the same DKIM/SPF-alignment check auto-unsubscribe.js
+ * and email-sync.js's customer bell use; see inbox-hygiene.js). A spoofed
+ * "delivery" is refused before any purchase_receipt_lines row is written.
+ *
+ * Bells: a logged line rings one ("Amazon delivery logged: ..."). A line
+ * held for a person — possible_duplicate, size_mismatch, needs_size, or an
+ * itemless email's no_items placeholder — rings one saying why. unmatched
+ * lines (personal purchases, mostly) ring nothing; the Intelligence Bar's
+ * list_unlogged_purchases shows every non-logged line.
  *
  * Two entry points sharing one path:
  *   - processReceiptEmail(email): called right after email-sync inserts a
@@ -31,87 +35,100 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp } = require('../../config/feature-gates');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-delivery-parser');
 const { processReceiptLine } = require('./receipt-processor');
 
 const GATE = 'GATE_PURCHASE_RECEIPT_RESTOCK';
+const SINCE_ENV = 'PURCHASE_RECEIPT_SINCE';
+const INVENTORY_LINK = '/admin/inventory?tab=products';
 
-function sinceBoundary() {
-  const raw = process.env.PURCHASE_RECEIPT_SINCE;
-  if (!raw) return null;
-  const parsed = new Date(raw);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+// Line status -> summary bucket. A result with no status (already
+// processed, no order number) lands in alreadyProcessed.
+const SUMMARY_BUCKETS = {
+  logged: 'logged', possible_duplicate: 'possibleDuplicate', unmatched: 'unmatched',
+  size_mismatch: 'sizeMismatch', needs_size: 'needsSize', no_items: 'noItems',
+};
+
+// Why a held line wasn't added — the second sentence of its bell.
+const HELD_REASONS = {
+  possible_duplicate: 'A manual restock or count was logged around the same time, so check the count.',
+  size_mismatch: "The listing's size or pack count doesn't match the catalog container size, so log it by hand.",
+  needs_size: 'The product has no container size in the catalog, so log it by hand.',
+  no_items: "The email doesn't name the item. If it's stock, log it by hand.",
+};
+
+// NOTE: the bucket is `alreadyProcessed`, never `skipped` — the whole-email
+// early returns use `{ skipped: '<reason>' }` as their sentinel, and an
+// array is always truthy, so runPurchaseReceiptRestockSweep's
+// `if (result.skipped)` would swallow every processed email.
+function emptySummary() {
+  return { logged: [], possibleDuplicate: [], unmatched: [], sizeMismatch: [], needsSize: [], noItems: [], alreadyProcessed: [], errors: [] };
 }
 
 function displayUnit(unit) {
   return String(unit || '').replace(/_/g, ' ');
 }
 
-async function ringLoggedBell(notifyAdmin, { email, item, outcome }) {
-  if (!notifyAdmin) return;
-  try {
-    const perItemAmount = round(outcome.receivedQty / item.quantity);
-    let body = `Amazon delivery logged: ${outcome.product.name} +${outcome.receivedQty} ${displayUnit(outcome.receivedUnit)} `
-      + `(${item.quantity} × ${perItemAmount} ${displayUnit(outcome.receivedUnit)})`;
-    // Stock was adjusted directly (no restock request qualified — see
-    // selectRestockRequestOutcome in receipt-processor.js) while exactly one
-    // OTHER live request sits open/ordered for the same product: name it so
-    // the office knows to close it by hand if this delivery actually covers it.
-    if (outcome.leftoverRequest) {
-      const vendorText = outcome.leftoverRequest.vendor || 'another vendor';
-      body += ` A ${vendorText} order for it is still marked ${outcome.leftoverRequest.status} — close it if this covers it.`;
-    }
-    await notifyAdmin('inventory', 'Amazon delivery logged', body, {
-      link: '/admin/inventory?tab=products',
-      bell: true,
-      dedupeKey: `amazon-delivery:${email?.id}:${item.title}`,
-      metadata: { emailId: email?.id || null, productId: outcome.product.id, receivedQty: outcome.receivedQty, receivedUnit: outcome.receivedUnit },
-    });
-  } catch (err) {
-    logger.warn(`[purchase-receipts] bell failed for ${email?.id}: ${err.message}`);
-  }
-}
-
 function round(value) {
   return Math.round(value * 10000) / 10000;
 }
 
-// The ONE placeholder row for an itemless Delivered email (see the parser's
-// header). Pulled out of processReceiptEmail purely to keep that function's
-// own branching flat.
-async function recordNoItemsPlaceholder({ email, orderNumber, shipmentKey, summary }) {
-  const placeholderTitle = email.subject || `Amazon delivery, order ${orderNumber || 'unknown'}`;
-  try {
-    const outcome = await processReceiptLine({
-      email, orderNumber, shipmentKey, item: { title: placeholderTitle, quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
-    });
-    if (outcome.status === 'no_items') summary.noItems.push({ title: placeholderTitle, orderNumber: orderNumber || null });
-    else summary.alreadyProcessed.push({ title: placeholderTitle, reason: outcome.reason || null });
-  } catch (err) {
-    logger.error(`[purchase-receipts] no_items placeholder failed for email ${email.id}: ${err.message}`);
-    summary.errors.push({ title: placeholderTitle, message: err.message });
+async function ringLoggedBell(notifyAdmin, { email, item, outcome }) {
+  const unit = displayUnit(outcome.receivedUnit);
+  let body = `Amazon delivery logged: ${outcome.product.name} +${outcome.receivedQty} ${unit} `
+    + `(${item.quantity} × ${round(outcome.receivedQty / item.quantity)} ${unit})`;
+  // Read-only note: this lane never writes a restock request (see
+  // receipt-processor.js's header); a person decides whether this covers it.
+  if (outcome.hasOpenRestockRequest) {
+    body += ` A restock request for ${outcome.product.name} is still open. Close it in the Intelligence Bar if this delivery covers it.`;
   }
+  await notifyAdmin('inventory', 'Amazon delivery logged', body, {
+    link: INVENTORY_LINK,
+    bell: true,
+    dedupeKey: `amazon-delivery:${email.id}:${item.title}`,
+    metadata: { emailId: email.id, productId: outcome.product.id, receivedQty: outcome.receivedQty, receivedUnit: outcome.receivedUnit },
+  });
 }
 
-// One real item -> one purchase_receipt_lines outcome, filed into the right
-// summary bucket. Pulled out of processReceiptEmail for the same reason as
-// recordNoItemsPlaceholder above.
-async function recordItemOutcome({ email, orderNumber, shipmentKey, item, lineNo, notifyAdmin, summary }) {
+async function ringHeldBell(notifyAdmin, { email, item, outcome }) {
+  // An itemless email's placeholder title is its subject ("Delivered: 1 Lawn & Garden item").
+  const what = outcome.product ? `${outcome.product.name} ×${item.quantity}` : `"${item.title.replace(/^delivered:\s*/i, '')}"`;
+  await notifyAdmin('inventory', 'Amazon delivery not added', `Amazon delivery of ${what} wasn't added. ${HELD_REASONS[outcome.status]}`, {
+    link: INVENTORY_LINK,
+    bell: true,
+    dedupeKey: `amazon-delivery-held:${email.id}:${item.title}`,
+    metadata: { emailId: email.id, productId: outcome.product?.id || null, status: outcome.status },
+  });
+}
+
+// One line -> one purchase_receipt_lines outcome, filed into its summary
+// bucket, with its bell. A failure here is recorded and never stops the
+// email's other lines.
+async function recordLineOutcome({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus, notifyAdmin, summary }) {
+  let outcome;
   try {
-    const outcome = await processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo });
-    if (outcome.status === 'logged') {
-      summary.logged.push({ title: item.title, receivedQty: outcome.receivedQty, receivedUnit: outcome.receivedUnit, productId: outcome.product.id });
-      await ringLoggedBell(notifyAdmin, { email, item, outcome });
-    } else if (outcome.status === 'unmatched') summary.unmatched.push({ title: item.title });
-    else if (outcome.status === 'size_mismatch') summary.sizeMismatch.push({ title: item.title });
-    else if (outcome.status === 'needs_size') summary.needsSize.push({ title: item.title });
-    else summary.alreadyProcessed.push({ title: item.title, reason: outcome.reason || null });
+    outcome = await processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus });
   } catch (err) {
     logger.error(`[purchase-receipts] item "${item.title}" on email ${email.id} failed: ${err.message}`);
     summary.errors.push({ title: item.title, message: err.message });
+    return;
+  }
+  const bucket = SUMMARY_BUCKETS[outcome.status];
+  if (!bucket) {
+    summary.alreadyProcessed.push({ title: item.title, reason: outcome.reason || null });
+    return;
+  }
+  summary[bucket].push({ title: item.title, productId: outcome.product?.id || null, receivedQty: outcome.receivedQty ?? null, receivedUnit: outcome.receivedUnit ?? null });
+  if (outcome.status !== 'logged' && !HELD_REASONS[outcome.status]) return;
+  // The line's write is already committed; a failed bell must not read as a failed line.
+  try {
+    if (outcome.status === 'logged') await ringLoggedBell(notifyAdmin, { email, item, outcome });
+    else await ringHeldBell(notifyAdmin, { email, item, outcome });
+  } catch (err) {
+    logger.warn(`[purchase-receipts] bell failed for email ${email.id}: ${err.message}`);
   }
 }
 
@@ -121,9 +138,10 @@ async function recordItemOutcome({ email, orderNumber, shipmentKey, item, lineNo
  */
 async function processReceiptEmail(email, { notify } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated' };
-  const since = sinceBoundary();
+  const since = gateEnvTimestamp(SINCE_ENV);
   if (!since) return { skipped: 'no_since' };
-  if (!email?.received_at || new Date(email.received_at) < since) return { skipped: 'before_since' };
+  // A missing or unreadable received_at fails this comparison too.
+  if (!(new Date(email.received_at) >= since)) return { skipped: 'before_since' };
 
   const parsed = parseAmazonDeliveredEmail(email);
   if (!parsed) return { skipped: 'not_a_delivery_email' };
@@ -137,23 +155,16 @@ async function processReceiptEmail(email, { notify } = {}) {
   }
 
   const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
-  // NOTE: this bucket is named `alreadyProcessed`, never `skipped` — the
-  // whole-function early returns above use `{ skipped: '<reason>' }` (a
-  // string) as their sentinel, and an array is always truthy, so reusing
-  // the name here would make runPurchaseReceiptRestockSweep's `if
-  // (result.skipped) continue;` swallow every successfully processed email.
-  const summary = { logged: [], unmatched: [], sizeMismatch: [], needsSize: [], noItems: [], alreadyProcessed: [], errors: [] };
-
-  const items = parsed.items;
-  if (!items.length) {
-    await recordNoItemsPlaceholder({ email, orderNumber: parsed.orderNumber, shipmentKey: parsed.shipmentKey, summary });
-    return summary;
-  }
-
-  let lineNo = 0;
-  for (const item of items) {
-    lineNo += 1;
-    await recordItemOutcome({ email, orderNumber: parsed.orderNumber, shipmentKey: parsed.shipmentKey, item, lineNo, notifyAdmin, summary });
+  const summary = emptySummary();
+  // An itemless "Delivered: N Lawn & Garden item(s)" email (see the parser's
+  // header) gets one no_items placeholder line, titled with its subject.
+  const lines = parsed.items.length
+    ? parsed.items.map((item) => ({ item }))
+    : [{ item: { title: email.subject, quantity: 1 }, forcedStatus: 'no_items' }];
+  for (const [index, line] of lines.entries()) {
+    await recordLineOutcome({
+      ...line, email, orderNumber: parsed.orderNumber, shipmentKey: parsed.shipmentKey, lineNo: index + 1, notifyAdmin, summary,
+    });
   }
   return summary;
 }
@@ -168,7 +179,7 @@ async function processReceiptEmail(email, { notify } = {}) {
  */
 async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated' };
-  const since = sinceBoundary();
+  const since = gateEnvTimestamp(SINCE_ENV);
   if (!since) return { skipped: 'no_since' };
 
   const emails = await db('emails')
@@ -177,18 +188,14 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
     .where('received_at', '>=', since)
     .orderBy('received_at', 'asc');
 
-  const totals = { emailsScanned: emails.length, logged: [], unmatched: [], sizeMismatch: [], needsSize: [], noItems: [], alreadyProcessed: [], errors: [] };
+  const totals = { emailsScanned: emails.length, ...emptySummary() };
   for (const email of emails) {
     const result = await processReceiptEmail(email, { notify });
-    // `result.skipped` here is only ever the whole-function string sentinel
-    // ('before_since' / 'not_a_delivery_email' / 'unauthenticated' —
-    // 'gated'/'no_since' can't reach this loop, both gates were already
-    // checked above); a successfully processed email's summary object has
-    // no `skipped` key.
+    // Only a whole-email string sentinel ('not_a_delivery_email' /
+    // 'unauthenticated' / 'before_since') reaches here; a processed email's
+    // summary has no `skipped` key.
     if (result.skipped) continue;
-    for (const key of ['logged', 'unmatched', 'sizeMismatch', 'needsSize', 'noItems', 'alreadyProcessed', 'errors']) {
-      if (Array.isArray(result[key])) totals[key].push(...result[key].map((row) => ({ ...row, emailId: email.id })));
-    }
+    for (const [bucket, rows] of Object.entries(result)) totals[bucket].push(...rows.map((row) => ({ ...row, emailId: email.id })));
   }
   return totals;
 }
