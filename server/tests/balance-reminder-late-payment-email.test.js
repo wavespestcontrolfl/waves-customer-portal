@@ -676,7 +676,9 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       channel: 'email', to: null,
-      metadata: expect.objectContaining({ billingDeliveryLeg: 'email', collections_ledger_id: 'led-1' }),
+      metadata: expect.objectContaining({
+        billingDeliveryLeg: 'email', collections_ledger_id: 'led-1', collections_sibling_ledger_ids: [],
+      }),
     }));
     expect(ContactLedger.recordContact).toHaveBeenCalledTimes(1);
     expect(interaction.insert).toHaveBeenCalledTimes(1);

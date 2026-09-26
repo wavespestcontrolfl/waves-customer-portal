@@ -62,12 +62,24 @@ async function reminderProgress(customerId, source, channels) {
 
 // `send` receives the leg's reservation so a producer can hand its ledger id
 // to a deferred replay that must re-check the collections rail.
-async function sendLeg(send, channel, entry) {
+async function sendLeg(send, channel, entry, siblingIds) {
   try {
-    return await send(channel, entry);
+    return await send(channel, entry, siblingIds);
   } catch (err) {
     return err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: 'REMINDER_OUTCOME_UNCONFIRMED' };
   }
+}
+
+async function reserveLegs(legs, { customerId, invoiceId, purpose, source, digest, eventKey, channels, metadata }) {
+  const reservations = new Map();
+  for (const channel of legs) {
+    reservations.set(channel, await ContactLedger.recordContact({
+      customerId, channel, purpose, invoiceIds: [invoiceId], source,
+      idempotencyKey: `billing-reminder:${digest}:${channel}`,
+      metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels },
+    }));
+  }
+  return reservations;
 }
 
 // Stamps one leg's provider outcome on its reservation and returns the state
@@ -113,20 +125,24 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
   // Only a durable denial waives its leg; a spacing window keeps it owed.
   const waived = new Set([...(existing?.waived || []),
     ...pending.filter((_channel, index) => verdictDurablyDenied(permitted[index]))]);
-  const episodeRowIds = new Set(entries.map((entry) => entry.id));
-  for (const [index, channel] of pending.entries()) {
-    if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
-    const entry = await ContactLedger.recordContact({
-      customerId, channel, purpose, invoiceIds: [invoiceId], source,
-      idempotencyKey: `billing-reminder:${digest}:${channel}`,
-      metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels,
-        ...(waived.size ? { policy_waived_channels: [...waived] } : {}) },
-    });
-    episodeRowIds.add(entry?.id);
+  const permittedLegs = pending.filter((_channel, index) => verdictAllows(permitted[index]));
+  for (const channel of pending) {
+    if (!permittedLegs.includes(channel)) results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' };
+  }
+  // Reserve every permitted leg before any provider handoff, so each leg can
+  // name its same-notification siblings (a queued Email retry excludes them
+  // from its collections re-check). Each row still precedes its own send.
+  const reservations = await reserveLegs(permittedLegs, {
+    customerId, invoiceId, purpose, source, digest, eventKey, channels,
+    metadata: { ...metadata, ...(waived.size ? { policy_waived_channels: [...waived] } : {}) },
+  });
+  const episodeRowIds = new Set([...entries, ...reservations.values()].map((entry) => entry?.id));
+  for (const [channel, entry] of reservations) {
     const claim = await ContactLedger.claimAttempt(entry);
     if (claim.delivered) { delivered.add(channel); continue; }
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
-    const result = await sendLeg(send, channel, entry);
+    const siblingIds = [...episodeRowIds].filter((id) => id && id !== entry.id).map(String);
+    const result = await sendLeg(send, channel, entry, siblingIds);
     results[channel] = result;
     const state = await recordLegOutcome(entry, channel, result, results);
     if (state === 'delivered') {

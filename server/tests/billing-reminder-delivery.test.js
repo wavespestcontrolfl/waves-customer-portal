@@ -198,6 +198,28 @@ describe('billing reminder per-channel delivery progress', () => {
     await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: false });
   });
 
+  test('every leg is reserved before any send, and each learns its same-notification siblings', async () => {
+    const order = [];
+    ContactLedger.recordContact.mockImplementationOnce(async (input) => {
+      order.push(`reserve:${input.channel}`);
+      rows.push({ id: 'ledger-email', channel: 'email', occurred_at: new Date(), idempotency_key: input.idempotencyKey, metadata: { ...input.metadata } });
+      return { id: 'ledger-email', metadata: { ...input.metadata } };
+    }).mockImplementationOnce(async (input) => {
+      order.push(`reserve:${input.channel}`);
+      rows.push({ id: 'ledger-sms', channel: 'sms', occurred_at: new Date(), idempotency_key: input.idempotencyKey, metadata: { ...input.metadata } });
+      return { id: 'ledger-sms', metadata: { ...input.metadata } };
+    });
+    const send = jest.fn(async (channel) => {
+      order.push(`send:${channel}`);
+      return { sent: true, deliveryOutcome: 'accepted', auditLogId: `audit-${channel}` };
+    });
+
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true });
+    expect(order).toEqual(['reserve:email', 'reserve:sms', 'send:email', 'send:sms']);
+    expect(send).toHaveBeenCalledWith('email', expect.objectContaining({ id: 'ledger-email' }), ['ledger-sms']);
+    expect(send).toHaveBeenCalledWith('sms', expect.objectContaining({ id: 'ledger-sms' }), ['ledger-email']);
+  });
+
   test('an unstamped acceptance is held and never sent twice', async () => {
     ContactLedger.markDelivered.mockResolvedValueOnce(false);
     const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
