@@ -263,7 +263,9 @@ const BIAgent = {
           const toolInput = data.input || {};
           const toolUseId = toolUseIdFromEvent(data);
           if (!toolUseId) {
-            logger.error(`[bi-agent] Tool ${toolName || '(unknown)'} missing tool use id: ${JSON.stringify(data).slice(0, 500)}`);
+            // Tool inputs can carry customer names (the briefing names at-risk
+            // customers) — log identifiers only, never the event body.
+            logger.error(`[bi-agent] Tool ${toolName || '(unknown)'} (${data?.type || event}) missing tool use id in session ${sessionId}`);
             continue;
           }
           pendingCustomToolUses.set(toolUseId, { toolName, toolInput });
