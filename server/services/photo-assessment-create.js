@@ -39,6 +39,7 @@ const {
   identifyPest,
   buildPestReportContract,
   buildPublicPestReport,
+  publicIdentificationLabel,
   PEST_LIBRARY,
 } = require('./pest-identification');
 const {
@@ -259,10 +260,25 @@ function scopeProspectMode(qb) {
   return qb.where({ mode: 'prospect' });
 }
 
+// A group-only answer (the two vision models split on the species) has no
+// species_slug but keeps its group in the contract; staff see the same group
+// wording the customer sees ("an ant species") instead of a bare category.
+function pestGroupLabel(contract) {
+  const ident = (contract && contract.identification) || {};
+  return !ident.slug && ident.group ? publicIdentificationLabel(contract).label : null;
+}
+
+function pestContractOf(row) {
+  if (!row.report_contract) return {};
+  if (typeof row.report_contract === 'object') return row.report_contract;
+  try { return JSON.parse(row.report_contract) || {}; } catch { return {}; }
+}
+
 function pestListFields(row) {
   const item = row.species_slug ? LIBRARY_BY_SLUG.get(row.species_slug) : null;
+  const groupLabel = item ? null : pestGroupLabel(pestContractOf(row));
   return {
-    headline: item ? item.label : (row.category || 'Unidentified'),
+    headline: item ? item.label : (groupLabel || row.category || 'Unidentified'),
     category: row.category || null,
     urgency: row.urgency || null,
     service_line: row.service_line || null,
@@ -292,7 +308,8 @@ function pestTechView(row, contract) {
   return {
     identification: {
       slug: ident.slug || null,
-      label: item ? item.label : null,
+      label: item ? item.label : pestGroupLabel(contract),
+      group: ident.group || null,
       category: ident.category || null,
       confidence: ident.confidence || null,
       contested: !!ident.contested,

@@ -107,6 +107,12 @@ describe('mergeModelResults', () => {
     expect(buildPestTeaser(contract).safety_flag).toBe(true);
   });
 
+  test('a split keeps inspection-first when either candidate needs it (carpenter ant vs ghost ant)', () => {
+    const split = mergeModelResults(claude({ best_match: 'carpenter ant' }), claude());
+    const contract = buildPestReportContract({ ...split, identification: _test.aggregateIdentification([split]) });
+    expect(contract.service).toMatchObject({ line: 'pest', inspection_required: true });
+  });
+
   test('two stinging species keep the sting; photos of different pairs keep only what all share', () => {
     const wasps = mergeModelResults(claude({ best_match: 'paper wasp' }), claude({ best_match: 'yellowjacket' }));
     expect(buildPestReportContract({ ...wasps, identification: _test.aggregateIdentification([wasps]) }).safety.stinging).toBe(true);

@@ -527,7 +527,7 @@ const URGENCY_RANK = { low: 0, moderate: 1, high: 2 };
 
 // What stays true whichever of the candidates it really is: a safety flag
 // only if every candidate has it, the lowest urgency, and the service only
-// when every candidate routes to the same one. A group-only answer carries
+// when every candidate routes to the same one (inspection-first if any is). A group-only answer carries
 // these instead of one disputed species' facts (Codex #4865 r3).
 function sharedFacts(list) {
   const [first] = list;
@@ -536,8 +536,11 @@ function sharedFacts(list) {
   const urgency = list.reduce((lowest, facts) => (URGENCY_RANK[facts.urgency] < URGENCY_RANK[lowest] ? facts.urgency : lowest), first.urgency);
   const sameService = first.service && list.every((facts) => facts.service
     && facts.service.line === first.service.line && facts.service.key === first.service.key && facts.service.label === first.service.label);
+  // Inspection stays required if ANY candidate needs it: an unresolved
+  // carpenter-ant/ghost-ant split must not skip the carpenter ant's
+  // inspection-first path (Codex #4865 r4).
   const service = sameService
-    ? { ...first.service, inspection_required: list.every((facts) => facts.service.inspection_required) }
+    ? { ...first.service, inspection_required: list.some((facts) => facts.service.inspection_required) }
     : null;
   return { safety, urgency, service };
 }
