@@ -465,6 +465,8 @@ const {
   requestedAddressIsOnFile,
   bookingAtRequestedAddress,
   bookingCoversRequest,
+  isBareNotConfirmedAsk,
+  computeContestedBareNotConfirmedIds,
   loadEvidence,
 } = require('../services/triage-auto-resolve');
 
@@ -1324,6 +1326,125 @@ describe('evidence helpers', () => {
     // (e)-shaped: no property_id / no address stamp at all cannot be
     // positively placed anywhere, even well within the age window.
     expect(bookingCoversRequest(card, [bareBooking({ service_address_line1: null, service_address_city: null, service_address_zip: null, property_id: null })], { singleProperty: true, places })).toBe(false);
+  });
+
+  // codex pre-push P1 (2026-09-26): the bare fallback must apply only when
+  // the card's OWN filing-time status says the caller actually asked for a
+  // time. call-recording-processor's noSchedulingAsk already stopped
+  // filing not_confirmed cards with status 'none' — this pins the ones a
+  // legacy card (or another status the extraction schema allows) still
+  // carries.
+  test('the bare fallback applies only to a real scheduling ask (requested / offered), never none/null or a differently-shaped status', () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const CARD_AT = '2026-09-10T15:00:00Z';
+    const days = (n) => new Date(new Date(CARD_AT).getTime() + n * 24 * 3600 * 1000).toISOString();
+    const cardWithStatus = (status) => item({
+      reason_code: 'not_confirmed', call_log_id: 'call-1', call_customer_id: 'cust-1',
+      created_at: CARD_AT,
+      customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205',
+      payload: {
+        flag: 'not_confirmed', confidence: 0.6,
+        scheduling_status: status,
+        scheduling_window: {
+          status, blackout_dates: [], requested_address: none, confirmed_start_at: null,
+          callback_window_start: null, callback_window_end: null,
+          scheduling_notes_raw: null, preferred_time_of_day: 'unspecified',
+          requested_date_range_start: null, requested_date_range_end: null,
+        },
+      },
+    });
+    const places = new Map();
+    const booking = { id: 'b1', parent_service_id: null, recurring_parent_id: null, status: 'confirmed',
+      service_type: 'Bi-Monthly Pest Control', created_at: days(5), scheduled_date: '2026-09-15',
+      service_address_line1: '77 Oak Street', service_address_city: 'Bradenton', service_address_zip: '34205' };
+    // 'none' — a legacy card the processor no longer files, and legacy
+    // '' / null / undefined the same processor guard already excluded.
+    for (const noAsk of ['none', '', null, undefined]) {
+      expect(isBareNotConfirmedAsk(cardWithStatus(noAsk))).toBe(false);
+      expect(bookingCoversRequest(cardWithStatus(noAsk), [booking], { singleProperty: true, places })).toBe(false);
+    }
+    // The schema's other scheduling.status values (call-extraction.persisted
+    // .schema.json) are each a different, more specific situation than a
+    // plain unconfirmed time ask — not this fallback's job either.
+    for (const otherStatus of ['ambiguous', 'canceled', 'reschedule_requested']) {
+      expect(isBareNotConfirmedAsk(cardWithStatus(otherStatus))).toBe(false);
+      expect(bookingCoversRequest(cardWithStatus(otherStatus), [booking], { singleProperty: true, places })).toBe(false);
+    }
+    // 'requested' and 'offered' are the real ask — both still resolve.
+    for (const realAsk of ['requested', 'offered']) {
+      expect(isBareNotConfirmedAsk(cardWithStatus(realAsk))).toBe(true);
+      expect(bookingCoversRequest(cardWithStatus(realAsk), [booking], { singleProperty: true, places })).toBe(true);
+    }
+  });
+
+  // codex pre-push P1 (2026-09-26): the bare fallback ignores
+  // source_call_log_id and doesn't consume bookings one-to-one, so two
+  // bare not_confirmed cards for the same customer/address within 7 days
+  // could both see the same later booking and both resolve, though it may
+  // answer only one. computeContestedBareNotConfirmedIds is the guard
+  // loadVisitEvidence applies before flagging booking_after_card.
+  test('computeContestedBareNotConfirmedIds leaves BOTH sibling bare cards open when they compete for the same booking', () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const bareCard = (id, createdAt) => item({
+      id, reason_code: 'not_confirmed', call_log_id: `call-${id}`, call_customer_id: 'cust-1',
+      created_at: createdAt,
+      customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205',
+      payload: {
+        flag: 'not_confirmed', confidence: 0.6, scheduling_status: 'requested',
+        scheduling_window: { status: 'requested', blackout_dates: [], requested_address: none, confirmed_start_at: null,
+          callback_window_start: null, callback_window_end: null, scheduling_notes_raw: null,
+          preferred_time_of_day: 'unspecified', requested_date_range_start: null, requested_date_range_end: null },
+      },
+    });
+    const places = new Map();
+    const bookingAt = (createdAt, id = 'b1') => ({ id, parent_service_id: null, recurring_parent_id: null, status: 'confirmed',
+      service_type: 'Bi-Monthly Pest Control', created_at: createdAt, scheduled_date: '2026-09-15',
+      service_address_line1: '77 Oak Street', service_address_city: 'Bradenton', service_address_zip: '34205' });
+    // Two calls from the same customer, three days apart, neither ever
+    // confirmed a time. ONE booking lands after BOTH cards and within
+    // both cards' 7-day span — it can only be the answer to one of them.
+    const cardA = bareCard('t1', '2026-09-10T15:00:00Z');
+    const cardB = bareCard('t2', '2026-09-13T15:00:00Z');
+    const sharedBooking = bookingAt('2026-09-16T09:00:00Z');
+    const mine = [sharedBooking];
+    const visitsByCustomer = new Map([['cust-1', mine]]);
+    // In isolation each card would resolve — the ambiguity only exists
+    // because they're siblings.
+    expect(bookingCoversRequest(cardA, mine, { singleProperty: true, places })).toBe(true);
+    expect(bookingCoversRequest(cardB, mine, { singleProperty: true, places })).toBe(true);
+    const contested = computeContestedBareNotConfirmedIds([cardA, cardB], visitsByCustomer, places);
+    expect(contested.has('t1')).toBe(true);
+    expect(contested.has('t2')).toBe(true);
+    // Mirrors the gate loadVisitEvidence applies: neither actually flags.
+    expect(bookingCoversRequest(cardA, mine, { singleProperty: true, places }) && !contested.has(cardA.id)).toBe(false);
+    expect(bookingCoversRequest(cardB, mine, { singleProperty: true, places }) && !contested.has(cardB.id)).toBe(false);
+
+    // Two INDEPENDENT bookings, one per card, are not a contest — both
+    // resolve normally. bookingForB is dated outside cardA's own 7-day
+    // span (9 days after cardA, but only 6 after cardB) so it answers only
+    // cardB — a genuine non-overlap, not just two dates close together.
+    const bookingForA = bookingAt('2026-09-11T09:00:00Z', 'bA');
+    const bookingForB = bookingAt('2026-09-19T09:00:00Z', 'bB');
+    const separateMine = [bookingForA, bookingForB];
+    const separateByCustomer = new Map([['cust-1', separateMine]]);
+    const notContested = computeContestedBareNotConfirmedIds([cardA, cardB], separateByCustomer, places);
+    expect(notContested.size).toBe(0);
+    expect(bookingCoversRequest(cardA, separateMine, { singleProperty: true, places })).toBe(true);
+    expect(bookingCoversRequest(cardB, separateMine, { singleProperty: true, places })).toBe(true);
+
+    // A single bare card has nothing to contest against — never flagged.
+    const solo = computeContestedBareNotConfirmedIds([cardA], visitsByCustomer, places);
+    expect(solo.size).toBe(0);
+
+    // Two bare cards for DIFFERENT customers never contest each other, even
+    // over an (impossible in practice) shared booking id.
+    const cardC = { ...bareCard('t3', '2026-09-10T15:00:00Z'), call_customer_id: 'cust-2' };
+    const crossCustomer = computeContestedBareNotConfirmedIds(
+      [cardA, cardC],
+      new Map([['cust-1', mine], ['cust-2', mine]]),
+      places,
+    );
+    expect(crossCustomer.size).toBe(0);
   });
 
   test('loadEvidence is an empty map with the evidence gate off — no DB access', async () => {

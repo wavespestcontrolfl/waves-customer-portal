@@ -1499,6 +1499,53 @@ function withinRequestedTiming(item, visit) {
   return day >= window.start && day <= window.end;
 }
 
+// The not_confirmed bare-ask fallback applies only when the card's OWN
+// filing-time status says the caller actually made a scheduling ask.
+// call-recording-processor's noSchedulingAsk (~L9741) already draws this
+// line for whether to file the card at ALL: 'none' / '' / null / undefined
+// means no ask (a quote request, a service question, a plain cancellation)
+// and has filed no not_confirmed card since that guard shipped — but
+// legacy cards filed before it still sit open, and 'ambiguous' /
+// 'reschedule_requested' / 'canceled' (the extraction schema's other
+// scheduling.status values, call-extraction.persisted.schema.json) are
+// each a different, more specific situation than "asked for a time, never
+// confirmed it" — closing one of those on an unrelated later booking is
+// not this fallback's job. Only 'requested' and 'offered' are that plain
+// ask (codex pre-push P1, 2026-09-26).
+const BARE_ASK_SCHEDULING_STATUSES = new Set(['requested', 'offered']);
+
+// Is this card the bare not_confirmed ask the fallback below exists for:
+// no requested service category, no requested_service_intent, and a
+// filing-time status that says the caller actually asked for a time?
+// Exported so the evidence pass (loadVisitEvidence) can find every SIBLING
+// bare card for a customer without re-deriving this in two places.
+function isBareNotConfirmedAsk(item) {
+  return item.reason_code === 'not_confirmed'
+    && !requestedServiceTokens(item).length
+    && !requestAsk(item)?.requested_service_intent
+    && BARE_ASK_SCHEDULING_STATUSES.has(cardSchedulingStatus(item));
+}
+
+// The bookings that actually ANSWER a bare not_confirmed card's ask: live
+// PARENT rows created after the card, within NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS
+// of it, honoring every date/time signal the card DID capture
+// (withinRequestedTiming), and positively matching at least one address the
+// card's ask named (bookingAtReadings — the on-file address when it named
+// none). Exported (not just bareNotConfirmedBookingCoversCall's boolean)
+// because the evidence pass needs the actual booking set to tell whether
+// the SAME booking would answer two different SIBLING cards (see
+// loadVisitEvidence's contest check) — one booking is not evidence a
+// customer got scheduled twice.
+function bareNotConfirmedAnsweringBookings(item, mine, places) {
+  const asked = requestedPlaces(item);
+  if (!asked) return [];
+  const candidates = mine.filter((v) => !v.parent_service_id && !v.recurring_parent_id
+    && strictlyAfter(v.created_at, item.created_at)
+    && ageDays(item.created_at, toDate(v.created_at) || new Date(NaN)) <= NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS
+    && withinRequestedTiming(item, v));
+  return candidates.filter((v) => asked.some((readings) => bookingAtReadings(item, v, places, readings)));
+}
+
 // not_confirmed's bare-ask fallback: the card snapshotted NO requested
 // service category and NO requested_service_intent — what every REAL
 // not_confirmed payload does (2026-09-26 prod audit: 74 such cards filed
@@ -1522,15 +1569,56 @@ function withinRequestedTiming(item, visit) {
 // beyond that positive per-visit check. Direct-vs-association provenance is
 // not judged either: a booking a human made by hand after reading the card
 // carries no source_call_log_id pointing back at this call at all, and
-// that is exactly the case this fallback exists for.
+// that is exactly the case this fallback exists for. Whether a SIBLING bare
+// card would be answered by the SAME booking is not this function's
+// question — see loadVisitEvidence's contest check, which gates the flag
+// this feeds, not this predicate.
 function bareNotConfirmedBookingCoversCall(item, mine, places) {
   const asked = requestedPlaces(item);
   if (!asked) return false;
-  const candidates = mine.filter((v) => !v.parent_service_id && !v.recurring_parent_id
-    && strictlyAfter(v.created_at, item.created_at)
-    && ageDays(item.created_at, toDate(v.created_at) || new Date(NaN)) <= NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS
-    && withinRequestedTiming(item, v));
-  return asked.every((readings) => candidates.some((v) => bookingAtReadings(item, v, places, readings)));
+  const answering = bareNotConfirmedAnsweringBookings(item, mine, places);
+  return asked.every((readings) => answering.some((v) => bookingAtReadings(item, v, places, readings)));
+}
+
+// One booking cannot be evidence that a customer got scheduled for two
+// DIFFERENT not_confirmed calls (codex pre-push P1, 2026-09-26): two bare
+// cards for the same customer within 7 days of each other can both see the
+// same later booking, but it can only be the answer to one of them. Pure
+// and exported: `visitItems` is the sweep's candidate rows (only
+// call_customer_id / id / reason_code / payload / created_at are read),
+// `visitsByCustomer` maps customer id → their live parent-eligible visits
+// (the same shape loadVisitEvidence already builds), `places` the same
+// active-property map bookingAtReadings reads. Returns the SET of bare
+// item ids that share at least one answering booking with ANOTHER bare
+// card for the same customer — simplest safe rule (no attempt at a
+// one-to-one pairing): any contested booking leaves EVERY card it is
+// shared between open for a human, even one of them also has an
+// independent, uncontested booking of its own.
+function computeContestedBareNotConfirmedIds(visitItems, visitsByCustomer, places) {
+  const byCustomer = new Map();
+  for (const item of visitItems) {
+    if (!isBareNotConfirmedAsk(item) || !item.call_customer_id) continue;
+    const list = byCustomer.get(String(item.call_customer_id)) || [];
+    list.push(item);
+    byCustomer.set(String(item.call_customer_id), list);
+  }
+  const contested = new Set();
+  for (const cards of byCustomer.values()) {
+    if (cards.length < 2) continue;
+    const claimants = new Map(); // booking id → Set of card ids answering with it
+    for (const item of cards) {
+      const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
+      for (const v of bareNotConfirmedAnsweringBookings(item, mine, places)) {
+        const ids = claimants.get(v.id) || new Set();
+        ids.add(item.id);
+        claimants.set(v.id, ids);
+      }
+    }
+    for (const ids of claimants.values()) {
+      if (ids.size > 1) for (const id of ids) contested.add(id);
+    }
+  }
+  return contested;
 }
 
 // not_confirmed → bookings created after the card that COLLECTIVELY cover
@@ -1554,14 +1642,19 @@ function bareNotConfirmedBookingCoversCall(item, mine, places) {
 function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const categories = requestedServiceTokens(item);
   if (!categories.length) {
-    // The snapshot's OWN field, never intentRule()'s lookup: intentRule
-    // returns null for a valid intent the table simply has no booking rule
-    // for (complaint_or_callback, cancellation_request) as much as for a
+    // isBareNotConfirmedAsk reads the snapshot's OWN requested_service_intent
+    // field, never intentRule()'s lookup — intentRule returns null for a
+    // valid intent the table simply has no booking rule for
+    // (complaint_or_callback, cancellation_request) as much as for a
     // genuinely absent one, and a card that snapshotted one of THOSE has
-    // asked something specific — it must keep failing closed on the strict
-    // path below (codex pre-push finding, 2026-09-26), not fall into the
-    // no-ask bypass.
-    if (item.reason_code !== 'not_confirmed' || requestAsk(item)?.requested_service_intent) return false;
+    // asked something specific, so it must keep failing closed on the
+    // strict path below (codex pre-push finding, 2026-09-26) — not fall
+    // into the no-ask bypass. It also requires the card's OWN filing-time
+    // status to say the caller actually asked for a time ('requested' /
+    // 'offered'), excluding legacy cards with no scheduling ask at all and
+    // the schema's other, differently-shaped statuses (another codex
+    // pre-push P1).
+    if (!isBareNotConfirmedAsk(item)) return false;
     return bareNotConfirmedBookingCoversCall(item, mine, places);
   }
   // Parent rows only: neither a follow-up child (parent_service_id) nor a
@@ -2050,6 +2143,13 @@ async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {})
     visitsByCustomer.set(String(v.customer_id), list);
   }
 
+  // One booking cannot be evidence that TWO SIBLING bare not_confirmed
+  // cards (same customer) each got their own appointment — see
+  // computeContestedBareNotConfirmedIds. Computed once over every bare
+  // card in this batch, not per item, so a contest is caught however the
+  // sweep chunked the backlog.
+  const contestedBare = computeContestedBareNotConfirmedIds(visitItems, visitsByCustomer, places);
+
   for (const item of visitItems) {
     const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
     // At VERDICT time (ignoreGate) the association path is admitted for a
@@ -2057,7 +2157,7 @@ async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {})
     // to match the approved premise there, so the single-property guard
     // (a nightly-sweep safety margin) would only file a duplicate task
     // for an appointment that exists (codex #4666 r24 P1).
-    if (needsBooking(item)
+    if (needsBooking(item) && !contestedBare.has(item.id)
       && bookingCoversRequest(item, mine, { singleProperty: ignoreGate || singleProperty(item.call_customer_id), places })) {
       flag(item.id, 'booking_after_card');
     }
@@ -2256,6 +2356,9 @@ module.exports = {
   requestedAddressIsOnFile,
   bookingAtRequestedAddress,
   bookingCoversRequest,
+  isBareNotConfirmedAsk,
+  bareNotConfirmedAnsweringBookings,
+  computeContestedBareNotConfirmedIds,
   visitAtStatedAddress,
   loadEvidence,
   EVIDENCE_CODES,
