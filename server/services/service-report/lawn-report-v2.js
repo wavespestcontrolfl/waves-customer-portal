@@ -480,11 +480,11 @@ function buildAftercare(applications) {
     (entry) => entry.required === true && !entry.hasInstruction,
   );
   if (productNotes.length > 1) {
-    watering = null;
+    watering = 'The recorded product watering instructions differ. Confirm the directions with your technician before changing irrigation.';
     evidenceSource = 'conflicting_product_instructions';
     needsReview = true;
   } else if (requiredWithoutInstruction && productNotes.length) {
-    watering = null;
+    watering = 'A required product watering instruction is missing. Confirm the directions with your technician before changing irrigation.';
     evidenceSource = 'incomplete_product_instructions';
     needsReview = true;
   } else if (productNotes.length === 1) {

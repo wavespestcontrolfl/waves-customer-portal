@@ -172,11 +172,11 @@ describe('lawn insight evidence boundaries', () => {
     expect(buildAftercare([
       { product: { irrigation_notes: 'Water after service.' } },
       { product: { irrigation_notes: 'Do not water after service.' } },
-    ])).toMatchObject({ watering: null, evidenceSource: 'conflicting_product_instructions', needsReview: true });
+    ])).toMatchObject({ watering: expect.stringMatching(/Confirm the directions/), evidenceSource: 'conflicting_product_instructions', needsReview: true });
     expect(buildAftercare([
-      { product: { irrigation_required: true } },
+      { product: { irrigation_required: true, reentry_text: 'Keep people and pets away until dry.' } },
       { product: { irrigation_notes: 'Do not water after service.' } },
-    ])).toMatchObject({ watering: null, evidenceSource: 'incomplete_product_instructions', needsReview: true });
+    ])).toMatchObject({ watering: expect.stringMatching(/Confirm the directions/), reentry: 'Keep people and pets away until dry.', evidenceSource: 'incomplete_product_instructions', needsReview: true });
 
     const surplusAssessment = assessment({
       waterContext: {
