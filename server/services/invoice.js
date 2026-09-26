@@ -5429,10 +5429,16 @@ const InvoiceService = {
       // The unfinished leg (channelResults holds one when a partial fan-out
       // both delivered and still owes a retry) — never populated for an
       // ordinary single-leg or fully-accepted send.
-      const pendingChannel = acceptedChannelResults && anyChannelAccepted && !sendResult.sent
+      // Every unfinished leg is considered, not just the first: an uncertain
+      // leg wins (so nothing is requeued that might double-send), then a
+      // retryable/deferred leg (so it is queued), then any other.
+      const pendingLegs = acceptedChannelResults && anyChannelAccepted && !sendResult.sent
         ? Object.entries(acceptedChannelResults)
-          .find(([, leg]) => !(leg?.sent === true && leg?.deliveryOutcome === "accepted"))
-        : null;
+          .filter(([, leg]) => !(leg?.sent === true && leg?.deliveryOutcome === "accepted"))
+        : [];
+      const pendingChannel = pendingLegs.find(([, leg]) => leg?.deliveryOutcome === "uncertain")
+        || pendingLegs.find(([, leg]) => leg?.retryable === true || leg?.deferred === true)
+        || pendingLegs[0] || null;
 
       if (!anyChannelAccepted) {
         logger.warn(

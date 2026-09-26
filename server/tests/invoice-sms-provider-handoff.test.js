@@ -657,6 +657,27 @@ describe('invoice SMS provider handoff', () => {
       };
     }
 
+    test.each([
+      ['uncertain first', ['push', 'sms']],
+      ['retryable first', ['sms', 'push']],
+    ])('an uncertain sibling blocks the requeue whatever the leg order (%s)', async (_label, order) => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      const legs = {
+        push: { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'APP_OUTCOME_UNCERTAIN' },
+        sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', retryable: true },
+      };
+      const channelResults = { email: { sent: true, deliveryOutcome: 'accepted' } };
+      order.forEach((k) => { channelResults[k] = legs[k]; });
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'APP_OUTCOME_UNCERTAIN', retryable: true, channelResults,
+      }));
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'push', pendingChannelQueued: false });
+      expect(smsLogInserts).toHaveLength(0);
+    });
+
     test('a queued replay keeps Email in its fan-out when no Email leg was accepted', async () => {
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts });
