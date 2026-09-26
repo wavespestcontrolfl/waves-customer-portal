@@ -13,10 +13,14 @@
 //
 // Grandfathering (ruling 2026-09-26): jobs sold before the change keep
 // unlimited included checks. A job is grandfathered when its opener's
-// source estimate was accepted before TRAP_CHECK_FEE_EFFECTIVE_DATE, or —
-// with no estimate link — when the opener was scheduled before that date.
+// source estimate was CREATED before TRAP_CHECK_FEE_EFFECTIVE_DATE — an
+// estimate already out with the customer keeps the terms it was quoted
+// under, whenever it is accepted — or, with no estimate link, when the
+// opener was booked (row created) before that date.
 
 const TRAP_CHECK_ADDITIONAL_KEY = 'rodent_trap_check_additional';
+// Code default only — the live price is the catalog row's base_price
+// (catalogAdditionalCheckPrice), the same number booking stamps.
 const TRAP_CHECK_ADDITIONAL_PRICE = 95;
 const INCLUDED_TRAPPING_VISITS = 2;
 // ET calendar date the 2-visit rule starts applying to newly sold jobs.
@@ -58,8 +62,8 @@ function dayNumber(ymd) {
   return Date.UTC(y, m - 1, d) / 86400000;
 }
 
-function isGrandfathered({ acceptedAt, openerDate }) {
-  const basis = acceptedAt || openerDate;
+function isGrandfathered({ estimateDate, bookedDate }) {
+  const basis = estimateDate || bookedDate;
   if (!basis) return false;
   return String(basis).slice(0, 10) < TRAP_CHECK_FEE_EFFECTIVE_DATE;
 }
@@ -155,7 +159,10 @@ const VISIT_COLUMNS = [
 async function trappingVisits(db, customerId) {
   const dayCols = () => [
     db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_day"),
-    db.raw("to_char(e.accepted_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as accepted_day"),
+    // estimates.created_at / scheduled_services.created_at are timestamptz,
+    // so one AT TIME ZONE yields the ET wall clock.
+    db.raw("to_char(e.created_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as estimate_day"),
+    db.raw("to_char(ss.created_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as booked_day"),
     db.raw("to_char(ss.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') as created_key"),
   ];
   const primaries = await db('scheduled_services as ss')
@@ -188,6 +195,16 @@ async function trappingVisits(db, customerId) {
   ));
 }
 
+// The price booking will actually stamp: the active catalog row's
+// base_price, falling back to the code default when the row is absent.
+async function catalogAdditionalCheckPrice(db) {
+  const row = await db('services')
+    .where({ service_key: TRAP_CHECK_ADDITIONAL_KEY, is_active: true })
+    .first('base_price');
+  const price = Number(row?.base_price);
+  return Number.isFinite(price) && price > 0 ? price : TRAP_CHECK_ADDITIONAL_PRICE;
+}
+
 /**
  * The trapping job a booking on `date` (ET 'YYYY-MM-DD', default today)
  * belongs to: only visits on or before that date count (a later booked
@@ -218,7 +235,7 @@ async function trappingJobStatus(db, customerId, { date, today, propertyId = nul
   const base = {
     includedVisits: INCLUDED_TRAPPING_VISITS,
     additionalCheckKey: TRAP_CHECK_ADDITIONAL_KEY,
-    additionalCheckPrice: TRAP_CHECK_ADDITIONAL_PRICE,
+    additionalCheckPrice: await catalogAdditionalCheckPrice(db),
   };
   if (!job) {
     return { ...base, hasJob: false, openerDate: null, openerUnknown: false, visitCount: 0, grandfathered: false, nextVisitBillable: false };
@@ -228,11 +245,12 @@ async function trappingJobStatus(db, customerId, { date, today, propertyId = nul
   const firstDay = job.visits[0].scheduled_day;
   let grandfathered;
   if (job.opener) {
-    grandfathered = isGrandfathered({ acceptedAt: job.opener.accepted_day, openerDate: job.opener.scheduled_day });
+    grandfathered = isGrandfathered({ estimateDate: job.opener.estimate_day, bookedDate: job.opener.booked_day });
   } else {
-    // No identifiable opener: a job already running before the rule is
-    // grandfathered for certain; otherwise the office has to look.
-    grandfathered = firstDay < TRAP_CHECK_FEE_EFFECTIVE_DATE;
+    // No identifiable opener: a job already running (or booked) before the
+    // rule is grandfathered for certain; otherwise the office has to look.
+    grandfathered = firstDay < TRAP_CHECK_FEE_EFFECTIVE_DATE
+      || isGrandfathered({ bookedDate: job.visits[0].booked_day });
   }
   const openerUnknown = !job.opener && !grandfathered;
 

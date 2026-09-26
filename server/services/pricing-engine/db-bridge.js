@@ -17,6 +17,7 @@ const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.
 // Pristine code defaults for the rodent bracket ladder (codex #3591 r54
 // P1): a DB row that disappears or invalidates after a prior sync must
 // fall back to these, not keep the stale process-global values.
+const RODENT_ADDITIONAL_CHECK_DEFAULT = constants.RODENT.trapping.additionalCheckPrice;
 const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
   baitBrackets: constants.RODENT.baitBrackets,
   baitBracketExtension: constants.RODENT.baitBracketExtension,
@@ -1512,9 +1513,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       // additional_followup_rate is deliberately not mapped: the $95 extra
       // check (owner ruling 2026-09-26) is billed by the office-booked
       // "Rodent Trap Check - Additional" catalog row, whose base_price is
-      // the booking authority; additionalCheckPrice in constants only feeds
-      // customer copy and is pinned to that row by the catalog migration
-      // (20260927000001). A second DB-editable copy would let them drift.
+      // the booking authority. additionalCheckPrice (customer copy) is
+      // overlaid from that row below, so copy and invoice never drift.
       if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);
       if (t.emergency_minimum_surcharge != null) constants.RODENT.trapping.emergencyMinimumSurcharge = r(t.emergency_minimum_surcharge);
       if (Array.isArray(t.home_size_adjustments)) {
@@ -2119,6 +2119,25 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
           target.lotAdjustments.followUp = flea.lot.followUp.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
         }
       }
+    }
+
+    // ── Rodent extra trap check: catalog base_price is the authority ──
+    // (owner ruling 2026-09-26). Reset to the code default first so a
+    // removed/inactive row never leaves a stale overlay behind.
+    // A failed catalog read keeps the code default rather than failing the
+    // whole pricing sync — this number only feeds customer copy; booking
+    // stamps the catalog price itself.
+    constants.RODENT.trapping.additionalCheckPrice = RODENT_ADDITIONAL_CHECK_DEFAULT;
+    try {
+      if (await db.schema.hasTable('services')) {
+        const extraCheck = await db('services')
+          .where({ service_key: 'rodent_trap_check_additional', is_active: true })
+          .first('base_price');
+        const price = Number(extraCheck?.base_price);
+        if (Number.isFinite(price) && price > 0) constants.RODENT.trapping.additionalCheckPrice = r(price);
+      }
+    } catch (err) {
+      console.warn('[pricing-engine] rodent extra-check catalog price read skipped:', err.message);
     }
 
     // ── Lawn Care Brackets (all 4 grass tracks) ──────────────
