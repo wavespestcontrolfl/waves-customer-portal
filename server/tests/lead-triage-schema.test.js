@@ -75,3 +75,38 @@ test('a serviceInterest longer than 255 chars is not usable (fallback)', async (
   expect(await aiTriageLead(LEAD)).toBeNull();
   expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
 });
+
+// Owner ruling 2026-09-26: customer texts are never signed. The prompt says so
+// and the suggestion is stripped anyway, since models add sign-offs on their own.
+describe('aiTriageLead — suggested replies are never signed', () => {
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  beforeEach(() => { process.env.ANTHROPIC_API_KEY = 'test-key'; mockCreate.mockReset(); ledgerCallRejected.mockClear(); dispatch.mockReset(); dispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' }); });
+  afterAll(() => { if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey; });
+
+  test.each([
+    'Thanks — we can help with the ants. — Adam, Waves Pest Control',
+    'Thanks — we can help with the ants.\n\nAdam, Waves Pest Control',
+    'Thanks — we can help with the ants. — Adam',
+  ])('a signed fallback suggestion is stripped: %j', async (suggestedReply) => {
+    mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
+    expect((await aiTriageLead(LEAD)).suggestedReply).toBe('Thanks — we can help with the ants.');
+  });
+
+  test('a signed primary suggestion is stripped too', async () => {
+    dispatch.mockResolvedValueOnce({ ok: true, json: { ...VALID, suggestedReply: 'We can help. — Adam, Waves Pest Control' } });
+    expect((await aiTriageLead(LEAD)).suggestedReply).toBe('We can help.');
+  });
+
+  test('a reply that just thanks a customer named Adam by name is kept', async () => {
+    mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply: 'Thanks, Adam!' }));
+    expect((await aiTriageLead({ ...LEAD, name: 'Adam Smith' })).suggestedReply).toBe('Thanks, Adam!');
+  });
+
+  test('the prompt asks for no signature', async () => {
+    mockCreate.mockResolvedValue(reply(VALID));
+    await aiTriageLead(LEAD);
+    const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+    expect(prompt).toMatch(/NEVER sign/);
+    expect(prompt).not.toMatch(/signed "Adam/);
+  });
+});

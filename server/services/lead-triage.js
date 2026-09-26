@@ -3,6 +3,7 @@ const MODELS = require('../config/models');
 const { dispatch, rejectCall } = require('./llm/call');
 const { stripThinkingBlocks } = require('./llm/deep');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
+const { stripTrailingSignature } = require('./messaging/sms-signoff');
 
 // Structured-output contract for the live (dispatcher) leg. The direct-SDK
 // Claude fallback below has no schema path, so the prompt keeps its field
@@ -24,7 +25,7 @@ const TRIAGE_SCHEMA = {
         propertyType: { type: ['string', 'null'], description: '"residential", "commercial", or null' },
       },
     },
-    suggestedReply: { type: 'string', description: 'A warm, personalized SMS reply under 300 characters signed "Adam, Waves Pest Control"' },
+    suggestedReply: { type: 'string', description: 'A warm, personalized SMS reply under 300 characters, never signed — no name, sign-off or company name at the end' },
   },
 };
 
@@ -47,12 +48,17 @@ function triageMatchesSchema(t) {
     && strOrNull(x.pestType) && strOrNull(x.location) && strOrNull(x.propertyType);
 }
 
-function mapTriage(parsed) {
+// Owner ruling 2026-09-26: customer texts are never signed. The prompt says
+// so, and the suggestion is stripped deterministically anyway because models
+// add sign-offs on their own; the lead's first name keeps a reply addressed
+// to a customer who shares the signer's name intact.
+function mapTriage(parsed, { firstName } = {}) {
+  const reply = parsed.suggestedReply ? stripTrailingSignature(parsed.suggestedReply, { addresseeFirstName: firstName }) : '';
   return {
     serviceInterest: parsed.serviceInterest || null,
     urgency: parsed.urgency || 'normal',
     extractedData: parsed.extractedData || {},
-    suggestedReply: parsed.suggestedReply || null,
+    suggestedReply: reply || null,
   };
 }
 
@@ -63,6 +69,7 @@ function mapTriage(parsed) {
  */
 async function aiTriageLead({ name, phone, message, address, pageUrl, formName }) {
   if (!message) return null;
+  const firstName = String(name || '').trim().split(/\s+/)[0] || undefined;
 
   const prompt = `You are a lead triage assistant for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
 
@@ -82,7 +89,7 @@ Return a JSON object with:
    - "pestType" — specific pest mentioned if any (e.g. "ants", "roaches", "rats", "mosquitoes") or null
    - "location" — area/neighborhood if identifiable from address or message, or null
    - "propertyType" — "residential" or "commercial" or null
-4. "suggestedReply" — a warm, personalized SMS reply (under 300 chars) signed "Adam, Waves Pest Control". Reference their specific concern. Be friendly and professional.
+4. "suggestedReply" — a warm, personalized SMS reply (under 300 chars). Reference their specific concern. Be friendly and professional. NEVER sign it — no name, sign-off or company name at the end; the text just ends.
 
 Return ONLY valid JSON, no markdown.`;
 
@@ -93,7 +100,7 @@ Return ONLY valid JSON, no markdown.`;
       // The structured-output schema cannot forbid blank strings, so the
       // primary gets the same check as the fallback; a miss fails its row
       // and Claude gets a turn.
-      if (triageMatchesSchema(r.json)) return mapTriage(r.json);
+      if (triageMatchesSchema(r.json)) return mapTriage(r.json, { firstName });
       rejectCall(r, 'schema_invalid');
     }
   }
@@ -124,7 +131,7 @@ Return ONLY valid JSON, no markdown.`;
       ledgerCallRejected(response, 'schema_invalid');
       return null;
     }
-    return mapTriage(triage);
+    return mapTriage(triage, { firstName });
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);
     return null;
