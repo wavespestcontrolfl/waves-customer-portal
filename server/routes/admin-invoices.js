@@ -2323,9 +2323,9 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 // - a prepay with any payment on it is refused (owner ruling 2026-09-26):
 //   the payment stays on the surviving invoice, so undoing coverage would
 //   bill the covered work again — a refund is the way to end it;
-// - a prepay minted by the on-site switch or carrying a rodent setup fee is
-//   refused: the cancel restores the charges it replaced while the surviving
-//   invoice still carries them — voiding it is the way to end it.
+// - a prepay born from an accepted estimate, minted by the on-site switch or
+//   carrying a rodent setup fee is refused: its own flow owns collection and
+//   the charges it replaced — voiding it is the way to end it.
 // Re-marking later re-activates a term this route cancelled.
 router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   const refuse = (message) => {
@@ -2340,9 +2340,15 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   // triage cancels a live session) and again under the locks.
   const removalRefusal = async (conn, row) => {
     if (!row.annual_prepay_term_id) return null;
-    const term = await conn('annual_prepay_terms').where({ id: row.annual_prepay_term_id }).first('status', 'renewal_decision');
+    const term = await conn('annual_prepay_terms').where({ id: row.annual_prepay_term_id }).first('status', 'renewal_decision', 'source_estimate_id');
     if (term?.renewal_decision) {
       return `This term already has a renewal decision (${term.renewal_decision}) and cannot be removed this way — use the renewal workflow instead.`;
+    }
+    // A prepay born from an accepted estimate is not a mistaken flag: the
+    // accept flow owns its collection (a durable card auto-charge job can
+    // still charge the surviving invoice), so it ends by voiding.
+    if (term?.source_estimate_id) {
+      return 'This annual prepay came from an accepted estimate, so it is not a flag set by mistake. Void the invoice instead — voiding is how an accepted prepay is cancelled.';
     }
     // Money on the invoice itself, not only the term's status: the Stripe
     // webhook commits the invoice paid before it activates the term (and

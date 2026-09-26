@@ -249,6 +249,25 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
   });
 
+  test('removing the flag from a prepay born from an accepted estimate is refused (void ends it)', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const estimateId = randomUUID();
+    await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted', estimate_data: {} });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, source_estimate_id: estimateId, status: 'payment_pending',
+      term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, { status: 'sent', annual_prepay_term_id: termId });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/accepted estimate/);
+    expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
+  });
+
   test('removing the flag refuses a decided term and changes nothing', async () => {
     const customerId = await customer({ billing_mode: 'annual_prepay' });
     const prepayInvoiceId = await invoice(customerId, { status: 'paid', paid_at: new Date() });
