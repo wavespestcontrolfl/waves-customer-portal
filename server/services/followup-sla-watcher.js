@@ -148,7 +148,7 @@ function contactPhone(row) {
 // a text sent mid-call is not a follow-up. Pager rows are untouched, so no
 // staff renewal can move this boundary.
 // Which of these promises show follow-up the proof does not close on its
-// own, in four queries however many rows (the check also runs under the publishing
+// own, in five queries however many rows (the check also runs under the publishing
 // lock): a booking someone made, a call that reached the customer, or a text
 // a staff member typed. Evidence counts only after the promise's call ENDED
 // (promisedAt) and is matched by customer — or, for a caller with no
@@ -163,19 +163,27 @@ async function followedUpIds(conn, rows) {
   // Numbers match on their last ten digits, however they were written
   // (9415550123, +19415550123, (941) 555-0123) — call-commitments' phoneWhere.
   const phones = [...new Set(scoped.filter((x) => x.phone).map((x) => phoneKey(x.phone)).filter(Boolean))];
+  const phoneIn = (column) => [`right(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10) IN (${phones.map(() => '?').join(', ')})`, phones];
+  // A caller with no customer record when the promise was made is usually
+  // linked (or created) by the very follow-up that keeps it, so their later
+  // calls and texts match by number whether or not they carry a customer now.
   const byContact = (qb) => qb.where(function contact() {
     if (customerIds.length) this.whereIn('customer_id', customerIds);
-    if (phones.length) {
-      this.orWhere(function unlinked() {
-        this.whereNull('customer_id')
-          .whereRaw(`right(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) IN (${phones.map(() => '?').join(', ')})`, phones);
-      });
-    }
+    if (phones.length) this.orWhereRaw(...phoneIn('to_phone'));
   });
+  // …and a booking made for them lands under the customer that number
+  // belongs to by then.
+  const phoneCustomers = phones.length ? await conn('customers').whereRaw(...phoneIn('phone')).select('id', 'phone') : [];
+  const customersByPhone = new Map();
+  for (const c of phoneCustomers) {
+    const k = phoneKey(c.phone);
+    customersByPhone.set(k, [...(customersByPhone.get(k) || []), String(c.id)]);
+  }
+  const visitCustomerIds = [...new Set([...customerIds.map(String), ...phoneCustomers.map((c) => String(c.id))])];
   // A booking someone made — never a visit the system generated on its own
   // (the nightly series top-up, a booking's seeded follow-ups) and never one
   // later cancelled (the proof's own rule).
-  const visits = customerIds.length ? await conn('scheduled_services').whereIn('customer_id', customerIds)
+  const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
     .where('created_at', '>', floor).whereNull('recurring_parent_id').whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at') : [];
   // A call that reached the customer — the proof's bar for a returned
@@ -209,9 +217,11 @@ async function followedUpIds(conn, rows) {
   }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
-    : !rec.customer_id && phoneKey(rec.to_phone) === phoneKey(x.phone));
+    : phoneKey(rec.to_phone) === phoneKey(x.phone));
+  const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
+    : (customersByPhone.get(phoneKey(x.phone)) || []).includes(String(v.customer_id)));
   for (const x of scoped) {
-    if (visits.some((v) => String(v.customer_id) === String(x.r.customer_id) && after(v, x.since))
+    if (visits.some((v) => visitFor(v, x) && after(v, x.since))
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
       || texts.some((t) => mine(t, x) && after(t, x.since))) done.add(x.r.id);
   }
