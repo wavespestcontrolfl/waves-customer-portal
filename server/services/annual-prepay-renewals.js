@@ -5512,7 +5512,7 @@ async function termNoticeAddress(termiteRung, term, customer) {
 // prior term_end). So the successor 12-month window starts the day AFTER
 // term_end and ends on the next anniversary — no overlap, no drift.
 async function sendTermNoticeEmail({
-  termiteRung, customer, term, daysOut, cancelLink, planAddress,
+  termiteRung, customer, term, daysOut, cancelLink, planAddress, coversRungs = null,
 }) {
   try {
     // newEnd is derived from newStart, not from term_end directly — exactly
@@ -5535,6 +5535,8 @@ async function sendTermNoticeEmail({
         newEnd: addMonthsSameDay(newStart, 12),
         cancelLink,
         address: planAddress,
+        // Combined 30+45 send only: the evidence marker (see sendCustomerTermNotice).
+        ...(coversRungs ? { coversRungs } : {}),
         // No annual-inspection date is tracked anywhere yet (the signed
         // annual report is a later slice per the build brief) — always
         // unknown for now, so the email's last-inspection sentence is
@@ -5682,7 +5684,10 @@ async function releaseTermNoticeClaim(claimedTerm, daysOut, previousStatus) {
 // must never be overwritten/duplicated as late). Its late bell rings only if
 // that late record actually landed; this rung's late bell only if this
 // rung's own late record landed.
-async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung = null } = {}) {
+// missedRungAt: when the other rung's obligation was actually discharged —
+// the combined send's own acceptance time (defaults to sentAt; a recovery
+// passes the covering evidence's time).
+async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung = null, missedRungAt = null } = {}) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
   const claimCol = noticeClaimColumnForDaysOut(daysOut);
   const sentCol = noticeWitnessColumn(daysOut, claimedTerm, etDateString(sentAt));
@@ -5705,7 +5710,7 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
         .where({ id: claimedTerm.id })
         .whereNull(lateCol)
         .whereNull(missedRungWitnessCol)
-        .update({ [lateCol]: sentAt, updated_at: new Date() });
+        .update({ [lateCol]: missedRungAt || sentAt, updated_at: new Date() });
     }
   });
   if (stamped && sentCol === termiteLateColumnForDaysOut(daysOut)) await fileTermiteLateNoticeException(claimedTerm, daysOut);
@@ -5736,23 +5741,86 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
 // out is still a fact to record. An unanchored original (provisional
 // term_end) is never recovered — nothing could have been sent for it.
 // A lookup ERROR throws (no claim is held yet) — callers abort and retry.
+//
+// Every input it decides from is PERSISTED — never a call-site option:
+//   which rung(s) one send covered → the evidence's own covers_rungs marker
+//     (SMS audit metadata / email payload_snapshot), so a combined 30+45
+//     notice whose witness write failed is recovered as BOTH rungs, in ONE
+//     transaction, even when the retry is a plain single-rung call;
+//   acceptance time → the evidence's sent_at;
+//   on-time vs late → that time against the term row's term_end;
+//   what is already recorded / claimed / the status to restore → the term row;
+//   whether the covered rung has its OWN earlier acceptance → its own
+//     evidence, which then wins (e.g. an on-time 45) over the combined
+//     send's late record.
 async function recoverTermiteNoticeFromAcceptance(term, daysOut) {
   const n = Number(daysOut);
   if (!term || !isTermiteAnnualPlanTerm(term) || !TERMITE_COPY_NOTICE_DAYS.includes(n) || coverageAwaitsInstallation(term)) return null;
-  if (noticeDoneColumns(n, term).some((col) => term[col])) return null;
+  if (termiteRungRecorded(term, n)) return null;
   const prior = await priorTermiteNoticeAcceptance(term, n);
-  if (!prior) return null;
+  if (!prior) {
+    // No evidence of its OWN — but the 45 may have been discharged by a
+    // combined 30-day send whose evidence says it covered the 45.
+    if (n !== TERMITE_EXTRA_NOTICE_DAYS) return null;
+    const covering = await priorTermiteNoticeAcceptance(term, 30);
+    const coveredAt = covering?.coveredAt?.[TERMITE_EXTRA_NOTICE_DAYS];
+    if (!coveredAt) return null;
+    // The 30 not yet recorded: recover it — that stamps the 30 AND the
+    // covered 45 together, atomically. Already recorded (by some other
+    // path): record the covered 45 on its own, at the covering time.
+    if (!termiteRungRecorded(term, 30)) {
+      const both = await recoverTermiteNoticeFromAcceptance(term, 30);
+      return both && both.sent ? { ...both, rungs: [30, TERMITE_EXTRA_NOTICE_DAYS] } : both;
+    }
+    return claimAndStampRecovered(term, n, { at: coveredAt, channel: covering.channel, coveredAt: {} });
+  }
+  return claimAndStampRecovered(term, n, prior);
+}
+
+function termiteRungRecorded(term, rung) {
+  return noticeDoneColumns(rung, term).some((col) => term[col]);
+}
+
+// Claim the rung, then stamp it from the evidence (see stampRecoveredRung);
+// a stamp failure releases the claim and rethrows.
+async function claimAndStampRecovered(term, n, prior) {
   const previousStatus = term.status;
   const claimedTerm = await claimTermNotice(term, n);
   if (!claimedTerm) return { sent: false, reason: 'already_claimed' };
+  let rungs;
   try {
-    await stampTermNoticeWitness(claimedTerm, n, prior.at);
+    rungs = await stampRecoveredRung(claimedTerm, n, prior);
   } catch (err) {
     await releaseTermNoticeClaim(claimedTerm, n, previousStatus);
     throw err;
   }
-  logger.info(`[annual-prepay] termite ${n}-day notice for term ${claimedTerm.id} was already accepted (${prior.channel}) at ${prior.at.toISOString()}; stamped from that, nothing re-sent`);
-  return { sent: true, termId: claimedTerm.id, channel: prior.channel, recovered: true };
+  logger.info(`[annual-prepay] termite ${n}-day notice for term ${claimedTerm.id} was already accepted (${prior.channel}) at ${prior.at.toISOString()}; stamped rung(s) ${rungs.join('+')} from that, nothing re-sent`);
+  return { sent: true, termId: claimedTerm.id, channel: prior.channel, recovered: true, rungs };
+}
+
+// Stamp a CLAIMED rung from its persisted evidence. If that evidence covered
+// the other rung too (a combined send) and the other rung has no record:
+// the other rung's OWN acceptance evidence wins when it has any (recovered
+// on its own — e.g. an on-time 45), otherwise the combined send's late
+// record for it lands in the SAME transaction as this rung's witness.
+// Returns the rungs recorded.
+async function stampRecoveredRung(claimedTerm, n, prior) {
+  const other = n === TERMITE_EXTRA_NOTICE_DAYS ? 30 : TERMITE_EXTRA_NOTICE_DAYS;
+  const coveredOtherAt = prior.coveredAt?.[other] || null;
+  let alsoRecordMissedRung = null;
+  const rungs = [n];
+  if (coveredOtherAt && !termiteRungRecorded(claimedTerm, other)) {
+    const ownOther = await priorTermiteNoticeAcceptance(claimedTerm, other);
+    if (ownOther) {
+      const otherResult = await claimAndStampRecovered(claimedTerm, other, { ...ownOther, coveredAt: {} });
+      if (otherResult.sent) rungs.push(other);
+    } else {
+      alsoRecordMissedRung = other;
+      rungs.push(other);
+    }
+  }
+  await stampTermNoticeWitness(claimedTerm, n, prior.at, { alsoRecordMissedRung, missedRungAt: coveredOtherAt });
+  return rungs;
 }
 
 // A provider acceptance time from a send result, if it is a real, non-future
@@ -5813,8 +5881,15 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     // Resolves { confirmed, acceptedAt } — acceptedAt is the ORIGINAL
     // provider acceptance time when the email layer deduped this attempt
     // against an already-accepted send, else null.
+    // Combined send: the evidence itself records that this ONE notice
+    // discharges both rungs (SMS audit metadata + email payload), so a
+    // recovery after a failed witness write restores the combined
+    // obligation without depending on the retry's call-site options.
+    const coversRungs = termiteRung && opts.alsoRecordMissedRung
+      ? [Number(daysOut), Number(opts.alsoRecordMissedRung)]
+      : null;
     const sendRenewalEmail = () => sendTermNoticeEmail({
-      termiteRung, customer, term: claimedTerm, daysOut, cancelLink, planAddress,
+      termiteRung, customer, term: claimedTerm, daysOut, cancelLink, planAddress, coversRungs,
     });
     const markNoticeSent = async (sentAt = new Date()) => {
       await stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung: opts.alsoRecordMissedRung });
@@ -5829,8 +5904,11 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
       const prior = await priorTermiteNoticeAcceptance(claimedTerm, daysOut);
       if (prior) {
         logger.info(`[annual-prepay] termite ${daysOut}-day notice for term ${claimedTerm.id} was already accepted (${prior.channel}) at ${prior.at.toISOString()}; stamping from that, not re-sending`);
-        await markNoticeSent(prior.at);
-        return { sent: true, termId: claimedTerm.id, channel: prior.channel, recovered: true };
+        // Decided from the EVIDENCE (its own covers_rungs), never from this
+        // call's opts.alsoRecordMissedRung.
+        const rungs = await stampRecoveredRung(claimedTerm, Number(daysOut), prior);
+        noticeRecorded = true;
+        return { sent: true, termId: claimedTerm.id, channel: prior.channel, recovered: true, rungs };
       }
     }
 
@@ -5860,7 +5938,8 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     }
 
     const smsResult = await sendTermNoticeSms({
-      customer, body, smsTemplateKey, term: claimedTerm, daysOut, extraMetadata: opts.metadata,
+      customer, body, smsTemplateKey, term: claimedTerm, daysOut,
+      extraMetadata: coversRungs ? { ...(opts.metadata || {}), covers_rungs: coversRungs } : opts.metadata,
     });
 
     if (!smsResult.sent) {
@@ -5927,6 +6006,9 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
 // records no SID, and a blocked attempt records blocked_code. Errors
 // propagate (see sendCustomerTermNotice).
 const TWILIO_MESSAGE_SID_RE = '^(SM|MM)[0-9a-fA-F]{32}$';
+// Returns { at, coversRungs } for the EARLIEST accepted send, or null.
+// coversRungs comes from the send's own metadata (covers_rungs, stamped on a
+// combined 30+45 notice); [] when absent.
 async function priorTermiteSmsAcceptance(term, daysOut) {
   const row = await db('messaging_audit_log')
     .where({ customer_id: term.customer_id, channel: 'sms', provider: 'twilio' })
@@ -5937,29 +6019,45 @@ async function priorTermiteSmsAcceptance(term, daysOut) {
     .whereRaw("metadata->>'days_out' = ?", [String(Number(daysOut))])
     .whereRaw('provider_message_id ~ ?', [TWILIO_MESSAGE_SID_RE])
     .orderBy('sent_at', 'asc')
-    .first('sent_at');
-  return row?.sent_at ? new Date(row.sent_at) : null;
+    .first('sent_at', db.raw("metadata->'covers_rungs' as covers_rungs"));
+  if (!row?.sent_at) return null;
+  return { at: new Date(row.sent_at), coversRungs: parseCoversRungs(row.covers_rungs) };
 }
 
-// Earliest persisted acceptance (SMS or email) for this term+rung, or null.
+function parseCoversRungs(value) {
+  let v = value;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  return Array.isArray(v) ? v.map(Number).filter(Number.isFinite) : [];
+}
+
+// Earliest persisted acceptance (SMS or email) for this term+rung, or null:
+// { channel, at, coveredAt } where coveredAt maps each OTHER rung a source
+// says it covered (a combined send) to the earliest such acceptance time.
 // A time in the future or unparseable is ignored (never a witness).
 async function priorTermiteNoticeAcceptance(term, daysOut) {
-  const smsAt = await priorTermiteSmsAcceptance(term, daysOut);
+  const sms = await priorTermiteSmsAcceptance(term, daysOut);
   const email = await AccountMembershipEmail.findAcceptedTermiteRenewalReminder({
     customerId: term.customer_id,
     termId: term.id,
     daysOut,
     renewalDate: term.term_end,
   });
-  const emailAt = email?.sentAt ? new Date(email.sentAt) : null;
   const now = Date.now();
   const candidates = [
-    { channel: 'sms', at: smsAt },
-    { channel: 'email', at: emailAt },
+    { channel: 'sms', at: sms?.at || null, coversRungs: sms?.coversRungs || [] },
+    { channel: 'email', at: email?.sentAt ? new Date(email.sentAt) : null, coversRungs: email?.coversRungs || [] },
   ].filter((c) => c.at && !Number.isNaN(c.at.getTime()) && c.at.getTime() <= now);
   if (!candidates.length) return null;
   candidates.sort((a, b) => a.at - b.at);
-  return candidates[0];
+  const coveredAt = {};
+  for (const c of candidates) {
+    for (const rung of c.coversRungs) {
+      if (rung !== Number(daysOut) && !coveredAt[rung]) coveredAt[rung] = c.at;
+    }
+  }
+  return { channel: candidates[0].channel, at: candidates[0].at, coveredAt };
 }
 
 // ── Termite annual-plan notice obligations: ONE pass, both rungs ──────────
@@ -6067,7 +6165,11 @@ async function processTermiteNoticeObligations(term, today) {
     // lookup error throws (nothing sent or stamped; retried next run).
     const recovered45 = await recoverTermiteNoticeFromAcceptance(term, TERMITE_EXTRA_NOTICE_DAYS);
     if (recovered45 && !recovered45.sent) return recovered45; // another sender holds the 45 — retry next run
-    if (recovered45) return sendCustomerTermNotice(term, 30);
+    if (recovered45) {
+      // Recovered via a combined 30-day send's evidence: both rungs recorded.
+      if (recovered45.rungs && recovered45.rungs.includes(30)) return recovered45;
+      return sendCustomerTermNotice(term, 30);
+    }
     const alsoRecordMissedRung = coverageAwaitsInstallation(term) ? null : TERMITE_EXTRA_NOTICE_DAYS;
     return sendCustomerTermNotice(term, 30, { alsoRecordMissedRung });
   }

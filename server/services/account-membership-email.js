@@ -907,12 +907,25 @@ const ACCEPTED_EMAIL_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
 // original acceptance time before deciding whether to send anything at all.
 // Returns { sentAt } or null. A query error is NOT swallowed — the caller
 // must treat "could not check" differently from "never sent".
+//
+// coversRungs: the rungs this ONE send discharged, read back from the
+// email's own persisted payload_snapshot (`covers_rungs`, stamped by the
+// sender for a combined 30+45 notice) — so a recovery after a failed witness
+// write knows the combined obligation from the evidence itself, never from
+// the retry's call-site options. [] when the payload carries no marker.
 async function findAcceptedTermiteRenewalReminder({ customerId, termId, daysOut, renewalDate } = {}) {
   const row = await db('email_messages')
     .where({ idempotency_key: termiteRenewalReminderKey({ customerId, termId, daysOut, renewalDate }) })
-    .first('status', 'sent_at');
+    .first('status', 'sent_at', 'payload_snapshot');
   if (!row || !row.sent_at || !ACCEPTED_EMAIL_STATUSES.includes(String(row.status || '').toLowerCase())) return null;
-  return { sentAt: row.sent_at };
+  let payload = row.payload_snapshot;
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); } catch { payload = null; }
+  }
+  const coversRungs = Array.isArray(payload?.covers_rungs)
+    ? payload.covers_rungs.map(Number).filter(Number.isFinite)
+    : [];
+  return { sentAt: row.sent_at, coversRungs };
 }
 
 async function sendTermiteRenewalReminder({
@@ -933,6 +946,10 @@ async function sendTermiteRenewalReminder({
   // The plan's own property (annual-prepay-renewals planPropertyForTerm);
   // falls back to the customer's address.
   address: planAddress = null,
+  // Combined 30+45 notice: the rungs this one send discharges, persisted in
+  // the email's payload_snapshot as evidence (see
+  // findAcceptedTermiteRenewalReminder). Unreferenced by the template.
+  coversRungs = null,
   idempotencyKey,
 } = {}) {
   const customer = await loadCustomer(customerId);
@@ -954,6 +971,7 @@ async function sendTermiteRenewalReminder({
       last_inspection_sentence: lastInspectionDate
         ? `Your last annual inspection: ${displayDate(lastInspectionDate)}.`
         : '',
+      ...(Array.isArray(coversRungs) && coversRungs.length ? { covers_rungs: coversRungs } : {}),
     },
     idempotencyKey: idempotencyKey
       || termiteRenewalReminderKey({ customerId, termId, daysOut, renewalDate }),

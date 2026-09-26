@@ -550,6 +550,37 @@ describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, s
     }));
   });
 
+  // Codex #4921 pre-push P1: a combined 30+45 notice carries its covered
+  // rungs in the email's own persisted payload (payload_snapshot), and the
+  // acceptance lookup reads them back — evidence, not call-site options.
+  test('a combined send persists covers_rungs in the payload; a plain send carries no marker', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })] });
+    const base = {
+      customerId: 'cust-1', termId: 'term-1', daysOut: 30, renewalDate: '2026-11-10', renewalFee: 650,
+      newStart: '2026-11-11', newEnd: '2027-11-11', cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    };
+    await AccountMembershipEmail.sendTermiteRenewalReminder({ ...base, coversRungs: [30, 45] });
+    await AccountMembershipEmail.sendTermiteRenewalReminder(base);
+    const payloads = EmailTemplates.sendTemplate.mock.calls.map((c) => c[0].payload);
+    expect(payloads[0]).toMatchObject({ covers_rungs: [30, 45] });
+    expect(payloads[1]).not.toHaveProperty('covers_rungs');
+  });
+
+  test('findAcceptedTermiteRenewalReminder reads the sender\'s key, accepted statuses only, and covers_rungs from payload_snapshot', async () => {
+    const accepted = chain({ first: { status: 'delivered', sent_at: '2026-10-13T16:00:00.000Z', payload_snapshot: JSON.stringify({ covers_rungs: [30, 45] }) } });
+    const plain = chain({ first: { status: 'sent', sent_at: '2026-09-26T16:00:00.000Z', payload_snapshot: { first_name: 'T' } } });
+    const failed = chain({ first: { status: 'failed', sent_at: null, payload_snapshot: '{}' } });
+    setDbQueues({ email_messages: [accepted, plain, failed] });
+    const args = { customerId: 'cust-1', termId: 'term-1', renewalDate: '2026-11-10' };
+
+    await expect(AccountMembershipEmail.findAcceptedTermiteRenewalReminder({ ...args, daysOut: 30 }))
+      .resolves.toEqual({ sentAt: '2026-10-13T16:00:00.000Z', coversRungs: [30, 45] });
+    expect(accepted.where).toHaveBeenCalledWith({ idempotency_key: 'membership.termite_renewal_reminder:term-1:30:2026-11-10' });
+    await expect(AccountMembershipEmail.findAcceptedTermiteRenewalReminder({ ...args, daysOut: 45 }))
+      .resolves.toEqual({ sentAt: '2026-09-26T16:00:00.000Z', coversRungs: [] });
+    await expect(AccountMembershipEmail.findAcceptedTermiteRenewalReminder({ ...args, daysOut: 45 })).resolves.toBeNull();
+  });
+
   // Codex #4921 r4 P1: a retry deduped against an email the provider already
   // accepted must carry the ORIGINAL acceptance time (the existing
   // email_messages row's sent_at), so the termite notice witness is

@@ -286,7 +286,7 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
     )`);
     await db.raw(`CREATE TABLE email_messages (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      idempotency_key text UNIQUE, status text, sent_at timestamptz
+      idempotency_key text UNIQUE, status text, sent_at timestamptz, payload_snapshot jsonb DEFAULT '{}'
     )`);
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -313,8 +313,8 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
       row({ provider_message_id: sid('2'), sent_at: t('2026-09-26T12:00:00Z') }),
     ]);
     const term = { id: termId, customer_id: customerId, term_end: '2026-11-10' };
-    await expect(_private.priorTermiteSmsAcceptance(term, 45)).resolves.toEqual(t('2026-09-26T12:00:00Z'));
-    await expect(_private.priorTermiteSmsAcceptance(term, 30)).resolves.toEqual(t('2026-09-20T12:00:00Z'));
+    await expect(_private.priorTermiteSmsAcceptance(term, 45)).resolves.toEqual({ at: t('2026-09-26T12:00:00Z'), coversRungs: [] });
+    await expect(_private.priorTermiteSmsAcceptance(term, 30)).resolves.toEqual({ at: t('2026-09-20T12:00:00Z'), coversRungs: [] });
     await expect(_private.priorTermiteSmsAcceptance({ ...term, id: randomUUID() }, 45)).resolves.toBeNull();
 
     const key = (daysOut) => `membership.termite_renewal_reminder:${termId}:${daysOut}:2026-11-10`;
@@ -325,7 +325,7 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
     const lookup = (daysOut) => AccountMembershipEmail.findAcceptedTermiteRenewalReminder({
       customerId, termId, daysOut, renewalDate: '2026-11-10',
     });
-    await expect(lookup(45)).resolves.toEqual({ sentAt: t('2026-09-26T13:00:00Z') });
+    await expect(lookup(45)).resolves.toEqual({ sentAt: t('2026-09-26T13:00:00Z'), coversRungs: [] });
     await expect(lookup(30)).resolves.toBeNull();
   });
 
@@ -534,6 +534,60 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     expect(b.notice_30_late_sent_at).toEqual(at28);
     // One late-45 bell: for the term that genuinely had no 45 record.
     expect(lateBells(notifyAdmin, 45).map((c) => c[3].metadata.annual_prepay_term_id)).toEqual([withNothing.id]);
+  });
+
+  // Codex #4921 pre-push P1: a COMBINED 30+45 send's evidence carries
+  // covers_rungs, so recovery restores BOTH rungs atomically with no
+  // call-site options — and a 45 with its own earlier on-time acceptance is
+  // stamped on time instead of late.
+  test('combined 30+45 evidence (covers_rungs in the audit metadata): recovering the 45 stamps the 30 AND a late 45 together; a 45 with its own on-time evidence is stamped on time', async () => {
+    const { db } = fixture;
+    await migrateThrough108(db);
+    await db.raw(`CREATE TABLE messaging_audit_log (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id uuid, channel text, provider text, blocked_code text,
+      provider_message_id text, sent_at timestamptz, metadata jsonb
+    )`);
+    jest.doMock('../models/db', () => db);
+    const notifyAdmin = mockSendSide();
+    const { _private } = require('../services/annual-prepay-renewals');
+    // Dates in the real past (acceptance times in the future are never evidence).
+    const base = {
+      term_start: '2025-10-01', term_end: '2026-10-01', status: 'active', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-10-01T12:00:00Z'),
+    };
+    const [combinedOnly] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID() }).returning('*');
+    const [alsoOwn45] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID() }).returning('*');
+    const day28 = new Date('2026-09-03T16:00:00Z'); // 28 days before 2026-10-01
+    const day45 = new Date('2026-08-17T16:00:00Z'); // exactly 45 days before (ET)
+    const sms = (term, daysOut, sentAt, c, extra = {}) => ({
+      customer_id: term.customer_id, channel: 'sms', provider: 'twilio', blocked_code: null,
+      provider_message_id: `SM${c.repeat(32)}`, sent_at: sentAt,
+      metadata: JSON.stringify({ original_message_type: 'termite_annual_renewal_notice', annual_prepay_term_id: term.id, days_out: daysOut, ...extra }),
+    });
+    await db('messaging_audit_log').insert([
+      sms(combinedOnly, 30, day28, 'a', { covers_rungs: [30, 45] }),
+      sms(alsoOwn45, 45, day45, 'b'),
+      sms(alsoOwn45, 30, day28, 'c', { covers_rungs: [30, 45] }),
+    ]);
+
+    // Entry via the 45 (e.g. the escalation pass) — no options anywhere.
+    await expect(_private.recoverTermiteNoticeFromAcceptance(combinedOnly, 45))
+      .resolves.toMatchObject({ sent: true, recovered: true, rungs: [30, 45] });
+    const a = await db('annual_prepay_terms').where({ id: combinedOnly.id }).first();
+    expect(a.notice_30_late_sent_at).toEqual(day28);
+    expect(a.notice_45_late_sent_at).toEqual(day28);
+    expect(a.notice_45_sent_at).toBeNull();
+    expect(a.notice_30_claimed_at).toBeNull();
+
+    // Entry via the 30: the 45's OWN on-time evidence wins over the combined late record.
+    await expect(_private.recoverTermiteNoticeFromAcceptance(alsoOwn45, 30))
+      .resolves.toMatchObject({ sent: true, recovered: true, rungs: [30, 45] });
+    const b = await db('annual_prepay_terms').where({ id: alsoOwn45.id }).first();
+    expect(b.notice_45_sent_at).toEqual(day45);
+    expect(b.notice_45_late_sent_at).toBeNull();
+    expect(b.notice_30_late_sent_at).toEqual(day28);
+    expect(lateBells(notifyAdmin, 45).map((c) => c[3].metadata.annual_prepay_term_id)).toEqual([combinedOnly.id]);
   });
 
   test('checkAndSend: an accepted notice whose witness write failed is recovered from messaging_audit_log — before the send (44 days out) AND before the missed-notice bell (at term_end) — with no text, no email and no bell', async () => {
