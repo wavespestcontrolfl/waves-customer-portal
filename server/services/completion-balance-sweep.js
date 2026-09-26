@@ -36,12 +36,10 @@
  * changed under us. Un-swept invoices keep their pay links and their own
  * dunning clocks exactly as today (oldest-invoice escalation — ruling #2).
  *
- * Invoices for a visit that has not been performed yet are skipped (owner
- * ruling 2026-09-26: never charge a client before the visit). An invoice
- * linked to a visit is swept only once that visit is 'completed'; an unlinked
- * invoice is swept only when its service_date is not in the future (ET). A
- * bill minted ahead of its visit (estimate accept, setup fee) is collected by
- * that visit's own completion charge instead.
+ * Only bills tied to performed work are swept (owner ruling 2026-09-26:
+ * never charge a client before the visit) — see performedWorkPlan. A bill
+ * minted ahead of its visit (estimate accept, setup fee) is collected by that
+ * visit's own completion charge or stays on its pay link and dunning.
  *
  * Invoices whose follow-up sequence an admin explicitly STOPPED are skipped:
  * "stop dunning" (customer mailing a check, disputed bill) must also mean
@@ -75,6 +73,7 @@ const { invoiceAmountDue } = require('./invoice-helpers');
 const { logAutopay } = require('./autopay-log');
 const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { invoiceHasPositiveSetupFeeLine } = require('./estimate-first-application-invoice');
+const { acceptedEstimateIdFromNotes } = require('./setup-fee-alert-reconcile');
 
 const SWEEP_SOURCE = 'completion_balance_sweep';
 
@@ -88,74 +87,53 @@ async function dunningStoppedInvoiceIds(invoiceIds, { database = db } = {}) {
   return new Set(rows.map((r) => String(r.invoice_id)));
 }
 
-// Estimate acceptance stamps its invoices "Auto-generated from accepted
-// estimate #<id>" (routes/estimate-public.js); a setup-only acceptance bill
-// carries no visit link and no service date, so the stamp is its provenance.
-const ACCEPTANCE_STAMP_RE = /Auto-generated from accepted estimate #([0-9a-fA-F-]{36})(?=\W|$)/;
+// Owner ruling 2026-09-26: never charge a client before the visit. The
+// sweep collects only a bill it can tie to performed work; everything else
+// waits on its own pay link and dunning.
+//   - A bill linked to a visit (its own scheduled_service_id, or its service
+//     record's) is collectible once that visit is 'completed'. The charge
+//     re-checks it under the visit lock (requireCompletedVisit).
+//   - An unlinked bill is collectible only when its service_date is before
+//     today (ET) and it is neither an estimate-acceptance bill (setup fee or
+//     first application, any "accepted estimate #" stamp) nor a setup fee.
+// Returns Map(invoice id -> { visitId, ownVisit }) of collectible invoices.
+async function performedWorkPlan(invoiceIds, { database = db, today = etDateString() } = {}) {
+  const plan = new Map();
+  if (!invoiceIds.length) return plan;
+  // Read from the invoice row itself, not the candidate projection.
+  const docs = await database('invoices')
+    .whereIn('id', invoiceIds)
+    .select('id', 'scheduled_service_id', 'service_record_id', 'service_date', 'notes', 'line_items');
 
-// Invoices whose visit hasn't happened yet (owner ruling 2026-09-26). A
-// linked visit must be 'completed'; a missing, cancelled or still-scheduled
-// visit means the service was not performed, so the bill waits. An unlinked
-// bill waits while its service_date is in the future, and an acceptance bill
-// (setup fee, or a first application booked without a visit link) waits
-// until a visit booked from its estimate is completed. A setup-fee bill with
-// no acceptance stamp can't be tied to a visit, so it waits too.
-async function completedVisitIds(visitIds, database) {
-  if (!visitIds.length) return new Set();
-  const rows = await database('scheduled_services')
-    .whereIn('id', visitIds)
-    .where({ status: 'completed' })
-    .select('id');
-  return new Set(rows.map((row) => String(row.id)));
-}
-
-const acceptanceEstimateId = (doc) => ACCEPTANCE_STAMP_RE.exec(String(doc?.notes || ''))?.[1] || null;
-
-// Provenance of unlinked candidates: their notes/lines, plus which stamped
-// estimates already have a completed visit booked from them.
-async function unlinkedProvenance(unlinkedIds, database) {
-  const docs = new Map();
-  const performedEstimates = new Set();
-  if (!unlinkedIds.length) return { docs, performedEstimates };
-  const rows = await database('invoices').whereIn('id', unlinkedIds).select('id', 'notes', 'line_items');
-  for (const row of rows) docs.set(String(row.id), row);
-  const estimateIds = [...new Set(rows.map(acceptanceEstimateId).filter(Boolean))];
-  if (estimateIds.length) {
-    const done = await database('scheduled_services')
-      .whereIn('source_estimate_id', estimateIds)
-      .where({ status: 'completed' })
-      .select('source_estimate_id');
-    for (const row of done) performedEstimates.add(String(row.source_estimate_id));
+  const recordIds = [...new Set(docs
+    .filter((doc) => !doc.scheduled_service_id && doc.service_record_id)
+    .map((doc) => String(doc.service_record_id)))];
+  const recordVisit = new Map();
+  if (recordIds.length) {
+    const records = await database('service_records').whereIn('id', recordIds).select('id', 'scheduled_service_id');
+    for (const r of records) if (r.scheduled_service_id) recordVisit.set(String(r.id), String(r.scheduled_service_id));
   }
-  return { docs, performedEstimates };
-}
+  const visitOf = (doc) => (doc.scheduled_service_id
+    ? String(doc.scheduled_service_id)
+    : recordVisit.get(String(doc.service_record_id)) || null);
 
-function unlinkedBillWaits(inv, { docs, performedEstimates }, today) {
-  if (inv.service_date && etCalendarDayOf(inv.service_date) > today) return true;
-  const doc = docs.get(String(inv.id));
-  if (!doc) return true;
-  const estimateId = acceptanceEstimateId(doc);
-  if (estimateId) return !performedEstimates.has(estimateId);
-  return invoiceHasPositiveSetupFeeLine(doc);
-}
-
-async function unperformedVisitInvoiceIds(invoices, { database = db, today = etDateString() } = {}) {
-  // Fail closed: a candidate read without the visit link or the service
-  // date can't prove its visit happened, so it waits.
-  const readable = (inv) => 'scheduled_service_id' in inv && 'service_date' in inv;
-  const visitIds = [...new Set(invoices.map((inv) => inv.scheduled_service_id).filter(Boolean).map(String))];
-  const performed = await completedVisitIds(visitIds, database);
-  const unlinkedIds = invoices.filter((inv) => readable(inv) && !inv.scheduled_service_id).map((inv) => String(inv.id));
-  const provenance = await unlinkedProvenance(unlinkedIds, database);
-  const skip = new Set();
-  for (const inv of invoices) {
-    const waits = !readable(inv)
-      || (inv.scheduled_service_id
-        ? !performed.has(String(inv.scheduled_service_id))
-        : unlinkedBillWaits(inv, provenance, today));
-    if (waits) skip.add(String(inv.id));
+  const visitIds = [...new Set(docs.map(visitOf).filter(Boolean))];
+  const completed = new Set();
+  if (visitIds.length) {
+    const rows = await database('scheduled_services').whereIn('id', visitIds).where({ status: 'completed' }).select('id');
+    for (const row of rows) completed.add(String(row.id));
   }
-  return skip;
+
+  for (const doc of docs) {
+    const visitId = visitOf(doc);
+    if (visitId) {
+      if (completed.has(visitId)) plan.set(String(doc.id), { visitId, ownVisit: !!doc.scheduled_service_id });
+    } else if (doc.service_date && etCalendarDayOf(doc.service_date) < today
+      && !acceptedEstimateIdFromNotes(doc.notes) && !invoiceHasPositiveSetupFeeLine(doc)) {
+      plan.set(String(doc.id), { visitId: null, ownVisit: false });
+    }
+  }
+  return plan;
 }
 
 /**
@@ -175,6 +153,7 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
   if (!customerId || !paymentMethodId) return summary;
 
   let candidates = [];
+  let plan = new Map();
   try {
     candidates = await openBalanceInvoices(customerId, { excludeInvoiceId });
     summary.considered = candidates.length;
@@ -184,11 +163,9 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
       summary.skipped += candidates.filter((inv) => stopped.has(String(inv.id))).length;
       candidates = candidates.filter((inv) => !stopped.has(String(inv.id)));
     }
-    const unperformed = await unperformedVisitInvoiceIds(candidates);
-    if (unperformed.size) {
-      summary.skipped += unperformed.size;
-      candidates = candidates.filter((inv) => !unperformed.has(String(inv.id)));
-    }
+    plan = await performedWorkPlan(candidates.map((inv) => String(inv.id)));
+    summary.skipped += candidates.filter((inv) => !plan.has(String(inv.id))).length;
+    candidates = candidates.filter((inv) => plan.has(String(inv.id)));
   } catch (err) {
     logger.error(`[balance-sweep] candidate lookup failed for customer ${customerId}: ${err.message}`);
     return summary;
@@ -196,6 +173,7 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
 
   const StripeService = require('./stripe');
   for (const inv of candidates) {
+    const { visitId, ownVisit } = plan.get(String(inv.id));
     // This invoice's own current amount is the ceiling — the same pre-tax
     // subtotal-net-of-discount comparator the completion rail caps with,
     // re-checked by the charge service against the LOCKED row so a
@@ -211,13 +189,12 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
         // amount due must not exceed this snapshot's.
         maxAuthorizedChargeCents: Math.round(invoiceAmountDue(inv) * 100),
         requireAutopayForCustomerId: customerId,
-        requireSelfPayScheduledServiceId: inv.scheduled_service_id || null,
-        // The performed-visit verdict above is binding under the charge's
-        // visit lock: a visit reopened or cancelled mid-sweep refuses, and
-        // the invoice must still be that visit's bill.
-        ...(inv.scheduled_service_id
-          ? { requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: true }
-          : {}),
+        // The visit the bill was tied to (its own, or its service
+        // record's). The completed-visit verdict is binding under the
+        // charge's visit lock, and a bill on its own visit must still be
+        // that visit's bill.
+        requireSelfPayScheduledServiceId: visitId,
+        ...(visitId ? { requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: ownVisit } : {}),
         // Binding default-payer check for ad-hoc invoices with no visit —
         // the visit-keyed guard has nothing to key on there (pre-push r2 P0).
         requireSelfPayCustomerId: customerId,
@@ -275,4 +252,4 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
   return summary;
 }
 
-module.exports = { runCompletionBalanceSweep, dunningStoppedInvoiceIds, unperformedVisitInvoiceIds, SWEEP_SOURCE };
+module.exports = { runCompletionBalanceSweep, dunningStoppedInvoiceIds, performedWorkPlan, SWEEP_SOURCE };
