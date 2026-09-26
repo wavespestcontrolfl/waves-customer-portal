@@ -69,10 +69,16 @@ function canAct(request) {
 // RECORD step after the customer signs — never a gate on activation/billing.
 const TERMITE_ANNUAL_TEMPLATE_KEY = "service_agreement.termite_annual_protection";
 
+// Executed = the customer signed (signedAt) and it is signed or was
+// cancelled afterwards — mirrors admin-contracts.js isExecutedAgreement.
+function isExecutedAgreement(request) {
+  return !!request?.signedAt && ["signed", "cancelled"].includes(request?.status);
+}
+
 function canCountersign(request) {
   return request?.contractType === "document_template"
     && request?.documentTemplateKey === TERMITE_ANNUAL_TEMPLATE_KEY
-    && request?.status === "signed"
+    && isExecutedAgreement(request)
     && !request?.countersignedAt;
 }
 
@@ -85,7 +91,7 @@ function CountersignBadge({ request }) {
 // The executed copy, countersignature stamp included — the only place a
 // countersigned PDF can be obtained (the customer's signing link is burned).
 function SignedPdfButton({ request, disabled, onError }) {
-  if (!request?.countersignedAt) return null;
+  if (!request?.countersignedAt || !isExecutedAgreement(request)) return null;
   const openPdf = async () => {
     const tab = window.open("", "_blank");
     try {
@@ -159,8 +165,10 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   // The page stays mounted when the bell link navigates to it again, so the
   // initializer alone would keep the old tab — follow the URL whenever its
   // ?status= changes (tab clicks don't touch the URL, so they're unaffected).
+  // A missing or unknown ?status= means Open, same as the initializer — so
+  // Back from a bell link (?status=signed → none) returns to Open.
   useEffect(() => {
-    if (STATUS_TABS.some((tab) => tab.key === requestedStatus)) setStatus(requestedStatus);
+    setStatus(STATUS_TABS.some((tab) => tab.key === requestedStatus) ? requestedStatus : "open");
   }, [requestedStatus]);
   // A tab click mirrors itself into ?status= (other params kept, history
   // replaced), so the URL never holds a stale status. Otherwise a later bell

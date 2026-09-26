@@ -53,6 +53,9 @@ async function createScratchDb() {
     email_sent_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);
+  // The countersign reminder only reminds what the Requests queue can show
+  // (non-archived customers).
+  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deleted_at timestamptz)');
   // 20260925030001's countersigned_by FK target.
   await db.raw('CREATE TABLE technicians (id uuid PRIMARY KEY DEFAULT gen_random_uuid())');
   await db.raw(`CREATE TABLE customer_contracts (
@@ -536,18 +539,23 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
     return { sweep: (opts = {}) => reconcileTermiteAnnualActivations({ conn: db, ...opts }), notifyAdmin, db };
   }
 
+  const customer = async (db, fields = {}) => (await db('customers').insert(fields).returning('id'))[0].id;
+  const reminderKeys = (notifyAdmin) => notifyAdmin.mock.calls
+    .map(([, , , opts]) => String(opts?.dedupeKey || ''))
+    .filter((key) => key.startsWith('termite-annual-countersign-reminder:'));
+
   test('re-rings a signed annual agreement left un-countersigned past a day; never a countersigned, fresh, or other-template one', async () => {
     const { sweep, notifyAdmin, db } = load();
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     // 9:30pm ET on Sep 20 is already Sep 21 in UTC — the reminder names the ET day.
     const lateEvening = new Date('2026-09-21T01:30:00Z');
     const [pending] = await db('customer_contracts').insert({
-      customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: lateEvening, signed_name: 'Sam Customer',
+      customer_id: await customer(db), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: lateEvening, signed_name: 'Sam Customer',
     }).returning('*');
     await db('customer_contracts').insert([
-      { customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: twoDaysAgo, countersigned_at: new Date() },
-      { customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date() },
-      { customer_id: randomUUID(), document_template_key: 'service_agreement.termite_bait_program_purchase', status: 'signed', signed_at: twoDaysAgo },
+      { customer_id: await customer(db), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: twoDaysAgo, countersigned_at: new Date() },
+      { customer_id: await customer(db), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date() },
+      { customer_id: await customer(db), document_template_key: 'service_agreement.termite_bait_program_purchase', status: 'signed', signed_at: twoDaysAgo },
     ]);
 
     const counts = await sweep();
@@ -576,10 +584,10 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
       .filter((key) => key.startsWith('termite-annual-countersign-reminder:'))
       .map((key) => key.split(':').pop());
     const [older] = await db('customer_contracts').insert({
-      customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date(Date.now() - 5 * 86400000),
+      customer_id: await customer(db), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date(Date.now() - 5 * 86400000),
     }).returning('*');
     const [newer] = await db('customer_contracts').insert({
-      customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date(Date.now() - 3 * 86400000),
+      customer_id: await customer(db), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date(Date.now() - 3 * 86400000),
     }).returning('*');
 
     await sweep({ limit: 1 });
@@ -589,5 +597,33 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
     expect(reminded()).toEqual([older.id, newer.id, older.id]);
     const events = await db('customer_contract_events').where({ event_type: 'countersign_reminder_sent' });
     expect(events).toHaveLength(3);
+  });
+
+  test('never reminds an archived customer\'s agreement (hidden from the Requests queue) or a cancelled one (codex #4842 r4 P2)', async () => {
+    const { sweep, notifyAdmin, db } = load();
+    const twoDaysAgo = new Date(Date.now() - 2 * 86400000);
+    await db('customer_contracts').insert([
+      { customer_id: await customer(db, { deleted_at: new Date() }), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: twoDaysAgo },
+      { customer_id: await customer(db), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'cancelled', signed_at: twoDaysAgo },
+    ]);
+    const counts = await sweep();
+    expect(counts.countersignScanned).toBe(0);
+    expect(reminderKeys(notifyAdmin)).toEqual([]);
+  });
+
+  test('a countersign landing mid-batch suppresses the stale reminder and records no event (codex #4842 r4 P2)', async () => {
+    const { sweep, notifyAdmin, db } = load();
+    const [row] = await db('customer_contracts').insert({
+      customer_id: await customer(db), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date(Date.now() - 2 * 86400000),
+    }).returning('*');
+    notifyAdmin.mockImplementation(async (category, title, body, opts) => {
+      if (!String(opts?.dedupeKey || '').startsWith('termite-annual-countersign-reminder:')) return { id: randomUUID(), deduped: false };
+      // The operator countersigns after the scan, before the bell persists.
+      await db('customer_contracts').where({ id: row.id }).update({ countersigned_at: new Date() });
+      return (await opts.shouldContinue()) ? { id: randomUUID(), deduped: false } : { id: null, suppressed: true, deduped: false };
+    });
+    const counts = await sweep();
+    expect(counts).toMatchObject({ countersignScanned: 1, countersignReminded: 0 });
+    expect(await db('customer_contract_events').where({ event_type: 'countersign_reminder_sent' })).toHaveLength(0);
   });
 });

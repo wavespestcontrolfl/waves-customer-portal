@@ -690,6 +690,16 @@ router.post('/:id/cancel', async (req, res, next) => {
 // file, and the name recorded on the agreement and PDF is that verified
 // account's printed name. The operator still types it as evidence of intent,
 // but the typed text is only checked against it, never stored in its place.
+// An EXECUTED agreement: the customer signed it (signed_at stamped) and it
+// is signed, or was cancelled afterwards. Cancelling preserves signed_at
+// and the signature evidence, so the countersignature record step and the
+// executed copy stay available (codex #4842 r4). A contract cancelled
+// before anyone signed has no signed_at and never qualifies.
+const EXECUTED_STATUSES = ['signed', 'cancelled'];
+function isExecutedAgreement(contract) {
+  return !!contract?.signed_at && EXECUTED_STATUSES.includes(contract.status);
+}
+
 function designatedCertifiedOperatorIds() {
   return String(process.env.TERMITE_CERTIFIED_OPERATOR_TECHNICIAN_IDS || '')
     .split(',').map((id) => id.trim()).filter(Boolean);
@@ -756,7 +766,7 @@ router.post('/:id/countersign', async (req, res, next) => {
         response = { status: 400, body: { error: 'Only the Waves Subterranean Termite Protection annual agreement can be countersigned.' } };
         return;
       }
-      if (contract.status !== 'signed') {
+      if (!isExecutedAgreement(contract)) {
         response = { status: 409, body: { error: 'This agreement has not been signed by the customer yet.' } };
         return;
       }
@@ -788,7 +798,9 @@ router.post('/:id/countersign', async (req, res, next) => {
       }
 
       const updated = await trx('customer_contracts')
-        .where({ id: contract.id, status: 'signed' })
+        .where({ id: contract.id })
+        .whereIn('status', EXECUTED_STATUSES)
+        .whereNotNull('signed_at')
         .whereNull('countersigned_at')
         .update({
           countersigned_at: now,
@@ -825,7 +837,7 @@ router.get('/:id/pdf', async (req, res, next) => {
   try {
     const contract = await loadContract(req.params.id);
     if (!contract) return res.status(404).json({ error: 'Contract not found' });
-    if (contract.contract_type !== 'document_template' || contract.status !== 'signed') {
+    if (contract.contract_type !== 'document_template' || !isExecutedAgreement(contract)) {
       return res.status(409).json({ error: 'Only a signed agreement has an executed copy to download.' });
     }
     const customer = await db('customers')

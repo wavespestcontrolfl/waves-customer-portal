@@ -95,6 +95,7 @@ const BASE_CONTRACT = {
   contract_type: 'document_template',
   document_template_key: ANNUAL_KEY,
   status: 'signed',
+  signed_at: new Date('2026-09-24T14:00:00Z'),
   title: 'Waves Subterranean Termite Protection — Annual Service Agreement',
   countersigned_at: null,
 };
@@ -255,7 +256,7 @@ describe('POST /api/admin/contracts/:id/countersign — admin', () => {
       expect(res.status).toBe(409);
     });
     const [update] = mockWrites.filter((w) => w.op === 'update' && w.table === 'customer_contracts');
-    expect(update.filters).toEqual(expect.arrayContaining([{ id: CONTRACT_ID, status: 'signed' }]));
+    expect(update.filters).toEqual(expect.arrayContaining([{ id: CONTRACT_ID }]));
     expect(mockWrites.find((w) => w.table === 'customer_contract_events')).toBeUndefined();
   });
 
@@ -374,4 +375,36 @@ test('a contract repointed to another customer while waiting on the customer loc
     expect(res.status).toBe(409);
   });
   expect(mockWrites).toHaveLength(0);
+});
+
+describe('executed agreements after cancellation (codex #4842 r4)', () => {
+  test('an agreement cancelled AFTER the customer signed can still be countersigned', async () => {
+    const cancelledAfter = { ...BASE_CONTRACT, status: 'cancelled', cancelled_at: new Date('2026-09-25T10:00:00Z') };
+    let reads = 0;
+    mockRows.customer_contracts = () => (reads++ < 2 ? cancelledAfter : { ...cancelledAfter, countersigned_at: new Date(), countersigner_name: 'Adam Owner' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/countersign`, { method: 'POST', headers: adminHdrs, body: JSON.stringify({ name: 'Adam Owner' }) });
+      expect(res.status).toBe(200);
+    });
+    expect(mockWrites.filter((w) => w.op === 'update' && w.table === 'customer_contracts')).toHaveLength(1);
+  });
+
+  test('an agreement cancelled BEFORE anyone signed is never countersignable', async () => {
+    mockRows.customer_contracts = { ...BASE_CONTRACT, status: 'cancelled', signed_at: null };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/countersign`, { method: 'POST', headers: adminHdrs, body: JSON.stringify({ name: 'Adam Owner' }) });
+      expect(res.status).toBe(409);
+    });
+    expect(mockWrites).toHaveLength(0);
+  });
+
+  test('the executed PDF stays available after cancellation; a never-signed cancelled contract 409s', async () => {
+    mockRows.customers = { first_name: 'Sam', last_name: 'Customer' };
+    await withServer(async (baseUrl) => {
+      mockRows.customer_contracts = { ...BASE_CONTRACT, status: 'cancelled', countersigned_at: new Date(), countersigner_name: 'Adam Owner' };
+      expect((await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/pdf`, { headers: adminHdrs })).status).toBe(200);
+      mockRows.customer_contracts = { ...BASE_CONTRACT, status: 'cancelled', signed_at: null };
+      expect((await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/pdf`, { headers: adminHdrs })).status).toBe(409);
+    });
+  });
 });

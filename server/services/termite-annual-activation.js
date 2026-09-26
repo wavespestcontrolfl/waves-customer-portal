@@ -557,7 +557,13 @@ async function remindPendingCountersignatures({ conn, limit, counts }) {
       .max('ev.created_at')
       .whereRaw('ev.contract_id = cc.id')
       .where('ev.event_type', COUNTERSIGN_REMINDER_EVENT);
+    // Only agreements the Requests queue can show (document-contract-
+    // delivery.js requestBaseQuery hides archived customers), and only
+    // live signed ones: a cancelled agreement stays countersignable from
+    // the Cancelled tab but is never nagged about daily.
     const pending = await conn('customer_contracts as cc')
+      .join('customers as c', 'c.id', 'cc.customer_id')
+      .whereNull('c.deleted_at')
       .where({ 'cc.document_template_key': ANNUAL_TEMPLATE_KEY, 'cc.status': 'signed' })
       .whereNull('cc.countersigned_at')
       .whereRaw("cc.signed_at < now() - interval '1 day'")
@@ -578,9 +584,16 @@ async function remindPendingCountersignatures({ conn, limit, counts }) {
             dedupeKey: `termite-annual-countersign-reminder:${row.id}`,
             dedupeWindowMs: COUNTERSIGN_REMINDER_WINDOW_MS,
             metadata: { customerId: row.customer_id, contractId: row.id },
+            // Re-read just before the bell persists: a countersign (or
+            // cancel) landing while this batch runs must not produce a
+            // stale "still needs" alert.
+            shouldContinue: async () => !!(await conn('customer_contracts')
+              .where({ id: row.id, status: 'signed' })
+              .whereNull('countersigned_at')
+              .first('id')),
           },
         );
-        if (bell && !bell.deduped) {
+        if (bell && !bell.deduped && !bell.suppressed) {
           counts.countersignReminded += 1;
           if (row.customer_id) {
             await conn('customer_contract_events').insert({

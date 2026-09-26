@@ -21,6 +21,7 @@ const request = (id, title, overrides = {}) => ({
   requestStatus: "signed",
   contractType: "document_template",
   documentTemplateKey: ANNUAL_KEY,
+  signedAt: "2026-09-24T14:00:00.000Z",
   countersignedAt: null,
   customerId: `customer-${id}`,
   customer: { name: `Customer ${id}` },
@@ -38,7 +39,9 @@ beforeEach(() => {
     request("annual", "Annual agreement"),
     request("done", "Countersigned annual", { countersignedAt: "2026-09-25T14:00:00.000Z" }),
     request("quarterly", "Quarterly agreement", { documentTemplateKey: "service_agreement.termite_bait_program_purchase" }),
-    request("unsigned", "Unsigned annual", { status: "viewed", requestStatus: "viewed" }),
+    request("unsigned", "Unsigned annual", { status: "viewed", requestStatus: "viewed", signedAt: null }),
+    request("cancelledAfter", "Cancelled after signing", { status: "cancelled", requestStatus: "cancelled" }),
+    request("cancelledBefore", "Cancelled before signing", { status: "cancelled", requestStatus: "cancelled", signedAt: null }),
   ];
   adminFetch.mockImplementation((path, options = {}) => {
     if (path === "/admin/contracts/requests/stats") return Promise.resolve(response({ stats: {} }));
@@ -113,6 +116,33 @@ it("offers Countersign only on a signed, not-yet-countersigned annual agreement"
   expect(within(rowFor("Countersigned annual")).getByText("Countersigned")).toBeInTheDocument();
   expect(within(rowFor("Quarterly agreement")).queryByRole("button", { name: /countersign/i })).toBeNull();
   expect(within(rowFor("Unsigned annual")).queryByRole("button", { name: /countersign/i })).toBeNull();
+  // Cancelling after the customer signed keeps the record step (codex #4842 r4 P1).
+  expect(within(rowFor("Cancelled after signing")).getByRole("button", { name: /countersign/i })).toBeInTheDocument();
+  expect(within(rowFor("Cancelled before signing")).queryByRole("button", { name: /countersign/i })).toBeNull();
+});
+
+it("Back from a bell link (?status=signed → no status) returns to Open (codex #4842 r4 P2)", async () => {
+  function Nav() {
+    const navigate = useNavigate();
+    return (
+      <>
+        <button type="button" onClick={() => navigate("/admin/contracts?tab=requests&status=signed")}>open bell link</button>
+        <button type="button" onClick={() => navigate(-1)}>go back</button>
+      </>
+    );
+  }
+  render(
+    <MemoryRouter initialEntries={["/admin/contracts?tab=requests"]}>
+      <Nav />
+      <DocumentRequestsPage />
+    </MemoryRouter>,
+  );
+  await screen.findByText("Annual agreement");
+  expect(listPaths.at(-1)).toContain("status=open");
+  fireEvent.click(screen.getByRole("button", { name: "open bell link" }));
+  await waitFor(() => expect(listPaths.at(-1)).toContain("status=signed"));
+  fireEvent.click(screen.getByRole("button", { name: "go back" }));
+  await waitFor(() => expect(listPaths.at(-1)).toContain("status=open"));
 });
 
 it("requires a typed name, posts it, and refreshes the row as countersigned", async () => {
