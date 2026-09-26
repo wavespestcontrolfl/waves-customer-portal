@@ -41,17 +41,60 @@ function templateNotSent(result) {
   return blocked('EMAIL_NOT_SENT', reason, { retryable: result.retryable === true });
 }
 
+// Preserve canonical provider evidence carried on a throw, but rebuild it
+// from an allowlist so an email_messages row (or other private context) can
+// never escape through the billing channel result.
+function structuredProviderOutcome(err) {
+  const outcome = err?.providerOutcome;
+  if (!outcome || typeof outcome !== 'object') return null;
+  const deliveryOutcome = clean(outcome.deliveryOutcome);
+  const consistent = (deliveryOutcome === 'accepted' && outcome.sent === true)
+    || (['not_sent', 'uncertain'].includes(deliveryOutcome) && outcome.sent === false);
+  if (!consistent) return null;
+  const accepted = deliveryOutcome === 'accepted';
+  const code = clean(outcome.code) || clean(err.code);
+  const providerMessageId = accepted ? clean(outcome.providerMessageId) || null : null;
+  return {
+    sent: accepted,
+    provider: 'email',
+    providerMessageId,
+    deliveryOutcome,
+    blocked: accepted ? false : outcome.blocked === true,
+    ...(code ? { code } : {}),
+    reason: EmailTemplateLibrary.redactEmailAddresses(clean(outcome.reason) || clean(err.message)),
+    retryable: !accepted && outcome.retryable === true,
+    ...(outcome.held === true ? { held: true } : {}),
+    ...(typeof outcome.providerAttempted === 'boolean' ? { providerAttempted: outcome.providerAttempted } : {}),
+    ...(accepted && outcome.deduped === true ? { deduped: true } : {}),
+  };
+}
+
 // After the handoff begins, a definite SendGrid rejection (the canonical
 // sendgrid-mail.isDefiniteRejection statuses) accepted nothing, so the
 // outcome is `not_sent` and retryable; a 408, other 4xx, 5xx or network
 // error may have gone out before the response and stays `uncertain`.
 // SENDGRID_NOT_CONFIGURED is thrown from sendgrid-mail's authHeaders()
 // before fetch is ever called, so even though the authority already
-// flipped handoffStarted, no provider request occurred — same "definitely
-// not sent" bucket as the pre-handoff and EMAIL_SEND_IN_PROGRESS cases.
+// flipped handoffStarted, no provider request occurred. EMAIL_SEND_IN_PROGRESS
+// is different: another attempt owns the key and may already be accepted.
 function providerFailure(err, handoffStarted) {
+  const structured = structuredProviderOutcome(err);
+  if (structured) return structured;
+  if (err.code === 'EMAIL_SEND_IN_PROGRESS') {
+    return {
+      sent: false,
+      provider: 'email',
+      providerMessageId: null,
+      deliveryOutcome: 'uncertain',
+      blocked: false,
+      code: err.code,
+      reason: EmailTemplateLibrary.redactEmailAddresses(err.message),
+      retryable: true,
+      held: true,
+      providerAttempted: false,
+    };
+  }
   const definitelyNotSent = !handoffStarted
-    || err.code === 'EMAIL_SEND_IN_PROGRESS'
     || err.code === 'SENDGRID_NOT_CONFIGURED'
     || require('./sendgrid-mail').isDefiniteRejection(err);
   return {
